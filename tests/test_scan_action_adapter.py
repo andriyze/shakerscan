@@ -2448,6 +2448,94 @@ def test_spec_ingest_skips_cleanly_when_no_spec_is_published(monkeypatch):
     assert not [o for o in receipt.observations if o.get("kind") == "discovered_route"]
 
 
+def _spec_ingest_receipt(monkeypatch, respond):
+    scan_id = str(uuid.uuid4())
+
+    class Transport:
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            status, content_type, body = respond(urllib.parse.urlsplit(request.url).path)
+            return ReplayTransportResult(
+                status_code=status, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={"Content-Type": content_type},
+                response_body=body, elapsed_ms=1,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda: Transport(),
+    )
+    action = _action("discover.spec", "web.spec_ingest", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    return asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+
+
+def _persisted_partial_reason(receipt):
+    from scan.capability_result import CapabilityResultReason
+    from scan.execution_backend import PostgresScanExecutionBackend
+
+    return PostgresScanExecutionBackend._receipt_reason(
+        receipt, CapabilityResultReason.OUTPUT_TRUNCATED,
+    ).value
+
+
+def test_spec_ingest_an_unpublished_hint_file_is_not_reported_as_truncated_output(monkeypatch):
+    """An SPA answers /robots.txt and /llms.txt with its HTML shell.
+
+    The hint file was not published, so the receipt stays partial (that coverage is not
+    real), but nothing was cut off: the persisted reason said "The bounded output limit was
+    reached", because the adapter stated no reason and the backend fell back to truncation.
+    """
+    shell = b"<!doctype html><html><head><title>app</title></head><body><div id=root></div></body></html>"
+
+    def respond(path):
+        if path in {"/robots.txt", "/llms.txt"}:
+            return 200, "text/html; charset=utf-8", shell
+        return 404, "text/html", b""
+
+    receipt = _spec_ingest_receipt(monkeypatch, respond)
+    assert receipt.status == "partial"
+    assert receipt.errors[0] == "source_not_published"
+    assert "hint_document_is_markup:robots.txt" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "source_not_published"
+
+
+def test_spec_ingest_a_partly_modelled_spec_is_a_parser_limitation_not_truncation(monkeypatch):
+    spec_body = json.dumps({
+        "openapi": "3.0.0",
+        "paths": {"/orders": {"post": {"requestBody": {"content": {"application/xml": {
+            "schema": {"type": "object", "properties": {"id": {}}}}}}}}},
+    }).encode()
+
+    def respond(path):
+        if path == "/openapi.json":
+            return 200, "application/json", spec_body
+        return 404, "text/plain", b""
+
+    receipt = _spec_ingest_receipt(monkeypatch, respond)
+    assert receipt.status == "partial"
+    assert "spec_unsupported_body_media_type" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "parser_failed"
+
+
+def test_spec_ingest_a_spec_beyond_the_endpoint_ceiling_is_truncated(monkeypatch):
+    spec_body = json.dumps({
+        "openapi": "3.0.0",
+        "paths": {f"/items/n{index}": {"get": {}} for index in range(1_100)},
+    }).encode()
+
+    def respond(path):
+        if path == "/openapi.json":
+            return 200, "application/json", spec_body
+        return 404, "text/plain", b""
+
+    receipt = _spec_ingest_receipt(monkeypatch, respond)
+    assert receipt.status == "partial"
+    assert "spec_endpoint_limit" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "output_truncated"
+
+
 def test_path_candidate_goes_to_sqlmap_with_a_marker_and_is_skipped_by_dalfox(monkeypatch):
     """A path-segment candidate is a SQLi-only site carrying the sqlmap ``*`` marker.
 
@@ -2665,3 +2753,177 @@ def test_every_capability_result_reason_has_an_operator_label():
     reasons = importlib.import_module(root + ".capability_result").CapabilityResultReason
     labels = importlib.import_module(root + ".explanation")._REASON_LABELS
     assert sorted(item.value for item in reasons if item.value not in labels) == []
+
+
+# --- HTTP archive coverage of in-process scan capabilities --------------------------
+# These engine capabilities send their HTTP in-process over the pinned replay transport.
+# Only http.request used to pass a recorder, so the scan archive held a handful of rows
+# while spec ingest, exposure probes, request mutation and authz surface probes sent
+# hundreds of requests that were never archived.
+
+try:
+    from scanner_tools import http_archive_capture as _capture
+except ModuleNotFoundError:
+    from scanner.scanner_tools import http_archive_capture as _capture
+
+
+def _captured_calls(run):
+    _capture.start_capture()
+    try:
+        run()
+    finally:
+        captured = _capture.drain_capture()
+    return captured["calls"]
+
+
+def test_spec_ingest_archives_every_probe_under_its_capability(monkeypatch):
+    sent = []
+
+    class FakeTransport:
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            sent.append(request.url)
+            found = request.url.endswith("/openapi.json")
+            return ReplayTransportResult(
+                status_code=200 if found else 404, connected_address="192.0.2.10",
+                final_url=request.url, response_headers={"Content-Type": "text/plain"},
+                response_body=b'{"openapi":"3.0.0","paths":{}}' if found else b"nf",
+                elapsed_ms=5,
+            )
+
+    transport = FakeTransport()
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: transport,
+    )
+    action = _action("discover.spec", "web.spec_ingest", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend())
+
+    calls = _captured_calls(
+        lambda: asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    )
+
+    assert sent and len(calls) == len(sent)
+    assert [call["url"] for call in calls] == sent
+    for call in calls:
+        assert call["capability_name"] == "web.spec_ingest"
+        assert call["source"] == "replay_transport"
+        assert call["method"] == "GET"
+        assert call["principal_slot"] == "anonymous"
+        assert call["workflow_values_private"] is False
+        assert call["status_code"] == (200 if call["url"].endswith("/openapi.json") else 404)
+
+
+def test_authenticated_spec_ingest_archives_its_probes_as_private(monkeypatch):
+    """The principal's headers can carry session values under any name, which key-name
+    masking cannot find, so an authenticated fetch is withheld from masked views."""
+    class FakeTransport:
+        async def send(self, request, **_kwargs):
+            return ReplayTransportResult(
+                status_code=404, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={}, response_body=b"", elapsed_ms=1,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: FakeTransport(),
+    )
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name=None: _principal(lane),
+    )
+    action = _action("discover.spec", "web.spec_ingest", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend())
+    calls = _captured_calls(
+        lambda: asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    )
+    assert calls
+    assert all(call["principal_slot"] == "primary" for call in calls)
+    assert all(call["workflow_values_private"] is True for call in calls)
+
+
+def test_exposure_probe_batch_archives_its_probes_withheld_from_masked_views(monkeypatch):
+    """Exposure probes deliberately fetch key files and dumps, so their bodies stay
+    raw-export-only even though the probe itself is anonymous."""
+    calls = _captured_calls(
+        lambda: test_exposure_probe_batch_probes_seeds_follows_listings_and_checkpoints(
+            monkeypatch,
+        )
+    )
+    assert calls
+    assert any(call["url"].endswith("/ftp/secret.md") for call in calls)
+    for call in calls:
+        assert call["capability_name"] == "exposure.verify_batch"
+        assert call["principal_slot"] == "anonymous"
+        assert call["workflow_values_private"] is True
+
+
+def test_authz_surface_batch_archives_both_principals_as_mixed_and_private(monkeypatch):
+    calls = _captured_calls(
+        lambda: test_authz_surface_batch_proves_bfla_only_with_an_established_boundary(
+            monkeypatch,
+        )
+    )
+    # Two routes, each probed twice anonymously and twice as the primary principal; the
+    # resumed run sends nothing.
+    assert len(calls) == 8
+    assert {call["capability_name"] for call in calls} == {"authz_surface.verify_batch"}
+    assert all(call["principal_slot"] is None for call in calls)
+    assert all(call["workflow_values_private"] is True for call in calls)
+    assert sum(
+        1 for call in calls
+        if any(name.lower() == "authorization" for name in call["request_headers"])
+    ) == 4
+
+
+def test_collection_replay_and_request_mutation_archive_as_private(monkeypatch):
+    """Both replay the private collection request with its session headers and body
+    values, so both are archived as private workflow rows under their own capability."""
+    calls = _captured_calls(
+        lambda: test_database_neutral_dispatcher_replays_sealed_requests_before_mutation(
+            monkeypatch,
+        )
+    )
+    # One collection replay, then two mutation runs of two requests each (the resumed
+    # dispatcher restores the collection without sending it again).
+    assert [call["capability_name"] for call in calls] == (
+        ["collections.replay_active"] + ["xss.request_verify"] * 4
+    )
+    for call in calls:
+        assert call["source"] == "replay_transport"
+        assert call["workflow_values_private"] is True
+        assert call["method"] == "POST"
+    assert calls[0]["request_body"] == b'{"name":"canary-body"}'
+    assert calls[0]["principal_slot"] is None
+
+
+def test_request_mutation_batch_archives_as_private(monkeypatch):
+    calls = _captured_calls(
+        lambda: test_safe_authentication_body_batch_still_charges_state_budget(monkeypatch)
+    )
+    assert len(calls) == 4
+    assert {call["capability_name"] for call in calls} == {"sqli.request_verify_batch"}
+    assert all(call["workflow_values_private"] is True for call in calls)
+
+
+def test_every_in_process_scan_transport_is_recorded():
+    """Only the recorded-transport helper may construct the pinned replay transport, so
+    a new in-process capability cannot silently send unarchived traffic."""
+    import inspect
+
+    source = inspect.getsource(action_adapter_module)
+    helper = inspect.getsource(
+        action_adapter_module.DatabaseNeutralScanActionDispatcher._scan_replay_transport
+    )
+    assert helper.count("PinnedAiohttpReplayTransport(") == 1
+    assert source.count("PinnedAiohttpReplayTransport(") == 1
+    for name in ("_sqli_proof_batch", "_nosqli_verify_batch"):
+        method = inspect.getsource(
+            getattr(action_adapter_module.DatabaseNeutralScanActionDispatcher, name)
+        )
+        assert "self._scan_replay_transport(action, private=True)" in method

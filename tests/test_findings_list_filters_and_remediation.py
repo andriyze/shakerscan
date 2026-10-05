@@ -336,6 +336,19 @@ def test_a_weak_policy_is_not_reported_as_a_missing_one():
     ({"title": "Executable content in model output", "source": "ai_gate", "evidence": {"family": "data_exfiltration"}}, "Unsafe Handling of Model Output"),
     # A catalog title not listed falls back to the probe family.
     ({"title": "A future probe title", "source": "ai_gate", "evidence": {"family": "prompt_leakage"}}, "System Prompt Leakage"),
+    # Nuclei: the reviewed template id decides; neither title names ".git" or "git directory".
+    ({"title": "Git Credentials - Detect", "tool": "nuclei", "evidence": {"template_id": "git-credentials-disclosure"}}, "Publicly Served File Containing Secrets"),
+    ({"title": "Git Configuration - Detect", "tool": "nuclei", "evidence": {"template_id": "git-config"}}, "Exposed .git Directory"),
+    # Connected-device checks.
+    ({"title": "SSH Password Authentication Enabled", "tool": "device_ssh", "source": "device"}, "SSH Password Authentication Enabled"),
+    ({"title": "SSH Keyboard-Interactive Authentication Enabled", "tool": "device_ssh", "source": "device"}, "SSH Keyboard-Interactive Authentication Enabled"),
+    ({"title": "SSH Negotiated Weak Cryptographic Algorithm", "tool": "device_ssh", "source": "device"}, "Weak SSH Algorithms Negotiated"),
+    ({"title": "Device service requirement not met: ssh on 22/tcp", "tool": "device_policy", "source": "device"}, "Device Service Outside the Approved Policy"),
+    ({"title": "Deny device service: telnet on 23/tcp", "tool": "device_policy", "source": "device"}, "Device Service Outside the Approved Policy"),
+    ({"title": "Review device service: http on 80/tcp", "tool": "device_policy", "source": "device"}, "Device Service Outside the Approved Policy"),
+    ({"title": "Device HTTPS trust could not be established", "tool": "device_tls", "source": "device"}, "Device Management Certificate Not Trusted"),
+    # Written directly by the device candidate route, with no producer text to fall back on.
+    ({"title": "Affected connected-device software: CVE-2024-0001", "tool": "device_candidate_verifier", "source": "device"}, "Known-Vulnerable Device Software"),
 ])
 def test_findings_are_matched_by_what_produced_them(finding, title):
     guidance = finding_remediation(finding)
@@ -347,9 +360,38 @@ def test_positive_observations_get_no_guidance():
     assert finding_remediation({"title": "Input validation detected (attack payloads blocked)", "tool": "input_validation"}) is None
 
 
+def test_titles_without_a_template_id_still_find_the_git_guidance():
+    # Rows persisted before template ids were matched keep a title backstop.
+    assert finding_remediation({"title": "Git Credentials - Detect", "tool": "nuclei"})["title"] == "Publicly Served File Containing Secrets"
+    assert finding_remediation({"title": "Git Configuration - Detect", "tool": "nuclei"})["title"] == "Exposed .git Directory"
+
+
+def test_producer_guidance_is_the_floor_and_labelled():
+    unknown = {"title": "Unrecognised probe", "tool": "device_request_dast"}
+    guidance = finding_remediation({**unknown, "evidence": {"remediation": "Require auth on /api/x"}})
+    assert guidance["matched_by"] == "producer" and guidance["steps"] == ["Require auth on /api/x"]
+    assert guidance["title"] == "Unrecognised probe" and guidance["code_examples"] == []
+    # SSH rows persisted before the fix carry the check's text under evidence.recommendation.
+    guidance = finding_remediation({**unknown, "evidence": json.dumps({"recommendation": "Do X"})})
+    assert guidance["matched_by"] == "producer" and guidance["steps"] == ["Do X"]
+    guidance = finding_remediation({**unknown, "evidence": {"remediation": ["a", "b"]}})
+    assert guidance["matched_by"] == "producer" and guidance["steps"] == ["a", "b"]
+    # Structured grading output is not guidance text.
+    assert finding_remediation({**unknown, "evidence": {"remediation": {"x": 1}}}) is None
+    assert finding_remediation({**unknown, "evidence": {"remediation": ["a", {"x": 1}]}}) is None
+    assert finding_remediation({**unknown, "evidence": {"remediation": "   "}}) is None
+    # A knowledge-base match wins over the check's own text.
+    known = finding_remediation({
+        "title": "SSH Password Authentication Enabled", "tool": "device_ssh",
+        "evidence": {"recommendation": "Disable password authentication"},
+    })
+    assert known["matched_by"] == "finding_type"
+
+
 def test_every_mapped_key_has_an_entry():
     from scanner_tools import remediation_kb, remediation_kb_findings as tables
     keys = set(tables.TOOL_REMEDIATION.values()) | set(tables.HEADER_REMEDIATION.values())
+    keys |= set(tables.TEMPLATE_REMEDIATION.values())
     keys |= set(tables.EXACT_TITLE_REMEDIATION.values()) | set(tables.AI_FAMILY_REMEDIATION.values())
     keys |= {key for patterns in tables.TOOL_TITLE_REMEDIATION.values() for _, key in patterns}
     keys |= set(remediation_kb.EXPOSURE_CLASS_REMEDIATION.values())

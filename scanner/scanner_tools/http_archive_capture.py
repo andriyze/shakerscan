@@ -230,17 +230,28 @@ def record_curl_invocation(
     })
 
 
-def record_scan_call(captured: Mapping[str, Any]) -> None:
-    """Record a call made through the shared target-bound HTTP executor.
+def record_scan_call(
+    captured: Mapping[str, Any],
+    *,
+    capability_name: str | None = None,
+    source: str = "http.request",
+) -> None:
+    """Record a call made by an in-process scan capability.
 
     Takes the executor's own capture, which describes the request as built rather than as
-    requested, so a Scan row carries the same fidelity a Hunt row does.
+    requested, so a Scan row carries the same fidelity a Hunt row does. The capability is
+    named because archive completeness is judged per capability: a row stamped only with
+    its transport left the capability that sent it reported as unarchived.
     """
     if not capture_active():
         return
     record({
         "plane": "scan",
-        "source": "http.request",
+        "source": source,
+        "capability_name": capability_name,
+        # Values under arbitrary names (CSRF tokens, PINs, session headers) that masked
+        # views must withhold rather than trust key-name redaction to find.
+        "workflow_values_private": captured.get("workflow_values_private") is True,
         "method": captured.get("method") or "GET",
         "url": captured.get("url") or "",
         "request_headers": dict(captured.get("request_headers") or {}),

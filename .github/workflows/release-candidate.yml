@@ -366,6 +366,50 @@ jobs:
               --entrypoint python3 "$image" /app/release_identity.py --verify
           done
 
+      - name: Verify the first nuclei run in a fresh scanner container is warm
+        shell: bash
+        run: |
+          # nuclei indexes the whole pinned template bundle on its first run. Unbaked, the first
+          # canonical passive action after every worker start spent its 30 s wall on that and
+          # timed out. A fresh, offline container must already hold the index and finish the
+          # exact canonical passive argv quickly against a loopback fixture.
+          docker run --rm -i --network none --entrypoint python3 \
+            -e PYTHONPATH=/app -w /app shakerscan-scanner:release-candidate - <<'PY'
+          import json, os, shutil, subprocess, sys, threading, time
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          index = "/tmp/.cache/nuclei/index.gob"
+          if not (os.path.isfile(index) and os.path.getsize(index) > 0):
+              sys.exit(f"fresh scanner container has no baked nuclei template index at {index}")
+
+          class Fixture(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/html")
+                  self.end_headers()
+                  self.wfile.write(b"<html><body>cold-start fixture</body></html>")
+
+              def log_message(self, *_args):
+                  pass
+
+          server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
+          threading.Thread(target=server.serve_forever, daemon=True).start()
+          import agent_tools
+          argv = agent_tools._tmpl_nuclei(
+              f"http://127.0.0.1:{server.server_address[1]}/",
+              {"template_ids": agent_tools._CANONICAL_PASSIVE_NUCLEI_IDS},
+          )
+          started = time.monotonic()
+          result = subprocess.run([shutil.which("nuclei"), *argv], stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=60)
+          elapsed = time.monotonic() - started
+          matches = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+          matches = [match for match in matches if match.get("template-id")]
+          print(f"canonical passive nuclei: exit={result.returncode} matches={len(matches)} elapsed={elapsed:.2f}s")
+          if result.returncode != 0 or len(matches) != 10 or elapsed > 5:
+              sys.exit("first canonical passive nuclei run in a fresh scanner container is not warm")
+          PY
+
       - name: Enforce candidate-image external wire ceilings
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}

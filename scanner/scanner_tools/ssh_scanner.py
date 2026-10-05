@@ -578,41 +578,62 @@ async def ssh_auth_methods(
     result["publickey_enabled"] = "publickey" in auth_methods
     result["scan_completed"] = True
 
-    # Generate findings
+    # Generate findings. The top-level recommendation is what the worker persists as the
+    # check's guidance; evidence.recommendation stays for rows and readers that use it.
+    offered = ", ".join(str(method) for method in auth_methods) or "none listed"
     if result["password_auth_enabled"]:
+        recommendation = "Disable password authentication in sshd_config (PasswordAuthentication no)"
         result["findings"].append({
             "title": "SSH Password Authentication Enabled",
             "severity": "medium",
             "cwe": "CWE-287",
+            "description": (
+                f"The SSH service on {host}:{port} offers password authentication (offered methods: {offered}). "
+                "Password logins are exposed to online guessing and credential stuffing."
+            ),
+            "recommendation": recommendation,
             "evidence": {
                 "host": host,
                 "port": port,
                 "auth_methods": auth_methods,
                 "banner": result["banner"],
-                "recommendation": "Disable password authentication in sshd_config (PasswordAuthentication no)"
+                "recommendation": recommendation,
             }
         })
 
     # keyboard-interactive can also be used for password auth in some configs
     if result["keyboard_interactive_enabled"] and not result["password_auth_enabled"]:
+        recommendation = "Review keyboard-interactive auth configuration - may allow password-based access"
         result["findings"].append({
             "title": "SSH Keyboard-Interactive Authentication Enabled",
             "severity": "low",
             "cwe": "CWE-287",
+            "description": (
+                f"The SSH service on {host}:{port} offers keyboard-interactive authentication (offered methods: {offered}). "
+                "On most systems this is a password prompt, so password guessing stays possible unless it carries a second factor."
+            ),
+            "recommendation": recommendation,
             "evidence": {
                 "host": host,
                 "port": port,
                 "auth_methods": auth_methods,
                 "banner": result["banner"],
-                "recommendation": "Review keyboard-interactive auth configuration - may allow password-based access"
+                "recommendation": recommendation,
             }
         })
 
     if result["weak_algorithms"]:
+        recommendation = "Disable legacy SSH ciphers, MACs, and undersized host keys"
+        weak = ", ".join(str(item) for item in result["weak_algorithms"])
         result["findings"].append({
             "title": "SSH Negotiated Weak Cryptographic Algorithm",
             "severity": result["weak_algorithm_severity"] or "medium",
             "cwe": "CWE-327",
+            "description": (
+                f"The SSH service on {host}:{port} negotiated legacy algorithms or an undersized host key: {weak}. "
+                "They weaken the confidentiality and integrity of management sessions."
+            ),
+            "recommendation": recommendation,
             "evidence": {
                 "host": host,
                 "port": port,
@@ -620,7 +641,7 @@ async def ssh_auth_methods(
                 "host_key": result["host_key"],
                 "negotiated_algorithms": result["negotiated_algorithms"],
                 "weak_algorithms": result["weak_algorithms"],
-                "recommendation": "Disable legacy SSH ciphers, MACs, and undersized host keys"
+                "recommendation": recommendation,
             }
         })
 

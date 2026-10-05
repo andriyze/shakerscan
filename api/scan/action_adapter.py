@@ -8,6 +8,7 @@ module; it performs only the target-bound operation authorized by one action.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import functools
 import hashlib
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 import json
@@ -23,6 +24,7 @@ try:
     from capabilities.dns import inspect_dns_posture
     from capabilities.infrastructure import inspect_infrastructure_intelligence
     from capabilities.http import execute_bound_http_request
+    from capabilities.replay import RecordedReplayTransport
     from capabilities.inline import (
         AuthSessionExecutionAdapter,
         AuthzVerificationExecutionAdapter,
@@ -87,6 +89,7 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.dns import inspect_dns_posture
     from ..capabilities.infrastructure import inspect_infrastructure_intelligence
     from ..capabilities.http import execute_bound_http_request
+    from ..capabilities.replay import RecordedReplayTransport
     from ..capabilities.inline import (
         AuthSessionExecutionAdapter,
         AuthzVerificationExecutionAdapter,
@@ -440,6 +443,22 @@ def _directory_listing_child_url(directory_url: str, link: str) -> str:
     return urllib.parse.urljoin(base, link)
 
 
+def _spec_ingest_partial_reason(issues: Sequence[str]) -> CapabilityResultReason:
+    """The honest reason a spec/hint ingestion is partial, most severe first.
+
+    A ``*_limit`` / ``*_limit_reached`` issue is a real bound: routes beyond it were dropped,
+    so the output was truncated. A hint file the target answered with its HTML shell was never
+    published -- nothing was dropped or misparsed. Anything else is a document the parser could
+    only partly model (an unsupported media type, an unresolvable reference, a hint parse error).
+    """
+    tokens = [str(issue or "").split(":", 1)[0] for issue in issues]
+    if any(token.endswith(("_limit", "_limit_reached")) for token in tokens):
+        return CapabilityResultReason.OUTPUT_TRUNCATED
+    if tokens and all(token == "hint_document_is_markup" for token in tokens):
+        return CapabilityResultReason.SOURCE_NOT_PUBLISHED
+    return CapabilityResultReason.PARSER_FAILED
+
+
 class DatabaseNeutralScanActionDispatcher:
     """Execute canonical actions without Redis or PostgreSQL credentials."""
 
@@ -641,13 +660,39 @@ class DatabaseNeutralScanActionDispatcher:
             self._origin_selected = True
         return self._origin_selected
 
+    @staticmethod
+    def _scan_call_recorder(action: ScanAction, *, source: str = "http.request") -> Any:
+        """Archive callback that names the capability, not only the transport."""
+        return functools.partial(
+            _scan_capture.record_scan_call,
+            capability_name=action.capability_name, source=source,
+        )
+
+    def _scan_replay_transport(
+        self, action: ScanAction, *, principal_slot: str | None = None,
+        private: bool = False, **transport_options: Any,
+    ) -> Any:
+        """The pinned replay transport, recording every call into the scan archive.
+
+        Engine capabilities that send in-process are within reach of the archive; only the
+        external scanner processes behind the opaque tunnel are not. ``private`` marks rows
+        whose values (replayed collection bodies, session headers under arbitrary names,
+        fetched secret files) masked archive views must withhold.
+        """
+        return RecordedReplayTransport(
+            PinnedAiohttpReplayTransport(**transport_options),
+            self._scan_call_recorder(action, source="replay_transport"),
+            principal_slot=principal_slot,
+            private=private,
+        )
+
     async def _origin_select(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
         from .origin_selection import select_inferred_scan_origin, selected_origin_from_observations
 
         async def operation() -> Mapping[str, Any]:
             return await select_inferred_scan_origin(
                 target=self.target,
-                transaction_recorder=_scan_capture.record_scan_call,
+                transaction_recorder=self._scan_call_recorder(action),
                 timeout_seconds=int(action.requested_budget.get("tool_wall_seconds") or 20),
             )
 
@@ -895,7 +940,7 @@ class DatabaseNeutralScanActionDispatcher:
                 allow_write=False,
                 # The deterministic Scan plane records here for the same reason Hunt does:
                 # without it a scan export was empty while the endpoint claimed coverage.
-                transaction_recorder=_scan_capture.record_scan_call,
+                transaction_recorder=self._scan_call_recorder(action),
                 timeout_seconds=max(1, int(action.requested_budget.get("tool_wall_seconds") or 1)),
                 allow_bound_origin_redirects=follow,
                 trusted_headers=(
@@ -1208,7 +1253,13 @@ class DatabaseNeutralScanActionDispatcher:
             worker_id=self.worker_id,
             limits=action.requested_budget,
             consumed={name: 0 for name in action.requested_budget},
-            transport=PinnedAiohttpReplayTransport(),
+            # Collection requests carry the operator's private workflow values, so the
+            # archived rows are withheld from masked views as Hunt's collection rows are.
+            transport=self._scan_replay_transport(
+                action,
+                principal_slot="primary" if primary_profile_bound else None,
+                private=True,
+            ),
             timeout_seconds=max(0.1, min(30.0, wall / len(plan.requests))),
             lease_seconds=max(30, wall + 5),
             authorized_budget=action.requested_budget,
@@ -1281,7 +1332,7 @@ class DatabaseNeutralScanActionDispatcher:
             target=self.target,
             request=request,
             candidate=candidate,
-            transport=PinnedAiohttpReplayTransport(),
+            transport=self._scan_replay_transport(action, private=True),
             requested_budget=action.requested_budget,
         )
         return await self._execute_adapter(
@@ -1384,7 +1435,7 @@ class DatabaseNeutralScanActionDispatcher:
                 target=self.target,
                 request=request,
                 candidate=candidate,
-                transport=PinnedAiohttpReplayTransport(),
+                transport=self._scan_replay_transport(action, private=True),
                 requested_budget=sub_budget,
             )
             result = await CapabilityExecutor().execute(
@@ -1865,7 +1916,7 @@ class DatabaseNeutralScanActionDispatcher:
                     target=self.target,
                     request=request,
                     candidate=proof_candidate,
-                    transport=PinnedAiohttpReplayTransport(),
+                    transport=self._scan_replay_transport(action, private=True),
                     requested_budget=sub_budget,
                 )
             except SQLiProofError as exc:
@@ -1988,7 +2039,13 @@ class DatabaseNeutralScanActionDispatcher:
         )
         http_ceiling = int(action.requested_budget.get("http_requests") or 0)
         wall_ceiling = max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
-        transport = PinnedAiohttpReplayTransport()
+        # An authenticated fetch carries the principal's headers, whose names are not
+        # known to key-name masking, so it is archived as private.
+        transport = self._scan_replay_transport(
+            action,
+            principal_slot="primary" if header_items else "anonymous",
+            private=bool(header_items),
+        )
         started_at = datetime.now(timezone.utc).isoformat()
         documents: list[tuple[str, bytes, str | None]] = []
         errors: list[str] = []
@@ -2038,6 +2095,11 @@ class DatabaseNeutralScanActionDispatcher:
             ingestion_issues.append(
                 f"hint_ingestion_failed:{type(hint_error).__name__}"
             )
+        if ingestion_issues:
+            # State why the action is partial. Without a stated reason the backend falls back to
+            # output_truncated, which told the operator a bounded limit was reached when the
+            # target had only answered robots.txt with its HTML shell.
+            errors.insert(0, _spec_ingest_partial_reason(ingestion_issues).value)
         errors.extend(ingestion_issues)
         # Value-free: the observation carries the route shape and field names, never a spec value.
         observations = tuple(dict(route) for route in routes)
@@ -2130,7 +2192,12 @@ class DatabaseNeutralScanActionDispatcher:
         # Content-Length or closes mid-body (a directory index is the common
         # case); keep the bytes already received so a real disclosure on a
         # badly-framed response is still classified rather than dropped.
-        transport = PinnedAiohttpReplayTransport(tolerate_incomplete_body=True)
+        # The probes target key files, dumps and environment files on purpose, so the
+        # archived bodies are kept out of masked views even though no principal is sent.
+        transport = self._scan_replay_transport(
+            action, principal_slot="anonymous", private=True,
+            tolerate_incomplete_body=True,
+        )
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -2389,7 +2456,7 @@ class DatabaseNeutralScanActionDispatcher:
                 target=self.target,
                 request=request,
                 candidate=proof_candidate,
-                transport=PinnedAiohttpReplayTransport(),
+                transport=self._scan_replay_transport(action, private=True),
                 requested_budget=sub_budget,
             )
             result = await CapabilityExecutor().execute(
@@ -2496,7 +2563,8 @@ class DatabaseNeutralScanActionDispatcher:
             endpoints.entries[start:min(len(endpoints.entries), start + count)],
             start=start,
         ))
-        transport = PinnedAiohttpReplayTransport()
+        # Anonymous and primary probes share one transport, so no single slot applies.
+        transport = self._scan_replay_transport(action, principal_slot=None, private=True)
         started_at = datetime.now(timezone.utc).isoformat()
         consumed = {name: 0 for name in action.requested_budget}
         http_ceiling = int(action.requested_budget.get("http_requests") or 0)

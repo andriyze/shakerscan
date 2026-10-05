@@ -362,6 +362,15 @@ RUN mkdir -p /tmp/.config/subfinder && \
 
 ENV HOME=/tmp
 
+# nuclei parses the whole pinned template bundle (~13k files) on its first run and writes
+# its metadata index to $HOME/.cache/nuclei/index.gob, even when a scan selects a few
+# templates by -id. Unbaked, the first nuclei process after every container start paid that
+# inside the passive action's 30 s wall and timed out. Build the index offline here, under
+# the runtime HOME, and keep it ahead of the release identity so source changes reuse it.
+RUN --network=none /opt/tools/nuclei -duc -silent -no-color -tl >/dev/null && \
+    test -s /tmp/.cache/nuclei/index.gob && \
+    chmod -R a+rX /tmp/.cache
+
 # Bake the human release/build identity into the image itself. Keep this late
 # in the Dockerfile: a new source revision must not invalidate OS packages,
 # Python dependencies, scanner tools, and vulnerability databases. Standalone

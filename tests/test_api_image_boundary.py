@@ -18,6 +18,9 @@ API_PROCESS_SUBPROCESS_MODULES = {
 NON_API_ENTRYPOINT_SUBPROCESS_MODULES = {
     "api/gungnir_worker.py",
     "api/model_intake_firecracker_runner.py",
+    # Builds nuclei's template index once at worker/broker-worker start: a fixed,
+    # offline argv with no target (``-duc -silent -no-color -tl``).
+    "api/runtime/nuclei_index.py",
     "api/worker.py",
 }
 
@@ -121,3 +124,14 @@ def test_release_api_storage_init_preserves_private_sandbox_and_shares_worker_di
     api_entrypoint = (ROOT / "scanner" / "api-entrypoint.sh").read_text(encoding="utf-8")
     assert "umask 0002" in worker_entrypoint
     assert "umask 0002" in api_entrypoint
+
+
+def test_nuclei_index_warm_up_stays_a_worker_entrypoint_concern():
+    importers = sorted(
+        path.relative_to(ROOT).as_posix()
+        for path in API.rglob("*.py")
+        if "runtime.nuclei_index" in path.read_text(encoding="utf-8")
+    )
+    assert importers == ["api/broker_worker.py", "api/worker.py"]
+    source = (API / "runtime" / "nuclei_index.py").read_text(encoding="utf-8")
+    assert 'INDEX_BUILD_ARGV = ("-duc", "-silent", "-no-color", "-tl")' in source

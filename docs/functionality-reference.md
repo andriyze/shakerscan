@@ -1174,8 +1174,15 @@ read, and record export events. Retention classes are `short`, `standard`, `audi
 is deliberately raw replay evidence and may contain credentials and bodies; raw non-HAR JSON also
 requires `SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW` plus the operator credential. The export's `fidelity`
 and archive stats distinguish complete, partial, unavailable, failed, and dropped capture; absence
-of an archived row is not proof that no request occurred. Operator-authenticated `DELETE` routes
-purge the archive and unreferenced blobs without requiring raw export to be enabled.
+of an archived row is not proof that no request occurred. Scan engine capabilities that send
+in-process (origin selection, baseline, spec ingest, collection replay, exposure, mutation,
+proof and authz-surface batches) are archived under their own capability name; replayed private
+workflow values, authenticated fetches and exposure bodies are withheld from masked views. External
+scanner processes (httpx, katana, ffuf, nuclei, dalfox, sqlmap) reach the target through an opaque
+pinned tunnel and are not archived; the stats list them apart from engine gaps
+(`unarchived_external_tool_capabilities` vs `unarchived_engine_capabilities`).
+Operator-authenticated `DELETE` routes purge the archive and unreferenced blobs without requiring
+raw export to be enabled.
 
 **Mission campaigns and action ledger**: campaigns are durable operating wrappers over Continuous
 ASM, authenticated DAST, API authorization, AI red-team, Model Intake, benchmark, and retest work.
@@ -1538,7 +1545,15 @@ concurrency-limited with per-tool timeouts and a global deadline.
   unless its operator chooses `allow` (`prepare --private-network-targets allow`). The `internal`
   cohort classifies a target; it does not by itself admit a private address. `/health` reports the setting, every admission it makes is
   recorded on the scope receipt (`allowed_by_deployment_policy`), and a refusal names the class
-  and, where one exists, the setting that would admit it.
+  and, where one exists, the setting that would admit it. Connected-device (network) scans and
+  service probes apply the same private-network setting, judged under the device's environment:
+  the API refuses a device whose address (or every resolved address) is loopback, private or
+  reserved with `422 loopback_or_private_range` before queueing, and the device worker (which now
+  receives the setting) re-checks the address it pins under the stricter of the admitting
+  deployment's setting and its own. On this plane link-local (APIPA) devices stay admitted, and
+  cloud metadata addresses are governed by `SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS` and
+  `SHAKERSCAN_DEVICE_DENY_CIDRS`. Registering a device is not checked, so a refused target
+  network scan can leave its device profile behind.
 - **Coverage honesty**: an endpoint is only counted `tested` when scanner telemetry proves it was
   attempted/completed; timeouts/partials never inflate coverage.
 - **Local binding**: laptop mode binds to `127.0.0.1`; remote mode binds to a Tailscale IP. Exposing
@@ -1689,7 +1704,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 399 | Python sources + Compose manifests |
-| Internal compatibility scanner modules | 125 | `scanner/scanner_tools/` |
+| Internal compatibility scanner modules | 126 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
@@ -2824,7 +2839,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_POSTURE_IPINFO_TOKEN` | `api/public_check.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_POSTURE_NODE` | `api/public_check.py` |
 | `SHAKERSCAN_POSTURE_RESOLVER` | `api/public_check.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/host_guard.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_CONSUMER_GROUP` | `api/job_queue.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
@@ -2959,7 +2974,7 @@ Implementation modules below are inventory only. The immutable action graph and 
 capability registry define execution authority; module presence does not advertise a public
 Scan feature or a second orchestration engine.
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `remediation_kb_findings.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `remediation_kb_devices.py`, `remediation_kb_findings.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
 
 ### Durable Storage Inventory
 

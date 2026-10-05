@@ -1238,6 +1238,9 @@ FINDING_TO_REMEDIATION_MAP = {
     # Exposed files
     ".git": "exposed_git",
     "git directory": "exposed_git",
+    # Nuclei titles for rows saved without a template id ("Git Credentials - Detect").
+    "git credentials": "exposed_secret_file",
+    "git configuration": "exposed_git",
     "git_directory": "exposed_git",
     ".env": "exposed_env",
     "env file": "exposed_env",
@@ -1289,8 +1292,10 @@ def match_remediation(finding: dict[str, Any]) -> tuple[dict[str, Any], str] | N
     """Guidance for a finding and how it was matched.
 
     In order: ``exposure_class`` (the exposure prover's classification), ``finding_type`` (the check
-    that produced it, a fixed catalog title, or the header a missing-header finding names), and
-    ``title`` (keywords in the title: general guidance for that kind of issue).
+    that produced it, a nuclei template id, a fixed catalog title, or the header a missing-header
+    finding names), ``title`` (keywords in the title: general guidance for that kind of issue), and
+    ``producer`` (the check's own remediation text kept in evidence, for findings the knowledge
+    base does not know, such as per-probe device catalog titles).
     """
     evidence = _evidence_dict(finding)
     entry = get_remediation_for_exposure_class(str(evidence.get("exposure_class") or ""))
@@ -1301,7 +1306,37 @@ def match_remediation(finding: dict[str, Any]) -> tuple[dict[str, Any], str] | N
         return REMEDIATION_DATABASE[key].copy(), "finding_type"
     subject = _TRAILING_LOCATION.sub("", str(finding.get("title") or "")).strip()
     entry = _keyword_remediation(str(finding.get("tool") or ""), subject)
-    return (entry, "title") if entry else None
+    if entry:
+        return entry, "title"
+    steps = _producer_steps(evidence)
+    if steps:
+        return {
+            "title": str(finding.get("title") or "").strip() or None,
+            "description": None,
+            "remediation_steps": steps,
+            "code_examples": {},
+            "documentation_links": [],
+            "verification": None,
+            "effort": None,
+        }, "producer"
+    return None
+
+
+def _producer_steps(evidence: dict[str, Any]) -> list[str]:
+    """The check's own guidance from evidence: a string (one step) or a list of strings.
+
+    ``remediation`` is what the worker persists; ``recommendation`` is where the SSH check (and rows
+    saved before that) kept it. Structured values such as grading output are not guidance.
+    """
+    for key in ("remediation", "recommendation"):
+        value = evidence.get(key)
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        if isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+            steps = [item.strip() for item in value if item.strip()]
+            if steps:
+                return steps
+    return []
 
 
 def get_remediation_for_finding(finding: dict[str, Any]) -> dict[str, Any] | None:

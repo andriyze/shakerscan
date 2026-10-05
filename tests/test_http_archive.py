@@ -725,7 +725,13 @@ def test_the_deterministic_scan_plane_records_its_calls():
     endpoint advertised coverage."""
     from tests.api_sources import api_tree_source
 
-    assert "transaction_recorder=_scan_capture.record_scan_call" in api_tree_source()
+    source = api_tree_source()
+    # The recorder now names the capability; it is still the scan capture's callback.
+    assert "transaction_recorder=self._scan_call_recorder(action)" in source
+    recorder = source[source.index("def _scan_call_recorder("):]
+    recorder = recorder[:recorder.index("def _scan_replay_transport(")]
+    assert "_scan_capture.record_scan_call" in recorder
+    assert "capability_name=action.capability_name" in recorder
 
 
 def test_scan_capture_preserves_wire_identity_and_truncation_metadata():
@@ -1048,3 +1054,165 @@ def test_purging_a_parent_scan_clears_the_child_scans_its_export_shows(monkeypat
     assert conn.stats == {("scan", UNRELATED)}
     again = asyncio.run(router._purge(None, scan_id=PARENT, hunt_run_id=None))
     assert again["transactions_deleted"] == 0 and conn.transactions == [{"scan_id": UNRELATED}]
+
+
+def test_scan_capture_rows_carry_the_action_capability():
+    """The unarchived-capability query matches rows on capability_name, so a scan row
+    stamped with its adapter instead of its capability left every in-process capability
+    reported as missing even when its calls were stored."""
+    from api.runtime.http_archive import scan_transactions_from_capture
+
+    http_archive_capture.start_capture()
+    http_archive_capture.record_scan_call(
+        {"method": "GET", "url": "https://t/openapi.json", "status_code": 200},
+        capability_name="web.spec_ingest", source="replay_transport",
+    )
+    http_archive_capture.record_scan_call({"method": "GET", "url": "https://t/"})
+    attributed, legacy = scan_transactions_from_capture(
+        http_archive_capture.drain_capture(), scan_id="scan-1",
+    )
+    assert attributed.capability_name == "web.spec_ingest"
+    assert attributed.adapter == "replay_transport"
+    assert legacy.capability_name == "http.request"
+    assert legacy.adapter == "http.request"
+
+
+def test_scan_capture_carries_the_private_workflow_marker():
+    from api.runtime.http_archive import scan_transactions_from_capture
+
+    http_archive_capture.start_capture()
+    http_archive_capture.record_scan_call(
+        {"method": "POST", "url": "https://t/login", "workflow_values_private": True},
+        capability_name="sqli.request_verify_batch", source="replay_transport",
+    )
+    http_archive_capture.record_scan_call(
+        {"method": "GET", "url": "https://t/", "workflow_values_private": "yes"},
+    )
+    private, public = scan_transactions_from_capture(
+        http_archive_capture.drain_capture(), scan_id="scan-1",
+    )
+    assert private.metadata["workflow_values_private"] is True
+    assert "workflow_values_private" not in public.metadata
+
+
+def test_scan_private_workflow_rows_are_withheld_in_redacted_view():
+    """Scan mutation verifiers replay private collection requests carrying CSRF tokens,
+    PINs and session headers under arbitrary names. Key-name redaction cannot find those,
+    so a scan row marked private is blanked in every masked view exactly as Hunt is."""
+    digest = hashlib.sha256(b"csrf=tok123").hexdigest()
+    row = {
+        "id": "scan-private", "plane": "scan", "scan_id": "s1",
+        "capability_name": "sqli.request_verify_batch", "method": "POST",
+        "url": "https://t/form", "sequence": 0,
+        "request_headers": {"X-Session": "secret-value"},
+        "response_headers": {"X-Echo": "secret-value"},
+        "request_body": "csrf=tok123", "response_body": "welcome tok123",
+        "request_body_sha256": digest, "response_body_sha256": digest,
+        "metadata_json": {"workflow_values_private": True},
+    }
+    public = project(row, redaction="redacted")
+    text = json.dumps(public)
+    assert "secret-value" not in text and "tok123" not in text and digest not in text
+    assert public["request"]["body"] is None and public["response"]["body"] is None
+    assert public["request"]["sha256"] is None and public["response"]["sha256"] is None
+    assert public["request"]["headers"] == {"X-Session": "[REDACTED]"}
+    assert public["response"]["headers"] == {"X-Echo": "[REDACTED]"}
+    raw = project(row, redaction="raw")
+    assert raw["request"]["headers"]["X-Session"] == "secret-value"
+    assert raw["request"]["body"] == "csrf=tok123"
+
+
+def test_scan_rows_without_the_private_marker_keep_their_masked_bodies():
+    row = {
+        "id": "scan-public", "plane": "scan", "scan_id": "s1",
+        "capability_name": "web.spec_ingest", "method": "GET",
+        "url": "https://t/openapi.json", "sequence": 0,
+        "response_body": "openapi: 3.0.0", "metadata_json": {},
+    }
+    assert project(row, redaction="redacted")["response"]["body"] == "openapi: 3.0.0"
+
+
+@pytest.mark.asyncio
+async def test_scan_stats_separate_external_tool_gaps_from_engine_gaps():
+    class Conn:
+        async def fetchrow(self, query, *params):
+            return {"attempted": 3, "stored": 3, "failed": 0, "dropped": 0}
+
+        async def fetchval(self, query, *params):
+            return 0
+
+        async def fetch(self, query, *params):
+            return [
+                {"capability_name": "not.a.capability"},
+                {"capability_name": "templates.passive_batch"},
+                {"capability_name": "web.crawl"},
+                {"capability_name": "web.spec_ingest"},
+            ]
+
+    stats = await read_archive_stats(Conn(), scan_id="scan-1", hunt_run_id=None)
+    assert stats["unarchived_external_tool_capabilities"] == [
+        "templates.passive_batch", "web.crawl",
+    ]
+    assert stats["unarchived_engine_capabilities"] == [
+        "not.a.capability", "web.spec_ingest",
+    ]
+    assert stats["unarchived_http_capabilities"] == [
+        "not.a.capability", "templates.passive_batch", "web.crawl", "web.spec_ingest",
+    ]
+
+
+def test_fidelity_names_external_tool_gap_separately():
+    """A HAR that silently omits the crawl, probe and template traffic reads as the
+    whole scan. The detail says which gap is the opaque tool tunnel and which is an
+    engine capability that recorded nothing; neither upgrades the archive."""
+    fidelity, detail = archive_fidelity({
+        "attempted": 2, "stored": 2, "failed": 0, "dropped": 0, "capture_limited": 0,
+        "unarchived_http_capabilities": ["web.crawl", "web.spec_ingest"],
+        "unarchived_external_tool_capabilities": ["web.crawl"],
+        "unarchived_engine_capabilities": ["web.spec_ingest"],
+    }, total=2)
+    assert fidelity == "partial"
+    assert (
+        "external scanner traffic (relayed as an opaque pinned tunnel, not archived): web.crawl"
+        in detail
+    )
+    assert "engine capabilities with no archived calls: web.spec_ingest" in detail
+    only_external = archive_fidelity({
+        "attempted": 2, "stored": 2, "failed": 0, "dropped": 0, "capture_limited": 0,
+        "unarchived_http_capabilities": ["web.crawl"],
+        "unarchived_external_tool_capabilities": ["web.crawl"],
+        "unarchived_engine_capabilities": [],
+    }, total=2)
+    assert only_external[0] == "partial"
+    assert "engine capabilities" not in only_external[1]
+
+
+def test_recorded_replay_transport_keeps_hunt_slot_and_records_scan_slot_as_given():
+    from types import SimpleNamespace
+
+    from api.capabilities.replay import (
+        RecordedHuntReplayTransport,
+        RecordedReplayTransport,
+    )
+
+    class Inner:
+        async def send(self, request, **_kwargs):
+            return SimpleNamespace(
+                response_headers={"X": "1"}, response_body=b"ok", status_code=200,
+                connected_address="192.0.2.1", elapsed_ms=1, error_code=None,
+            )
+
+    request = SimpleNamespace(method="GET", url="https://t/", headers=(("A", "b"),), body=b"")
+    recorded = []
+    asyncio.run(RecordedHuntReplayTransport(
+        Inner(), recorded.append, principal_slot="",
+    ).send(request))
+    asyncio.run(RecordedReplayTransport(
+        Inner(), recorded.append, principal_slot=None,
+    ).send(request))
+    asyncio.run(RecordedReplayTransport(
+        Inner(), recorded.append, principal_slot="primary", private=True,
+    ).send(request))
+    assert [item["principal_slot"] for item in recorded] == ["anonymous", None, "primary"]
+    assert [item["workflow_values_private"] for item in recorded] == [False, False, True]
+    assert recorded[0]["request_headers"] == {"A": "b"}

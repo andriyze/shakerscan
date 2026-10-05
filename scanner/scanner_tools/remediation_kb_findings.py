@@ -4,12 +4,15 @@ remediation_kb.py merges these entries into REMEDIATION_DATABASE. Matching here 
 produced the finding, not by words in its title: the check (`tool`), an exact title from a fixed
 catalog (AI Gate probes), the header a missing-header finding names, or the AI Gate probe family.
 Plain data only; no imports from remediation_kb, so either module can import the other's names.
+The connected-device entries live in remediation_kb_devices.py and are merged in here.
 """
 
 from __future__ import annotations
 
 import re
 from typing import Any
+
+from .remediation_kb_devices import DEVICE_REMEDIATIONS
 
 _MDN = "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/"
 
@@ -654,6 +657,19 @@ max_age: 86400""",
     },
 }
 
+FINDING_TYPE_REMEDIATIONS.update(DEVICE_REMEDIATIONS)
+
+# Nuclei template ids (evidence.template_id), matched exactly. Only ids reviewed from the pinned
+# template bundle (api/scan/work_manifests.py); their titles ("Git Credentials - Detect") name no
+# keyword the title table knows. http-missing-security-headers is left to the per-header match.
+TEMPLATE_REMEDIATION: dict[str, str] = {
+    "git-config": "exposed_git",
+    "git-credentials-disclosure": "exposed_secret_file",
+    "openapi": "open_api_exposed",
+    "server-status": "exposed_metrics_endpoint",
+    "web-config": "exposed_confidential_file",
+}
+
 # A finding's check (`tool`) names its kind for these, whatever the title says.
 TOOL_REMEDIATION: dict[str, str] = {
     "rate_limiting": "rate_limiting",
@@ -665,6 +681,8 @@ TOOL_REMEDIATION: dict[str, str] = {
     "http_smuggling": "http_request_smuggling",
     "webhook_checks": "webhook_signature",
     "directory_listing": "directory_listing",
+    "device_policy": "device_service_policy",
+    "device_tls": "device_tls_trust",
 }
 
 # Checks that report several kinds; the title picks which (first pattern that matches wins).
@@ -681,6 +699,29 @@ TOOL_TITLE_REMEDIATION: dict[str, list[tuple[str, str]]] = {
     "tls.inspect": [(r"legacy tls|weak cipher", "weak_tls")],
     "js_dependency": [(r"vulnerable javascript library", "vulnerable_js_library")],
     "approval_checks": [(r"authorization|approval", "broken_authorization")],
+    "device_ssh": [
+        (r"password authentication", "ssh_password_auth"),
+        (r"keyboard-interactive", "ssh_keyboard_interactive"),
+        (r"weak cryptographic|weak algorithm", "ssh_weak_algorithms"),
+    ],
+    "device_web_headers": [
+        (r"\bhsts\b", "missing_hsts"),
+        (r"content security policy", "missing_csp"),
+        (r"framing protection", "missing_x_frame_options"),
+        (r"content-type sniffing", "missing_x_content_type_options"),
+        (r"cache control", "sensitive_response_caching"),
+        (r"cookie", "insecure_cookies"),
+    ],
+    # The worker's re-verified device candidates and the device route's advisory row (which
+    # carries no remediation text of its own).
+    "device_candidate_verifier": [
+        (r"^affected connected-device software", "device_firmware_advisory"),
+        (r"^policy-denied connected-device service", "device_service_policy"),
+        (r"^device ssh cryptographic posture", "ssh_weak_algorithms"),
+        (r"^device https identity verification", "device_tls_trust"),
+        (r"^device api authentication bypass", "broken_authorization"),
+        (r"^device control endpoint accepts unauthenticated", "device_control_missing_authentication"),
+    ],
 }
 
 # Response headers named by "Missing HTTP response header: X" or "X missing".
@@ -766,11 +807,14 @@ def normalized_title(title: Any) -> str:
 
 
 def finding_type_remediation_key(finding: dict[str, Any], evidence: dict[str, Any]) -> str | None:
-    """The knowledge-base key for a finding identified by its check, catalog title or header."""
+    """The knowledge-base key for a finding identified by its check, template id, catalog title or header."""
     title = normalized_title(finding.get("title"))
     tool = str(finding.get("tool") or "").strip().lower()
     if title in EXACT_TITLE_REMEDIATION:
         return EXACT_TITLE_REMEDIATION[title]
+    template_id = str(evidence.get("template_id") or "").strip().lower()
+    if template_id in TEMPLATE_REMEDIATION:
+        return TEMPLATE_REMEDIATION[template_id]
     if tool in TOOL_REMEDIATION:
         return TOOL_REMEDIATION[tool]
     for pattern, key in TOOL_TITLE_REMEDIATION.get(tool, ()):

@@ -66,12 +66,14 @@ _REASON_LABELS = {
     "manifest_unavailable": "Required immutable work was unavailable",
     "unsupported_output_schema": "The worker returned an unsupported result format",
     "not_applicable": "The capability did not apply to this target",
+    "source_not_published": "An optional discovery source was not published by the target",
     "active_verifier_zero_attempts": "An active verifier had candidates but made no bounded attempt",
     "unproven_critical_high": "High or critical candidates still require deterministic proof",
     "report_grade_unreliable": "The final report marked the grade as provisional",
     "scan_in_progress": "Required actions are still running",
     "missing_terminal_result": "A required capability has no terminal result",
     "parallel_child_incomplete": "At least one parallel shard completed with partial coverage",
+    "no_injection_candidates": "Selected injection families had no candidate to test",
 }
 
 
@@ -266,6 +268,85 @@ def _work_manifests(execution: Mapping[str, Any]) -> list[dict[str, Any]]:
         })
     result.sort(key=lambda item: (item["kind"], item["manifest_id"]))
     return result
+
+
+_INJECTION_FAMILIES = ("xss", "sqli")
+_INJECTION_GAP_MESSAGES = {
+    "state_changing_http_not_authorized": (
+        "No injection candidates were built: {withheld} endpoint(s) accept a request body, and "
+        "testing a body needs a state-changing request. Enable allow_state_changing_http with a "
+        "target-bound approval receipt to test JSON-body APIs."
+    ),
+    "path_operation_not_supported": (
+        "No injection candidates were built: the parameterized routes found are non-GET "
+        "operations with templated path segments, which the path verifier cannot test."
+    ),
+    "endpoint_manifest_partial": (
+        "No injection candidates were built from a discovery that did not complete, so "
+        "parameterized routes may have been missed."
+    ),
+    "candidate_limit_reached": "No injection candidates were kept within the candidate limit.",
+    "no_query_or_path_surface": (
+        "No injection candidates were built: no discovered route carried a query parameter or "
+        "a numeric or UUID path segment. Request bodies are tested only with "
+        "allow_state_changing_http and a target-bound approval receipt."
+    ),
+    "no_injectable_surface": (
+        "No injection candidates were built: no discovered route carried a query parameter, a "
+        "numeric or UUID path segment, or a request body."
+    ),
+}
+
+
+def injection_candidate_gap(
+    *,
+    scan_policy: Mapping[str, Any] | None,
+    candidate_manifests: Sequence[Mapping[str, Any]],
+    withheld_body_endpoints: int | None,
+) -> dict[str, Any] | None:
+    """Why selected XSS/SQLi families had nothing to test, or None when they did.
+
+    A scan whose candidate manifest is empty never plans an injection verifier, so the
+    explanation used to omit the stage silently. ``candidate_manifests`` are the executed
+    candidate manifests (entry_count, status, reason_code); ``withheld_body_endpoints`` is
+    the count of body-bearing endpoints the policy withheld, or None when unknown.
+    """
+    policy = _object(scan_policy)
+    selected = {str(item) for item in _array(policy.get("include_families"))}
+    families = [family for family in _INJECTION_FAMILIES if family in selected]
+    manifests = [
+        _object(item) for item in candidate_manifests
+        if str(_object(item).get("status")) != "cancelled"
+    ]
+    if not families or not manifests:
+        return None
+    if sum(_integer(item.get("entry_count")) for item in manifests) > 0:
+        return None
+    allowed = bool(policy.get("allow_state_changing_http"))
+    withheld = (
+        0 if allowed
+        else None if withheld_body_endpoints is None
+        else max(0, _integer(withheld_body_endpoints))
+    )
+    manifest_reasons = sorted({
+        str(item.get("reason_code")) for item in manifests
+        if item.get("reason_code") and str(item.get("reason_code")) in _INJECTION_GAP_MESSAGES
+    })
+    cause = (
+        "state_changing_http_not_authorized" if withheld
+        else manifest_reasons[0] if manifest_reasons
+        else "no_injectable_surface" if allowed
+        # Unknown or zero withheld bodies: claim only what holds either way.
+        else "no_query_or_path_surface"
+    )
+    return {
+        "reason_code": "no_injection_candidates",
+        "families": families,
+        "cause": cause,
+        "withheld_body_endpoints": withheld,
+        "allow_state_changing_http": allowed,
+        "message": _INJECTION_GAP_MESSAGES[cause].format(withheld=withheld),
+    }
 
 
 def build_scan_execution_explanation(
@@ -827,6 +908,8 @@ def build_scan_execution_explanation(
                 str(item) for item in _array(report_coverage.get("selected_family_gaps"))
             ],
             "work_manifests": work_manifests,
+            # Filled by the read path, which can load the executed manifests; None when unknown.
+            "injection_candidates": None,
         },
         "transport_parity": transport_parity,
     }

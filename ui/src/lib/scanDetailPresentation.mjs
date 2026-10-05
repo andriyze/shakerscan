@@ -264,6 +264,8 @@ const COVERAGE_REASON_LABELS = {
   worker_lost: 'A worker was lost before all planned work finished',
   authentication_uncertain: 'Credential authority could not be confirmed',
   output_truncated: 'A step produced more output than it may keep, so part of its result was cut off',
+  source_not_published: 'An optional discovery file (robots.txt or llms.txt) was not published by the target',
+  parser_failed: 'A step returned output that could only be partly read',
   parallel_child_incomplete: 'One of the parallel parts of this scan did not finish',
   connection_limit_exceeded: 'A step hit its connection limit before it finished',
   unproven_critical_high: 'A critical or high result is still unproven',
@@ -544,6 +546,10 @@ export function scanResultPresentation(scan, assurance) {
         && Number(record(row).attempted_candidates || 0) === 0)
     })
     .map((family) => String(family).replaceAll('_', ' ')) : []
+  // Why the selected injection families had nothing to test, as the server worked it out from
+  // the executed manifests -- for a JSON-body API, that its bodies need state-changing authority.
+  const injectionGap = record(record(record(scanRecord.execution_explanation).coverage).injection_candidates)
+  const injectionCandidateGap = typeof injectionGap.message === 'string' ? injectionGap.message : ''
   const assuranceGaps = Array.isArray(assurance?.gaps) ? assurance.gaps : []
   // A strong examination score describes the work that ran. When the run stopped before its
   // plan completed, or the scorer itself marked the grade unreliable, the conclusion is only as
@@ -588,6 +594,7 @@ export function scanResultPresentation(scan, assurance) {
     coverageGapReasons,
     incompleteFamilies,
     candidateGapFamilies,
+    injectionCandidateGap,
     observedCount: findings.length,
     observedRiskScore: notExamined ? null : finiteNumber(result.risk_score ?? result.score ?? scanRecord.score, null),
     observedRiskGrade: notExamined ? '' : String(result.risk_grade || result.grade || scanRecord.grade || '').replace(/\*+$/, ''),

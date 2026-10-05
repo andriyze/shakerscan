@@ -654,6 +654,7 @@ try:
         get_scan_coverage,
         get_scan_parity_artifact,
         get_scan_public_contract,
+        explain_injection_candidates as _explain_injection_candidates,
         load_public_scan_execution_explanation as _load_public_scan_execution_explanation,
         public_scan_execution_explanation as _public_scan_execution_explanation,
         router as scan_read_router,
@@ -782,6 +783,7 @@ except ModuleNotFoundError:
         get_scan_coverage,
         get_scan_parity_artifact,
         get_scan_public_contract,
+        explain_injection_candidates as _explain_injection_candidates,
         load_public_scan_execution_explanation as _load_public_scan_execution_explanation,
         public_scan_execution_explanation as _public_scan_execution_explanation,
         router as scan_read_router,
@@ -11822,8 +11824,10 @@ async def get_scan(scan_id: str, verified_only: bool = False):
                     extra={"scan_id": scan_id, "error": str(exc)},
                 )
 
+        execution_explanation = _public_scan_execution_explanation(dict(scan), action_rows)
+        await _explain_injection_candidates(conn, scan, execution_explanation)
+
     result = dict(scan)
-    execution_explanation = _public_scan_execution_explanation(result, action_rows)
     result['execution_context'] = _json_object(result.get('execution_context'))
     if result.get('result') is not None:
         result['result'] = _normalize_scan_result_for_api(_decode_json_value(result['result']))
@@ -13361,6 +13365,7 @@ configure_hunt_run_router(
     start_handler=_start_hunt_v2,
     # Defined later in this module; the lambda defers the lookup to call time like its siblings.
     standing_authorization_resolver=lambda target_id: _standing_authorization_for_target_id(target_id),
+    target_scope_refusal_resolver=target_authorization.pooled_scope_refusal_resolver(lambda: db_pool),
     metrics_provider=lambda: HUNT_ACTION_SERVICE.metrics.snapshot(),
 )
 app.include_router(hunt_run_router)

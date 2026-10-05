@@ -2308,9 +2308,10 @@ export function extractFindingTriage(finding: Finding | undefined | null): Findi
 }
 
 // Fix guidance from the scanner's remediation knowledge base (GET /findings/{id} only).
-// matched_by 'exposure_class' is the prover's classification and 'finding_type' the check, catalog
-// title or header that identifies the finding; 'title' is a keyword match on the title, so it is
-// general guidance for that kind of issue.
+// matched_by 'exposure_class' is the prover's classification and 'finding_type' the check, nuclei
+// template, catalog title or header that identifies the finding; 'title' is a keyword match on the
+// title, so it is general guidance for that kind of issue; 'producer' is the remediation text the
+// check itself wrote, used when the knowledge base has no entry (steps only, no examples).
 export interface FindingRemediation {
   title: string | null
   description: string | null
@@ -2320,7 +2321,7 @@ export interface FindingRemediation {
   verification: string | null
   references: string[]
   effort: string | null
-  matched_by: 'exposure_class' | 'finding_type' | 'title'
+  matched_by: 'exposure_class' | 'finding_type' | 'title' | 'producer'
 }
 
 export interface Finding {

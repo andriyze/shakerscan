@@ -59,6 +59,10 @@ class CapabilityResultReason(str, Enum):
     MANIFEST_UNAVAILABLE = "manifest_unavailable"
     UNSUPPORTED_OUTPUT_SCHEMA = "unsupported_output_schema"
     NOT_APPLICABLE = "not_applicable"
+    # An optional discovery source (robots.txt, llms.txt) was answered with the site's HTML
+    # shell: the target never published it. The action is partial because the coverage the
+    # file would imply is not real, but nothing was cut off or misparsed.
+    SOURCE_NOT_PUBLISHED = "source_not_published"
 
 
 class CapabilityResultError(ValueError):

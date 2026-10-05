@@ -869,3 +869,62 @@ def test_the_skippable_error_is_a_strict_subset_of_manifest_errors():
     with pytest.raises(ScanWorkManifestError) as caught:
         _reject_sensitive_keys({"authorization": "Bearer never-persist"})
     assert not isinstance(caught.value, ScanWorkManifestUnrepresentableError)
+
+
+# Captured from main before the zero-candidate explanation landed: the explanation must not
+# move a candidate's content address.
+AGENT_RUN_BODY_CANDIDATE_ID = (
+    "04b112e4ee170dd5324182bfc19bc4d0355c7e9fb7888a6d17c04871dc49008c"
+)
+
+
+def _agent_run_endpoints():
+    surface = {
+        "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+        "endpoints": [
+            {
+                "method": "POST", "scheme": "https", "host": "app.example.test", "port": 443,
+                "normalized_path": "/agent/run", "concrete_path": "/agent/run",
+                "query_keys": [], "body_field_names": ["prompt"],
+                "content_type": "application/json", "source": "web.spec_ingest",
+            },
+            {
+                "method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                "normalized_path": "/api/v1/chat/health", "concrete_path": "/api/v1/chat/health",
+                "query_keys": [], "source": "web.spec_ingest",
+            },
+        ],
+    }
+    return build_endpoint_manifest(
+        scan_id=SCAN_ID, target_binding_digest=TARGET_DIGEST,
+        surface_manifest=surface, source_action_ids=("discover.spec",),
+    )
+
+
+def test_a_json_body_api_without_mutation_authority_yields_no_candidates_and_says_why():
+    """The withheld body endpoints are counted from the manifest, not guessed.
+
+    Without allow_state_changing_http a POST body is never a candidate, so a JSON-only API
+    produces an empty, complete candidate manifest. The manifest itself stays exactly as it
+    was (a complete manifest cannot carry a reason); the count is what the explanation uses
+    to say why the injection families had nothing to test.
+    """
+    from api.scan.work_manifests import state_changing_body_endpoint_count
+
+    endpoints = _agent_run_endpoints()
+    withheld = build_candidate_manifest(
+        endpoints, source_action_ids=("discover.candidates",), maximum=20,
+    )
+    assert withheld.entries == ()
+    assert withheld.status == "complete" and withheld.reason_code is None
+    assert state_changing_body_endpoint_count(endpoints) == 1
+
+    authorized = build_candidate_manifest(
+        endpoints, source_action_ids=("discover.candidates",), maximum=20,
+        allow_state_changing_http=True,
+    )
+    assert [(entry["method"], entry["parameter_name"]) for entry in authorized.entries] == [
+        ("POST", "prompt"),
+    ]
+    # Candidate identity is content-addressed and must not move.
+    assert authorized.entries[0]["candidate_id"] == AGENT_RUN_BODY_CANDIDATE_ID

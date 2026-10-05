@@ -514,3 +514,21 @@ test('a finding proven in this run stays proven once merged with the row the wor
   const [lead] = merged({ proof_state: 'suspected', is_verified: false, is_suspected: true })
   assert.equal(isProvenFinding(lead), false)
 })
+
+
+test('a scan with no injection candidates says why, and an unpublished hint file is not truncation', () => {
+  const message = 'No injection candidates were built: 2 endpoint(s) accept a request body.'
+  const result = scanResultPresentation({
+    options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['xss', 'sqli'] } },
+    execution_explanation: { coverage: { injection_candidates: { cause: 'state_changing_http_not_authorized', message } } },
+    result: { findings: [], result: {}, coverage: { reasons: ['source_not_published'], family_coverage: [] } },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.equal(result.injectionCandidateGap, message)
+  assert.deepEqual(result.candidateGapFamilies, ['xss', 'sqli'])
+  assert.deepEqual(result.coverageGapReasons, [
+    'An optional discovery file (robots.txt or llms.txt) was not published by the target',
+  ])
+
+  const unexplained = scanResultPresentation({ result: { findings: [], result: {} } }, { band: 'limited', label: 'x' })
+  assert.equal(unexplained.injectionCandidateGap, '')
+})

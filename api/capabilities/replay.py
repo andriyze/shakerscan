@@ -144,15 +144,24 @@ class ReplayExecutionAdapter:
         )
 
 
-class RecordedHuntReplayTransport:
+class RecordedReplayTransport:
     """Archive the exact request plan and bounded response through the existing store.
 
     The transport may add framing headers, so fidelity is explicitly plan-level,
     not a complete packet capture. Values go only to the private archive callback.
+
+    ``principal_slot`` is recorded as given; ``None`` means the transport carries more
+    than one principal (or none is known) and no single slot can be claimed. ``private``
+    marks rows whose header and body values may be workflow secrets under arbitrary
+    names, so masked archive views withhold them.
     """
 
-    def __init__(self, transport: Any, recorder: Any, *, principal_slot: str) -> None:
+    def __init__(
+        self, transport: Any, recorder: Any, *, principal_slot: str | None,
+        private: bool = False,
+    ) -> None:
         self.transport, self.recorder, self.principal_slot = transport, recorder, principal_slot
+        self.private = private
 
     async def send(self, request: Any, **kwargs: Any) -> Any:
         from datetime import datetime, timezone
@@ -171,5 +180,13 @@ class RecordedHuntReplayTransport:
                 "elapsed_ms": result.elapsed_ms if result else None,
                 "error": result.error_code if result else "cancelled_or_failed",
                 "response_body_truncated": result is None or bool(result.error_code),
-                "started_at": started_at, "principal_slot": self.principal_slot or "anonymous",
+                "started_at": started_at, "principal_slot": self.principal_slot,
+                "workflow_values_private": self.private,
                 "fidelity": "exact_replay_plan_bounded_response"})
+
+
+class RecordedHuntReplayTransport(RecordedReplayTransport):
+    """Hunt replay acts as exactly one principal; an unnamed one is anonymous."""
+
+    def __init__(self, transport: Any, recorder: Any, *, principal_slot: str | None) -> None:
+        super().__init__(transport, recorder, principal_slot=principal_slot or "anonymous")

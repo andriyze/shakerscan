@@ -1,8 +1,10 @@
 """Fix guidance for a finding, from the scanner's remediation knowledge base.
 
 The knowledge base matches by the exposure prover's class, then by the finding's type (the check
-that produced it, a fixed catalog title, or the header it names), then by title keywords. The
-response says which (``matched_by``): a keyword match is general guidance for that kind of issue.
+that produced it, a nuclei template id, a fixed catalog title, or the header it names), then by
+title keywords. When none of those matches, the check's own remediation text kept in evidence is
+the floor. The response says which (``matched_by``): a keyword match is general guidance for that
+kind of issue, and ``producer`` is the text the check itself wrote.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ except ImportError:  # host-side tests add api/ only; the runtime image has scan
 
 
 def finding_remediation(finding: dict[str, Any]) -> dict[str, Any] | None:
-    """The guidance to show for ``finding``, or None when the knowledge base has none."""
+    """The guidance to show for ``finding``, or None when neither the knowledge base nor the check has any."""
     matched = match_remediation(finding)
     if not matched:
         return None

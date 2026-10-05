@@ -21,7 +21,10 @@ from .explanation import (
     build_scan_execution_explanation,
     capability_list_response,
     coverage_response,
+    injection_candidate_gap,
 )
+from .manifest_store import PostgresScanManifestStore, ScanManifestStoreError
+from .work_manifests import ScanWorkManifestKind, state_changing_body_endpoint_count
 from .parity import build_scan_semantic_parity_artifact
 try:
     from authenticated_assurance.evaluation import scan_authentication_summary
@@ -124,6 +127,82 @@ def public_scan_execution_explanation(
     return explanation
 
 
+async def _load_manifest(
+    conn: Any, scan_id: str, reference: Mapping[str, Any], kind: ScanWorkManifestKind,
+) -> Any:
+    try:
+        return await PostgresScanManifestStore().load(
+            conn,
+            manifest_id=str(reference.get("manifest_id") or ""),
+            scan_id=scan_id,
+            expected_kind=kind,
+            expected_digest=str(reference.get("manifest_digest") or "") or None,
+        )
+    except ScanManifestStoreError:
+        return None
+
+
+async def explain_injection_candidates(
+    conn: Any,
+    scan: Mapping[str, Any],
+    explanation: dict[str, Any],
+) -> None:
+    """Say why selected XSS/SQLi families had no candidate, from the executed manifests.
+
+    An empty candidate manifest plans no injection verifier, so without this the explanation
+    showed no injection stage and no reason. Manifests are read only in that case; a manifest
+    that cannot be read leaves its part unknown rather than guessed.
+    """
+    coverage = explanation.get("coverage")
+    if not isinstance(coverage, dict):
+        return
+    policy = _json_object(_json_object(scan.get("options")).get("scan_policy"))
+    if not {"xss", "sqli"} & {str(item) for item in policy.get("include_families") or ()}:
+        return
+    # The finalizer's work_manifests come from action arguments, so an empty candidate
+    # manifest (which planned no verify action) is named only by the plan revision.
+    references: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in (
+        *(coverage.get("work_manifests") or ()),
+        *(_json_object(explanation.get("plan_revision")).get("work_manifest_references") or ()),
+    ):
+        if isinstance(item, Mapping):
+            key = (str(item.get("kind") or ""), str(item.get("manifest_id") or ""),
+                   str(item.get("manifest_digest") or ""))
+            references.setdefault(key, dict(item))
+    candidate_refs = [
+        item for item in references.values()
+        if item.get("kind") == "candidate" and item.get("status") != "cancelled"
+    ]
+    if not candidate_refs or any(int(item.get("entry_count") or 0) > 0 for item in candidate_refs):
+        return
+    scan_id = str(scan.get("id") or "")
+    candidate_manifests = []
+    for reference in candidate_refs:
+        manifest = await _load_manifest(conn, scan_id, reference, ScanWorkManifestKind.CANDIDATE)
+        candidate_manifests.append({
+            "entry_count": 0,
+            "status": reference.get("status"),
+            "reason_code": manifest.reason_code if manifest is not None else None,
+        })
+    withheld: int | None = None
+    if not policy.get("allow_state_changing_http"):
+        withheld = 0
+        for reference in references.values():
+            if reference.get("kind") != "endpoint":
+                continue
+            manifest = await _load_manifest(conn, scan_id, reference, ScanWorkManifestKind.ENDPOINT)
+            if manifest is None:
+                withheld = None
+                break
+            withheld += state_changing_body_endpoint_count(manifest)
+    coverage["injection_candidates"] = injection_candidate_gap(
+        scan_policy=policy,
+        candidate_manifests=candidate_manifests,
+        withheld_body_endpoints=withheld,
+    )
+
+
 async def load_public_scan_execution_explanation(
     conn: Any,
     scan_id: str,
@@ -150,7 +229,9 @@ async def load_public_scan_execution_explanation(
             status_code=409,
             detail=f"Scan plan revision is invalid: {exc}",
         ) from exc
-    return public_scan_execution_explanation(scan, action_rows, plan_revision)
+    explanation = public_scan_execution_explanation(scan, action_rows, plan_revision)
+    await explain_injection_candidates(conn, scan, explanation)
+    return explanation
 
 
 @router.get("/scan/contracts")

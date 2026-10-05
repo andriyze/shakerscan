@@ -123,6 +123,7 @@ _service_provider: Callable[[], HuntRunService] | None = None
 _start_handler: Callable[[HuntStartContract], Awaitable[dict[str, Any]]] | None = None
 _metrics_provider: Callable[[], Mapping[str, Any]] | None = None
 _standing_authorization_resolver: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None = None
+_target_scope_refusal_resolver: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None = None
 
 PRIVILEGED_POLICY_FLAGS = (
     "active_testing", "allow_state_changing_http", "network_discovery",
@@ -138,12 +139,25 @@ def configure_hunt_run_router(
     standing_authorization_resolver: (
         Callable[[str], Awaitable[Mapping[str, Any] | None]] | None
     ) = None,
+    target_scope_refusal_resolver: (
+        Callable[[str], Awaitable[Mapping[str, Any] | None]] | None
+    ) = None,
 ) -> None:
     global _metrics_provider, _service_provider, _start_handler, _standing_authorization_resolver
+    global _target_scope_refusal_resolver
     _service_provider = service_provider
     _start_handler = start_handler
     _metrics_provider = metrics_provider
     _standing_authorization_resolver = standing_authorization_resolver
+    _target_scope_refusal_resolver = target_scope_refusal_resolver
+
+
+def _needs_receipt(payload: Mapping[str, Any]) -> bool:
+    """Whether the start asks for privileged authority without naming an approval receipt."""
+    policy = payload.get("policy")
+    if not isinstance(policy, Mapping) or policy.get("approval_receipt_id") or payload.get("approval_receipt_id"):
+        return False
+    return bool(payload.get("credential_refs")) or any(policy.get(flag) for flag in PRIVILEGED_POLICY_FLAGS)
 
 
 async def apply_standing_authorization(
@@ -159,10 +173,7 @@ async def apply_standing_authorization(
     explicitly selected for this target. A policy naming its own receipt is left untouched.
     """
     policy = payload.get("policy")
-    if (resolver is None or not isinstance(policy, dict) or policy.get("approval_receipt_id")
-            or payload.get("approval_receipt_id")):
-        return payload
-    if not payload.get("credential_refs") and not any(policy.get(flag) for flag in PRIVILEGED_POLICY_FLAGS):
+    if resolver is None or not isinstance(policy, dict) or not _needs_receipt(payload):
         return payload
     target_id = str(payload.get("target_id") or "").strip()
     if not target_id:
@@ -176,6 +187,37 @@ async def apply_standing_authorization(
         policy["scope_receipt_id"] = str(standing["scope_receipt_id"])
     policy["authorization_confirmed"] = True
     return {**payload, "policy": policy}
+
+
+async def refuse_blocked_target_scope(
+    payload: Mapping[str, Any],
+    resolver: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None,
+) -> None:
+    """Refuse a privileged start whose target scope is blocked, before asking for a receipt.
+
+    Without a receipt the contract tells the caller to authorize the target. When the target's
+    scope is blocked (a private address under ``SHAKERSCAN_PRIVATE_NETWORK_TARGETS=refuse``) the
+    authorization endpoint refuses too, so that remedy can never work; the scope verdict and its
+    reason are the answer. Starts that name a receipt -- explicit or standing -- are decided by
+    receipt validation as before. The resolver only ever refuses: None admits nothing here.
+    """
+    if resolver is None or not _needs_receipt(payload):
+        return
+    target_id = str(payload.get("target_id") or "").strip()
+    if not target_id:
+        return
+    refusal = await resolver(target_id)
+    if not refusal:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "error": "target_scope_blocked",
+            "message": str(refusal.get("message") or "the target's scope is blocked"),
+            "blocked_by": list(refusal.get("blocked_by") or []),
+            "schema_version": HUNT_START_SCHEMA,
+        },
+    )
 
 
 def _service() -> HuntRunService:
@@ -254,6 +296,7 @@ async def start_hunt(request: Request, response: Response):
             parsed.model_dump(mode="python", exclude_none=True),
             _standing_authorization_resolver,
         )
+        await refuse_blocked_target_scope(payload, _target_scope_refusal_resolver)
         contract = normalize_hunt_start_payload(payload)
         result = await _start_handler(contract)
     except HuntStartContractError as exc:

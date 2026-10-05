@@ -7,6 +7,7 @@ import { Section } from './Section'
 
 // Fix guidance: why it matters, the steps, a configuration example, and how to check the fix.
 // Guidance matched by title is labelled general: the knowledge base guessed the kind of issue.
+// Guidance from the check itself (no knowledge-base entry) is labelled as coming from the check.
 export function HowToFix({ remediation, toolSteps }: { remediation?: FindingRemediation | null; toolSteps: string[] }) {
   const examples = remediation?.code_examples || []
   const [exampleIndex, setExampleIndex] = useState(0)
@@ -21,6 +22,9 @@ export function HowToFix({ remediation, toolSteps }: { remediation?: FindingReme
         <span className="flex items-center gap-2 text-xs text-gray-500">
           {remediation.matched_by === 'title' && (
             <span title="Matched by the finding's title, not by what the scanner classified">General guidance</span>
+          )}
+          {remediation.matched_by === 'producer' && (
+            <span title="Written by the check that reported this finding; the knowledge base has no entry for it">From the check</span>
           )}
           {remediation.effort && <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-gray-300">Effort: {remediation.effort}</span>}
         </span>

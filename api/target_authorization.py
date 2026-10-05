@@ -15,7 +15,8 @@ from __future__ import annotations
 import json
 import urllib.parse
 import uuid
-from typing import Any, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any
 
 try:
     from action_scope import evaluate_scope, receipt_to_dict
@@ -29,7 +30,15 @@ except ModuleNotFoundError:
 
 
 class TargetAuthorizationError(ValueError):
-    """The target cannot be authorized as requested (blocked scope, unknown target)."""
+    """The target cannot be authorized as requested (blocked scope, unknown target).
+
+    ``code`` names the refusal for callers that map it to a status ("not_found",
+    "scope_blocked"); matching on the message text broke as soon as the message explained more.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _host(url: str) -> str:
@@ -201,6 +210,112 @@ async def _current_exact_target_authorization(conn: Any, target_id: Any) -> dict
     return None
 
 
+async def evaluate_target_scope(
+    conn: Any, target_id: Any, *, environment: str | None = None,
+) -> dict[str, Any]:
+    """Evaluate the target's destination scope exactly as authorizing it would; writes nothing.
+
+    Returns ``{target_uuid, url, host, environment, receipt}``. Raises
+    ``TargetAuthorizationError`` for an id that is not a UUID or names no target.
+    """
+    try:
+        target_uuid = uuid.UUID(str(target_id))
+    except (TypeError, ValueError) as exc:
+        raise TargetAuthorizationError("target id must be a UUID") from exc
+    target = _row(await conn.fetchrow("SELECT id, url, metadata_json FROM targets WHERE id=$1", target_uuid))
+    if target:
+        metadata = _json(target.get("metadata_json")) or {}
+        env = effective_target_environment(metadata, requested=environment)
+        url = str(target.get("url") or "")
+    else:
+        # A connected device is an asset the operator owns exactly as a web target is. Reading
+        # only the web table meant `POST /targets/{id}/authorization` answered 404 for a device,
+        # so every device scan re-asked for permission inline and no device Hunt could resolve a
+        # standing receipt. The device's own environment wins when the caller names none.
+        device = _row(await conn.fetchrow(
+            "SELECT id, primary_locator, environment FROM device_targets WHERE id=$1",
+            target_uuid,
+        ))
+        if not device:
+            raise TargetAuthorizationError("target not found", code="not_found")
+        locator = str(device.get("primary_locator") or "").strip()
+        env = str(environment or device.get("environment") or "production").strip() or "production"
+        url = locator if "://" in locator else (
+            f"http://[{locator}]" if ":" in locator else f"http://{locator}"
+        )
+    if url.startswith("host://"):
+        url = "http://" + url[len("host://"):].split("#",1)[0]
+    host = _host(url)
+    receipt = receipt_to_dict(evaluate_scope(
+        url, allowed_hosts=[host] if host else None, environment=env, target_id=str(target_uuid),
+    ))
+    return {"target_uuid": target_uuid, "url": url, "host": host, "environment": env, "receipt": receipt}
+
+
+def scope_block_message(receipt: Mapping[str, Any]) -> str:
+    """The refusal for a blocked scope: the codes, then each blocked check's own explanation.
+
+    The codes alone (``loopback_or_private_range``) did not say whether the address class is
+    never scanned or whether this deployment chose to refuse it, nor which setting changes it;
+    the scope evaluation already wrote that into the blocked check.
+    """
+    message = "the target's scope is blocked: " + ", ".join(
+        str(code) for code in receipt.get("blocked_by") or []
+    )
+    seen: list[str] = []
+    for check in receipt.get("checks") or []:
+        if not isinstance(check, Mapping) or check.get("status") != "blocked":
+            continue
+        detail = str(check.get("message") or check.get("detail") or "").strip()
+        if detail and detail not in seen:
+            seen.append(detail)
+    for detail in seen:
+        message += ": " + detail
+    return message
+
+
+async def target_scope_refusal(conn: Any, target_id: Any) -> dict[str, Any] | None:
+    """The target's blocked-scope refusal, or None when its scope is not blocked.
+
+    Only a "blocked" verdict refuses (a "needs_approval" host is still authorizable). An id that
+    is not a UUID or names no target returns None so the caller's existing errors decide it.
+    """
+    try:
+        evaluated = await evaluate_target_scope(conn, target_id)
+    except TargetAuthorizationError:
+        return None
+    receipt = evaluated["receipt"]
+    if receipt.get("verdict") != "blocked":
+        return None
+    return {
+        "blocked_by": list(receipt.get("blocked_by") or []),
+        "message": scope_block_message(receipt),
+        "environment": evaluated["environment"],
+    }
+
+
+def pooled_scope_refusal_resolver(
+    pool_provider: Callable[[], Any],
+) -> Callable[[Any], Awaitable[dict[str, Any] | None]]:
+    """A ``target_scope_refusal`` bound to a connection pool, for the Hunt start boundary.
+
+    It fails open to None (no pool yet, a database error): the receipt gate behind it still
+    refuses every privileged start without a receipt, so only the message quality is lost and
+    nothing is ever admitted by this resolver.
+    """
+    async def resolve(target_id: Any) -> dict[str, Any] | None:
+        pool = pool_provider()
+        if pool is None:
+            return None
+        try:
+            async with pool.acquire() as conn:
+                return await target_scope_refusal(conn, target_id)
+        except Exception:  # noqa: BLE001 - a better refusal message only, never an admission
+            return None
+
+    return resolve
+
+
 async def authorize_target(
     conn: Any,
     target_id: Any,
@@ -222,37 +337,10 @@ async def authorize_target(
     existing = await current_target_authorization(conn, target_uuid)
     if existing and existing.get("standing") and existing.get("risk_tier") == risk_tier:
         return existing
-    target = _row(await conn.fetchrow("SELECT id, url, metadata_json FROM targets WHERE id=$1", target_uuid))
-    if target:
-        metadata = _json(target.get("metadata_json")) or {}
-        env = effective_target_environment(metadata, requested=environment)
-        url = str(target.get("url") or "")
-    else:
-        # A connected device is an asset the operator owns exactly as a web target is. Reading
-        # only the web table meant `POST /targets/{id}/authorization` answered 404 for a device,
-        # so every device scan re-asked for permission inline and no device Hunt could resolve a
-        # standing receipt. The device's own environment wins when the caller names none.
-        device = _row(await conn.fetchrow(
-            "SELECT id, primary_locator, environment FROM device_targets WHERE id=$1",
-            target_uuid,
-        ))
-        if not device:
-            raise TargetAuthorizationError("target not found")
-        locator = str(device.get("primary_locator") or "").strip()
-        env = str(environment or device.get("environment") or "production").strip() or "production"
-        url = locator if "://" in locator else (
-            f"http://[{locator}]" if ":" in locator else f"http://{locator}"
-        )
-    if url.startswith("host://"):
-        url = "http://" + url[len("host://"):].split("#",1)[0]
-    host = _host(url)
-    receipt = receipt_to_dict(evaluate_scope(
-        url, allowed_hosts=[host] if host else None, environment=env, target_id=str(target_uuid),
-    ))
+    evaluated = await evaluate_target_scope(conn, target_uuid, environment=environment)
+    receipt, host = evaluated["receipt"], evaluated["host"]
     if receipt["verdict"] == "blocked":
-        raise TargetAuthorizationError(
-            "the target's scope is blocked: " + ", ".join(receipt["blocked_by"])
-        )
+        raise TargetAuthorizationError(scope_block_message(receipt), code="scope_blocked")
     await persist_scope_receipt(conn, receipt, target_uuid)
     confirmations = ["confirm_authorized"]
     if receipt["verdict"] == "needs_approval":

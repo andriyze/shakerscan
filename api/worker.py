@@ -62,6 +62,8 @@ from retest_contract import (
     validate_retest_job_payload,
 )
 from runtime.json_fields import json_array_field, json_object_field, strip_null_bytes
+from runtime.nuclei_index import ensure_nuclei_template_index
+from runtime.worker_startup import reject_admission_signer_material
 from runtime.worker_projection import (
     AI_GATE_RUN_KINDS,
     MODEL_INTAKE_RUN_KINDS,
@@ -1524,19 +1526,13 @@ def _scan_time_verification_fields(finding: dict[str, Any]) -> tuple[str | None,
 
 def run_worker_preflight() -> None:
     """Fail fast when the container has an inconsistent scanner import graph."""
-    forbidden_signer_variables = (
-        "MODEL_INTAKE_ADMISSION_SIGNING_KEY_PEM",
-        "MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM",
-        "MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID",
-    )
-    if any(os.environ.get(name) for name in forbidden_signer_variables):
-        raise RuntimeError(
-            "worker preflight failed: admission signing material must not be present in an evidence-producing worker"
-        )
+    reject_admission_signer_material()
     if os.environ.get("WORKER_PREFLIGHT_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
         print("[preflight] worker preflight disabled", flush=True)
         return
     worker_queue_policy_module.refresh_model_intake_scanner_data(MODEL_INTAKE_ONLY_WORKER)
+    # Pay nuclei's whole-bundle template indexing here, not in the first scan action's wall.
+    ensure_nuclei_template_index()
 
     try:
         try:
@@ -3783,10 +3779,7 @@ async def prepare_device_candidate_posture_result(
     controls: list[dict[str, Any]] = []
     evidence: dict[str, Any] = {"reexecuted_at_handoff": True}
     subject: dict[str, Any] = {"device_target_id": device_target_id}
-    title = "Connected-device candidate was deterministically verified"
-    description = "A fresh connected-device posture run satisfied the registered proof contract."
     severity = "medium"
-    recommendation = "Review and remediate the verified connected-device control failure."
     url = f"device://{device_target_id}"
     proof_basis = "device_posture_observation"
 

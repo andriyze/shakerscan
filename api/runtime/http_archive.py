@@ -948,7 +948,10 @@ def scan_transactions_from_capture(
             sequence=index,
             scan_id=scan_id,
             target_id=str(target_id) if target_id else None,
-            capability_name=str(call.get("source") or "scanner"),
+            # Rows recorded before capability attribution carry only their source.
+            capability_name=str(
+                call.get("capability_name") or call.get("source") or "scanner"
+            ),
             adapter=str(call.get("source") or "scanner"),
             method=call.get("method") or "GET",
             url=call.get("url"),
@@ -971,6 +974,10 @@ def scan_transactions_from_capture(
                 "fidelity": call.get("fidelity"),
                 "response_digest_scope": call.get("response_digest_scope"),
                 "redacted_argv": call.get("redacted_argv"),
+                **(
+                    {"workflow_values_private": True}
+                    if call.get("workflow_values_private") is True else {}
+                ),
                 # Stated on every row so a bounded archive is never mistaken for the
                 # complete traffic of the run.
                 "dropped_calls": dropped,

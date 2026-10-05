@@ -218,3 +218,93 @@ def test_a_receipt_without_the_standing_action_name_is_not_a_standing_authorizat
     # The runtime gate already agreed: a receipt with no action_name and no
     # expiry is not standing, which is exactly why the two disagreeing deadlocked.
     assert _decision(legacy) is not ActionAuthorityDecision.ALLOWED
+
+
+# --- Scope refusal is answered before the receipt question -----------------------------------
+# On a deployment with SHAKERSCAN_PRIVATE_NETWORK_TARGETS=refuse a privileged Hunt against a
+# private address used to be told to record a standing authorization -- which the authorization
+# endpoint then refused with only a bare code. Both answers now come from one scope evaluation
+# and carry the explanation an operator can act on.
+
+
+def test_target_scope_refusal_names_the_private_range_and_the_setting(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    conn = _Conn(url="host://10.0.0.5")
+    refusal = asyncio.run(ta.target_scope_refusal(conn, TARGET_ID))
+    assert refusal is not None
+    assert refusal["blocked_by"] == ["loopback_or_private_range"]
+    assert "10.0.0.5" in refusal["message"]
+    assert "SHAKERSCAN_PRIVATE_NETWORK_TARGETS" in refusal["message"]
+    assert refusal["message"].startswith("the target's scope is blocked: loopback_or_private_range")
+    # Evaluating the scope writes nothing.
+    assert conn.approvals == [] and conn.scopes == {} and conn.executed == []
+
+
+def test_target_scope_refusal_is_none_when_allowed_or_unknown(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
+    assert asyncio.run(ta.target_scope_refusal(_Conn(url="host://10.0.0.5"), TARGET_ID)) is None
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    assert asyncio.run(ta.target_scope_refusal(_Conn(url="host://10.0.0.5"), uuid.uuid4())) is None
+    assert asyncio.run(ta.target_scope_refusal(_Conn(url="host://10.0.0.5"), "not-a-uuid")) is None
+    assert asyncio.run(ta.target_scope_refusal(_Conn(), TARGET_ID)) is None
+
+
+def test_authorize_target_blocked_message_carries_the_explanation(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    conn = _Conn(url="host://10.0.0.5")
+    with pytest.raises(ta.TargetAuthorizationError) as caught:
+        asyncio.run(ta.authorize_target(conn, TARGET_ID, approved_by="alice"))
+    assert "does not allow private-network targets" in str(caught.value)
+    assert caught.value.code == "scope_blocked"
+    assert conn.approvals == []
+    with pytest.raises(ta.TargetAuthorizationError) as missing:
+        asyncio.run(ta.authorize_target(_Conn(), uuid.uuid4(), approved_by="alice"))
+    assert missing.value.code == "not_found"
+
+
+class _Pool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        conn = self.conn
+
+        class _Acquire:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        return _Acquire()
+
+
+def test_authorization_endpoint_maps_blocked_to_400_and_unknown_to_404(monkeypatch):
+    from fastapi import HTTPException
+    from targets import router as targets_router
+
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    monkeypatch.setattr(targets_router, "_pool_provider", lambda: _Pool(_Conn(url="host://10.0.0.5")))
+    request = targets_router.TargetAuthorizationRequest(approved_by="alice")
+    with pytest.raises(HTTPException) as blocked:
+        asyncio.run(targets_router.authorize_target(str(TARGET_ID), request))
+    assert blocked.value.status_code == 400
+    assert "SHAKERSCAN_PRIVATE_NETWORK_TARGETS" in blocked.value.detail
+    with pytest.raises(HTTPException) as unknown:
+        asyncio.run(targets_router.authorize_target(str(uuid.uuid4()), request))
+    assert unknown.value.status_code == 404
+
+
+def test_pooled_scope_refusal_resolver_refuses_and_fails_open(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    resolve = ta.pooled_scope_refusal_resolver(lambda: _Pool(_Conn(url="host://10.0.0.5")))
+    assert asyncio.run(resolve(str(TARGET_ID)))["blocked_by"] == ["loopback_or_private_range"]
+    # No pool yet, or a database failure: no refusal message, and nothing admitted here --
+    # the receipt gate behind it still refuses a privileged start without a receipt.
+    assert asyncio.run(ta.pooled_scope_refusal_resolver(lambda: None)(str(TARGET_ID))) is None
+
+    class _Broken:
+        def acquire(self):
+            raise RuntimeError("database is down")
+
+    assert asyncio.run(ta.pooled_scope_refusal_resolver(lambda: _Broken())(str(TARGET_ID))) is None

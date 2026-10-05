@@ -1384,6 +1384,21 @@ def build_candidate_manifest(
     )
 
 
+def state_changing_body_endpoint_count(endpoint_manifest: ScanWorkManifest) -> int:
+    """How many endpoints declare a body that only a state-changing request can reach.
+
+    These are exactly the endpoints ``build_candidate_manifest`` turns into body candidates
+    when the scan holds ``allow_state_changing_http``, and withholds otherwise. Counting them
+    lets a scan with no injection candidates say why, without touching the manifest.
+    """
+    if endpoint_manifest.kind is not ScanWorkManifestKind.ENDPOINT:
+        raise ScanWorkManifestError("body endpoint count requires an endpoint manifest")
+    return sum(
+        1 for endpoint in endpoint_manifest.entries
+        if endpoint["method"] != "GET" and endpoint.get("body_field_names")
+    )
+
+
 def build_request_manifest(
     *,
     scan_id: str,
