@@ -35,6 +35,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 try:
+    import deployment_policy
     import device_agent
     import device_capabilities
     import investigation_candidates
@@ -63,7 +64,7 @@ try:
     from secret_store import decrypt_secret, encrypt_secret, encryption_enabled
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
 except ModuleNotFoundError:  # package import in host-side tests
-    from .. import device_agent, device_capabilities, investigation_candidates
+    from .. import deployment_policy, device_agent, device_capabilities, investigation_candidates
     from .. import family_proof
     from ..api_utils import (
         SEVERITY_ORDER, _QUEUE_HANDOFF_CONFIRMATION_KEY, _clean_string_list, _int_or_none,
@@ -96,6 +97,9 @@ from .shared_credentials import (
 from .shared_collections import save_device_collection, deactivate_device_collection, collection_view
 from .collection_environments import bind_environments
 from .network_authorization import network_authorization_snapshot
+from .destination_policy import (
+    admit_device_destination, device_destination_policy_record, device_policy_environment,
+)
 
 router = APIRouter()
 
@@ -1363,6 +1367,38 @@ async def deactivate_device(device_id: str):
     return {"status": "deactivated", "device_id": device_id}
 
 
+async def _admit_device_destination(device_uuid: uuid.UUID) -> dict[str, str] | None:
+    """Admit an active device's destination before the submission takes its connection.
+
+    Resolution can take seconds, so it runs on a short read of its own rather than inside the
+    connection that later queues the scan; the caller confirms the locator and environment it
+    then reads are the ones admitted here. None when the device is absent or inactive, which
+    the caller reports with its usual 404/409.
+    """
+    async with _pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT primary_locator, environment, is_active FROM device_targets WHERE id=$1",
+            device_uuid,
+        )
+    if not row or not row["is_active"]:
+        return None
+    environment = device_policy_environment(row["environment"])
+    policy = deployment_policy.private_network_targets_policy()
+    await admit_device_destination(str(row["primary_locator"]), environment, policy=policy)
+    return {"locator": str(row["primary_locator"]), "environment": environment, "policy": policy}
+
+
+def _confirm_admitted_destination(device: Any, admitted: dict[str, str] | None) -> None:
+    if admitted is None or (
+        str(device["primary_locator"]) != admitted["locator"]
+        or device_policy_environment(device["environment"]) != admitted["environment"]
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Device address or environment changed during submission; review it and retry",
+        )
+
+
 @router.post("/devices/{device_id}/scan")
 async def scan_device(device_id: str, request: DeviceScanRequest):
     if not _device_posture_enabled():
@@ -1417,12 +1453,14 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
     device_uuid = _device_uuid(device_id)
     candidate_uuid = _device_uuid(request.candidate_id, "candidate") if request.candidate_id else None
     scan_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
+    admitted_destination = await _admit_device_destination(device_uuid)
     async with _pool().acquire() as conn:
         device = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
         if not device:
             raise HTTPException(status_code=404, detail="Connected device not found")
         if not device["is_active"]:
             raise HTTPException(status_code=409, detail="Connected device is inactive")
+        _confirm_admitted_destination(device, admitted_destination)
         candidate = None
         if candidate_uuid:
             candidate = await conn.fetchrow(
@@ -1594,6 +1632,11 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "run_kind": "device_posture",
             _QUEUE_HANDOFF_CONFIRMATION_KEY: False,
             "device_class": str(device["device_class"]),
+            "device_environment": admitted_destination["environment"],
+            "private_network_targets": admitted_destination["policy"],
+            "device_destination_policy": device_destination_policy_record(
+                admitted_destination["environment"], admitted_destination["policy"],
+            ),
             "device_name": str(device["name"] or ""),
             "device_manufacturer": str(device["manufacturer"] or ""),
             "device_model": str(device["model"] or ""),
@@ -1743,12 +1786,14 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
     device_uuid = _device_uuid(device_id)
     candidate_uuid = _device_uuid(request.candidate_id, "candidate") if request.candidate_id else None
     scan_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
+    admitted_destination = await _admit_device_destination(device_uuid)
     async with _pool().acquire() as conn:
         device = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
         if not device:
             raise HTTPException(status_code=404, detail="Connected device not found")
         if not device["is_active"]:
             raise HTTPException(status_code=409, detail="Connected device is inactive")
+        _confirm_admitted_destination(device, admitted_destination)
         candidate = None
         if candidate_uuid:
             candidate = await conn.fetchrow(
@@ -1795,6 +1840,11 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
             "run_kind": "device_probe",
             _QUEUE_HANDOFF_CONFIRMATION_KEY: False,
             "probe_kind": "service_state",
+            "device_environment": admitted_destination["environment"],
+            "private_network_targets": admitted_destination["policy"],
+            "device_destination_policy": device_destination_policy_record(
+                admitted_destination["environment"], admitted_destination["policy"],
+            ),
             "probe_transport": request.transport,
             "probe_port": request.port,
             "expected_state": request.expected_state,

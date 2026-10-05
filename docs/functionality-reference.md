@@ -1538,7 +1538,15 @@ concurrency-limited with per-tool timeouts and a global deadline.
   unless its operator chooses `allow` (`prepare --private-network-targets allow`). The `internal`
   cohort classifies a target; it does not by itself admit a private address. `/health` reports the setting, every admission it makes is
   recorded on the scope receipt (`allowed_by_deployment_policy`), and a refusal names the class
-  and, where one exists, the setting that would admit it.
+  and, where one exists, the setting that would admit it. Connected-device (network) scans and
+  service probes apply the same private-network setting, judged under the device's environment:
+  the API refuses a device whose address (or every resolved address) is loopback, private or
+  reserved with `422 loopback_or_private_range` before queueing, and the device worker (which now
+  receives the setting) re-checks the address it pins under the stricter of the admitting
+  deployment's setting and its own. On this plane link-local (APIPA) devices stay admitted, and
+  cloud metadata addresses are governed by `SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS` and
+  `SHAKERSCAN_DEVICE_DENY_CIDRS`. Registering a device is not checked, so a refused target
+  network scan can leave its device profile behind.
 - **Coverage honesty**: an endpoint is only counted `tested` when scanner telemetry proves it was
   attempted/completed; timeouts/partials never inflate coverage.
 - **Local binding**: laptop mode binds to `127.0.0.1`; remote mode binds to a Tailscale IP. Exposing
@@ -2824,7 +2832,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_POSTURE_IPINFO_TOKEN` | `api/public_check.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_POSTURE_NODE` | `api/public_check.py` |
 | `SHAKERSCAN_POSTURE_RESOLVER` | `api/public_check.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/host_guard.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_CONSUMER_GROUP` | `api/job_queue.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |

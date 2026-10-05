@@ -23,7 +23,7 @@ import tempfile
 import time
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 try:
     from ..score_bands import grade_for
@@ -118,6 +118,10 @@ _HTTP_STATUS = re.compile(rb"^HTTP/(?:1\.[01]|2(?:\.0)?)\s+\d{3}\b", re.I)
 _TIMEOUT_TEXT = re.compile(r"(?:host\s+)?timed?\s*out|host-timeout", re.I)
 _HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.?$")
 KNOWN_POLICY_REQUIREMENTS = {"encrypted", "password_auth", "weak_algorithms", "publickey_auth"}
+PRIVATE_NETWORK_TARGETS_ENV = "SHAKERSCAN_PRIVATE_NETWORK_TARGETS"
+PRIVATE_DESTINATION_REASON = "loopback_or_private_range"
+# Must equal api/action_scope.SAFE_LAB_ENVIRONMENTS; a test keeps the two identical.
+DEVICE_LAB_ENVIRONMENTS = frozenset({"development", "dev", "preview", "staging", "lab", "test"})
 DEFAULT_DENIED_DEVICE_DESTINATIONS = (
     "169.254.169.254/32",  # AWS/GCP/OpenStack metadata
     "169.254.170.2/32",    # AWS container credentials
@@ -176,8 +180,19 @@ def normalize_device_locator(value: Any) -> str:
         return candidate
 
 
-async def resolve_device_address(locator: str, *, timeout: float = 5.0) -> str:
-    """Resolve once so every stage stays pinned to one authorized address."""
+async def resolve_device_address(
+    locator: str,
+    *,
+    timeout: float = 5.0,
+    admit: Callable[[str], bool] | None = None,
+) -> str:
+    """Resolve once so every stage stays pinned to one authorized address.
+
+    ``admit`` narrows a multi-address answer to the addresses the destination policy admits, so
+    a dual-stack name whose lowest-sorted address is private is pinned to its admitted public
+    address rather than refused. When nothing is admitted the usual pick is returned unchanged
+    and ``validate_device_destination`` refuses it by name.
+    """
     try:
         return str(ipaddress.ip_address(locator))
     except ValueError:
@@ -204,14 +219,114 @@ async def resolve_device_address(locator: str, *, timeout: float = 5.0) -> str:
         ipaddress.ip_address(value).version,
         int(ipaddress.ip_address(value)),
     ))
+    if admit is not None:
+        admitted = [address for address in addresses if admit(address)]
+        if admitted:
+            return admitted[0]
     return addresses[0]
 
 
-def validate_device_destination(address: str) -> str:
-    """Reject infrastructure control-plane destinations, not authorized public devices."""
+def private_network_targets_policy(raw: Any = None) -> str:
+    """Parse ``SHAKERSCAN_PRIVATE_NETWORK_TARGETS`` exactly as api/deployment_policy.py does.
+
+    Unset or empty means ``allow`` (a self-hosted scanner examines the operator's own network).
+    The scanner package does not import the API package, so the parsing is mirrored here and a
+    test keeps the two identical.
+    """
+    value = str(raw or "").strip().lower()
+    if not value:
+        return "allow"
+    return "allow" if value in {"allow", "allowed", "1", "true", "yes", "on"} else "refuse"
+
+
+def _worker_private_network_policy() -> str:
+    """This worker process's own setting (inventoried, so spelled literally)."""
+    return private_network_targets_policy(os.environ.get("SHAKERSCAN_PRIVATE_NETWORK_TARGETS"))
+
+
+def effective_private_network_policy(admitted_policy: Any = None) -> str:
+    """The stricter of the policy recorded when the job was admitted and this worker's own.
+
+    A remote or broker device worker may run without the setting (which reads as ``allow``); it
+    must still honour the refusing deployment that admitted the job. A refusing worker is not
+    loosened by a job admitted elsewhere under ``allow`` either.
+    """
+    policies = {_worker_private_network_policy()}
+    if admitted_policy is not None and str(admitted_policy).strip():
+        policies.add(private_network_targets_policy(admitted_policy))
+    return "refuse" if "refuse" in policies else "allow"
+
+
+def _device_metadata_destination(parsed: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return any(
+        parsed.version == network.version and parsed in network
+        for network in (ipaddress.ip_network(raw) for raw in DEFAULT_DENIED_DEVICE_DESTINATIONS)
+    )
+
+
+def device_private_destination_refusal(address: str, environment: Any, policy: Any = None) -> str | None:
+    """Why ``address`` is refused under the deployment's private-network policy, or None.
+
+    This is the policy-dependent part of the web scope guard (api/action_scope.py): loopback,
+    private and reserved addresses are refused outside a Lab environment unless the deployment
+    allows private-network targets. It deliberately does not apply that guard's always-refused
+    classes: link-local (APIPA) devices are legitimate LAN devices on this plane, and the cloud
+    metadata destinations are governed by ``DEFAULT_DENIED_DEVICE_DESTINATIONS`` and
+    ``SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS``. ``policy`` None reads this process's setting.
+    """
+    try:
+        parsed = ipaddress.ip_address(str(address or "").split("%", 1)[0].strip("[]"))
+    except ValueError:
+        return None
+    mapped = getattr(parsed, "ipv4_mapped", None)
+    if mapped is not None:
+        parsed = mapped
+    judged = str(environment or "").strip().lower()
+    if not judged or judged == "unknown":
+        judged = "production"
+    effective = (
+        _worker_private_network_policy()
+        if policy is None else private_network_targets_policy(policy)
+    )
+    if judged in DEVICE_LAB_ENVIRONMENTS or effective == "allow":
+        return None
+    if parsed.is_link_local or _device_metadata_destination(parsed):
+        return None
+    if not (parsed.is_loopback or parsed.is_private or parsed.is_reserved):
+        return None
+    kind = "a loopback" if parsed.is_loopback else "a private-network" if parsed.is_private else "a reserved"
+    return (
+        f"{parsed} is {kind} address; this deployment does not allow private-network targets "
+        f"outside a Lab environment. The device is evaluated under the '{judged}' environment. "
+        f"Set the device's environment to Lab, or set {PRIVATE_NETWORK_TARGETS_ENV}=allow for "
+        "the deployment."
+    )
+
+
+def device_destination_context(options: dict[str, Any]) -> tuple[str, str]:
+    """The (environment, effective policy) a device job is classified under."""
+    environment = str(options.get("device_environment") or "production").strip().lower() or "production"
+    return environment, effective_private_network_policy(options.get("private_network_targets"))
+
+
+def validate_device_destination(
+    address: str, *, environment: Any = "production", policy: Any = None,
+) -> str:
+    """Reject infrastructure control-plane destinations, not authorized public devices.
+
+    Private, loopback and reserved destinations are also refused when the deployment refuses
+    private-network targets (``SHAKERSCAN_PRIVATE_NETWORK_TARGETS=refuse``) and the device is not
+    in a Lab environment. ``policy`` is the policy recorded when the job was admitted; the
+    stricter of it and this worker's own setting applies.
+    """
     parsed = ipaddress.ip_address(address)
     if parsed.is_unspecified or parsed.is_multicast:
         raise ValueError("device destination is not a unicast host address")
+    refusal = device_private_destination_refusal(
+        str(parsed), environment, effective_private_network_policy(policy),
+    )
+    if refusal:
+        raise ValueError(f"device destination refused ({PRIVATE_DESTINATION_REASON}): {refusal}")
     if os.environ.get("SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS", "").strip().lower() in {"1", "true", "yes"}:
         return str(parsed)
     configured = [
@@ -1515,8 +1630,14 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
 
     await ensure_active("health baseline")
     safety.authorize("target_health_baseline", "readonly")
+    destination_environment, destination_policy = device_destination_context(options)
     try:
-        resolved_address = await resolve_device_address(locator)
+        resolved_address = await resolve_device_address(
+            locator,
+            admit=lambda address: device_private_destination_refusal(
+                address, destination_environment, destination_policy,
+            ) is None,
+        )
     except ValueError as exc:
         reachability = unresolved_reachability(locator, exc)
         safety.record_health(_reachability_checkpoint(reachability, stage="reachability_preflight"))
@@ -1532,7 +1653,9 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             policy_name=policy_name,
             policy_rules_count=len(rules),
         )
-    validate_device_destination(resolved_address)
+    validate_device_destination(
+        resolved_address, environment=destination_environment, policy=destination_policy,
+    )
 
     async def scan_stage_callback(event: dict[str, Any]) -> bool | None:
         kind = str(event.get("kind") or "")

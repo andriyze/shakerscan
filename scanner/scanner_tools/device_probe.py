@@ -18,11 +18,17 @@ except ImportError:  # pragma: no cover - minimal host test environment
 
 try:
     from .common import run
-    from .device_posture import normalize_device_locator, resolve_device_address
+    from .device_posture import (
+        device_destination_context, device_private_destination_refusal, normalize_device_locator,
+        resolve_device_address, validate_device_destination,
+    )
     from .device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
 except ImportError:  # pragma: no cover - flat scanner runtime
     from common import run
-    from device_posture import normalize_device_locator, resolve_device_address
+    from device_posture import (
+        device_destination_context, device_private_destination_refusal, normalize_device_locator,
+        resolve_device_address, validate_device_destination,
+    )
     from device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
 
 
@@ -131,7 +137,18 @@ async def run_device_service_probe(locator: str, options: dict[str, Any]) -> dic
         max_requests_per_second=min(5.0, safety_profile.max_requests_per_second),
     )
     started = time.monotonic()
-    resolved_address = await resolve_device_address(locator)
+    destination_environment, destination_policy = device_destination_context(options)
+    resolved_address = await resolve_device_address(
+        locator,
+        admit=lambda address: device_private_destination_refusal(
+            address, destination_environment, destination_policy,
+        ) is None,
+    )
+    # The posture scan always checked its pinned address; the probe never did, so a service
+    # probe reached metadata, deny-listed and policy-refused private destinations unchecked.
+    validate_device_destination(
+        resolved_address, environment=destination_environment, policy=destination_policy,
+    )
     known_ports = [port] if transport == "tcp" else []
     safety.record_health(await check_device_health(resolved_address, stage="before_targeted_probe", tcp_ports=known_ports))
     if safety.halted:
