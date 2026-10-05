@@ -164,6 +164,30 @@ async def migrate_target_assets(conn: Any) -> None:
     await conn.execute("INSERT INTO app_schema_migrations(name) VALUES($1)", ASSET_MIGRATION)
 
 
+async def reconcile_active_finding_counts(conn: Any) -> None:
+    """Repair drifted finding badges from the authoritative finding rows.
+
+    The legacy baseline repaired them once, but the baseline never runs again on a converted
+    database, so a badge that drifted there survived every later upgrade. Only drifted rows are
+    rewritten, so a consistent database pays one read and no writes.
+    """
+    await conn.execute("""
+        UPDATE targets t SET active_findings_count=counted.n
+        FROM (SELECT t2.id, (SELECT COUNT(*) FROM findings f
+                             WHERE f.target_id=t2.id AND f.status='active') AS n
+              FROM targets t2) counted
+        WHERE t.id=counted.id AND t.active_findings_count IS DISTINCT FROM counted.n
+    """)
+    await conn.execute("""
+        UPDATE target_device_profiles p SET active_findings_count=counted.n
+        FROM (SELECT p2.target_id, (SELECT COUNT(*) FROM findings f
+                                    WHERE f.device_target_id=p2.target_id
+                                      AND f.status='active') AS n
+              FROM target_device_profiles p2) counted
+        WHERE p.target_id=counted.target_id AND p.active_findings_count IS DISTINCT FROM counted.n
+    """)
+
+
 async def run_unified_startup(pool: Any, baseline: Any) -> None:
     """Serialize baseline and conversion atomically, including concurrent worker startup."""
     async with pool.acquire() as conn:
@@ -196,5 +220,13 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                 except ModuleNotFoundError:
                     from api.runtime.archive_blob_secrets import encrypt_stored_blobs
                 await encrypt_stored_blobs(conn)
+                # Marker-gated: a no-op once the baseline mirrored legacy web credentials, but a
+                # converted database whose marker is absent must still be mirrored.
+                try:
+                    from runtime.credential_migration import migrate_legacy_web_credentials
+                except ModuleNotFoundError:
+                    from api.runtime.credential_migration import migrate_legacy_web_credentials
+                await migrate_legacy_web_credentials(conn)
+                await reconcile_active_finding_counts(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
