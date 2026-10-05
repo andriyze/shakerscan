@@ -821,7 +821,7 @@ async def authorize_target(target_id: str, request: TargetAuthorizationRequest):
                 environment=request.environment, risk_tier=request.risk_tier,
             )
         except target_authorization.TargetAuthorizationError as exc:
-            status = 404 if "not found" in str(exc) else 400
+            status = 404 if getattr(exc, "code", None) == "not_found" else 400
             raise HTTPException(status_code=status, detail=str(exc)) from exc
     return {"target_id": str(target_uuid), "authorization": authorization}
 

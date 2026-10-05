@@ -13361,6 +13361,7 @@ configure_hunt_run_router(
     start_handler=_start_hunt_v2,
     # Defined later in this module; the lambda defers the lookup to call time like its siblings.
     standing_authorization_resolver=lambda target_id: _standing_authorization_for_target_id(target_id),
+    target_scope_refusal_resolver=target_authorization.pooled_scope_refusal_resolver(lambda: db_pool),
     metrics_provider=lambda: HUNT_ACTION_SERVICE.metrics.snapshot(),
 )
 app.include_router(hunt_run_router)
