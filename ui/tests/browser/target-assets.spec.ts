@@ -8,7 +8,11 @@ const collectionId = '00000000-0000-4000-8000-000000000297'
 const target = {id:assetId,asset_id:assetId,name:'Shared fixture',url:'host://asset.example.test',locator:'asset.example.test',is_active:true,environment:'lab',connected_device:true,device_class:'media',origin_count:2,service_count:2,active_findings_count:0,created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z'}
 const origins = [{id:originId,url:'https://asset.example.test:8443',name:'Management',is_active:true,current_membership:true,active_findings_count:0},{id:'00000000-0000-4000-8000-000000000298',url:'http://asset.example.test:3000',name:'API',is_active:true,current_membership:true,active_findings_count:0}]
 const history = {asset_id:assetId,kind:'scans',items:[],total:0,offset:0,limit:25}
-const serviceIntelligence = {services:[{id:originId,target_id:assetId,port:8008,transport:'tcp',address:'192.0.2.10',service:'http',binding_status:'observation_only',observation_status:'partial',evidence:[{hunt_id:collectionId,status:'partial'}]}],warnings:[],sources_truncated:false}
+const udpProbeScanId = '00000000-0000-4000-8000-000000000299'
+const serviceIntelligence = {services:[
+  {id:originId,target_id:assetId,port:8008,transport:'tcp',state:'open',presence:'observed_open',address:'192.0.2.10',service:'http',binding_status:'observation_only',observation_status:'partial',evidence:[{hunt_id:collectionId,status:'partial'}]},
+  {id:'00000000-0000-4000-8000-000000000300',target_id:assetId,port:53,transport:'udp',state:'open|filtered',presence:'inconclusive',address:'192.0.2.10',service:'domain',binding_status:'observation_only',observation_status:'success',evidence:[{scan_id:udpProbeScanId,status:'success'}]},
+],warnings:[],sources_truncated:false}
 async function mock(page: Page, portHints = [8008,8060]) {
   const writes: string[] = []
   await pinMockApiOrigin(page)
@@ -25,6 +29,21 @@ async function mock(page: Page, portHints = [8008,8060]) {
     return route.fulfill({json:{status:'healthy',workers:[],devices:[],targets:[],total:0}})
   })
   return writes
+}
+
+async function expectNoResponseProbeIsNotADiscoveredPort(page: Page) {
+  const discovered = page.getByRole('table')
+  await expect(discovered.getByRole('cell',{name:/8008\/tcp/})).toBeVisible()
+  await expect(discovered.getByRole('cell',{name:/^53\/udp/})).toHaveCount(0)
+  await expect(page.getByRole('link',{name:'Start Hunt',exact:true})).toHaveCount(1)
+  await expect(page.locator('a[href*="udp%2F53"], a[href*="udp/53"]')).toHaveCount(0)
+  const probes = page.getByText('1 unconfirmed no-response probe',{exact:true})
+  await expect(probes).toBeVisible()
+  await expect(page.getByText('53/udp',{exact:true})).toBeHidden()
+  await probes.click()
+  await expect(page.getByText('53/udp',{exact:true})).toBeVisible()
+  await expect(page.getByText('No response',{exact:true})).toBeVisible()
+  await expect(page.getByText('Expected protocol: domain',{exact:true})).toBeVisible()
 }
 
 test('ASSET-001 one asset owns service origins and shared IDs without executing on navigation', async ({page}) => {
@@ -107,5 +126,16 @@ test('ASSET-005 Hunt-discovered ports populate scan hints without saved metadata
   await dialog.getByRole('button',{name:'Cancel',exact:true}).click()
   await page.getByRole('button',{name:'Start network scan',exact:true}).click()
   await expect(hints).toHaveValue('8008')
+  expect(writes).toEqual([])
+})
+
+test('ASSET-006 no-response UDP probes are not listed as discovered ports or offered for Hunt', async ({page}) => {
+  const writes = await mock(page)
+  await page.goto(`/targets/${assetId}/asset`)
+  await expect(page.getByRole('heading',{name:'Ports discovered across Scans and Hunts'})).toBeVisible()
+  await expectNoResponseProbeIsNotADiscoveredPort(page)
+  await page.goto(`/devices/${assetId}`)
+  await expect(page.getByRole('heading',{name:'Ports discovered across Scans and Hunts'})).toBeVisible()
+  await expectNoResponseProbeIsNotADiscoveredPort(page)
   expect(writes).toEqual([])
 })
