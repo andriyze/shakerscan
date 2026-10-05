@@ -139,6 +139,8 @@ def test_dispatcher_accepts_the_declared_browser_runtime_for_xss_verify():
 
 def test_browser_execution_proof_materializes_a_verified_finding():
     class DB:
+        async def fetchrow(self, *_args):
+            return None
         async def fetchval(self, query, *args):
             self.query, self.evidence = query, json.loads(args[4])
             self.description, self.tool = args[5], args[6]
@@ -185,6 +187,8 @@ def test_browser_execution_proof_materializes_a_verified_finding():
 
 def test_browser_proof_on_authorized_alternate_port_persists_separately():
     class DB:
+        async def fetchrow(self, *_args):
+            return None
         async def fetchval(self, _query, *args):
             self.fingerprint, self.url = args[2], args[3]
             self.evidence = json.loads(args[4])

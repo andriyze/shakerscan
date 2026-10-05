@@ -35,37 +35,13 @@ def _verified_xss_fingerprint(
     normalized_method = str(method or "GET").strip().upper()
     if not normalized_method.isalpha() or not 3 <= len(normalized_method) <= 12:
         normalized_method = "GET"
-    client_route = str(proof.get("client_route") or "")
-    if client_route:
-        parsed_route = urllib.parse.urlsplit(client_route.lstrip("!"))
-        parameters = {
-            str(name).strip()
-            for name, _value in urllib.parse.parse_qsl(
-                parsed_route.query, keep_blank_values=True,
-            )
-            if str(name).strip()
-        }
-        if proof.get("param"):
-            parameters.add(str(proof["param"]))
-        identity = (
-            f"CWE-79|{normalized_method}|"
-            f"{template_path(str(proof.get('path') or '/'))}#"
-            f"{template_path(parsed_route.path or '/')}|"
-            f"{','.join(sorted(parameters))}"
-        )
-    else:
-        identity = templated_finding_identity({
-            "cwe": "CWE-79",
-            "tool": "dalfox",
-            "url": proof.get("url"),
-            "evidence": {
-                "method": normalized_method,
-                "param": proof.get("param"),
-            },
-        })
-        if not identity:
-            raise ValueError("verified XSS proof has no canonical endpoint identity")
-    identity += service_identity_suffix(str(proof["url"]), target_url=target_url)
+    identity = templated_finding_identity({
+        "cwe": "CWE-79", "tool": "dalfox", "url": proof.get("url"),
+        "evidence": {"method": normalized_method, "param": proof.get("param"),
+                     "client_route": proof.get("client_route")},
+    })
+    if not identity:
+        raise ValueError("verified XSS proof has no canonical endpoint identity")
     return "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
@@ -242,6 +218,14 @@ async def materialize_verified_hunt_findings(
     findings: list[str] = []
     for record in records:
         evidence = record["evidence"]
+        try:
+            from scan.finding_reconciliation import reconcile_legacy_finding_row
+        except ModuleNotFoundError:
+            from ..scan.finding_reconciliation import reconcile_legacy_finding_row
+        await reconcile_legacy_finding_row(
+            conn, target_uuid=target_id, fingerprint=record["fingerprint"],
+            finding=record, target_kind=target_kind,
+        )
         finding_id = await conn.fetchval(
             f"""INSERT INTO findings (
                    {target_column}, hunt_run_id, fingerprint, title, description,

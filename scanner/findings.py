@@ -10,9 +10,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qsl
 from datetime import datetime, UTC
 from typing import Any
+
+try:
+    from .finding_service_identity import finding_service_origin
+except ImportError:
+    from finding_service_identity import finding_service_origin
 
 _UUID_SEG_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _HEX_SEG_RE = re.compile(r"^[0-9a-fA-F]+$")
@@ -59,6 +64,13 @@ def templated_finding_identity(finding: dict) -> str | None:
 
     See ``_templated_identity``; this is the current key, which names the check that fired.
     """
+    identity = _templated_identity(finding, with_check=True, with_client_route=True)
+    origin = finding_service_origin(finding)
+    return identity + f"|service={origin}" if identity and origin else identity
+
+
+def pre_service_templated_finding_identity(finding: dict) -> str | None:
+    """The old host-wide key, used only with matching service provenance."""
     return _templated_identity(finding, with_check=True)
 
 
@@ -72,7 +84,7 @@ def pre_check_templated_finding_identity(finding: dict) -> str | None:
     key did not change (no CWE, or no declared check).
     """
     previous = _templated_identity(finding, with_check=False)
-    return previous if previous is not None and previous != templated_finding_identity(finding) else None
+    return previous if previous is not None and previous != pre_service_templated_finding_identity(finding) else None
 
 
 def _declared_check(evidence: dict) -> str:
@@ -85,7 +97,7 @@ def _declared_check(evidence: dict) -> str:
     return str(evidence.get("check") or "").strip()
 
 
-def _templated_identity(finding: dict, *, with_check: bool) -> str | None:
+def _templated_identity(finding: dict, *, with_check: bool, with_client_route: bool = False) -> str | None:
     """ID/payload-insensitive identity for an *endpoint* finding (docs §5).
 
     Collapses the count-explosion — one templated BOLA route reported once per
@@ -130,6 +142,10 @@ def _templated_identity(finding: dict, *, with_check: bool) -> str | None:
             params.add(v.strip())
 
     method = str(evidence.get("method") or finding.get("method") or "GET").upper()
+    if with_client_route and str(finding.get("cwe") or "").strip() == "CWE-79" and evidence.get("client_route"):
+        route = urlparse(str(evidence["client_route"]).lstrip("!"))
+        tpath += "#" + template_path(route.path or "/")
+        params.update(name for name, _ in parse_qsl(route.query, keep_blank_values=True) if name)
     # vuln class: the CWE, plus the check that fired when the finding names one.
     # A CWE alone is not a check: several checks share one (five TLS certificate
     # checks are CWE-295), so keying on it merged them into one row per URL. The
@@ -164,7 +180,7 @@ def legacy_templated_finding_identity(finding: dict) -> str | None:
     """
     if str(finding.get("cwe") or "").strip():
         return None
-    current = templated_finding_identity(finding)
+    current = pre_service_templated_finding_identity(finding)
     if current is None:
         return None
     _vuln, rest = current.split("|", 1)

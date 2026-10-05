@@ -8,6 +8,7 @@ one (distinct checks sharing a CWE on one URL had shared a row).
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 
 
@@ -22,17 +23,32 @@ def legacy_finding_fingerprint(legacy_identity: str | None, fingerprint: str) ->
 def _legacy_identities(finding: dict) -> list[str]:
     """The earlier templated keys this finding may still be stored under, oldest change first."""
     try:
-        from findings import legacy_templated_finding_identity, pre_check_templated_finding_identity
+        from findings import legacy_templated_finding_identity, pre_check_templated_finding_identity, pre_service_templated_finding_identity, template_path
     except ImportError:  # package layout
-        from scanner.findings import legacy_templated_finding_identity, pre_check_templated_finding_identity
+        from scanner.findings import legacy_templated_finding_identity, pre_check_templated_finding_identity, pre_service_templated_finding_identity, template_path
     identities = []
-    for previous in (legacy_templated_finding_identity, pre_check_templated_finding_identity):
+    for previous in (legacy_templated_finding_identity, pre_check_templated_finding_identity, pre_service_templated_finding_identity):
         try:
             identity = previous(finding)
         except Exception:  # noqa: BLE001 - an unreadable finding simply has no legacy row
             identity = None
         if identity:
             identities.append(identity)
+    evidence = finding.get("evidence") or {}
+    if isinstance(evidence, str):
+        try:
+            evidence = json.loads(evidence)
+        except ValueError:
+            evidence = {}
+    if finding.get("cwe") == "CWE-79" and isinstance(evidence, dict) and evidence.get("client_route"):
+        from urllib.parse import urlsplit, parse_qsl
+        route = urlsplit(str(evidence["client_route"]).lstrip("!"))
+        params = {key for key, _ in parse_qsl(route.query, keep_blank_values=True)}
+        if evidence.get("param"):
+            params.add(str(evidence["param"]))
+        identities.append(f"CWE-79|{evidence.get('method') or 'GET'}|"
+                          f"{template_path(evidence.get('path') or '/')}#"
+                          f"{template_path(route.path or '/')}|{','.join(sorted(params))}")
     return identities
 
 
@@ -42,6 +58,7 @@ async def reconcile_legacy_finding_row(
     target_uuid: Any,
     fingerprint: str,
     finding: dict,
+    target_kind: str = "web",
 ) -> Any | None:
     """Move the row an older installation holds for this finding to its new key.
 
@@ -54,24 +71,49 @@ async def reconcile_legacy_finding_row(
     own, and never has one disposition copied onto every split. A row moves
     once, so only one of the split findings can adopt it.
     """
+    target_column = "device_target_id" if target_kind == "device" else "target_id"
     for identity in _legacy_identities(finding):
         legacy_fingerprint = legacy_finding_fingerprint(identity, fingerprint)
         if not legacy_fingerprint:
             continue
         legacy_row = await conn.fetchrow(
-            """
-            SELECT id, status, resurfaced_count, title, tool, cwe, evidence
+            f"""
+            SELECT id, status, resurfaced_count, title, tool, cwe, url, evidence
             FROM findings
-            WHERE target_id = $1 AND fingerprint = $2
+            WHERE {target_column} = $1 AND fingerprint = $2
             FOR UPDATE
             """,
             target_uuid, legacy_fingerprint,
         )
         if not legacy_row or str(legacy_row.get("title") or "") != str(finding.get("title") or ""):
             continue
-        await conn.execute(
-            "UPDATE findings SET fingerprint = $1 WHERE id = $2",
-            fingerprint, legacy_row["id"],
+        try:
+            from finding_service_identity import same_finding_service
+        except ModuleNotFoundError:
+            from scanner.finding_service_identity import same_finding_service
+        if not same_finding_service(legacy_row, finding):
+            continue
+        current = await conn.fetchrow(
+            f"SELECT id FROM findings WHERE {target_column}=$1 AND fingerprint=$2 FOR UPDATE",
+            target_uuid, fingerprint,
         )
+        if current:
+            return None
+        try:
+            # A concurrent run can insert the canonical key after our absence check.
+            # Roll back only this re-key, retaining the legacy row and its history.
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE findings SET fingerprint = $1 WHERE id = $2",
+                    fingerprint, legacy_row["id"],
+                )
+        except Exception as exc:
+            if getattr(exc, "sqlstate", None) != "23505":
+                raise
+            return await conn.fetchrow(
+                f"SELECT id, status, resurfaced_count, title, tool, cwe, url, evidence "
+                f"FROM findings WHERE {target_column}=$1 AND fingerprint=$2 FOR UPDATE",
+                target_uuid, fingerprint,
+            )
         return legacy_row
     return None

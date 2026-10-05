@@ -853,7 +853,10 @@ async def _execute_browser_action(
                     else:
                         request_count += 1
                         proof_body_requests += 1
-                        headers = dict(request.headers)
+                        headers = {**dict(request.headers), **{
+                            name.lower(): value for name, value in (trusted_headers or {}).items()
+                            if name.lower() != "cookie"
+                        }}
                         headers["content-type"] = str(prepared.content_type)
                         await route.continue_(
                             method=prepared.method,

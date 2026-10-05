@@ -192,10 +192,8 @@ from .capability_execution import (
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import finalize_scan_report
-from .nuclei_template_index import (
-    nuclei_templates_directory,
-    resolve_active_nuclei_selection,
-)
+from .nuclei_execution import resolve_active_scan_nuclei_options
+from .nuclei_template_index import nuclei_templates_directory
 from .private_inputs import BrokerPrivateScanInputs
 from .work_manifests import (
     ScanWorkManifest,
@@ -2701,6 +2699,7 @@ class DatabaseNeutralScanActionDispatcher:
         )
         args: dict[str, Any] = dict(primary.capability_args())
         scanner_options: dict[str, Any] = {}
+        requested_budget = dict(action.requested_budget)
         if tool == "nuclei":
             template_manifest = await self._work_manifest(
                 action, "template_manifest_ref", ScanWorkManifestKind.TEMPLATE,
@@ -2715,8 +2714,38 @@ class DatabaseNeutralScanActionDispatcher:
                 )
             except ScanWorkManifestError as exc:
                 raise ScanActionAdapterError(str(exc)) from exc
-            args.update(template_options)
-            scanner_options.update(template_options)
+            if action.capability_name == "templates.scan":
+                # Old durable single actions may have no mutation hold even when
+                # their policy permits POST. Never enlarge an immutable hold;
+                # those actions can still execute the GET/HEAD part of the pack.
+                resolved = resolve_active_scan_nuclei_options(
+                    template_options,
+                    templates_dir=nuclei_templates_directory(),
+                    allow_state_changing_http=bool(
+                        self.policy.allow_state_changing_http
+                        and requested_budget.get("state_changing_requests", 0) > 0
+                    ),
+                )
+                if resolved.skip_reason:
+                    return self._skip(action, resolved.skip_reason)
+                args.update(resolved.capability_args)
+                scanner_options.update(resolved.worker_options)
+                # Reuse the same reservation-derived pacing as a batch attempt,
+                # including legacy holds smaller than the former fixed profile.
+                scanner_options["_batch_attempt"] = True
+                if scanner_options["nuclei_active_state_changing"]:
+                    # Every emitted request may mutate state. The process ceiling
+                    # and mutation settlement must both fit the saved reservation.
+                    http = min(
+                        int(requested_budget.get("http_requests", 0)),
+                        int(requested_budget.get("state_changing_requests", 0)),
+                    )
+                    requested_budget.update(
+                        http_requests=http, state_changing_requests=http,
+                    )
+            else:
+                args.update(template_options)
+                scanner_options.update(template_options)
         if tool == "ffuf":
             args["wordlist"] = "common"
             scanner_options["wordlist"] = "common"
@@ -2731,7 +2760,7 @@ class DatabaseNeutralScanActionDispatcher:
                 args=args,
                 policy=self.policy,
             ),
-            ledger_limits=action.requested_budget,
+            ledger_limits=requested_budget,
         )
         candidate_digest = hashlib.sha256(execution_target.encode()).hexdigest()[:16]
         adapter = ScannerExecutionAdapter(
@@ -2747,7 +2776,7 @@ class DatabaseNeutralScanActionDispatcher:
                     self.options.get("auth_browser_storage")
                     if tool == "katana_headless" else None
                 ),
-                "timeout_ms": int(action.requested_budget.get("tool_wall_seconds") or 1) * 1_000,
+                "timeout_ms": int(requested_budget.get("tool_wall_seconds") or 1) * 1_000,
                 "pinned_address": socket_factory.primary_address,
                 "authorized_addresses": list(self.target.allowed_addresses),
                 "address_policy": socket_factory.policy_receipt,
@@ -2755,7 +2784,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "oob_interactsh_token": None,
             },
             process_runner=self.process_runner,
-            requested_budget=action.requested_budget,
+            requested_budget=requested_budget,
             redacted_execution=prepared.redacted_execution,
         )
         return await self._execute_adapter(
@@ -2834,35 +2863,21 @@ class DatabaseNeutralScanActionDispatcher:
         worker_template_options = dict(template_options)
         args_template_options = dict(template_options)
         if tool == "nuclei" and action.capability_name == "templates.active_batch":
-            selection = resolve_active_nuclei_selection(
-                nuclei_templates_directory(),
-                severities=template_options.get("severity"),
-                tags=template_options.get("tags"),
-                allow_state_changing_http=bool(self.policy.allow_state_changing_http),
+            resolved = resolve_active_scan_nuclei_options(
+                template_options,
+                templates_dir=nuclei_templates_directory(),
+                allow_state_changing_http=bool(
+                    self.policy.allow_state_changing_http
+                    and action.requested_budget.get("state_changing_requests", 0) > 0
+                ),
             )
-            if selection.skip:
+            if resolved.skip_reason:
                 # Fail closed: the active selection could not be resolved (index
                 # unavailable, or no permitted template once intrusive/non-GET
                 # exclusions apply). Record a coverage gap, never a clean result.
-                return self._skip(action, selection.skip_reason or "not_applicable")
-            worker_template_options = {
-                "severity": template_options.get("severity", "high,critical"),
-                "template_ids": ",".join(selection.template_ids),
-                "template_profile": "active",
-                "nuclei_active_state_changing": selection.includes_state_changing,
-            }
-            if template_options.get("template_pack_digest"):
-                worker_template_options["template_pack_digest"] = (
-                    template_options["template_pack_digest"]
-                )
-            # Keep only schema-declared, length-bounded fields in the capability
-            # input digest (no big id list, no worker control flags, no tag filter
-            # that the allowlist has already resolved).
-            args_template_options = {
-                key: template_options[key]
-                for key in ("severity", "template_pack_digest")
-                if key in template_options
-            }
+                return self._skip(action, resolved.skip_reason)
+            worker_template_options = dict(resolved.worker_options)
+            args_template_options = dict(resolved.capability_args)
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
         if not callable(load_attempts) or not callable(checkpoint_attempt):

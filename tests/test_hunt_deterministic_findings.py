@@ -102,6 +102,7 @@ def test_reflected_xss_uses_the_canonical_scan_fingerprint():
 
 def test_materialized_xss_has_execution_evidence_not_an_invented_impact_score():
     class DB:
+        async def fetchrow(self, query, *args): return None
         async def fetchval(self, query, *args):
             self.query, self.evidence = query, json.loads(args[4])
             return uuid.uuid4()
@@ -126,6 +127,9 @@ def test_materialized_xss_has_execution_evidence_not_an_invented_impact_score():
 def test_device_proof_and_verification_use_the_device_inventory():
     class DB:
         def __init__(self): self.queries = []
+        async def fetchrow(self, query, *args):
+            self.queries.append(query)
+            return None
         async def fetchval(self, query, *args):
             self.queries.append(query)
             return uuid.uuid4()

@@ -10,6 +10,7 @@ not be identified"). This is the regression guard for that one-line fix.
 """
 
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -47,3 +48,11 @@ def test_an_unidentified_or_unreachable_stack_yields_no_source_revision(monkeypa
 
     monkeypatch.setattr(run_e2e.H, "get", _boom)
     assert "source_revision" not in run_e2e._tested_subject()
+
+
+def test_caller_digest_assertions_are_not_recorded_as_inspected_release_identity(monkeypatch):
+    _with_health(monkeypatch, {"source_revision": "a" * 40})
+    monkeypatch.setenv("SHAKERSCAN_E2E_IMAGE_DIGESTS", json.dumps({
+        key: "sha256:" + "f" * 64 for key in ("scanner", "api", "ui", "signer")
+    }))
+    assert "images" not in run_e2e._tested_subject()

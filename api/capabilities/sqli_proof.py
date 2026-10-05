@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 import urllib.parse
 
 try:
+    from capabilities.authentication_proof import successful_token_signals
     from capabilities.request_mutation import (
         RequestMutationVerificationError,
         replace_private_request_field,
@@ -23,6 +24,7 @@ try:
     from runtime.models import TargetBinding
     from runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
 except ModuleNotFoundError:
+    from .authentication_proof import successful_token_signals
     from .request_mutation import (
         RequestMutationVerificationError,
         replace_private_request_field,
@@ -145,37 +147,7 @@ def _reflection_free_key(
 
 
 def _identity_signal(result: ReplayTransportResult) -> tuple[str, ...]:
-    signals = {
-        name.lower() for name in result.response_headers
-        if name.lower() in {"set-cookie", "authorization", "x-auth-token"}
-    }
-    content_type = next((
-        str(value).lower() for name, value in result.response_headers.items()
-        if str(name).lower() == "content-type"
-    ), "")
-    if "json" in content_type and result.response_body:
-        try:
-            document = json.loads(result.response_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            document = None
-
-        def walk(value: Any, path: tuple[str, ...] = ()) -> None:
-            if isinstance(value, Mapping):
-                for raw_name, child in value.items():
-                    name = str(raw_name).lower()
-                    child_path = (*path, name)
-                    if (
-                        name in {"token", "access_token", "id_token", "jwt"}
-                        and isinstance(child, str) and child.strip()
-                    ):
-                        signals.add("json:" + ".".join(child_path))
-                    walk(child, child_path)
-            elif isinstance(value, list):
-                for child in value[:20]:
-                    walk(child, path)
-
-        walk(document)
-    return tuple(sorted(signals))
+    return successful_token_signals(result)
 
 
 class SQLiProofAdapter:
@@ -274,8 +246,9 @@ class SQLiProofAdapter:
             elif request_class == "safe_authentication" and budget - attempted >= 4:
                 injection = _mutate(self.request, self.field, "' OR 1=1-- ")
                 auth_pairs = [(await send(control_request), await send(injection)) for _ in range(2)]
-                # The identity signal is an asymmetric header/JSON-token test: it must
-                # be absent from the invalid control and present on the bypass payload.
+                # A successful token assertion must be absent from the invalid
+                # control and present on the bypass payload. A cookie alone cannot
+                # distinguish a challenge response from an authenticated login.
                 # A reflected payload string cannot satisfy that -- the control reflects
                 # its own invalid value just the same -- so this branch does not need
                 # the boolean branch's reflection normalization.

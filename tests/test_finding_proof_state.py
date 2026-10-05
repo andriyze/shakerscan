@@ -53,6 +53,7 @@ import api as api_module  # noqa: E402
 pf = api_module.finding_proof_fields
 
 from scan.finding_identity import canonical_finding_fingerprint  # noqa: E402  (the worker's persistence key)
+from finding_service_identity import finding_provenance_key  # noqa: E402
 
 
 def test_deterministic_exploited_retest_is_verified():
@@ -207,7 +208,8 @@ def test_a_persisted_row_is_proven_by_this_runs_proof_and_keeps_a_retest_proof()
     raw = _exposure_report_finding()
     # Keyed the way the worker persists it, not by a helper of this module.
     row_for_raw = {"id": "a", "fingerprint": canonical_finding_fingerprint(raw), "severity": "critical",
-                   "evidence": None, "latest_retest_mode": None, "last_verification_verdict": "exploited"}
+                   "url": raw["url"], "evidence": None, "latest_retest_mode": None,
+                   "last_verification_verdict": "exploited"}
     retested = {"id": "b", "fingerprint": "elsewhere", "severity": "high", "evidence": "{}",
                 "latest_retest_mode": "deterministic", "last_verification_verdict": "exploited"}
     unproven = {"id": "c", "fingerprint": "other", "severity": "high", "evidence": None,
@@ -223,9 +225,11 @@ def test_a_persisted_row_is_proven_by_this_runs_proof_and_keeps_a_retest_proof()
 def test_the_exposure_row_is_keyed_canonically_not_by_the_old_api_hash():
     raw = _exposure_report_finding()
     # The audit's example: the persisted row is templated; the old API helper was not.
-    assert api_module.finding_identity_keys(raw) == ("t:c2f2ffb786643d9c", "b9a1f522b80ef3d9")
-    assert api_module.generate_finding_fingerprint(raw) == "t:c2f2ffb786643d9c"
-    (proven,), (row,) = _project([raw], [_stored_row(canonical_finding_fingerprint(raw))])
+    assert api_module.finding_identity_keys(raw) == (
+        "t:87298f037581f42d", "t:c2f2ffb786643d9c", "b9a1f522b80ef3d9",
+    )
+    assert api_module.generate_finding_fingerprint(raw) == "t:87298f037581f42d"
+    (proven,), (row,) = _project([raw], [_stored_row(canonical_finding_fingerprint(raw), url=raw["url"])])
     assert (proven["proof_state"], row["proof_state"]) == ("verified", "verified")
 
 
@@ -237,8 +241,10 @@ def test_rows_collapsed_across_object_ids_and_query_values_are_proven_by_any_var
             "url": "https://app.example.test/search?q=zzz", "proof_of_exploitation": True,
             "proof_state": "exploited", "verified": True, "severity": "critical"}
     # The worker stored each row from another object id / query value of the same endpoint.
-    stored = [_stored_row(canonical_finding_fingerprint({**bola, "url": "https://app.example.test/api/orders/12"})),
-              _stored_row(canonical_finding_fingerprint({**sqli, "url": "https://app.example.test/search?q=1%27"}))]
+    stored = [_stored_row(canonical_finding_fingerprint({**bola, "url": "https://app.example.test/api/orders/12"}),
+                          url="https://app.example.test/api/orders/12"),
+              _stored_row(canonical_finding_fingerprint({**sqli, "url": "https://app.example.test/search?q=1%27"}),
+                          url="https://app.example.test/search?q=1%27")]
     reports, rows = _project([bola, sqli], stored)
     assert [finding["proof_state"] for finding in reports] == ["verified", "verified"]
     assert [row["proof_state"] for row in rows] == ["verified", "verified"]
@@ -248,9 +254,9 @@ def test_a_row_stored_under_the_old_identity_is_still_found():
     raw = _exposure_report_finding()
     scanner_id = {**raw, "id": "exposure:id_rsa"}
     # Rows persisted before endpoint identities were templated: the hash, and the scanner ID.
-    _, rows = _project([raw], [_stored_row("b9a1f522b80ef3d9")])
+    _, rows = _project([raw], [_stored_row("b9a1f522b80ef3d9", url=raw["url"])])
     assert rows[0]["proof_state"] == "verified"
-    _, rows = _project([scanner_id], [_stored_row("exposure:id_rsa")])
+    _, rows = _project([scanner_id], [_stored_row("exposure:id_rsa", url=raw["url"])])
     assert rows[0]["proof_state"] == "verified"
 
 
@@ -270,6 +276,58 @@ def test_only_this_runs_proof_lifts_a_row_never_a_lead_or_another_finding():
 def test_scan_time_overrides_reach_the_canonically_keyed_row():
     raw = _exposure_report_finding()
     overrides = api_module._scan_result_verification_overrides({"findings": [raw]})
-    assert set(overrides) == {"t:c2f2ffb786643d9c", "b9a1f522b80ef3d9"}
-    assert overrides["t:c2f2ffb786643d9c"]["last_verification_verdict"] == "exploited"
+    assert set(overrides) == {
+        (key, finding_provenance_key(raw))
+        for key in ("t:87298f037581f42d", "t:c2f2ffb786643d9c", "b9a1f522b80ef3d9")
+    }
+    assert overrides[("t:87298f037581f42d", finding_provenance_key(raw))]["last_verification_verdict"] == "exploited"
 
+
+def test_scan_time_overrides_keep_both_services_that_share_a_legacy_key():
+    from scan.finding_verification_overrides import matching_verification_override
+
+    primary = _exposure_report_finding()
+    alternate = _exposure_report_finding(url="https://honey.example.test:8443/id_rsa")
+    overrides = api_module._scan_result_verification_overrides({"findings": [primary, alternate]})
+    legacy_key = "t:c2f2ffb786643d9c"
+    for url in (primary["url"], alternate["url"]):
+        fields = matching_verification_override(overrides, _stored_row(legacy_key, url=url))
+        assert fields["last_verification_verdict"] == "exploited"
+    assert matching_verification_override(
+        overrides, _stored_row(legacy_key, url="https://honey.example.test:9443/id_rsa"),
+    ) == {}
+    assert matching_verification_override(overrides, _stored_row(legacy_key)) == {}
+
+
+def test_legacy_report_proof_does_not_cross_service_or_fill_missing_provenance():
+    raw = _exposure_report_finding()
+    rows = [
+        _stored_row("t:c2f2ffb786643d9c", url="https://honey.example.test:8443/id_rsa"),
+        _stored_row("t:c2f2ffb786643d9c", url="http://honey.example.test/id_rsa"),
+        _stored_row("t:c2f2ffb786643d9c"),
+        _stored_row("t:c2f2ffb786643d9c", url="https://honey.example.test:443/id_rsa"),
+    ]
+    _, projected = _project([raw], rows)
+    assert [row["is_verified"] for row in projected] == [False, False, False, True]
+
+
+def test_legacy_dom_proof_projection_and_overrides_require_the_same_client_route():
+    import hashlib
+    from findings import pre_service_templated_finding_identity
+    from scan.finding_verification_overrides import matching_verification_override
+
+    finding = {
+        "url": "https://app.example.test/", "tool": "dalfox", "cwe": "CWE-79",
+        "title": "Verified cross-site scripting", "severity": "high",
+        "proof_of_exploitation": True, "proof_state": "exploited",
+        "evidence": {"method": "GET", "param": "q", "client_route": "/search?q=proof"},
+    }
+    legacy = "t:" + hashlib.sha256(pre_service_templated_finding_identity(finding).encode()).hexdigest()[:16]
+    rows = [
+        _stored_row(legacy, url=finding["url"], evidence={"client_route": route})
+        for route in ("/profile?q=", "/search?name=", None, "/search?q=another-value")
+    ]
+    overrides = api_module._scan_result_verification_overrides({"findings": [finding]})
+    assert [bool(matching_verification_override(overrides, row)) for row in rows] == [False, False, False, True]
+    _, projected = _project([finding], rows)
+    assert [row["is_verified"] for row in projected] == [False, False, False, True]

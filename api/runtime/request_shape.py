@@ -10,6 +10,7 @@ import urllib.parse
 MAX_REQUEST_BODY_SHAPE_BYTES = 256 * 1024
 MAX_REQUEST_BODY_FIELDS = 128
 MAX_REQUEST_BODY_FIELD_LENGTH = 200
+MAX_REQUEST_BODY_FIELD_DEPTH = 8
 
 
 def _field_names(values: Any) -> tuple[str, ...]:
@@ -75,6 +76,54 @@ def public_request_body_shape(value: Any) -> tuple[str | None, tuple[str, ...]]:
         ("application/x-www-form-urlencoded", names)
         if names else (None, ())
     )
+
+
+def resolve_json_field_path(document: Any, field_name: str) -> tuple[str | int, ...]:
+    """Resolve a flattened field to existing JSON nodes without creating any nodes.
+
+    Collection paths use ``items[].name`` for the first array element; exact replay
+    uses ``items.0.name``. Older discovery paths use ``items.name``. Resolve each
+    against the actual document so all mutation/proof senders select the same field.
+    Numeric object keys remain keys, and explicit indices preserve array siblings.
+    """
+    if (
+        not isinstance(field_name, str) or not field_name
+        or len(field_name) > MAX_REQUEST_BODY_FIELD_LENGTH
+        or any(ord(char) < 0x20 or ord(char) == 0x7f for char in field_name)
+    ):
+        raise ValueError("invalid JSON field path")
+    path: list[str | int] = []
+    cursor = document
+
+    def descend(component: str | int) -> None:
+        nonlocal cursor
+        if len(path) >= MAX_REQUEST_BODY_FIELD_DEPTH:
+            raise ValueError("JSON field path exceeds depth limit")
+        if isinstance(cursor, Mapping) and isinstance(component, str) and component in cursor:
+            cursor = cursor[component]
+        elif isinstance(cursor, list) and isinstance(component, int) and 0 <= component < len(cursor):
+            cursor = cursor[component]
+        else:
+            raise ValueError("JSON field path does not match the body shape")
+        path.append(component)
+
+    for raw_part in field_name.split("."):
+        key, arrays = raw_part, 0
+        while key.endswith("[]"):
+            key, arrays = key[:-2], arrays + 1
+        if not key and not arrays:
+            raise ValueError("invalid JSON field path")
+        if key:
+            if isinstance(cursor, list) and key.isdecimal():
+                descend(int(key))
+            else:
+                # The older discovery convention omits the array marker.
+                while isinstance(cursor, list):
+                    descend(0)
+                descend(key)
+        for _ in range(arrays):
+            descend(0)
+    return tuple(path)
 
 
 def _field_path(raw_name: str) -> list[tuple[str, bool]]:

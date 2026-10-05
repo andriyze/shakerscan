@@ -13,8 +13,10 @@ from typing import Any, Mapping, Sequence
 
 try:
     from release_image_inventory import IMAGE_KEYS
+    from release_deployment_subject import DeploymentBindingError, validate_binding
 except ModuleNotFoundError:
     from scripts.release_image_inventory import IMAGE_KEYS
+    from scripts.release_deployment_subject import DeploymentBindingError, validate_binding
 
 
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -64,28 +66,28 @@ def _require_candidate_subject(
     *,
     source_sha: str,
     images: Mapping[str, Any],
+    version: str,
 ) -> None:
     """Require a receipt to name the deployment it ran against, and that to be the candidate.
 
-    Producers read the identity from the deployment itself (the live API's /health, or the API
-    image's release manifest), never from the dispatching environment, so a receipt produced on
-    another stack cannot certify this candidate. Image digests are checked whenever recorded.
+    Diagnostic source-checkout receipts remain useful, but cannot certify a release. The installed
+    stack runner binds each release receipt using actual Docker inspections at both test boundaries.
     """
     subject = receipt.get("subject")
     if not isinstance(subject, Mapping):
         raise CertificationError(f"{label} receipt does not identify the deployment it ran against")
     if subject.get("source_revision") != source_sha:
         raise CertificationError(f"{label} receipt ran against a different source revision")
-    recorded = subject.get("images")
-    if recorded is None:
-        return
-    if (
-        not isinstance(recorded, Mapping)
-        or not recorded
-        or not set(recorded).issubset(images)
-        or any(recorded[key] != images[key] for key in recorded)
-    ):
+    if subject.get("image_built") is not True or subject.get("identity_stable") is False:
+        raise CertificationError(f"{label} receipt lacks a stable image-built deployment identity")
+    if subject.get("images") != dict(images):
         raise CertificationError(f"{label} receipt did not run the final release image digests")
+    try:
+        validate_binding(subject.get("deployment_binding"), {
+            "candidate_sha": source_sha, "version": version, "images": images,
+        })
+    except DeploymentBindingError as exc:
+        raise CertificationError(f"{label} receipt: {exc}") from exc
 
 
 def _read(path: Path) -> Mapping[str, Any]:
@@ -258,17 +260,17 @@ def certify_receipt(
             "E2E scorecard carries declared-debt xfails, but this release did not "
             "authorize installed-stack E2E debt"
         )
-    # The other three receipts each bind the source they ran against; the E2E scorecard did not,
-    # so a run that exercised a different deployment could certify this candidate. Require it to
-    # name the revision it actually tested, and the images when it recorded them.
+    # Every release receipt must carry the inspected deployment identity, including E2E.
     e2e_subject = e2e.get("subject")
     if not isinstance(e2e_subject, Mapping):
         raise CertificationError("E2E scorecard does not identify the deployment it tested")
     if e2e_subject.get("source_revision") != source_sha:
         raise CertificationError("E2E scorecard tested a different source revision")
-    e2e_images = e2e_subject.get("images")
-    if e2e_images is not None and dict(e2e_images) != dict(sorted(images.items())):
+    if e2e_subject.get("images") != dict(images):
         raise CertificationError("E2E scorecard did not test the final release image digests")
+    _require_candidate_subject(
+        "E2E", e2e, source_sha=source_sha, images=images, version=str(candidate.get("version")),
+    )
 
     external = dict(external_evidence or {})
     required_external = {
@@ -287,7 +289,7 @@ def certify_receipt(
     # build qualified this candidate as readily as its own. Bind it like the other receipts, and
     # require the worker fleet it ran on to have been uniformly on that build.
     _require_candidate_subject(
-        "DAST quality", dast, source_sha=source_sha, images=images,
+        "DAST quality", dast, source_sha=source_sha, images=images, version=str(candidate.get("version")),
     )
     if dast.get("fleet_uniform") is not True:
         raise CertificationError(
@@ -319,7 +321,9 @@ def certify_receipt(
         evidence = external[key][0]
         if evidence.get("schema_version") != schema or evidence.get("passed") is not True:
             raise CertificationError(f"{key} did not pass on the final manifest stack")
-        _require_candidate_subject(key, evidence, source_sha=source_sha, images=images)
+        _require_candidate_subject(
+            key, evidence, source_sha=source_sha, images=images, version=str(candidate.get("version")),
+        )
     if "real_fleet_parity" in external:
         parity = external["real_fleet_parity"][0]
         if (

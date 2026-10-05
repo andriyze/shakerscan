@@ -218,6 +218,24 @@ def test_authorized_active_batch_runs_post_templates_and_settles_mutations(monke
     assert receipt.budget_consumed["state_changing_requests"] > 0
 
 
+def test_active_batch_with_mutation_permission_but_zero_saved_hold_runs_get_templates(monkeypatch):
+    receipt, captured = _drive(
+        monkeypatch,
+        policy=ScanPolicy(
+            active_testing=True, allow_state_changing_http=True,
+            approval_receipt_id="approval-1",
+        ),
+        requested_budget={
+            "http_requests": 120, "state_changing_requests": 0, "tool_wall_seconds": 45,
+        },
+    )
+    assert receipt.status == "success"
+    options = captured["scanner_options"]
+    assert options["template_ids"] == "squid-analysis-report-generator"
+    assert options["nuclei_active_state_changing"] is False
+    assert receipt.budget_consumed.get("state_changing_requests", 0) == 0
+
+
 def test_active_batch_fails_closed_when_index_unavailable(monkeypatch, tmp_path):
     receipt, _captured = _drive(
         monkeypatch,

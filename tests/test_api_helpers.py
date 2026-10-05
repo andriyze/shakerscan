@@ -2610,6 +2610,7 @@ def test_short_url_label_drops_userinfo_credentials():
 # ----- scan-time verification overrides -------------------------------------
 
 def test_scan_result_verification_overrides_promote_raw_scan_proof():
+    from scan.finding_verification_overrides import matching_verification_override
     overrides = api_module._scan_result_verification_overrides({
         "findings": [
             {
@@ -2622,9 +2623,10 @@ def test_scan_result_verification_overrides_promote_raw_scan_proof():
         ]
     })
 
-    assert overrides["smart_sqli:abc"]["last_verification_status"] == "still_vulnerable"
-    assert overrides["smart_sqli:abc"]["last_verification_verdict"] == "exploited"
-    assert overrides["smart_sqli:abc"]["last_verification_confidence"] == 0.95
+    fields = matching_verification_override(overrides, {"fingerprint": "smart_sqli:abc"})
+    assert fields["last_verification_status"] == "still_vulnerable"
+    assert fields["last_verification_verdict"] == "exploited"
+    assert fields["last_verification_confidence"] == 0.95
 
 
 def test_scan_result_verification_overrides_ignore_stale_false_positive_without_proof():
@@ -2691,6 +2693,7 @@ def test_findings_saved_from_partial_results_update_the_row_the_worker_stored():
     """Partial results were saved under a different fingerprint than the worker uses, so an
     endpoint finding the worker had already stored was inserted a second time."""
     from scan.finding_identity import canonical_finding_fingerprint
+    from contextlib import asynccontextmanager
 
     finding = {"title": "SQL injection", "tool": "sqlmap", "cwe": "CWE-89", "severity": "critical",
                "url": "https://app.example.test/search?q=1%27"}
@@ -2698,6 +2701,10 @@ def test_findings_saved_from_partial_results_update_the_row_the_worker_stored():
     looked_up, statements = [], []
 
     class _Conn:
+        @asynccontextmanager
+        async def transaction(self):
+            yield
+
         async def fetchrow(self, query, *args):
             looked_up.append(args[1])
             return worker_row if args[1] == canonical_finding_fingerprint(finding) else None

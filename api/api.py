@@ -54,6 +54,8 @@ except ModuleNotFoundError:
 from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
 from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
 from scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
+from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
+from scan.finding_reconciliation import reconcile_legacy_finding_row
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
 from scan.browser_login import browser_login_scan_limits, admit_scan_browser_login_profiles
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -2057,20 +2059,8 @@ def generate_finding_fingerprint(finding: dict) -> str:
     return canonical_finding_fingerprint(finding)
 
 
-def _scan_result_verification_overrides(scan_result: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    if not isinstance(scan_result, dict):
-        return {}
-
-    overrides: dict[str, dict[str, Any]] = {}
-    for finding in scan_result.get("findings") or []:
-        if not isinstance(finding, dict):
-            continue
-        fields = _scan_time_verification_fields(finding)
-        if not fields:
-            continue
-        for fingerprint in finding_identity_keys(finding):
-            overrides[fingerprint] = fields
-    return overrides
+def _scan_result_verification_overrides(scan_result: dict[str, Any] | None) -> dict[tuple, dict[str, Any]]:
+    return scan_result_verification_overrides(scan_result, _scan_time_verification_fields)
 
 
 _NUCLEI_NOT_EXECUTED_COVERAGE_GAP = "Nuclei templates not executed - check nuclei configuration or timeouts"
@@ -2276,11 +2266,15 @@ async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.U
         ai_classification_source = finding.get('ai_classification_source')
 
         # Check if this finding already exists for this target
-        existing = await conn.fetchrow("""
-            SELECT id, status, resurfaced_count
-            FROM findings
-            WHERE target_id = $1 AND fingerprint = $2
-        """, target_id, fingerprint)
+        async with conn.transaction():
+            existing = await conn.fetchrow("""
+                SELECT id, status, resurfaced_count
+                FROM findings
+                WHERE target_id = $1 AND fingerprint = $2
+                FOR UPDATE
+            """, target_id, fingerprint)
+            existing = existing or await reconcile_legacy_finding_row(
+                conn, target_uuid=target_id, fingerprint=fingerprint, finding=finding)
 
         if existing:
             # Update existing finding
@@ -11837,7 +11831,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     merged_findings = []
     for row in findings:
         finding = dict(row)
-        override = verification_overrides.get(str(finding.get("fingerprint") or ""))
+        override = matching_verification_override(verification_overrides, finding)
         if override:
             finding.update(override)
         if verified_only and finding.get("last_verification_verdict") != "exploited":

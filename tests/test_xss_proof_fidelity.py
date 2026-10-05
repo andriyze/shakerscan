@@ -36,7 +36,7 @@ SECRET = "Bearer shakerscan-test-secret-value"
 
 def _install_fake_browser(monkeypatch, *, requires_auth: bool):
     """A page that renders the reflected payload only for an authenticated request."""
-    seen: dict[str, object] = {"headers": [], "cookies": []}
+    seen: dict[str, object] = {"headers": [], "cookies": [], "requests": []}
 
     class FakePinnedProxy:
         def __init__(self, **_kwargs):
@@ -63,6 +63,7 @@ def _install_fake_browser(monkeypatch, *, requires_auth: bool):
         async def continue_(self, **kwargs):
             headers = dict(kwargs.get("headers") or {})
             seen["headers"].append(headers)
+            seen["requests"].append(kwargs)
             self.page.authenticated = headers.get("authorization") == SECRET
 
     class FakeResponse:
@@ -224,6 +225,37 @@ def test_json_body_proof_nests_dotted_fields():
     assert document["profile"]["bio"] == "shakerscan"
     assert prepared.marker in document["profile"]["name"]
     assert "profile.name" not in document
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH"])
+def test_authenticated_body_proof_preserves_session_headers_and_exact_override(monkeypatch, method):
+    prepared = XSSBrowserProofAdapter.prepare(
+        target=TARGET, execution_url="https://app.example.test/api/profile",
+        candidate_id="c0deadbeefcafe02", parameter_name="profile.name",
+        method=method, content_type="application/json",
+        body_field_names=("profile.name", "profile.bio"),
+    )
+    page, seen = _install_fake_browser(monkeypatch, requires_auth=True)
+    page.marker = prepared.marker
+    result = asyncio.run(XSSBrowserProofAdapter(prepared, trusted_headers={
+        "Authorization": SECRET, "Cookie": "sid=abc123", "X-Api-Key": "api-key-secret",
+        "Content-Type": "text/plain",
+    }).execute(heartbeat=_noop, cancelled=lambda: False))
+
+    assert result.status == "success"
+    assert _proof(result)["proof_state"] == "verified"
+    request = seen["requests"][0]
+    assert request["method"] == method
+    assert request["post_data"] == prepared.body
+    assert request["headers"]["authorization"] == SECRET
+    assert request["headers"]["x-api-key"] == "api-key-secret"
+    assert request["headers"]["content-type"] == "application/json"
+    assert "cookie" not in request["headers"]
+    assert seen["cookies"][0]["value"] == "abc123"
+    assert result.actual_budget["http_requests"] == 1
+    assert result.actual_budget["state_changing_requests"] == 1
+    receipt = json.dumps(result.__dict__, default=str)
+    assert all(secret not in receipt for secret in (SECRET, "abc123", "api-key-secret"))
 
 
 def test_json_body_proof_refuses_a_container_field():

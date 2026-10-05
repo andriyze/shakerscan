@@ -216,6 +216,55 @@ def _s3_signed_headers(
     return headers
 
 
+class EvidenceReadBudgetExceeded(Exception):
+    """The stored object cannot be returned within the caller's byte allowance."""
+
+    def __init__(self, bytes_read: int = 0):
+        super().__init__("stored evidence exceeds the read budget")
+        self.bytes_read = bytes_read
+
+
+class EvidenceReadFailed(Exception):
+    """Keep bytes spent on an interrupted object in the caller's read accounting."""
+
+    def __init__(self, bytes_read: int):
+        super().__init__("stored evidence read failed")
+        self.bytes_read = bytes_read
+
+
+def _read_stored_bytes(stream: Any, *, maximum: int | None, size: int | None = None) -> bytes:
+    """Bound allocation and I/O by ciphertext bytes, rather than plaintext metadata."""
+    if maximum is None:
+        return stream.read()
+    maximum = max(0, int(maximum))
+    if size is not None and size > maximum:
+        raise EvidenceReadBudgetExceeded()
+    chunks: list[bytes] = []
+    consumed = 0
+    while consumed < maximum:
+        allowance = min(64 * 1024, maximum - consumed,
+                        size - consumed if size is not None else maximum)
+        try:
+            chunk = stream.read(allowance)
+        except Exception as exc:
+            partial = getattr(exc, "partial", None)
+            # IncompleteRead carries received bytes. Opaque transport failures can
+            # have consumed bytes internally, so reserve the attempted allowance.
+            spent = len(partial) if isinstance(partial, bytes) else allowance
+            raise EvidenceReadFailed(consumed + min(allowance, spent)) from exc
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        consumed += len(chunk)
+        if size is not None and consumed == size:
+            return b"".join(chunks)
+    # With no trustworthy length, exhaustion cannot establish EOF without spending
+    # another byte. Omit the object instead of reading beyond the allowance.
+    if size == consumed:
+        return b"".join(chunks)
+    raise EvidenceReadBudgetExceeded(consumed)
+
+
 def _s3_request(
     method: str,
     bucket: str,
@@ -224,6 +273,7 @@ def _s3_request(
     body: bytes = b"",
     content_type: str | None = None,
     config: dict[str, Any] | None = None,
+    max_stored_bytes: int | None = None,
 ) -> bytes:
     cfg = config or _s3_config()
     url = _s3_url(bucket, key, cfg)
@@ -235,7 +285,12 @@ def _s3_request(
         method=method.upper(),
     )
     with urllib.request.urlopen(request, timeout=cfg["timeout"]) as response:  # noqa: S310 - operator-configured evidence store
-        return response.read()
+        length = response.headers.get("Content-Length") if max_stored_bytes is not None else None
+        try:
+            size = int(length) if length is not None else None
+        except (TypeError, ValueError):
+            size = None
+        return _read_stored_bytes(response, maximum=max_stored_bytes, size=size if size is None or size >= 0 else None)
 
 
 def _store_s3_evidence(raw: str, content_sha256: str) -> dict[str, Any] | None:
@@ -320,7 +375,9 @@ def store_evidence_content(
     }
 
 
-def _hydrate_s3_evidence(row: dict[str, Any], storage_uri: str) -> dict[str, Any]:
+def _hydrate_s3_evidence(
+    row: dict[str, Any], storage_uri: str, *, max_stored_bytes: int | None = None,
+) -> dict[str, Any]:
     parsed = _parse_s3_storage_uri(storage_uri)
     row["storage_status"] = "remote"
     if parsed is None:
@@ -329,7 +386,14 @@ def _hydrate_s3_evidence(row: dict[str, Any], storage_uri: str) -> dict[str, Any
         return row
     bucket, key = parsed
     try:
-        raw_bytes = _s3_request("GET", bucket, key)
+        options = {"max_stored_bytes": max_stored_bytes} if max_stored_bytes is not None else {}
+        raw_bytes = _s3_request("GET", bucket, key, **options)
+    except EvidenceReadBudgetExceeded as exc:
+        row.update(content=None, storage_status="budget_exceeded", storage_bytes_read=exc.bytes_read)
+        return row
+    except EvidenceReadFailed as exc:
+        row.update(content=None, storage_status="remote_error", storage_bytes_read=exc.bytes_read)
+        return row
     except urllib.error.HTTPError as exc:
         row["content"] = None
         row["storage_status"] = "missing" if exc.code == 404 else "remote_error"
@@ -340,6 +404,7 @@ def _hydrate_s3_evidence(row: dict[str, Any], storage_uri: str) -> dict[str, Any
         row["storage_status"] = "remote_error"
         row["storage_error"] = f"remote evidence read failed ({type(exc).__name__})"
         return row
+    row["storage_bytes_read"] = len(raw_bytes)
     sha = hashlib.sha256(raw_bytes).hexdigest()
     expected = str(row.get("content_sha256") or "")
     if expected and sha != expected:
@@ -437,10 +502,12 @@ def public_evidence_object(row: dict[str, Any], *, results_dir: Path) -> dict[st
     return hydrate_evidence_content(row, results_dir=results_dir)
 
 
-def hydrate_evidence_content(row: dict[str, Any], *, results_dir: Path) -> dict[str, Any]:
+def hydrate_evidence_content(
+    row: dict[str, Any], *, results_dir: Path, max_stored_bytes: int | None = None,
+) -> dict[str, Any]:
     storage_uri = str(row.get("storage_uri") or "")
     if storage_uri.startswith(S3_STORAGE_PREFIX):
-        return _hydrate_s3_evidence(row, storage_uri)
+        return _hydrate_s3_evidence(row, storage_uri, max_stored_bytes=max_stored_bytes)
     if not storage_uri.startswith(LOCAL_STORAGE_PREFIX):
         row.setdefault("storage_status", "inline")
         content = row.get("content")
@@ -471,7 +538,23 @@ def hydrate_evidence_content(row: dict[str, Any], *, results_dir: Path) -> dict[
         row["content"] = None
         return row
     try:
-        raw = path.read_text(encoding="utf-8")
+        with path.open("rb") as stream:
+            raw_bytes = _read_stored_bytes(
+                stream, maximum=max_stored_bytes, size=os.fstat(stream.fileno()).st_size,
+            )
+            row["storage_bytes_read"] = len(raw_bytes)
+            if max_stored_bytes is not None and os.fstat(stream.fileno()).st_size > len(raw_bytes):
+                raise EvidenceReadBudgetExceeded(len(raw_bytes))
+        raw = raw_bytes.decode("utf-8")
+    except EvidenceReadBudgetExceeded as exc:
+        row.update(content=None, storage_status="budget_exceeded", storage_bytes_read=exc.bytes_read)
+        return row
+    except EvidenceReadFailed as exc:
+        row.update(content=None, storage_status="read_error", storage_bytes_read=exc.bytes_read)
+        return row
+    except UnicodeError:
+        row.update(content=None, storage_status="read_error")
+        return row
     except OSError:
         row["storage_status"] = "missing"
         row["content"] = None

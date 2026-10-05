@@ -26,7 +26,7 @@ from api.hunt.deterministic_findings import materialize_verified_hunt_findings
 from api.runtime.budget_reservations import DurableBudgetReservation
 from api.runtime.models import TargetBinding
 from api.scan.finalizer import canonical_authz_findings
-from scanner.findings import templated_finding_identity
+from scanner.findings import pre_service_templated_finding_identity, templated_finding_identity
 from tests.api_sources import definition_source
 from tests.e2e.fixtures import fixtures_server
 
@@ -125,6 +125,8 @@ def test_materializing_a_second_service_proof_does_not_overwrite_the_first():
     class DB:
         """The findings upsert, keyed like (target_id, fingerprint)."""
         def __init__(self): self.rows = {}
+        async def fetchrow(self, query, target_id, fingerprint):
+            return self.rows.get(fingerprint)
         async def fetchval(self, query, target_id, hunt_id, fingerprint, url, *args):
             assert "ON CONFLICT" in query
             self.rows.setdefault(fingerprint, {"id": uuid.uuid4()})["url"] = url
@@ -161,15 +163,20 @@ def test_default_port_spellings_of_one_service_share_a_fingerprint():
                           target_url="https://h.test:443/")["fingerprint"] == implicit["fingerprint"]
 
 
-def test_a_target_service_finding_keeps_the_fingerprint_it_had_before_service_qualifiers():
-    """Rows already proven on the Hunt target's own service must not be re-keyed."""
+def test_a_target_service_finding_uses_scan_identity_and_retains_its_legacy_key():
+    """Scan and Hunt agree even when the Hunt baseline uses another service."""
     record = _service_proof("https://h.test/api/orders/7")
-    assert record["fingerprint"] == "t:33e0ffeed54c7ba2"
-    unqualified = templated_finding_identity({
+    finding = {
         "url": record["url"], "cwe": record["cwe"], "tool": record["tool"],
         "title": record["title"], "evidence": record["evidence"],
-    })
-    assert record["fingerprint"] == "t:" + hashlib.sha256(unqualified.encode()).hexdigest()[:16]
+    }
+    identity = templated_finding_identity(finding)
+    assert record["fingerprint"] == "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+    previous = pre_service_templated_finding_identity(finding)
+    assert "t:" + hashlib.sha256(previous.encode()).hexdigest()[:16] == "t:33e0ffeed54c7ba2"
+    assert _service_proof(
+        "https://h.test/api/orders/7", target_url="https://h.test:8443",
+    )["fingerprint"] == record["fingerprint"]
 
 
 def test_real_bound_http_proof_projects_to_the_same_finding_as_scan(origin):
@@ -260,6 +267,7 @@ CREATE TABLE findings(
  tool text, cwe text, url text, evidence jsonb, source text, status text,
  last_verification_status text, last_verification_verdict text, last_verification_confidence double precision,
  last_verified_at timestamptz, verification_count int, resolved_at timestamptz,
+ resurfaced_count int DEFAULT 0,
  last_seen_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
 CREATE UNIQUE INDEX web_finding_key ON findings(target_id,fingerprint) WHERE target_id IS NOT NULL;
 CREATE UNIQUE INDEX device_finding_key ON findings(device_target_id,fingerprint) WHERE device_target_id IS NOT NULL;
