@@ -203,7 +203,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "d0deec535d65198f85ee49788e770ce6f2e4f458dbe5d9fec1937418f90af5e8",
+  "contract_sha256": "284cfe387c15f63383cd8de92abef3934fa49def79b2568f5feec75520262506",
   "openapi": "3.1.0",
   "operation_count": 451,
   "operations": {
@@ -4758,7 +4758,7 @@
     "POST /hunts/{hunt_id}/boundary-discovery": {
       "deprecated": false,
       "operation_id": "discover_hunt_boundary_context_hunts__hunt_id__boundary_discovery_post",
-      "parameters_sha256": "2e4ac0bf7e01a02d968759249d186dbe624e65e94991e90043c21d9181994b44",
+      "parameters_sha256": "cc413fdb829ef94954b9a5eca8dc4a5d489194b070cc781a444e9f5f17c1fc09",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -4771,7 +4771,7 @@
     "POST /hunts/{hunt_id}/boundary-discovery/{draft_id}/prepare": {
       "deprecated": false,
       "operation_id": "prepare_hunt_boundary_discovery_hunts__hunt_id__boundary_discovery__draft_id__prepare_post",
-      "parameters_sha256": "02ea2cf620da817e3d21cedf0dfda8f3acb865f19cfd1d7d5cd60c3b2e4c3b48",
+      "parameters_sha256": "f6ea05cbb404569c2325710b2787a96363dba969bc066ab0bf89c3c584026cbd",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
