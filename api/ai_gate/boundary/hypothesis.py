@@ -505,6 +505,7 @@ def materialize_boundary_contract(
         raise ContractError("boundary_materialization_base_incomplete")
 
     materialized = copy.deepcopy(boundary_base)
+    source_binding = normalize_boundary_source_binding(proposal.get("source_binding"))
     bindings = proposal.get("principal_bindings")
     if not isinstance(bindings, dict) or set(bindings) != {"owner", "attacker"}:
         raise ContractError("boundary_materialization_principal_binding_mismatch")
@@ -552,7 +553,7 @@ def materialize_boundary_contract(
         "proposal_sha256": proposal.get("hypothesis_sha256"),
         "hypothesis_id": proposal.get("hypothesis_id"),
         "provenance": copy.deepcopy(proposal.get("provenance") or []),
-        "source_binding": copy.deepcopy(proposal.get("source_binding")),
+        "source_binding": copy.deepcopy(source_binding),
         "boundary_contract": materialized,
         "boundary_contract_sha256": parsed.digest,
     }
