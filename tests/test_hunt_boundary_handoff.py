@@ -177,3 +177,51 @@ async def test_discovery_source_binding_cannot_switch_hunt_or_target():
             expected_rule="Manager approval is required for refunds.",
         )
 
+
+
+@pytest.mark.asyncio
+async def test_shared_candidate_uses_only_current_hunt_discovery_source_binding():
+    local = {
+        "schema_version": "hunt-boundary-source/v1",
+        "hunt_id": RUN["id"],
+        "target_id": RUN["target_id"],
+        "origin": "https://agent.example.test",
+        "agent_paths": ["/chat"],
+    }
+    foreign = {
+        "schema_version": "hunt-boundary-source/v1",
+        "hunt_id": OTHER,
+        "target_id": RUN["target_id"],
+        "origin": "https://foreign.example.test",
+        "agent_paths": ["/chat"],
+    }
+    db = DB()
+    db.db.execute("UPDATE investigation_candidates SET canonical_locus=?", (
+        json.dumps({"route": "/orders/order-a", "ai_boundary_context": {
+            "prompt": "Refund the order.", "verifier_path": "/orders/order-a",
+            "state_path": "status", "initial_value": "paid", "forbidden_value": "refunded",
+            "approval_path": "/approvals/order-a", "approval_state_path": "state",
+            "required_approval_value": "approved",
+        }}),
+    ))
+    db.db.execute(
+        """UPDATE investigation_candidate_observations
+           SET source_kind='hunt_boundary_discovery', observation_context=?""",
+        (json.dumps({"boundary_source_binding": local, "authoritative": False}),),
+    )
+    db.db.execute(
+        """INSERT INTO investigation_candidate_observations
+           (id,candidate_id,hunt_run_id,evidence_refs,observed_at,source_kind,observation_context)
+           VALUES(?,?,?,?,?,?,?)""",
+        (
+            uid(777), CANDIDATE, OTHER, json.dumps([ACTION]), 99,
+            "hunt_boundary_discovery",
+            json.dumps({"boundary_source_binding": foreign, "authoritative": False}),
+        ),
+    )
+    db.guard()
+    result = await handoff(
+        db, expected_rule="Manager approval is required for refunds.",
+    )
+    assert result["proposal"]["source_binding"] == local
+    assert "foreign.example.test" not in json.dumps(result)
