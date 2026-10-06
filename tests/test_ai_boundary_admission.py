@@ -232,7 +232,12 @@ async def test_boundary_verify_accepts_matching_hunt_discovery_endpoint(monkeypa
                     "is_active": True,
                 }
             return None
-        async def fetch(self, *_args):
+        async def fetch(self, query, *_args):
+            if "FROM ai_target_principals" in query:
+                return [
+                    {"role": "victim", "label": "victim"},
+                    {"role": "attacker", "label": "attacker"},
+                ]
             return []
     class Acquire:
         async def __aenter__(self): return FakeConn()
