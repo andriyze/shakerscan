@@ -326,6 +326,11 @@ def _validate_evidence_claim(
             "coverage_negative_requires_completed_actions",
             "Negative coverage may cite only completed actions; partial/blocked work is a gap",
         )
+    if status == "negative" and angle.get("contradictory_evidence_action_ids"):
+        raise CoverageLedgerError(
+            "coverage_negative_has_contradictory_evidence",
+            "Negative coverage cannot close an angle while contradictory evidence remains",
+        )
     if status == "candidate" and any(item == "blocked" for item in evidence_statuses):
         raise CoverageLedgerError(
             "coverage_candidate_requires_executed_evidence",
