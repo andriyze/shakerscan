@@ -152,7 +152,8 @@ def test_state_changing_requests_are_inventory_leads_not_authorized_actions():
     assert lead["path"] == "/records/owner-record"
     assert lead["execution_enabled"] is False
     assert lead["missing_facts"] == [
-        "expected_business_rule", "independent_postcondition", "approval_semantics",
+        "effect_classification", "expected_business_rule",
+        "independent_postcondition", "approval_semantics",
     ]
     assert lead["provenance"][0]["authority"] is False
 
