@@ -12,7 +12,6 @@ but neither a planner-written angle nor a checkpoint may create or verify a find
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Mapping, Sequence
 import hashlib
 import json
@@ -489,8 +488,34 @@ async def build_hunt_checkpoint(
         hunt_run_id,
     )
 
-    candidates = [
-        {
+    coverage_status_rows = await conn.fetch(
+        """WITH latest AS (
+               SELECT DISTINCT ON (fingerprint) fingerprint, status
+               FROM hunt_coverage_angle_events
+               WHERE hunt_run_id=$1::uuid
+               ORDER BY fingerprint, created_at DESC, id DESC
+           )
+           SELECT status, COUNT(*) AS count
+           FROM latest
+           GROUP BY status
+           ORDER BY status""",
+        hunt_run_id,
+    )
+    coverage_family_rows = await conn.fetch(
+        """WITH latest AS (
+               SELECT DISTINCT ON (fingerprint) fingerprint, family
+               FROM hunt_coverage_angle_events
+               WHERE hunt_run_id=$1::uuid
+               ORDER BY fingerprint, created_at DESC, id DESC
+           )
+           SELECT family, COUNT(*) AS count
+           FROM latest
+           GROUP BY family
+           ORDER BY family""",
+        hunt_run_id,
+    )
+
+    candidates = [        {
             "id": str(row["id"]),
             "family": str(row["family"] or ""),
             "title": str(row["title"] or ""),
@@ -508,8 +533,12 @@ async def build_hunt_checkpoint(
     candidate_total = int(candidate_rows[0]["total_count"]) if candidate_rows else 0
 
     latest_angles = coverage["angles"]
-    status_counts = Counter(str(item["status"]) for item in latest_angles)
-    family_counts = Counter(str(item["family"]) for item in latest_angles)
+    status_counts = {
+        str(row["status"]): int(row["count"]) for row in coverage_status_rows
+    }
+    family_counts = {
+        str(row["family"]): int(row["count"]) for row in coverage_family_rows
+    }
 
     priority = {"candidate": 0, "partial": 1, "testing": 2, "planned": 3, "blocked": 4}
     continuation = sorted(
