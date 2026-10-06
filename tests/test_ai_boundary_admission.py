@@ -285,3 +285,68 @@ async def test_boundary_verify_accepts_matching_hunt_discovery_endpoint(monkeypa
     stored = captured["override"]["metadata_json"]["boundary_proposal"]["source_binding"]
     assert stored["origin"] == "https://agent.example.test"
     assert stored["agent_paths"] == ["/chat"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_verification_requires_both_declared_roles_on_ai_target(monkeypatch):
+    class FakeConn:
+        async def fetchrow(self, query, *_args):
+            if "FROM ai_targets" in query:
+                return {
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "name": "Observed agent",
+                    "target_type": "api_chat",
+                    "endpoint_url": "https://agent.example.test/chat",
+                    "method": "POST",
+                    "headers_template": {},
+                    "request_template": {"message": "{{prompt}}"},
+                    "response_path": "answer",
+                    "streaming_mode": "json",
+                    "rate_limit_rps": 2,
+                    "token_budget": 32000,
+                    "request_budget": 64,
+                    "production_mode": False,
+                    "metadata_json": {},
+                    "is_active": True,
+                }
+            return None
+        async def fetch(self, query, *_args):
+            if "FROM ai_target_principals" in query:
+                return [{"role": "victim", "label": "victim"}]
+            return []
+    class Acquire:
+        async def __aenter__(self): return FakeConn()
+        async def __aexit__(self, *_args): return False
+    class Pool:
+        def acquire(self): return Acquire()
+
+    monkeypatch.setattr(router, "_pool_provider", lambda: Pool())
+    from ai_gate.boundary.hypothesis import compile_boundary_hypothesis
+    proposal = compile_boundary_hypothesis({
+        "version": 1, "hypothesis_id": "hunt-read", "kind": "cross_tenant_read",
+        "owner": {"role": "victim", "subject": "user-a", "tenant": "tenant-a", "resource_id": "doc-a"},
+        "attacker": {"role": "attacker", "subject": "user-b", "tenant": "tenant-b", "resource_id": "doc-b"},
+        "provenance": [{"kind": "hunt_candidate", "id": "candidate-1"}],
+    })
+    proposal["source_binding"] = {
+        "schema_version": "hunt-boundary-source/v1",
+        "hunt_id": "00000000-0000-0000-0000-000000000010",
+        "target_id": "00000000-0000-0000-0000-000000000020",
+        "origin": "https://agent.example.test",
+        "agent_paths": ["/chat"],
+    }
+    base = {
+        "version": 1, "name": "support-agent-boundary",
+        "owner": {"role": "victim", "subject": "user-a", "tenant": "tenant-a", "resource_id": "doc-a"},
+        "attacker": {"role": "attacker", "subject": "user-b", "tenant": "tenant-b", "resource_id": "doc-b"},
+        "identity": {"path": "/identity", "subject_field": "subject", "tenant_field": "tenant"},
+        "resource": {"path": "/documents/{{resource_id}}", "id_field": "id", "owner_field": "owner", "tenant_field": "tenant", "marker_field": "marker"},
+        "response_path": "answer",
+    }
+    with pytest.raises(HTTPException) as exc:
+        await router.verify_ai_boundary_proposal(
+            "00000000-0000-0000-0000-000000000001",
+            router.AIBoundaryVerifyRequest(proposal=proposal, boundary_base=base),
+        )
+    assert exc.value.status_code == 409
+    assert "attacker" in str(exc.value.detail)
