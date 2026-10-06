@@ -65,8 +65,7 @@ class DB:
                 "required_approval_value": "approved", "unexpected_secret": SECRET,
             }}),
         ))
-        self.db.execute("INSERT INTO investigation_candidate_observations
-            (id,candidate_id,hunt_run_id,evidence_refs,observed_at) VALUES(?,?,?,?,?)", (
+        self.db.execute("INSERT INTO investigation_candidate_observations (id,candidate_id,hunt_run_id,evidence_refs,observed_at) VALUES(?,?,?,?,?)", (
             uid(100), CANDIDATE, HUNT, json.dumps([ACTION, RECEIPT, TRANSACTION]), 1,
         ))
         self.db.executemany("INSERT INTO hunt_actions VALUES(?,?,?)", [
@@ -152,8 +151,7 @@ async def test_same_hunt_observation_cannot_authorize_a_foreign_target():
 @pytest.mark.asyncio
 async def test_shared_candidate_does_not_import_another_hunts_observation_refs():
     db = DB()
-    db.db.execute("INSERT INTO investigation_candidate_observations
-            (id,candidate_id,hunt_run_id,evidence_refs,observed_at) VALUES(?,?,?,?,?)", (
+    db.db.execute("INSERT INTO investigation_candidate_observations (id,candidate_id,hunt_run_id,evidence_refs,observed_at) VALUES(?,?,?,?,?)", (
         uid(101), CANDIDATE, OTHER, json.dumps([FOREIGN_ACTION]), 99,
     ))
     result = await inspect(db)
@@ -239,8 +237,7 @@ async def test_malformed_or_sensitive_refs_are_not_echoed(refs):
 async def test_bounded_observation_window_reports_partial_coverage():
     db = DB()
     for n in range(51):
-        db.db.execute("INSERT INTO investigation_candidate_observations
-            (id,candidate_id,hunt_run_id,evidence_refs,observed_at) VALUES(?,?,?,?,?)", (
+        db.db.execute("INSERT INTO investigation_candidate_observations (id,candidate_id,hunt_run_id,evidence_refs,observed_at) VALUES(?,?,?,?,?)", (
             uid(200+n), CANDIDATE, HUNT, json.dumps([ACTION]), n+2,
         ))
     result = await inspect(db)
