@@ -64,20 +64,38 @@ not establish the presence of an agent or its relationship to the resource.
 Ambiguous field, identity-path and agent-response bindings stay missing.
 
 AI Gate → Agent boundary verification offers discovery and explicit preparation.
-The selected configured AI endpoint must match an observed path on the exact
-service before preparation. Preparation uses the existing candidate route,
-requires an active/awaiting-planner Hunt and consumes its normal candidate
-budget. It prefills a partial fixture and leaves subject, tenant and role
-declarations empty. Confirm that the resources are controlled synthetic fixtures
-and that the agent belongs to the application, then complete any missing shape
-bindings. Principal form edits also update the fixture declarations. Compilation,
-materialization and explicit verification continue through the existing workflow.
-Preparing a candidate never queues a scan or marks a finding verified.
+The browser submits only the selected discovery draft ID. The server reloads the
+Hunt under lock, recomputes that draft from Hunt-owned captures, enforces the
+normal candidate budget, and then writes the existing unverified candidate. A
+client cannot substitute its own candidate payload for a discovered draft.
+
+The draft carries a validated source binding: Hunt ID, asset ID, exact origin and
+the observed agent paths. The compiled Boundary proposal preserves that binding.
+Before queueing verification the selected AI target must match the exact source
+origin/path, and both declared Boundary roles must exist as active principals on
+that AI target. These checks improve provenance and operator feedback; they do
+not grant target authority or credential access. The selected AI target still
+passes its normal authorization, credential, budget and worker admission.
+
+Repeated observations of the same principal/resource are merged only when their
+structural bindings agree. Conflicts are counted as explicit coverage gaps rather
+than first-match-wins input. Observed POST/PUT/PATCH/DELETE exchanges are retained
+as non-executing action leads with missing business-rule, independent-postcondition
+and approval-semantics prerequisites. They are not automatically converted into
+state-changing Boundary tests.
+
+The partial read fixture still leaves subject, tenant and role declarations empty.
+Confirm that the resources are controlled synthetic fixtures and that the agent
+belongs to the application, then complete any missing shape bindings. Principal
+form edits also update the fixture declarations. Compilation, materialization and
+explicit verification continue through the existing workflow. Preparing a
+candidate never queues a scan or marks a finding verified.
 
 This slice does not infer body values, provision canaries, prove ownership,
-discover delegated tools, or construct action/approval hypotheses. Same-origin
-membership and structural field names remain observations. The verifier must
-still establish distinct principals, ownership, tenants and synthetic canaries.
+discover delegated tools, or autonomously construct action/approval hypotheses.
+Same-origin membership and structural field names remain observations. The
+verifier must still establish distinct principals, ownership, tenants and
+synthetic canaries.
 
 ## Research implications adopted in this phase
 
@@ -234,7 +252,10 @@ The implementation must prove that:
 6. candidate preparation makes no network calls and spends no execution budget;
 7. deterministic verification still happens only through the existing AI Boundary lifecycle;
 8. secure and vulnerable loopback fixtures produce different proof outcomes;
-9. allowed control workflows remain represented for regression.
+9. allowed control workflows remain represented for regression;
+10. repeated conflicting resource observations are rejected rather than selected by order;
+11. a discovered proposal cannot be queued against a different AI endpoint or missing principal role;
+12. discovered candidate preparation is recomputed server-side from the selected Hunt.
 
 ## Follow-on order
 
