@@ -33,12 +33,25 @@ export interface BoundaryDiscoveryDraft {
   }
 }
 
+export interface BoundaryActionLead {
+  origin: string
+  path: string
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  principal_slot?: string | null
+  missing_facts: string[]
+  execution_enabled: false
+  provenance: Array<{ origin_kind: string; capture_id: string; action_id: string; authority: false }>
+}
+
 export interface BoundaryDiscovery {
   status: 'drafts_available' | 'needs_evidence'
   drafts: BoundaryDiscoveryDraft[]
+  action_leads?: BoundaryActionLead[]
   coverage: {
     captures_read: number; captures_truncated: boolean; structure_unavailable: number
-    drafts_truncated: boolean; historical_backfill_performed: false
+    conflicting_resource_observations?: number
+    drafts_truncated: boolean; action_leads_truncated?: boolean
+    historical_backfill_performed: false
   }
   execution_enabled: false
 }
