@@ -515,7 +515,8 @@ async def build_hunt_checkpoint(
         hunt_run_id,
     )
 
-    candidates = [        {
+    candidates = [
+        {
             "id": str(row["id"]),
             "family": str(row["family"] or ""),
             "title": str(row["title"] or ""),
