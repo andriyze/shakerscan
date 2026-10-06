@@ -159,6 +159,15 @@ async def query_knowledge_page(
     cursor: str | None = None,
 ) -> dict[str, Any]:
     kind = "receipts" if kind == "tool_receipts" else kind
+    if kind == "graph_nodes" and (filters or {}).get("node_type") == "agent_authorization_model":
+        from .agent_boundary_discovery import agent_boundary_model_page
+        try:
+            return await agent_boundary_model_page(
+                conn, target_id=target_id, device=device, filters=filters or {},
+                limit=limit, cursor=cursor,
+            )
+        except (ValueError, TypeError) as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
     if kind == "service_intelligence":
         try:
             from exposure.service_knowledge import query_service_knowledge
