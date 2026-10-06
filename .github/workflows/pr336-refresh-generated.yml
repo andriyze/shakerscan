@@ -1,0 +1,52 @@
+name: PR336 refresh generated contracts
+
+on:
+  push:
+    branches: ['hunt-coverage-ledger']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr336-generated-contracts
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: hunt-coverage-ledger
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install locked dependencies
+        run: python -m pip install --require-hashes -r scanner/requirements.lock
+      - name: Regenerate authoritative committed artifacts
+        env:
+          SHAKERSCAN_UPDATE_API_CONTRACT: '1'
+        run: |
+          python -m pytest -q tests/test_api_characterization.py
+          python scripts/generate_public_api_contract.py
+          python scripts/generate_capability_inventory.py
+          python scripts/generate_install_manifest.py
+      - name: Commit generated artifacts and remove this temporary workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/fixtures/api_contract/routes.json \
+                  tests/fixtures/api_contract/operations.json \
+                  tests/fixtures/api_contract/app_contract.json \
+                  docs/generated/public-openapi-manifest.json \
+                  ui/src/lib/publicApi.generated.ts \
+                  docs/functionality-reference.md \
+                  install/MANIFEST.sha256
+          git rm .github/workflows/pr336-refresh-generated.yml
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "generated: refresh Hunt coverage contracts"
+          git push origin HEAD:hunt-coverage-ledger
