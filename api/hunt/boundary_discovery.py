@@ -16,8 +16,10 @@ from urllib.parse import urlsplit
 from .boundary_context import BoundaryContextError, _json, _uuid
 try:
     from runtime.http_structure import structure_fields
+    from ai_gate.boundary.hypothesis import normalize_boundary_source_binding
 except ModuleNotFoundError:
     from ..runtime.http_structure import structure_fields
+    from ..ai_gate.boundary.hypothesis import normalize_boundary_source_binding
 
 MAX_CAPTURES = 500
 MAX_DRAFTS = 20
@@ -72,7 +74,7 @@ def _provenance(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _observe(rows):
-    agents, identities, resources = [], [], []
+    agents, identities, resources, actions = [], [], [], []
     unavailable = skipped = 0
     for row in rows:
         service = _service(row.get("url"))
@@ -80,6 +82,20 @@ def _observe(rows):
                 or type(row.get("status_code")) is not int or not 200 <= row["status_code"] < 300):
             skipped += 1
             continue
+        origin, path = service
+        method = str(row.get("method") or "").upper()
+        source = {"origin": origin, "path": path, "method": method,
+                  "principal_slot": row.get("principal_slot"), "provenance": _provenance(row)}
+        if method in {"POST", "PUT", "PATCH", "DELETE"}:
+            actions.append({
+                **source,
+                "missing_facts": [
+                    "expected_business_rule",
+                    "independent_postcondition",
+                    "approval_semantics",
+                ],
+                "execution_enabled": False,
+            })
         try:
             metadata = _json(row.get("metadata_json"), dict)
         except BoundaryContextError:
@@ -92,13 +108,10 @@ def _observe(rows):
         if not fields:
             unavailable += 1
             continue
-        origin, path = service
-        source = {"origin": origin, "path": path, "method": row.get("method"),
-                  "principal_slot": row.get("principal_slot"), "provenance": _provenance(row)}
         answer = _pick(fields, ("answer", "text"), string_only=True)
-        if row.get("method") == "POST" and answer:
+        if method == "POST" and answer:
             agents.append({**source, "response_path": answer, "agent_presence_verified": False})
-        if row.get("method") != "GET" or row.get("principal_slot") not in {"primary", "secondary"}:
+        if method != "GET" or row.get("principal_slot") not in {"primary", "secondary"}:
             continue
         subject, tenant = _pick(fields, ("subject", "user_id")), _pick(fields, ("tenant", "tenant_id"))
         if subject and tenant:
@@ -110,20 +123,67 @@ def _observe(rows):
                               "path_template": parts[0] + "/{{resource_id}}", "id_field": identifier,
                               "owner_field": _pick(fields, ("owner", "owner_id")),
                               "tenant_field": tenant, "marker_field": _pick(fields, ("marker",), string_only=True)})
-    return agents, identities, resources, unavailable, skipped
+    return agents, identities, resources, actions, unavailable, skipped
+
+
+def _stable_resources(resources):
+    """Merge consistent repeated observations; reject ambiguous structure."""
+    grouped = defaultdict(list)
+    for resource in resources:
+        grouped[(
+            resource["origin"], resource["path_template"],
+            resource["principal_slot"], resource["resource_id"],
+        )].append(resource)
+    stable, conflicts = [], 0
+    for _, records in sorted(grouped.items()):
+        signatures = {
+            json.dumps(
+                {key: record.get(key) for key in ("id_field", "owner_field", "tenant_field", "marker_field")},
+                sort_keys=True, separators=(",", ":"),
+            )
+            for record in records
+        }
+        if len(signatures) != 1:
+            conflicts += 1
+            continue
+        item = dict(records[0])
+        item["provenance_records"] = list(dict.fromkeys(
+            json.dumps(record["provenance"], sort_keys=True, separators=(",", ":"))
+            for record in records
+        ))
+        item["provenance_records"] = [json.loads(value) for value in item["provenance_records"]]
+        stable.append(item)
+    return stable, conflicts
+
+
+def _action_leads(actions):
+    """Inventory state-changing observations without inferring policy or execution permission."""
+    grouped = {}
+    for action in actions:
+        key = (action["origin"], action["path"], action["method"], action.get("principal_slot"))
+        current = grouped.setdefault(key, {**action, "provenance": []})
+        marker = json.dumps(action["provenance"], sort_keys=True, separators=(",", ":"))
+        if marker not in {
+            json.dumps(item, sort_keys=True, separators=(",", ":"))
+            for item in current["provenance"]
+        }:
+            current["provenance"].append(action["provenance"])
+    return [grouped[key] for key in sorted(grouped)]
 
 
 def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     """Pure bounded projection. Values outside structural metadata are unused."""
     hunt_id = _uuid(run.get("id"))
     rows_truncated = len(rows) > MAX_CAPTURES
-    agents, identities, resources, unavailable, skipped = _observe(rows[:MAX_CAPTURES])
+    agents, identities, resources, actions, unavailable, skipped = _observe(rows[:MAX_CAPTURES])
+    resources, resource_conflicts = _stable_resources(resources)
+    actions = _action_leads(actions)
     # Stable ordering and grouping keep output deterministic; the query window is
     # explicitly incomplete when it hits its bound. No all-pairs explosion.
     groups = defaultdict(lambda: {"primary": {}, "secondary": {}})
     for resource in resources:
         key = (resource["origin"], resource["path_template"])
-        groups[key][resource["principal_slot"]].setdefault(resource["resource_id"], resource)
+        groups[key][resource["principal_slot"]][resource["resource_id"]] = resource
     drafts = []
     draft_count = 0
     for (origin, template), slots in sorted(groups.items()):
@@ -135,14 +195,19 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
                 draft_count += 1
                 if len(drafts) >= MAX_DRAFTS:
                     continue
-                sources = [owner["provenance"], attacker["provenance"]]
+                owner_sources = owner.get("provenance_records") or [owner["provenance"]]
+                attacker_sources = attacker.get("provenance_records") or [attacker["provenance"]]
+                sources = [*owner_sources, *attacker_sources]
                 prefill: dict[str, Any] = {
                     "version": 1, "name": "discovered-read-boundary",
                     "owner": {"resource_id": owner_id}, "attacker": {"resource_id": attacker_id},
                     "resource": {"path": template},
                 }
-                field_sources = {"owner.resource_id": [sources[0]], "attacker.resource_id": [sources[1]],
-                                 "resource.path": sources.copy()}
+                field_sources = {
+                    "owner.resource_id": owner_sources.copy(),
+                    "attacker.resource_id": attacker_sources.copy(),
+                    "resource.path": sources.copy(),
+                }
                 for key in ("id_field", "owner_field", "tenant_field", "marker_field"):
                     if owner[key] and owner[key] == attacker[key]:
                         prefill["resource"][key] = owner[key]
@@ -179,18 +244,31 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
                 # observations retain each Hunt's own evidence association.
                 digest = hashlib.sha256(json.dumps([origin, template, owner_id, attacker_id], separators=(",", ":")).encode()).hexdigest()
                 refs = list(dict.fromkeys(s["capture_id"] for s in sources))
+                agent_paths = sorted({p for p, _ in same_agents})
+                target_ref = run.get("device_target_id") or run.get("target_id")
+                source_binding = normalize_boundary_source_binding({
+                    "schema_version": "hunt-boundary-source/v1",
+                    "hunt_id": hunt_id,
+                    "target_id": _uuid(target_ref),
+                    "origin": origin,
+                    "agent_paths": agent_paths,
+                }) if agent_paths else None
                 drafts.append({
                     "draft_id": digest, "kind": "cross_tenant_read", "status": "needs_context",
-                    "origin": origin, "agent_paths": sorted({p for p, _ in same_agents}),
+                    "origin": origin, "agent_paths": agent_paths,
+                    "source_binding": source_binding,
                     "principal_slots": {"owner": "primary", "attacker": "secondary"},
                     "fixture_prefill": prefill, "field_provenance": field_sources,
                     "provenance": sources, "missing_facts": missing,
                     "candidate_request": {
                         "family": "cross_tenant_retrieval", "locus": {
                             "method": "GET", "url": origin + template, "route": template,
-                            "ai_boundary_context": {"discovery_draft_id": digest,
-                                                    "owner_resource_id": owner_id,
-                                                    "attacker_resource_id": attacker_id},
+                            "ai_boundary_context": {
+                                "discovery_draft_id": digest,
+                                "owner_resource_id": owner_id,
+                                "attacker_resource_id": attacker_id,
+                                **({"source_binding": source_binding} if source_binding else {}),
+                            },
                         },
                         "title": "Possible cross-principal agent resource read",
                         "claim": "Two credential slots accessed different resources. Ownership, distinct identity and agent integration remain unverified.",
@@ -201,9 +279,12 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
         "schema_version": "hunt-boundary-discovery/v1", "hunt_id": hunt_id,
         "status": "drafts_available" if drafts else "needs_evidence", "drafts": drafts,
         "agent_surfaces": agents[:MAX_SURFACES],
+        "action_leads": actions[:MAX_SURFACES],
         "coverage": {"captures_read": min(len(rows), MAX_CAPTURES), "captures_truncated": rows_truncated,
                      "structure_unavailable": unavailable, "captures_skipped": skipped,
+                     "conflicting_resource_observations": resource_conflicts,
                      "drafts_truncated": draft_count > MAX_DRAFTS, "agent_surfaces_truncated": len(agents) > MAX_SURFACES,
+                     "action_leads_truncated": len(actions) > MAX_SURFACES,
                      "historical_backfill_performed": False},
         "gaps": ["agent_resource_relationship_unverified", "credentials_are_not_distinct_identity_proof",
                  "successful_access_is_not_ownership", "application_policy_unassessed"],
