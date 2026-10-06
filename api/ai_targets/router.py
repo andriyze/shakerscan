@@ -462,14 +462,30 @@ async def verify_ai_boundary_proposal(target_id: str, request: AIBoundaryVerifyR
                 str(contract["owner"]["role"]),
                 str(contract["attacker"]["role"]),
             }
-            active_roles = {str(item["role"]) for item in principal_rows if item.get("role")}
-            missing_roles = sorted(required_roles - active_roles)
+            role_counts = {
+                role: sum(
+                    1
+                    for item in principal_rows
+                    if str(item.get("role") or "") == role
+                )
+                for role in required_roles
+            }
+            missing_roles = sorted(role for role, count in role_counts.items() if count == 0)
             if missing_roles:
                 raise HTTPException(
                     status_code=409,
                     detail=(
                         "Hunt discovery Boundary roles are not active on the selected AI target: "
                         + ", ".join(missing_roles)
+                    ),
+                )
+            ambiguous_roles = sorted(role for role, count in role_counts.items() if count > 1)
+            if ambiguous_roles:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Hunt discovery Boundary roles must map to exactly one active AI target principal: "
+                        + ", ".join(ambiguous_roles)
                     ),
                 )
         credential_profile_ref, principal_refs = await _resolve_ai_gate_credential_refs(
