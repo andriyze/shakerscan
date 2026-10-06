@@ -203,7 +203,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "02e4ec1eb4f8dd182f819aa40316063ee33f7c5b45f61f42806a2f97393e996c",
+  "contract_sha256": "55c7bb792e8e73752914a11fe7c14c0cc2c1f63b9d9cdc8fc400a7b92a8442d0",
   "openapi": "3.1.0",
   "operation_count": 451,
   "operations": {
