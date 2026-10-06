@@ -8,6 +8,7 @@ import pytest
 from api.hunt.coverage_ledger import (
     COVERAGE_ANGLE_STATUSES,
     CoverageLedgerError,
+    build_hunt_checkpoint,
     coverage_fingerprint,
     normalize_coverage_angle,
     record_coverage_angle,
@@ -232,3 +233,94 @@ async def test_candidate_from_another_hunt_is_rejected():
             ),
         )
     assert exc.value.code == "coverage_candidate_not_owned"
+
+@pytest.mark.asyncio
+async def test_negative_cannot_close_an_angle_with_contradictory_evidence():
+    hunt_id = str(uuid4())
+    proof_action = str(uuid4())
+    contradictory_action = str(uuid4())
+    conn = _Conn({
+        proof_action: "completed",
+        contradictory_action: "completed",
+    })
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(
+            conn,
+            hunt_run_id=hunt_id,
+            values=_angle(
+                status="negative",
+                evidence_action_ids=[proof_action],
+                contradictory_evidence_action_ids=[contradictory_action],
+            ),
+        )
+    assert exc.value.code == "coverage_negative_has_contradictory_evidence"
+    assert conn.inserted is None
+
+
+class _CheckpointConn:
+    def __init__(self):
+        self.candidate_id = uuid4()
+        self.angle_id = uuid4()
+        self.now = datetime.now(timezone.utc)
+
+    async def fetch(self, query, *args):
+        if "LEFT JOIN investigation_candidates" in query:
+            return [{
+                "id": self.angle_id,
+                "fingerprint": "f" * 64,
+                "family": "authorization",
+                "locus_json": '{"method":"GET","route":"/api/orders/{id}"}',
+                "mechanism": "object swap",
+                "principal_context": '{"owner":"a","attacker":"b"}',
+                "hypothesis": "cross-principal access",
+                "status": "candidate",
+                "evidence_action_ids": "[]",
+                "contradictory_evidence_action_ids": "[]",
+                "candidate_id": self.candidate_id,
+                "candidate_status": "verified",
+                "blocker": None,
+                "proof_gap": None,
+                "created_at": self.now,
+                "total_count": 1,
+            }]
+        if "FROM investigation_candidates c" in query:
+            return [{
+                "id": self.candidate_id,
+                "family": "authorization",
+                "title": "Cross-principal order read",
+                "status": "verified",
+                "claimed_severity": "high",
+                "verifier_contract_id": "authz.verify",
+                "last_seen_at": self.now,
+                "total_count": 1,
+            }]
+        if "FROM hunt_actions" in query:
+            return [{"status": "completed", "count": 2}]
+        if "SELECT status, COUNT(*) AS count" in query:
+            return [{"status": "candidate", "count": 1}]
+        if "SELECT family, COUNT(*) AS count" in query:
+            return [{"family": "authorization", "count": 1}]
+        raise AssertionError(query)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_does_not_requeue_a_terminal_candidate():
+    hunt_id = uuid4()
+    conn = _CheckpointConn()
+    checkpoint = await build_hunt_checkpoint(
+        conn,
+        run={
+            "id": hunt_id,
+            "status": "active",
+            "target_kind": "web",
+            "objective": "Investigate authorization",
+            "budget_json": {"requests": 50},
+            "budget_used_json": {"requests": 2},
+        },
+    )
+    assert checkpoint["coverage"]["angle_count"] == 1
+    assert checkpoint["coverage"]["latest_angles"][0]["candidate_status"] == "verified"
+    assert checkpoint["candidates"][0]["status"] == "verified"
+    assert checkpoint["continuation_queue"] == []
+    assert checkpoint["advisory_only"] is True
+
