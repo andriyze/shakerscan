@@ -4,16 +4,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .boundary_context import CANDIDATE_QUERY, inspect_candidate_boundary_context, _json
+from .boundary_context import CANDIDATE_QUERY, inspect_candidate_boundary_context, read_candidate_boundary_source_binding
 
 try:
-    from ai_gate.boundary.hypothesis import (
-        compile_hunt_candidate_boundary, normalize_boundary_source_binding,
-    )
+    from ai_gate.boundary.hypothesis import compile_hunt_candidate_boundary
 except ModuleNotFoundError:  # package import in host-side tests
-    from ..ai_gate.boundary.hypothesis import (
-        compile_hunt_candidate_boundary, normalize_boundary_source_binding,
-    )
+    from ..ai_gate.boundary.hypothesis import compile_hunt_candidate_boundary
 
 
 async def compile_candidate_boundary_handoff(
@@ -79,17 +75,11 @@ async def compile_candidate_boundary_handoff(
         ),
     )
     proposal = projected["proposal"]
-    locus = _json(candidate["canonical_locus"], dict)
-    boundary_context = locus.get("ai_boundary_context")
-    boundary_context = boundary_context if isinstance(boundary_context, dict) else {}
-    raw_source_binding = boundary_context.get("source_binding")
-    if raw_source_binding is not None:
-        target_ref = run.get("device_target_id") or run.get("target_id")
-        proposal["source_binding"] = normalize_boundary_source_binding(
-            raw_source_binding,
-            hunt_id=inspection["hunt_id"],
-            target_id=str(target_ref),
-        )
+    source_binding = await read_candidate_boundary_source_binding(
+        conn, run=run, candidate_id=inspection["candidate_id"],
+    )
+    if source_binding is not None:
+        proposal["source_binding"] = source_binding
     result.update(
         status=proposal["status"],
         missing_facts=proposal["missing_facts"],
