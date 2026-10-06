@@ -102,6 +102,12 @@ Hypothesis:  authorization may depend only on the order id.
 Evidence:    response.diff(GET /api/orders/4121, principal=A, principal=B)
 ```
 
+## Coverage angles and planner checkpoints
+
+A Hunt records **exact coverage angles**, not family-level self-attestations. An angle is keyed by the material dimensions that make the experiment distinct: vulnerability family, operation/locus, mechanism, principal context, and application state. The ledger is append-only; later events update the current view without erasing what the planner previously believed. `negative` coverage requires completed same-Hunt actions, while partial or blocked execution remains an explicit gap. A negative result on one angle never closes a materially different method, route, identity, mechanism, input path, or state.
+
+`GET /hunts/{hunt_id}/checkpoint` builds a bounded handoff from server-owned state: latest coverage angles, open candidates, action outcomes, budgets, and unresolved proof gaps. It is intended for context compaction, planner replacement, and resumed work. The checkpoint is advisory investigation memory only. It cannot grant authority, create proof, or promote a candidate to a verified finding.
+
 ## Capability architecture
 
 The AI receives small, strongly typed capabilities, never arbitrary shell or planner-supplied argv
