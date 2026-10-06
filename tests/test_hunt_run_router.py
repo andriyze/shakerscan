@@ -479,6 +479,8 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
                 return []
             if "FROM hunt_actions action" in query:
                 return []
+            if "FROM hunt_coverage_angle_events" in query:
+                return []
             raise AssertionError(query)
 
     service = HuntRunService(lambda: _Pool(Connection()))
@@ -675,6 +677,9 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
             "get_hunt_lifecycle_metrics",
         ),
         (frozenset({"GET"}), "/hunts/{hunt_id}", "get_hunt"),
+        (frozenset({"GET"}), "/hunts/{hunt_id}/checkpoint", "get_hunt_checkpoint"),
+        (frozenset({"GET"}), "/hunts/{hunt_id}/coverage-angles", "get_hunt_coverage_angles"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/coverage-angles", "record_hunt_coverage_angle"),
         (frozenset({"GET"}), "/hunts/{hunt_id}/record", "export_hunt_record"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/skills/suggestions", "suggest_hunt_skills"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/skills/{skill_id}/read", "read_hunt_skill"),

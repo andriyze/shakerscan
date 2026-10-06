@@ -480,7 +480,8 @@ async def build_hunt_checkpoint(
     )
     candidate_rows = await conn.fetch(
         """SELECT c.id, c.family, c.title, c.status, c.claimed_severity,
-                  c.verifier_contract_id, c.last_seen_at, COUNT(*) OVER() AS total_count
+                  c.fingerprint, c.canonical_locus, c.verifier_contract_id,
+                  c.last_seen_at, COUNT(*) OVER() AS total_count
            FROM investigation_candidates c
            WHERE EXISTS (
                SELECT 1 FROM investigation_candidate_observations o
@@ -534,6 +535,8 @@ async def build_hunt_checkpoint(
             "title": str(row["title"] or ""),
             "status": str(row["status"] or ""),
             "severity": str(row["claimed_severity"] or "info"),
+            "fingerprint": str(row["fingerprint"] or ""),
+            "canonical_locus": _json_value(row["canonical_locus"]) or {},
             "verifier_contract_id": row["verifier_contract_id"],
             "last_seen_at": (
                 row["last_seen_at"].isoformat()
@@ -544,6 +547,28 @@ async def build_hunt_checkpoint(
         for row in candidate_rows
     ]
     candidate_total = int(candidate_rows[0]["total_count"]) if candidate_rows else 0
+    review_queue = [
+        {
+            "candidate_id": item["id"],
+            "family": item["family"],
+            "status": item["status"],
+            "severity": item["severity"],
+            "fingerprint": item["fingerprint"],
+            "canonical_locus": item["canonical_locus"],
+            "verifier_contract_id": item["verifier_contract_id"],
+            "challenge": [
+                "attacker_prerequisite",
+                "alternative_explanation",
+                "impact_ceiling",
+                "duplicate_identity",
+                "smallest_falsifying_action",
+            ],
+        }
+        for item in candidates
+        if item["status"] not in {
+            "verified", "refuted", "expired", "verification_queued", "verifying",
+        }
+    ]
 
     latest_angles = coverage["angles"]
     status_counts = {
@@ -601,6 +626,7 @@ async def build_hunt_checkpoint(
         "candidates": candidates,
         "candidate_count": candidate_total,
         "candidates_truncated": candidate_total > len(candidates),
+        "review_queue": review_queue,
         "action_outcomes": {
             str(row["status"]): int(row["count"]) for row in action_rows
         },

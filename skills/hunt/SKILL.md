@@ -218,6 +218,22 @@ that exact Hunt and must cite same-Hunt evidence actions. None accepts proof, ve
 response, or target fields. Never use these controls to rewrite or delete a scanner-owned or
 deterministically verified finding.
 
+Before verification, challenge each non-terminal candidate as if you were trying to reject it.
+`GET /hunts/{hunt_id}/checkpoint` exposes a compact `review_queue` for this purpose. Check the
+attacker prerequisite, plausible alternative explanations, the highest impact actually supported,
+whether the same canonical candidate fingerprint/root boundary is already represented, and the
+smallest authorized action that could falsify the claim. For authorization candidates, inspect
+`GET /hunts/{hunt_id}/candidates/{candidate_id}/boundary-context` and compile a bounded boundary
+proposal when useful. A challenge pass is advisory and must never manufacture proof. If it reveals
+a missing prerequisite, contradictory evidence, or a duplicate, update/delete the candidate or
+record the exact coverage gap instead of escalating severity.
+
+Once breadth is sufficient, prefer evidence-driven deepening over another generic sweep. Start from
+a concrete observation or candidate, identify the next security-boundary edge needed for a useful
+impact chain, and choose the smallest action that can prove or falsify that edge. Do not optimize
+for a requested bug count or severity label; optimize for distinct, evidence-supported impact under
+the saved authority and budget.
+
 Use `POST /hunts/{hunt_id}/candidates/{candidate_id}/verify` for deterministic verification.
 The planner cannot create a verified finding, choose an unregistered verifier, or promote its own
 claim. Never describe a candidate as verified unless the returned proof contract does so.

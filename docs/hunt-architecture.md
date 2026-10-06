@@ -144,6 +144,20 @@ identifiers, replay with alternate principals, test nested resources, check read
 look for indirect references). The AI decides which ideas apply. Skills never contain
 target-specific routes or benchmark answers.
 
+## Adaptive coverage, deepening, and challenge
+
+Hunt records exact coverage angles rather than closing an entire vulnerability family after one
+negative test. Method, route/object/sink, mechanism, principal context, and application state can
+make two experiments materially different. Compact checkpoints preserve those distinctions across
+planner handoffs and context compaction without treating planner memory as proof.
+
+After broad surface coverage, the preferred mode is evidence-driven deepening: follow a supported
+observation toward the next security-boundary edge and run the smallest useful falsifying action
+instead of starting another generic sweep. Non-terminal candidates appear in the checkpoint review
+queue for an adversarial pass over attacker prerequisites, alternative explanations, impact ceiling,
+duplicate identity, and the next falsifying action. Candidate fingerprints and canonical loci are
+continuation/deduplication hints only; registered deterministic verification remains the proof gate.
+
 ## Deterministic proof — a hard invariant
 
 > **AI reasoning is not proof.** (AGENTS.md invariant 7.)

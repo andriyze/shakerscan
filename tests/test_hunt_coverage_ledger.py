@@ -290,6 +290,8 @@ class _CheckpointConn:
                 "title": "Cross-principal order read",
                 "status": "verified",
                 "claimed_severity": "high",
+                "fingerprint": "c" * 64,
+                "canonical_locus": '{"method":"GET","route":"/api/orders/{id}"}',
                 "verifier_contract_id": "authz.verify",
                 "last_seen_at": self.now,
                 "total_count": 1,
@@ -322,5 +324,48 @@ async def test_checkpoint_does_not_requeue_a_terminal_candidate():
     assert checkpoint["coverage"]["latest_angles"][0]["candidate_status"] == "verified"
     assert checkpoint["candidates"][0]["status"] == "verified"
     assert checkpoint["continuation_queue"] == []
+    assert checkpoint["review_queue"] == []
+    assert checkpoint["candidates"][0]["fingerprint"] == "c" * 64
+    assert checkpoint["candidates"][0]["canonical_locus"]["route"] == "/api/orders/{id}"
     assert checkpoint["advisory_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_queues_nonterminal_candidate_for_adversarial_review():
+    hunt_id = uuid4()
+    conn = _CheckpointConn()
+    original_fetch = conn.fetch
+
+    async def fetch(query, *args):
+        rows = await original_fetch(query, *args)
+        if "FROM investigation_candidates c" in query:
+            rows[0]["status"] = "new"
+        if "LEFT JOIN investigation_candidates" in query:
+            rows[0]["candidate_status"] = "new"
+        return rows
+
+    conn.fetch = fetch
+    checkpoint = await build_hunt_checkpoint(
+        conn,
+        run={
+            "id": hunt_id,
+            "status": "active",
+            "target_kind": "web",
+            "objective": "Investigate authorization",
+            "budget_json": {"requests": 50},
+            "budget_used_json": {"requests": 2},
+        },
+    )
+    assert len(checkpoint["review_queue"]) == 1
+    review = checkpoint["review_queue"][0]
+    assert review["candidate_id"] == str(conn.candidate_id)
+    assert review["fingerprint"] == "c" * 64
+    assert review["challenge"] == [
+        "attacker_prerequisite",
+        "alternative_explanation",
+        "impact_ceiling",
+        "duplicate_identity",
+        "smallest_falsifying_action",
+    ]
+    assert checkpoint["continuation_queue"][0]["candidate_status"] == "new"
 
