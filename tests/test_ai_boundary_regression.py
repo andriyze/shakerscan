@@ -145,6 +145,28 @@ def test_artifact_digest_and_required_control_policy_cannot_be_weakened():
         evaluate_boundary_regression_artifact(artifact, scan=_later())
 
 
+def test_export_preserves_validated_hunt_source_binding_without_making_it_authority():
+    proposal, base = _proposal_and_base()
+    proposal["source_binding"] = {
+        "schema_version": "hunt-boundary-source/v1",
+        "hunt_id": str(UUID(int=10)),
+        "target_id": str(UUID(int=11)),
+        "origin": "https://agent.example.test",
+        "agent_paths": ["/chat"],
+    }
+    artifact = build_boundary_regression_artifact(
+        proposal=proposal, boundary_base=base, target_id=TARGET, source_scan=_scan(),
+    )
+    assert artifact["verify_request"]["proposal"]["source_binding"] == proposal["source_binding"]
+    assert artifact["execution_enabled"] is False
+    bad = dict(proposal)
+    bad["source_binding"] = {**proposal["source_binding"], "origin": "not-an-origin"}
+    with pytest.raises(ContractError, match="invalid_boundary_source_origin"):
+        build_boundary_regression_artifact(
+            proposal=bad, boundary_base=base, target_id=TARGET, source_scan=_scan(),
+        )
+
+
 def test_export_rejects_ignored_payload_fields_and_allows_hunt_provenance_without_digest():
     proposal, base = _proposal_and_base()
     proposal["approval_receipt_id"] = "receipt-that-must-not-be-exported"
