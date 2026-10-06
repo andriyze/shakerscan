@@ -90,6 +90,7 @@ def _observe(rows):
             actions.append({
                 **source,
                 "missing_facts": [
+                    "effect_classification",
                     "expected_business_rule",
                     "independent_postcondition",
                     "approval_semantics",
@@ -157,7 +158,7 @@ def _stable_resources(resources):
 
 
 def _action_leads(actions):
-    """Inventory state-changing observations without inferring policy or execution permission."""
+    """Inventory non-GET observations without assuming they changed state or were authorized."""
     grouped = {}
     for action in actions:
         key = (action["origin"], action["path"], action["method"], action.get("principal_slot"))
