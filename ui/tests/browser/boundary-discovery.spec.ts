@@ -12,7 +12,7 @@ const discovery = {
   status: 'drafts_available', execution_enabled: false,
   coverage: { captures_read: 5, captures_truncated: false, structure_unavailable: 0, drafts_truncated: false },
   drafts: [{
-    draft_id: 'read-pair', origin: 'https://app.test:8443', kind: 'cross_tenant_read', agent_paths: ['/chat'],
+    draft_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', origin: 'https://app.test:8443', kind: 'cross_tenant_read', agent_paths: ['/chat'],
     fixture_prefill: prefill, missing_facts: ['distinct_principals', 'owner.subject'],
     field_provenance: { 'resource.path': [{ capture_id: 'capture-1', action_id: 'action-1' }] },
     candidate_request: { family: 'cross_tenant_retrieval', locus: { url: 'https://app.test:8443/records/{{resource_id}}' }, evidence_refs: ['capture-1'] },
@@ -32,9 +32,9 @@ test('discovery prepares an unverified candidate and keeps confirmed principal f
     writes.push('discovery')
     return route.fulfill({ json: discovery })
   })
-  await page.route(`**/hunts/${huntId}/candidates`, (route) => {
+  await page.route(`**/hunts/${huntId}/boundary-discovery/${discovery.drafts[0].draft_id}/prepare`, (route) => {
     writes.push('candidate')
-    expect(route.request().postDataJSON()).toEqual(discovery.drafts[0].candidate_request)
+    expect(route.request().postData()).toBeNull()
     return route.fulfill({ json: { candidate: { id: candidateId }, verified: false } })
   })
   await page.route('**/boundary/verify', (route) => {
