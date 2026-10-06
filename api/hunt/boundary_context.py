@@ -184,7 +184,7 @@ async def read_candidate_boundary_source_binding(
                 raw, hunt_id=hunt_id, target_id=target_ref,
             )
         except ValueError as exc:
-            raise BoundaryContextError("boundary_source_binding_context_invalid") from exc
+            raise BoundaryContextError(str(exc)) from exc
         if binding is None:
             continue
         digest = json.dumps(binding, sort_keys=True, separators=(",", ":"))
