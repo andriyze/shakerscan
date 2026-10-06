@@ -1082,6 +1082,79 @@ async def discover_hunt_boundary_context(hunt_id: str):
         raise HTTPException(status_code=422, detail=exc.code) from exc
 
 
+@router.post("/hunts/{hunt_id}/boundary-discovery/{draft_id}/prepare")
+async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
+    """Recompute one discovery draft server-side before saving its unverified candidate."""
+    hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(draft_id or "")):
+        raise HTTPException(status_code=422, detail="Invalid boundary discovery draft id")
+    async with _pool().acquire() as conn:
+        async with conn.transaction():
+            run = await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+            if run["status"] not in {"active", "awaiting_planner"}:
+                raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
+            discovery = await discover_hunt_boundaries(conn, run=dict(run))
+            draft = next(
+                (item for item in discovery["drafts"] if item.get("draft_id") == draft_id),
+                None,
+            )
+            if draft is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Boundary discovery changed or the selected draft is no longer available; discover again",
+                )
+            if not draft.get("source_binding"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="An observed agent endpoint on the same service is required before preparing this draft",
+                )
+            used = _hunt_json(run["budget_used_json"], {})
+            budget = _hunt_json(run["budget_json"], {})
+            if int(used.get("candidates") or 0) >= int(budget.get("max_candidates") or 0):
+                raise HTTPException(status_code=409, detail="Hunt candidate budget exhausted")
+            request = draft["candidate_request"]
+            candidate = investigation_candidates.normalize_candidate(
+                plane="device" if run["device_target_id"] else "web",
+                target_id=str(run["target_id"]) if run["target_id"] else None,
+                device_target_id=str(run["device_target_id"]) if run["device_target_id"] else None,
+                hunt_run_id=str(run["id"]),
+                family=request["family"],
+                locus=request["locus"],
+                title=request["title"],
+                claim=request["claim"],
+                severity=request["severity"],
+                evidence_refs=request["evidence_refs"],
+                source_kind="hunt_boundary_discovery",
+            )
+            result = await investigation_candidates.upsert_candidate(
+                conn,
+                candidate,
+                created_by=f"hunt_boundary_discovery:{hunt_uuid}",
+                observation_context={
+                    "hunt_id": str(hunt_uuid),
+                    "objective": run["objective"],
+                    "discovery_draft_id": draft_id,
+                    "boundary_source_binding": draft["source_binding"],
+                    "authoritative": False,
+                },
+            )
+            used["candidates"] = int(used.get("candidates") or 0) + 1
+            await conn.execute(
+                "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1",
+                run["id"],
+                json.dumps(used),
+            )
+    return {
+        "hunt_id": str(hunt_uuid),
+        "draft_id": draft_id,
+        "candidate": result,
+        "source_binding": draft["source_binding"],
+        "authoritative": False,
+        "verified": False,
+        "verification_performed": False,
+    }
+
+
 @router.get("/hunts/{hunt_id}/candidates/{candidate_id}/boundary-context")
 async def get_hunt_candidate_boundary_context(hunt_id: str, candidate_id: str):
     """Inspect stored context/evidence by ID, without target traffic or proof claims."""
