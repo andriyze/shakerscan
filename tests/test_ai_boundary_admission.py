@@ -350,3 +350,87 @@ async def test_discovery_verification_requires_both_declared_roles_on_ai_target(
         )
     assert exc.value.status_code == 409
     assert "attacker" in str(exc.value.detail)
+
+@pytest.mark.asyncio
+async def test_discovery_verification_rejects_ambiguous_declared_roles_before_queue(monkeypatch):
+    class FakeConn:
+        async def fetchrow(self, query, *_args):
+            if "FROM ai_targets" in query:
+                return {
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "name": "Observed agent",
+                    "target_type": "api_chat",
+                    "endpoint_url": "https://agent.example.test/chat",
+                    "method": "POST",
+                    "headers_template": {},
+                    "request_template": {"message": "{{prompt}}"},
+                    "response_path": "answer",
+                    "streaming_mode": "json",
+                    "rate_limit_rps": 2,
+                    "token_budget": 32000,
+                    "request_budget": 64,
+                    "production_mode": False,
+                    "metadata_json": {},
+                    "is_active": True,
+                }
+            return None
+
+        async def fetch(self, query, *_args):
+            if "FROM ai_target_principals" in query:
+                return [
+                    {"role": "victim", "label": "victim"},
+                    {"role": "attacker", "label": "attacker-a"},
+                    {"role": "attacker", "label": "attacker-b"},
+                ]
+            return []
+
+    class Acquire:
+        async def __aenter__(self): return FakeConn()
+        async def __aexit__(self, *_args): return False
+
+    class Pool:
+        def acquire(self): return Acquire()
+
+    monkeypatch.setattr(router, "_pool_provider", lambda: Pool())
+
+    async def forbidden_refs(*_args, **_kwargs):
+        raise AssertionError("ambiguous role must fail before credential resolution")
+
+    async def forbidden_queue(*_args, **_kwargs):
+        raise AssertionError("ambiguous role must fail before queueing")
+
+    monkeypatch.setattr(router, "_resolve_ai_gate_credential_refs", forbidden_refs)
+    monkeypatch.setattr(router, "_queue_ai_target_scan", forbidden_queue)
+
+    from ai_gate.boundary.hypothesis import compile_boundary_hypothesis
+    proposal = compile_boundary_hypothesis({
+        "version": 1, "hypothesis_id": "hunt-read", "kind": "cross_tenant_read",
+        "owner": {"role": "victim", "subject": "user-a", "tenant": "tenant-a", "resource_id": "doc-a"},
+        "attacker": {"role": "attacker", "subject": "user-b", "tenant": "tenant-b", "resource_id": "doc-b"},
+        "provenance": [{"kind": "hunt_candidate", "id": "candidate-1"}],
+    })
+    proposal["source_binding"] = {
+        "schema_version": "hunt-boundary-source/v1",
+        "hunt_id": "00000000-0000-0000-0000-000000000010",
+        "target_id": "00000000-0000-0000-0000-000000000020",
+        "origin": "https://agent.example.test",
+        "agent_paths": ["/chat"],
+    }
+    base = {
+        "version": 1, "name": "support-agent-boundary",
+        "owner": {"role": "victim", "subject": "user-a", "tenant": "tenant-a", "resource_id": "doc-a"},
+        "attacker": {"role": "attacker", "subject": "user-b", "tenant": "tenant-b", "resource_id": "doc-b"},
+        "identity": {"path": "/identity", "subject_field": "subject", "tenant_field": "tenant"},
+        "resource": {"path": "/documents/{{resource_id}}", "id_field": "id", "owner_field": "owner", "tenant_field": "tenant", "marker_field": "marker"},
+        "response_path": "answer",
+    }
+
+    with pytest.raises(HTTPException) as exc:
+        await router.verify_ai_boundary_proposal(
+            "00000000-0000-0000-0000-000000000001",
+            router.AIBoundaryVerifyRequest(proposal=proposal, boundary_base=base),
+        )
+    assert exc.value.status_code == 409
+    assert "exactly one active AI target principal" in str(exc.value.detail)
+    assert "attacker" in str(exc.value.detail)
+
