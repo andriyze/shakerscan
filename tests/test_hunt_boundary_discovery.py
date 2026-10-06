@@ -63,6 +63,14 @@ def test_prefilled_fields_have_provenance_but_values_and_authority_are_not_infer
     assert all(sources for sources in draft["field_provenance"].values())
     assert all(source["authority"] is False for source in draft["provenance"])
     assert set(draft["candidate_request"]["evidence_refs"]) == {uid(n) for n in range(10, 15)}
+    assert draft["source_binding"] == {
+        "schema_version": "hunt-boundary-source/v1",
+        "hunt_id": RUN["id"],
+        "target_id": RUN["target_id"],
+        "origin": "https://app.test",
+        "agent_paths": ["/chat"],
+    }
+    assert draft["candidate_request"]["locus"]["ai_boundary_context"]["source_binding"] == draft["source_binding"]
 
 
 @pytest.mark.parametrize("origin", ["http://app.test", "https://app.test:8443", "https://other.test"])
@@ -119,6 +127,34 @@ def test_competing_field_paths_identity_and_agents_stay_missing():
     evidence[2] = rows()[2]
     draft, = build_boundary_discovery(run=RUN, rows=evidence)["drafts"]
     assert "identity" in draft["missing_facts"] and "response_path" in draft["missing_facts"]
+
+
+def test_repeated_resource_structure_conflicts_are_not_first_match_wins():
+    evidence = rows()
+    evidence.append(row(
+        17,
+        "/records/owner-record",
+        {"id": SECRET, "owner_id": SECRET, "tenant": SECRET, "marker": SECRET},
+    ))
+    result = build_boundary_discovery(run=RUN, rows=evidence)
+    assert result["drafts"] == []
+    assert result["coverage"]["conflicting_resource_observations"] == 1
+
+
+def test_state_changing_requests_are_inventory_leads_not_authorized_actions():
+    evidence = rows()
+    evidence.append(row(
+        18, "/records/owner-record", {}, method="DELETE",
+        metadata_json={},
+    ))
+    result = build_boundary_discovery(run=RUN, rows=evidence)
+    lead = next(item for item in result["action_leads"] if item["method"] == "DELETE")
+    assert lead["path"] == "/records/owner-record"
+    assert lead["execution_enabled"] is False
+    assert lead["missing_facts"] == [
+        "expected_business_rule", "independent_postcondition", "approval_semantics",
+    ]
+    assert lead["provenance"][0]["authority"] is False
 
 
 def test_output_bounds_report_partial_coverage():
@@ -245,3 +281,92 @@ def test_route_uses_readonly_snapshot_and_ignores_fabricated_context_authority(m
     assert "APPROVED" not in json.dumps(response.json())
     assert store.transactions == [{"isolation": "repeatable_read", "readonly": True}]
     assert client.post("/hunts/not-a-uuid/boundary-discovery").status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_server_owned_prepare_recomputes_draft_and_persists_source_binding(monkeypatch):
+    draft = build_boundary_discovery(run=RUN, rows=rows())["drafts"][0]
+
+    class PreparedStore:
+        def __init__(self):
+            self.executed = []
+        @asynccontextmanager
+        async def acquire(self):
+            yield self
+        @asynccontextmanager
+        async def transaction(self, **_kwargs):
+            yield self
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "UPDATE 1"
+
+    store = PreparedStore()
+    run = {
+        **RUN,
+        "status": "active",
+        "objective": "test agent authorization",
+        "budget_used_json": {"candidates": 0},
+        "budget_json": {"max_candidates": 4},
+    }
+
+    async def lookup(_conn, hunt_id, for_update=False):
+        assert hunt_id == RUN["id"] and for_update is True
+        return run
+
+    async def discovery(_conn, *, run):
+        assert run["id"] == RUN["id"]
+        return {"drafts": [draft]}
+
+    captured = {}
+    def normalize_candidate(**kwargs):
+        captured["normalized"] = kwargs
+        return {"normalized": True}
+
+    async def upsert_candidate(_conn, candidate, *, created_by, observation_context):
+        captured.update(
+            candidate=candidate,
+            created_by=created_by,
+            observation_context=observation_context,
+        )
+        return {"id": uid(77), "inserted": True}
+
+    monkeypatch.setattr(router, "_pool", lambda: store)
+    monkeypatch.setattr(router, "_hunt_run_or_404", lookup)
+    monkeypatch.setattr(router, "discover_hunt_boundaries", discovery)
+    monkeypatch.setattr(router.investigation_candidates, "normalize_candidate", normalize_candidate)
+    monkeypatch.setattr(router.investigation_candidates, "upsert_candidate", upsert_candidate)
+
+    result = await router.prepare_hunt_boundary_discovery(RUN["id"], draft["draft_id"])
+    assert result["candidate"]["id"] == uid(77)
+    assert captured["normalized"]["locus"] == draft["candidate_request"]["locus"]
+    assert captured["observation_context"]["boundary_source_binding"] == draft["source_binding"]
+    assert captured["observation_context"]["authoritative"] is False
+    assert any("UPDATE hunt_runs SET budget_used_json" in query for query, _ in store.executed)
+
+
+@pytest.mark.asyncio
+async def test_server_owned_prepare_rejects_stale_or_missing_draft(monkeypatch):
+    class PreparedStore:
+        @asynccontextmanager
+        async def acquire(self):
+            yield self
+        @asynccontextmanager
+        async def transaction(self, **_kwargs):
+            yield self
+
+    async def lookup(_conn, _hunt_id, for_update=False):
+        assert for_update is True
+        return {
+            **RUN, "status": "active", "objective": "test",
+            "budget_used_json": {}, "budget_json": {"max_candidates": 4},
+        }
+
+    async def discovery(_conn, *, run):
+        return {"drafts": []}
+
+    monkeypatch.setattr(router, "_pool", lambda: PreparedStore())
+    monkeypatch.setattr(router, "_hunt_run_or_404", lookup)
+    monkeypatch.setattr(router, "discover_hunt_boundaries", discovery)
+    with pytest.raises(Exception) as exc:
+        await router.prepare_hunt_boundary_discovery(RUN["id"], "a" * 64)
+    assert getattr(exc.value, "status_code", None) == 409
