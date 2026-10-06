@@ -70,7 +70,7 @@ def test_prefilled_fields_have_provenance_but_values_and_authority_are_not_infer
         "origin": "https://app.test",
         "agent_paths": ["/chat"],
     }
-    assert draft["candidate_request"]["locus"]["ai_boundary_context"]["source_binding"] == draft["source_binding"]
+    assert "source_binding" not in draft["candidate_request"]["locus"]["ai_boundary_context"]
 
 
 @pytest.mark.parametrize("origin", ["http://app.test", "https://app.test:8443", "https://other.test"])
@@ -88,6 +88,22 @@ def test_equivalent_default_port_spellings_pair_and_capture_opaque_or_numeric_id
         draft, = build_boundary_discovery(run=RUN, rows=evidence)["drafts"]
         assert draft["origin"] == "https://app.test"
         assert draft["fixture_prefill"]["owner"]["resource_id"] == owner
+
+
+def test_run_provenance_does_not_change_canonical_candidate_fingerprint():
+    from api.investigation_candidates import candidate_fingerprint
+    first, = build_boundary_discovery(run=RUN, rows=rows())["drafts"]
+    other_run = {**RUN, "id": uid(99)}
+    second, = build_boundary_discovery(run=other_run, rows=rows())["drafts"]
+    assert first["source_binding"]["hunt_id"] != second["source_binding"]["hunt_id"]
+    assert first["candidate_request"]["locus"] == second["candidate_request"]["locus"]
+    def fingerprint(draft):
+        return candidate_fingerprint(
+            plane="web", target_ref=RUN["target_id"],
+            family="cross_tenant_retrieval",
+            locus=draft["candidate_request"]["locus"],
+        )
+    assert fingerprint(first) == fingerprint(second)
 
 
 def test_candidate_storage_preserves_exact_service_and_does_not_deduplicate_different_pairs():
