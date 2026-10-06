@@ -3503,6 +3503,9 @@ async def _run_schema_migrations_once(pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_hunt_skill_events_run
                 ON hunt_skill_events(hunt_run_id, created_at, id)
             """)
+            from hunt.coverage_ledger import COVERAGE_LEDGER_SCHEMA_STATEMENTS
+            for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
+                await conn.execute(statement)
             await conn.execute("""
                 DO $$
                 BEGIN
