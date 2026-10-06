@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 import sqlite3
 from contextlib import asynccontextmanager
 from uuid import UUID
@@ -387,3 +388,16 @@ async def test_server_owned_prepare_rejects_stale_or_missing_draft(monkeypatch):
     with pytest.raises(Exception) as exc:
         await router.prepare_hunt_boundary_discovery(RUN["id"], "a" * 64)
     assert getattr(exc.value, "status_code", None) == 409
+
+def test_hunt_skill_advertises_discovery_without_granting_proof_or_write_authority():
+    skill = (Path(__file__).resolve().parents[1] / "skills/hunt/SKILL.md").read_text()
+    assert "POST /hunts/{hunt_id}/boundary-discovery" in skill
+    assert "POST /hunts/{hunt_id}/boundary-discovery/{draft_id}/prepare" in skill
+    assert "POST /hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal" in skill
+    discovery_section = skill.split("POST /hunts/{hunt_id}/boundary-discovery", 1)[1].split(
+        "Correct a candidate", 1
+    )[0]
+    assert "sends no target traffic" in discovery_section
+    assert "not authority or proof" in discovery_section
+    assert "never authorize a state-changing follow-up" in discovery_section
+
