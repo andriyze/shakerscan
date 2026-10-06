@@ -204,7 +204,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "6d94b8ae5d5c8c80d7a626deb5c5102768c8731385c91540858e4dd1135dcaa8",
+  "contract_sha256": "a38d9350a34bcd1f80e580764968367e9df6d79b60b1bf21960872352e2e0e7a",
   "openapi": "3.1.0",
   "operation_count": 452,
   "operations": {
@@ -4869,7 +4869,7 @@
     "POST /hunts/{hunt_id}/coverage-angles": {
       "deprecated": false,
       "operation_id": "record_hunt_coverage_angle_hunts__hunt_id__coverage_angles_post",
-      "parameters_sha256": "2e4ac0bf7e01a02d968759249d186dbe624e65e94991e90043c21d9181994b44",
+      "parameters_sha256": "cc413fdb829ef94954b9a5eca8dc4a5d489194b070cc781a444e9f5f17c1fc09",
       "request_schema_sha256": "41087a405eb6922081bb542142488438ebf96462b63871b7169bb6ed587404f5",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
