@@ -109,10 +109,10 @@ export async function discoverBoundaryDrafts(huntId: string): Promise<BoundaryDi
 export async function prepareBoundaryCandidate(
   huntId: string, draft: BoundaryDiscoveryDraft,
 ): Promise<{ candidate: { id: string } }> {
-  return responseJson(fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/candidates`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(draft.candidate_request),
-  }), 'Failed to prepare boundary candidate')
+  return responseJson(fetch(
+    `${API_URL}/hunts/${encodeURIComponent(huntId)}/boundary-discovery/${encodeURIComponent(draft.draft_id)}/prepare`,
+    { method: 'POST', cache: 'no-store' },
+  ), 'Failed to prepare boundary candidate')
 }
 
 export async function inspectBoundaryCandidate(huntId: string, candidateId: string): Promise<BoundaryContext> {
