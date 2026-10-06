@@ -20,7 +20,7 @@ PRINCIPALS = {
 }
 
 
-def ready_db() -> DB:
+def ready_db(*, source_binding=None) -> DB:
     db = DB()
     db.db.execute("UPDATE investigation_candidates SET canonical_locus=?", (
         json.dumps({"route": "/orders/order-a", "ai_boundary_context": {
@@ -30,6 +30,15 @@ def ready_db() -> DB:
             "required_approval_value": "approved",
         }}),
     ))
+    if source_binding is not None:
+        db.db.execute(
+            """UPDATE investigation_candidate_observations
+               SET source_kind='hunt_boundary_discovery', observation_context=?""",
+            (json.dumps({
+                "boundary_source_binding": source_binding,
+                "authoritative": False,
+            }),),
+        )
     db.guard()
     return db
 
@@ -138,7 +147,6 @@ async def test_route_uses_hunt_lookup_and_read_only_snapshot(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_discovery_source_binding_survives_server_loaded_handoff():
-    db = ready_db()
     source = {
         "schema_version": "hunt-boundary-source/v1",
         "hunt_id": RUN["id"],
@@ -146,16 +154,9 @@ async def test_discovery_source_binding_survives_server_loaded_handoff():
         "origin": "https://agent.example.test",
         "agent_paths": ["/chat"],
     }
-    row = db.db.execute("SELECT canonical_locus FROM investigation_candidates").fetchone()
-    locus = json.loads(row[0])
-    locus["ai_boundary_context"]["source_binding"] = source
-    db.db.execute(
-        "UPDATE investigation_candidates SET canonical_locus=?",
-        (json.dumps(locus),),
-    )
-    db.guard()
     result = await handoff(
-        db, expected_rule="Manager approval is required for refunds.",
+        ready_db(source_binding=source),
+        expected_rule="Manager approval is required for refunds.",
     )
     assert result["status"] == "ready"
     assert result["proposal"]["source_binding"] == source
@@ -163,7 +164,6 @@ async def test_discovery_source_binding_survives_server_loaded_handoff():
 
 @pytest.mark.asyncio
 async def test_discovery_source_binding_cannot_switch_hunt_or_target():
-    db = ready_db()
     source = {
         "schema_version": "hunt-boundary-source/v1",
         "hunt_id": OTHER,
@@ -171,13 +171,9 @@ async def test_discovery_source_binding_cannot_switch_hunt_or_target():
         "origin": "https://agent.example.test",
         "agent_paths": ["/chat"],
     }
-    row = db.db.execute("SELECT canonical_locus FROM investigation_candidates").fetchone()
-    locus = json.loads(row[0])
-    locus["ai_boundary_context"]["source_binding"] = source
-    db.db.execute(
-        "UPDATE investigation_candidates SET canonical_locus=?",
-        (json.dumps(locus),),
-    )
-    db.guard()
-    with pytest.raises(ValueError, match="boundary_source_hunt_mismatch"):
-        await handoff(db, expected_rule="Manager approval is required for refunds.")
+    with pytest.raises(BoundaryContextError, match="boundary_source_hunt_mismatch"):
+        await handoff(
+            ready_db(source_binding=source),
+            expected_rule="Manager approval is required for refunds.",
+        )
+
