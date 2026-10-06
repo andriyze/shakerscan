@@ -1693,8 +1693,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 459 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 381 | `api/**/*.py` |
+| Public REST operations | 462 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 383 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1711,7 +1711,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 101 | `db/init.sql` + migrations |
+| Durable tables | 102 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -3031,6 +3031,7 @@ Scan feature or a second orchestration engine.
 | `hunt_actions` | `db/init.sql` |
 | `hunt_budget_amendments` | `db/init.sql` |
 | `hunt_cancellable_jobs` | `api/retest_contract.py` |
+| `hunt_coverage_angle_events` | `db/init.sql` |
 | `hunt_runs` | `db/init.sql` |
 | `hunt_skill_events` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
