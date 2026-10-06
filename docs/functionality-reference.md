@@ -1393,7 +1393,8 @@ See [`docs/mcp.md`](mcp.md).
 `POST /hunts/{hunt_id}/skills/suggestions` ·
 `POST /hunts/{hunt_id}/skills/{skill_id}/read|bind|usage` ·
 `DELETE /hunts/{hunt_id}/skills/{skill_id}` ·
-`POST /hunts/{hunt_id}/query` · `POST /hunts/{hunt_id}/capabilities/{capability_name}` ·
+`POST /hunts/{hunt_id}/query` · `GET|POST /hunts/{hunt_id}/coverage-angles` ·
+`GET /hunts/{hunt_id}/checkpoint` · `POST /hunts/{hunt_id}/capabilities/{capability_name}` ·
 `POST /hunts/{hunt_id}/candidates` · `PATCH|DELETE /hunts/{hunt_id}/candidates/{candidate_id}` ·
 `POST /hunts/{hunt_id}/candidates/{candidate_id}/verify` ·
 `POST /hunts/{hunt_id}/finish|cancel|resume` · `GET|DELETE /hunts/{hunt_id}/http-transactions`
@@ -1949,6 +1950,9 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal` | `compile_hunt_candidate_boundary_proposal` |
 | `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/verify` | `verify_hunt_candidate` |
 | `POST` | `/hunts/{hunt_id}/capabilities/{capability_name:path}` | `execute_hunt_capability` |
+| `GET` | `/hunts/{hunt_id}/checkpoint` | `get_hunt_checkpoint` |
+| `GET` | `/hunts/{hunt_id}/coverage-angles` | `get_hunt_coverage_angles` |
+| `POST` | `/hunts/{hunt_id}/coverage-angles` | `record_hunt_coverage_angle` |
 | `POST` | `/hunts/{hunt_id}/finish` | `finish_hunt` |
 | `DELETE` | `/hunts/{hunt_id}/http-transactions` | `purge_hunt_transactions` |
 | `GET` | `/hunts/{hunt_id}/http-transactions` | `export_hunt_transactions` |
