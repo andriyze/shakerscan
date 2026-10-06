@@ -139,6 +139,18 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   Follow `next_cursor` with the same kind and filters while `has_more` is true; the page limit
   is not the inventory size. Use returned IDs for follow-up and `filter.id` for exact records.
   Prefer untested endpoints, unresolved hypotheses, and prior findings over repeating settled work.
+- Track materially distinct tests with the coverage ledger. Before a focused probe, append
+  `planned` or `testing` to `POST /hunts/{hunt_id}/coverage-angles` using the concrete
+  family plus route/operation/object/input, mechanism, principal context, and application state
+  that make the angle distinct. After execution append the final `negative`, `partial`,
+  `blocked`, or `candidate` state with the actual same-Hunt action IDs. The server rejects
+  clean/negative claims backed only by partial or blocked work. One negative angle never closes a
+  materially different method, identity, mechanism, input path, or state.
+- Use `GET /hunts/{hunt_id}/checkpoint` after context compaction, planner handoff, or resume.
+  It is a bounded server-derived view of current coverage, candidates, action outcomes, budgets,
+  and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. Coverage
+  and checkpoint state are advisory investigation memory; neither can grant authority or verify a
+  finding.
 - Browser capabilities return `browser_surface` observations containing safe CSS selectors,
   visible control structure, a redacted SPA route, and a `state_id`, not page text or secrets.
   `browser.interact` accepts either one `selector` or up to eight `steps` (`click` or non-secret
