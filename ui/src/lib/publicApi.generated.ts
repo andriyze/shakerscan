@@ -40,6 +40,7 @@ export const PUBLIC_API_OPERATIONS = {
   "authorization_reproduction_hunts__hunt_id__authorization_investigations__proposal_id__reproduction_get": { method: "GET", path: "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction", surface: "hunt" },
   "skip_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__skip_post": { method: "POST", path: "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip", surface: "hunt" },
   "discover_hunt_boundary_context_hunts__hunt_id__boundary_discovery_post": { method: "POST", path: "/hunts/{hunt_id}/boundary-discovery", surface: "hunt" },
+  "prepare_hunt_boundary_discovery_hunts__hunt_id__boundary_discovery__draft_id__prepare_post": { method: "POST", path: "/hunts/{hunt_id}/boundary-discovery/{draft_id}/prepare", surface: "hunt" },
   "get_hunt_budget_amendments_hunts__hunt_id__budget_amendments_get": { method: "GET", path: "/hunts/{hunt_id}/budget-amendments", surface: "hunt" },
   "amend_hunt_budget_hunts__hunt_id__budget_amendments_post": { method: "POST", path: "/hunts/{hunt_id}/budget-amendments", surface: "hunt" },
   "cancel_hunt_hunts__hunt_id__cancel_post": { method: "POST", path: "/hunts/{hunt_id}/cancel", surface: "hunt" },
@@ -819,6 +820,10 @@ export type SkipAuthorizationInvestigationHuntsHuntIdAuthorizationInvestigations
 export type DiscoverHuntBoundaryContextHuntsHuntIdBoundaryDiscoveryPostRequest = never
 export type DiscoverHuntBoundaryContextHuntsHuntIdBoundaryDiscoveryPostResponse = unknown
 
+export type PrepareHuntBoundaryDiscoveryHuntsHuntIdBoundaryDiscoveryDraftIdPreparePostRequest = never
+export type PrepareHuntBoundaryDiscoveryHuntsHuntIdBoundaryDiscoveryDraftIdPreparePostResponse = unknown
+
+
 export type GetHuntBudgetAmendmentsHuntsHuntIdBudgetAmendmentsGetRequest = never
 export type GetHuntBudgetAmendmentsHuntsHuntIdBudgetAmendmentsGetResponse = unknown
 
@@ -1287,6 +1292,7 @@ export interface PublicApiRequestByOperation {
   "authorization_reproduction_hunts__hunt_id__authorization_investigations__proposal_id__reproduction_get": AuthorizationReproductionHuntsHuntIdAuthorizationInvestigationsProposalIdReproductionGetRequest
   "skip_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__skip_post": SkipAuthorizationInvestigationHuntsHuntIdAuthorizationInvestigationsProposalIdSkipPostRequest
   "discover_hunt_boundary_context_hunts__hunt_id__boundary_discovery_post": DiscoverHuntBoundaryContextHuntsHuntIdBoundaryDiscoveryPostRequest
+  "prepare_hunt_boundary_discovery_hunts__hunt_id__boundary_discovery__draft_id__prepare_post": PrepareHuntBoundaryDiscoveryHuntsHuntIdBoundaryDiscoveryDraftIdPreparePostRequest
   "get_hunt_budget_amendments_hunts__hunt_id__budget_amendments_get": GetHuntBudgetAmendmentsHuntsHuntIdBudgetAmendmentsGetRequest
   "amend_hunt_budget_hunts__hunt_id__budget_amendments_post": AmendHuntBudgetHuntsHuntIdBudgetAmendmentsPostRequest
   "cancel_hunt_hunts__hunt_id__cancel_post": CancelHuntHuntsHuntIdCancelPostRequest
@@ -1443,6 +1449,7 @@ export interface PublicApiResponseByOperation {
   "authorization_reproduction_hunts__hunt_id__authorization_investigations__proposal_id__reproduction_get": AuthorizationReproductionHuntsHuntIdAuthorizationInvestigationsProposalIdReproductionGetResponse
   "skip_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__skip_post": SkipAuthorizationInvestigationHuntsHuntIdAuthorizationInvestigationsProposalIdSkipPostResponse
   "discover_hunt_boundary_context_hunts__hunt_id__boundary_discovery_post": DiscoverHuntBoundaryContextHuntsHuntIdBoundaryDiscoveryPostResponse
+  "prepare_hunt_boundary_discovery_hunts__hunt_id__boundary_discovery__draft_id__prepare_post": PrepareHuntBoundaryDiscoveryHuntsHuntIdBoundaryDiscoveryDraftIdPreparePostResponse
   "get_hunt_budget_amendments_hunts__hunt_id__budget_amendments_get": GetHuntBudgetAmendmentsHuntsHuntIdBudgetAmendmentsGetResponse
   "amend_hunt_budget_hunts__hunt_id__budget_amendments_post": AmendHuntBudgetHuntsHuntIdBudgetAmendmentsPostResponse
   "cancel_hunt_hunts__hunt_id__cancel_post": CancelHuntHuntsHuntIdCancelPostResponse
