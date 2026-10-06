@@ -353,6 +353,9 @@ def _public_row(row: Mapping[str, Any]) -> dict[str, Any]:
             )
         ],
         "candidate_id": str(item["candidate_id"]) if item.get("candidate_id") else None,
+        "candidate_status": (
+            str(item["candidate_status"]) if item.get("candidate_status") else None
+        ),
         "blocker": item.get("blocker"),
         "proof_gap": item.get("proof_gap"),
         "created_at": (
@@ -434,11 +437,13 @@ async def list_coverage_angles(
                WHERE hunt_run_id=$1::uuid
                ORDER BY fingerprint, created_at DESC, id DESC
            )
-           SELECT latest.*, COUNT(*) OVER() AS total_count
+           SELECT latest.*, c.status AS candidate_status,
+                  COUNT(*) OVER() AS total_count
            FROM latest
-           WHERE ($2::text IS NULL OR status=$2)
-             AND ($3::text IS NULL OR family=$3)
-           ORDER BY created_at DESC, id DESC
+           LEFT JOIN investigation_candidates c ON c.id=latest.candidate_id
+           WHERE ($2::text IS NULL OR latest.status=$2)
+             AND ($3::text IS NULL OR latest.family=$3)
+           ORDER BY latest.created_at DESC, latest.id DESC
            LIMIT $4""",
         hunt_run_id,
         normalized_status,
@@ -551,12 +556,17 @@ async def build_hunt_checkpoint(
                 "mechanism": item["mechanism"],
                 "status": item["status"],
                 "candidate_id": item["candidate_id"],
+                "candidate_status": item["candidate_status"],
                 "blocker": item["blocker"],
                 "proof_gap": item["proof_gap"],
                 "evidence_action_ids": item["evidence_action_ids"],
             }
             for item in latest_angles
             if item["status"] != "negative"
+            and not (
+                item["status"] == "candidate"
+                and item["candidate_status"] in {"verified", "refuted", "expired"}
+            )
         ),
         key=lambda item: (
             priority.get(str(item["status"]), 99),
