@@ -7,6 +7,14 @@ export interface BoundaryPrincipal {
   resource_id: string
 }
 
+export interface BoundarySourceBinding {
+  schema_version: 'hunt-boundary-source/v1'
+  hunt_id: string
+  target_id: string
+  origin: string
+  agent_paths: string[]
+}
+
 export interface BoundaryDiscoveryDraft {
   draft_id: string
   origin: string
@@ -17,6 +25,7 @@ export interface BoundaryDiscoveryDraft {
     [key: string]: unknown
   }
   missing_facts: string[]
+  source_binding: BoundarySourceBinding | null
   field_provenance: Record<string, Array<{ capture_id: string; action_id: string }>>
   candidate_request: {
     family: string; locus: Record<string, unknown>; title: string; claim: string
@@ -43,6 +52,7 @@ export interface BoundaryProposal {
   missing_facts: string[]
   contract_fragment: Record<string, unknown> | null
   provenance: Array<Record<string, string>>
+  source_binding?: BoundarySourceBinding | null
   principal_bindings: { owner: BoundaryPrincipal; attacker: BoundaryPrincipal }
 }
 
