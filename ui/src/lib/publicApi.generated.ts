@@ -823,7 +823,6 @@ export type DiscoverHuntBoundaryContextHuntsHuntIdBoundaryDiscoveryPostResponse 
 export type PrepareHuntBoundaryDiscoveryHuntsHuntIdBoundaryDiscoveryDraftIdPreparePostRequest = never
 export type PrepareHuntBoundaryDiscoveryHuntsHuntIdBoundaryDiscoveryDraftIdPreparePostResponse = unknown
 
-
 export type GetHuntBudgetAmendmentsHuntsHuntIdBudgetAmendmentsGetRequest = never
 export type GetHuntBudgetAmendmentsHuntsHuntIdBudgetAmendmentsGetResponse = unknown
 
