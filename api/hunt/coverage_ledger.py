@@ -48,20 +48,22 @@ _SECRET_KEY_PARTS = (
     "session_key",
 )
 
+# Semantic dimensions only. Execution provenance (request/action/capability/collection
+# IDs) belongs in evidence references; putting it in the fingerprint would make a retry
+# of the same experiment look like new coverage.
 _LOCUS_KEYS = (
     "method",
     "route",
     "url",
     "parameter",
-    "object_id",
+    "object_kind",
+    "resource_kind",
     "transport",
+    "protocol",
     "port",
     "service_name",
     "operation_id",
-    "capability_id",
     "scheme",
-    "collection_id",
-    "request_id",
     "sink",
     "input_path",
     "application_state",
