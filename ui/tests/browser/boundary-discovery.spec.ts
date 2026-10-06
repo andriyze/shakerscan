@@ -10,7 +10,13 @@ const prefill = {
 }
 const discovery = {
   status: 'drafts_available', execution_enabled: false,
-  coverage: { captures_read: 5, captures_truncated: false, structure_unavailable: 0, drafts_truncated: false },
+  coverage: { captures_read: 6, captures_truncated: false, structure_unavailable: 0, drafts_truncated: false, action_leads_truncated: false },
+  action_leads: [{
+    origin: 'https://app.test:8443', path: '/orders/owner-record/refund', method: 'POST',
+    principal_slot: 'primary', execution_enabled: false,
+    missing_facts: ['effect_classification', 'expected_business_rule', 'independent_postcondition', 'approval_semantics'],
+    provenance: [{ origin_kind: 'http_capture', capture_id: 'capture-action', action_id: 'action-action', authority: false }],
+  }],
   drafts: [{
     draft_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', origin: 'https://app.test:8443', kind: 'cross_tenant_read', agent_paths: ['/chat'],
     fixture_prefill: prefill, missing_facts: ['distinct_principals', 'owner.subject'],
@@ -46,6 +52,10 @@ test('discovery prepares an unverified candidate and keeps confirmed principal f
   await page.getByPlaceholder('Hunt UUID').fill(huntId)
   await page.getByRole('button', { name: 'Load', exact: true }).click()
   await page.getByRole('button', { name: 'Discover boundary drafts' }).click()
+  await expect(page.getByText('Observed non-GET workflow leads · 1')).toBeVisible()
+  await page.getByText('Observed non-GET workflow leads · 1').click()
+  await expect(page.getByText('POST https://app.test:8443/orders/owner-record/refund · primary')).toBeVisible()
+  await expect(page.getByText(/Needs: effect_classification/)).toBeVisible()
   await expect(page.getByRole('button', { name: 'Prepare candidate and fixture' })).toBeDisabled()
   // Same hostname is insufficient: the configured service must match the capture.
   await page.getByRole('combobox', { name: /^AI target/ }).selectOption('target-1')
