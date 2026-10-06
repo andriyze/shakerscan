@@ -40,7 +40,7 @@ try:
     import asm_inventory
     from ai_assurance import build_agent_blast_radius, build_ai_inventory, run_mcp_live_readiness_probe
     from ai_demo_scenarios import get_ai_test_scenarios
-    from ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract
+    from ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract, boundary_source_matches_endpoint
     from ai_gate.boundary.regression import build_boundary_regression_artifact, evaluate_boundary_regression_artifact
     from ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
@@ -74,7 +74,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from .. import asm_inventory
     from ..ai_assurance import build_agent_blast_radius, build_ai_inventory, run_mcp_live_readiness_probe
     from ..ai_demo_scenarios import get_ai_test_scenarios
-    from ..ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract
+    from ..ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract, boundary_source_matches_endpoint
     from ..ai_gate.boundary.regression import build_boundary_regression_artifact, evaluate_boundary_regression_artifact
     from ..ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
@@ -427,6 +427,14 @@ async def verify_ai_boundary_proposal(target_id: str, request: AIBoundaryVerifyR
         if not row:
             raise HTTPException(status_code=404, detail="AI target not found")
         target = row_to_dict(row)
+        source_binding = request.proposal.get("source_binding")
+        if source_binding is not None and not boundary_source_matches_endpoint(
+            source_binding, target.get("endpoint_url"),
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="AI target endpoint does not match the Hunt discovery source binding",
+            )
         metadata = _decode_json_value(target.get("metadata_json")) or {}
         # Per-run override only: never mutate the saved target or make a Hunt proposal
         # silently become standing policy.
@@ -436,6 +444,7 @@ async def verify_ai_boundary_proposal(target_id: str, request: AIBoundaryVerifyR
             "proposal_sha256": materialized["proposal_sha256"],
             "boundary_contract_sha256": materialized["boundary_contract_sha256"],
             "provenance": materialized["provenance"],
+            "source_binding": materialized.get("source_binding"),
         }
         target["metadata_json"] = metadata
 
