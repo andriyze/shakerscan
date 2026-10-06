@@ -69,3 +69,24 @@ test('server refusal is surfaced instead of presenting a queued scan', async () 
     )
   } finally { global.fetch = original }
 })
+
+test('discovery reads server evidence and preparation uses the existing candidate lifecycle without verification', async () => {
+  const original = global.fetch
+  const calls = []
+  global.fetch = async (url, options) => {
+    calls.push({ url, options })
+    return { ok: true, json: async () => ({ candidate: { id: 'prepared-id' } }) }
+  }
+  try {
+    const candidate = { family: 'cross_tenant_retrieval', locus: { url: 'https://app.test:8443/records/{{resource_id}}' }, evidence_refs: ['capture-1'] }
+    await boundary.discoverBoundaryDrafts('hunt/1')
+    const result = await boundary.prepareBoundaryCandidate('hunt/1', { candidate_request: candidate })
+    assert.match(calls[0].url, /hunts\/hunt%2F1\/boundary-discovery$/)
+    assert.equal(calls[0].options.body, undefined)
+    assert.match(calls[1].url, /hunts\/hunt%2F1\/candidates$/)
+    assert.deepEqual(JSON.parse(calls[1].options.body), candidate)
+    assert.equal(result.candidate.id, 'prepared-id')
+    assert.equal(calls.length, 2)
+    assert.ok(calls.every(({ url }) => !url.includes('/verify')))
+  } finally { global.fetch = original }
+})

@@ -42,6 +42,7 @@ except ModuleNotFoundError:
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
 from .boundary_handoff import compile_candidate_boundary_handoff
+from .boundary_discovery import discover_hunt_boundaries
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
 from .verification_budget import record_budget_shortage, web_candidate_budget
 from . import finding_actions as _hunt_finding_actions
@@ -1066,6 +1067,19 @@ async def confirm_hunt_shell_plan(
     response["queued_scan"] = accepted_scan
     response["recovered_after_response_failure"] = bool(dispatch_error)
     return response
+
+
+@router.post("/hunts/{hunt_id}/boundary-discovery")
+async def discover_hunt_boundary_context(hunt_id: str):
+    """Read bounded same-asset captures; no target traffic, decryption or writes."""
+    hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+    try:
+        async with _pool().acquire() as conn:
+            async with conn.transaction(isolation="repeatable_read", readonly=True):
+                run = await _hunt_run_or_404(conn, str(hunt_uuid))
+                return await discover_hunt_boundaries(conn, run=dict(run))
+    except BoundaryContextError as exc:
+        raise HTTPException(status_code=422, detail=exc.code) from exc
 
 
 @router.get("/hunts/{hunt_id}/candidates/{candidate_id}/boundary-context")

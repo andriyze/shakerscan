@@ -1556,6 +1556,13 @@
     "name": "skip_authorization_investigation"
   },
   {
+    "path": "/hunts/{hunt_id}/boundary-discovery",
+    "methods": [
+      "POST"
+    ],
+    "name": "discover_hunt_boundary_context"
+  },
+  {
     "path": "/hunts/{hunt_id}/budget-amendments",
     "methods": [
       "GET"

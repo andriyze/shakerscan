@@ -1692,8 +1692,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 459 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 381 | `api/**/*.py` |
+| Public REST operations | 460 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 382 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1939,6 +1939,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve` | `approve_authorization_investigation` |
 | `GET` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction` | `authorization_reproduction` |
 | `POST` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip` | `skip_authorization_investigation` |
+| `POST` | `/hunts/{hunt_id}/boundary-discovery` | `discover_hunt_boundary_context` |
 | `GET` | `/hunts/{hunt_id}/budget-amendments` | `get_hunt_budget_amendments` |
 | `POST` | `/hunts/{hunt_id}/budget-amendments` | `amend_hunt_budget` |
 | `POST` | `/hunts/{hunt_id}/cancel` | `cancel_hunt` |

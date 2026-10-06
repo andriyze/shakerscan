@@ -1,6 +1,6 @@
 # Evidence-driven agent boundary discovery
 
-**Status:** implementation direction for the next Agent Authorization phase. This is not a release claim.
+**Status:** first capture-driven read-boundary slice implemented in this PR; broader workstreams below remain design direction.
 
 ## Objective
 
@@ -35,6 +35,49 @@ The implementation should:
 6. feed resulting candidates into the existing Boundary proposal/materialization/verification flow.
 
 No discovered fact may grant testing authority or credential access.
+
+### Implemented interface and limits
+
+`POST /hunts/{hunt_id}/boundary-discovery` reads a repeatable-read, read-only
+snapshot of at most 500 recent same-Hunt, same-target HTTP transactions from
+completed/partial actions. It does not read body blobs, decrypt credentials,
+contact targets, create candidates, or reserve execution budget. It returns up
+to 20 read-boundary drafts, field provenance, missing facts, and explicit
+truncation/structure-unavailable counts. Partial actions may contribute a
+complete successful exchange; failed, truncated or unsuccessful exchanges do not.
+
+Prospective captures in full archive mode retain an allowlisted JSON shape
+under `metadata_json.boundary_structure`. It contains field paths and scalar
+types only. Parsing is bounded to 64 KiB, six container levels and 48 fields;
+duplicate keys, nonfinite constants, malformed/truncated JSON and array roots
+are unavailable. Unknown property names/subtrees, credentials and tool arguments
+are omitted. Metadata/off modes and private workflow exchanges retain no shape.
+Old captures are not backfilled or retroactively decrypted.
+
+Resource hypotheses pair different terminal path IDs observed under primary
+and secondary slots on one exact service and path template. Numeric and opaque
+IDs are supported. Scheme and nonstandard ports remain distinct; equivalent
+default ports normalize. Query-dependent and encoded paths are omitted because
+the existing Boundary fixture cannot faithfully represent them. POST responses
+with compatible answer/text fields suggest possible agent endpoints; they do
+not establish the presence of an agent or its relationship to the resource.
+Ambiguous field, identity-path and agent-response bindings stay missing.
+
+AI Gate → Agent boundary verification offers discovery and explicit preparation.
+The selected configured AI endpoint must match an observed path on the exact
+service before preparation. Preparation uses the existing candidate route,
+requires an active/awaiting-planner Hunt and consumes its normal candidate
+budget. It prefills a partial fixture and leaves subject, tenant and role
+declarations empty. Confirm that the resources are controlled synthetic fixtures
+and that the agent belongs to the application, then complete any missing shape
+bindings. Principal form edits also update the fixture declarations. Compilation,
+materialization and explicit verification continue through the existing workflow.
+Preparing a candidate never queues a scan or marks a finding verified.
+
+This slice does not infer body values, provision canaries, prove ownership,
+discover delegated tools, or construct action/approval hypotheses. Same-origin
+membership and structural field names remain observations. The verifier must
+still establish distinct principals, ownership, tenants and synthetic canaries.
 
 ## Research implications adopted in this phase
 
