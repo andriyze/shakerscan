@@ -456,6 +456,22 @@ async def verify_ai_boundary_proposal(target_id: str, request: AIBoundaryVerifyR
                WHERE ai_target_id=$1 AND is_active=true ORDER BY role,label""",
             target_uuid,
         )
+        if source_binding is not None:
+            contract = materialized["boundary_contract"]
+            required_roles = {
+                str(contract["owner"]["role"]),
+                str(contract["attacker"]["role"]),
+            }
+            active_roles = {str(item["role"]) for item in principal_rows if item.get("role")}
+            missing_roles = sorted(required_roles - active_roles)
+            if missing_roles:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Hunt discovery Boundary roles are not active on the selected AI target: "
+                        + ", ".join(missing_roles)
+                    ),
+                )
         credential_profile_ref, principal_refs = await _resolve_ai_gate_credential_refs(
             conn, target_id=target_id, credential_row=credential_row,
             principal_rows=list(principal_rows),
