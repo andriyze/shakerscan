@@ -42,6 +42,7 @@ except ModuleNotFoundError:
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
 from .candidate_evidence import CandidateEvidenceError, resolve_candidate_evidence
+from .action_replay import execution_started_from_budget, replay_observations
 from .boundary_handoff import compile_candidate_boundary_handoff
 from .boundary_discovery import discover_hunt_boundaries
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
@@ -1579,6 +1580,10 @@ async def _execute_hunt_capability_lifecycle(
                     existing_action["result_summary"], {}
                 )
                 existing_status = str(existing_action["status"])
+                replayed_observations = await replay_observations(
+                    conn, hunt_id=run["id"], action_id=action_id,
+                    receipt_id=existing_action["receipt_id"], summary=existing_summary,
+                )
                 lifecycle.mark_replayed()
                 return {
                     "hunt_id": hunt_id,
@@ -1598,11 +1603,7 @@ async def _execute_hunt_capability_lifecycle(
                             if existing_status == "completed"
                             else existing_status
                         ),
-                        observations=tuple(
-                            dict(item)
-                            for item in existing_summary.get("observations") or ()
-                            if isinstance(item, Mapping)
-                        ),
+                        observations=replayed_observations,
                         errors=(
                             (str(existing_summary.get("error")),)
                             if existing_summary.get("error")
@@ -1613,6 +1614,9 @@ async def _execute_hunt_capability_lifecycle(
                         ),
                         partial=bool(existing_summary.get("partial")),
                         timed_out=bool(existing_summary.get("timed_out")),
+                        execution_started=execution_started_from_budget(
+                            existing_summary.get("budget_consumed")
+                        ),
                         parser_version=str(spec.output_schema),
                     ).public_dict(),
                     "result": existing_summary,

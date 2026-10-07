@@ -21,6 +21,7 @@ import uuid
 
 from fastapi import HTTPException
 import pytest
+from hunt.action_replay import execution_started_from_budget, replay_observations
 from hunt.device_traffic import reserve_device_traffic
 from runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
 from runtime.credential_refs import (
@@ -168,6 +169,8 @@ def admission(store, **overrides):
         "_hunt_redacted_capability_input": lambda name, values: (
             redact_http_request_body(values) if name == "http.request" else dict(values)),
         "HuntActionResult": lambda **kwargs: SimpleNamespace(public_dict=lambda: dict(kwargs)),
+        "replay_observations": replay_observations,
+        "execution_started_from_budget": execution_started_from_budget,
     }
     context.update(overrides)
     exec(compile(selected, str(source), "exec"), context)
