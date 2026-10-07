@@ -33,10 +33,24 @@ interface ArchiveDocument {
   archive_total?: number
   /** Capabilities whose traffic the engine could not archive, split by reason. */
   capture_stats?: { unarchived_external_tool_capabilities?: string[] }
+  /** Whether this deployment exports verbatim HAR; absent from servers that predate it. */
+  raw_har?: { available: boolean; reason?: string | null }
   transactions: ArchivedTransaction[]
 }
 
 const PAGE_SIZE = 25
+
+/** The server's refusal text, whether `detail` is a string or an object carrying one. */
+export function refusalMessage(body: unknown, fallback: string): string {
+  const detail = body && typeof body === 'object' ? (body as { detail?: unknown }).detail : undefined
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (detail && typeof detail === 'object') {
+    const nested = (detail as { message?: unknown; detail?: unknown })
+    if (typeof nested.message === 'string' && nested.message.trim()) return nested.message
+    if (typeof nested.detail === 'string' && nested.detail.trim()) return nested.detail
+  }
+  return fallback
+}
 
 function fidelityClass(fidelity?: string): string {
   if (fidelity === 'complete') return 'bg-emerald-500/10 text-emerald-300'
@@ -117,6 +131,8 @@ export default function HttpArchiveExport({
   const [loaded, setLoaded] = useState(false)
   const [archive, setArchive] = useState<ArchiveDocument | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // A refused export stays on screen: a toast alone can be missed, and a silent failure was the bug.
+  const [exportError, setExportError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [method, setMethod] = useState('')
   const [statusCode, setStatusCode] = useState('')
@@ -124,6 +140,10 @@ export default function HttpArchiveExport({
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const ownerPath = ownerKind === 'scan' ? 'scans' : 'hunts'
+  // Declared by the server with the archive. A server that predates the field keeps the option
+  // and still answers a refusal, which is then shown rather than swallowed.
+  const rawHarUnavailable = archive?.raw_har?.available === false
+  const rawHarReason = archive?.raw_har?.reason || 'Verbatim HAR is disabled on this deployment; export the masked HAR instead.'
 
   const archiveUrl = (format: ArchiveFormat, pageOffset = 0, redaction: 'redacted' | 'raw' = 'redacted') => {
     const params = new URLSearchParams({
@@ -144,7 +164,7 @@ export default function HttpArchiveExport({
       const response = await fetch(archiveUrl('transactions', nextOffset))
       if (!response.ok) {
         const detail = await response.json().catch(() => null)
-        throw new Error(detail?.detail || `Archive request failed (${response.status})`)
+        throw new Error(refusalMessage(detail, `Archive request failed (${response.status})`))
       }
       setArchive(await response.json() as ArchiveDocument)
       setOffset(nextOffset)
@@ -166,15 +186,20 @@ export default function HttpArchiveExport({
 
   const download = async (format: ExportKind) => {
     const raw = format === 'har-raw'
+    if (raw && rawHarUnavailable) {
+      setExportError(rawHarReason)
+      return
+    }
     if (raw && !window.confirm(
       'Raw HAR contains verbatim URLs, authentication headers, cookies, request bodies, and response data. Treat the downloaded file as sensitive. Continue?',
     )) return
     setDownloading(format)
+    setExportError(null)
     try {
       const response = await fetch(archiveUrl(raw ? 'har' : format, 0, raw ? 'raw' : 'redacted'))
       if (!response.ok) {
         const detail = await response.json().catch(() => null)
-        throw new Error(detail?.detail || `Export failed (${response.status})`)
+        throw new Error(refusalMessage(detail, `Export failed (${response.status})`))
       }
       const blob = await response.blob()
       const url = URL.createObjectURL(blob)
@@ -187,7 +212,9 @@ export default function HttpArchiveExport({
       URL.revokeObjectURL(url)
       toast.success(raw ? 'Raw HAR export downloaded' : format === 'har' ? 'Masked HAR downloaded' : 'Request archive downloaded')
     } catch (cause) {
-      toast.error(cause instanceof Error ? cause.message : 'Could not export request archive')
+      const message = cause instanceof Error && cause.message ? cause.message : 'Could not export request archive'
+      setExportError(message)
+      toast.error(message)
     } finally {
       setDownloading(null)
     }
@@ -199,7 +226,7 @@ export default function HttpArchiveExport({
       const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(ownerId)}/record`)
       if (!response.ok) {
         const detail = await response.json().catch(() => null)
-        throw new Error(detail?.detail || `Hunt record export failed (${response.status})`)
+        throw new Error(refusalMessage(detail, `Hunt record export failed (${response.status})`))
       }
       const blob = await response.blob()
       const url = URL.createObjectURL(blob)
@@ -250,8 +277,8 @@ export default function HttpArchiveExport({
           <Button size="sm" variant="secondary" onClick={() => download('transactions')} disabled={downloading !== null}>
             <Download className="h-4 w-4" />{downloading === 'transactions' ? 'Preparing…' : 'Requests JSON'}
           </Button>
-          <Button size="sm" variant="secondary" onClick={() => download('har-raw')} disabled={downloading !== null}
-            title="Verbatim traffic, credentials included, for replay in Burp or similar">
+          <Button size="sm" variant="secondary" onClick={() => download('har-raw')} disabled={downloading !== null || rawHarUnavailable}
+            title={rawHarUnavailable ? rawHarReason : 'Verbatim traffic, credentials included, for replay in Burp or similar'}>
             <Download className="h-4 w-4" />{downloading === 'har-raw' ? 'Preparing…' : `Raw HAR 1.2${archive ? ` · ${archive.fidelity}` : ''}`}
           </Button>
           <Button size="sm" variant="ghost" onClick={() => download('har')} disabled={downloading !== null}
@@ -260,6 +287,8 @@ export default function HttpArchiveExport({
           </Button>
         </div>
       </div>
+      {rawHarUnavailable && <p className="mt-2 text-xs text-gray-500">Raw HAR unavailable: {rawHarReason}</p>}
+      {exportError && <p role="alert" className="mt-2 text-xs text-red-300">{exportError}</p>}
       {browse && (
         <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950/30" onToggle={(event) => { if (event.currentTarget.open && !loaded && !loading) void load(0) }}>
           <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-blue-300">Browse recorded calls</summary>
@@ -322,7 +351,7 @@ export default function HttpArchiveExport({
     const item = 'flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left hover:bg-gray-800 disabled:opacity-50'
     const choose = (action: () => Promise<void>) => { setMenuOpen(false); void action() }
     return <div ref={menuRef} className="relative">
-      <Button size="sm" variant="secondary" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(open => !open)} loading={downloading !== null}>
+      <Button size="sm" variant="secondary" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => { setExportError(null); setMenuOpen(open => !open) }} loading={downloading !== null}>
         <Download className="h-4 w-4" />Export
       </Button>
       {menuOpen && <div role="menu" aria-label="Export" className="absolute right-0 z-30 mt-1 w-72 rounded-lg border border-gray-700 bg-gray-900 p-1 shadow-xl shadow-black/40">
@@ -330,9 +359,10 @@ export default function HttpArchiveExport({
           <span className="text-sm text-gray-100">Requests JSON</span>
           <span className="text-xs text-gray-500">Masked; safe to share</span>
         </button>
-        <button type="button" role="menuitem" className={item} onClick={() => choose(() => download('har-raw'))}>
+        <button type="button" role="menuitem" className={item} disabled={rawHarUnavailable} title={rawHarUnavailable ? rawHarReason : undefined}
+          onClick={() => choose(() => download('har-raw'))}>
           <span className="text-sm text-amber-200">{`Raw HAR 1.2${archive ? ` · ${archive.fidelity}` : ''}`}</span>
-          <span className="text-xs text-gray-500">Verbatim traffic for Burp or replay; sensitive</span>
+          <span className="text-xs text-gray-500">{rawHarUnavailable ? rawHarReason : 'Verbatim traffic for Burp or replay; sensitive'}</span>
         </button>
         <button type="button" role="menuitem" className={item} onClick={() => choose(() => download('har'))}>
           <span className="text-sm text-gray-100">HAR 1.2 (masked)</span>
@@ -343,6 +373,7 @@ export default function HttpArchiveExport({
           <span className="text-xs text-gray-500">Decisions, actions and debrief as JSON</span>
         </button>}
       </div>}
+      {exportError && <p role="alert" className="absolute right-0 mt-1 w-72 rounded-md border border-red-900/60 bg-gray-900 p-2 text-xs text-red-300">{exportError}</p>}
     </div>
   }
 

@@ -95,6 +95,24 @@ def raw_har_enabled() -> bool:
     return _published_on_loopback_only()
 
 
+def raw_har_availability() -> dict[str, Any]:
+    """Whether verbatim HAR may be exported here, and why not, for the UI to say before asking.
+
+    The archive envelope carries this so a client hides or disables the raw option with the
+    deployment's reason instead of offering a download the server will refuse.
+    """
+    if raw_har_enabled():
+        return {"available": True, "reason": None}
+    value = str(os.environ.get("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR") or "").strip().lower()
+    if value in {"0", "false", "no", "off", "disabled"}:
+        reason = ("Verbatim HAR is disabled on this deployment; export the masked HAR instead.")
+    else:
+        reason = ("Verbatim HAR is disabled on this deployment because its API is published beyond "
+                  "loopback; export the masked HAR instead. An API published beyond loopback needs "
+                  "SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1")
+    return {"available": False, "reason": reason}
+
+
 def _authorize_raw(request: Request) -> None:
     """Gate verbatim export on the deployment switch and the operator credential.
 
@@ -174,6 +192,7 @@ async def _export(
                 detail=("verbatim HAR is disabled on this deployment; export the masked HAR instead. "
                         "An API published beyond loopback needs SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1"),
             )
+    raw_har = raw_har_availability()
     async with _pool().acquire() as conn:
         scan_ids = await _scan_archive_ids(conn, scan_id) if scan_id else None
         archive_total = await count_transactions(
@@ -198,6 +217,10 @@ async def _export(
         owner=owner, total=total,
         archive_total=archive_total, stats=stats,
     )
+    if export_format == "transactions":
+        # A HAR document has a fixed shape; the ShakerScan envelope says what this deployment
+        # will export so the raw option is never offered only to be refused.
+        document["raw_har"] = raw_har
     name = scan_id or hunt_run_id or "export"
     suffix = ("RAW.har" if effective_redaction == "raw" else "masked.har") if export_format == "har" else "json"
     return JSONResponse(
@@ -209,6 +232,7 @@ async def _export(
             "x-shakerscan-archive-sensitive": (
                 "true" if effective_redaction == "raw" else "possibly"
             ),
+            "x-shakerscan-raw-har": "available" if raw_har["available"] else "disabled",
         },
     )
 
@@ -293,6 +317,7 @@ async def purge_hunt_transactions(request: Request, hunt_id: str):
 __all__ = [
     "configure_http_archive_router",
     "raw_export_enabled",
+    "raw_har_availability",
     "export_hunt_transactions",
     "export_scan_transactions",
     "purge_hunt_transactions",
