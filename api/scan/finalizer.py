@@ -2170,6 +2170,17 @@ def finalize_scan_report(
             and item.get("kind") == "candidate_attempt"
             and str(item.get("attempt_id") or "")
         }
+        result = action_results[action.action_id]
+        if (
+            not attempt_rows
+            and result.status is CapabilityResultStatus.SKIPPED
+            and result.reason_code is CapabilityResultReason.NOT_APPLICABLE
+        ):
+            # Nothing in the slice applied (a proof escalation with no eligible candidate):
+            # there was no work to attempt, so none of it went unattempted. Counting the slice
+            # here told the operator "planned candidates were not attempted" for an escalation
+            # that correctly had nothing to escalate.
+            planned = 0
         completed = {
             attempt_id for attempt_id, status in attempt_rows.items()
             if status in {"success", "succeeded", "completed"}
@@ -2198,8 +2209,16 @@ def finalize_scan_report(
         )
         if row["unattempted_candidates"] or row["incomplete_candidates"]:
             row["status"] = "partial"
-    if (zero_attempt_actions or truncated_discovery) and coverage_status == "complete":
+    if (
+        zero_attempt_actions or truncated_discovery or selected_family_gaps
+    ) and coverage_status == "complete":
+        # A selected family that did not cover its surface (entries never scheduled, candidates
+        # left unattempted) leaves the Scan's coverage incomplete even when every action it did
+        # schedule succeeded: 6d25cc89 reported `coverage: complete` over a passive family with
+        # 36 manifest entries unscheduled and its grade marked unreliable for exactly that.
         coverage_status = "partial"
+        if selected_family_gaps:
+            coverage_reasons = sorted(set(coverage_reasons) | {"selected_family_incomplete"})
     verified = sum(1 for item in findings if item.get("verified") is True)
     suspected = sum(1 for item in findings if item.get("suspected") is True)
     coverage_block = {

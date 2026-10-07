@@ -208,7 +208,7 @@ Never imply historical capture is complete when it was partial or introduced aft
 
 ## Scoring and interpretation
 
-Current reports use `risk_and_assurance/v8` with independent axes:
+Current reports use `risk_and_assurance/v9` with independent axes:
 
 - **Observed risk:** `risk_score` (0–100, higher is better) and `risk_grade` (A–F) summarize only
   deterministic evidence observed. Compatibility `score`/`grade` mirror this axis.

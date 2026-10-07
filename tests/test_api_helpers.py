@@ -2895,7 +2895,7 @@ def test_normalize_scan_result_preserves_legacy_score_with_visible_provenance():
 def test_normalize_scan_result_leaves_current_score_projection_untouched():
     report = {
         "result": {
-            "score_policy": "risk_and_assurance/v8",
+            "score_policy": "risk_and_assurance/v9",
             "score": 73,
             "grade": "C",
         },
