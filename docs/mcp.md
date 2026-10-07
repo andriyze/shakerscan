@@ -82,6 +82,15 @@ credential references, capability allowlist, request-collection references, and 
 records and no bodies; the planner loads exactly one relevant method through the Hunt-specific read
 tool before binding it. MCP never auto-binds a methodology or changes authority.
 
+Hunt lifecycle tools (`shakerscan_hunt_start`, `_get`, `_finish`, `_cancel`, `_skill_bind`,
+`_skill_unbind`, `_skill_usage`) answer with a compact projection of the Hunt record by default:
+identity, status, budget and use, next action, policy, each capability's name, input fields and
+budget cost, the last few actions, and counts, plus `mcp_view.omitted` naming what was left out
+(the context pack and any field over 4 KB). The full record is 70-150 KB, which agents' tool
+output truncates. `view: "full"` returns the record unchanged, and `shakerscan_hunt_get` with
+`capability: "<name>"` adds that capability's full manifest entry. Neither argument is sent to
+the server.
+
 Before capability execution, the adapter reloads `GET /hunts/{id}`, requires an active or
 awaiting-planner run, finds the capability in that Hunt's returned manifest, and validates input
 against its published schema. The client may provide an `idempotency_key`; if omitted, the adapter

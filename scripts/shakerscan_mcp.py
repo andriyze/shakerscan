@@ -23,7 +23,7 @@ import urllib.request
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, BinaryIO, Mapping
 
@@ -332,7 +332,9 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         ("skill_id",), read_only=True, idempotent=True,
     ),
     HuntMCPTool(
-        "shakerscan_hunt_get", "GET", "/hunts/{hunt_id}", "Read a Hunt and its capability manifest.",
+        "shakerscan_hunt_get", "GET", "/hunts/{hunt_id}",
+        "Read a Hunt: compact by default (status, budget and use, capability names and input fields, "
+        "counts); view=full for the whole record, capability=<name> for one capability's contract.",
         {"hunt_id": {"type": "string", "format": "uuid"}},
         ("hunt_id",), read_only=True, idempotent=True,
     ),
@@ -510,6 +512,102 @@ HUNT_TOOLS += (
 )
 HUNT_TOOL_BY_NAME = {tool.name: tool for tool in HUNT_TOOLS}
 
+# Hunt lifecycle answers carry the whole record (every capability's request, output and identity
+# contracts, the context pack, every action): 70-150 KB that agents' tool output truncates. They
+# answer with a compact projection unless view=full is asked for.
+COMPACT_HUNT_TOOLS = frozenset({
+    "shakerscan_hunt_start", "shakerscan_hunt_get", "shakerscan_hunt_finish", "shakerscan_hunt_cancel",
+    "shakerscan_hunt_skill_bind", "shakerscan_hunt_skill_unbind", "shakerscan_hunt_skill_usage",
+})
+VIEW_PROPERTY = {
+    "type": "string", "enum": ["compact", "full"],
+    "description": "compact (default): ids, status, budget and use, next action, capability names with "
+                   "their input fields, counts. full: the complete Hunt record.",
+}
+CAPABILITY_DETAIL_PROPERTY = {
+    "type": "string", "minLength": 1, "maxLength": 128, "pattern": DEFAULT_CAPABILITY_PATTERN,
+    "description": "Also return this capability's full manifest entry (input schema, call, budget cost).",
+}
+COMPACT_FIELD_BYTES = 4_096
+RECENT_ACTIONS = 5
+HUNT_TOOLS = tuple(
+    replace(tool, properties={
+        **tool.properties, "view": VIEW_PROPERTY,
+        **({"capability": CAPABILITY_DETAIL_PROPERTY} if tool.name == "shakerscan_hunt_get" else {}),
+    }) if tool.name in COMPACT_HUNT_TOOLS else tool
+    for tool in HUNT_TOOLS
+)
+HUNT_TOOL_BY_NAME = {tool.name: tool for tool in HUNT_TOOLS}
+
+
+def _field_hint(schema: Any) -> str:
+    if not isinstance(schema, Mapping):
+        return "any"
+    if isinstance(schema.get("enum"), list):
+        return _bounded_text("one of " + "|".join(str(item) for item in schema["enum"]), 160) or ""
+    kind = str(schema.get("type") or "any")
+    low, high = schema.get("minimum"), schema.get("maximum")
+    if kind in {"integer", "number"} and (low is not None or high is not None):
+        return f"{kind} {'' if low is None else low}..{'' if high is None else high}"
+    return kind
+
+
+def _compact_capability(item: Any) -> Any:
+    if not isinstance(item, Mapping):
+        return item
+    schema = item.get("input_schema") if isinstance(item.get("input_schema"), Mapping) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), Mapping) else {}
+    compact: dict[str, Any] = {"name": item.get("name"), "risk_tier": item.get("risk_tier")}
+    compact["input"] = {
+        "required": list(schema.get("required") or []),
+        "fields": {str(key): _field_hint(value) for key, value in properties.items()},
+    }
+    if isinstance(item.get("budget_cost"), Mapping):
+        compact["budget_cost"] = dict(item["budget_cost"])
+    return compact
+
+
+def _pick(item: Any, keys: tuple[str, ...]) -> Any:
+    return {key: item[key] for key in keys if key in item} if isinstance(item, Mapping) else item
+
+
+def _compact_hunt(record: Any) -> Any:
+    """The compact view of a Hunt record; anything that is not one is returned unchanged."""
+    if not isinstance(record, dict) or "hunt_id" not in record or not isinstance(record.get("capabilities"), list):
+        return record
+    compact: dict[str, Any] = {}
+    omitted: list[str] = []
+    counts: dict[str, int] = {}
+    for key, value in record.items():
+        if key == "capabilities":
+            compact[key] = [_compact_capability(item) for item in value]
+        elif key == "actions" and isinstance(value, list):
+            compact["recent_actions"] = [
+                _pick(item, ("action_id", "capability_name", "status", "receipt_id", "completed_at"))
+                for item in value[-RECENT_ACTIONS:]
+            ]
+        elif key == "skills" and isinstance(value, list):
+            compact[key] = [_pick(item, ("skill_id", "title", "support", "phase")) for item in value]
+        elif key == "skill_activity" and isinstance(value, list):
+            compact["recent_skill_activity"] = [
+                _pick(item, ("event_type", "skill_id", "action_id", "created_at")) for item in value[-3:]
+            ]
+        elif key == "context_pack" or len(json.dumps(value, default=str)) > COMPACT_FIELD_BYTES:
+            omitted.append(key)
+            continue
+        else:
+            compact[key] = value
+        if key in {"capabilities", "actions", "skills", "skill_activity"} and isinstance(value, list):
+            counts[key] = len(value)
+    compact["counts"] = counts
+    compact["mcp_view"] = {
+        "view": "compact",
+        "omitted": sorted(omitted),
+        "full_view": "Call shakerscan_hunt_get with view=full for the complete record, or with "
+                     "capability=<name> for one capability's full contract.",
+    }
+    return compact
+
 
 def _positive_int(value: Any, default: int) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else default
@@ -639,6 +737,7 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
             "maxItems": _positive_int(limits.get("skill_ids"), 4),
             "uniqueItems": True,
         },
+        "view": VIEW_PROPERTY,
     }
     return HuntMCPTool(
         "shakerscan_hunt_start", "POST", "/hunts",
@@ -1037,6 +1136,9 @@ class ArsenalClient:
             for key, value in arguments.items():
                 self._validate_argument(key, value, hunt_tool.properties[key])
             payload = dict(arguments)
+            # MCP-only presentation arguments; the server never sees them.
+            view = payload.pop("view", "compact") if name in COMPACT_HUNT_TOOLS else "full"
+            detail_capability = payload.pop("capability", None) if name == "shakerscan_hunt_get" else None
             if name == "shakerscan_hunt_start":
                 # MCP exposes only the canonical V2 names. Populate optional containers and
                 # explicit policy booleans so the REST request is complete and audit-friendly.
@@ -1157,6 +1259,17 @@ class ArsenalClient:
                     "mcp_idempotency_key": payload["idempotency_key"],
                     "mcp_generated_idempotency_key": generated_idempotency_key is not None,
                 }
+            if detail_capability is not None:
+                entry = next((
+                    item for item in result.get("capabilities") or ()
+                    if isinstance(item, Mapping) and item.get("name") == detail_capability
+                ), None)
+                if entry is None:
+                    raise MCPError(-32602, f"Capability {detail_capability} is not in this Hunt's manifest")
+            if view != "full":
+                result = _compact_hunt(result)
+            if detail_capability is not None:
+                result = {**result, "capability": entry}
             return {
                 "content": [{"type": "text", "text": json.dumps(result, sort_keys=True, default=str)}],
                 "structuredContent": result,
