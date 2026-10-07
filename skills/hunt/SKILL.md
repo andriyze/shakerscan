@@ -139,6 +139,18 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   Follow `next_cursor` with the same kind and filters while `has_more` is true; the page limit
   is not the inventory size. Use returned IDs for follow-up and `filter.id` for exact records.
   Prefer untested endpoints, unresolved hypotheses, and prior findings over repeating settled work.
+- Track materially distinct tests with the coverage ledger. Before a focused probe, append
+  `planned` or `testing` to `POST /hunts/{hunt_id}/coverage-angles` using the concrete
+  family plus route/operation/object/input, mechanism, principal context, and application state
+  that make the angle distinct. After execution append the final `negative`, `partial`,
+  `blocked`, or `candidate` state with the actual same-Hunt action IDs. The server rejects
+  clean/negative claims backed only by partial or blocked work. One negative angle never closes a
+  materially different method, identity, mechanism, input path, or state.
+- Use `GET /hunts/{hunt_id}/checkpoint` after context compaction, planner handoff, or resume.
+  It is a bounded server-derived view of current coverage, candidates, action outcomes, budgets,
+  and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. Coverage
+  and checkpoint state are advisory investigation memory; neither can grant authority or verify a
+  finding.
 - Browser capabilities return `browser_surface` observations containing safe CSS selectors,
   visible control structure, a redacted SPA route, and a `state_id`, not page text or secrets.
   `browser.interact` accepts either one `selector` or up to eight `steps` (`click` or non-secret
@@ -214,6 +226,22 @@ state, and `findings.delete` requires `confirm_delete: true`; both are limited t
 that exact Hunt and must cite same-Hunt evidence actions. None accepts proof, verification, request,
 response, or target fields. Never use these controls to rewrite or delete a scanner-owned or
 deterministically verified finding.
+
+Before verification, challenge each non-terminal candidate as if you were trying to reject it.
+`GET /hunts/{hunt_id}/checkpoint` exposes a compact `review_queue` for this purpose. Check the
+attacker prerequisite, plausible alternative explanations, the highest impact actually supported,
+whether the same canonical candidate fingerprint/root boundary is already represented, and the
+smallest authorized action that could falsify the claim. For authorization candidates, inspect
+`GET /hunts/{hunt_id}/candidates/{candidate_id}/boundary-context` and compile a bounded boundary
+proposal when useful. A challenge pass is advisory and must never manufacture proof. If it reveals
+a missing prerequisite, contradictory evidence, or a duplicate, update/delete the candidate or
+record the exact coverage gap instead of escalating severity.
+
+Once breadth is sufficient, prefer evidence-driven deepening over another generic sweep. Start from
+a concrete observation or candidate, identify the next security-boundary edge needed for a useful
+impact chain, and choose the smallest action that can prove or falsify that edge. Do not optimize
+for a requested bug count or severity label; optimize for distinct, evidence-supported impact under
+the saved authority and budget.
 
 Use `POST /hunts/{hunt_id}/candidates/{candidate_id}/verify` for deterministic verification.
 The planner cannot create a verified finding, choose an unregistered verifier, or promote its own

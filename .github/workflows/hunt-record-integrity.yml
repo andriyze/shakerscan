@@ -93,6 +93,7 @@ jobs:
             tests/test_hunt_service_sources.py \
             tests/test_hunt_service_sources_postgres.py \
             tests/test_hunt_budget_amendments_postgres.py \
+            tests/test_hunt_coverage_ledger_postgres.py \
             tests/test_service_intelligence_postgres.py
           python scripts/check_module_size.py
       - name: Canonical authorization proof and real PostgreSQL materialization

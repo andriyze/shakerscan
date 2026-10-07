@@ -1155,6 +1155,21 @@
     "operation_id": "execute_hunt_capability_hunts__hunt_id__capabilities__capability_name__post"
   },
   {
+    "path": "/hunts/{hunt_id}/checkpoint",
+    "method": "get",
+    "operation_id": "get_hunt_checkpoint_hunts__hunt_id__checkpoint_get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/coverage-angles",
+    "method": "get",
+    "operation_id": "get_hunt_coverage_angles_hunts__hunt_id__coverage_angles_get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/coverage-angles",
+    "method": "post",
+    "operation_id": "record_hunt_coverage_angle_hunts__hunt_id__coverage_angles_post"
+  },
+  {
     "path": "/hunts/{hunt_id}/finish",
     "method": "post",
     "operation_id": "finish_hunt_hunts__hunt_id__finish_post"

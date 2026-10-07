@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 197,
+  "component_schema_count": 198,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -103,6 +103,7 @@
     "HuntCandidateUpdateRequest": "d8bf357f06e099fa5b57be30706a1bc654509f14c1c01f3281f9e22a86ab8568",
     "HuntCandidateVerifyRequest": "112cf562326c66072257c087dc2226b394ac6b7379296d3c3e5ad125a59847aa",
     "HuntCapabilityRequest": "0048d34cbebc4635761f66c0b54ca394a513e170ad6b043fc394ed4b4398414b",
+    "HuntCoverageAngleRequest": "fa1d205218956f1e150495f08d0c9fa7513b3d4bf39e17911bc706f810fa4ea9",
     "HuntFinishRequest": "a1b31b0b8ab44686e0049d9f83d07ad12fcf749bc9d68f93424a6abaff3fee1b",
     "HuntQueryRequest": "0b959752ee74203902bff0b7cdfe2d4f260bd12fdd74dbf1954b8ec175f81d37",
     "HuntSkillBindRequest": "89c12e18f3f55a126cb209590bca6163c97e3300b987c1173fafeff762ed13ac",
@@ -203,9 +204,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "284cfe387c15f63383cd8de92abef3934fa49def79b2568f5feec75520262506",
+  "contract_sha256": "7b4b713f9c3dbe8d6c812fd893899802423dc1a9e86d96ae0925d26e8770ba52",
   "openapi": "3.1.0",
-  "operation_count": 451,
+  "operation_count": 454,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1918,6 +1919,36 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": "hunt",
       "tags": []
+    },
+    "GET /hunts/{hunt_id}/checkpoint": {
+      "deprecated": false,
+      "operation_id": "get_hunt_checkpoint_hunts__hunt_id__checkpoint_get",
+      "parameters_sha256": "2e4ac0bf7e01a02d968759249d186dbe624e65e94991e90043c21d9181994b44",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "GET /hunts/{hunt_id}/coverage-angles": {
+      "deprecated": false,
+      "operation_id": "get_hunt_coverage_angles_hunts__hunt_id__coverage_angles_get",
+      "parameters_sha256": "1c854ea7277117f3588197643135cbc07585f468919038cef706ae7d8e00a059",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
     },
     "GET /hunts/{hunt_id}/http-transactions": {
       "deprecated": false,
@@ -4861,6 +4892,21 @@
       "surface": "hunt",
       "tags": []
     },
+    "POST /hunts/{hunt_id}/coverage-angles": {
+      "deprecated": false,
+      "operation_id": "record_hunt_coverage_angle_hunts__hunt_id__coverage_angles_post",
+      "parameters_sha256": "cc413fdb829ef94954b9a5eca8dc4a5d489194b070cc781a444e9f5f17c1fc09",
+      "request_schema_sha256": "41087a405eb6922081bb542142488438ebf96462b63871b7169bb6ed587404f5",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
     "POST /hunts/{hunt_id}/finish": {
       "deprecated": false,
       "operation_id": "finish_hunt_hunts__hunt_id__finish_post",
@@ -6229,6 +6275,8 @@
       "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction",
       "GET /hunts/{hunt_id}/budget-amendments",
       "GET /hunts/{hunt_id}/candidates/{candidate_id}/boundary-context",
+      "GET /hunts/{hunt_id}/checkpoint",
+      "GET /hunts/{hunt_id}/coverage-angles",
       "GET /hunts/{hunt_id}/http-transactions",
       "GET /hunts/{hunt_id}/record",
       "GET /hunts/{hunt_id}/ssh/actions/{action_id}/output",
@@ -6245,6 +6293,7 @@
       "POST /hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal",
       "POST /hunts/{hunt_id}/candidates/{candidate_id}/verify",
       "POST /hunts/{hunt_id}/capabilities/{capability_name}",
+      "POST /hunts/{hunt_id}/coverage-angles",
       "POST /hunts/{hunt_id}/finish",
       "POST /hunts/{hunt_id}/query",
       "POST /hunts/{hunt_id}/resume",

@@ -1640,6 +1640,27 @@
     "name": "execute_hunt_capability"
   },
   {
+    "path": "/hunts/{hunt_id}/checkpoint",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_checkpoint"
+  },
+  {
+    "path": "/hunts/{hunt_id}/coverage-angles",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_coverage_angles"
+  },
+  {
+    "path": "/hunts/{hunt_id}/coverage-angles",
+    "methods": [
+      "POST"
+    ],
+    "name": "record_hunt_coverage_angle"
+  },
+  {
     "path": "/hunts/{hunt_id}/finish",
     "methods": [
       "POST"

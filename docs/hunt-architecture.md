@@ -102,6 +102,12 @@ Hypothesis:  authorization may depend only on the order id.
 Evidence:    response.diff(GET /api/orders/4121, principal=A, principal=B)
 ```
 
+## Coverage angles and planner checkpoints
+
+A Hunt records **exact coverage angles**, not family-level self-attestations. An angle is keyed by the material dimensions that make the experiment distinct: vulnerability family, operation/locus, mechanism, principal context, and application state. The ledger is append-only; later events update the current view without erasing what the planner previously believed. `negative` coverage requires completed same-Hunt actions, while partial or blocked execution remains an explicit gap. A negative result on one angle never closes a materially different method, route, identity, mechanism, input path, or state.
+
+`GET /hunts/{hunt_id}/checkpoint` builds a bounded handoff from server-owned state: latest coverage angles, open candidates, action outcomes, budgets, and unresolved proof gaps. It is intended for context compaction, planner replacement, and resumed work. The checkpoint is advisory investigation memory only. It cannot grant authority, create proof, or promote a candidate to a verified finding.
+
 ## Capability architecture
 
 The AI receives small, strongly typed capabilities, never arbitrary shell or planner-supplied argv
@@ -137,6 +143,20 @@ object relationships and principals, distinguish collection/object endpoints, in
 identifiers, replay with alternate principals, test nested resources, check read/write asymmetry,
 look for indirect references). The AI decides which ideas apply. Skills never contain
 target-specific routes or benchmark answers.
+
+## Adaptive coverage, deepening, and challenge
+
+Hunt records exact coverage angles rather than closing an entire vulnerability family after one
+negative test. Method, route/object/sink, mechanism, principal context, and application state can
+make two experiments materially different. Compact checkpoints preserve those distinctions across
+planner handoffs and context compaction without treating planner memory as proof.
+
+After broad surface coverage, the preferred mode is evidence-driven deepening: follow a supported
+observation toward the next security-boundary edge and run the smallest useful falsifying action
+instead of starting another generic sweep. Non-terminal candidates appear in the checkpoint review
+queue for an adversarial pass over attacker prerequisites, alternative explanations, impact ceiling,
+duplicate identity, and the next falsifying action. Candidate fingerprints and canonical loci are
+continuation/deduplication hints only; registered deterministic verification remains the proof gate.
 
 ## Deterministic proof — a hard invariant
 

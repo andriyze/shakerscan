@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .run_service import HuntRunService
 from .budget_amendments import HuntBudgetAmendmentRequest
+from .coverage_ledger import CoverageLedgerError
 from .skills import HuntSkillError, skill_library
 from .start_contract import (
     HUNT_START_SCHEMA,
@@ -97,6 +98,23 @@ class HuntFinishRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     summary: str = Field(min_length=1, max_length=20_000)
     next_actions: list[str] = Field(default_factory=list, max_length=100)
+
+
+class HuntCoverageAngleRequest(BaseModel):
+    """One exact investigation angle; never a finding or proof assertion."""
+
+    model_config = ConfigDict(extra="forbid")
+    family: str = Field(min_length=1, max_length=80)
+    locus: dict[str, Any] = Field(default_factory=dict)
+    mechanism: str = Field(default="", max_length=1000)
+    principal_context: dict[str, Any] = Field(default_factory=dict)
+    hypothesis: str = Field(default="", max_length=8000)
+    status: Literal["planned", "testing", "negative", "partial", "blocked", "candidate"]
+    evidence_action_ids: list[str] = Field(default_factory=list, max_length=50)
+    contradictory_evidence_action_ids: list[str] = Field(default_factory=list, max_length=50)
+    candidate_id: str | None = Field(default=None, max_length=80)
+    blocker: str = Field(default="", max_length=2000)
+    proof_gap: str = Field(default="", max_length=4000)
 
 
 class HuntSkillSuggestionRequest(BaseModel):
@@ -413,6 +431,47 @@ async def get_hunt(hunt_id: str):
     return await _service().get(hunt_id)
 
 
+@router.post("/hunts/{hunt_id}/coverage-angles", tags=["Hunt"])
+async def record_hunt_coverage_angle(
+    hunt_id: str, request: HuntCoverageAngleRequest,
+):
+    """Append a server-bound coverage event for one concrete investigation angle."""
+    try:
+        return await _service().record_coverage_angle(
+            hunt_id, values=request.model_dump(mode="python"),
+        )
+    except CoverageLedgerError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@router.get("/hunts/{hunt_id}/coverage-angles", tags=["Hunt"])
+async def get_hunt_coverage_angles(
+    hunt_id: str,
+    status: str | None = Query(None, max_length=40),
+    family: str | None = Query(None, max_length=80),
+    limit: int = Query(200, ge=1, le=500),
+):
+    """Read the newest state of each exact angle; history remains append-only in storage."""
+    try:
+        return await _service().coverage_angles(
+            hunt_id, status=status, family=family, limit=limit,
+        )
+    except CoverageLedgerError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@router.get("/hunts/{hunt_id}/checkpoint", tags=["Hunt"])
+async def get_hunt_checkpoint(hunt_id: str):
+    """Return a bounded server-derived handoff for resume or context compaction."""
+    return await _service().checkpoint(hunt_id)
+
+
 @router.get("/hunts/{hunt_id}/record", tags=["Hunt"])
 async def export_hunt_record(hunt_id: str):
     """Download the redacted explicit decision trace plus archived HTTP calls."""
@@ -478,6 +537,7 @@ async def get_hunt_budget_amendments(
 
 
 __all__ = [
+    "HuntCoverageAngleRequest",
     "HuntFinishRequest",
     "HuntStartV2PolicyRequest",
     "HuntStartV2Request",
@@ -490,6 +550,8 @@ __all__ = [
     "configure_hunt_run_router",
     "finish_hunt",
     "get_hunt",
+    "get_hunt_checkpoint",
+    "get_hunt_coverage_angles",
     "get_hunt_contract",
     "get_hunt_lifecycle_metrics",
     "get_hunt_skill",
@@ -498,6 +560,7 @@ __all__ = [
     "parse_hunt_start_body",
     "resume_hunt",
     "read_hunt_skill",
+    "record_hunt_coverage_angle",
     "record_hunt_skill_usage",
     "router",
     "start_hunt",

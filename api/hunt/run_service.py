@@ -16,6 +16,12 @@ from .budget_amendments import (
     require_resume_headroom,
 )
 
+from .coverage_ledger import (
+    build_hunt_checkpoint,
+    list_coverage_angles as _list_coverage_angles,
+    record_coverage_angle as _record_coverage_angle,
+)
+
 from .skills import (
     MAX_CONTEXT_SKILL_SUGGESTIONS,
     MAX_SKILLS_PER_HUNT,
@@ -665,6 +671,44 @@ class HuntRunService:
             await hunt_run_or_404(connection, hunt_id)
             return await read_amendments(connection, hunt_uuid, after_revision=after_revision, limit=limit)
 
+    async def record_coverage_angle(
+        self, hunt_id: str, *, values: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Append one exact, evidence-bound investigation coverage event."""
+        hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                row = await hunt_run_or_404(connection, hunt_id, for_update=True)
+                if str(row["status"]) not in ACTIVE_HUNT_STATUSES:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Hunt is {row['status']}; coverage is immutable after execution stops",
+                    )
+                return await _record_coverage_angle(
+                    connection, hunt_run_id=str(hunt_uuid), values=values,
+                )
+
+    async def coverage_angles(
+        self, hunt_id: str, *, status: str | None = None,
+        family: str | None = None, limit: int = 200,
+    ) -> dict[str, Any]:
+        """Return the current state of each exact angle without replaying event history."""
+        hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+        async with self._pool().acquire() as connection:
+            await hunt_run_or_404(connection, hunt_id)
+            return await _list_coverage_angles(
+                connection, hunt_run_id=str(hunt_uuid),
+                status=status, family=family, limit=limit,
+            )
+
+    async def checkpoint(self, hunt_id: str) -> dict[str, Any]:
+        """Build a compact server-derived handoff for resume or context compaction."""
+        _uuid_or_400(hunt_id, "hunt id")
+        async with self._pool().acquire() as connection:
+            async with connection.transaction(isolation="repeatable_read", readonly=True):
+                row = await hunt_run_or_404(connection, hunt_id)
+                return await build_hunt_checkpoint(connection, run=dict(row))
+
     async def skill_suggestions(
         self, hunt_id: str, *, signals: list[str] | None = None,
     ) -> dict[str, Any]:
@@ -1024,6 +1068,9 @@ class HuntRunService:
                 connection, scan_id=None, hunt_run_id=hunt_id,
                 limit=MAX_EXPORT_ROWS, offset=0,
             )
+            coverage_ledger = await _list_coverage_angles(
+                connection, hunt_run_id=str(hunt_uuid), limit=MAX_EXPORT_ROWS,
+            )
         run = redact_sensitive(
             public_hunt_run(row, include_context=False),
             redact_strings=True,
@@ -1038,7 +1085,8 @@ class HuntRunService:
                 "includes": [
                     "objective", "bound_skills", "policy", "budgets",
                     "planner_capability_inputs", "action_outcomes", "receipt_references",
-                    "persisted_notes", "final_debrief", "http_transactions", "budget_amendments",
+                    "coverage_angles", "persisted_notes", "final_debrief",
+                    "http_transactions", "budget_amendments",
                 ],
                 "excludes": ["hidden_model_chain_of_thought", "context_pack"],
                 "detail": (
@@ -1055,6 +1103,9 @@ class HuntRunService:
             "methodology_trace": [
                 public_hunt_skill_event(event) for event in skill_events
             ],
+            "coverage_ledger": redact_sensitive(
+                coverage_ledger, redact_strings=True, scrub_text=True,
+            ),
             "notes": redact_sensitive(notes, redact_strings=True, scrub_text=True),
             "http_archive": export_document(
                 transactions, export_format="transactions", redaction="redacted",

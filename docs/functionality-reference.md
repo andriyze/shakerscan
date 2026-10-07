@@ -1393,7 +1393,8 @@ See [`docs/mcp.md`](mcp.md).
 `POST /hunts/{hunt_id}/skills/suggestions` ·
 `POST /hunts/{hunt_id}/skills/{skill_id}/read|bind|usage` ·
 `DELETE /hunts/{hunt_id}/skills/{skill_id}` ·
-`POST /hunts/{hunt_id}/query` · `POST /hunts/{hunt_id}/capabilities/{capability_name}` ·
+`POST /hunts/{hunt_id}/query` · `GET|POST /hunts/{hunt_id}/coverage-angles` ·
+`GET /hunts/{hunt_id}/checkpoint` · `POST /hunts/{hunt_id}/capabilities/{capability_name}` ·
 `POST /hunts/{hunt_id}/candidates` · `PATCH|DELETE /hunts/{hunt_id}/candidates/{candidate_id}` ·
 `POST /hunts/{hunt_id}/candidates/{candidate_id}/verify` ·
 `POST /hunts/{hunt_id}/finish|cancel|resume` · `GET|DELETE /hunts/{hunt_id}/http-transactions`
@@ -1692,8 +1693,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 461 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 383 | `api/**/*.py` |
+| Public REST operations | 464 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 385 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1710,7 +1711,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 101 | `db/init.sql` + migrations |
+| Durable tables | 102 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1951,6 +1952,9 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal` | `compile_hunt_candidate_boundary_proposal` |
 | `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/verify` | `verify_hunt_candidate` |
 | `POST` | `/hunts/{hunt_id}/capabilities/{capability_name:path}` | `execute_hunt_capability` |
+| `GET` | `/hunts/{hunt_id}/checkpoint` | `get_hunt_checkpoint` |
+| `GET` | `/hunts/{hunt_id}/coverage-angles` | `get_hunt_coverage_angles` |
+| `POST` | `/hunts/{hunt_id}/coverage-angles` | `record_hunt_coverage_angle` |
 | `POST` | `/hunts/{hunt_id}/finish` | `finish_hunt` |
 | `DELETE` | `/hunts/{hunt_id}/http-transactions` | `purge_hunt_transactions` |
 | `GET` | `/hunts/{hunt_id}/http-transactions` | `export_hunt_transactions` |
@@ -3029,6 +3033,7 @@ Scan feature or a second orchestration engine.
 | `hunt_actions` | `db/init.sql` |
 | `hunt_budget_amendments` | `db/init.sql` |
 | `hunt_cancellable_jobs` | `api/retest_contract.py` |
+| `hunt_coverage_angle_events` | `db/init.sql` |
 | `hunt_runs` | `db/init.sql` |
 | `hunt_skill_events` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
