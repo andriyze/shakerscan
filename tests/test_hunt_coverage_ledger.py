@@ -818,3 +818,56 @@ async def test_record_export_carries_the_event_history_with_an_explicit_bound():
     assert history["events"][0]["superseded_by_event_id"] == str(history["events"][1]["id"])
     assert history["event_total"] == 2 and history["events_truncated"] is False
     assert history["event_limit"] == run_service.MAX_EXPORT_ROWS
+
+
+def test_secret_values_are_redacted_before_storage_and_fingerprinting():
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLXZhbHVl"
+    first = normalize_coverage_angle(_angle(
+        locus={"route": "/cb", "url": "https://a.example/cb?access_token=abc123&state=1"},
+        mechanism="replay with password=hunter2",
+        hypothesis=f"session {jwt} is accepted after logout",
+        principal_context={"owner": "Authorization: Bearer abcdef0123456789"},
+        status="blocked", blocker="needs token Zm9vYmFyYmF6cXV4MTIz rotated",
+    ))
+    second = normalize_coverage_angle(_angle(
+        locus={"route": "/cb", "url": "https://a.example/cb?access_token=zzz999&state=1"},
+        mechanism="replay with password=other-pass",
+        principal_context={"owner": "Authorization: Bearer 9876543210fedcba"},
+    ))
+    stored = json.dumps(first)
+    for secret in ("abc123", "hunter2", jwt, "abcdef0123456789", "Zm9vYmFyYmF6cXV4MTIz"):
+        assert secret not in stored
+    assert "state=1" in first["locus"]["url"]
+    assert first["fingerprint"] == second["fingerprint"]
+    # Redaction is stable, so a stored angle re-normalizes to the same fingerprint.
+    again = normalize_coverage_angle({**first, "evidence_action_ids": []})
+    assert again["fingerprint"] == first["fingerprint"]
+
+
+def test_oversized_principal_context_is_refused():
+    with pytest.raises(CoverageLedgerError) as exc:
+        normalize_coverage_angle(_angle(principal_context={"note": "x" * 17_000}))
+    assert exc.value.code == "coverage_context_too_large"
+
+
+@pytest.mark.asyncio
+async def test_per_hunt_event_cap_refuses_further_events():
+    from api.hunt.coverage_ledger import MAX_COVERAGE_EVENTS_PER_HUNT
+    from api.runtime.http_archive_reader import MAX_EXPORT_ROWS
+
+    from api.hunt.start_contract import hunt_start_public_contract
+
+    assert MAX_COVERAGE_EVENTS_PER_HUNT < MAX_EXPORT_ROWS
+    contract = hunt_start_public_contract()["coverage_ledger"]
+    assert contract["max_events_per_hunt"] == MAX_COVERAGE_EVENTS_PER_HUNT
+    skill = (Path(__file__).resolve().parents[1] / "skills/hunt/SKILL.md").read_text()
+    assert f"at most {MAX_COVERAGE_EVENTS_PER_HUNT:,} coverage events" in skill
+    conn = _Conn({}, recorded_events=MAX_COVERAGE_EVENTS_PER_HUNT)
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle())
+    assert exc.value.code == "coverage_event_limit_reached"
+    assert exc.value.status_code == 409
+    assert exc.value.details["max_events_per_hunt"] == MAX_COVERAGE_EVENTS_PER_HUNT
+    assert conn.inserted is None
+    conn.recorded_events -= 1
+    assert (await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle()))["angle"]

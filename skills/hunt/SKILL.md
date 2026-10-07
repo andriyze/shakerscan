@@ -158,14 +158,15 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   angle never closes a materially different method, identity, mechanism, input path, or state.
   An unfinished `budget_exhausted` Hunt still accepts evidence-bound events, so settle the angles
   the last actions examined before finishing; finished and cancelled Hunts are read-only.
+  Coverage text and values are stored through the shared secret redactor, so keep secrets out of
+  them anyway. A Hunt holds at most 5,000 coverage events; record one event per state change.
 - Use `GET /hunts/{hunt_id}/checkpoint` after context compaction, planner handoff, or resume.
   It is a bounded server-derived view of current coverage, candidates, action outcomes, budgets,
   and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. When
   `continuation_truncated` (or `angles_truncated`) is true the queue is not complete; narrow it
   with `GET /hunts/{hunt_id}/coverage-angles?status=...&family=...`, which reports `truncated` too.
-  Coverage
-  and checkpoint state are advisory investigation memory; neither can grant authority or verify a
-  finding.
+  Coverage and checkpoint state are advisory investigation memory; neither can grant authority
+  or verify a finding.
 - Browser capabilities return `browser_surface` observations containing safe CSS selectors,
   visible control structure, a redacted SPA route, and a `state_id`, not page text or secrets.
   `browser.interact` accepts either one `selector` or up to eight `steps` (`click` or non-secret

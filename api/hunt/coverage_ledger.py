@@ -16,6 +16,10 @@ is its highest-sequence event; the record export carries every event, superseded
 included. One supersession is refused: an event that cites no new
 same-Hunt evidence cannot drop the candidate an angle is bound to.
 
+Planner-supplied strings are passed through the shared redactor before they are stored
+or fingerprinted, so a secret-shaped value never persists and never distinguishes angles.
+A Hunt holds at most ``MAX_COVERAGE_EVENTS_PER_HUNT`` events.
+
 This is investigation state, not proof.  A coverage event can point at a candidate,
 but neither a planner-written angle nor a checkpoint may create or verify a finding.
 """
@@ -54,6 +58,8 @@ MAX_EVIDENCE_ACTIONS = 50
 MAX_CHECKPOINT_ANGLES = 200
 MAX_CHECKPOINT_CONTINUATION = 200
 MAX_CHECKPOINT_CANDIDATES = 100
+# Several events per examined angle fit comfortably; the record export bound is higher.
+MAX_COVERAGE_EVENTS_PER_HUNT = 5_000
 MAX_JSON_BYTES = 16_384
 MAX_LOCUS_VALUE_CHARS = 1_000
 _TEXT_LIMITS = {
@@ -106,6 +112,15 @@ COVERAGE_LOCUS_KEYS: tuple[str, ...] = (
 _LOCUS_KEY_SET = frozenset(COVERAGE_LOCUS_KEYS)
 
 
+def _redacted(value: Any) -> Any:
+    """Mask secret-shaped values with the shared redactor before storage."""
+    try:
+        from redaction import redact_sensitive
+    except ModuleNotFoundError:
+        from scanner.redaction import redact_sensitive
+    return redact_sensitive(value, redact_strings=True, scrub_text=True)
+
+
 def _text(value: Any, *, field: str, required: bool = False) -> str:
     result = str(value or "").strip()
     if required and not result:
@@ -116,7 +131,7 @@ def _text(value: Any, *, field: str, required: bool = False) -> str:
         raise CoverageLedgerError(
             "coverage_field_too_long", f"{field} exceeds {_TEXT_LIMITS[field]} characters",
         )
-    return result
+    return str(_redacted(result))
 
 
 def _json_value(value: Any) -> Any:
@@ -161,7 +176,7 @@ def _bounded_json_object(value: Any, *, field: str) -> dict[str, Any]:
         raise CoverageLedgerError(
             "coverage_context_too_large", f"{field} exceeds {MAX_JSON_BYTES} bytes",
         )
-    return json.loads(encoded)
+    return _redacted(json.loads(encoded))
 
 
 def _locus_error(code: str, message: str, **details: Any) -> CoverageLedgerError:
@@ -209,6 +224,7 @@ def canonical_coverage_locus(value: Any) -> dict[str, Any]:
                 "coverage_locus_value_too_long",
                 f"locus.{key} exceeds {MAX_LOCUS_VALUE_CHARS} characters",
             )
+        text = str(_redacted(text))
         result[key] = text.upper() if key == "method" else text
     return result
 
@@ -431,6 +447,18 @@ async def record_coverage_angle(
             "Hunt is budget_exhausted; until it resumes, coverage must cite the same-Hunt "
             "actions that settle the angle",
             status_code=409,
+        )
+    recorded = int(await conn.fetchval(
+        "SELECT COUNT(*) FROM hunt_coverage_angle_events WHERE hunt_run_id=$1::uuid",
+        hunt_run_id,
+    ) or 0)
+    if recorded >= MAX_COVERAGE_EVENTS_PER_HUNT:
+        raise CoverageLedgerError(
+            "coverage_event_limit_reached",
+            f"This Hunt already has {MAX_COVERAGE_EVENTS_PER_HUNT} coverage events; record "
+            "the remaining gaps in the final debrief",
+            status_code=409,
+            details={"max_events_per_hunt": MAX_COVERAGE_EVENTS_PER_HUNT},
         )
     all_refs = list(dict.fromkeys(
         list(angle["evidence_action_ids"])
@@ -845,6 +873,7 @@ __all__ = [
     "COVERAGE_WRITABLE_RUN_STATUSES",
     "CoverageLedgerError",
     "HUNT_CHECKPOINT_SCHEMA",
+    "MAX_COVERAGE_EVENTS_PER_HUNT",
     "TERMINAL_ACTION_STATUSES",
     "build_hunt_checkpoint",
     "canonical_coverage_locus",
