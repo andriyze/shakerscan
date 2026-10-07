@@ -148,6 +148,9 @@ export const HUNT_START_CONTRACT = {
     ],
     "evidence_ref_scope": "Each reference must resolve to an action, receipt or HTTP transaction of this Hunt, a finding on its target, or a device evidence entry of this Hunt (otherwise candidate_evidence_unresolved). An action or receipt counts only when the action completed or ended partial; a failed, admission-refused, blocked or unfinished action is refused as candidate_evidence_unsettled.",
     "identity": "target + family + locus",
+    "identity_only_location_keys": [
+      "paths"
+    ],
     "locus_keys": {
       "address": "IP address of the host",
       "advisory_id": "advisory identifier",
@@ -163,7 +166,7 @@ export const HUNT_START_CONTRACT = {
       "origin": "scheme://host[:port] of the service",
       "parameter": "query/body/header parameter name",
       "path": "concrete request path, e.g. /.git-credentials",
-      "paths": "set of concrete paths; order-insensitive",
+      "paths": "set of concrete paths; order-insensitive; identity only, never a verification route",
       "port": "integer 1-65535",
       "principal": "principal slot or role the claim concerns",
       "request_id": "request identifier within a collection",
@@ -183,7 +186,13 @@ export const HUNT_START_CONTRACT = {
     "max_locus_keys": 32,
     "max_locus_list_items": 100,
     "max_locus_value_chars": 1000,
-    "url_template": "/hunts/{hunt_id}/candidates"
+    "url_template": "/hunts/{hunt_id}/candidates",
+    "verification_route": "candidate.verify re-executes one concrete route, taken from the first of the verification_route_keys present in the locus; identity_only_location_keys distinguish candidates but never resolve a route (otherwise 422 verification_route_unresolved, at no budget cost).",
+    "verification_route_keys": [
+      "route",
+      "url",
+      "path"
+    ]
   },
   "credential_ref_fields": [
     "authorization_header_credential_id",
