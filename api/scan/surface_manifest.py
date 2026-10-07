@@ -336,15 +336,9 @@ def build_scan_surface_manifest(
         )
 
     collect("seed", (("GET", target_url),), summary={"status": "success"})
-    collect(
-        "known_endpoints",
-        (
-            item
-            for raw in options.get("custom_endpoints") or ()
-            if (item := _known_endpoint_url(raw, origin=target_origin)) is not None
-        ),
-        summary={"status": "success"},
-    )
+    # Replayed collection requests first: their routes are also merged into the declared
+    # endpoints, and the first producer to record a route owns its label, so a replayed request
+    # was reported as `known_endpoints` instead of `collections.replay`.
     collect(
         "collections.replay",
         (
@@ -356,6 +350,15 @@ def build_scan_surface_manifest(
             if isinstance(item, Mapping) and item.get("kind") == "request_replay"
         ),
         summary=collection_replay,
+    )
+    collect(
+        "known_endpoints",
+        (
+            item
+            for raw in options.get("custom_endpoints") or ()
+            if (item := _known_endpoint_url(raw, origin=target_origin)) is not None
+        ),
+        summary={"status": "success"},
     )
     collect(
         "web.probe",
