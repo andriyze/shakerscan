@@ -13846,8 +13846,7 @@ async def _verify_suspected_finding_workflow_unlocked(
     re-executes the workflow twice and derives the verdict from server-corroborated predicates; the
     agent's claim is never trusted. Raises HTTPException on guard failures (the manual endpoint
     surfaces them; the auto-verify path catches them). Supports bola / auth_bypass / data_exposure.
-    Only autonomous (router-driven) verification needs AI_OPS_ROUTER_EXECUTE_ENABLED; a Hunt's own
-    verification (autonomous=False) runs under that Hunt's authority, budget and proof contract."""
+    Only autonomous verification needs AI_OPS_ROUTER_EXECUTE_ENABLED; a Hunt's own (autonomous=False) runs under its authority, budget and proof contract."""
     if autonomous and not _ai_ops_execute_enabled():
         raise HTTPException(status_code=400, detail="execution_feature_disabled")
     async with db_pool.acquire() as conn:
