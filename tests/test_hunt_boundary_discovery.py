@@ -187,6 +187,26 @@ def test_output_bounds_report_partial_coverage():
     assert result["coverage"]["captures_read"] == MAX_CAPTURES
 
 
+def test_anonymous_and_authenticated_action_leads_do_not_fail_discovery():
+    evidence = rows() + [row(20, "/chat", {}, slot=None, method="POST")]
+    result = build_boundary_discovery(run=RUN, rows=evidence)
+    assert len(result["drafts"]) == 1
+    assert {lead["principal_slot"] for lead in result["action_leads"]} == {None, "primary"}
+
+
+def test_excess_agent_paths_preserve_partial_drafts_without_preparable_binding():
+    evidence = rows() + [
+        row(20 + n, f"/chat/{n}", {"answer": SECRET}, method="POST")
+        for n in range(16)
+    ]
+    result = build_boundary_discovery(run=RUN, rows=evidence)
+    draft, = result["drafts"]
+    assert len(draft["agent_paths"]) == 17
+    assert draft["source_binding"] is None
+    assert "agent_endpoint_binding_limit" in draft["missing_facts"]
+    assert result["coverage"]["source_bindings_withheld"] == 1
+
+
 def test_allowlisted_structure_never_copies_unknown_names_values_credentials_or_tool_arguments():
     payload = {"id": SECRET, SECRET: "x", "tool_calls": [{"arguments": {"id": SECRET}}],
                "credentials": {"tenant": SECRET}, "data": {"subject": SECRET, "api_key": SECRET},
@@ -400,4 +420,3 @@ def test_hunt_skill_advertises_discovery_without_granting_proof_or_write_authori
     assert "sends no target traffic" in discovery_section
     assert "not authority or proof" in discovery_section
     assert "never authorize a state-changing follow-up" in discovery_section
-

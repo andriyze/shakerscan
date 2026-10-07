@@ -44,6 +44,7 @@ _ALLOWED_KINDS = {
 
 
 BOUNDARY_SOURCE_SCHEMA = "hunt-boundary-source/v1"
+MAX_BOUNDARY_SOURCE_AGENT_PATHS = 16
 
 
 def normalize_boundary_source_binding(
@@ -92,7 +93,7 @@ def normalize_boundary_source_binding(
         raise ContractError("invalid_boundary_source_origin")
 
     paths = raw.get("agent_paths")
-    if not isinstance(paths, list) or not 1 <= len(paths) <= 16:
+    if not isinstance(paths, list) or not 1 <= len(paths) <= MAX_BOUNDARY_SOURCE_AGENT_PATHS:
         raise ContractError("invalid_boundary_source_agent_paths")
     normalized_paths: list[str] = []
     for item in paths:

@@ -16,10 +16,10 @@ from urllib.parse import urlsplit
 from .boundary_context import BoundaryContextError, _json, _uuid
 try:
     from runtime.http_structure import structure_fields
-    from ai_gate.boundary.hypothesis import normalize_boundary_source_binding
+    from ai_gate.boundary.hypothesis import MAX_BOUNDARY_SOURCE_AGENT_PATHS, normalize_boundary_source_binding
 except ModuleNotFoundError:
     from ..runtime.http_structure import structure_fields
-    from ..ai_gate.boundary.hypothesis import normalize_boundary_source_binding
+    from ..ai_gate.boundary.hypothesis import MAX_BOUNDARY_SOURCE_AGENT_PATHS, normalize_boundary_source_binding
 
 MAX_CAPTURES = 500
 MAX_DRAFTS = 20
@@ -169,7 +169,7 @@ def _action_leads(actions):
             for item in current["provenance"]
         }:
             current["provenance"].append(action["provenance"])
-    return [grouped[key] for key in sorted(grouped)]
+    return [grouped[key] for key in sorted(grouped, key=lambda key: (*key[:3], key[3] or ""))]
 
 
 def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -187,6 +187,7 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
         groups[key][resource["principal_slot"]][resource["resource_id"]] = resource
     drafts = []
     draft_count = 0
+    source_bindings_withheld = 0
     for (origin, template), slots in sorted(groups.items()):
         same_agents = {(a["path"], a["response_path"]) for a in agents if a["origin"] == origin}
         for owner_id, owner in sorted(slots["primary"].items()):
@@ -246,6 +247,9 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
                 digest = hashlib.sha256(json.dumps([origin, template, owner_id, attacker_id], separators=(",", ":")).encode()).hexdigest()
                 refs = list(dict.fromkeys(s["capture_id"] for s in sources))
                 agent_paths = sorted({p for p, _ in same_agents})
+                if len(agent_paths) > MAX_BOUNDARY_SOURCE_AGENT_PATHS:
+                    missing.append("agent_endpoint_binding_limit")
+                    source_bindings_withheld += 1
                 target_ref = run.get("device_target_id") or run.get("target_id")
                 source_binding = normalize_boundary_source_binding({
                     "schema_version": "hunt-boundary-source/v1",
@@ -253,7 +257,7 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
                     "target_id": _uuid(target_ref),
                     "origin": origin,
                     "agent_paths": agent_paths,
-                }) if agent_paths else None
+                }) if 0 < len(agent_paths) <= MAX_BOUNDARY_SOURCE_AGENT_PATHS else None
                 drafts.append({
                     "draft_id": digest, "kind": "cross_tenant_read", "status": "needs_context",
                     "origin": origin, "agent_paths": agent_paths,
@@ -283,6 +287,7 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
         "coverage": {"captures_read": min(len(rows), MAX_CAPTURES), "captures_truncated": rows_truncated,
                      "structure_unavailable": unavailable, "captures_skipped": skipped,
                      "conflicting_resource_observations": resource_conflicts,
+                     "source_bindings_withheld": source_bindings_withheld,
                      "drafts_truncated": draft_count > MAX_DRAFTS, "agent_surfaces_truncated": len(agents) > MAX_SURFACES,
                      "action_leads_truncated": len(actions) > MAX_SURFACES,
                      "historical_backfill_performed": False},
