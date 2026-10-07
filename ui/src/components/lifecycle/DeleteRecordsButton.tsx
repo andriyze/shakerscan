@@ -22,7 +22,7 @@ interface Props {
   className?: string
 }
 
-export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onArchived, archived = false }: {
+export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onArchived, archived = false, archiveTargetId }: {
   preview: DeletionPreview | null
   subject: string
   onClose: () => void
@@ -30,6 +30,9 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
   onArchived?: () => void
   /** The target is already archived, so "archive instead" is not an alternative to offer. */
   archived?: boolean
+  /** The selected target. A host's preview also lists its linked services as roots; archiving
+   * the host covers them, so the choice is offered for it rather than only for a lone target. */
+  archiveTargetId?: string
 }) {
   const toast = useToast()
   const [busy, setBusy] = useState(false)
@@ -39,13 +42,18 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
   const approval = useRef<string | null>(null)
   useEffect(() => { approval.current = null; setError(null); setArchiveMode(false) }, [preview?.preview_id])
 
+  const archiveId = preview?.kind === 'target'
+    ? (archiveTargetId && preview.root_ids.includes(archiveTargetId) ? archiveTargetId
+      : preview.root_ids.length === 1 ? preview.root_ids[0] : undefined)
+    : undefined
+
   async function archive() {
-    if (!preview || preview.kind !== 'target' || preview.root_ids.length !== 1 || inFlight.current) return
+    if (!preview || !archiveId || inFlight.current) return
     inFlight.current = true
     setBusy(true)
     setError(null)
     try {
-      await archiveRecordTarget(preview.root_ids[0])
+      await archiveRecordTarget(archiveId)
       onArchived?.()
       onClose()
       toast.success('Target archived. Future schedules paused; history and admitted work retained.')
@@ -105,7 +113,7 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
       <p className="font-medium text-gray-200">What is kept</p>
       {preview.retained.map(text => <p key={text}>{text}</p>)}
       {preview.blockers.map(text => <p role="alert" key={text} className="text-amber-300">{text}</p>)}
-      {preview.kind === 'target' && preview.root_ids.length === 1 && onArchived && !archived && (
+      {archiveId && onArchived && !archived && (
         <Button disabled={busy} onClick={() => { setArchiveMode(true); setError(null) }}>Archive target instead</Button>
       )}
       {error && <p role="alert" className="text-red-300">{error} Close and preview again for changed or expired records.</p>}
@@ -161,6 +169,7 @@ export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDe
     <Button variant={variant} className={className} disabled={disabled || loading} onClick={open} aria-label={`Delete ${subject}`}>
       {loading ? 'Previewing…' : label}
     </Button>
-    <RecordDeletionDialog preview={preview} subject={subject} onClose={() => { previewKey.current = null; setPreview(null) }} onDeleted={onDeleted} onArchived={onArchived} archived={archived} />
+    <RecordDeletionDialog preview={preview} subject={subject} onClose={() => { previewKey.current = null; setPreview(null) }} onDeleted={onDeleted} onArchived={onArchived} archived={archived}
+      archiveTargetId={selection.kind === 'target' ? selection.target_id : undefined} />
   </span>
 }
