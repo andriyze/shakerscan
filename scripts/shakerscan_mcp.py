@@ -35,6 +35,8 @@ _SSH_PROGRESS = ContextVar('ssh_progress',default=None)
 _KEEPALIVE = ContextVar("mcp_keepalive", default=None)
 # A per-request timeout override for the capability POST, sized from the server's wall time.
 _REQUEST_TIMEOUT = ContextVar("mcp_request_timeout", default=None)
+# The Idempotency-Key header of the one request a tool is making (Hunt start), or None.
+_IDEMPOTENCY_KEY = ContextVar("mcp_idempotency_key", default=None)
 PUBLIC_API_URL = "https://pub.shakerscan.com"
 
 
@@ -677,6 +679,17 @@ def _positive_int(value: Any, default: int) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else default
 
 
+START_IDEMPOTENCY_KEY_PROPERTY = {
+    "type": "string", "minLength": 8, "maxLength": 200,
+    "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+    "description": (
+        "Optional. One key per Hunt you mean to start; generated when omitted and returned as "
+        "mcp_idempotency_key. After an uncertain answer call again with that key and unchanged "
+        "input: the server returns the Hunt it already started instead of starting another."
+    ),
+}
+
+
 def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
     """Generate the MCP Hunt-start surface from the server's live authority contract."""
     schema_version = str(contract.get("schema_version") or "").strip()
@@ -801,6 +814,7 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
             "maxItems": _positive_int(limits.get("skill_ids"), 4),
             "uniqueItems": True,
         },
+        "idempotency_key": dict(START_IDEMPOTENCY_KEY_PROPERTY),
         "view": VIEW_PROPERTY,
     }
     return HuntMCPTool(
@@ -876,6 +890,17 @@ def _unknown_outcome(exc: MCPError) -> bool:
     if exc.code == -32001:
         return True
     return exc.code == -32002 and _http_status(exc) in LOST_ANSWER_HTTP_STATUSES
+
+
+def _start_failure(exc: BaseException, key: str, generated: bool) -> MCPError:
+    """An unconfirmed Hunt start: the POST may have started the Hunt, so name the retry key."""
+    identity = {"mcp_idempotency_key": key, "mcp_generated_idempotency_key": generated}
+    status = _http_status(exc)
+    return MCPError(getattr(exc, "code", -32001), (
+        "Hunt start was not confirmed: list the target's Hunts, or call again with "
+        f"idempotency_key {key} and unchanged input, never a new key; the server returns the "
+        "Hunt it already started."
+    ), {"outcome": "unknown", "http_status": status, **identity}, http_status=status)
 
 
 def _capability_failure(exc: BaseException, identity: Mapping[str, Any]) -> MCPError:
@@ -991,6 +1016,7 @@ class ArsenalClient:
                 "Content-Type": "application/json",
                 "User-Agent": "ShakerScan-MCP/" + SERVER_VERSION,
                 **({"Authorization": "Bearer " + self.api_token} if self.api_token else {}),
+                **({"Idempotency-Key": _IDEMPOTENCY_KEY.get()} if _IDEMPOTENCY_KEY.get() else {}),
             },
         )
         try:
@@ -1371,6 +1397,14 @@ class ArsenalClient:
                     path = f"{path}?{query}"
                 payload = {}
             generated_idempotency_key: str | None = None
+            start_key: str | None = None
+            if name == "shakerscan_hunt_start":
+                # REST and the CLI take Idempotency-Key on POST /hunts; without one here a retried
+                # start created a second Hunt. The key is a header, never part of the contract body.
+                start_key = str(payload.pop("idempotency_key", "") or "").strip()
+                if not start_key:
+                    start_key = f"mcp-{uuid.uuid4().hex}"
+                    generated_idempotency_key = start_key
             if name == "shakerscan_hunt_capability":
                 hunt_id = str(arguments["hunt_id"])
                 capability_name = str(arguments["capability_name"])
@@ -1412,9 +1446,19 @@ class ArsenalClient:
                     result = self._run_capability(
                         path, payload, _capability_wall_seconds(capability, capability_input), capability_name,
                     )
+                elif start_key is not None:
+                    key_token = _IDEMPOTENCY_KEY.set(start_key)
+                    try:
+                        result = self.request_json(hunt_tool.method, path, payload or None)
+                    finally:
+                        _IDEMPOTENCY_KEY.reset(key_token)
                 else:
                     result = self.request_json(hunt_tool.method, path, payload or None)
             except (MCPError, ValueError, urllib.error.URLError, OSError) as exc:
+                if start_key is not None:
+                    if _definite_refusal(exc):
+                        raise
+                    raise _start_failure(exc, start_key, generated_idempotency_key is not None) from exc
                 if name != "shakerscan_hunt_capability":
                     raise
                 identity = {
@@ -1442,6 +1486,12 @@ class ArsenalClient:
                     raise MCPError(-32602, f"Capability {detail_capability} is not in this Hunt's manifest")
             if view != "full":
                 result = _compact_hunt(result)
+            if start_key is not None:
+                result = {
+                    **result,
+                    "mcp_idempotency_key": start_key,
+                    "mcp_generated_idempotency_key": generated_idempotency_key is not None,
+                }
             if detail_capability is not None:
                 result = {**result, "capability": entry}
             return {
