@@ -502,6 +502,29 @@ def public_evidence_object(row: dict[str, Any], *, results_dir: Path) -> dict[st
     return hydrate_evidence_content(row, results_dir=results_dir)
 
 
+def _inline_content_digests(content: Any) -> list[str]:
+    """Digests an inline object's stored content may legitimately have.
+
+    The hash is taken over ``serialize_evidence_content`` (sorted keys, ASCII escapes), but the
+    content column is JSONB: PostgreSQL stores the parsed value and returns its own text form
+    (keys ordered by length, raw non-ASCII). Hashing that text reported every new inline object
+    -- every ``nuclei_evidence`` row on the soak -- as ``mismatch``. The stored JSON is
+    re-serialized the way it was hashed; a plain string is also checked as written.
+    """
+    if not isinstance(content, str):
+        raw, _sha, _size = serialize_evidence_content(content)
+        return [hashlib.sha256((raw or "").encode("utf-8", "ignore")).hexdigest()]
+    digests = [hashlib.sha256(content.encode("utf-8", "ignore")).hexdigest()]
+    try:
+        decoded = json.loads(content)
+    except ValueError:
+        return digests
+    raw, sha, _size = serialize_evidence_content(decoded)
+    if sha and raw != content:
+        digests.append(sha)
+    return digests
+
+
 def hydrate_evidence_content(
     row: dict[str, Any], *, results_dir: Path, max_stored_bytes: int | None = None,
 ) -> dict[str, Any]:
@@ -518,13 +541,7 @@ def hydrate_evidence_content(
         if content is None:
             row["storage_integrity"] = "missing"
             return row
-        if isinstance(content, str):
-            raw = content
-        else:
-            raw, _sha, _size = serialize_evidence_content(content)
-            raw = raw or ""
-        actual = hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
-        if not hmac.compare_digest(actual, expected):
+        if not any(hmac.compare_digest(actual, expected) for actual in _inline_content_digests(content)):
             row["storage_integrity"] = "mismatch"
             row["content"] = None
         else:
