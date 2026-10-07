@@ -689,3 +689,14 @@ def test_postgres_sightings_after_patch_in_flight_and_refresh():
                     uuid.UUID(refreshed["id"]))
                 assert (row["title"], row["claimed_severity"]) == ("New", "critical")
     asyncio.run(scenario())
+
+
+def test_candidate_postgres_acceptance_runs_in_the_provisioned_ci_database():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / ".github/workflows/hunt-record-integrity.yml").read_text()
+    for test_file in (
+        "tests/test_hunt_candidate_identity.py", "tests/test_hunt_action_outcomes.py",
+        "tests/test_hunt_budget_exhaustion.py", "tests/test_hunt_content_discover_replay.py",
+    ):
+        assert test_file in source
+    assert "'tests/hunt_candidate_pg_schema.py'" in source and "'db/init.sql'" in source
