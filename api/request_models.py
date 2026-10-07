@@ -19,9 +19,11 @@ try:
     import parallel_scan
     from constants import SMART_SCAN_BUDGETS
     from job_queue import normalize_placement
+    from scan.known_endpoints import KnownEndpointSyntaxError, normalize_known_endpoints
 except ModuleNotFoundError:  # package import in host-side tests
     from . import check_registry, parallel_scan
     from .job_queue import normalize_placement
+    from .scan.known_endpoints import KnownEndpointSyntaxError, normalize_known_endpoints
     from scanner.constants import SMART_SCAN_BUDGETS
 
 class ScanOptions(BaseModel):
@@ -293,6 +295,16 @@ class ScanPublicCompatibilityOptions(BaseModel):
     ] = None
     shard_strategy: Optional[Literal["auto", "scope", "family", "coverage", "coverage_family"]] = None
     auth_state_shards: bool = False
+
+    @field_validator("custom_endpoints")
+    @classmethod
+    def validate_custom_endpoints(cls, value: list[str]) -> list[str]:
+        # Store the one canonical spelling every Scan stage reads, and refuse a line that would
+        # otherwise be kept as path text and silently never tested.
+        try:
+            return normalize_known_endpoints(value)
+        except KnownEndpointSyntaxError as exc:
+            raise ValueError(str(exc)) from None
 
     @model_validator(mode="after")
     def validate_parallel_controls(self):

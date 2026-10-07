@@ -17,6 +17,8 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import PreparedExecution, ScanPolicy, TargetBinding
 
+from .known_endpoints import KnownEndpointSyntaxError, normalize_known_endpoint
+
 try:
     from scanner_tools.url_redaction import redact_path
 except ModuleNotFoundError:  # package imports in host-side tests
@@ -442,6 +444,10 @@ def scan_parameterized_execution_candidates(
         text = str(item or "").strip()
         if not text:
             continue
+        try:
+            text = normalize_known_endpoint(text)
+        except KnownEndpointSyntaxError:
+            pass
         pieces = text.split(None, 1)
         if len(pieces) == 2 and pieces[0].upper() in {
             "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE",
