@@ -150,7 +150,7 @@ def test_the_residual_bounds_the_extension_or_drops_it():
     ) is None, "an extension no larger than the slice buys nothing"
 
 
-def test_two_extensions_in_one_lane_share_one_lane_allowance():
+def test_two_extensions_in_one_lane_share_one_lane_allowance_fairly():
     planned = plan_verification_extensions(
         parent_plan=_plan(
             _action("verify.sqli.r01", "sqli.verify_batch"),
@@ -163,10 +163,13 @@ def test_two_extensions_in_one_lane_share_one_lane_allowance():
         profile_limits=BALANCED,
         residual={"http_requests": 14_000, "state_changing_requests": 1_700, "tool_wall_seconds": 2_000},
     )
-    # The first extension takes the SQLi lane's quarter of the wall; the second slice waits
-    # for a later round's share instead of taking a second quarter.
-    assert [item["action_id"] for item in planned] == ["verify.sqli.r01.ext"]
+    # Both slices are extended inside the SQLi lane's single quarter of the wall, split evenly
+    # (soak N30: the first slice used to take the whole quarter and the second waited forever).
+    assert [item["action_id"] for item in planned] == [
+        "verify.sqli.r01.ext", "verify.sqli.001.r01.ext",
+    ]
     lane_share = BALANCED["tool_wall_seconds"] // 4
+    assert [item["budget"]["tool_wall_seconds"] for item in planned] == [450, 450]
     assert sum(item["budget"]["tool_wall_seconds"] for item in planned) <= lane_share
     # Another lane has its own allowance in the same round.
     mixed = plan_verification_extensions(
@@ -182,7 +185,7 @@ def test_two_extensions_in_one_lane_share_one_lane_allowance():
         residual={"http_requests": 14_000, "state_changing_requests": 1_700, "tool_wall_seconds": 2_000},
     )
     assert [item["action_id"] for item in mixed] == ["verify.sqli.r01.ext", "verify.xss.r01.ext"]
-    # A later round extends the slice that waited, from a fresh lane share.
+    # A later round extends a slice not yet extended, from a fresh lane share.
     later = plan_verification_extensions(
         parent_plan=_plan(
             _action("verify.sqli.r01", "sqli.verify_batch"),
@@ -200,6 +203,8 @@ def test_two_extensions_in_one_lane_share_one_lane_allowance():
         residual={"http_requests": 14_000, "state_changing_requests": 1_700, "tool_wall_seconds": 2_000},
     )
     assert [item["action_id"] for item in later] == ["verify.sqli.001.r01.ext"]
+    # A residual that funds only one progress floor (420 s + one stage minimum) extends one
+    # slice, in priority order, and leaves the other for the next round.
     starved = plan_verification_extensions(
         parent_plan=_plan(
             _action("verify.sqli.r01", "sqli.verify_batch"),
@@ -210,9 +215,10 @@ def test_two_extensions_in_one_lane_share_one_lane_allowance():
             "verify.sqli.001.r01": _settled("timed_out"),
         },
         profile_limits=BALANCED,
-        residual={"http_requests": 14_000, "state_changing_requests": 1_700, "tool_wall_seconds": 1_400},
+        residual={"http_requests": 14_000, "state_changing_requests": 1_700, "tool_wall_seconds": 800},
     )
     assert [item["action_id"] for item in starved] == ["verify.sqli.r01.ext"]
+    assert starved[0]["budget"]["tool_wall_seconds"] == 799
 
 
 def test_proof_escalation_is_replanned_behind_the_extended_verifiers():
