@@ -108,6 +108,8 @@ def test_scanner_adapter_uses_exact_settlement_and_redacted_execution():
         "targets": 0,
         "wall_seconds": 2,
         "limiter_status": "within_ceiling",
+        "http_charge_basis": "wire_count",
+        "http_charge_estimated": False,
     }
     assert "worker-only-secret" not in str(result)
 
@@ -236,3 +238,67 @@ def test_incomplete_wire_capture_cannot_inherit_an_exact_planned_ceiling_label()
     assert result.actual_budget["http_requests"] == 7
     assert result.redacted_execution["wire_telemetry"]["accounting_mode"] == "conservative"
     assert result.redacted_execution["wire_telemetry"]["actual_http_requests"] is None
+
+
+def _unmeasured_run(*, requested, enforcement, elapsed, observed=0):
+    async def process_runner(payload, *, heartbeat):
+        return {
+            "status": "success", "elapsed_seconds": elapsed, "typed_output": {"records": []},
+            "settlement": {"mode": "unavailable", "actual": None, "observed_minimum": observed},
+            "process_enforcement": enforcement,
+        }
+    return _run(ScannerExecutionAdapter(
+        specification=CAPABILITY_REGISTRY.require("templates.scan"), process_payload={},
+        process_runner=process_runner, requested_budget=requested, redacted_execution={},
+    ), requested)
+
+
+def test_an_unmeasured_crawl_is_charged_its_rate_over_the_seconds_it_ran_not_its_hold():
+    """Soak 146b6c03: katana crawled 14 of its 300 seconds through a TLS tunnel (no wire count)
+    and was charged its whole 1,500-request hold. Its launch proof is rate x time box + 1, so
+    the same enforced rate bounds what it could send in 14 seconds."""
+    requested = {"http_requests": 1_500, "tool_wall_seconds": 300}
+    enforcement = {
+        **_enforcement(
+            hard={"http_requests": 1_476, "tool_wall_seconds": 300},
+            method="rate_time_upper_bound",
+        ),
+        "rate_bound": {"rate_per_second": 5, "startup_burst": 1},
+    }
+    result = _unmeasured_run(requested=requested, enforcement=enforcement, elapsed=14)
+
+    assert result.actual_budget["http_requests"] == 5 * 14 + 1
+    telemetry = result.redacted_execution["wire_telemetry"]
+    assert telemetry["http_charge_basis"] == "rate_time_bound"
+    assert telemetry["http_charge_estimated"] is True
+    assert telemetry["accounting_mode"] == "conservative"
+
+
+def test_an_unmeasured_wordlist_sweep_is_charged_its_exact_wordlist_not_its_hold():
+    """Content discovery reserved 2,000 (6,000 on Thorough) for a 108-entry wordlist whose
+    launch proof is the wordlist itself, and was charged the reservation."""
+    requested = {"http_requests": 6_000, "tool_wall_seconds": 450}
+    enforcement = _enforcement(
+        hard={"http_requests": 108, "tool_wall_seconds": 450}, method="exact_wordlist",
+    )
+    result = _unmeasured_run(requested=requested, enforcement=enforcement, elapsed=109)
+
+    assert result.actual_budget["http_requests"] == 108
+    assert result.redacted_execution["wire_telemetry"]["http_charge_basis"] == "process_upper_bound"
+
+
+def test_an_unmeasured_charge_never_falls_below_what_the_proxy_saw_or_rises_above_the_hold():
+    requested = {"http_requests": 100, "tool_wall_seconds": 60}
+    enforcement = {
+        **_enforcement(
+            hard={"http_requests": 100, "tool_wall_seconds": 60},
+            method="rate_time_upper_bound",
+        ),
+        "rate_bound": {"rate_per_second": 1, "startup_burst": 1},
+    }
+    seen = _unmeasured_run(requested=requested, enforcement=enforcement, elapsed=10, observed=40)
+    assert seen.actual_budget["http_requests"] == 40
+    assert seen.redacted_execution["wire_telemetry"]["http_charge_basis"] == "observed_minimum"
+
+    long_run = _unmeasured_run(requested=requested, enforcement=enforcement, elapsed=600)
+    assert long_run.actual_budget["http_requests"] == 100

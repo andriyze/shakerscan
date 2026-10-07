@@ -302,7 +302,7 @@ class EnforcedProcessPlan:
 
     def enforcement_receipt(self) -> dict[str, Any]:
         proof = dict(self.budget_proof)
-        return {
+        receipt = {
             "schema_version": PROCESS_ENFORCEMENT_SCHEMA,
             "tool_name": self.tool_name,
             "process_plan_digest": self.digest,
@@ -311,6 +311,37 @@ class EnforcedProcessPlan:
             "proof_method": proof["method"],
             "parser_version": self.parser_version,
         }
+        rate_bound = process_rate_bound(proof)
+        if rate_bound is not None:
+            receipt["rate_bound"] = rate_bound
+        return receipt
+
+
+def _non_negative_integer(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def process_rate_bound(proof: Mapping[str, Any]) -> dict[str, int] | None:
+    """The enforced request rate a process proof rests on, when it rests on one.
+
+    A crawler, a content sweep or a paced template attempt is launched with a request rate its
+    hard ceiling is derived from (rate x time box + an initial burst). The same rate bounds what
+    the tool could have sent in the time it actually ran, which is what its settlement charges
+    when no wire log counts the requests (see capabilities/scanner.py).
+    """
+    inputs = proof.get("inputs") if isinstance(proof.get("inputs"), Mapping) else {}
+    rate = _non_negative_integer(inputs.get("rate_per_second"))
+    if not rate:
+        return None
+    burst = next((
+        value for value in (
+            _non_negative_integer(inputs.get(name))
+            for name in ("startup_burst", "burst", "threads", "concurrency")
+        ) if value is not None
+    ), rate)
+    return {"rate_per_second": rate, "startup_burst": max(1, burst)}
 
 
 def validate_enforcement_receipt(
@@ -340,6 +371,13 @@ def validate_enforcement_receipt(
             "process enforcement exceeds reservation: " + ",".join(shortages)
         )
     value["hard_budget"] = hard
+    if "rate_bound" in value:
+        raw = value.get("rate_bound")
+        rate = _non_negative_integer(raw.get("rate_per_second")) if isinstance(raw, Mapping) else None
+        burst = _non_negative_integer(raw.get("startup_burst")) if isinstance(raw, Mapping) else None
+        if not rate or not burst:
+            raise ExternalProcessContractError("process enforcement rate bound is invalid")
+        value["rate_bound"] = {"rate_per_second": rate, "startup_burst": burst}
     return value
 
 

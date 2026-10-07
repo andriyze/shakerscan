@@ -19,6 +19,11 @@ _ACRONYMS = {
 }
 
 
+_CHARGE_BASES = frozenset({
+    "wire_count", "rate_time_bound", "process_upper_bound", "observed_minimum", "reservation",
+})
+
+
 def _action_label(action_id: str) -> str:
     tokens = str(action_id or "Action").replace("_", ".").split(".")
     return " ".join(
@@ -213,11 +218,21 @@ def scan_action_diagnostic_line(
     limiter = str(wire.get("limiter_status") or "unknown").strip().lower()
     if limiter not in {"within_ceiling", "failed"}:
         limiter = "unknown"
+    # What the ledger was charged and what that charge rests on: a wire count, or an
+    # estimate from the run's proven bound (rate x elapsed, the hard ceiling, the hold).
+    basis = str(wire.get("http_charge_basis") or "").strip().lower()
+    charged = (
+        f" · charged={int(result.budget_consumed.get('http_requests', 0))}"
+        + ("" if basis == "wire_count" else " estimated")
+        + (f" ({basis})" if basis in _CHARGE_BASES else "")
+        if basis else ""
+    )
     return (
         f"[scan] Diagnostic {label} · outcome={result.status.value}"
         f" · reason={reason} · error={error_class}"
         f" · execution={execution_state}"
         f" · http={observed_http}/{hard_http}/{reserved_http} observed/hard/reserved"
+        f"{charged}"
         f" · wall={observed_wall}s/{hard_wall}s"
         f" · connections={opened_connections}/{attempted_connections} opened/attempted"
         f" · limiter={limiter}"
