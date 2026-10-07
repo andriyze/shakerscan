@@ -23,6 +23,8 @@ BACKEND_FILES = frozenset({
     "tests/test_public_api_contract_generation.py",
     ".github/workflows/e2e-pr.yml",
     ".github/workflows/e2e.yml",
+    ".github/smoke-image-cache.hcl",
+    "scripts/merge_e2e_scorecards.py",
 })
 UI_CONTRACT_FILES = frozenset({
     "api/api.py",

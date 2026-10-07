@@ -8,6 +8,15 @@ name: E2E smoke
 # rebuilding the scanner fleet. UI image/dependency changes keep the stack and image gate.
 # The final release candidate still certifies every area against its exact image digests.
 # This required check always reports, including for unrelated changes.
+#
+# The work runs as four parallel shards, each on its own runner and its own stack built from the
+# same source: `dast` (the DAST area), `core` (every other E2E area and the stored-SSH Hunt check),
+# `browser` (UI contracts and build, real-stack and mocked browser acceptance) and `images` (the
+# five-image vulnerability gate). Every shard builds with `./scanner.sh build`; a cache-only bake
+# first restores unchanged layers from the GitHub Actions cache (.github/smoke-image-cache.hcl),
+# which main's image build keeps warm. The required `smoke` job passes only when every shard
+# passed, and it applies the completeness gate to the union of the shards' E2E scorecards, so no
+# area or required assertion can silently disappear.
 
 on:
   pull_request:
@@ -22,9 +31,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  smoke:
+  smoke-shard:
+    name: smoke shard (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
+    strategy:
+      # Every shard reports, so one failure does not hide the state of the others.
+      fail-fast: false
+      matrix:
+        shard: [dast, core, browser, images]
     env:
       POSTGRES_PASSWORD: ci-postgres-credential-0000000000000001
       REDIS_PASSWORD: ci-redis-credential-000000000000000001
@@ -47,20 +62,117 @@ jobs:
             --head "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" \
             >> "$GITHUB_OUTPUT"
 
-      - name: Skip smoke tests for unrelated changes
-        if: steps.changes.outputs.ui != 'true'
-        run: echo "No E2E-relevant backend or UI changes; smoke test is not required."
+      - name: Select this shard's work
+        id: shard
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          EVENT: ${{ github.event_name }}
+          STACK: ${{ steps.changes.outputs.stack }}
+          BACKEND: ${{ steps.changes.outputs.backend }}
+          E2E_AREA: ${{ steps.changes.outputs.e2e_area }}
+        run: |
+          # The single-job smoke ran `run_e2e.py --area "$E2E_AREA"` on one stack. The same
+          # selection is split here: `dast` runs the DAST area, `core` runs every other area
+          # (`--area all --exclude-area dast` keeps any newly added area in this shard).
+          e2e_args=""
+          if [[ "$EVENT" == pull_request && "$BACKEND" == true ]]; then
+            case "$E2E_AREA" in
+              all|platform|model_intake|ai_gate|dast|hunt) ;;
+              *) echo "::error::unknown E2E area selection: $E2E_AREA"; exit 1 ;;
+            esac
+            case "$SHARD" in
+              dast)
+                if [[ "$E2E_AREA" == all || "$E2E_AREA" == dast ]]; then e2e_args="--area dast"; fi ;;
+              core)
+                if [[ "$E2E_AREA" == all ]]; then
+                  e2e_args="--area all --exclude-area dast"
+                elif [[ "$E2E_AREA" != dast ]]; then
+                  e2e_args="--area $E2E_AREA"
+                fi ;;
+            esac
+          fi
+          # Every shard that runs acceptance builds and starts the same stack the single job did.
+          stack=false
+          if [[ "$EVENT" == pull_request && "$STACK" == true ]]; then
+            case "$SHARD" in
+              dast|core) if [[ -n "$e2e_args" ]]; then stack=true; fi ;;
+              browser|images) stack=true ;;
+            esac
+          fi
+          echo "e2e_args=$e2e_args" >> "$GITHUB_OUTPUT"
+          echo "stack=$stack" >> "$GITHUB_OUTPUT"
+          echo "shard $SHARD: stack=$stack e2e=${e2e_args:-none}"
 
-      - name: Explain merge queue coverage
-        if: github.event_name == 'merge_group' && steps.changes.outputs.ui == 'true'
-        run: echo "Merge queue checks the combined source with UI contracts; PR E2E and final-image certification carry active integration coverage."
+      - name: Use the containerd image store so the local build can reuse cached layers
+        if: steps.shard.outputs.stack == 'true'
+        shell: bash
+        run: |
+          # The default Docker driver imports and exports GitHub Actions cache layers only with
+          # the containerd image store. It also keeps FROM shakerscan-worker:local resolvable,
+          # which a separate BuildKit container could not see.
+          if ! docker info -f '{{ .DriverStatus }}' | grep -q io.containerd.snapshotter.v1; then
+            config=/etc/docker/daemon.json
+            current='{}'
+            if sudo test -s "$config"; then current="$(sudo cat "$config")"; fi
+            jq '.features = ((.features // {}) + {"containerd-snapshotter": true})' <<< "$current" \
+              | sudo tee "$config" >/dev/null
+            sudo systemctl restart docker
+          fi
+          docker info -f '{{ .DriverStatus }}' | grep -q io.containerd.snapshotter.v1
+          docker version --format 'Docker {{ .Server.Version }}'
+          df -h / | tail -1
 
-      - name: Start ShakerScan stack
-        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
+      - name: Pin the build identity
+        id: identity
+        if: steps.shard.outputs.stack == 'true'
+        shell: bash
+        run: |
+          # The same values scanner.sh derives (get_build_version and set_build_env), computed once
+          # so the cache bake below and ./scanner.sh build pass identical build arguments.
+          commit="$(git rev-parse --short HEAD)"
+          if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then commit="${commit}-dirty"; fi
+          fingerprint="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1] + "/scanner"); from scanner_tools.build_fingerprint import hash_source_files, source_file_map; print(hash_source_files(source_file_map(sys.argv[1]), require_all=True) or "")' "$PWD" 2>/dev/null || true)"
+          echo "version=$commit" >> "$GITHUB_OUTPUT"
+          echo "fingerprint=${fingerprint:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "build identity: $commit (API fingerprint ${fingerprint:-unknown})"
+
+      - name: Restore unchanged image layers from the build cache
+        if: steps.shard.outputs.stack == 'true'
+        uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
+        env:
+          SCANNER_VERSION: ${{ steps.identity.outputs.version }}
+          GIT_COMMIT: ${{ steps.identity.outputs.version }}
+          SHAKERSCAN_EXPECTED_API_FINGERPRINT: ${{ steps.identity.outputs.fingerprint }}
+          # Only one shard writes this pull request's cache entries; the others read them.
+          SMOKE_CACHE_WRITE: ${{ matrix.shard == 'images' }}
+        with:
+          source: .
+          files: |
+            docker-compose.yml
+            .github/smoke-image-cache.hcl
+          targets: smoke-cache
+          provenance: false
+
+      - name: Build ShakerScan images
+        if: steps.shard.outputs.stack == 'true'
+        env:
+          SCANNER_VERSION: ${{ steps.identity.outputs.version }}
+          GIT_COMMIT: ${{ steps.identity.outputs.version }}
+          NEXT_PUBLIC_APP_VERSION: ${{ steps.identity.outputs.version }}
         run: |
           # The API image builds FROM shakerscan-worker:local, which compose will not
-          # build for it -- see tests/test_ci_builds_before_composing.py.
+          # build for it -- see tests/test_ci_builds_before_composing.py. This is the
+          # same complete build as before; the bake above only warmed its layer cache.
           ./scanner.sh build
+
+      - name: Start ShakerScan stack
+        if: steps.shard.outputs.stack == 'true'
+        env:
+          SCANNER_VERSION: ${{ steps.identity.outputs.version }}
+          GIT_COMMIT: ${{ steps.identity.outputs.version }}
+          NEXT_PUBLIC_APP_VERSION: ${{ steps.identity.outputs.version }}
+        run: |
           # The e2e profile adds the pinned Juice Shop fixture the DAST and Hunt areas scan,
           # reachable from the workers by its compose service name.
           COMPOSE_PROFILES=e2e ./scanner.sh start
@@ -76,9 +188,9 @@ jobs:
           curl -sf http://127.0.0.1:3001/ >/dev/null
 
       - name: Run selected E2E areas on the built stack
-        if: github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' && steps.shard.outputs.e2e_args != ''
         env:
-          E2E_AREA: ${{ steps.changes.outputs.e2e_area }}
+          E2E_ARGS: ${{ steps.shard.outputs.e2e_args }}
           # The PR gate mirrors the candidate certification, which is an authorized declared-debt
           # release: checks the release owner has recorded as debt run as loud, counted XFAIL rows
           # (an XPASS is printed when one unexpectedly passes). Every undeclared check stays hard.
@@ -90,7 +202,8 @@ jobs:
           SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN: ${{ env.MODEL_INTAKE_OPERATOR_TOKEN }}
         run: |
           mkdir -p artifacts
-          python3 tests/e2e/run_e2e.py --area "$E2E_AREA" --scorecard artifacts/e2e-scorecard.json
+          read -ra selection <<< "$E2E_ARGS"
+          python3 tests/e2e/run_e2e.py "${selection[@]}" --scorecard artifacts/e2e-scorecard.json
           python3 - <<'PY'
           import json
           card = json.load(open("artifacts/e2e-scorecard.json"))
@@ -105,42 +218,12 @@ jobs:
           PY
 
       - name: Verify stored SSH credentials through Hunt
-        if: github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' && (steps.changes.outputs.e2e_area == 'all' || steps.changes.outputs.e2e_area == 'hunt')
+        if: github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' && (steps.changes.outputs.e2e_area == 'all' || steps.changes.outputs.e2e_area == 'hunt') && matrix.shard == 'core'
         run: python3 tests/e2e/run_hunt_ssh_acceptance.py | tee artifacts/hunt-ssh-acceptance.log
-
-      - name: Report actual assertions and validate E2E completeness
-        if: ${{ always() && github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' }}
-        env:
-          E2E_AREA: ${{ steps.changes.outputs.e2e_area }}
-        run: |
-          mkdir -p artifacts
-          requirements=()
-          if [[ "$E2E_AREA" == all ]]; then
-            requirements+=(--require-area platform --require-area ai_gate --require-area model_intake --require-area dast --require-area hunt)
-          else
-            requirements+=(--require-area "$E2E_AREA")
-          fi
-          if [[ "$E2E_AREA" == all || "$E2E_AREA" == dast ]]; then
-            requirements+=(--require-check 'dast:D-2 retains request-based SQLi result')
-            requirements+=(--require-check 'dast:D-3 retains request-based XSS result')
-          fi
-          if [[ "$E2E_AREA" == all || "$E2E_AREA" == hunt ]]; then
-            requirements+=(--require-check 'hunt:H-18 adaptive real-target methodology produces a verified finding')
-            requirements+=(--require-pass 'hunt:H-19 authorization proof materializes into a Hunt-attributed finding')
-            requirements+=(--require-pass 'hunt:H-20 protected and shared objects remain unverified')
-          fi
-          if [[ "$E2E_AREA" == all || "$E2E_AREA" == model_intake ]]; then
-            requirements+=(--require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor')
-            requirements+=(--require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify')
-            requirements+=(--require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature')
-            requirements+=(--require-pass 'model_intake:MI-6C deactivated durable anchor stops verification')
-          fi
-          python3 scripts/summarize_e2e_debt.py artifacts/e2e-scorecard.json "${requirements[@]}" \
-            > artifacts/e2e-actual-assertions.json
 
       - name: Resolve the built images and the active vulnerability waivers
         id: images
-        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true' && matrix.shard == 'images'
         shell: bash
         run: |
           resolve() {
@@ -175,7 +258,7 @@ jobs:
           done
 
       - name: Reject high or critical vulnerabilities in the built scanner image
-        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true' && matrix.shard == 'images'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.images.outputs.scanner }}
@@ -190,7 +273,7 @@ jobs:
           skip-files: ""
 
       - name: Reject high or critical vulnerabilities in the built API image
-        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true' && matrix.shard == 'images'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.images.outputs.api }}
@@ -205,7 +288,7 @@ jobs:
           skip-files: /usr/local/bin/docker
 
       - name: Reject high or critical vulnerabilities in the built Model Intake image
-        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true' && matrix.shard == 'images'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.images.outputs.model_intake }}
@@ -220,7 +303,7 @@ jobs:
           skip-files: ""
 
       - name: Reject high or critical vulnerabilities in the built UI image
-        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true' && matrix.shard == 'images'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.images.outputs.ui }}
@@ -235,7 +318,7 @@ jobs:
           skip-files: ""
 
       - name: Reject high or critical vulnerabilities in the built signer image
-        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true' && matrix.shard == 'images'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.images.outputs.signer }}
@@ -250,7 +333,7 @@ jobs:
           skip-files: ""
 
       - name: Set up supported Node runtime
-        if: steps.changes.outputs.ui == 'true'
+        if: steps.changes.outputs.ui == 'true' && matrix.shard == 'browser'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: 26
@@ -258,7 +341,7 @@ jobs:
           cache-dependency-path: ui/package-lock.json
 
       - name: Run UI contracts and production build
-        if: steps.changes.outputs.ui == 'true'
+        if: steps.changes.outputs.ui == 'true' && matrix.shard == 'browser'
         run: |
           npm --prefix ui ci
           npm --prefix ui run test:unit
@@ -266,7 +349,7 @@ jobs:
           npx --prefix ui playwright install --with-deps chromium
 
       - name: Run real-stack browser acceptance
-        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true' && matrix.shard == 'browser'
         env:
           PLAYWRIGHT_REAL_STACK: "1"
           SHAKERSCAN_API_URL: http://localhost:8080
@@ -274,7 +357,7 @@ jobs:
           PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser
 
       - name: Run mocked browser contracts
-        if: steps.changes.outputs.ui == 'true' && (github.event_name == 'merge_group' || steps.changes.outputs.stack != 'true')
+        if: matrix.shard == 'browser' && steps.changes.outputs.ui == 'true' && (github.event_name == 'merge_group' || steps.changes.outputs.stack != 'true')
         run: |
           mkdir -p ui/.next/standalone/.next
           cp -R ui/.next/static ui/.next/standalone/.next/static
@@ -293,6 +376,110 @@ jobs:
             hunt-budget-amendments.spec.ts hunt-review-refresh.spec.ts \
             service-intelligence.spec.ts
 
+      - name: Upload this shard's E2E scorecard, browser and image results
+        if: always() && steps.changes.outputs.ui == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: e2e-smoke-shard-${{ matrix.shard }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          path: |
+            artifacts/e2e-scorecard.json
+            artifacts/hunt-ssh-acceptance.log
+            ui/test-results/browser-results.json
+            trivy-*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Dump stack logs on failure
+        if: failure() && steps.shard.outputs.stack == 'true'
+        run: docker compose --profile e2e logs --tail=300 api worker model-intake-worker ui juice-shop || true
+
+      - name: Stop E2E stack
+        if: always() && steps.shard.outputs.stack == 'true'
+        run: docker compose --profile e2e down -v
+
+  # The required status check. It always reports. It passes only when every shard passed, and it
+  # validates E2E completeness over the union of the shards' scorecards exactly as the single job
+  # validated its own scorecard.
+  smoke:
+    needs: smoke-shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: changes
+        shell: bash
+        run: |
+          python3 scripts/ci_smoke_scope.py \
+            --base "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}" \
+            --head "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Skip smoke tests for unrelated changes
+        if: steps.changes.outputs.ui != 'true'
+        run: echo "No E2E-relevant backend or UI changes; smoke test is not required."
+
+      - name: Explain merge queue coverage
+        if: github.event_name == 'merge_group' && steps.changes.outputs.ui == 'true'
+        run: echo "Merge queue checks the combined source with UI contracts; PR E2E and final-image certification carry active integration coverage."
+
+      - name: Require every smoke shard to pass
+        env:
+          SHARDS: ${{ needs.smoke-shard.result }}
+        run: |
+          echo "smoke shards: $SHARDS"
+          if [[ "$SHARDS" != success ]]; then
+            echo "::error::a smoke shard did not pass"
+            exit 1
+          fi
+
+      - name: Collect the shard E2E scorecards
+        if: ${{ always() && github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: e2e-smoke-shard-*
+          path: shards
+
+      - name: Merge the shard E2E scorecards
+        if: ${{ always() && github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' }}
+        run: |
+          mapfile -t cards < <(find shards -name e2e-scorecard.json | sort)
+          python3 scripts/merge_e2e_scorecards.py --output artifacts/e2e-scorecard.json "${cards[@]}"
+
+      - name: Report actual assertions and validate E2E completeness
+        if: ${{ always() && github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' }}
+        env:
+          E2E_AREA: ${{ steps.changes.outputs.e2e_area }}
+        run: |
+          mkdir -p artifacts
+          requirements=()
+          if [[ "$E2E_AREA" == all ]]; then
+            requirements+=(--require-area platform --require-area ai_gate --require-area model_intake --require-area dast --require-area hunt)
+          else
+            requirements+=(--require-area "$E2E_AREA")
+          fi
+          if [[ "$E2E_AREA" == all || "$E2E_AREA" == dast ]]; then
+            requirements+=(--require-check 'dast:D-2 retains request-based SQLi result')
+            requirements+=(--require-check 'dast:D-3 retains request-based XSS result')
+          fi
+          if [[ "$E2E_AREA" == all || "$E2E_AREA" == hunt ]]; then
+            requirements+=(--require-check 'hunt:H-18 adaptive real-target methodology produces a verified finding')
+            requirements+=(--require-pass 'hunt:H-19 authorization proof materializes into a Hunt-attributed finding')
+            requirements+=(--require-pass 'hunt:H-20 protected and shared objects remain unverified')
+          fi
+          if [[ "$E2E_AREA" == all || "$E2E_AREA" == model_intake ]]; then
+            requirements+=(--require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor')
+            requirements+=(--require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify')
+            requirements+=(--require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature')
+            requirements+=(--require-pass 'model_intake:MI-6C deactivated durable anchor stops verification')
+          fi
+          python3 scripts/summarize_e2e_debt.py artifacts/e2e-scorecard.json "${requirements[@]}" \
+            > artifacts/e2e-actual-assertions.json
+
       - name: Upload E2E scorecard and browser results
         if: always() && steps.changes.outputs.ui == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -301,15 +488,6 @@ jobs:
           path: |
             artifacts/e2e-scorecard.json
             artifacts/e2e-actual-assertions.json
-            ui/test-results/browser-results.json
-            trivy-*.json
+            shards/
           if-no-files-found: ignore
           retention-days: 14
-
-      - name: Dump stack logs on failure
-        if: failure() && github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
-        run: docker compose --profile e2e logs --tail=300 api worker model-intake-worker ui juice-shop || true
-
-      - name: Stop E2E stack
-        if: always() && github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
-        run: docker compose --profile e2e down -v

@@ -39,6 +39,7 @@ def test_backend_and_mixed_changes_keep_every_gate():
         ["scanner/scan.py"], ["db/init.sql"],
         ["ui/src/lib/labels.ts", "api/api.py"],
         [".github/workflows/e2e-pr.yml"], ["scripts/ci_smoke_scope.py"],
+        [".github/smoke-image-cache.hcl"], ["scripts/merge_e2e_scorecards.py"],
     ):
         assert scope.classify_paths(paths) == {
             "backend": True, "ui": True, "stack": True,
