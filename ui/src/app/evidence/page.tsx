@@ -276,9 +276,11 @@ function EvidenceContent() {
           ) : loading ? (
             <TableSkeleton rows={5} />
           ) : instances.length === 0 ? (
+            // This list holds autonomous-test evidence only. Scan findings keep their evidence objects
+            // on the finding, so an empty list here does not mean nothing was stored.
             <EmptyState
-              message="No evidence yet"
-              hint="Evidence is recorded when proof-backed findings and autonomous tests capture durable request/response proof."
+              message="No autonomous test evidence yet"
+              hint="Scan findings keep their evidence on each finding: open a finding, or filter this page by finding ID to list its evidence objects."
             />
           ) : visible.length === 0 ? (
             <EmptyState message="No evidence matches these filters" hint="Try a different proof state or clear the search." />
