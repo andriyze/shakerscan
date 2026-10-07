@@ -104,6 +104,31 @@ jobs:
           echo "stack=$stack" >> "$GITHUB_OUTPUT"
           echo "shard $SHARD: stack=$stack e2e=${e2e_args:-none}"
 
+      - name: Set up supported Node runtime
+        if: steps.changes.outputs.ui == 'true' && matrix.shard == 'browser'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Run UI contracts and production build
+        if: steps.changes.outputs.ui == 'true' && matrix.shard == 'browser'
+        shell: bash
+        run: |
+          # These need no stack, so they run while the images build; "Report UI contracts and
+          # production build" below waits for them and fails the shard if any command failed.
+          (
+            (
+              set -e
+              npm --prefix ui ci
+              npm --prefix ui run test:unit
+              npm --prefix ui run build
+              npx --prefix ui playwright install --with-deps chromium
+            ) > "$RUNNER_TEMP/ui-contracts.log" 2>&1
+            echo "$?" > "$RUNNER_TEMP/ui-contracts.status"
+          ) &
+
       - name: Use the containerd image store so the local build can reuse cached layers
         if: steps.shard.outputs.stack == 'true'
         shell: bash
@@ -332,21 +357,16 @@ jobs:
           skip-dirs: ""
           skip-files: ""
 
-      - name: Set up supported Node runtime
+      - name: Report UI contracts and production build
         if: steps.changes.outputs.ui == 'true' && matrix.shard == 'browser'
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        with:
-          node-version: 26
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-
-      - name: Run UI contracts and production build
-        if: steps.changes.outputs.ui == 'true' && matrix.shard == 'browser'
+        shell: bash
         run: |
-          npm --prefix ui ci
-          npm --prefix ui run test:unit
-          npm --prefix ui run build
-          npx --prefix ui playwright install --with-deps chromium
+          # Wait for the run started before the image build and fail exactly as it failed.
+          until [ -f "$RUNNER_TEMP/ui-contracts.status" ]; do sleep 2; done
+          cat "$RUNNER_TEMP/ui-contracts.log"
+          status="$(cat "$RUNNER_TEMP/ui-contracts.status")"
+          echo "UI contracts and production build exit status: $status"
+          exit "$status"
 
       - name: Run real-stack browser acceptance
         if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true' && matrix.shard == 'browser'
