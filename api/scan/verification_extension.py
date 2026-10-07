@@ -34,8 +34,9 @@ EXTENDABLE_CAPABILITIES = frozenset({"xss.verify_batch", "sqli.verify_batch"})
 # Proof escalation reads its candidates from the verifiers it depends on, so a slice whose
 # verifier is extended gets its escalation re-planned behind the extension.
 PROOF_CAPABILITIES = frozenset({"sqli.prove_batch", "xss.browser_prove_batch"})
-# The share of the profile's tool wall one extension may hold: the bound a single verifier
-# lane holds in one compile, so an extension cannot starve the proof stage it feeds.
+# The share of the profile's tool wall one lane's extensions may hold together in a round: the
+# bound a single verifier lane holds in one compile, so extensions cannot starve the proof
+# stage they feed.
 EXTENSION_WALL_SHARE = _LANE_WALL_SHARE
 # An extension is worth planning only when it buys meaningfully more time than the slice had.
 _MINIMUM_SCALE = 1.25
@@ -105,6 +106,11 @@ def plan_verification_extensions(
         for name, amount in dict(residual).items()
     }
     planned: list[dict[str, Any]] = []
+    # One lane (a verifier family) holds at most its share of the wall across all of its
+    # extensions in this round, exactly as its slices do in one compile. Sizing every
+    # extension against the whole share let two SQLi slices hold half the profile wall.
+    # A slice the share cannot fund now is extended in a later round, from a fresh share.
+    lane_wall: dict[str, int] = {}
     for action in actions:
         if (
             action.capability_name not in EXTENDABLE_CAPABILITIES
@@ -119,7 +125,7 @@ def plan_verification_extensions(
         scale = extension_scale(
             reserved=reserved,
             consumed=dict(getattr(result, "budget_consumed", {}) or {}),
-            wall_ceiling=wall_ceiling,
+            wall_ceiling=max(0, wall_ceiling - lane_wall.get(action.capability_name, 0)),
             residual=remaining,
         )
         if scale is None:
@@ -134,6 +140,9 @@ def plan_verification_extensions(
         }
         for name, amount in budget.items():
             remaining[name] = remaining.get(name, 0) - amount
+        lane_wall[action.capability_name] = (
+            lane_wall.get(action.capability_name, 0) + int(budget.get("tool_wall_seconds", 0))
+        )
         planned.append({
             "action_id": extension_action_id(action.action_id),
             "stage": action.stage,
