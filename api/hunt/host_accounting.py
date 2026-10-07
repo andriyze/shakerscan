@@ -79,29 +79,30 @@ def distinct_host_charge(
 def bound_distinct_hosts(
     requested_budget: Mapping[str, int], prepared: Any, reserved: Mapping[str, int],
     context: Any,
-) -> tuple[dict[str, int], Any]:
+) -> tuple[dict[str, int], Any, frozenset[str]]:
     """Worker: adopt the admitted host hold (never above the estimate) and bound measurement to it.
 
     The admission and queue digests cover the reduced hold, so the recomputed request must use it;
     the adapter measures hosts against its prepared estimate, so the estimate is bounded too. A
     hold the stored reservation omits is zero. A hold below the action's hosts that this Hunt has
-    not recorded as attempted is not adopted, so no host can run uncharged.
+    not recorded as attempted is not adopted, so no host can run uncharged. Also returns the
+    action's hosts, identified before bounding, for ``record_attempted_hosts``.
     """
     budget = dict(requested_budget)
     hosts = action_hosts(prepared)
     if DIMENSION not in budget or not hosts:
-        return budget, prepared
+        return budget, prepared, hosts
     held = int(dict(reserved).get(DIMENSION) or 0)
     unattempted = len(hosts - charged_hosts(context))
     if not unattempted <= held <= int(budget[DIMENSION]):
-        return budget, prepared
+        return budget, prepared, hosts
     estimate = dict(prepared.estimated_budget)
     if held:
         budget[DIMENSION] = estimate[DIMENSION] = held
     else:
         budget.pop(DIMENSION)
         estimate.pop(DIMENSION, None)
-    return budget, replace(prepared, estimated_budget=estimate)
+    return budget, replace(prepared, estimated_budget=estimate), hosts
 
 
 async def record_attempted_hosts(

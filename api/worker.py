@@ -19906,7 +19906,7 @@ def _worker_terminal_network_result(
 
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
-from hunt.host_accounting import action_hosts, bound_distinct_hosts, record_attempted_hosts
+from hunt.host_accounting import bound_distinct_hosts, record_attempted_hosts
 
 
 async def _revalidate_hunt_action_authority(
@@ -21400,8 +21400,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                 ).requires_active_approval:
                     requested_budget["active_actions"] = 1
                 reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
-                attempted_hosts = action_hosts(prepared)
-                requested_budget, prepared = bound_distinct_hosts(requested_budget, prepared, stored.record.requested, context)
+                requested_budget, prepared, attempted_hosts = bound_distinct_hosts(requested_budget, prepared, stored.record.requested, context)
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
                     action_id=action_id,
