@@ -4231,10 +4231,14 @@ async def _execute_hunt_candidate_verification(
             candidate_id=str(candidate_uuid), reason="Hunt V2 deterministic verification",
         )
     else:
+        # A Hunt verification is requested by its operator or planner inside the Hunt's own
+        # authority, budget and proof contract, so it is not autonomous router execution and does
+        # not depend on AI_OPS_ROUTER_EXECUTE_ENABLED. Every other verifier gate still applies.
         result = await _verify_suspected_finding_workflow(
             candidate_uuid,
             str(policy["approval_receipt_id"]),
             created_by=f"hunt_v2:{run['id']}",
+            autonomous=False,
         )
         verified_finding_id = (
             result.get("verified_finding_id") if isinstance(result, Mapping) else None

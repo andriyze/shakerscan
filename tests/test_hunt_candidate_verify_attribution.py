@@ -39,8 +39,9 @@ class _Pool:
 
 
 def _verify(monkeypatch, verification, conn):
-    async def verifier(candidate_uuid, approval, *, created_by):
+    async def verifier(candidate_uuid, approval, *, created_by, autonomous):
         assert candidate_uuid == CANDIDATE and created_by == f"hunt_v2:{HUNT}"
+        assert autonomous is False  # a Hunt verifies under its own authority
         return dict(verification)
 
     monkeypatch.setattr(router, "_verify_suspected_finding_workflow", verifier)

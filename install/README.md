@@ -42,7 +42,9 @@ The release runtime enables confirmation-gated AI Operations execution by defaul
 user can launch Deep Hunt with the current coding agent as the keyless planner. Deep Hunt still
 requires an authorized target and an expiring target-bound approval. Set
 `AI_OPS_ROUTER_EXECUTE_ENABLED=false` in the install's `.env` and restart to disable all gated AI
-Operations execution globally.
+Operations execution globally. That switch covers autonomous, router-driven execution; deterministic
+verification that an operator or planner requests inside a Hunt (`candidate.verify`) runs under that
+Hunt's own authority, budget and proof contract and is not affected by it.
 
 Re-running the install command upgrades the installed runtime files in place. It refreshes
 `scanner.sh`, `docker-compose.release.yml`, `VERSION`, `README.md`, `AGENTS.md`,

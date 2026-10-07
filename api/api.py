@@ -13837,14 +13837,16 @@ async def _agent_verification_workflow_for(
 
 
 async def _verify_suspected_finding_workflow_unlocked(
-    finding_uuid: uuid.UUID, approval_receipt_id: str, *, created_by: str
+    finding_uuid: uuid.UUID, approval_receipt_id: str, *, created_by: str, autonomous: bool = True,
 ) -> dict[str, Any]:
     """Core of the SUSPECTED->VERIFIED bridge (Gap B): run ONE suspected autonomous-agent finding
     through the EXISTING family_proof two-run verification. The moat is unchanged — the server
     re-executes the workflow twice and derives the verdict from server-corroborated predicates; the
     agent's claim is never trusted. Raises HTTPException on guard failures (the manual endpoint
-    surfaces them; the auto-verify path catches them). Supports bola / auth_bypass / data_exposure."""
-    if not _ai_ops_execute_enabled():
+    surfaces them; the auto-verify path catches them). Supports bola / auth_bypass / data_exposure.
+    Only autonomous (router-driven) verification needs AI_OPS_ROUTER_EXECUTE_ENABLED; a Hunt's own
+    verification (autonomous=False) runs under that Hunt's authority, budget and proof contract."""
+    if autonomous and not _ai_ops_execute_enabled():
         raise HTTPException(status_code=400, detail="execution_feature_disabled")
     async with db_pool.acquire() as conn:
         finding = await conn.fetchrow("SELECT * FROM findings WHERE id=$1", finding_uuid)
@@ -13953,10 +13955,10 @@ async def _verify_suspected_finding_workflow_unlocked(
 
 
 async def _verify_web_candidate_workflow_unlocked(
-    candidate_uuid: uuid.UUID, approval_receipt_id: str, *, created_by: str,
+    candidate_uuid: uuid.UUID, approval_receipt_id: str, *, created_by: str, autonomous: bool = True,
 ) -> dict[str, Any]:
     """Verify a candidate directly; a findings row is materialized only after proof succeeds."""
-    if not _ai_ops_execute_enabled():
+    if autonomous and not _ai_ops_execute_enabled():
         raise HTTPException(status_code=400, detail="execution_feature_disabled")
     async with db_pool.acquire() as conn:
         candidate = await conn.fetchrow(
@@ -14130,7 +14132,7 @@ async def _verify_web_candidate_workflow_unlocked(
 
 
 async def _verify_suspected_finding_workflow(
-    finding_uuid: uuid.UUID, approval_receipt_id: str, *, created_by: str
+    finding_uuid: uuid.UUID, approval_receipt_id: str, *, created_by: str, autonomous: bool = True,
 ) -> dict[str, Any]:
     async with _agent_finding_verification_lock(finding_uuid):
         async with db_pool.acquire() as conn:
@@ -14142,12 +14144,12 @@ async def _verify_suspected_finding_workflow(
             return await _verify_web_candidate_workflow_unlocked(
                 finding_uuid,
                 approval_receipt_id,
-                created_by=created_by,
+                created_by=created_by, autonomous=autonomous,
             )
         return await _verify_suspected_finding_workflow_unlocked(
             finding_uuid,
             approval_receipt_id,
-            created_by=created_by,
+            created_by=created_by, autonomous=autonomous,
         )
 
 
