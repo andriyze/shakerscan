@@ -395,7 +395,9 @@ the instance with `shakerscan api METHOD PATH [JSON]`, `shakerscan scan …`, `s
 and, in an agent with an MCP client, the MCP tools (server `shakerscan`); the credential is in a
 file those commands read, never in the environment. Every action runs under that person's
 identity and role and is audited. A route the instance keeps closed answers with a refusal that
-names what is missing: report it and choose another path. Kit version: ShakerScan {kit_version}.
+names what is missing: report it and choose another path. The gateway serves only the routes the
+product uses, so `GET /openapi.json` is refused here: read request shapes from `GET /hunts/contract`,
+`GET /scan/contracts` and the MCP tool schemas. Kit version: ShakerScan {kit_version}.
 
 """
 

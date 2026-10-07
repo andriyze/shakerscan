@@ -179,6 +179,10 @@ class FakeClient(mcp.ArsenalClient):
             "action_state": {"catalog_status": "read_only", "risk_tier": "read_only"},
         }
 
+    def serves_route(self, method, path):
+        # An engine that serves the posture check (the probe itself is covered separately).
+        return (method, path) == ("POST", "/public/check")
+
 
 def test_mcp_exposes_only_fixed_read_only_arsenal_commands():
     client = FakeClient()

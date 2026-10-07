@@ -196,7 +196,8 @@ current run's `expected_revision`, new **total** `limits`, a stable retry `idemp
 headroom; no action starts automatically. Existing usage, queued holds, identities and permissions
 stay in place. Device pauses and independent device/per-action limits still apply. Inspect current
 state after a conflict; retry a lost response with the same key/body, not an extra increase.
-Completed/cancelled/finalized runs stay terminal. Read `GET /openapi.json` for the request schema;
+Completed/cancelled/finalized runs stay terminal. Read `GET /openapi.json` for the request schema
+on an open-source engine (an Enterprise gateway refuses it; the fields above are the request);
 `GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
 
 ## Candidates and proof
