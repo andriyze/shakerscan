@@ -20646,8 +20646,8 @@ async def process_canonical_scanner_capability_job(
                     capability_input, observations, target_kind=target.target_kind,
                     allowed_origins=target.allowed_origins,
                 )
-                from hunt.endpoint_knowledge import enrich_crawl_endpoints
-                await enrich_crawl_endpoints(conn, target=target, origin=execution_target,
+                from hunt.endpoint_knowledge import record_discovered_endpoints
+                await record_discovered_endpoints(conn, target=target, origin=execution_target,
                     capability=capability_name, input=capability_input, records=observations)
                 persisted = await store.persist_terminal(
                     conn,

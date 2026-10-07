@@ -12,9 +12,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -169,6 +172,75 @@ def test_content_discovery_is_recorded_in_the_endpoint_inventory(monkeypatch):
     ))
     assert count == 2
     assert calls[0][1] == ["GET /.git/config", "GET /admin"]
+
+
+class SavepointConnection:
+    def __init__(self):
+        self.savepoints = []
+
+    @asynccontextmanager
+    async def transaction(self, **_kwargs):
+        self.savepoints.append("open")
+        try:
+            yield self
+        except BaseException:
+            self.savepoints.append("rolled_back")
+            raise
+        self.savepoints.append("released")
+
+
+def test_inventory_failure_rolls_back_only_its_savepoint(monkeypatch):
+    async def failing_upsert(conn, target_id, worklist, **kwargs):
+        raise RuntimeError("inventory unavailable")
+
+    monkeypatch.setattr(endpoint_knowledge.asm_inventory, "upsert_endpoints", failing_upsert)
+    conn = SavepointConnection()
+    count = asyncio.run(endpoint_knowledge.record_discovered_endpoints(
+        conn, target=SimpleNamespace(target_kind="web", target_id="owned"),
+        origin="https://app.test/", capability="web.crawl", input={},
+        records=[{"kind": "discovered_route", "url": "https://app.test/a", "method": "GET"}],
+    ))
+    assert count == 0
+    assert conn.savepoints == ["open", "rolled_back"]
+
+
+DSN = os.environ.get("HUNT_TEST_POSTGRES_DSN")
+
+
+@pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not configured")
+def test_postgres_inventory_failure_leaves_the_settlement_transaction_usable():
+    import asyncpg
+
+    async def scenario():
+        assert urlsplit(DSN).hostname in {"localhost", "127.0.0.1", "::1", "postgres"}
+        schema = "hunt_inventory_savepoint_" + uuid.uuid4().hex
+        conn = await asyncpg.connect(DSN)
+        try:
+            await conn.execute(f'CREATE SCHEMA "{schema}"')
+            await conn.execute(f'SET search_path TO "{schema}"')
+            await conn.execute("CREATE TABLE settled (id int)")
+            async with conn.transaction():
+                await conn.execute("INSERT INTO settled VALUES (1)")
+                # target_endpoints does not exist here: the upsert fails inside its savepoint.
+                count = await endpoint_knowledge.record_discovered_endpoints(
+                    conn, target=SimpleNamespace(target_kind="web", target_id=str(uuid.uuid4())),
+                    origin="https://app.test/", capability="web.content_discover", input={},
+                    records=[*CONTROLS, *HITS],
+                )
+                assert count == 0
+                await conn.execute("INSERT INTO settled VALUES (2)")
+            assert await conn.fetchval("SELECT count(*) FROM settled") == 2
+        finally:
+            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            await conn.close()
+
+    asyncio.run(scenario())
+
+
+def test_worker_settlement_records_endpoints_through_the_savepoint_helper():
+    source = (Path(__file__).resolve().parents[1] / "api" / "worker.py").read_text(encoding="utf-8")
+    assert "await record_discovered_endpoints(conn, target=target, origin=execution_target," in source
+    assert "await enrich_crawl_endpoints(" not in source
 
 
 @pytest.mark.parametrize("budget,started", [
