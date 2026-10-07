@@ -114,7 +114,10 @@ by the text of the reason. A definite refusal (a 4xx other than 408, 425 and 429
 and reports `outcome: "refused"`: its status and the server's stated reason are in the error message
 the agent reads (`error.data` keeps the body). 408, 425 and 429 mean "not now": they report
 `outcome: "retry_later"` with any `Retry-After` seconds, and the message names the key to call again
-with after waiting.
+with after waiting. A 4xx is a refusal only before dispatch: once the server has reported the action
+dispatched (`execution_started: true`, or the action's in-flight state), a later 4xx -- a settling
+replay answered 409 because the Hunt finished meanwhile, say -- reports `outcome: "unknown"` with
+`indeterminate: true`, the `action_id` and the key, because the action may have run.
 
 The capability request may run as long as the server's wall time for it
 (`budget_cost.tool_wall_seconds` in the Hunt manifest) plus a margin, never only the adapter's
