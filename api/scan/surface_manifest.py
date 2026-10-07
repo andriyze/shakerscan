@@ -7,6 +7,7 @@ import re
 from typing import Any, Iterable, Mapping
 import urllib.parse
 
+from .known_endpoints import KnownEndpointSyntaxError, normalize_known_endpoint
 from .negative_control import indistinguishable_from_absent, is_negative_control_url
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 
@@ -168,6 +169,12 @@ def _known_endpoint_url(
     text = str(value or "").strip()
     if not text:
         return None
+    try:
+        # Rows stored before submission normalized the field-list form (`POST /login user,pass`)
+        # still read as a body declaration instead of a path containing spaces.
+        text = normalize_known_endpoint(text)
+    except KnownEndpointSyntaxError:
+        pass
     pieces = text.split(None, 1)
     if len(pieces) == 2 and _HTTP_METHOD.fullmatch(pieces[0].upper()):
         method, text = pieces[0].upper(), pieces[1].strip()
