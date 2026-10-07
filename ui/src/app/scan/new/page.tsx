@@ -107,7 +107,7 @@ export default function NewScanPage() {
       .map((value) => value.trim())
       .filter(Boolean)
     const requestedTarget = requestedParams.get('target')?.trim()
-    if (requestedTargets.length > 0) {
+    if (requestedTargets.length > 0 && featureEnabled('batch_scan')) {
       setBatchMode(true)
       setBatchTargets(Array.from(new Set(requestedTargets)).join('\n'))
     } else if (requestedTarget) {
@@ -549,7 +549,8 @@ export default function NewScanPage() {
               <h2 className="font-medium text-white">Target</h2>
               <p className="text-xs text-gray-500">Web URL or hostname in your authorized scope.</p>
             </div>
-            <label className="flex items-center gap-2 text-sm text-gray-300">
+            {/* A managed deployment that does not list batch_scan refuses POST /scans/batch. */}
+            {featureEnabled('batch_scan') && <label className="flex items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={batchMode} onChange={(event) => {
                 setBatchMode(event.target.checked)
                 if (event.target.checked) {
@@ -565,7 +566,7 @@ export default function NewScanPage() {
                 }
               }} />
               Multiple targets
-            </label>
+            </label>}
           </div>
           {batchMode ? (
             <Field label="Target URLs (one per line)" required>
