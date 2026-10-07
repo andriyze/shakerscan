@@ -829,6 +829,9 @@ try:
         CapabilityExecutor,
     )
     from hunt.device_policy import DeviceHuntPolicyState
+    from hunt.candidate_verification_preflight import (
+        CandidateVerificationRefused, VERIFIABLE_FAMILIES, web_candidate_preflight,
+    )
     from hunt import prior_knowledge as hunt_prior_knowledge
     from capabilities.inline import (
         ControlPlaneExecutionAdapter,
@@ -888,6 +891,9 @@ except ModuleNotFoundError:
         CapabilityExecutor,
     )
     from api.hunt.device_policy import DeviceHuntPolicyState
+    from api.hunt.candidate_verification_preflight import (
+        CandidateVerificationRefused, VERIFIABLE_FAMILIES, web_candidate_preflight,
+    )
     from api.hunt import prior_knowledge as hunt_prior_knowledge
     from api.capabilities.inline import (
         ControlPlaneExecutionAdapter,
@@ -13670,7 +13676,7 @@ async def _resolve_approved_invariant_contract(
 # invariant contract (the oracle a bare finding lacks) and verified by the invariant binder. Every
 # family is verified by the UNCHANGED family_proof two-run moat — the bridge supplies routes and
 # bindings, never a verdict.
-_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = frozenset({"bola", "auth_bypass", "data_exposure", "mass_assignment", "access_control", "field_constraint", "workflow"})
+_AGENT_VERIFIABLE_FAMILIES: frozenset[str] = VERIFIABLE_FAMILIES
 # Families whose VERIFICATION workflow mutates the target (create-MA does live create POSTs;
 # field_constraint writes an out-of-bounds value then restores; workflow_transition attempts a
 # forbidden state transition then restores). These may auto-verify only from a gated (allow_write)
@@ -13960,28 +13966,16 @@ async def _verify_web_candidate_workflow_unlocked(
         )
         if not candidate:
             raise HTTPException(status_code=404, detail="Investigation candidate not found")
-        if str(candidate["status"] or "") == "verified":
-            raise HTTPException(status_code=409, detail="Candidate is already verified")
+        try:  # the same refusals candidate.verify makes at admission, before any reservation
+            family, route, method_hint = web_candidate_preflight(dict(candidate))
+        except CandidateVerificationRefused as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         target = await conn.fetchrow(
             "SELECT id, url, is_active FROM targets WHERE id=$1",
             candidate["target_id"],
         )
         if not target or not target["is_active"]:
             raise HTTPException(status_code=404, detail="Active target not found")
-        locus = _decode_json_value(candidate["canonical_locus"]) or {}
-        context = _decode_json_value(candidate["verification_context"]) or {}
-        family = family_proof.canonical_family(candidate["family"])
-        if family not in _AGENT_VERIFIABLE_FAMILIES:
-            raise HTTPException(
-                status_code=422,
-                detail=f"verification bridge supports {sorted(_AGENT_VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'",
-            )
-        route = str(locus.get("route") or locus.get("url") or context.get("route") or "").strip()
-        if route.startswith("http://") or route.startswith("https://"):
-            route = urllib.parse.urlsplit(route).path or "/"
-        if not route or route == "/":
-            raise HTTPException(status_code=422, detail="verification_route_unresolved")
-        method_hint = str(locus.get("method") or context.get("method") or "GET")
         workflow, object_route, method, extra_metadata = await _agent_verification_workflow_for(
             conn, candidate["target_id"], family, route, method_hint,
         )

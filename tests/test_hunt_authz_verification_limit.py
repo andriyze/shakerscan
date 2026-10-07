@@ -22,6 +22,9 @@ import uuid
 from fastapi import HTTPException
 import pytest
 from hunt.action_replay import execution_started_from_budget, replay_observations
+from hunt.candidate_verification_preflight import (
+    CandidateVerificationRefused, web_candidate_preflight,
+)
 from hunt.device_traffic import reserve_device_traffic
 from hunt.host_accounting import distinct_host_charge
 from runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
@@ -58,6 +61,8 @@ class ReservationStore:
 
 class AdmissionStore:
     def __init__(self, maximum=1, used=0):
+        self.candidate = {"status": "new", "family": "bola",
+                          "canonical_locus": {"method": "GET", "route": "/api/orders/{id}"}}
         self.lock = asyncio.Lock()
         self.actions = {}
         self.calls = []
@@ -93,7 +98,7 @@ class AdmissionStore:
         if "FROM targets" in sql:
             return {"url": "https://fixture.example.test", "is_active": True}
         if "FROM investigation_candidates" in sql:
-            return {"status": "open", "family": "bola"}
+            return dict(self.candidate)
         raise AssertionError(sql)
 
     async def execute(self, sql, *args):
@@ -173,6 +178,8 @@ def admission(store, **overrides):
         "replay_observations": replay_observations,
         "execution_started_from_budget": execution_started_from_budget,
         "distinct_host_charge": distinct_host_charge,
+        "web_candidate_preflight": web_candidate_preflight,
+        "CandidateVerificationRefused": CandidateVerificationRefused,
     }
     context.update(overrides)
     exec(compile(selected, str(source), "exec"), context)
@@ -303,3 +310,27 @@ def test_scanner_capability_rejects_a_principal_it_cannot_apply():
         ))
     assert error.value.status_code == 422
     assert not store.actions
+
+
+@pytest.mark.parametrize("candidate,detail", [
+    # sqli canonicalizes to injection, which the family-proof bridge cannot re-execute.
+    ({"family": "sqli", "canonical_locus": {"method": "GET", "route": "/search"}},
+     "verification bridge supports"),
+    ({"family": "data_exposure", "canonical_locus": {"method": "GET"}},
+     "verification_route_unresolved"),
+    ({"family": "data_exposure", "canonical_locus": {"method": "GET", "url": "https://h.test/"}},
+     "verification_route_unresolved"),
+    ({"family": "mass_assignment", "canonical_locus": {"method": "PUT", "route": "/api/users"}},
+     "explicitly evidenced POST"),
+])
+def test_candidate_refusals_decided_by_the_candidate_cost_nothing(candidate, detail):
+    store = AdmissionStore()
+    store.candidate = {"status": "new", **candidate}
+    with pytest.raises(HTTPException, match=detail) as error:
+        asyncio.run(call(store, name="candidate.verify"))
+    assert error.value.status_code == 422
+    # No verification counted, no action recorded, nothing reserved: zero charge.
+    assert store.run["budget_used_json"] == {"verifications": 0}
+    assert not store.actions
+    assert not any("INSERT INTO hunt_actions" in sql for sql in store.calls)
+

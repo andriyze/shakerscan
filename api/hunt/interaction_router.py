@@ -42,6 +42,7 @@ except ModuleNotFoundError:
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
 from .candidate_evidence import CandidateEvidenceError, resolve_candidate_evidence
+from .candidate_verification_preflight import CandidateVerificationRefused, web_candidate_preflight
 from .action_replay import execution_started_from_budget, replay_observations
 from .host_accounting import distinct_host_charge
 from .boundary_handoff import compile_candidate_boundary_handoff
@@ -1727,6 +1728,16 @@ async def _execute_hunt_capability_lifecycle(
                         status_code=409,
                         detail=f"Candidate is {candidate_record['status']}",
                     )
+                if not run["device_target_id"]:
+                    # Refusals decided by the stored candidate alone are made here, before a
+                    # verification is counted or any budget reserved: they send no traffic, so
+                    # they must cost nothing.
+                    try:
+                        web_candidate_preflight(dict(candidate_record))
+                    except CandidateVerificationRefused as exc:
+                        raise HTTPException(
+                            status_code=exc.status_code, detail=exc.detail,
+                        ) from exc
             allowed = {item["name"] for item in _hunt_public(run, include_context=False)["capabilities"]}
             if name not in allowed:
                 raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
