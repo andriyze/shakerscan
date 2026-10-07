@@ -4124,7 +4124,7 @@ async def correlate_device_advisory_lifecycle(
                     family="device_firmware_advisory",
                     locus={
                         "transport": service.get("transport"),
-                        "port": service.get("port"),
+                        "port": service.get("port") or None,  # package identities report 0
                         "service_name": service.get("service_name"),
                         "advisory_id": advisory_id,
                         "cpe": cpe,
