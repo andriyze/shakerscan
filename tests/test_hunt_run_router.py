@@ -544,22 +544,39 @@ def test_hunt_run_service_lists_without_context_or_capability_expansion():
 
 
 def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
+    """Finish once; a same-debrief retry says nothing changed; anything else is refused (D20).
+
+    Soak 2026-10-07 (Hunts 522e2b7b, 343188a8): finish or cancel on a completed Hunt answered
+    200 with the record and no sign that nothing had happened.
+    """
     hunt_id = str(uuid.uuid4())
 
     class Connection:
         def __init__(self):
             self.status = "active"
+            self.completed_at = None
+            self.final_debrief = None
+            self.updates = 0
             self.cleared_http_captures = False
+
+        def row(self):
+            return _row(
+                id=uuid.UUID(hunt_id), status=self.status,
+                completed_at=self.completed_at, final_debrief=self.final_debrief,
+            )
 
         async def fetchrow(self, query, *args):
             if query.startswith("SELECT * FROM hunt_runs"):
-                return _row(id=uuid.UUID(hunt_id), status=self.status)
+                return self.row()
             if "FROM hunt_actions" in query:
                 assert "FROM budget_reservations" in query
                 return {"actions": False, "reservations": False}
             if "UPDATE hunt_runs" in query and "final_debrief=$2" in query:
+                self.updates += 1
                 self.status = "completed"
-                return _row(id=uuid.UUID(hunt_id), status=self.status)
+                self.completed_at = datetime(2026, 10, 7, tzinfo=timezone.utc)
+                self.final_debrief = args[1]
+                return self.row()
             if "SET status='cancelled'" in query:
                 return None
             raise AssertionError(query)
@@ -574,11 +591,68 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
     finished = asyncio.run(service.finish(
         hunt_id, summary="Done", next_actions=["Review evidence"]
     ))
-    cancelled_after_finish = asyncio.run(service.cancel(hunt_id))
-
     assert finished["status"] == "completed"
-    assert cancelled_after_finish["status"] == "completed"
+    assert finished["already_terminal"] is False
     assert connection.cleared_http_captures is True
+
+    # A retry of the same finish (its response was lost) answers the record and says so.
+    retried = asyncio.run(service.finish(
+        hunt_id, summary="Done", next_actions=["Review evidence"]
+    ))
+    assert retried["status"] == "completed"
+    assert retried["already_terminal"] is True
+    assert connection.updates == 1
+
+    # A different debrief on a completed Hunt is refused rather than silently dropped.
+    with pytest.raises(run_router.HTTPException) as refused_finish:
+        asyncio.run(service.finish(hunt_id, summary="Another debrief", next_actions=[]))
+    assert refused_finish.value.status_code == 409
+    assert "already completed" in refused_finish.value.detail
+    assert connection.updates == 1
+
+    # Cancelling a completed Hunt is refused; it used to answer 200 as if it had cancelled.
+    with pytest.raises(run_router.HTTPException) as refused_cancel:
+        asyncio.run(service.cancel(hunt_id))
+    assert refused_cancel.value.status_code == 409
+    assert "already completed" in refused_cancel.value.detail
+
+
+def test_finished_budget_exhausted_hunt_is_not_finished_again():
+    hunt_id = str(uuid.uuid4())
+
+    class Connection:
+        async def fetchrow(self, query, *args):
+            assert query.startswith("SELECT * FROM hunt_runs"), query
+            return _row(
+                id=uuid.UUID(hunt_id), status="budget_exhausted",
+                completed_at=datetime(2026, 10, 7, tzinfo=timezone.utc),
+                final_debrief=json.dumps({"summary": "First", "next_actions": []}),
+            )
+
+    with pytest.raises(run_router.HTTPException) as exc:
+        asyncio.run(HuntRunService(lambda: _Pool(Connection())).finish(
+            hunt_id, summary="Overwrite", next_actions=[],
+        ))
+    assert exc.value.status_code == 409
+
+
+def test_repeated_cancel_says_the_hunt_was_already_cancelled():
+    hunt_id = str(uuid.uuid4())
+
+    class Connection:
+        async def fetchrow(self, query, *args):
+            if "SET status='cancelled'" in query:
+                return None
+            assert query.startswith("SELECT * FROM hunt_runs"), query
+            return _row(id=uuid.UUID(hunt_id), status="cancelled")
+
+        async def fetch(self, query, *args):
+            assert "hunt_cancellable_jobs" in query
+            return []
+
+    result = asyncio.run(HuntRunService(lambda: _Pool(Connection())).cancel(hunt_id))
+    assert result["status"] == "cancelled"
+    assert result["already_terminal"] is True
 
 
 def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
