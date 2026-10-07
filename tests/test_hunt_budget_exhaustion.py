@@ -104,8 +104,7 @@ def _worker_reconstruction(adapter, args, action_id, stored_requested, context):
     }
     requested["agent_actions"] = 1
     requested["active_actions"] = 1
-    hosts = host_accounting.action_hosts(prepared)
-    requested, prepared = host_accounting.bound_distinct_hosts(
+    requested, prepared, hosts = host_accounting.bound_distinct_hosts(
         requested, prepared, stored_requested, context,
     )
     return hosts, requested, prepared, _digest(prepared, args, action_id, requested)
@@ -191,10 +190,10 @@ def test_partial_host_hold_charges_and_records_only_the_new_host():
         owner_kind="hunt", owner_id=HUNT_ID, capability_name="service.fingerprint",
         amounts={**charges, "agent_actions": 1},
     )
-    hosts = host_accounting.action_hosts(prepared)
-    requested, bounded = host_accounting.bound_distinct_hosts(
+    requested, bounded, hosts = host_accounting.bound_distinct_hosts(
         dict(prepared.estimated_budget), prepared, record.requested, context,
     )
+    assert hosts == {ADDRESS, second}
     assert requested["hosts_attempted"] == bounded.estimated_budget["hosts_attempted"] == 1
     conn = RecordingConnection()
     asyncio.run(host_accounting.record_attempted_hosts(
@@ -242,10 +241,10 @@ def test_unknown_host_identity_keeps_the_conservative_full_charge():
         {"hosts_attempted_addresses": [ADDRESS]}, prepared, {"hosts_attempted": 1},
     )
     assert charges["hosts_attempted"] == 1
-    budget, same = host_accounting.bound_distinct_hosts(
+    budget, same, hosts = host_accounting.bound_distinct_hosts(
         {"hosts_attempted": 1}, prepared, {}, {"hosts_attempted_addresses": [ADDRESS]},
     )
-    assert budget["hosts_attempted"] == 1 and same is prepared
+    assert budget["hosts_attempted"] == 1 and same is prepared and hosts == frozenset()
 
 
 def test_hosts_are_recorded_only_after_their_whole_hold_was_measured():
@@ -264,11 +263,11 @@ def test_worker_network_job_adopts_and_records_the_distinct_host_hold():
     source = (root / "api" / "worker.py").read_text(encoding="utf-8")
     job = source[source.index("async def process_canonical_network_capability_job"):]
     job = job[:job.index("\nasync def ", 10)]
-    hosts = job.index("attempted_hosts = action_hosts(prepared)")
     adopt = job.index(
-        "bound_distinct_hosts(requested_budget, prepared, stored.record.requested, context)"
+        "requested_budget, prepared, attempted_hosts = bound_distinct_hosts("
+        "requested_budget, prepared, stored.record.requested, context)"
     )
-    assert hosts < adopt < job.index("recomputed_digest = hunt_capability_action_digest(")
+    assert adopt < job.index("recomputed_digest = hunt_capability_action_digest(")
     assert adopt < job.index("build_network_execution(prepared=prepared")
     assert "record_attempted_hosts(conn, hunt_id=hunt_id, run=locked, hosts=attempted_hosts" in job
     admission = Path(router.__file__).read_text(encoding="utf-8")
