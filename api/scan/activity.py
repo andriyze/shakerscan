@@ -88,6 +88,8 @@ _DIAGNOSTIC_ERROR_CLASSES = frozenset({
     # send, and cancellation are stated reasons, not unclassified adapter errors.
     "http_request_budget_exhausted", "state_changing_budget_exhausted",
     "process_killed", "cancelled",
+    # Every endpoint was attempted; the named endpoints were too slow to finish the pack.
+    "slow_endpoints",
 })
 # Labels a batch prepends to say *that* it failed rather than *why*. They are honest answers
 # only when nothing more specific follows, so the scan must look past them.

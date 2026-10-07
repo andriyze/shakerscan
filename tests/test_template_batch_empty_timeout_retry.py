@@ -176,8 +176,10 @@ def test_no_retry_when_the_residual_is_no_larger_than_the_share_that_timed_out(m
     assert _within_reservation(receipt)
 
 
-def test_partial_output_from_a_timed_out_attempt_is_kept_and_not_retried(monkeypatch):
-    # Output the tool printed before its wall is trustworthy evidence: kept, no retry needed.
+def test_a_passive_pack_cut_off_after_some_output_is_retried_and_its_output_kept_once(monkeypatch):
+    # Output printed before the wall is real evidence, but a passive pack cut off part-way did
+    # not examine the endpoint, so it is retried (soak N32). The retry re-sends the whole pack,
+    # so its matches replace the cut-off attempt's rather than duplicating them.
     def outcome(path, call, granted):
         if path == "/slow":
             matched = _matched(path, granted, seconds=granted["tool_wall_seconds"])
@@ -186,10 +188,12 @@ def test_partial_output_from_a_timed_out_attempt_is_kept_and_not_retried(monkeyp
 
     receipt, calls, _, _ = _run(monkeypatch, outcome)
 
-    assert [path for path, _ in calls].count("/slow") == 1
+    assert [path for path, _ in calls].count("/slow") == 2
     assert _matches(receipt) == ["/fast-one", "/fast-two", "/slow"]
     assert receipt.status == "partial" and receipt.timed_out is True
-    assert receipt.redacted_execution["unexamined_count"] == 0
+    # The endpoint that could not finish even on its retry is named, not a generic timeout.
+    assert receipt.redacted_execution["unexamined_count"] == 1
+    assert receipt.errors[0] == "slow_endpoints"
 
 
 def test_a_resumed_batch_replays_the_retry_without_running_anything(monkeypatch):

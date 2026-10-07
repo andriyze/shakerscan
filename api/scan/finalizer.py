@@ -1781,7 +1781,7 @@ def finalize_scan_report(
             # Per-capability manifest size vs what the plan actually scheduled. A capability whose
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
-            "_manifest_entries": {}, "_scheduled_entries": {},
+            "_manifest_entries": {}, "_scheduled_entries": {}, "_slow_endpoints": [],
             "proof_escalation": {
                 "actions": 0, "attempted_candidates": 0,
                 "_statuses": [], "_reasons": [],
@@ -1802,6 +1802,13 @@ def finalize_scan_report(
                 proof["_reasons"].append(result.reason_code.value)
         else:
             row["batch_actions"] += 1
+            # Endpoints a template batch could not finish inside its wall even on a retry
+            # sized for a slow endpoint (soak N32), named so coverage says which ones.
+            row["_slow_endpoints"].extend(
+                str(item.get("url") or item.get("candidate_id") or "")
+                for item in observations.get(action.action_id, ())
+                if isinstance(item, Mapping) and item.get("kind") == "template_slow_endpoint"
+            )
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
             row["_statuses"].append(result.status.value)
@@ -1840,6 +1847,10 @@ def finalize_scan_report(
     for family, row in family_coverage.items():
         statuses = row.pop("_statuses")
         batch_reasons = row.pop("_reasons")
+        slow_endpoints = sorted(set(filter(None, row.pop("_slow_endpoints"))))
+        if slow_endpoints:
+            row["slow_endpoints"] = slow_endpoints
+            row["slow_endpoint_count"] = len(slow_endpoints)
         proof = row["proof_escalation"]
         proof_statuses = proof.pop("_statuses")
         proof_reasons = proof.pop("_reasons")
@@ -1912,6 +1923,12 @@ def finalize_scan_report(
         elif (action_incomplete or zero_attempts) and not no_candidates:
             row["coverage_status"] = "partial"
             row["reason"] = "zero_attempts" if zero_attempts else "action_incomplete"
+            if slow_endpoints and not zero_attempts and all(
+                reason == "slow_endpoints"
+                for status, reason in zip(statuses, batch_reasons) if status != "success"
+            ):
+                # Partial because of these named slow endpoints, not a generic timeout.
+                row["reason"] = "slow_endpoints"
             if row["required"]:
                 selected_family_gaps.append(family)
         elif row["unscheduled_candidates"] > 0:

@@ -278,6 +278,20 @@ const COVERAGE_REASON_LABELS = {
   parser_promoted_or_degraded_output: 'A step returned output that could only be partly read',
   nmap_timeout_reported: 'The port scan ran out of time before it finished',
   malformed_naabu_jsonl: 'The port discovery step returned output that could not be read',
+  slow_endpoints: 'Some endpoints answered too slowly to finish the passive templates in time',
+  no_families_selected: 'The scan policy selected no check family, so only the baseline probes ran',
+}
+
+// "Partial because N slow endpoints", naming them from the family coverage the finalizer wrote,
+// so a reader sees which endpoints were too slow rather than a generic timeout.
+export function slowEndpointsLabel(coverage) {
+  const rows = Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : []
+  const endpoints = [...new Set(rows.flatMap((row) => (
+    Array.isArray(record(row).slow_endpoints) ? record(row).slow_endpoints.map((item) => String(item || '')) : []
+  )).filter(Boolean))]
+  if (!endpoints.length) return COVERAGE_REASON_LABELS.slow_endpoints
+  const plural = endpoints.length === 1 ? 'endpoint' : 'endpoints'
+  return `Partial because ${endpoints.length} slow ${plural} could not finish the passive templates in time: ${endpoints.join(', ')}`
 }
 
 // Why no application response was observed. The finalizer records the cause as a coverage
@@ -578,7 +592,11 @@ export function scanResultPresentation(scan, assurance) {
         ? `${assuranceLabel} for the work that ran, but the run did not finish everything it planned; the conclusion is limited to what completed.`
         : `${assuranceLabel} for the work that ran; the listed coverage gaps limit what can be concluded from this run.`
       : `${assuranceLabel} supports this run-level conclusion.`
-  const coverageGapReasons = coverageReasons.map((reason) => COVERAGE_REASON_LABELS[String(reason)] || String(reason || '').replaceAll('_', ' ')).filter(Boolean)
+  const coverageGapReasons = coverageReasons.map((reason) => (
+    String(reason) === 'slow_endpoints'
+      ? slowEndpointsLabel(coverage)
+      : COVERAGE_REASON_LABELS[String(reason)] || String(reason || '').replaceAll('_', ' ')
+  )).filter(Boolean)
   const nextSteps = nextStepsFor({
     targetUrl: String(scanRecord.target_url || scanRecord.target || ''),
     testingWarning,

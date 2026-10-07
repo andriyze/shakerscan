@@ -152,7 +152,7 @@ def test_the_slice_holds_requests_for_a_retry_and_a_wall_killed_endpoint_recover
     # the slice now holds for it.
     paths = ("/slow", "/a", "/b", "/c")
     budget = {"http_requests": passive_batch_request_hold(4), "tool_wall_seconds": 48}
-    assert budget["http_requests"] == PACK * 5
+    assert budget["http_requests"] == PACK * 6
     receipt, calls = _run(monkeypatch, paths, budget, stalls_once={"/slow"})
 
     assert [path for path, _ in calls].count("/slow") == 2
@@ -180,8 +180,11 @@ def test_a_retry_the_request_hold_cannot_fund_names_the_request_ceiling(monkeypa
 
 
 def test_planned_passive_slices_hold_retry_headroom():
-    assert passive_batch_request_hold(18) == PACK * (18 + 4)
-    assert passive_batch_request_hold(25) == PACK * (25 + 6)
-    assert passive_batch_request_hold(4) == PACK * 5
+    # One retry per two endpoints (soak e5264021: a slice of seven had two slow endpoints).
+    assert passive_batch_request_hold(18) == PACK * (18 + 9)
+    assert passive_batch_request_hold(25) == PACK * (25 + 12)
+    assert passive_batch_request_hold(7) == PACK * (7 + 3)
+    assert passive_batch_request_hold(4) == PACK * 6
+    assert passive_batch_request_hold(3) == PACK * 3
     # The single-route admission slice keeps exactly the pack (tight parallel children).
     assert passive_batch_request_hold(1) == PACK

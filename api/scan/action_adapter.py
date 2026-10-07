@@ -12,6 +12,7 @@ import functools
 import hashlib
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
 import json
+import statistics
 import urllib.parse
 
 try:
@@ -189,6 +190,7 @@ from .external_process import (
     batch_attempt_floor,
     order_batch_rows_by_cost_class,
     template_attempt_wall,
+    template_retry_wall,
 )
 from .continuation import (
     ScanContinuationError,
@@ -3153,7 +3155,24 @@ class DatabaseNeutralScanActionDispatcher:
         # only when that share is larger than the one it timed out on; an endpoint that still
         # produced nothing is reported as unexamined. Shares in the first pass are unchanged.
         retry_empty_timeouts = tool == "nuclei"
+        # The passive pack is seven read-only GETs, so an endpoint the wall cut off part-way is
+        # retried too: a pack that sent some of its templates did not examine the endpoint.
+        # Soak e5264021 left 5 of 28 attempts on honey's AI endpoints wall-killed at ~12 s with
+        # 45 s of the batch's wall unspent, because only an attempt with no output was retried.
+        # The first attempt is the latency measurement: an endpoint that did not finish the
+        # pack inside its share needs the pack's latency bound (template_retry_wall), and its
+        # retry holds that much of what the batch has left.
+        retry_partial_timeouts = action.capability_name == "templates.passive_batch"
         empty_timeouts: dict[str, int] = {}
+        # The first attempt each retried endpoint was cut off in, and the redacted URL each
+        # endpoint was attempted at, so an endpoint that never finished can be named.
+        cut_off_attempts: dict[str, str] = {}
+        endpoint_urls: dict[str, str] = {}
+        retry_walls: dict[str, int] = {}
+        retried_with_output: set[str] = set()
+        # The wall each finished first-pass template attempt took: the target's measured pack
+        # latency, which sizes what later attempts are reserved (template_attempt_wall).
+        finished_walls: list[int] = []
         deferred_errors: dict[str, list[str]] = {}
         still_empty: set[str] = set()
         recovered: set[str] = set()
@@ -3233,9 +3252,19 @@ class DatabaseNeutralScanActionDispatcher:
                 prior_timed_out = (
                     prior_status in {"timed_out", "partial"} or bool(prior.get("timed_out"))
                 )
-                prior_empty = retry_empty_timeouts and prior_timed_out and _no_tool_output(
-                    prior.get("observations") or (),
+                prior_empty = retry_empty_timeouts and prior_timed_out and (
+                    _no_tool_output(prior.get("observations") or ())
+                    or (retry_partial_timeouts and prior_wall_killed)
                 )
+                if prior_empty and not retry_round:
+                    cut_off_attempts[candidate_id] = attempt_id
+                if retry_round and not _no_tool_output(prior.get("observations") or ()):
+                    retried_with_output.add(candidate_id)
+                prior_wall = int(dict(prior.get("budget_consumed") or {}).get(
+                    "tool_wall_seconds", 0,
+                ) or 0)
+                if not retry_round and prior_status in _BATCH_SUCCESS_STATUSES and prior_wall > 0:
+                    finished_walls.append(prior_wall)
                 self._settle_template_attempt(
                     candidate_id, retry_round, prior_empty,
                     succeeded=prior_status in _BATCH_SUCCESS_STATUSES,
@@ -3313,12 +3342,27 @@ class DatabaseNeutralScanActionDispatcher:
                     for name, amount in remaining_budget.items() if amount > 0
                 }
                 if tool == "nuclei" and sub_budget.get("tool_wall_seconds"):
-                    sub_budget["tool_wall_seconds"] = template_attempt_wall(
-                        remaining_wall=remaining_budget["tool_wall_seconds"],
-                        remaining_attempts=remaining_attempts,
-                        planned_share=int(action.requested_budget.get("tool_wall_seconds") or 0)
-                        // max(1, first_pass),
-                        passive_pack=action.capability_name == "templates.passive_batch",
+                    planned_share = (
+                        int(action.requested_budget.get("tool_wall_seconds") or 0)
+                        // max(1, first_pass)
+                    )
+                    passive_pack = action.capability_name == "templates.passive_batch"
+                    sub_budget["tool_wall_seconds"] = (
+                        template_retry_wall(
+                            remaining_wall=remaining_budget["tool_wall_seconds"],
+                            planned_share=planned_share,
+                            passive_pack=passive_pack,
+                        )
+                        if retry_round else
+                        template_attempt_wall(
+                            remaining_wall=remaining_budget["tool_wall_seconds"],
+                            remaining_attempts=remaining_attempts,
+                            planned_share=planned_share,
+                            passive_pack=passive_pack,
+                            measured_wall=(
+                                statistics.median_low(finished_walls) if finished_walls else None
+                            ),
+                        )
                     )
                 if body_request:
                     # Every request a body attempt sends is a mutation, so the body scanner
@@ -3360,6 +3404,9 @@ class DatabaseNeutralScanActionDispatcher:
                     # The residual would grant no more wall than the attempt that timed out
                     # empty: retrying it would fail the same way. It stays unexamined.
                     continue
+                if retry_round:
+                    retry_walls[candidate_id] = int(sub_budget["tool_wall_seconds"])
+                endpoint_urls.setdefault(candidate_id, redact_url(execution_target))
                 parsed = urllib.parse.urlsplit(execution_target)
                 registered_target = urllib.parse.urlunsplit(
                     (parsed.scheme, parsed.netloc, "", "", "")
@@ -3511,6 +3558,8 @@ class DatabaseNeutralScanActionDispatcher:
                     await checkpoint_attempt(action.action_id, attempt)
                 if retry_round:
                     retried += 1
+                    if result.observations:
+                        retried_with_output.add(candidate_id)
                 else:
                     attempted += 1
                 observations.extend(attempt_observations)
@@ -3518,9 +3567,22 @@ class DatabaseNeutralScanActionDispatcher:
                     result.status in {"timed_out", "partial"}
                     or bool(getattr(result, "timed_out", False))
                 )
+                result_wall_killed = (
+                    bool(getattr(result, "timed_out", False)) or result.status == "timed_out"
+                )
+                needs_retry = retry_empty_timeouts and result_timed_out and (
+                    not result.observations or (retry_partial_timeouts and result_wall_killed)
+                )
+                if needs_retry and not retry_round:
+                    cut_off_attempts[candidate_id] = attempt_id
+                if (
+                    not retry_round and result.status in _BATCH_SUCCESS_STATUSES
+                    and int(result.actual_budget.get("tool_wall_seconds", 0) or 0) > 0
+                ):
+                    finished_walls.append(int(result.actual_budget["tool_wall_seconds"]))
                 self._settle_template_attempt(
                     candidate_id, retry_round,
-                    retry_empty_timeouts and result_timed_out and not result.observations,
+                    needs_retry,
                     succeeded=result.status in _BATCH_SUCCESS_STATUSES,
                     granted_wall=int(sub_budget.get("tool_wall_seconds", 0)),
                     attempt_errors=[str(item) for item in result.errors],
@@ -3594,6 +3656,33 @@ class DatabaseNeutralScanActionDispatcher:
             ]
             terminal_failure = any(not succeeded for _, _, succeeded, _ in standing)
             attempt_timed_out = any(timed_out for _, _, _, timed_out in standing)
+        if (recovered or retried_with_output) and cut_off_attempts:
+            # A retry re-sends the whole pack with more wall than the cut-off first attempt had,
+            # so what that attempt reported before its wall would only duplicate the retry's
+            # matches. Its bookkeeping record stays, so the attempt remains on the receipt.
+            superseded_attempts = {
+                cut_off_attempts[item] for item in recovered | retried_with_output
+                if item in cut_off_attempts
+            }
+            observations = [
+                item for item in observations
+                if not (
+                    isinstance(item, Mapping)
+                    and item.get("attempt_id") in superseded_attempts
+                    and item.get("kind") != "candidate_attempt"
+                )
+            ]
+        slow_endpoints = sorted(still_empty) if retry_partial_timeouts else []
+        for candidate_id in slow_endpoints:
+            # Named per endpoint, so coverage can say which endpoints were too slow for the
+            # pack inside this batch's wall instead of a generic timeout.
+            observations.append({
+                "kind": "template_slow_endpoint",
+                "candidate_id": candidate_id,
+                "url": endpoint_urls.get(candidate_id, ""),
+                "first_attempt_wall_seconds": int(empty_timeouts.get(candidate_id, 0)),
+                "retry_wall_seconds": int(retry_walls.get(candidate_id, 0)),
+            })
         unattempted = max(0, len(rows) - attempted - inapplicable)
         partial = unattempted > 0 or terminal_failure
         # Say why, ahead of any per-attempt tool errors, so the durable reason is
@@ -3617,6 +3706,17 @@ class DatabaseNeutralScanActionDispatcher:
             if stated == CapabilityResultReason.TIMED_OUT.value and unattempted:
                 # The action's own wall ran out with candidates left: a real timeout.
                 attempt_timed_out = attempt_timed_out or "tool_wall_seconds" in exhausted
+            elif (
+                stated == CapabilityResultReason.TIMED_OUT.value and slow_endpoints
+                and {entry[0] for entry in attempt_log if entry[2]}
+                and {entry[0] for entry in attempt_log}
+                <= {entry[0] for entry in attempt_log if entry[2]} | set(slow_endpoints)
+            ):
+                # Every endpoint was attempted, every other endpoint finished, and every stop
+                # was the wall cutting off an endpoint that could not finish the pack even on
+                # its retry: name those endpoints instead of a timeout of the whole batch. When
+                # no endpoint finished, the host or the whole target was slow -- a timeout.
+                stated = CapabilityResultReason.SLOW_ENDPOINTS.value
             batch_errors.insert(0, stated)
         return self._receipt(
             action,
@@ -3645,6 +3745,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "recovered_count": len(recovered),
                 "unexamined_count": len(still_empty),
                 "unexamined_candidate_ids": sorted(still_empty)[:50],
+                **({"slow_endpoint_count": len(slow_endpoints)} if slow_endpoints else {}),
                 "checkpoint_mode": "after_each_candidate",
                 **({"extends": extends} if extends else {}),
                 **({"technique_stages": staged_summary} if tool == "sqlmap" else {}),

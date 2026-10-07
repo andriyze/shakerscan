@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import re
 from typing import Any, Mapping, Sequence
 
@@ -178,12 +179,20 @@ PASSIVE_PACK_ATTEMPT_WALL_SECONDS = 7 * 5 + 5
 _TEMPLATE_ATTEMPT_SHARE_MULTIPLE = 3
 
 
+# What a later passive-pack attempt is reserved once finished attempts on this target have
+# measured the pack: the typical (median) finished attempt's wall with this margin, never
+# below process start-up and never above the planned share.
+_PASSIVE_MEASURED_MARGIN = 1.5
+_PASSIVE_MEASURED_FLOOR_SECONDS = 5
+
+
 def template_attempt_wall(
     *,
     remaining_wall: int,
     remaining_attempts: int,
     planned_share: int,
     passive_pack: bool,
+    measured_wall: float | None = None,
 ) -> int:
     """The wall one template sweep attempt may hold, front-loading what earlier ones left.
 
@@ -193,6 +202,13 @@ def template_attempt_wall(
     128 of the batch's 216 seconds never used. An attempt may now take what earlier attempts
     left unspent, up to what the work can need, while every attempt after it keeps at least
     its planned share: a later attempt is never funded below what the plan promised it.
+
+    Once passive-pack attempts on this target have finished, ``measured_wall`` (the typical
+    finished attempt's wall) replaces the planned share as what each later attempt is
+    reserved. Soak e5264021 gave an AI endpoint answering in ~3-5 s 12 seconds while its
+    fast siblings had each finished in about three, because every later attempt was still
+    reserved 12. A later endpoint that turns out slower than measured is cut off and retried
+    at the pack's bound (``template_retry_wall``), so nothing is left unexamined silently.
     """
     remaining = max(0, int(remaining_wall))
     attempts = max(1, int(remaining_attempts))
@@ -202,8 +218,38 @@ def template_attempt_wall(
         max(share, PASSIVE_PACK_ATTEMPT_WALL_SECONDS) if passive_pack
         else share * _TEMPLATE_ATTEMPT_SHARE_MULTIPLE
     )
-    spare = remaining - (attempts - 1) * share
+    reserve = share
+    if passive_pack and measured_wall is not None and measured_wall > 0:
+        reserve = min(share, max(
+            _PASSIVE_MEASURED_FLOOR_SECONDS,
+            math.ceil(float(measured_wall) * _PASSIVE_MEASURED_MARGIN),
+        ))
+    spare = remaining - (attempts - 1) * reserve
     return max(even, min(ceiling, spare))
+
+
+def template_retry_wall(
+    *,
+    remaining_wall: int,
+    planned_share: int,
+    passive_pack: bool,
+) -> int:
+    """The wall a template endpoint's retry holds, sized by what its first attempt measured.
+
+    Only an endpoint whose first attempt the wall cut off is retried, so the attempt measured
+    it as slower than the share allowed. The passive pack sends its seven GETs one at a time
+    and nuclei abandons any request after its 5-second ``-timeout``, so however slow the
+    endpoint answers, the pack needs at most ``PASSIVE_PACK_ATTEMPT_WALL_SECONDS``; an active
+    attempt keeps its share multiple. Retries run after every endpoint's first attempt, so a
+    retry takes that need from what the batch has left, in order: completing one slow endpoint
+    is worth more than starving each of them below what it needs again.
+    """
+    share = max(1, int(planned_share))
+    need = (
+        max(share, PASSIVE_PACK_ATTEMPT_WALL_SECONDS) if passive_pack
+        else share * _TEMPLATE_ATTEMPT_SHARE_MULTIPLE
+    )
+    return max(0, min(need, int(remaining_wall)))
 
 
 def batch_attempt_capacity(

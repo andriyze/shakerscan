@@ -79,6 +79,10 @@ class CapabilityResultReason(str, Enum):
     # As above for some of its operations only: the routes on the bound origin were ingested and
     # those declared only on another origin were not.
     DECLARED_PARTLY_OUT_OF_SCOPE = "declared_partly_out_of_scope"
+    # Every endpoint of a template batch was attempted, and the only work left undone is
+    # endpoints that answered too slowly to finish the pack even on a retry sized for a slow
+    # endpoint. The receipt names each one (`template_slow_endpoint` observations).
+    SLOW_ENDPOINTS = "slow_endpoints"
 
 
 # The reason naming each non-time budget dimension an action can run out of.
