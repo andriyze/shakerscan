@@ -129,6 +129,8 @@ def partition_test_files(repo_root: Path) -> tuple[tuple[Path, ...], tuple[Path,
 
 
 SHARD_MANIFEST_SCHEMA = "shakerscan-python-suite-shard/v1"
+# Read by scripts/pytest_shard_select.py.
+SHARD_SELECT_ENV = "SHAKERSCAN_PYTEST_SHARD_FILES"
 
 
 def parse_shard(value: str) -> tuple[int, int]:
@@ -309,13 +311,21 @@ def _run_group(
     coverage: bool,
     coverage_file: Path,
     junit_path: Path | None,
+    select: tuple[Path, ...] | None = None,
+    select_file: Path | None = None,
 ) -> int:
-    if not paths:
-        # A shard can hold no file of one group. pytest without paths would run the
-        # configured default test paths instead, so an empty slice runs nothing.
+    if not paths or select == ():
+        # A shard can hold no file of one group; it then runs nothing for that group.
         print(f"[{name}] 0 files", flush=True)
         return 0
     pytest_args = ["-q", "-p", "no:cacheprovider"]
+    if select is not None:
+        # Collect the whole group in the unsharded order, so every module-level import side
+        # effect matches the complete run, then execute only this shard's files.
+        if select_file is None:
+            raise CompleteSuiteError("a shard selection needs a selection file")
+        select_file.write_text(json.dumps(_relative(repo_root, select)), encoding="utf-8")
+        pytest_args.extend(["-p", "scripts.pytest_shard_select"])
     if collect_only:
         pytest_args.extend(["-q", "--collect-only"])
     if junit_path is not None:
@@ -333,7 +343,12 @@ def _run_group(
     env = _environment(repo_root, package_native=package_native)
     if coverage:
         env["COVERAGE_FILE"] = str(coverage_file)
-    print(f"[{name}] {len(paths)} files", flush=True)
+    if select is not None:
+        env[SHARD_SELECT_ENV] = str(select_file)
+        print(f"[{name}] {len(select)} of {len(paths)} collected files", flush=True)
+    else:
+        env.pop(SHARD_SELECT_ENV, None)
+        print(f"[{name}] {len(paths)} files", flush=True)
     return subprocess.run(command, cwd=repo_root, env=env, check=False).returncode
 
 
@@ -367,13 +382,16 @@ def main(argv: list[str] | None = None) -> int:
 
     package, compatibility = partition_test_files(repo_root)
     shard: tuple[int, int] | None = None
+    selected: dict[str, tuple[Path, ...] | None] = {"package": None, "compatibility": None}
     if args.shard:
         try:
             shard = parse_shard(args.shard)
         except CompleteSuiteError as exc:
             parser.error(str(exc))
-        package = shard_paths(package, *shard)
-        compatibility = shard_paths(compatibility, *shard)
+        selected = {
+            "package": shard_paths(package, *shard),
+            "compatibility": shard_paths(compatibility, *shard),
+        }
     coverage_file = artifacts / ".coverage.v2"
     if not args.collect_only:
         artifacts.mkdir(parents=True, exist_ok=True)
@@ -400,10 +418,10 @@ def main(argv: list[str] | None = None) -> int:
             "schema": SHARD_MANIFEST_SCHEMA,
             "shard": shard[0],
             "count": shard[1],
-            "package": _relative(repo_root, package),
-            "compatibility": _relative(repo_root, compatibility),
+            "package": _relative(repo_root, selected["package"]),
+            "compatibility": _relative(repo_root, selected["compatibility"]),
         }, indent=2) + "\n", encoding="utf-8")
-        if not package and not compatibility:
+        if not selected["package"] and not selected["compatibility"]:
             raise CompleteSuiteError(f"shard {args.shard} has no test files; use fewer shards")
     results = [
         _run_group(
@@ -415,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
             coverage=args.coverage,
             coverage_file=coverage_file,
             junit_path=None if args.collect_only else reports["package"],
+            select=selected["package"],
+            select_file=None if shard is None else artifacts / f"{_shard_stem(*shard)}-package-select.json",
         ),
         _run_group(
             repo_root,
@@ -425,6 +445,8 @@ def main(argv: list[str] | None = None) -> int:
             coverage=args.coverage,
             coverage_file=coverage_file,
             junit_path=None if args.collect_only else reports["compatibility"],
+            select=selected["compatibility"],
+            select_file=None if shard is None else artifacts / f"{_shard_stem(*shard)}-compatibility-select.json",
         ),
     ]
     if args.collect_only:
