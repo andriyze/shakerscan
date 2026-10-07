@@ -211,6 +211,12 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                     from api.hunt.coverage_ledger import COVERAGE_LEDGER_SCHEMA_STATEMENTS
                 for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
                     await conn.execute(statement)
+                try:
+                    from investigation_candidates import CANDIDATE_SCHEMA_STATEMENTS
+                except ModuleNotFoundError:
+                    from api.investigation_candidates import CANDIDATE_SCHEMA_STATEMENTS
+                for statement in CANDIDATE_SCHEMA_STATEMENTS:
+                    await conn.execute(statement)
                 # Data migrations added after the conversion must run here: the baseline above
                 # never runs again on a converted database. Each is marker-gated.
                 try:

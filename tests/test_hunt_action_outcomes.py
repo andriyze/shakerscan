@@ -145,6 +145,9 @@ DSN = os.environ.get("HUNT_TEST_POSTGRES_DSN")
 
 @pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not configured")
 def test_postgres_candidate_query_selects_live_candidates_observed_by_the_hunt():
+    from api.investigation_candidates import CANDIDATE_SCHEMA_STATEMENTS
+    from tests.hunt_candidate_pg_schema import candidate_schema_sql
+
     async def scenario():
         import asyncpg
         assert urlsplit(DSN).hostname in {"localhost", "127.0.0.1", "::1"}
@@ -153,19 +156,91 @@ def test_postgres_candidate_query_selects_live_candidates_observed_by_the_hunt()
         try:
             await conn.execute(f'CREATE SCHEMA "{schema}"')
             await conn.execute(f'SET search_path TO "{schema}"')
-            await conn.execute("""
-                CREATE TABLE investigation_candidates(id uuid PRIMARY KEY, status text);
-                CREATE TABLE investigation_candidate_observations(candidate_id uuid, hunt_run_id uuid);
-            """)
+            # The real baseline DDL, then unified startup twice (a converted, restarted install).
+            await conn.execute(candidate_schema_sql())
+            for _ in range(2):
+                for statement in CANDIDATE_SCHEMA_STATEMENTS:
+                    await conn.execute(statement)
+            target = uuid.uuid4()
             hunt, other = uuid.uuid4(), uuid.uuid4()
             live, expired, foreign = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
             for cid, status, owner in ((live, "new", hunt), (expired, "expired", hunt), (foreign, "new", other)):
-                await conn.execute("INSERT INTO investigation_candidates VALUES($1,$2)", cid, status)
-                await conn.execute("INSERT INTO investigation_candidate_observations VALUES($1,$2)", cid, owner)
-            await conn.execute("INSERT INTO investigation_candidate_observations VALUES($1,$2)", live, hunt)
+                await conn.execute(
+                    """INSERT INTO investigation_candidates
+                       (id, plane, target_id, family, title, claim, fingerprint, status)
+                       VALUES ($1,'web',$2,'x','t','c',$3,$4)""",
+                    cid, target, cid.hex, status,
+                )
+                await conn.execute(
+                    """INSERT INTO investigation_candidate_observations
+                       (candidate_id, hunt_run_id, title, claim) VALUES ($1,$2,'t','c')""",
+                    cid, owner,
+                )
+            await conn.execute(
+                """INSERT INTO investigation_candidate_observations
+                   (candidate_id, hunt_run_id, title, claim) VALUES ($1,$2,'t','c')""",
+                live, hunt,
+            )
             rows = await conn.fetch(HUNT_CANDIDATES_QUERY, hunt)
             assert [(row["id"], row["total_count"]) for row in rows] == [(live, 1)]
+            # The per-Hunt lookup is served by the hunt_run_id index, not a table scan.
+            await conn.execute("SET enable_seqscan = off")
+            plan = "\n".join(
+                row[0] for row in await conn.fetch("EXPLAIN " + HUNT_CANDIDATES_QUERY, hunt)
+            )
+            assert "idx_investigation_candidate_observations_hunt_run" in plan
         finally:
             await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
             await conn.close()
     asyncio.run(scenario())
+
+
+def test_unified_startup_installs_the_candidate_schema_on_converted_instances(monkeypatch):
+    import importlib
+
+    from api.targets import asset_migration
+
+    executed: list[str] = []
+
+    class Conn:
+        async def execute(self, statement, *args):
+            executed.append(" ".join(str(statement).split()))
+            return "OK"
+
+        def transaction(self):
+            @asynccontextmanager
+            async def scope():
+                yield self
+            return scope()
+
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self):
+            yield Conn()
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    async def converted(_conn):
+        return True
+
+    async def baseline(_pool):
+        raise AssertionError("a converted instance never reruns the frozen baseline")
+
+    monkeypatch.setattr(asset_migration, "migration_applied", converted)
+    monkeypatch.setattr(asset_migration, "reconcile_active_finding_counts", noop)
+    monkeypatch.setattr(
+        importlib.import_module("api.targets.asset_inputs_migration"), "migrate_asset_inputs", noop,
+    )
+    for module, name in (
+        ("runtime.ai_header_secrets", "encrypt_stored_secrets"),
+        ("runtime.ai_template_secrets", "encrypt_stored_templates"),
+        ("runtime.archive_blob_secrets", "encrypt_stored_blobs"),
+        ("runtime.credential_migration", "migrate_legacy_web_credentials"),
+    ):
+        monkeypatch.setattr(importlib.import_module(module), name, noop)
+    asyncio.run(asset_migration.run_unified_startup(Pool(), baseline))
+    assert any(
+        "CREATE INDEX IF NOT EXISTS idx_investigation_candidate_observations_hunt_run" in statement
+        for statement in executed
+    )
