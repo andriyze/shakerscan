@@ -34,9 +34,12 @@ from runtime.request_shape import (
 from scan.negative_control import is_negative_control_url
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
+    BATCH_ATTEMPT_REQUEST_HEADROOM,
     EnforcedProcessPlan,
     ExternalProcessContractError,
+    MAXIMUM_MEASURED_LATENCY_SECONDS,
     PROCESS_BUDGET_PROOF_SCHEMA,
+    paced_request_delay,
 )
 from scan.work_manifests import (
     CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
@@ -383,7 +386,10 @@ EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
 # actually send across the WHOLE wall. Below 1.0 it keeps a headroom margin so
 # scheduling jitter cannot push the tool over the pinned connection/wire ceiling
 # and fail the whole attempt (see _batch_attempt_pacing).
-_BATCH_ATTEMPT_REQUEST_HEADROOM = 0.9
+_BATCH_ATTEMPT_REQUEST_HEADROOM = BATCH_ATTEMPT_REQUEST_HEADROOM
+# The sqlmap technique letters a batched attempt may be confined to: one technique stage of a
+# resumable SQLi verification (scan/sqli_stages.py), or all four together.
+SQLMAP_TECHNIQUES = frozenset({"B", "E", "U", "T", "BEUT"})
 # nuclei's global request rate, as fixed in its argv; batch pacing may lower it, never raise it.
 _NUCLEI_RATE_CEILING = 10
 # The tool-keyed view of the shared per-attempt floors, so argv enforcement can
@@ -629,7 +635,10 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     # techniques would confirm (Juice Shop's q returns 500 yet was skipped).
     # --ignore-redirects keeps redirect containment without an --answers pattern that
     # substring-matches URLs containing "redirect" and silently declines testing.
-    args = ["-u", url, "--batch", "--technique", "BEUT", "--level", "2", "--risk", "2",
+    technique = str(opts.get("technique") or "BEUT").strip().upper()
+    if technique not in SQLMAP_TECHNIQUES:
+        technique = "BEUT"
+    args = ["-u", url, "--batch", "--technique", technique, "--level", "2", "--risk", "2",
             "--threads", "1", "--timeout", "8", "--retries", "0", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
             # -t logs every HTTP transaction sqlmap sends. The worker binds it into the
@@ -1072,7 +1081,9 @@ def build_scanner_argv(
     )
 
 
-def _batch_attempt_pacing(http: int, wall: int, *, minimum_seconds: float) -> tuple[float, int]:
+def _batch_attempt_pacing(
+    http: int, wall: int, *, minimum_seconds: float, latency_seconds: float = 0.0,
+) -> tuple[float, int]:
     """Pace one batched attempt so its reservation bounds its traffic over the whole wall.
 
     Nothing counts requests at run time for these tools, and the process runs until the
@@ -1096,18 +1107,12 @@ def _batch_attempt_pacing(http: int, wall: int, *, minimum_seconds: float) -> tu
     ``_BATCH_ATTEMPT_REQUEST_HEADROOM`` keeps the paced rate strictly under the ceiling so
     scheduling jitter cannot cross it.
     """
-    requests = max(1, int(http))
-    seconds = max(1, int(wall))
     # Pace the reserved count (less a headroom margin) across the WHOLE wall, so
-    # requests_sent = wall / delay stays below the ceiling however long the tool runs.
-    paced_requests = max(1.0, requests * _BATCH_ATTEMPT_REQUEST_HEADROOM)
-    delay = seconds / paced_requests
-    if delay < minimum_seconds:
-        # Too little wall to pace this many requests even at the floor delay: keep the
-        # floor and admit only the smaller number the wall can actually cover.
-        delay = minimum_seconds
-        requests = max(1, int(seconds / delay))
-    return delay, min(int(http), requests)
+    # requests_sent = wall / delay stays below the ceiling however long the tool runs. A
+    # latency measured on an earlier attempt shortens the delay (scan.external_process).
+    return paced_request_delay(
+        http, wall, minimum_seconds=minimum_seconds, latency_seconds=latency_seconds,
+    )
 
 
 def _replace_argv_value(argv: list[str], flag: str, value: Any) -> None:
@@ -1158,6 +1163,14 @@ def build_enforced_scanner_plan(
     runtime = dict(runtime_paths or {})
     internal_options = dict(options or {})
     batch_attempt = internal_options.pop("_batch_attempt", False) is True
+    raw_latency = internal_options.pop("_measured_latency_seconds", None)
+    measured_latency = 0.0
+    if raw_latency is not None:
+        if isinstance(raw_latency, bool) or not isinstance(raw_latency, (int, float)) or not (
+            0.0 <= float(raw_latency) <= MAXIMUM_MEASURED_LATENCY_SECONDS
+        ):
+            raise AgentToolError("measured scanner latency is invalid")
+        measured_latency = float(raw_latency)
     if scanner == "ffuf" and runtime.get("ffuf_wordlist"):
         internal_options["wordlist"] = "common"
 
@@ -1474,15 +1487,17 @@ def build_enforced_scanner_plan(
         _replace_argv_value(argv, "--threads", 1)
         _replace_argv_value(argv, "--retries", 0)
         http = int(reservation.get("http_requests") or 0)
+        technique = argv[argv.index("--technique") + 1]
+        delay_seconds = 1.0
         if batch_attempt and http >= 1:
             delay_seconds, affordable = _batch_attempt_pacing(
-                http, wall, minimum_seconds=0.05,
+                http, wall, minimum_seconds=0.05, latency_seconds=measured_latency,
             )
             _replace_argv_value(argv, "--delay", f"{delay_seconds:.3f}")
             hard = {"http_requests": affordable, "tool_wall_seconds": wall}
             timeout_seconds, timeout_ms = wall, wall * 1_000
             mode, method = "conservative", "runtime_transport_wall_limiter"
-            techniques, profile = "BEUT", "batch_attempt"
+            techniques, profile = technique, "batch_attempt"
         elif (
             http >= EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["http_requests"]
             and wall >= EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["tool_wall_seconds"]
@@ -1491,7 +1506,7 @@ def build_enforced_scanner_plan(
             timeout_seconds = EXTERNAL_VERIFICATION_FLOORS["sqlmap"]["tool_wall_seconds"]
             timeout_ms = timeout_seconds * 1_000
             mode, method = "conservative", "fixed_conservative_profile"
-            techniques, profile = "BEUT", "full"
+            techniques, profile = technique, "full"
         else:
             floor = EXTERNAL_VERIFICATION_FLOORS["sqlmap"]
             raise AgentToolError(
@@ -1502,7 +1517,8 @@ def build_enforced_scanner_plan(
             "profile": profile, "targets": 1, "candidate_requests": 1,
             "connection_ceiling": http if batch_attempt else None,
             "crawl_depth": 0, "retries": 0, "threads": 1,
-            "delay_ms": 1_000, "startup_burst": 1,
+            "delay_ms": int(round(delay_seconds * 1_000)), "startup_burst": 1,
+            "measured_latency_ms": int(round(measured_latency * 1_000)),
             "techniques": techniques, "shell": False, "file_read": False,
             "dump": False,
         }

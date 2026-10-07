@@ -93,7 +93,30 @@ def test_only_a_latency_starved_timeout_is_extended(status, consumed):
     assert planned == ()
 
 
-def test_a_slice_is_extended_once_and_an_extension_never_again():
+def test_a_slice_is_extended_once_and_a_dalfox_extension_never_again():
+    # Dalfox cannot resume: extending its extension would re-send the same attempt.
+    original = _action("verify.xss.r01", "xss.verify_batch")
+    extension = _action(
+        "verify.xss.r01.ext.r02", "xss.verify_batch",
+        args={"slice": {"start": 0, "count": 1}, EXTENDS_ARG: "verify.xss.r01"},
+    )
+    planned = plan_verification_extensions(
+        parent_plan=_plan(original, extension),
+        parent_results={
+            "verify.xss.r01": _settled("timed_out"),
+            "verify.xss.r01.ext.r02": _settled("timed_out"),
+        },
+        profile_limits=BALANCED, residual=ROOMY,
+    )
+    assert planned == ()
+
+
+def test_a_resumable_sqli_extension_is_continued_at_the_lane_share():
+    """146b6c03: the r02 extension held the whole Balanced lane share (900 s), sent 230 of
+    1,714 requests and timed out. Its candidates' finished technique stages are checkpointed,
+    so a continuation at the same share resumes rather than repeats it."""
+    ext_reserved = {"http_requests": 1_714, "state_changing_requests": 1_028, "tool_wall_seconds": 900}
+    ext_consumed = {"http_requests": 230, "state_changing_requests": 230, "tool_wall_seconds": 900}
     original = _action("verify.sqli.r01", "sqli.verify_batch")
     extension = _action(
         "verify.sqli.r01.ext.r02", "sqli.verify_batch",
@@ -103,11 +126,16 @@ def test_a_slice_is_extended_once_and_an_extension_never_again():
         parent_plan=_plan(original, extension),
         parent_results={
             "verify.sqli.r01": _settled("timed_out"),
-            "verify.sqli.r01.ext.r02": _settled("timed_out"),
+            "verify.sqli.r01.ext.r02": _settled(
+                "timed_out", reserved=ext_reserved, consumed=ext_consumed,
+            ),
         },
         profile_limits=BALANCED, residual=ROOMY,
     )
-    assert planned == ()
+
+    assert [item["action_id"] for item in planned] == ["verify.sqli.r01.ext.r02.ext"]
+    assert planned[0]["capability_args"][EXTENDS_ARG] == "verify.sqli.r01.ext.r02"
+    assert planned[0]["budget"] == ext_reserved
 
 
 def test_the_residual_bounds_the_extension_or_drops_it():

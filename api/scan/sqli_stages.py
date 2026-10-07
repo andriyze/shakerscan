@@ -1,0 +1,284 @@
+"""Resumable SQLi verification: one candidate is verified as a sequence of technique stages.
+
+Soak target honey answers its AI endpoints in about 3.7 seconds, and no SQLi verification on
+it ever finished. A body candidate's sqlmap run at level 2 / risk 2 needs about 430 requests
+to reach a negative verdict (measured in the scanner image against a non-injectable JSON
+field: boolean 87, error 144, union 53, time 189 when run one technique at a time; 432 for
+all four together), so at ~4 seconds a request the 420-second slice sent 110 and the
+latency-sized 900-second extension sent 230 -- and the extension restarted sqlmap from the
+first payload, re-sending the slice's 110 before reaching anything new.
+
+Resuming sqlmap's own session does not help: its session store keeps found injection points,
+not which payloads came back negative, so a wall-killed run starts detection over. The unit
+that can be resumed is a technique: ``--technique X`` is a complete, independent detection
+pass, and its verdict ("not injectable by X") is final. Each stage runs as its own bounded
+sqlmap invocation and is checkpointed when it finishes; a later attempt on the same
+candidate -- after a crash, or in a verification extension -- continues at the first stage
+without a verdict and only ever repeats the one stage the wall interrupted.
+
+Stages run most-likely-to-prove first: boolean-based blind (the most common detection on JSON
+APIs and the cheapest), error-based (the strongest proof when the DBMS reflects errors),
+UNION (cheap), and time-based blind last (the most requests, each costing the full response
+time on a slow target). A stage that proves an injection ends the candidate. Every stage is
+paced and bounded exactly like the attempt it is part of; a stage holds whatever the
+candidate's sub-budget has left, so no ceiling grows. A stage the wall interrupted is not a
+verdict and the candidate stays unproven-incomplete; a stage that already ran out of wall
+once is not re-run on a hold no larger than the one it ran out of.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+from .external_process import paced_request_delay
+
+SQLI_TECHNIQUE_STAGES: tuple[str, ...] = ("B", "E", "U", "T")
+STAGE_RECORD_KIND = "sqli_technique_stage"
+_SUCCESS = frozenset({"success", "succeeded", "completed"})
+# A stage holding less wall than this cannot get past sqlmap's connection and heuristic
+# checks; the candidate stops there and a later attempt resumes the stage.
+MINIMUM_STAGE_WALL_SECONDS = 20
+# Matches the minimum delay of the paced batch attempt the worker builds.
+_MINIMUM_DELAY_SECONDS = 0.05
+
+
+def stage_attempt_id(candidate_attempt_id: str, technique: str) -> str:
+    """The durable checkpoint id of one technique stage of one candidate attempt."""
+    return hashlib.sha256(
+        f"{candidate_attempt_id}:technique:{technique}".encode()
+    ).hexdigest()
+
+
+def _status(value: Any) -> str:
+    return str(getattr(value, "value", value) or "").strip().lower()
+
+
+def _stage_record(checkpoint: Mapping[str, Any]) -> Mapping[str, Any]:
+    return next((
+        item for item in checkpoint.get("observations") or ()
+        if isinstance(item, Mapping) and item.get("kind") == STAGE_RECORD_KIND
+    ), {})
+
+
+def _proved(observations: Iterable[Any]) -> bool:
+    return any(
+        isinstance(item, Mapping) and item.get("kind") == "sqli_finding"
+        for item in observations or ()
+    )
+
+
+@dataclass
+class PriorStages:
+    """What earlier checkpoints already settled for one candidate's stages."""
+
+    finished: dict[str, tuple[str, Mapping[str, Any]]] = field(default_factory=dict)
+    wall_killed: dict[str, int] = field(default_factory=dict)
+    latency_seconds: float | None = None
+
+
+def prior_stages(
+    sources: Sequence[tuple[str, Iterable[Mapping[str, Any]]]],
+    candidate_attempt_id: str,
+) -> PriorStages:
+    """Collect the candidate's stage checkpoints from ``sources``, nearest first.
+
+    ``sources`` is this action's own checkpoints followed by those of every action it
+    extends, nearest first. The first finished checkpoint of a stage wins; the largest wall a
+    stage was ever killed at is kept so it is not re-run on a hold no larger. The latest
+    response time measured by the nearest action that measured one (seconds per request less
+    the delay the stage was paced at) is the latency the next stage is paced with.
+    """
+    prior = PriorStages()
+    wanted = {
+        stage_attempt_id(candidate_attempt_id, technique): technique
+        for technique in SQLI_TECHNIQUE_STAGES
+    }
+    for source, attempts in sources:
+        source_latency: float | None = None
+        for item in attempts or ():
+            if not isinstance(item, Mapping):
+                continue
+            technique = wanted.get(str(item.get("attempt_id") or ""))
+            if technique is None:
+                continue
+            record = _stage_record(item)
+            consumed = dict(item.get("budget_consumed") or {})
+            sent = int(consumed.get("http_requests") or 0)
+            wall = int(consumed.get("tool_wall_seconds") or 0)
+            if sent > 0 and wall > 0:
+                delay = float(record.get("delay_ms") or 0) / 1_000
+                source_latency = max(0.0, wall / sent - delay)
+            if (
+                _status(item.get("status")) in _SUCCESS
+                and not item.get("timed_out")
+            ):
+                prior.finished.setdefault(technique, (source, item))
+            elif item.get("timed_out") or _status(item.get("status")) == "timed_out":
+                prior.wall_killed[technique] = max(
+                    prior.wall_killed.get(technique, 0),
+                    int(consumed.get("tool_wall_seconds") or 0),
+                )
+        if prior.latency_seconds is None and source_latency is not None:
+            prior.latency_seconds = source_latency
+    return prior
+
+
+@dataclass(frozen=True)
+class StagedAttempt:
+    """One candidate's staged verification, in the shape the batch loop reads a result in."""
+
+    status: str
+    observations: tuple[Mapping[str, Any], ...]
+    errors: tuple[str, ...]
+    actual_budget: Mapping[str, int]
+    timed_out: bool
+    stages: tuple[Mapping[str, Any], ...]
+
+
+RunStage = Callable[[str, Mapping[str, int], float], Awaitable[Any]]
+Checkpoint = Callable[[Mapping[str, Any]], Awaitable[None]]
+
+
+async def run_staged_sqli_attempt(
+    *,
+    candidate_attempt_id: str,
+    candidate_id: str,
+    budget: Mapping[str, int],
+    prior: PriorStages,
+    own_action_id: str,
+    run_stage: RunStage,
+    checkpoint: Checkpoint,
+    cancelled: Callable[[], bool],
+) -> StagedAttempt:
+    """Verify one candidate stage by stage from what earlier checkpoints left unsettled."""
+    remaining = {name: max(0, int(amount)) for name, amount in budget.items()}
+    consumed: dict[str, int] = {name: 0 for name in budget}
+    observations: list[Mapping[str, Any]] = []
+    errors: list[str] = []
+    stages: list[Mapping[str, Any]] = []
+    latency = prior.latency_seconds or 0.0
+    complete = True
+    proven = False
+    timed_out = False
+    was_cancelled = False
+    for technique in SQLI_TECHNIQUE_STAGES:
+        finished = prior.finished.get(technique)
+        if finished is not None:
+            source, item = finished
+            if source == own_action_id:
+                # Resumed inside the same action: its records were never settled on a
+                # receipt, so they are this action's evidence.
+                observations.extend(
+                    dict(record) for record in item.get("observations") or ()
+                    if isinstance(record, Mapping)
+                )
+            else:
+                observations.append({
+                    **dict(_stage_record(item)), "kind": STAGE_RECORD_KIND,
+                    "technique": technique, "carried_from": source,
+                })
+            stages.append({"technique": technique, "outcome": "carried", "source": source})
+            if _proved(item.get("observations")):
+                proven = True
+                break
+            continue
+        if cancelled():
+            complete, was_cancelled = False, True
+            break
+        wall = int(remaining.get("tool_wall_seconds", 0))
+        http = int(remaining.get("http_requests", 0))
+        if http < 1:
+            # The candidate's request hold is spent: the request ceiling stopped it.
+            complete = False
+            stages.append({"technique": technique, "outcome": "requests_exhausted"})
+            errors.append("connection_limit_exceeded")
+            break
+        if wall < MINIMUM_STAGE_WALL_SECONDS:
+            # The candidate's wall ran out between stages. That is the wall stopping a
+            # candidate mid-verification, exactly as a stage killed by it, so a later
+            # extension may continue here.
+            complete = False
+            timed_out = True
+            stages.append({"technique": technique, "outcome": "wall_exhausted"})
+            errors.append("timeout")
+            break
+        if prior.wall_killed.get(technique, 0) >= wall:
+            # The same stage already ran out of a hold at least this large: re-running it
+            # would send the same requests and stop the same way. The candidate stays
+            # incomplete for want of wall, and nothing new was interrupted, so this does
+            # not ask for another extension.
+            complete = False
+            stages.append({"technique": technique, "outcome": "would_repeat_timeout"})
+            errors.append("timeout")
+            break
+        stage_budget = {name: amount for name, amount in remaining.items() if amount > 0}
+        delay, _ceiling = paced_request_delay(
+            int(stage_budget.get("http_requests", 1)), wall,
+            minimum_seconds=_MINIMUM_DELAY_SECONDS, latency_seconds=latency,
+        )
+        result = await run_stage(technique, stage_budget, latency)
+        status = _status(getattr(result, "status", ""))
+        spent = {
+            str(name): max(0, int(amount))
+            for name, amount in dict(getattr(result, "actual_budget", {}) or {}).items()
+        }
+        for name, amount in spent.items():
+            consumed[name] = consumed.get(name, 0) + amount
+            remaining[name] = max(0, remaining.get(name, 0) - amount)
+        stage_killed = bool(getattr(result, "timed_out", False)) or status == "timed_out"
+        sent = int(spent.get("http_requests", 0))
+        took = int(spent.get("tool_wall_seconds", 0))
+        if sent > 0 and took > 0:
+            latency = max(0.0, took / sent - delay)
+        record = {
+            "kind": STAGE_RECORD_KIND, "technique": technique, "status": status,
+            "timed_out": stage_killed, "budget_consumed": dict(spent),
+            "delay_ms": int(round(delay * 1_000)),
+            "measured_latency_ms": int(round(latency * 1_000)),
+        }
+        stage_observations = (record, *(
+            dict(item) for item in getattr(result, "observations", ()) or ()
+            if isinstance(item, Mapping)
+        ))
+        stage_errors = tuple(str(item) for item in getattr(result, "errors", ()) or ())
+        if status != "cancelled":
+            await checkpoint({
+                "attempt_id": stage_attempt_id(candidate_attempt_id, technique),
+                "candidate_id": candidate_id,
+                "status": status or "failed",
+                "timed_out": stage_killed,
+                "budget_consumed": dict(spent),
+                "observations": stage_observations,
+                "errors": stage_errors,
+                "proof_state": "verified" if _proved(stage_observations) else "unproven",
+            })
+        observations.extend(stage_observations)
+        errors.extend(stage_errors)
+        stages.append({"technique": technique, "outcome": status, "timed_out": stage_killed})
+        timed_out = timed_out or stage_killed
+        if status == "cancelled":
+            complete, was_cancelled = False, True
+            break
+        if _proved(stage_observations):
+            proven = True
+            break
+        if status not in _SUCCESS:
+            complete = False
+            break
+    if was_cancelled:
+        outcome = "cancelled"
+    elif proven or complete:
+        outcome = "success"
+    else:
+        outcome = "partial"
+    return StagedAttempt(
+        status=outcome,
+        observations=tuple(observations),
+        errors=tuple(errors[:20]),
+        actual_budget=consumed,
+        timed_out=timed_out and outcome != "success",
+        stages=tuple(stages),
+    )

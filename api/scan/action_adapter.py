@@ -173,7 +173,8 @@ except (ImportError, ModuleNotFoundError):
     )
 
 from .action_plan import ScanAction, ScanActionPlan
-from .verification_extension import EXTENDS_ARG
+from .sqli_stages import prior_stages, run_staged_sqli_attempt
+from .verification_extension import EXTENDS_ARG, extension_lineage
 from .batch_carry import (
     admission_template_source, carried_records, finished_attempts, proof_signal_sources,
 )
@@ -1693,15 +1694,16 @@ class DatabaseNeutralScanActionDispatcher:
         }
 
         # A proof re-planned behind a verification extension carries every candidate the
-        # escalation it extends already took to a verdict: no candidate is proven twice.
+        # escalation it extends already took to a verdict: no candidate is proven twice. A
+        # proof re-planned again reads its whole chain, nearest first.
         extends = str(action.capability_args.get(EXTENDS_ARG) or "")
-        carried = {
-            attempt_id: item
-            for attempt_id, item in finished_attempts(
-                await load_attempts(extends) if extends else (),
-            ).items()
-            if attempt_id not in completed
-        }
+        carried: dict[str, dict] = {}
+        carried_source: dict[str, str] = {}
+        for source in extension_lineage(action, self.plan):
+            for finished_id, item in finished_attempts(await load_attempts(source)).items():
+                if finished_id not in completed and finished_id not in carried:
+                    carried[finished_id] = item
+                    carried_source[finished_id] = source
         carried_count = 0
         manifest_digest = manifest.reference().manifest_digest
         started_at = datetime.now(timezone.utc).isoformat()
@@ -1728,7 +1730,9 @@ class DatabaseNeutralScanActionDispatcher:
                 carried_count += 1
                 attempted += 1
                 attempt_statuses.append({"status": "success", "timed_out": False})
-                observations.extend(carried_records(carried[attempt_id], source=extends))
+                observations.extend(carried_records(
+                    carried[attempt_id], source=carried_source[attempt_id],
+                ))
                 continue
             prior = completed.get(attempt_id)
             if prior is not None:
@@ -1921,15 +1925,16 @@ class DatabaseNeutralScanActionDispatcher:
         }
 
         # A proof re-planned behind a verification extension carries every candidate the
-        # escalation it extends already took to a verdict: no candidate is proven twice.
+        # escalation it extends already took to a verdict: no candidate is proven twice. A
+        # proof re-planned again reads its whole chain, nearest first.
         extends = str(action.capability_args.get(EXTENDS_ARG) or "")
-        carried = {
-            attempt_id: item
-            for attempt_id, item in finished_attempts(
-                await load_attempts(extends) if extends else (),
-            ).items()
-            if attempt_id not in completed
-        }
+        carried: dict[str, dict] = {}
+        carried_source: dict[str, str] = {}
+        for source in extension_lineage(action, self.plan):
+            for finished_id, item in finished_attempts(await load_attempts(source)).items():
+                if finished_id not in completed and finished_id not in carried:
+                    carried[finished_id] = item
+                    carried_source[finished_id] = source
         carried_count = 0
         manifest_digest = manifest.reference().manifest_digest
         started_at = datetime.now(timezone.utc).isoformat()
@@ -1963,7 +1968,9 @@ class DatabaseNeutralScanActionDispatcher:
                 carried_count += 1
                 attempted += 1
                 attempt_statuses.append({"status": "success", "timed_out": False})
-                observations.extend(carried_records(carried[attempt_id], source=extends))
+                observations.extend(carried_records(
+                    carried[attempt_id], source=carried_source[attempt_id],
+                ))
                 continue
             prior = completed.get(attempt_id)
             if prior is not None:
@@ -3089,14 +3096,23 @@ class DatabaseNeutralScanActionDispatcher:
         }
         # An extension re-runs only what its slice could not finish: a candidate the extended
         # action already took to a verdict is carried, with no budget and no repeat traffic.
+        # A SQLi extension can extend an extension, so every action in the chain is read,
+        # nearest first: a candidate settled two rounds back is carried, not re-run.
         extends = str(action.capability_args.get(EXTENDS_ARG) or "")
-        carried = {
-            attempt_id: item
-            for attempt_id, item in finished_attempts(
-                await load_attempts(extends) if extends else (),
-            ).items()
-            if attempt_id not in completed
-        }
+        lineage_attempts = [
+            (source, tuple(await load_attempts(source)))
+            for source in extension_lineage(action, self.plan)
+        ]
+        carried: dict[str, tuple[dict, str]] = {}
+        for source, source_attempts in lineage_attempts:
+            for finished_id, item in finished_attempts(source_attempts).items():
+                if finished_id not in completed and finished_id not in carried:
+                    carried[finished_id] = (item, source)
+        staged_sources = (
+            [(action.action_id, tuple(completed.values())), *lineage_attempts]
+            if tool == "sqlmap" else []
+        )
+        staged_summary = {"stages_run": 0, "stages_carried": 0, "stages_unfinished": 0}
         # A passive continuation slice carries the routes the required admission pack
         # already examined (the frozen origin and admitted seeds) instead of re-sending
         # the pack to them. The manifests differ, so route identity is the key.
@@ -3183,7 +3199,7 @@ class DatabaseNeutralScanActionDispatcher:
             attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
             route_identity = str(row.get("candidate_id") or row.get("route_id") or "")
             carry = None if retry_round or attempt_id in completed else (
-                (carried[attempt_id], extends) if attempt_id in carried
+                carried[attempt_id] if attempt_id in carried
                 else (admitted[route_identity], admission_source)
                 if route_identity and route_identity in admitted else None
             )
@@ -3363,46 +3379,89 @@ class DatabaseNeutralScanActionDispatcher:
                     scanner_options["severity"] = "high"
                     args["severity"] = "high"
                 legacy_spec = CAPABILITY_REGISTRY.require(legacy_capability)
-                prepared = fit_prepared_scan_capability(
-                    prepare_scan_external_capability(
+
+                async def execute_attempt(
+                    budget: Mapping[str, int], extra_options: Mapping[str, Any], job_suffix: str,
+                ) -> Any:
+                    prepared = fit_prepared_scan_capability(
+                        prepare_scan_external_capability(
+                            specification=legacy_spec,
+                            target=self.target,
+                            args=args,
+                            policy=self.policy,
+                        ),
+                        ledger_limits=budget,
+                    )
+                    adapter = ScannerExecutionAdapter(
                         specification=legacy_spec,
-                        target=self.target,
-                        args=args,
-                        policy=self.policy,
-                    ),
-                    ledger_limits=sub_budget,
-                )
-                adapter = ScannerExecutionAdapter(
-                    specification=legacy_spec,
-                    process_payload={
-                        "job_id": f"{self.job_id}:{action.action_id}:{attempt_id[:16]}",
-                        "tool_name": tool,
-                        "execution_target": execution_target,
-                        "registered_target": registered_target,
-                        "scanner_options": scanner_options,
-                        "trusted_headers": primary.headers(),
-                        "timeout_ms": int(sub_budget["tool_wall_seconds"]) * 1_000,
-                        "pinned_address": socket_factory.primary_address,
-                        "authorized_addresses": list(self.target.allowed_addresses),
-                        "address_policy": socket_factory.policy_receipt,
-                        "oob_interactsh_server": None,
-                        "oob_interactsh_token": None,
-                    },
-                    process_runner=self.process_runner,
-                    requested_budget=sub_budget,
-                    redacted_execution=prepared.redacted_execution,
-                )
-                result = await CapabilityExecutor().execute(
-                    CapabilityExecutionContext(
-                        specification=legacy_spec,
-                        target=self.target,
-                        requested_budget=sub_budget,
-                        adapter_managed_cancellation=True,
-                    ),
-                    adapter,
-                    heartbeat=heartbeat,
-                    cancelled=self.cancelled,
-                )
+                        process_payload={
+                            "job_id": f"{self.job_id}:{action.action_id}:{job_suffix}",
+                            "tool_name": tool,
+                            "execution_target": execution_target,
+                            "registered_target": registered_target,
+                            "scanner_options": {**scanner_options, **extra_options},
+                            "trusted_headers": primary.headers(),
+                            "timeout_ms": int(budget["tool_wall_seconds"]) * 1_000,
+                            "pinned_address": socket_factory.primary_address,
+                            "authorized_addresses": list(self.target.allowed_addresses),
+                            "address_policy": socket_factory.policy_receipt,
+                            "oob_interactsh_server": None,
+                            "oob_interactsh_token": None,
+                        },
+                        process_runner=self.process_runner,
+                        requested_budget=dict(budget),
+                        redacted_execution=prepared.redacted_execution,
+                    )
+                    return await CapabilityExecutor().execute(
+                        CapabilityExecutionContext(
+                            specification=legacy_spec,
+                            target=self.target,
+                            requested_budget=dict(budget),
+                            adapter_managed_cancellation=True,
+                        ),
+                        adapter,
+                        heartbeat=heartbeat,
+                        cancelled=self.cancelled,
+                    )
+
+                if tool == "sqlmap":
+                    # One candidate, verified technique by technique; every finished stage
+                    # is checkpointed, so a later attempt continues instead of re-sending it.
+                    async def run_stage(
+                        technique: str, budget: Mapping[str, int], latency: float,
+                        _attempt_id: str = attempt_id,
+                    ) -> Any:
+                        return await execute_attempt(
+                            budget,
+                            {
+                                "technique": technique,
+                                **({"_measured_latency_seconds": round(latency, 3)} if latency else {}),
+                            },
+                            f"{_attempt_id[:16]}:{technique}",
+                        )
+
+                    async def checkpoint_stage(stage: Mapping[str, Any]) -> None:
+                        await checkpoint_attempt(action.action_id, stage)
+
+                    result = await run_staged_sqli_attempt(
+                        candidate_attempt_id=attempt_id,
+                        candidate_id=candidate_id,
+                        budget=sub_budget,
+                        prior=prior_stages(staged_sources, attempt_id),
+                        own_action_id=action.action_id,
+                        run_stage=run_stage,
+                        checkpoint=checkpoint_stage,
+                        cancelled=self.cancelled,
+                    )
+                    for stage in result.stages:
+                        key = (
+                            "stages_carried" if stage["outcome"] == "carried"
+                            else "stages_run" if stage["outcome"] in _BATCH_SUCCESS_STATUSES
+                            else "stages_unfinished"
+                        )
+                        staged_summary[key] += 1
+                else:
+                    result = await execute_attempt(sub_budget, {}, attempt_id[:16])
                 attempt_observations = tuple({
                     # The tool parsers read the tool's own output, which names the vulnerable parameter
                     # but not the endpoint. Without the locus a finding has no route, so it cannot be
@@ -3587,6 +3646,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "unexamined_candidate_ids": sorted(still_empty)[:50],
                 "checkpoint_mode": "after_each_candidate",
                 **({"extends": extends} if extends else {}),
+                **({"technique_stages": staged_summary} if tool == "sqlmap" else {}),
                 **({"carried_from_admission": admission_source} if admission_source else {}),
                 **({"carried_count": carried_count} if extends or admission_source else {}),
             },

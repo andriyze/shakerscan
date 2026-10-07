@@ -131,6 +131,44 @@ def order_batch_rows_by_cost_class(rows: Sequence[Any]) -> list[Any]:
     ))
 
 
+# The fraction of its reserved request ceiling a batched attempt is paced to send across the
+# WHOLE wall; below 1.0 it keeps a margin so scheduling jitter cannot reach the ceiling.
+BATCH_ATTEMPT_REQUEST_HEADROOM = 0.9
+# The share of a measured per-request latency a paced attempt's delay is shortened by. The
+# remainder stays as margin in case the target answers faster than it did when measured.
+MEASURED_LATENCY_CREDIT = 0.75
+MAXIMUM_MEASURED_LATENCY_SECONDS = 60.0
+
+
+def paced_request_delay(
+    http: int, wall: int, *, minimum_seconds: float, latency_seconds: float = 0.0,
+) -> tuple[float, int]:
+    """(delay between requests, request ceiling) for one paced, single-threaded attempt.
+
+    The delay paces the reserved count across the whole wall, so the count stays inside the
+    reservation however long the tool runs (see agent_tools._batch_attempt_pacing). A tool
+    that waits for each response -- sqlmap detection is sequential -- already spends the
+    target's latency between requests, and on soak target honey (~3 s per response) the
+    0.97 s delay on top of it cost a quarter of every SQLi attempt's throughput. When the
+    latency was measured on an earlier attempt against the same candidate, the delay is
+    shortened by part of it (never below ``minimum_seconds``). The request ceiling is not
+    raised: the pinned transport refuses connections past the reservation and sqlmap opens one
+    per request, so a target that turns faster stops the attempt at its hold, never past it.
+    """
+    requests = max(1, int(http))
+    seconds = max(1, int(wall))
+    paced_requests = max(1.0, requests * BATCH_ATTEMPT_REQUEST_HEADROOM)
+    delay = seconds / paced_requests
+    if delay < minimum_seconds:
+        # Too little wall to pace this many requests even at the floor delay: keep the
+        # floor and admit only the smaller number the wall can actually cover.
+        return minimum_seconds, min(int(http), max(1, int(seconds / minimum_seconds)))
+    credit = min(
+        MAXIMUM_MEASURED_LATENCY_SECONDS, max(0.0, float(latency_seconds or 0.0)),
+    ) * MEASURED_LATENCY_CREDIT
+    return max(minimum_seconds, delay - credit), int(http)
+
+
 # One reviewed passive-pack attempt sends its seven GETs one at a time (concurrency 1, nuclei
 # `-timeout 5`), so the attempt can need up to seven request timeouts plus process start-up.
 # Measured in the scanner image against a 3-second origin: 7 requests, 23 seconds.

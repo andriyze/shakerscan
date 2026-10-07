@@ -2695,7 +2695,8 @@ def test_path_candidate_goes_to_sqlmap_with_a_marker_and_is_skipped_by_dalfox(mo
         return calls
 
     sqli_calls = run("sqli.verify_batch", "sqlmap-jsonl/v1")
-    assert sqli_calls == ["https://app.example.test/api/orders/1*"], sqli_calls
+    # One candidate, verified one sqlmap technique stage at a time (scan/sqli_stages.py).
+    assert sqli_calls == ["https://app.example.test/api/orders/1*"] * 4, sqli_calls
 
     xss_calls = run("xss.verify_batch", "dalfox-jsonl/v1")
     assert xss_calls == [], "dalfox never receives a path candidate"
