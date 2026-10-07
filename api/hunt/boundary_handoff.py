@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .boundary_context import CANDIDATE_QUERY, inspect_candidate_boundary_context
+from .boundary_context import CANDIDATE_QUERY, inspect_candidate_boundary_context, read_candidate_boundary_source_binding
 
 try:
     from ai_gate.boundary.hypothesis import compile_hunt_candidate_boundary
@@ -75,6 +75,11 @@ async def compile_candidate_boundary_handoff(
         ),
     )
     proposal = projected["proposal"]
+    source_binding = await read_candidate_boundary_source_binding(
+        conn, run=run, candidate_id=inspection["candidate_id"],
+    )
+    if source_binding is not None:
+        proposal["source_binding"] = source_binding
     result.update(
         status=proposal["status"],
         missing_facts=proposal["missing_facts"],

@@ -45,6 +45,7 @@ contracts and release notes describe what ships.
 
 - [AI-native architecture](ai-native-architecture-rfc.md) — Scan/Hunt architecture direction.
 - [Agent authorization direction](agent-authorization-workflow-direction.md) — proposed AI Gate/Hunt direction.
+- [Agent boundary discovery](agent-boundary-discovery.md) — evidence-driven topology and hypothesis phase.
 - [Model Intake security roadmap](model-intake-security-review-roadmap.md)
 
 ## Operations

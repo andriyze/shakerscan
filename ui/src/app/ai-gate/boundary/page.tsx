@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import { Card } from '@/components/ui'
+import { BoundaryDiscoveryPanel } from '@/components/ai/BoundaryDiscoveryPanel'
 import { getAITargets, getScan, type AITarget, type Scan } from '@/lib/api'
 import { getHuntV2, type HuntV2 } from '@/lib/huntV2'
 import {
@@ -12,6 +13,7 @@ import {
   type BoundaryContext, type BoundaryHandoff, type BoundaryMaterialization,
   type BoundaryPrincipal, type BoundaryProposal, type BoundaryRegressionArtifact,
   type BoundaryRegressionEvaluation,
+  type BoundaryDiscoveryDraft,
 } from '@/lib/aiBoundary'
 import { boundaryBaseFromTarget, boundaryCandidateIds, boundaryScanMessage, savedArtifactMatchesSource } from '@/lib/aiBoundaryPresentation'
 
@@ -120,6 +122,18 @@ function BoundaryWorkflow() {
   function editPrincipal(slot: 'owner' | 'attacker', key: PrincipalKey, value: string) {
     const setter = slot === 'owner' ? setOwner : setAttacker
     setter((current) => ({ ...current, [key]: value }))
+    // Keep the fixture's explicit principal declarations aligned with the form
+    // so discovery prefill does not require entering each fact twice.
+    setBaseText((current) => {
+      try {
+        const base = parseObject('Boundary fixture base', current)
+        const principal = base[slot]
+        if (principal && typeof principal === 'object' && !Array.isArray(principal)) {
+          return JSON.stringify({ ...base, [slot]: { ...principal, [key]: value } }, null, 2)
+        }
+      } catch { /* Preserve an incomplete operator edit. */ }
+      return current
+    })
     invalidateProposal()
   }
 
@@ -160,6 +174,19 @@ function BoundaryWorkflow() {
       setContext(inspected)
       invalidateProposal()
     })
+  }
+
+  function useDiscovery(candidate: string, draft: BoundaryDiscoveryDraft) {
+    const nextOwner = { ...emptyPrincipal(), resource_id: draft.fixture_prefill.owner.resource_id }
+    const nextAttacker = { ...emptyPrincipal(), resource_id: draft.fixture_prefill.attacker.resource_id }
+    setCandidateId(candidate)
+    setContext(null)
+    setOwner(nextOwner)
+    setAttacker(nextAttacker)
+    setExpectedRule('')
+    setBaseText(JSON.stringify({ ...draft.fixture_prefill, owner: nextOwner, attacker: nextAttacker }, null, 2))
+    invalidateProposal()
+    setNotice('Unverified candidate prepared. Confirm principal facts and complete the fixture before verification.')
   }
 
   async function compile() {
@@ -309,6 +336,8 @@ function BoundaryWorkflow() {
             <button className={buttonStyle} disabled={busy || !target} onClick={useTargetFixture}>Use saved fixture</button>
           </div>
         </div>
+        <BoundaryDiscoveryPanel huntId={huntId.trim()} targetEndpoint={target?.endpoint_url}
+          canPrepare={!!hunt && ['active', 'awaiting_planner'].includes(hunt.status)} onPrepared={useDiscovery} />
         {hunt && target && <p className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300">
           Hunt asset: {hunt.target_url || hunt.target_id} · AI test endpoint: {target.endpoint_url}.
           Review these bindings before queueing verification.

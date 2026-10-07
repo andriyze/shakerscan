@@ -69,3 +69,25 @@ test('server refusal is surfaced instead of presenting a queued scan', async () 
     )
   } finally { global.fetch = original }
 })
+
+test('discovery reads server evidence and preparation uses server-owned draft recomputation without verification', async () => {
+  const original = global.fetch
+  const calls = []
+  global.fetch = async (url, options) => {
+    calls.push({ url, options })
+    return { ok: true, json: async () => ({ candidate: { id: 'prepared-id' } }) }
+  }
+  try {
+    const draftId = 'a'.repeat(64)
+    const draft = { draft_id: draftId, candidate_request: { family: 'cross_tenant_retrieval' } }
+    await boundary.discoverBoundaryDrafts('hunt/1')
+    const result = await boundary.prepareBoundaryCandidate('hunt/1', draft)
+    assert.match(calls[0].url, /hunts\/hunt%2F1\/boundary-discovery$/)
+    assert.equal(calls[0].options.body, undefined)
+    assert.match(calls[1].url, new RegExp('hunts/hunt%2F1/boundary-discovery/' + draftId + '/prepare$'))
+    assert.equal(calls[1].options.body, undefined)
+    assert.equal(result.candidate.id, 'prepared-id')
+    assert.equal(calls.length, 2)
+    assert.ok(calls.every(({ url }) => !url.includes('/verify')))
+  } finally { global.fetch = original }
+})
