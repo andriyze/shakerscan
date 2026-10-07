@@ -3741,6 +3741,7 @@ class DatabaseNeutralScanActionDispatcher:
                     row for row in receipt.get("observations", ())
                     if isinstance(row, Mapping)
                 )
+        execution_plan = self.options.get("scan_execution_plan")
         report = finalize_scan_report(
             plan=self.plan,
             plan_revision=self.plan_revision,
@@ -3748,6 +3749,13 @@ class DatabaseNeutralScanActionDispatcher:
             action_results=results,
             observations=observations,
             origin_evidence=origin_evidence,
+            # The worker verified this plan against the job (job_runtime) before running it.
+            resolved_families=(
+                tuple(execution_plan.get("resolved_families") or ())
+                if isinstance(execution_plan, Mapping)
+                and isinstance(execution_plan.get("resolved_families"), (list, tuple))
+                else None
+            ),
             work_manifest_references=unique_work_manifest_reference_dicts(
                 planned.capability_args for planned in self.plan.actions
             ),

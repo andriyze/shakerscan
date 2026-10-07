@@ -400,6 +400,14 @@ def resolve_scan_contract(
     )
     if preset == "custom" and not resolved:
         raise ValueError("custom preset requires at least one selected family")
+    if not resolved:
+        # Every family of the preset was excluded. Such a Scan ran only the baseline probes
+        # and was graded A 100 with coverage "complete" (soak 89770439): a no-op dressed as a
+        # clean result. The compiler also reads an empty resolved set as "no restriction".
+        raise ValueError(
+            f"exclude_families removes every family of the {preset} preset "
+            f"({', '.join(sorted(preset_defaults))}); select at least one family"
+        )
     # Derived from the canonical check registry, never a second hardcoded list.
     # A family added to SCAN_V2_FAMILY_NAMES without being added here would
     # otherwise be admissible under a passive policy: sensitive_exposure,

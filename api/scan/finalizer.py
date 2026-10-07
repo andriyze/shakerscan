@@ -1619,8 +1619,12 @@ def finalize_scan_report(
     work_manifest_references: Sequence[Mapping[str, Any]] = (),
     plan_revision: ScanPlanRevision | Mapping[str, Any] | None = None,
     origin_evidence: Sequence[Mapping[str, Any]] = (),
+    resolved_families: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Build the final report without network, process, filesystem, or clock access.
+
+    ``resolved_families`` is the execution plan's resolved family set when the caller has it
+    (the worker does). An empty set means the Scan selected no check family at all.
 
     ``origin_evidence`` carries the probe attempts of a failed ``origin.select``:
     a failed action has no observation manifest, yet its refused connections are exactly
@@ -2063,6 +2067,14 @@ def finalize_scan_report(
         and action_results[action.action_id].reason_code is not None
         and action_results[action.action_id].reason_code.value in _DISCOVERY_TRUNCATION_REASONS
     )
+    # A Scan whose execution plan resolved no check family examined nothing a grade is about:
+    # only the baseline probes ran (soak 89770439, graded A 100 "complete"). Admission refuses
+    # such a policy; a plan stored before that refusal must still not read as clean and complete.
+    no_families_selected = resolved_families is not None and not any(
+        str(item).strip() for item in resolved_families
+    )
+    if no_families_selected and coverage_status == "complete":
+        coverage_status = "partial"
     reliability_reasons = sorted({
         (
             result.reason_code.value
@@ -2073,6 +2085,7 @@ def finalize_scan_report(
     } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
       | ({"discovery_truncated"} if truncated_discovery else set())
       | ({"placement_unavailable"} if placement_gaps else set())
+      | ({"no_families_selected"} if no_families_selected else set())
       | ({"selected_family_incomplete"} if selected_family_gaps else set())
       | ({"unproven_critical_high"} if unproven_critical_high else set())
       | ({"application_not_observed"} if risk_assessment_state == "not_examined" else set())
@@ -2080,6 +2093,7 @@ def finalize_scan_report(
     grade_reliable = not reliability_reasons
     coverage_reasons = sorted(
         set(reasons)
+        | ({"no_families_selected"} if no_families_selected else set())
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
         | ({"discovery_truncated"} if truncated_discovery else set())
         | ({"placement_unavailable"} if placement_gaps else set())
