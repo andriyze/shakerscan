@@ -135,7 +135,7 @@ jobs:
         run: |
           npm --prefix ui ci
           npm --prefix ui run test:unit
-          npx --prefix ui playwright install --with-deps chromium
+          npx --prefix ui playwright install chromium
           PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser
           cp ui/test-results/browser-results.json artifacts/playwright.json
 

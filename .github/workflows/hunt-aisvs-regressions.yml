@@ -87,7 +87,7 @@ jobs:
         run: |
           npx tsc --noEmit
           npm run test:unit
-          npx playwright install --with-deps chromium
+          npx playwright install chromium
           npm run build
           npm run start > /tmp/hunt-instruction-ui.log 2>&1 &
           ui_pid=$!

@@ -154,7 +154,7 @@ jobs:
           PLAYWRIGHT_REAL_STACK: "1"
           SHAKERSCAN_API_URL: http://127.0.0.1:8080
         run: |
-          npx --prefix ui playwright install --with-deps chromium
+          npx --prefix ui playwright install chromium
           PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser
 
       - name: Run deterministic Model Intake V2 gate

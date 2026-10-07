@@ -63,7 +63,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
       - name: Install the Playwright browser the browser-safety tests drive
         if: steps.changes.outputs.python_mode == 'full'
-        run: python -m playwright install --with-deps chromium
+        run: python -m playwright install chromium
       - name: Run this shard of the complete partitioned Python suite
         if: steps.changes.outputs.python_mode == 'full'
         run: |

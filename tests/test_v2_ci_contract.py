@@ -37,7 +37,7 @@ def test_required_python_check_runs_full_or_focused_suite_by_change():
     assert "steps.changes.outputs.python_mode == 'full'" in text
     assert "Run UI-facing Python contracts" in text
     assert "--require-hashes" in text
-    assert "python -m playwright install --with-deps chromium" in text
+    assert "python -m playwright install chromium" in text
     for static_gate in (
         "scripts/generate_capability_inventory.py --check",
         "scripts/generate_install_manifest.py --check",

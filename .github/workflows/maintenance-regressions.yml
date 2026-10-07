@@ -172,7 +172,7 @@ jobs:
       - name: Investigation refresh browser regression (mocked API)
         working-directory: ui
         run: |
-          npx playwright install --with-deps chromium
+          npx playwright install chromium
           npm run start -- --hostname 127.0.0.1 > /tmp/maintenance-ui.log 2>&1 &
           ui_pid=$!
           trap 'kill "$ui_pid" 2>/dev/null || true' EXIT

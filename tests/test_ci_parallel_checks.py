@@ -253,7 +253,7 @@ def test_browser_toolchain_install_still_gates_the_shard(tmp_path):
     names = [step.get("name") for step in shard_job["steps"]]
     start = _step(shard_job, "Install the browser test toolchain while the images build")
     report = _step(shard_job, "Report the browser test toolchain install")
-    assert "set -e" in start["run"] and "playwright install --with-deps chromium" in start["run"]
+    assert "set -e" in start["run"] and "playwright install chromium" in start["run"]
     assert names.index(start["name"]) < names.index("Build ShakerScan images")
     assert names.index(report["name"]) < names.index("Run real-stack browser acceptance")
     assert start["if"] == report["if"] == _step(shard_job, "Run real-stack browser acceptance")["if"]
