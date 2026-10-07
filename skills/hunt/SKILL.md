@@ -214,7 +214,9 @@ second record with the same identity and the same title or claim merges its evid
 (`outcome: merged`); a different claim becomes its own candidate and never replaces a stored one.
 Each evidence reference must be this Hunt's action, receipt or HTTP transaction ID (bare or
 `action:`/`receipt:`/`transaction:` prefixed), a `finding:` on the target, or a device `devref_N`;
-anything else is refused with `candidate_evidence_unresolved`.
+anything else is refused with `candidate_evidence_unresolved`. An action or its receipt counts only
+once the action completed or ended partial; cite no failed, admission-refused, blocked or unfinished
+action (`candidate_evidence_unsettled`).
 
 When multi-principal Hunt evidence shows same-service identity/resource structure and an observed
 agent endpoint, call `POST /hunts/{hunt_id}/boundary-discovery` before hand-building the candidate.

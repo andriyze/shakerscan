@@ -231,7 +231,10 @@ def hunt_start_public_contract() -> dict[str, Any]:
             ],
             "evidence_ref_scope": (
                 "Each reference must resolve to an action, receipt or HTTP transaction of this "
-                "Hunt, a finding on its target, or a device evidence entry of this Hunt."
+                "Hunt, a finding on its target, or a device evidence entry of this Hunt "
+                "(otherwise candidate_evidence_unresolved). An action or receipt counts only "
+                "when the action completed or ended partial; a failed, admission-refused, "
+                "blocked or unfinished action is refused as candidate_evidence_unsettled."
             ),
         },
         "budget_profiles": {

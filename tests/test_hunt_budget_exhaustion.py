@@ -294,7 +294,7 @@ async def test_candidates_are_recordable_after_budget_exhaustion(monkeypatch, st
             yield self
 
         async def fetch(self, _sql, *args):
-            return [{"id": action, "kind": "action"}] if action in args[0] else []
+            return [{"id": action, "kind": "action", "status": "completed"}] if action in args[0] else []
 
         async def execute(self, sql, *args):
             writes.append(sql)

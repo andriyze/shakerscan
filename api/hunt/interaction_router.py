@@ -1249,9 +1249,10 @@ async def _require_candidate_evidence(conn: Any, run: Any, references: list[str]
         await resolve_candidate_evidence(conn, run=dict(run), references=list(references))
     except CandidateEvidenceError as exc:
         raise HTTPException(status_code=422, detail={
-            "error": "candidate_evidence_unresolved",
+            "error": exc.code,
             "message": str(exc),
             "unresolved_evidence_refs": exc.references,
+            "unsettled_evidence_refs": exc.unsettled,
         }) from exc
 
 

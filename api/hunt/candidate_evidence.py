@@ -6,6 +6,12 @@ claim look supported by evidence it never had. Every reference must resolve to a
 Hunt (an action, its receipt, or an HTTP transaction), to a finding on this Hunt's target, or, on a
 device Hunt, to a ``devref_N`` evidence entry in this Hunt's device runtime.
 
+An action, or the receipt of an action, is evidence only once it settled as ``completed`` or
+``partial``. An action refused at admission is stored as ``failed`` with no traffic, and a
+``blocked``, ``running`` or ``reserved`` action has produced nothing to cite yet; such a reference
+is refused as ``candidate_evidence_unsettled``. The caller owns these actions, so naming the
+status reveals nothing about another Hunt.
+
 Accepted reference forms (case-insensitive prefix, canonical UUID):
 
 * ``<uuid>`` -- any of the kinds below
@@ -30,18 +36,22 @@ _PREFIX_KINDS = {
     "finding": "finding",
 }
 _DEVICE_REF = re.compile(r"devref_[1-9][0-9]{0,8}")
+# Action statuses whose output exists and may be cited. Everything else is refused.
+SETTLED_ACTION_STATUSES = frozenset({"completed", "partial"})
+UNRESOLVED = "candidate_evidence_unresolved"
+UNSETTLED = "candidate_evidence_unsettled"
 
 EVIDENCE_QUERY = """
-SELECT a.id::text AS id, 'action' AS kind
+SELECT a.id::text AS id, 'action' AS kind, a.status::text AS status
 FROM hunt_actions a WHERE a.id = ANY($1::uuid[]) AND a.hunt_run_id = $2::uuid
 UNION ALL
-SELECT a.receipt_id::text AS id, 'receipt' AS kind
+SELECT a.receipt_id::text AS id, 'receipt' AS kind, a.status::text AS status
 FROM hunt_actions a WHERE a.receipt_id = ANY($1::uuid[]) AND a.hunt_run_id = $2::uuid
 UNION ALL
-SELECT t.id::text AS id, 'transaction' AS kind
+SELECT t.id::text AS id, 'transaction' AS kind, NULL::text AS status
 FROM http_transactions t WHERE t.id = ANY($1::uuid[]) AND t.hunt_run_id = $2::uuid
 UNION ALL
-SELECT f.id::text AS id, 'finding' AS kind
+SELECT f.id::text AS id, 'finding' AS kind, NULL::text AS status
 FROM findings f
 WHERE f.id = ANY($1::uuid[])
   AND (f.hunt_run_id = $2::uuid
@@ -51,11 +61,21 @@ WHERE f.id = ANY($1::uuid[])
 
 
 class CandidateEvidenceError(ValueError):
-    """One or more evidence references do not resolve to this Hunt's evidence."""
+    """One or more evidence references are not settled evidence of this Hunt.
 
-    def __init__(self, message: str, references: list[str]) -> None:
+    ``references`` lists the unresolved references and ``unsettled`` those naming an action of
+    this Hunt that has not completed; ``code`` is ``UNRESOLVED`` whenever any reference is
+    unresolved, else ``UNSETTLED``.
+    """
+
+    def __init__(
+        self, message: str, references: list[str], *,
+        unsettled: list[str] | None = None, code: str = UNRESOLVED,
+    ) -> None:
         super().__init__(message)
         self.references = references
+        self.unsettled = list(unsettled or [])
+        self.code = code
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -106,7 +126,7 @@ async def resolve_candidate_evidence(
     identifiers = sorted({
         identifier for _reference, kind, identifier in parsed if kind != "device_evidence"
     })
-    found: dict[str, set[str]] = {}
+    found: dict[str, dict[str, str | None]] = {}
     if identifiers:
         target_id = str(run["target_id"]) if run.get("target_id") else None
         device_id = str(run["device_target_id"]) if run.get("device_target_id") else None
@@ -114,22 +134,39 @@ async def resolve_candidate_evidence(
             EVIDENCE_QUERY, identifiers, str(run["id"]), target_id, device_id,
         )
         for row in rows:
-            found.setdefault(str(row["id"]), set()).add(str(row["kind"]))
+            status = row["status"]
+            found.setdefault(str(row["id"]), {})[str(row["kind"])] = (
+                None if status is None else str(status)
+            )
     device_evidence = _json_object(
         _json_object(_json_object(run.get("context_pack")).get("device_runtime")).get("evidence")
     )
     unresolved: list[str] = []
+    unsettled: list[str] = []
     for reference, kind, identifier in parsed:
         if kind == "device_evidence":
-            resolved = bool(run.get("device_target_id")) and identifier in device_evidence
-        else:
-            kinds = found.get(identifier, set())
-            resolved = bool(kinds) if kind is None else kind in kinds
-        if not resolved:
+            if not (bool(run.get("device_target_id")) and identifier in device_evidence):
+                unresolved.append(str(reference)[:120])
+            continue
+        kinds = found.get(identifier, {})
+        matches = list(kinds.items()) if kind is None else (
+            [(kind, kinds[kind])] if kind in kinds else []
+        )
+        if not matches:
             unresolved.append(str(reference)[:120])
+        elif not any(
+            status is None or status in SETTLED_ACTION_STATUSES for _kind, status in matches
+        ):
+            unsettled.append(str(reference)[:120])
     if unresolved:
         raise CandidateEvidenceError(
             "evidence references do not resolve to records of this Hunt or its target",
-            unresolved,
+            unresolved, unsettled=unsettled, code=UNRESOLVED,
+        )
+    if unsettled:
+        raise CandidateEvidenceError(
+            "evidence references name actions of this Hunt that did not complete; cite a "
+            "completed or partial action, its receipt, or a captured transaction",
+            [], unsettled=unsettled, code=UNSETTLED,
         )
     return list(references)
