@@ -23,7 +23,7 @@ from typing import Any, Callable, Literal, Optional
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 try:
     from api_utils import (
@@ -250,7 +250,10 @@ def _strip_pagination_for_count(query: str, params: list) -> tuple[str, list]:
 
 
 class FindingUpdate(BaseModel):
-    status: str  # active, resolved, false_positive, accepted_risk
+    # active, resolved, false_positive, accepted_risk. Omitted (or null) keeps the stored status:
+    # a verdict-only edit must not write back a status the client saw before a retest or another
+    # session changed it.
+    status: Optional[str] = None
     notes: Optional[str] = None
     # Omitted keeps the recorded verdict, a value records it, and an explicit null clears it
     # (the verdict and its time; its notes stay unless `notes` is sent). The status is always
@@ -265,6 +268,12 @@ class FindingUpdate(BaseModel):
         if "analyst_verdict" not in self.model_fields_set:
             return "keep"
         return "clear" if self.analyst_verdict is None else "set"
+
+    @model_validator(mode="after")
+    def _changes_something(self) -> "FindingUpdate":
+        if self.status is None and self.notes is None and self.verdict_change() == "keep":
+            raise ValueError("send a status, notes or analyst_verdict")
+        return self
 
 
 class FindingRetestRequest(BaseModel):
@@ -1554,9 +1563,9 @@ async def update_finding(
 # that sets a verdict and a status together must be able to show the status change it caused.
 FINDING_UPDATE_SQL = """
     UPDATE findings
-    SET status = $1,
-        resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(findings.resolved_at, NOW())
-                           WHEN $1 = 'active' THEN NULL
+    SET status = COALESCE($1::text, findings.status),
+        resolved_at = CASE WHEN $1::text = 'resolved' THEN COALESCE(findings.resolved_at, NOW())
+                           WHEN $1::text = 'active' THEN NULL
                            ELSE findings.resolved_at END,
         notes = COALESCE($2, findings.notes),
         analyst_verdict = CASE $5::text WHEN 'set' THEN $3::text WHEN 'clear' THEN NULL

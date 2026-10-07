@@ -33,22 +33,39 @@ export function statusForVerdict(current: string, verdict: AnalystVerdict | null
   return current
 }
 
+/**
+ * The status a verdict edit sends: only a change the verdict makes. A verdict that leaves the
+ * status alone sends none, so the server keeps the stored status rather than the one this page
+ * last saw (a retest or another session may have changed it since).
+ */
+export function verdictRequestStatus(current: string, verdict: AnalystVerdict | null): string | undefined {
+  const next = statusForVerdict(current, verdict)
+  return next === current ? undefined : next
+}
+
 /** Option text that names the status change a verdict would make, if any. */
 export function verdictOptionLabel(current: string, verdict: { value: AnalystVerdict; label: string }): string {
   const next = statusForVerdict(current, verdict.value)
   return next === current ? verdict.label : `${verdict.label} (status becomes ${statusLabel(next)})`
 }
 
-/** The confirmation after a verdict was stored, from what the server reported back. */
+/**
+ * The confirmation after a verdict was stored, from what the server reported back. `shownStatus`
+ * is the status the page displayed: a stored status that differs from it without this request
+ * changing it was changed elsewhere, and the confirmation says so rather than staying silent.
+ */
 export function verdictChangeMessage(result: {
   analyst_verdict?: string | null
   status?: string | null
   previous_status?: string | null
-}): string {
+}, shownStatus?: string | null): string {
   const verdict = ANALYST_VERDICTS.find((item) => item.value === result.analyst_verdict)
   const head = verdict ? `Analyst verdict set to ${verdict.label.toLowerCase()}` : 'Analyst verdict cleared'
   if (result.status && result.previous_status && result.status !== result.previous_status) {
     return `${head}; status changed from ${statusLabel(result.previous_status)} to ${statusLabel(result.status)}`
+  }
+  if (result.status && shownStatus && result.status !== shownStatus) {
+    return `${head}; status is ${statusLabel(result.status)}, changed since this page loaded`
   }
   return head
 }

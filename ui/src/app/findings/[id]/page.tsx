@@ -34,7 +34,7 @@ import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/
 import { canonicalFindingProofVerified } from '@/lib/findingProof'
 import { formatRelativeTime } from '@/lib/format'
 import { findingObservation, hostOf, pathOf, verificationSource } from '@/lib/findingObservation'
-import { ANALYST_VERDICTS, FINDING_STATUS_LABELS, statusForVerdict, verdictChangeMessage, verdictOptionLabel, type AnalystVerdict } from '@/lib/analystVerdict'
+import { ANALYST_VERDICTS, FINDING_STATUS_LABELS, verdictChangeMessage, verdictOptionLabel, verdictRequestStatus, type AnalystVerdict } from '@/lib/analystVerdict'
 import {
   Button,
   ConfirmDialog,
@@ -384,7 +384,8 @@ function FindingDetailContent() {
   }
 
   // null clears the verdict and keeps the status. A verdict changes the status only where the two
-  // would contradict, and the toast reports the change the server stored.
+  // would contradict; otherwise no status is sent and the server keeps the stored one. The toast
+  // reports what the server stored, including a status changed elsewhere since the page loaded.
   async function handleAnalystVerdict(verdict: AnalystVerdict | null) {
     if (!finding || statusUpdating) return
     try {
@@ -392,10 +393,10 @@ function FindingDetailContent() {
       // A verdict edit sends no notes: re-sending the finding's notes overwrote the verdict's own
       // (an automated retest's reason included) with them.
       const stored = await updateFinding(
-        finding.id, statusForVerdict(finding.status, verdict), undefined, finding.scan_id, verdict,
+        finding.id, verdictRequestStatus(finding.status, verdict), undefined, finding.scan_id, verdict,
       )
       await fetchFinding()
-      toast.success(verdictChangeMessage(stored))
+      toast.success(verdictChangeMessage(stored, finding.status))
     } catch (err) {
       console.error('Failed to update analyst verdict:', err)
       toast.error('Failed to update analyst verdict')
