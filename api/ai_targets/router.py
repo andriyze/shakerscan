@@ -42,6 +42,7 @@ try:
     from ai_demo_scenarios import get_ai_test_scenarios
     from ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract, boundary_source_matches_endpoint
     from ai_gate.boundary.regression import build_boundary_regression_artifact, evaluate_boundary_regression_artifact
+    from hunt.boundary_source import BoundarySourceError, admit_boundary_source_binding
     from ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
         build_headers as ai_build_headers,
@@ -76,6 +77,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_demo_scenarios import get_ai_test_scenarios
     from ..ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract, boundary_source_matches_endpoint
     from ..ai_gate.boundary.regression import build_boundary_regression_artifact, evaluate_boundary_regression_artifact
+    from ..hunt.boundary_source import BoundarySourceError, admit_boundary_source_binding
     from ..ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
         build_headers as ai_build_headers,
@@ -427,7 +429,14 @@ async def verify_ai_boundary_proposal(target_id: str, request: AIBoundaryVerifyR
         if not row:
             raise HTTPException(status_code=404, detail="AI target not found")
         target = row_to_dict(row)
-        source_binding = request.proposal.get("source_binding")
+        # A Hunt binding is admitted only after it matches the Hunt record, and a
+        # discovery-derived proposal cannot drop it to skip the checks below.
+        try:
+            source_binding = await admit_boundary_source_binding(
+                conn, proposal=request.proposal, contract=materialized["boundary_contract"],
+            )
+        except BoundarySourceError as exc:
+            raise HTTPException(status_code=409, detail=exc.code) from exc
         if source_binding is not None and not boundary_source_matches_endpoint(
             source_binding, target.get("endpoint_url"),
         ):

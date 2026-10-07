@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from .contract import ContractError, relative_path
 
@@ -62,8 +63,8 @@ def normalize_boundary_source_binding(
         raise ContractError("invalid_boundary_source_binding")
     if raw.get("schema_version") != BOUNDARY_SOURCE_SCHEMA:
         raise ContractError("invalid_boundary_source_binding")
-    source_hunt = _identifier(raw.get("hunt_id"), "source_hunt_id")
-    source_target = _identifier(raw.get("target_id"), "source_target_id")
+    source_hunt = _canonical_uuid(raw.get("hunt_id"), "source_hunt_id")
+    source_target = _canonical_uuid(raw.get("target_id"), "source_target_id")
     if hunt_id is not None and source_hunt != str(hunt_id):
         raise ContractError("boundary_source_hunt_mismatch")
     if target_id is not None and source_target != str(target_id):
@@ -116,6 +117,17 @@ def normalize_boundary_source_binding(
         "origin": normalized_origin,
         "agent_paths": normalized_paths,
     }
+
+
+def _canonical_uuid(value: Any, field: str) -> str:
+    """Server-written bindings carry canonical UUIDs; anything else is not one of them."""
+    try:
+        canonical = str(UUID(str(value)))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ContractError(f"invalid_boundary_hypothesis_{field}") from exc
+    if value != canonical:
+        raise ContractError(f"invalid_boundary_hypothesis_{field}")
+    return canonical
 
 
 def boundary_source_matches_endpoint(source_binding: Any, endpoint_url: Any) -> bool:
