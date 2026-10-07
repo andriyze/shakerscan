@@ -381,6 +381,18 @@ class ScanAdvancedLimits(BaseModel):
     exclude_families: list[str] = Field(default_factory=list, max_length=100)
     force_single_worker: bool = False
 
+    @field_validator(
+        "max_duration_seconds", "max_http_requests", "max_state_changing_requests",
+        "max_endpoints", "max_hosts", "max_browser_actions", "max_tcp_ports",
+        "max_tool_wall_seconds", "max_workers", mode="before",
+    )
+    @classmethod
+    def refuse_boolean_ceiling(cls, value):
+        # Lax integer parsing read `true` as 1 and admitted it as a one-unit ceiling.
+        if isinstance(value, bool):
+            raise ValueError("a budget ceiling must be a whole number, not true/false")
+        return value
+
 
 class ScanPublicPlacement(BaseModel):
     """Typed placement constraints accepted by public Scan clients."""
