@@ -1494,7 +1494,8 @@ identity. These routes will be removed after remaining legacy callers migrate.
 - AI retest verification: `AI_VERIFY_ENABLED`, `AI_VERIFY_URL`, `AI_VERIFY_API_KEY`,
   `AI_VERIFY_MODEL`, `AI_VERIFY_USE_BROWSER`, `AI_VERIFY_MAX_PER_SCAN`, `AI_VERIFY_MIN_SEVERITY`.
 - AI Ops Router execution gate: `AI_OPS_ROUTER_EXECUTE_ENABLED` (default on; set `false` for a global
-  kill switch).
+  kill switch on autonomous, router-driven execution). A Hunt's own `candidate.verify` is not
+  autonomous execution and keeps its target, approval, proof-contract and budget gates instead.
 - Evidence-retention preview lifetime: `EVIDENCE_RETENTION_PREVIEW_TTL_SECONDS` (default 600
   seconds, clamped to 60-3600 seconds).
 - AI Gate transcripts: `AI_GATE_TRANSCRIPT_RETENTION_DAYS` (retention label, default 30);
