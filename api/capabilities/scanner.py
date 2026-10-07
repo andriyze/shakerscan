@@ -200,17 +200,19 @@ class ScannerExecutionAdapter:
                 )
                 if not (self._state_changing and execution_started):
                     actual["state_changing_requests"] = 0
-                elif self._nuclei_state_changing and not self._body_state_changing:
-                    # Settle the mutation dimension to the HTTP requests actually
-                    # sent (conservative: the active run's reservation binds the two
-                    # equal), not the whole hold -- when non-GET templates were in
-                    # the run every request is counted as a possible mutation.
+                else:
+                    # Settle the mutation dimension to the HTTP requests charged, never
+                    # the whole hold. Both a body attempt and an active state-changing
+                    # template run reserve the two dimensions equal and count every
+                    # request as a possible mutation, so the HTTP charge is a sound upper
+                    # bound: exact when the wire was measured, the full hold when it was
+                    # not. Charging the hold regardless reported 240 of 240 mutations
+                    # for a dalfox body attempt that sent six requests, and the batch's
+                    # next body candidate went unfunded (insufficient_plan_budget).
                     actual["state_changing_requests"] = min(
                         reserved_state_changing,
                         int(actual.get("http_requests", reserved_state_changing)),
                     )
-                else:
-                    actual["state_changing_requests"] = reserved_state_changing
             if "browser_actions" in self._requested_budget:
                 # A headless crawl emits no per-action telemetry we parse, so
                 # there is nothing exact to charge. Retain the full hold once
