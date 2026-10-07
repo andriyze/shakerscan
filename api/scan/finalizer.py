@@ -159,6 +159,22 @@ class ScanFinalizationError(ValueError):
     """Terminal receipts are incomplete or inconsistent with the Scan plan."""
 
 
+# The manifest a batch slice indexes, in the order a slice's capability reads them.
+_SLICE_MANIFEST_ARGS = (
+    "request_candidate_manifest_ref", "candidate_manifest_ref",
+    "target_manifest_ref", "endpoint_manifest_ref",
+)
+
+
+def _manifest_lane(action: Any) -> tuple[str, str]:
+    """One worklist: the capability and the digest of the manifest its slices index."""
+    for name in _SLICE_MANIFEST_ARGS:
+        reference = action.capability_args.get(name)
+        if isinstance(reference, Mapping) and reference.get("manifest_digest"):
+            return action.capability_name, str(reference["manifest_digest"])
+    return action.capability_name, ""
+
+
 def _receipt(result: CapabilityResultReference) -> dict[str, Any]:
     return result.receipt_ref.canonical_dict()
 
@@ -1787,13 +1803,17 @@ def finalize_scan_report(
             row["_statuses"].append(result.status.value)
             row["_reasons"].append(result.reason_code.value if result.reason_code is not None else "")
             declared = action.capability_args.get("manifest_entries")
+            # Every slice of one worklist declares the same manifest size. A passive Scan
+            # runs the pack over two worklists -- the admitted surface and the discovered
+            # one -- and counting the admission slice against the discovered manifest let
+            # it cancel out an unscheduled discovered route.
+            lane = _manifest_lane(action)
             if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
-                # Every slice of one capability declares the same manifest size.
-                row["_manifest_entries"][action.capability_name] = max(
-                    int(row["_manifest_entries"].get(action.capability_name, 0)), declared,
+                row["_manifest_entries"][lane] = max(
+                    int(row["_manifest_entries"].get(lane, 0)), declared,
                 )
-            row["_scheduled_entries"][action.capability_name] = (
-                int(row["_scheduled_entries"].get(action.capability_name, 0)) + planned
+            row["_scheduled_entries"][lane] = (
+                int(row["_scheduled_entries"].get(lane, 0)) + planned
             )
         # Budget is real spend either way and stays aggregated for the family.
         for name, amount in result.budget_reserved.items():
@@ -1860,8 +1880,8 @@ def finalize_scan_report(
         scheduled_entries = row.pop("_scheduled_entries", {}) or {}
         row["manifest_candidates"] = sum(int(value) for value in manifest_entries.values())
         row["unscheduled_candidates"] = sum(
-            max(0, int(total) - int(scheduled_entries.get(capability, 0)))
-            for capability, total in manifest_entries.items()
+            max(0, int(total) - int(scheduled_entries.get(lane, 0)))
+            for lane, total in manifest_entries.items()
         )
         action_incomplete = any(status != "success" for status in statuses)
         zero_attempts = (
