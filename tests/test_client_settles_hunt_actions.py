@@ -93,7 +93,13 @@ def test_mcp_never_replays_a_definite_refusal():
 
 
 def test_mcp_wait_is_bounded_and_keeps_the_recovery_identity():
+    # The server said the action is still running: a known state, returned with the key to collect it.
     client = ScriptedHunt([mcp.MCPError(-32001, "unavailable")] + [_action("running")] * 1000, wait=0.05)
+    running = _call(client)["structuredContent"]
+    assert running["outcome"] == "running"
+    assert running["mcp_idempotency_key"] == "key-mcp-1"
+    # No answer ever arrived: the outcome stays unknown.
+    client = ScriptedHunt([mcp.MCPError(-32001, "unavailable")] * 1000, wait=0.05)
     with pytest.raises(mcp.MCPError) as unsettled:
         _call(client)
     assert unsettled.value.message == "Hunt capability response was not confirmed"

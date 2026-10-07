@@ -92,7 +92,18 @@ adapter replays the same key and unchanged input, which the engine answers with 
 current state without starting it again, until the action is final or
 `SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 900, at most 3600) passes; only then does it report
 the unknown outcome and its recovery identity. `shakerscan hunt call` does the same, bounded by
-`SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS`. A definite refusal (4xx) is never replayed.
+`SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS`. A definite refusal (4xx) is never replayed: its status and
+the server's stated reason are in the error message the agent reads (`error.data` keeps the body).
+
+The capability request may run as long as the server's wall time for it
+(`budget_cost.tool_wall_seconds` in the Hunt manifest) plus a margin, never only the adapter's
+20-second request timeout. MCP clients usually end a request after 60 seconds, so the adapter never outlives it: a
+client that sent a progress token receives progress notifications every 10 seconds while the
+action runs (clients that reset their timeout on progress, such as OpenCode, keep waiting); any
+other client gets an answer within `SHAKERSCAN_MCP_CALL_SECONDS` (default 45, at most 55). An
+action still running then is returned as a normal result with `outcome: "running"` and its
+`mcp_idempotency_key`: calling the tool again with the same key and unchanged input collects the
+result, because the engine replays the recorded action and never runs it twice.
 The runtime still revalidates target binding, approval, budgets, evidence, and proof contracts.
 Catalog/contract drift, redirects, oversized responses, unavailable APIs, and unexpected dispatch
 results fail closed.
