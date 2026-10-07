@@ -10,7 +10,12 @@ export default function SubdomainDiscoverySection({ section }: { section: Sectio
   if (!summary || !section) return null
   return (
     <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
-      <h2 className="text-2xl font-bold mb-2">Discovered subdomains</h2>
+      <h2 className="text-2xl font-bold mb-2">
+        Discovered subdomains
+        {(section.truncated || section.targets?.partial) && (
+          <span className="ml-2 align-middle rounded-sm bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-300">Partial</span>
+        )}
+      </h2>
       <p className="text-sm text-gray-400">{summary}</p>
       <p className="mt-1 text-xs text-gray-500">
         This scan did not test them. Scan each from <Link href="/targets" className="text-blue-400 underline">Targets</Link>.

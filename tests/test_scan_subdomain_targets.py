@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 import json
 import os
 from pathlib import Path
+import time
 
 import pytest
 
@@ -153,6 +154,81 @@ def test_a_report_without_subdomains_records_nothing():
     assert asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
         _pool(_FakeConn()), report, scan_id=str(SCAN_ID),
     )) is None
+
+
+def test_a_list_cut_at_the_report_limit_says_how_many_names_were_found():
+    hosts = tuple(f"h{index:04d}.shakerscan.com" for index in range(1_200))
+    section = _report_with_subdomains(hosts)["discovery"]["subdomains"]
+    assert section["count"] == 1_000 and len(section["hosts"]) == 1_000
+    assert section["total"] == 1_200
+    assert section["truncated"] is True
+    complete = _report_with_subdomains()["discovery"]["subdomains"]
+    assert complete["total"] == 3 and complete["truncated"] is False
+
+
+def test_every_name_the_recording_did_not_check_or_add_is_counted_with_its_cap():
+    """1,500 names: the report lists 1,000, DNS checks a window of 300, and 100 become targets.
+    The outcome used to say only "100 added", so 1,400 names vanished without a word."""
+    hosts = tuple(f"h{index:04d}.shakerscan.com" for index in range(1_000))
+    report = _report_with_subdomains(hosts)
+    report["discovery"]["subdomains"]["total"] = 1_500
+    conn = _FakeConn()
+
+    async def resolves(_name):
+        return ["203.0.113.10"]
+
+    async def plan(names):
+        return await subdomain_targets.target_resolution.plan_discovered_targets(
+            names, lookup=resolves,
+        )
+
+    outcome = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
+        _pool(conn), report, scan_id=str(SCAN_ID), plan_targets=plan,
+    ))
+    assert len(conn.inserted_targets) == 100
+    assert outcome["found"] == 1_500
+    assert outcome["checked"] == 300 and outcome["not_checked"] == 1_200
+    assert outcome["added"] == 100
+    assert outcome["target_limit"] == 100 and outcome["over_target_limit"] == 200
+    assert outcome["partial"] is True
+    assert outcome["partial_reasons"] == ["report_list_limit", "dns_resolve_limit", "target_limit"]
+    run = conn.runs[0]
+    assert run[2] == 1_500
+    stored = json.loads(run[5])["dns_resolution"]
+    assert stored["judged"] == 300 and stored["beyond_resolve_limit"] == 700
+
+    # A redelivered job reports the same account from the stored run.
+    redelivered = _report_with_subdomains(hosts)
+    redelivered["discovery"]["subdomains"]["total"] = 1_500
+    again = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
+        _pool(_FakeConn(existing={"id": outcome["discovery_id"], "sources_used": run[5]})),
+        redelivered, scan_id=str(SCAN_ID),
+    ))
+    assert again["checked"] == 300 and again["over_target_limit"] == 200
+
+
+def test_a_dead_resolver_cannot_hold_the_finished_scan_beyond_the_dns_deadline(monkeypatch):
+    """Each lookup has a 3 s timeout; 40 names at 16 at a time took about 9 s before the scan
+    could be saved, and a full window about a minute. One deadline now bounds the whole check."""
+    async def hangs(_name):
+        await asyncio.sleep(30)
+        return []
+
+    monkeypatch.setattr(subdomain_targets.target_resolution, "system_lookup", hangs)
+    monkeypatch.setattr(subdomain_targets, "DNS_DEADLINE_SECONDS", 0.2)
+    hosts = tuple(f"h{index:02d}.shakerscan.com" for index in range(40))
+    conn = _FakeConn()
+    started = time.monotonic()
+    outcome = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
+        _pool(conn), _report_with_subdomains(hosts), scan_id=str(SCAN_ID),
+    ))
+    assert time.monotonic() - started < 2.0
+    assert outcome["status"] == "recorded"
+    assert outcome["dns_deadline_skipped"] == 40
+    assert outcome["checked"] == 0 and outcome["not_checked"] == 40
+    assert "dns_deadline" in outcome["partial_reasons"]
+    # An unjudged name stays scannable, as a resolver fault always has; the report says so.
+    assert len(conn.inserted_targets) == 40
 
 
 # --- the recorder on real PostgreSQL ----------------------------------------------------------

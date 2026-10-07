@@ -1282,6 +1282,7 @@ def _posture_sections(
     seen_tech: set[str] = set()
     infrastructure_observation: dict[str, Any] = {}
     subdomain_hosts: dict[str, str] = {}
+    subdomain_seen: set[str] = set()
 
     for action_id, rows in observations.items():
         for row in rows or ():
@@ -1392,6 +1393,8 @@ def _posture_sections(
                 dns_section = _dns_section(row)
             elif kind == "subdomain":
                 host = str(row.get("host") or "").lower().rstrip(".")
+                if host:
+                    subdomain_seen.add(host)
                 if host and len(subdomain_hosts) < _REPORTED_SUBDOMAIN_LIMIT:
                     subdomain_hosts.setdefault(host, str(row.get("root_domain") or ""))
             elif kind == "infrastructure_intelligence":
@@ -1501,7 +1504,12 @@ def _posture_sections(
             discovery["subdomains"] = {
                 "root_domain": roots[0] if len(roots) == 1 else None,
                 "hosts": sorted(subdomain_hosts),
+                # `count` is how many are listed; `total` how many distinct names discovery
+                # returned. A list cut at the limit says so instead of reading as complete.
                 "count": len(subdomain_hosts),
+                "total": len(subdomain_seen),
+                "truncated": len(subdomain_seen) > len(subdomain_hosts),
+                "listed_limit": _REPORTED_SUBDOMAIN_LIMIT,
                 "source": "subfinder",
                 "scope": "discovered_names_not_scanned_by_this_scan",
             }
