@@ -298,6 +298,27 @@ def test_inline_evidence_hash_is_verified_and_mismatches_are_withheld(tmp_path):
     assert withheld["content"] is None
 
 
+def test_inline_evidence_read_back_from_jsonb_text_is_verified(tmp_path):
+    # Soak N8: every new nuclei_evidence object was reported `mismatch`. The content column is
+    # JSONB, so PostgreSQL returns its own text form (keys ordered by length, raw non-ASCII),
+    # not the sorted, ASCII-escaped text the hash was taken over.
+    content = {"template-id": "tech-detect", "matched-at": "https://h.test/\u00e9",
+               "info": {"severity": "info", "name": "N"}, "b": 1, "aa": 2.5}
+    stored = worker.store_evidence_content(content, results_dir=tmp_path)
+    jsonb_text = (
+        '{"b": 1, "aa": 2.5, "info": {"name": "N", "severity": "info"}, '
+        '"matched-at": "https://h.test/\u00e9", "template-id": "tech-detect"}'
+    ).replace("\\u00e9", "\u00e9")
+    assert jsonb_text != stored["content"]
+    read_back = dict(stored, content=jsonb_text)
+    verified = hydrate_evidence_content(read_back, results_dir=tmp_path)
+    assert verified["storage_integrity"] == "verified"
+    assert verified["content"] == jsonb_text
+
+    altered = dict(stored, content=jsonb_text.replace("tech-detect", "tech-detecT"))
+    assert hydrate_evidence_content(altered, results_dir=tmp_path)["storage_integrity"] == "mismatch"
+
+
 def test_never_raises_on_db_error():
     class _BadConn:
         async def execute(self, *a):
