@@ -85,6 +85,8 @@ _BASELINE_RECORDED_HEADERS: frozenset[str] = frozenset({
     "cross-origin-embedder-policy", "cross-origin-resource-policy",
     "access-control-allow-origin", "access-control-allow-credentials", "server", "x-powered-by",
 })
+# Hosts listed in the report's subdomain section; the discovery capability itself is bounded.
+_REPORTED_SUBDOMAIN_LIMIT = 1_000
 _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
     "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
@@ -1263,6 +1265,7 @@ def _posture_sections(
     server_versions: dict[str, Any] = {}
     seen_tech: set[str] = set()
     infrastructure_observation: dict[str, Any] = {}
+    subdomain_hosts: dict[str, str] = {}
 
     for action_id, rows in observations.items():
         for row in rows or ():
@@ -1371,6 +1374,10 @@ def _posture_sections(
                     tls_section = candidate
             elif kind == "dns_posture":
                 dns_section = _dns_section(row)
+            elif kind == "subdomain":
+                host = str(row.get("host") or "").lower().rstrip(".")
+                if host and len(subdomain_hosts) < _REPORTED_SUBDOMAIN_LIMIT:
+                    subdomain_hosts.setdefault(host, str(row.get("root_domain") or ""))
             elif kind == "infrastructure_intelligence":
                 infrastructure_observation = dict(row)
             elif kind == "http_fingerprint":
@@ -1464,12 +1471,24 @@ def _posture_sections(
             "limitations": list(infrastructure_observation.get("limitations") or ()),
             "errors": list(infrastructure_observation.get("errors") or ()),
         }
-    if technologies or server_versions:
+    if technologies or server_versions or subdomain_hosts:
         discovery: dict[str, Any] = {}
         if technologies:
             discovery["tech"] = {"items": technologies}
         if server_versions:
             discovery["server_versions"] = server_versions
+        if subdomain_hosts:
+            # The scan's own subdomain discovery used to stop at the endpoint manifest: the
+            # action said success while no report section or target named a single host.
+            # Listing them here is what the worker records as targets afterwards.
+            roots = sorted({root for root in subdomain_hosts.values() if root})
+            discovery["subdomains"] = {
+                "root_domain": roots[0] if len(roots) == 1 else None,
+                "hosts": sorted(subdomain_hosts),
+                "count": len(subdomain_hosts),
+                "source": "subfinder",
+                "scope": "discovered_names_not_scanned_by_this_scan",
+            }
         sections["discovery"] = discovery
     return sections
 
