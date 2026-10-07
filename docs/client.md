@@ -303,9 +303,10 @@ shakerscan hunt --url https://scanner.example.com --token-file ./token start --h
 The connection options (`--url`, `--token-file`, `--timeout`) may come before or after the
 subcommand, and everything after a `--` is forwarded untouched. `--timeout` is the seconds to
 wait for each API answer (default 60). `shakerscan hunt --help`, or `hunt` with nothing after
-it, prints the connection options and then that CLI's own help. `query` takes the same kinds as
-the MCP tool, including `hypotheses`, `graph_nodes` and `graph_edges`, and `--cursor` to follow
-`next_cursor`.
+it, prints the connection options and then that CLI's own help. `query` takes every kind the
+engine's `/hunts/{id}/query` accepts, the same as the MCP tool, including `hypotheses`,
+`graph_nodes`, `graph_edges`, `endpoint_groups` and `service_intelligence`, and `--cursor` to
+follow `next_cursor`.
 
 ## Versioning and release
 
