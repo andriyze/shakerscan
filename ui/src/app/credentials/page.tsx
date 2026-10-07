@@ -301,9 +301,17 @@ function CredentialsContent() {
     counts[profile.principal_slot] = (counts[profile.principal_slot] || 0) + 1
     return counts
   }, {}), [profiles])
-  const shareTargets = useMemo<ShareTargetChoice[]>(() => assets.map((asset) => ({
-    id: asset.id, kind: 'network', label: asset.name || asset.locator, detail: /^https?:\/\//i.test(asset.url) ? asset.url : asset.locator,
-  })), [assets])
+  // The grant names the target as it is; the server refuses a label that does not match.
+  const shareTargets = useMemo<ShareTargetChoice[]>(() => assets.map((asset) => {
+    const httpOrigin = /^https?:\/\//i.test(asset.url)
+    return {
+      id: asset.id,
+      kind: httpOrigin ? 'web' : asset.connected_device ? 'device' : 'network',
+      label: asset.name || asset.locator,
+      detail: httpOrigin ? asset.url : asset.locator,
+      servesHttp: httpOrigin || (typeof asset.origin_count === 'number' ? asset.origin_count > 0 : undefined),
+    }
+  }), [assets])
 
   useEffect(() => {
     if (loading) return

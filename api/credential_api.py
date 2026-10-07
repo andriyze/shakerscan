@@ -19,6 +19,8 @@ try:
     )
     from runtime.credentials import (
         CREDENTIAL_KINDS,
+        HTTP_CREDENTIAL_KINDS,
+        SSH_CREDENTIAL_KINDS,
         CredentialContractError,
         build_credential_secret,
         parse_credential_secret,
@@ -34,6 +36,8 @@ except ModuleNotFoundError:
     )
     from api.runtime.credentials import (
         CREDENTIAL_KINDS,
+        HTTP_CREDENTIAL_KINDS,
+        SSH_CREDENTIAL_KINDS,
         CredentialContractError,
         build_credential_secret,
         parse_credential_secret,
@@ -371,6 +375,60 @@ async def _require_target(conn: Any, *, target_kind: str, target_id: uuid.UUID) 
         )
     if not row:
         raise HTTPException(status_code=404, detail="active credential target not found")
+
+
+# What the receiving target actually is, read from the inventory rather than the caller's label.
+_GRANT_TARGET_FACTS_SQL = """
+SELECT t.url ~* '^https?://' AS http_origin,
+       (t.url ~* '^https?://' OR EXISTS(
+            SELECT 1 FROM targets member
+            WHERE member.asset_owner_id=t.id AND member.is_active AND member.url ~* '^https?://'
+       )) AS serves_http,
+       EXISTS(SELECT 1 FROM target_device_profiles profile WHERE profile.target_id=t.id) AS device
+FROM targets t WHERE t.id=$1 AND t.is_active=true
+UNION ALL
+SELECT false, false, true FROM device_targets d WHERE d.id=$1 AND d.is_active=true
+LIMIT 1"""
+
+
+def grant_target_kind_error(
+    *, declared_kind: str, auth_kind: str, http_origin: bool, serves_http: bool, device: bool,
+) -> str | None:
+    """Why a profile cannot be shared with this target, or None when the kinds agree.
+
+    Physical target views share explicitly granted inputs, but the label must name the target as
+    it is and the credential's protocol must have something to authenticate to there: a web basic
+    auth profile granted to an SSH-only device, or a web origin labelled as a network host, was
+    accepted with 201 and could never be used correctly.
+    """
+    if declared_kind in {"web", "api"} and not http_origin:
+        return f"a {declared_kind} grant needs a web or API origin; this target is a host or device"
+    if declared_kind in {"network", "device"} and http_origin:
+        return f"a {declared_kind} grant needs a host or device; this target is a web or API origin"
+    if declared_kind == "device" and not device:
+        return "a device grant needs a connected device; this host is not one"
+    if auth_kind in HTTP_CREDENTIAL_KINDS and not serves_http:
+        return (
+            f"a {auth_kind} credential authenticates HTTP; this target has no web or API origin"
+        )
+    if auth_kind in SSH_CREDENTIAL_KINDS and http_origin:
+        return "an SSH credential needs a host or device, not a web origin"
+    return None
+
+
+async def _require_grant_target(
+    conn: Any, *, target_kind: str, target_id: uuid.UUID, auth_kind: str,
+) -> None:
+    facts = await conn.fetchrow(_GRANT_TARGET_FACTS_SQL, target_id)
+    if not facts:
+        raise HTTPException(status_code=404, detail="active credential target not found")
+    reason = grant_target_kind_error(
+        declared_kind=target_kind, auth_kind=auth_kind,
+        http_origin=bool(facts["http_origin"]), serves_http=bool(facts["serves_http"]),
+        device=bool(facts["device"]),
+    )
+    if reason:
+        raise HTTPException(status_code=422, detail=reason)
 
 
 def _public(profile: CredentialProfileMetadata) -> dict[str, Any]:
@@ -729,8 +787,11 @@ async def grant_credential_profile(request: Request, profile_id: uuid.UUID, payl
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await _require_target(conn, target_kind=payload.target_kind, target_id=payload.target_id)
                 profile = await _store.get_profile(conn, profile_id=profile_id)
+                await _require_grant_target(
+                    conn, target_kind=payload.target_kind, target_id=payload.target_id,
+                    auth_kind=profile.auth_kind,
+                )
                 if _has_active_capabilities(profile):
                     await _require_active_capability_approval(
                         conn, approval_receipt_id=payload.approval_receipt_id, target_id=payload.target_id,

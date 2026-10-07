@@ -77,3 +77,15 @@ test('a credential is shared with other targets explicitly, and a shared copy is
   assert.match(dialog, /Each still needs\s+its own authorization/)
   assert.match(client, /\/credential-profiles\/\$\{encodeURIComponent\(profileId\)\}\/grants/)
 })
+
+test('a share names the target as it is and only offers targets the credential can authenticate to', () => {
+  const dialog = fs.readFileSync(path.join(root, 'src/components/credentials/ShareCredentialDialog.tsx'), 'utf8')
+  // Soak N6: every share was sent as `network`, and a web basic-auth profile was offered and
+  // granted to an SSH-only device. The kind comes from the asset, and the protocol must fit.
+  assert.doesNotMatch(page, /id: asset\.id, kind: 'network'/)
+  assert.match(page, /kind: httpOrigin \? 'web' : asset\.connected_device \? 'device' : 'network'/)
+  assert.match(page, /servesHttp: httpOrigin \|\|/)
+  assert.match(dialog, /if \(authKind\.startsWith\('ssh_'\)\) return target\.kind === 'network' \|\| target\.kind === 'device'/)
+  assert.match(dialog, /return target\.servesHttp !== false/)
+  assert.match(dialog, /protocolFits\(profile\.auth_kind, target\)/)
+})
