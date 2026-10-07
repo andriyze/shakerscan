@@ -343,7 +343,13 @@ def compile_continuation_round(
         # The first continuation satisfies explicit family floors. Later rounds
         # are opportunistic breadth and must stop cleanly when the residual can
         # no longer fund a fast-tier batch.
-        require_family_minimums=revision_number == 1,
+        # A passive Scan already holds the pack's required baseline in its admission
+        # plan; its continuation is breadth over the discovered surface, admitted when the
+        # residual funds it and never a reason to fail the Scan.
+        require_family_minimums=revision_number == 1 and not any(
+            action.required and action.capability_name == "templates.passive_batch"
+            for action in parent_plan.actions[:len(allocation.parent_action_ids)]
+        ),
         verification_extensions=extensions,
     )
     allocated_plan = allocate_scan_action_plan(

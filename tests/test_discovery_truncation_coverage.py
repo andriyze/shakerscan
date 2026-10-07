@@ -191,3 +191,81 @@ def test_a_passive_scan_runs_its_template_pack_over_the_discovered_surface():
         action.capability_name in {"xss.verify_batch", "sqli.verify_batch", "templates.active_batch"}
         for action in appended
     )
+
+
+def _d1_admission(endpoint_paths=("/",)):
+    """E2E D-1's exact submission: fast, passive, max_endpoints 40, single worker."""
+    from api.runtime.models import TargetBinding
+    from api.scan.admission_actions import _compile_scan_admission_action_authority
+    from api.scan.contracts import resolve_scan_contract
+    from api.scan.work_manifests import (
+        build_canonical_scan_nuclei_template_manifest, build_endpoint_manifest,
+    )
+
+    target = TargetBinding(
+        target_id="d1", target_kind="web", canonical_host="juice-shop.test",
+        allowed_origins=("http://juice-shop.test:3000",), allowed_addresses=("192.0.2.40",),
+        allowed_root_domains=("juice-shop.test",),
+    )
+    contract = resolve_scan_contract(
+        budget_profile="fast", policy={"active_testing": False},
+        advanced={"max_endpoints": 40, "force_single_worker": True},
+    )
+    template = build_canonical_scan_nuclei_template_manifest(
+        scan_id=SCAN_ID, target_binding_digest=target.digest, include_active=False,
+    )
+    endpoints = build_endpoint_manifest(
+        scan_id=SCAN_ID, target_binding_digest=target.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "http", "host": "juice-shop.test", "port": 3000,
+                "normalized_path": path, "concrete_path": path, "query_keys": [],
+                "source": "target",
+            } for path in endpoint_paths],
+        },
+        source_action_ids=("discover.web_probe",),
+    )
+    plan, allocation = _compile_scan_admission_action_authority(
+        scan_id=SCAN_ID, scan_contract=contract, target_binding=target,
+        endpoint_manifest_ref=endpoints.reference().canonical_dict(),
+        template_manifest_ref=template.reference().canonical_dict(),
+    )
+    return plan, allocation, contract, target, template
+
+
+def test_the_reviewed_passive_pack_stays_a_required_baseline_of_every_passive_scan():
+    """Breadth over discovery is additional work; the base-origin pack is never deferred.
+
+    E2E D-1 looks for `passive.templates` holding exactly 7 requests / 30 seconds and
+    requires it to succeed. Deferring the pack into the continuation removed it from the
+    admission plan, so a passive Scan could complete without it whenever discovery found
+    nothing or no round was funded.
+    """
+    from api.scan.continuation_rounds import compile_next_continuation
+    from tests.test_continuation_rounds import _settle_round_fixture
+
+    plan, allocation, contract, target, template = _d1_admission()
+    baseline = [a for a in plan.actions if a.capability_name == "templates.passive_batch"]
+    assert [a.action_id for a in baseline] == ["passive.templates"]
+    assert baseline[0].required is True
+    assert dict(baseline[0].requested_budget) == {"http_requests": 7, "tool_wall_seconds": 30}
+    assert allocation is not None
+
+    fixture = dict(
+        parent_plan=plan, allocation=allocation, parent_results={},
+        execution_plan=contract.execution_plan, target=target,
+        target_url="http://juice-shop.test:3000", observations={}, request_manifests=(),
+        options={
+            "template_manifest_ref": template.reference().canonical_dict(),
+            "custom_endpoints": [f"GET /page-{chr(97 + i)}" for i in range(20)],
+        },
+    )
+    _settle_round_fixture(fixture)
+    first = compile_next_continuation(**fixture, revision_number=1)
+    breadth = [
+        a for a in first.plan.actions[len(plan.actions):]
+        if a.capability_name == "templates.passive_batch"
+    ]
+    assert breadth, "discovered routes still get the pack as additional breadth"
+    assert not any(a.required for a in breadth), "breadth can never fail the Scan"

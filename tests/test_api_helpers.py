@@ -21930,13 +21930,16 @@ def test_passive_scan_admission_continues_its_template_pack_over_discovery():
         template_manifest_ref=template_manifest.reference().canonical_dict(),
     )
 
-    # The pack is deferred to the continuation instead of running once at the base origin.
+    # The pack keeps its required baseline at the base origin; the continuation only adds
+    # breadth over the discovered surface.
     assert continuation is not None
     assert plan.actions[-1].action_id != "finalize.report"
-    assert not any(
-        action.capability_name in {"templates.passive_scan", "templates.passive_batch"}
-        for action in plan.actions
-    )
+    baseline = [
+        action for action in plan.actions
+        if action.capability_name == "templates.passive_batch"
+    ]
+    assert [action.action_id for action in baseline] == ["passive.templates"]
+    assert baseline[0].required is True
     assert "templates.passive_batch" in continuation.allowed_capabilities
     assert continuation.required_capabilities == ()
     active = {
