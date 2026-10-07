@@ -70,9 +70,12 @@ class CapabilityResultReason(str, Enum):
     # file would imply is not real, but nothing was cut off or misparsed.
     SOURCE_NOT_PUBLISHED = "source_not_published"
     # The target published an API description that parsed, but every server it declares is a
-    # different origin (a Swagger `host`, an OpenAPI `servers` URL), so its routes are outside
-    # this scan's binding. Nothing was misparsed; the declared surface is simply not this one.
+    # different origin (a Swagger `host` or `schemes`, an OpenAPI `servers` URL), so its routes
+    # are outside this scan's binding. Nothing was misparsed; the declared surface is not this one.
     DECLARED_OUT_OF_SCOPE = "declared_out_of_scope"
+    # As above for some of its operations only: the routes on the bound origin were ingested and
+    # those declared only on another origin were not.
+    DECLARED_PARTLY_OUT_OF_SCOPE = "declared_partly_out_of_scope"
 
 
 # The reason naming each non-time budget dimension an action can run out of.

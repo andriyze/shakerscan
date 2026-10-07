@@ -487,25 +487,33 @@ def _directory_listing_child_url(directory_url: str, link: str) -> str:
     return urllib.parse.urljoin(base, link)
 
 
-def _spec_ingest_partial_reason(issues: Sequence[str]) -> CapabilityResultReason:
+_OFF_ORIGIN_SPEC_ISSUES = frozenset({"spec_off_origin_server", "spec_server_scheme_mismatch"})
+
+
+def _spec_ingest_partial_reason(
+    issues: Sequence[str], *, spec_routes: int = 0,
+) -> CapabilityResultReason:
     """The honest reason a spec/hint ingestion is partial, most severe first.
 
     A ``*_limit`` / ``*_limit_reached`` issue is a real bound: routes beyond it were dropped,
     so the output was truncated. A hint file the target answered with its HTML shell was never
-    published -- nothing was dropped or misparsed. A spec whose declared servers are all another
-    origin parsed, but its routes are outside the binding. Anything else is a document the parser
-    could only partly model (an unsupported media type, an unresolvable reference, a hint parse
-    error).
+    published -- nothing was dropped or misparsed. A spec whose operations declare only servers
+    on another origin (another host, port or scheme) parsed, but those routes are outside the
+    binding: when no spec route was ingested the description is out of scope, and when some were
+    it is partly so. Anything else is a document the parser could only partly model (an
+    unsupported media type, an unresolvable reference, a hint parse error).
     """
     tokens = [str(issue or "").split(":", 1)[0] for issue in issues]
     if any(token.endswith(("_limit", "_limit_reached")) for token in tokens):
         return CapabilityResultReason.OUTPUT_TRUNCATED
     if tokens and all(token == "hint_document_is_markup" for token in tokens):
         return CapabilityResultReason.SOURCE_NOT_PUBLISHED
-    # A spec that names another host parsed fine: its routes are out of scope, not misread.
-    if "spec_off_origin_server" in tokens and all(
-        token in {"spec_off_origin_server", "hint_document_is_markup"} for token in tokens
+    # A spec that names another origin parsed fine: its routes are out of scope, not misread.
+    if _OFF_ORIGIN_SPEC_ISSUES.intersection(tokens) and all(
+        token in _OFF_ORIGIN_SPEC_ISSUES or token == "hint_document_is_markup" for token in tokens
     ):
+        if spec_routes > 0:
+            return CapabilityResultReason.DECLARED_PARTLY_OUT_OF_SCOPE
         return CapabilityResultReason.DECLARED_OUT_OF_SCOPE
     return CapabilityResultReason.PARSER_FAILED
 
@@ -2135,6 +2143,7 @@ class DatabaseNeutralScanActionDispatcher:
                 target.append((spec_url, result.response_body, content_type))
         ingestion_issues: list[str] = []
         routes = ingest_spec_bodies(documents, origin=base_origin, issues=ingestion_issues)
+        spec_route_count = len(routes)
         # The hint files are an optional extra source. Whatever they do, the
         # specification results this action already parsed must survive them.
         try:
@@ -2150,7 +2159,9 @@ class DatabaseNeutralScanActionDispatcher:
             # State why the action is partial. Without a stated reason the backend falls back to
             # output_truncated, which told the operator a bounded limit was reached when the
             # target had only answered robots.txt with its HTML shell.
-            errors.insert(0, _spec_ingest_partial_reason(ingestion_issues).value)
+            errors.insert(0, _spec_ingest_partial_reason(
+                ingestion_issues, spec_routes=spec_route_count,
+            ).value)
         errors.extend(ingestion_issues)
         # Value-free: the observation carries the route shape and field names, never a spec value.
         observations = tuple(dict(route) for route in routes)
