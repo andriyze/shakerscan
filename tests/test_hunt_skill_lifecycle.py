@@ -131,7 +131,7 @@ class _Connection:
         raise AssertionError(query)
 
     async def fetch(self, query, *args):
-        if "FROM findings" in query:
+        if "FROM findings" in query or "FROM investigation_candidates" in query:
             return []
         if "FROM hunt_actions WHERE hunt_run_id=$1" in query:
             return []
