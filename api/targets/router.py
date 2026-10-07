@@ -922,12 +922,16 @@ async def update_target(target_id: str, request: TargetUpdate):
 
         query = f"UPDATE targets SET {', '.join(updates)} WHERE id = ${param_idx} RETURNING id"
         restored_services = 0
-        async with conn.transaction():
-            if request.is_active is True:
-                # Restore is the inverse of archive: the host's web apps archived with it come back
-                # with it. This runs first, while the host still carries its archive timestamp.
-                from .archive import restore_archived_members
+        if request.is_active is True:
+            # Restore is the inverse of archive: the host's web apps archived with it come back
+            # with it. This runs first, while the host still carries its archive timestamp.
+            from .archive import restore_archived_members
+            async with conn.transaction():
                 restored_services = await restore_archived_members(conn, uuid.UUID(target_id))
+                result = await conn.fetchval(query, *params)
+                if not result:
+                    raise HTTPException(status_code=404, detail="Target not found")
+        else:
             result = await conn.fetchval(query, *params)
             if not result:
                 raise HTTPException(status_code=404, detail="Target not found")
