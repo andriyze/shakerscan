@@ -226,7 +226,7 @@ from scan.action_plan import (
 )
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.activity import scan_action_activity_event, scan_action_diagnostic_line
-from scan.subdomain_targets import record_scan_subdomain_discovery
+from scan.subdomain_targets import load_recorded_scan_report, record_ingested_report_subdomains
 from scan.action_store import PostgresScanActionStore
 from scan.operational_metrics import record_operational_event
 from scan.budget_allocator import (
@@ -11656,24 +11656,11 @@ async def _execute_reserved_deterministic_scan(
         raise ScanCapabilityContractError(
             "canonical Scan finalization produced no report manifest"
         )
-    async with db_pool.acquire() as conn:
-        final_observations = await PostgresObservationManifestStore().load(
-            conn,
-            reference=final_result.observation_manifest_ref,
-            scan_id=scan_id,
-            action_id="finalize.report",
-        )
-    if (
-        not final_observations
-        or final_observations[0].get("kind") != "scan_report"
-        or not isinstance(final_observations[0].get("report"), Mapping)
-    ):
-        raise ScanCapabilityContractError(
-            "canonical Scan report observation is invalid"
-        )
-    report = dict(final_observations[0]["report"])
-    await record_scan_subdomain_discovery(db_pool, report, scan_id=scan_id)
-    return report
+    return await load_recorded_scan_report(
+        db_pool, PostgresObservationManifestStore(), final_result, scan_id=scan_id,
+        root_domains=execution.target_binding.allowed_root_domains,
+        invalid_error=ScanCapabilityContractError,
+    )
 
 
 async def _execute_scan_subdomain_discovery(
@@ -13377,6 +13364,7 @@ async def process_scan_job(job_data: dict):
         try:
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
+                await record_ingested_report_subdomains(db_pool, result, scan_id=scan_id, options=options)
             else:
                 if device_target_id:
                     from devices.network_authorization import revalidate_network_authorization
@@ -16212,6 +16200,7 @@ async def process_scan_shard_job(job_data: dict):
         try:
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
+                await record_ingested_report_subdomains(db_pool, result, scan_id=scan_id, options=options)
             else:
                 options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
