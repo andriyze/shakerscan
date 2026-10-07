@@ -160,7 +160,10 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   the last actions examined before finishing; finished and cancelled Hunts are read-only.
 - Use `GET /hunts/{hunt_id}/checkpoint` after context compaction, planner handoff, or resume.
   It is a bounded server-derived view of current coverage, candidates, action outcomes, budgets,
-  and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. Coverage
+  and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. When
+  `continuation_truncated` (or `angles_truncated`) is true the queue is not complete; narrow it
+  with `GET /hunts/{hunt_id}/coverage-angles?status=...&family=...`, which reports `truncated` too.
+  Coverage
   and checkpoint state are advisory investigation memory; neither can grant authority or verify a
   finding.
 - Browser capabilities return `browser_surface` observations containing safe CSS selectors,

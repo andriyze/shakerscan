@@ -12,7 +12,8 @@ experiments into one fingerprint.
 
 Events are append-only and ordered by ``event_seq``, which is assigned at insert while
 the writer holds the Hunt row lock, so it follows commit order. An angle's current state
-is its highest-sequence event. One supersession is refused: an event that cites no new
+is its highest-sequence event; the record export carries every event, superseded ones
+included. One supersession is refused: an event that cites no new
 same-Hunt evidence cannot drop the candidate an angle is bound to.
 
 This is investigation state, not proof.  A coverage event can point at a candidate,
@@ -35,6 +36,7 @@ from .coverage_evidence import (
 )
 
 COVERAGE_LEDGER_SCHEMA = "hunt-coverage-ledger/v1"
+COVERAGE_HISTORY_SCHEMA = "hunt-coverage-history/v1"
 HUNT_CHECKPOINT_SCHEMA = "hunt-checkpoint/v1"
 
 COVERAGE_ANGLE_STATUSES = frozenset({
@@ -50,6 +52,7 @@ COVERAGE_ANGLE_STATUSES = frozenset({
 COVERAGE_WRITABLE_RUN_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
 MAX_EVIDENCE_ACTIONS = 50
 MAX_CHECKPOINT_ANGLES = 200
+MAX_CHECKPOINT_CONTINUATION = 200
 MAX_CHECKPOINT_CANDIDATES = 100
 MAX_JSON_BYTES = 16_384
 MAX_LOCUS_VALUE_CHARS = 1_000
@@ -473,6 +476,14 @@ async def record_coverage_angle(
     }
 
 
+_LATEST_ANGLES_CTE = """WITH latest AS (
+               SELECT DISTINCT ON (fingerprint) *
+               FROM hunt_coverage_angle_events
+               WHERE hunt_run_id=$1::uuid
+               ORDER BY fingerprint, event_seq DESC
+           )"""
+
+
 async def list_coverage_angles(
     conn: Any,
     *,
@@ -488,12 +499,7 @@ async def list_coverage_angles(
     normalized_family = str(family or "").strip().lower()[:80] or None
     bounded_limit = max(1, min(int(limit), 500))
     rows = await conn.fetch(
-        """WITH latest AS (
-               SELECT DISTINCT ON (fingerprint) *
-               FROM hunt_coverage_angle_events
-               WHERE hunt_run_id=$1::uuid
-               ORDER BY fingerprint, event_seq DESC
-           )
+        _LATEST_ANGLES_CTE + """
            SELECT latest.*, c.status AS candidate_status,
                   COUNT(*) OVER() AS total_count
            FROM latest
@@ -516,8 +522,73 @@ async def list_coverage_angles(
         "angles": angles,
         "count": len(angles),
         "total": total,
+        "limit": bounded_limit,
         "truncated": total > len(angles),
     }
+
+
+async def coverage_history(
+    conn: Any, *, hunt_run_id: str, limit: int,
+) -> dict[str, Any]:
+    """Return every event in sequence order, marking the ones a later event superseded."""
+    bounded_limit = max(1, int(limit))
+    rows = await conn.fetch(
+        """SELECT e.*, c.status AS candidate_status,
+                  LEAD(e.id) OVER (
+                      PARTITION BY e.fingerprint ORDER BY e.event_seq
+                  ) AS superseded_by_event_id,
+                  COUNT(*) OVER() AS total_count
+           FROM hunt_coverage_angle_events e
+           LEFT JOIN investigation_candidates c ON c.id=e.candidate_id
+           WHERE e.hunt_run_id=$1::uuid
+           ORDER BY e.event_seq ASC
+           LIMIT $2""",
+        hunt_run_id,
+        bounded_limit,
+    )
+    events = []
+    for row in rows:
+        event = _public_row(row)
+        event.pop("total_count", None)
+        superseded_by = dict(row).get("superseded_by_event_id")
+        event["superseded"] = superseded_by is not None
+        event["superseded_by_event_id"] = str(superseded_by) if superseded_by else None
+        events.append(event)
+    total = int(dict(rows[0]).get("total_count") or 0) if rows else 0
+    return {
+        "schema_version": COVERAGE_HISTORY_SCHEMA,
+        "events": events,
+        "event_count": len(events),
+        "event_total": total,
+        "event_limit": bounded_limit,
+        "events_truncated": total > len(events),
+        "current_state_rule": (
+            "Each fingerprint's current state is its highest-sequence event; earlier "
+            "events stay listed with superseded=true."
+        ),
+        "advisory_only": True,
+    }
+
+
+_CONTINUATION_SQL = _LATEST_ANGLES_CTE + """,
+           open_angles AS (
+               SELECT latest.*, c.status AS candidate_status
+               FROM latest
+               LEFT JOIN investigation_candidates c ON c.id=latest.candidate_id
+               WHERE latest.status <> 'negative'
+                 AND NOT (
+                     latest.status='candidate'
+                     AND COALESCE(c.status, '') IN ('verified','refuted','expired')
+                 )
+           )
+           SELECT open_angles.*, COUNT(*) OVER() AS continuation_total
+           FROM open_angles
+           ORDER BY CASE status
+                        WHEN 'candidate' THEN 0 WHEN 'partial' THEN 1
+                        WHEN 'testing' THEN 2 WHEN 'planned' THEN 3
+                        WHEN 'blocked' THEN 4 ELSE 99 END,
+                    family, fingerprint
+           LIMIT $2"""
 
 
 async def build_hunt_checkpoint(
@@ -527,6 +598,11 @@ async def build_hunt_checkpoint(
     hunt_run_id = str(run["id"])
     coverage = await list_coverage_angles(
         conn, hunt_run_id=hunt_run_id, limit=MAX_CHECKPOINT_ANGLES,
+    )
+    # The queue is selected and counted in SQL over every open angle, not derived from
+    # the newest-first angle window, so older open work cannot fall off unreported.
+    continuation_rows = await conn.fetch(
+        _CONTINUATION_SQL, hunt_run_id, MAX_CHECKPOINT_CONTINUATION,
     )
     candidate_rows = await conn.fetch(
         """SELECT c.id, c.family, c.title, c.status, c.claimed_severity,
@@ -627,34 +703,18 @@ async def build_hunt_checkpoint(
     family_counts = {
         str(row["family"]): int(row["count"]) for row in coverage_family_rows
     }
-
-    priority = {"candidate": 0, "partial": 1, "testing": 2, "planned": 3, "blocked": 4}
-    continuation = sorted(
-        (
-            {
-                "fingerprint": item["fingerprint"],
-                "family": item["family"],
-                "locus": item["locus"],
-                "mechanism": item["mechanism"],
-                "status": item["status"],
-                "candidate_id": item["candidate_id"],
-                "candidate_status": item["candidate_status"],
-                "blocker": item["blocker"],
-                "proof_gap": item["proof_gap"],
-                "evidence_action_ids": item["evidence_action_ids"],
-            }
-            for item in latest_angles
-            if item["status"] != "negative"
-            and not (
-                item["status"] == "candidate"
-                and item["candidate_status"] in {"verified", "refuted", "expired"}
+    continuation = []
+    for row in continuation_rows:
+        item = _public_row(row)
+        continuation.append({
+            key: item[key] for key in (
+                "fingerprint", "family", "locus", "mechanism", "status", "candidate_id",
+                "candidate_status", "blocker", "proof_gap", "evidence_action_ids",
             )
-        ),
-        key=lambda item: (
-            priority.get(str(item["status"]), 99),
-            str(item["family"]),
-            str(item["fingerprint"]),
-        ),
+        })
+    continuation_total = (
+        int(dict(continuation_rows[0]).get("continuation_total") or 0)
+        if continuation_rows else 0
     )
 
     return {
@@ -673,6 +733,9 @@ async def build_hunt_checkpoint(
             "latest_angles": latest_angles,
         },
         "continuation_queue": continuation,
+        "continuation_count": len(continuation),
+        "continuation_total": continuation_total,
+        "continuation_truncated": continuation_total > len(continuation),
         "candidates": candidates,
         "candidate_count": candidate_total,
         "candidates_truncated": candidate_total > len(candidates),
@@ -775,6 +838,7 @@ COVERAGE_LEDGER_SCHEMA_STATEMENTS = (
 
 __all__ = [
     "COVERAGE_ANGLE_STATUSES",
+    "COVERAGE_HISTORY_SCHEMA",
     "COVERAGE_LEDGER_SCHEMA",
     "COVERAGE_LEDGER_SCHEMA_STATEMENTS",
     "COVERAGE_LOCUS_KEYS",
@@ -785,6 +849,7 @@ __all__ = [
     "build_hunt_checkpoint",
     "canonical_coverage_locus",
     "coverage_fingerprint",
+    "coverage_history",
     "list_coverage_angles",
     "normalize_coverage_angle",
     "record_coverage_angle",

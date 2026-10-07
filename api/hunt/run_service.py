@@ -19,6 +19,7 @@ from .budget_amendments import (
 from .coverage_ledger import (
     COVERAGE_WRITABLE_RUN_STATUSES,
     build_hunt_checkpoint,
+    coverage_history as _coverage_history,
     list_coverage_angles as _list_coverage_angles,
     record_coverage_angle as _record_coverage_angle,
 )
@@ -1088,7 +1089,9 @@ class HuntRunService:
                 connection, scan_id=None, hunt_run_id=hunt_id,
                 limit=MAX_EXPORT_ROWS, offset=0,
             )
-            coverage_ledger = await _list_coverage_angles(
+            # The full event history, superseded events included, with an explicit
+            # bound; the per-Hunt event cap keeps it below MAX_EXPORT_ROWS.
+            coverage_ledger = await _coverage_history(
                 connection, hunt_run_id=str(hunt_uuid), limit=MAX_EXPORT_ROWS,
             )
         run = redact_sensitive(
@@ -1105,7 +1108,7 @@ class HuntRunService:
                 "includes": [
                     "objective", "bound_skills", "policy", "budgets",
                     "planner_capability_inputs", "action_outcomes", "receipt_references",
-                    "coverage_angles", "persisted_notes", "final_debrief",
+                    "coverage_events", "persisted_notes", "final_debrief",
                     "http_transactions", "budget_amendments",
                 ],
                 "excludes": ["hidden_model_chain_of_thought", "context_pack"],

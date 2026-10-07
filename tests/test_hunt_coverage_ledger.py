@@ -536,37 +536,47 @@ def test_traffic_dimensions_are_canonical_budget_dimensions():
 
 
 class _CheckpointConn:
-    def __init__(self):
+    """Answers the checkpoint queries; the continuation query applies the SQL's filter."""
+
+    def __init__(self, candidate_status="verified"):
         self.candidate_id = uuid4()
         self.angle_id = uuid4()
+        self.candidate_status = candidate_status
         self.now = datetime.now(timezone.utc)
 
+    def _angle_row(self):
+        return {
+            "id": self.angle_id,
+            "event_seq": 1,
+            "fingerprint": "f" * 64,
+            "family": "authorization",
+            "locus_json": '{"method":"GET","route":"/api/orders/{id}"}',
+            "mechanism": "object swap",
+            "principal_context": '{"owner":"a","attacker":"b"}',
+            "hypothesis": "cross-principal access",
+            "status": "candidate",
+            "evidence_action_ids": "[]",
+            "contradictory_evidence_action_ids": "[]",
+            "candidate_id": self.candidate_id,
+            "candidate_status": self.candidate_status,
+            "blocker": None,
+            "proof_gap": None,
+            "created_at": self.now,
+        }
+
     async def fetch(self, query, *args):
+        if "continuation_total" in query:
+            if self.candidate_status in {"verified", "refuted", "expired"}:
+                return []
+            return [{**self._angle_row(), "continuation_total": 1}]
         if "LEFT JOIN investigation_candidates" in query:
-            return [{
-                "id": self.angle_id,
-                "fingerprint": "f" * 64,
-                "family": "authorization",
-                "locus_json": '{"method":"GET","route":"/api/orders/{id}"}',
-                "mechanism": "object swap",
-                "principal_context": '{"owner":"a","attacker":"b"}',
-                "hypothesis": "cross-principal access",
-                "status": "candidate",
-                "evidence_action_ids": "[]",
-                "contradictory_evidence_action_ids": "[]",
-                "candidate_id": self.candidate_id,
-                "candidate_status": "verified",
-                "blocker": None,
-                "proof_gap": None,
-                "created_at": self.now,
-                "total_count": 1,
-            }]
+            return [{**self._angle_row(), "total_count": 1}]
         if "FROM investigation_candidates c" in query:
             return [{
                 "id": self.candidate_id,
                 "family": "authorization",
                 "title": "Cross-principal order read",
-                "status": "verified",
+                "status": self.candidate_status,
                 "claimed_severity": "high",
                 "fingerprint": "c" * 64,
                 "canonical_locus": '{"method":"GET","route":"/api/orders/{id}"}',
@@ -611,18 +621,7 @@ async def test_checkpoint_does_not_requeue_a_terminal_candidate():
 @pytest.mark.asyncio
 async def test_checkpoint_queues_nonterminal_candidate_for_adversarial_review():
     hunt_id = uuid4()
-    conn = _CheckpointConn()
-    original_fetch = conn.fetch
-
-    async def fetch(query, *args):
-        rows = await original_fetch(query, *args)
-        if "FROM investigation_candidates c" in query:
-            rows[0]["status"] = "new"
-        if "LEFT JOIN investigation_candidates" in query:
-            rows[0]["candidate_status"] = "new"
-        return rows
-
-    conn.fetch = fetch
+    conn = _CheckpointConn(candidate_status="new")
     checkpoint = await build_hunt_checkpoint(
         conn,
         run={
@@ -749,3 +748,73 @@ async def test_active_hunts_accept_planned_coverage(status):
         str(run["id"]), values=_angle(status="planned"),
     )
     assert result["angle"]["status"] == "planned"
+
+
+class _WindowConn(_CheckpointConn):
+    """Simulates SQL that matched more open angles than the checkpoint returns."""
+
+    async def fetch(self, query, *args):
+        if "continuation_total" in query:
+            assert args[1] == 200
+            return [{**self._angle_row(), "fingerprint": f"{n:064x}", "status": "planned",
+                     "continuation_total": 201} for n in range(args[1])]
+        return await super().fetch(query, *args)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_reports_a_truncated_continuation_queue():
+    checkpoint = await build_hunt_checkpoint(
+        _WindowConn(candidate_status="new"), run={"id": uuid4(), "status": "active"},
+    )
+    assert checkpoint["continuation_count"] == 200
+    assert checkpoint["continuation_total"] == 201
+    assert checkpoint["continuation_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_selects_the_continuation_queue_over_every_open_angle():
+    class Recording(_CheckpointConn):
+        queries = []
+
+        async def fetch(self, query, *args):
+            self.queries.append(query)
+            return await super().fetch(query, *args)
+
+    conn = Recording(candidate_status="new")
+    checkpoint = await build_hunt_checkpoint(conn, run={"id": uuid4(), "status": "active"})
+    continuation = next(q for q in conn.queries if "continuation_total" in q)
+    # Not the newest-first 200-angle window: every open angle is counted and ranked.
+    assert "ORDER BY latest.event_seq DESC" not in continuation
+    assert "WHEN 'candidate' THEN 0" in continuation
+    assert checkpoint["continuation_total"] == 1 and checkpoint["continuation_truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_record_export_carries_the_event_history_with_an_explicit_bound():
+    from api.hunt import run_service
+
+    superseded = uuid4()
+
+    class Conn:
+        async def fetch(self, query, *args):
+            assert "FROM hunt_coverage_angle_events e" in query
+            assert args[1] == run_service.MAX_EXPORT_ROWS
+            first = {
+                "id": superseded, "event_seq": 1, "fingerprint": "f" * 64,
+                "family": "authorization", "locus_json": '{"route":"/r"}', "status": "candidate",
+                "candidate_id": uuid4(), "evidence_action_ids": "[]",
+                "contradictory_evidence_action_ids": "[]", "total_count": 2,
+            }
+            later = {**first, "id": uuid4(), "event_seq": 2, "status": "negative"}
+            return [{**first, "superseded_by_event_id": later["id"]},
+                    {**later, "superseded_by_event_id": None}]
+
+    history = await run_service._coverage_history(
+        Conn(), hunt_run_id=str(uuid4()), limit=run_service.MAX_EXPORT_ROWS,
+    )
+    assert [(event["status"], event["superseded"]) for event in history["events"]] == [
+        ("candidate", True), ("negative", False),
+    ]
+    assert history["events"][0]["superseded_by_event_id"] == str(history["events"][1]["id"])
+    assert history["event_total"] == 2 and history["events_truncated"] is False
+    assert history["event_limit"] == run_service.MAX_EXPORT_ROWS

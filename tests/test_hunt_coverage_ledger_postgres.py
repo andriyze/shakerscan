@@ -83,6 +83,11 @@ async def test_coverage_persists_and_checkpoint_uses_latest_owned_evidence(boots
         current = await service.coverage_angles(str(hunt), limit=1)
         assert current["total"] == 1 and current["angles"][0]["status"] == "negative"
         assert await conn.fetchval("SELECT count(*) FROM hunt_coverage_angle_events") == 2
+        # An old open angle that the newest-first 200-angle window will no longer contain.
+        await service.record_coverage_angle(str(hunt), values={
+            **angle, "locus": {"route": "/old-partial"}, "status": "partial",
+            "evidence_action_ids": [str(partial)],
+        })
         assert (await service.coverage_angles(str(other_hunt)))["total"] == 0
 
         await conn.execute(
@@ -103,7 +108,7 @@ async def test_coverage_persists_and_checkpoint_uses_latest_owned_evidence(boots
         assert exc.value.code == "coverage_candidate_binding_superseded"
         checkpoint = await service.checkpoint(str(hunt))
         assert checkpoint["review_queue"][0]["fingerprint"] == "canonical-fingerprint"
-        assert len(checkpoint["continuation_queue"]) == 1
+        assert [item["status"] for item in checkpoint["continuation_queue"]] == ["candidate", "partial"]
         await conn.execute("UPDATE investigation_candidates SET status='verified' WHERE id=$1", candidate)
 
         # Exceed the compact window: aggregate counts must cover all exact angles.
@@ -115,10 +120,28 @@ async def test_coverage_persists_and_checkpoint_uses_latest_owned_evidence(boots
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2, server_settings={"search_path": schema})
         restarted = HuntRunService(lambda: pool)
         checkpoint = await restarted.checkpoint(str(hunt))
-        assert checkpoint["coverage"]["angle_count"] == 207
-        assert checkpoint["coverage"]["status_counts"] == {"candidate": 1, "negative": 1, "planned": 205}
+        assert checkpoint["coverage"]["angle_count"] == 208
+        assert checkpoint["coverage"]["status_counts"] == {
+            "candidate": 1, "negative": 1, "partial": 1, "planned": 205,
+        }
         assert checkpoint["coverage"]["angles_truncated"] is True
         assert len(checkpoint["coverage"]["latest_angles"]) == 200
+        assert all(item["locus"] != {"route": "/old-partial"}
+                   for item in checkpoint["coverage"]["latest_angles"])
+        # The continuation queue is ranked over every open angle and says what it left out.
+        assert checkpoint["continuation_queue"][0]["locus"] == {"route": "/old-partial"}
+        assert (checkpoint["continuation_count"], checkpoint["continuation_total"]) == (200, 206)
+        assert checkpoint["continuation_truncated"] is True
+        from api.hunt.coverage_ledger import coverage_history
+        async with pool.acquire() as history_conn:
+            history = await coverage_history(history_conn, hunt_run_id=str(hunt), limit=10_000)
+        assert history["event_total"] == history["event_count"] == await conn.fetchval(
+            "SELECT count(*) FROM hunt_coverage_angle_events WHERE hunt_run_id=$1", hunt)
+        assert [event["sequence"] for event in history["events"]] == sorted(
+            event["sequence"] for event in history["events"])
+        planned, closed = history["events"][0], history["events"][1]
+        assert (planned["status"], planned["superseded"]) == ("planned", True)
+        assert planned["superseded_by_event_id"] == closed["id"] and closed["status"] == "negative"
         assert checkpoint["review_queue"] == []
         assert checkpoint["budget_used"] == {"http_requests": 2}
         assert json.loads(await conn.fetchval("SELECT budget_used_json FROM hunt_runs WHERE id=$1", hunt)) == {"http_requests": 2}
