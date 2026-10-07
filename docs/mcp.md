@@ -81,6 +81,11 @@ credential references, capability allowlist, request-collection references, and 
 `skill_ids`. A run normally starts without one. Adaptive suggestions return at most three compact
 records and no bodies; the planner loads exactly one relevant method through the Hunt-specific read
 tool before binding it. MCP never auto-binds a methodology or changes authority.
+`shakerscan_hunt_start` takes the same optional `idempotency_key` as `POST /hunts`
+(`Idempotency-Key`) and `shakerscan hunt start --idempotency-key`. When it is omitted the adapter
+generates one, sends it as the header and returns it as `mcp_idempotency_key`; a start whose answer
+was lost is retried with that key and unchanged input, and the server returns the Hunt it already
+started instead of starting a second one.
 
 Hunt lifecycle tools (`shakerscan_hunt_start`, `_get`, `_finish`, `_cancel`, `_skill_bind`,
 `_skill_unbind`, `_skill_usage`) answer with a compact projection of the Hunt record by default:
