@@ -84,6 +84,12 @@ def _compile_scan_admission_action_authority(
     against one. Discovery now continues into ranked passive batches over the discovered
     surface, sized by the profile like any other lane. A Scan with neither active testing
     nor the passive pack still has nothing to continue into.
+
+    That breadth is additional work. A passive Scan keeps the pack's required baseline at
+    the frozen base origin in its admission plan, exactly as before, so it can never
+    complete without the pack -- not when discovery finds nothing, and not when no
+    continuation round can be funded. Only an active Scan defers its manifest lanes,
+    because its verifiers need the discovered candidates.
     """
     if not scan_contract.policy.active_testing and "nuclei_passive" not in set(
         scan_contract.execution_plan.resolved_families
@@ -136,7 +142,7 @@ def _compile_scan_admission_action_authority(
         candidate_manifest_ref=candidate_manifest_ref,
         request_candidate_manifest_ref=request_candidate_manifest_ref,
         template_manifest_ref=template_manifest_ref,
-        defer_manifest_actions=True,
+        defer_manifest_actions=bool(scan_contract.policy.active_testing),
         include_finalizer=False,
     )
 
