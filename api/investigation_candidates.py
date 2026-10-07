@@ -97,9 +97,12 @@ def canonical_family(value: Any) -> str:
     return aliases.get(normalized, normalized)[:80] or "unknown"
 
 
-# Locus keys with a defined normalization. Every other key is preserved (bounded) because the
-# locus is the candidate's identity: dropping a natural key such as ``path`` or ``principal`` made
-# unrelated issues collide on one fingerprint and overwrite each other. For the same reason a value
+# The published locus vocabulary, and the only keys that make up a candidate's identity. It names
+# the natural keys (``path``, ``principal``, ``object_id``...) whose loss made unrelated issues
+# collide on one fingerprint. A key outside it is still accepted and kept, as metadata outside the
+# identity (``locus_metadata``): when it was part of the fingerprint, Hunts that described one
+# issue with an extra key of their own (``paths``-style lists, ``evidence``, ``note``) each made
+# their own candidate -- soak D4: ``.git`` x3 and ``/actuator/env`` x2 on one target. A value
 # that does not fit the bounds below is refused, never truncated or dropped.
 LOCUS_KEYS: dict[str, str] = {
     "method": "HTTP method, upper-cased",
@@ -109,6 +112,8 @@ LOCUS_KEYS: dict[str, str] = {
     "url": "absolute URL",
     "origin": "scheme://host[:port] of the service",
     "parameter": "query/body/header parameter name",
+    "input": "the input (field, header or prompt slot) the claim concerns",
+    "operation": "the operation the claim concerns (e.g. read, update, tool call)",
     "object_id": "object identifier the claim concerns",
     "principal": "principal slot or role the claim concerns",
     "address": "IP address of the host",
@@ -163,11 +168,28 @@ def _locus_port(item: Any) -> int:
 
 
 def canonical_locus(value: Any) -> dict[str, Any]:
-    """Return the candidate identity locus; documented keys are normalized, others preserved.
+    """Return the candidate identity locus: the ``LOCUS_KEYS`` of the normalized locus.
 
-    Keys outside ``LOCUS_KEYS`` are kept (lower-case identifiers only) so a distinct issue never
-    loses the attribute that distinguishes it. Values must be JSON; the result is bounded and an
-    oversized or malformed locus is rejected instead of being truncated into a collision.
+    The whole locus is validated first, so a malformed or oversized locus is refused whatever
+    its keys. Keys outside the vocabulary are not part of the identity; ``locus_metadata``
+    returns them.
+    """
+    normalized = normalized_locus(value)
+    return {key: item for key, item in normalized.items() if key in LOCUS_KEYS}
+
+
+def locus_metadata(value: Any) -> dict[str, Any]:
+    """The normalized locus keys outside the published vocabulary: kept, never identity."""
+    normalized = normalized_locus(value)
+    return {key: item for key, item in normalized.items() if key not in LOCUS_KEYS}
+
+
+def normalized_locus(value: Any) -> dict[str, Any]:
+    """Normalize and bound a whole locus; documented keys are normalized, others preserved.
+
+    Keys outside ``LOCUS_KEYS`` are kept (lower-case identifiers only). Values must be JSON; the
+    result is bounded and an oversized or malformed locus is rejected instead of being
+    truncated into a collision.
     """
     source = value if isinstance(value, dict) else {}
     result: dict[str, Any] = {}
@@ -276,7 +298,9 @@ def normalize_candidate(
         for item in (evidence_refs or [])
         if str(item).strip()
     ))[:MAX_CANDIDATE_EVIDENCE_REFS]
-    normalized_locus = canonical_locus(locus)
+    whole_locus = normalized_locus(locus)
+    identity_locus = {key: item for key, item in whole_locus.items() if key in LOCUS_KEYS}
+    extra_locus = {key: item for key, item in whole_locus.items() if key not in LOCUS_KEYS}
     normalized_family = canonical_family(family)
     if normalized_plane == "device":
         normalized_family = {
@@ -296,7 +320,9 @@ def normalize_candidate(
         "device_agent_run_id": str(device_agent_run_id) if device_agent_run_id else None,
         "hunt_run_id": str(hunt_run_id) if hunt_run_id else None,
         "family": normalized_family,
-        "canonical_locus": normalized_locus,
+        "canonical_locus": identity_locus,
+        # Kept with each sighting (observation ledger) and named in the response.
+        "locus_metadata": extra_locus,
         "title": str(title or "Investigation candidate").strip()[:300],
         "claim": str(claim or title or "Investigation candidate").strip()[:8000],
         "claimed_severity": normalized_severity,
@@ -307,7 +333,7 @@ def normalize_candidate(
             plane=normalized_plane,
             target_ref=target_ref,
             family=normalized_family,
-            locus=normalized_locus,
+            locus=identity_locus,
         ),
     }
 
@@ -420,6 +446,7 @@ async def upsert_candidate(
     the same ``source_kind`` produced.
     """
     fingerprint = candidate["fingerprint"]
+    extra_locus = dict(candidate.get("locus_metadata") or {})
     row, outcome = await _insert_or_match(conn, candidate, fingerprint, created_by)
     distinct_from: str | None = None
     if outcome == "existing" and not _same_claim(row, candidate):
@@ -498,7 +525,10 @@ async def upsert_candidate(
         row["id"], candidate.get("research_episode_id"), candidate.get("agent_hunt_run_id"),
         candidate.get("device_agent_run_id"), candidate.get("hunt_run_id"), candidate.get("source_kind"), candidate["title"],
         candidate["claim"], candidate["claimed_severity"], json.dumps(candidate["evidence_refs"]),
-        candidate.get("verifier_contract_id"), json.dumps(observation_context or {}),
+        candidate.get("verifier_contract_id"), json.dumps({
+            **(observation_context or {}),
+            **({"locus_metadata": extra_locus} if extra_locus else {}),
+        }),
         str(created_by or "hunt")[:120],
     )
     result = {
@@ -515,6 +545,8 @@ async def upsert_candidate(
         result["reason"] = reason
     if unapplied:
         result["unapplied_fields"] = unapplied
+    if extra_locus:
+        result["ignored_for_identity"] = sorted(extra_locus)
     return result
 
 

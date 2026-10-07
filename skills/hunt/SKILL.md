@@ -222,10 +222,12 @@ Create a candidate with `POST /hunts/{hunt_id}/candidates` only when the claim c
 references from this investigation. Include a canonical locus precise enough for a registered
 verifier. A candidate is non-authoritative.
 
-Identity is target + family + locus. `GET /hunts/contract` (`candidates`) lists the locus keys
-(`method`, `route`, `path`, `paths`, `url`, `origin`, `parameter`, `object_id`, `principal`,
-`address`, `host`, `transport`, `port`, ...); any other lower-case key is kept, never dropped, and
-a value that does not fit (over 1000 characters, a list over 100 items, an invalid port) is refused
+Identity is target + family + the locus keys `GET /hunts/contract` (`candidates`) lists
+(`method`, `route`, `path`, `paths`, `url`, `origin`, `parameter`, `input`, `operation`,
+`object_id`, `principal`, `address`, `host`, `transport`, `port`, ...). Any other lower-case key is
+kept with the sighting but is not part of the identity, and the response names it in
+`ignored_for_identity`, so wording your own extra keys never splits one issue into two candidates.
+A value that does not fit (over 1000 characters, a list over 100 items, an invalid port) is refused
 rather than truncated. Put
 the attribute that distinguishes this issue in the locus (for a file exposure, its `path`).
 Verification re-executes the first of `route`, `url` or `path` in the locus; `paths` only

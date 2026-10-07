@@ -147,7 +147,7 @@ export const HUNT_START_CONTRACT = {
       "devref_<n>"
     ],
     "evidence_ref_scope": "Each reference must resolve to an action, receipt or HTTP transaction of this Hunt, a finding on its target, or a device evidence entry of this Hunt (otherwise candidate_evidence_unresolved). An action or receipt counts only when the action completed or ended partial; a failed, admission-refused, blocked or unfinished action is refused as candidate_evidence_unsettled.",
-    "identity": "target + family + locus",
+    "identity": "target + family + the locus_keys of the locus",
     "identity_only_location_keys": [
       "paths"
     ],
@@ -160,8 +160,10 @@ export const HUNT_START_CONTRACT = {
       "cpe": "CPE string",
       "host": "host name",
       "host_key_fingerprint": "SSH host key fingerprint",
+      "input": "the input (field, header or prompt slot) the claim concerns",
       "method": "HTTP method, upper-cased",
       "object_id": "object identifier the claim concerns",
+      "operation": "the operation the claim concerns (e.g. read, update, tool call)",
       "operation_id": "API operation identifier",
       "origin": "scheme://host[:port] of the service",
       "parameter": "query/body/header parameter name",
@@ -177,7 +179,7 @@ export const HUNT_START_CONTRACT = {
       "url": "absolute URL",
       "version": "software version"
     },
-    "locus_other_keys": "Any other identifier key (lower-cased, '-' read as '_') is preserved and is part of the candidate identity. Nothing in the locus is truncated or dropped: a value over max_locus_value_chars, a list over max_locus_list_items distinct items, a port outside 1-65535, or a locus over max_locus_keys or max_locus_bytes is refused.",
+    "locus_other_keys": "Only locus_keys make up the candidate identity. Any other identifier key (lower-cased, '-' read as '_') is accepted and kept with the sighting as locus_metadata, outside the identity, and the response names it in ignored_for_identity. Nothing in the locus is truncated or dropped: a value over max_locus_value_chars, a list over max_locus_list_items distinct items, a port outside 1-65535, or a locus over max_locus_keys or max_locus_bytes is refused.",
     "locus_schema_version": "hunt-candidate-locus/v1",
     "locus_set_keys": [
       "paths"

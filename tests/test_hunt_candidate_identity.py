@@ -101,8 +101,10 @@ def test_locus_preserves_natural_keys_so_distinct_paths_have_distinct_identity()
     assert normalized == {
         "origin": "https://honey.example", "path": "/.git-credentials",
         "principal": "anonymous", "address": "203.0.113.7", "paths": ["/a", "/b"],
-        "method": "GET", "x_tool": "rag.search",
+        "method": "GET",
     }
+    # A key outside the published vocabulary is kept, as metadata outside the identity (D4).
+    assert candidates.locus_metadata(locus) == {"x_tool": "rag.search"}
     first = candidates.candidate_fingerprint(
         plane="web", target_ref=TARGET, family="sensitive_file_exposure",
         locus={"path": "/.git-credentials"},
@@ -114,6 +116,61 @@ def test_locus_preserves_natural_keys_so_distinct_paths_have_distinct_identity()
     assert first != second
     assert candidates.canonical_locus({"paths": ["/b", "/a"]}) == candidates.canonical_locus(
         {"paths": ["/a", "/b"]}
+    )
+
+
+def test_extra_locus_keys_never_split_one_issue_into_several_candidates():
+    """Soak D4: Hunts that described one issue with their own extra locus keys each made a
+    candidate (.git x3, /actuator/env x2). Identity is the published vocabulary only; the extra
+    keys are kept with the sighting and named in ignored_for_identity, never refused."""
+    conn = SqliteConnection()
+    claim = "GET /.git/config discloses the repository remote and credentials"
+    first = asyncio.run(candidates.upsert_candidate(conn, _candidate(
+        title=".git exposed", claim=claim, severity="critical",
+        locus={"path": "/.git/config", "method": "GET"},
+    ), created_by="hunt-a"))
+    second = asyncio.run(candidates.upsert_candidate(conn, _candidate(
+        title=".git exposed", claim=claim, severity="critical",
+        locus={"path": "/.git/config", "method": "GET", "evidence": "config file", "note": "seen"},
+        hunt=str(uuid.uuid4()),
+    ), created_by="hunt-b"))
+    third = asyncio.run(candidates.upsert_candidate(conn, _candidate(
+        title=".git exposed", claim=claim, severity="critical",
+        locus={"path": "/.git/config", "method": "get", "Exposure-Kind": "vcs"},
+        hunt=str(uuid.uuid4()),
+    ), created_by="hunt-c"))
+
+    assert [first["outcome"], second["outcome"], third["outcome"]] == [
+        "inserted", "merged", "merged"]
+    assert first["id"] == second["id"] == third["id"]
+    assert "ignored_for_identity" not in first
+    assert second["ignored_for_identity"] == ["evidence", "note"]
+    assert third["ignored_for_identity"] == ["exposure_kind"]
+    rows = conn.rows()
+    assert len(rows) == 1
+    assert json.loads(rows[0]["canonical_locus"]) == {"method": "GET", "path": "/.git/config"}
+    # Each sighting's extra keys are kept with that sighting.
+    contexts = [json.loads(item["observation_context"] or "{}") for item in conn.observations()]
+    assert [item.get("locus_metadata") for item in contexts] == [
+        None, {"evidence": "config file", "note": "seen"}, {"exposure_kind": "vcs"},
+    ]
+
+
+def test_published_input_and_operation_keys_stay_part_of_the_identity():
+    def fingerprint(locus):
+        return candidates.candidate_fingerprint(
+            plane="web", target_ref=TARGET, family="excessive_agency", locus=locus,
+        )
+    base = {"route": "/api/v1/agent/run", "method": "POST"}
+    assert {"input", "operation", "object_id"} <= set(candidates.LOCUS_KEYS)
+    assert fingerprint({**base, "input": "task"}) != fingerprint({**base, "input": "tool"})
+    assert fingerprint({**base, "operation": "refund"}) != fingerprint({**base, "operation": "exec"})
+    assert fingerprint({**base, "object_id": "7"}) != fingerprint({**base, "object_id": "8"})
+    assert fingerprint({**base, "note": "a"}) == fingerprint({**base, "note": "b"}) == fingerprint(base)
+    # A row stored before this change with only vocabulary keys keeps its fingerprint.
+    assert fingerprint({**base, "input": "task"}) == candidates.candidate_fingerprint(
+        plane="web", target_ref=TARGET, family="excessive_agency",
+        locus={"route": "/api/v1/agent/run", "method": "post", "input": "task"},
     )
 
 
@@ -549,7 +606,9 @@ async def test_candidate_route_refuses_unresolved_evidence_before_writing(monkey
 
 def test_contract_documents_the_locus_schema_and_evidence_forms():
     contract = hunt_start_public_contract()["candidates"]
-    assert {"path", "paths", "origin", "principal", "address"} <= set(contract["locus_keys"])
+    assert {"path", "paths", "origin", "principal", "address", "input", "operation"} <= set(
+        contract["locus_keys"])
+    assert "ignored_for_identity" in contract["locus_other_keys"]
     assert contract["max_locus_keys"] == candidates.MAX_LOCUS_KEYS
     assert "action:<uuid>" in contract["evidence_ref_forms"]
 

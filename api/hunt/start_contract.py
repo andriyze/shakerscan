@@ -228,8 +228,10 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "locus_keys": dict(candidates.LOCUS_KEYS),
             "locus_set_keys": sorted(candidates.LOCUS_SET_KEYS),
             "locus_other_keys": (
-                "Any other identifier key (lower-cased, '-' read as '_') is preserved and is "
-                "part of the candidate identity. Nothing in the locus is truncated or dropped: "
+                "Only locus_keys make up the candidate identity. Any other identifier key "
+                "(lower-cased, '-' read as '_') is accepted and kept with the sighting as "
+                "locus_metadata, outside the identity, and the response names it in "
+                "ignored_for_identity. Nothing in the locus is truncated or dropped: "
                 "a value over max_locus_value_chars, a list over max_locus_list_items distinct "
                 "items, a port outside 1-65535, or a locus over max_locus_keys or "
                 "max_locus_bytes is refused."
@@ -238,7 +240,7 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "max_locus_bytes": candidates.MAX_LOCUS_BYTES,
             "max_locus_value_chars": candidates.MAX_LOCUS_VALUE_CHARS,
             "max_locus_list_items": candidates.MAX_LOCUS_LIST_ITEMS,
-            "identity": "target + family + locus",
+            "identity": "target + family + the locus_keys of the locus",
             "verification_route_keys": list(ROUTE_LOCUS_KEYS),
             "identity_only_location_keys": list(IDENTITY_ONLY_LOCATION_KEYS),
             "verification_route": (
