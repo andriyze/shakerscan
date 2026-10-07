@@ -35,6 +35,8 @@ class WorkerPrivateHTTPResponse:
     _body: bytes = field(repr=False)
     _headers: Mapping[str, str] = field(repr=False)
     _cookies: Mapping[str, str] = field(repr=False)
+    # True when the target sent more body than the bounded read kept: ``body()`` is a prefix.
+    body_truncated: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -687,6 +689,7 @@ async def execute_bound_http_request(
                 str(name): str(value)
                 for name, value in response.cookies.items()
             },
+            body_truncated=bool(body_truncated),
         ))
     summary = response_summary(
         response,

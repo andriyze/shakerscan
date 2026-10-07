@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
+import sys
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence
 import uuid
 
@@ -42,6 +43,7 @@ except ModuleNotFoundError:
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
 from .candidate_evidence import CandidateEvidenceError, resolve_candidate_evidence
+from .candidate_verification_preflight import CandidateVerificationRefused, web_candidate_preflight
 from .action_replay import execution_started_from_budget, replay_observations
 from .host_accounting import distinct_host_charge
 from .boundary_handoff import compile_candidate_boundary_handoff
@@ -1732,6 +1734,16 @@ async def _execute_hunt_capability_lifecycle(
                         status_code=409,
                         detail=f"Candidate is {candidate_record['status']}",
                     )
+                if not run["device_target_id"]:
+                    # Refusals decided by the stored candidate alone are made here, before a
+                    # verification is counted or any budget reserved: they send no traffic, so
+                    # they must cost nothing.
+                    try:
+                        web_candidate_preflight(dict(candidate_record))
+                    except CandidateVerificationRefused as exc:
+                        raise HTTPException(
+                            status_code=exc.status_code, detail=exc.detail,
+                        ) from exc
             allowed = {item["name"] for item in _hunt_public(run, include_context=False)["capabilities"]}
             if name not in allowed:
                 raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
@@ -2434,20 +2446,16 @@ async def _execute_hunt_capability_lifecycle(
             assert candidate_record is not None
 
             async def verify_hunt_candidate_operation() -> dict[str, Any]:
+                candidate_uuid = _uuid_or_400(
+                    str(request.input.get("candidate_id") or ""), "candidate id",
+                )
                 verification = await _execute_hunt_candidate_verification(
                     run=run,
                     context=context,
                     policy=policy,
-                    candidate_uuid=_uuid_or_400(
-                        str(request.input.get("candidate_id") or ""), "candidate id",
-                    ),
+                    candidate_uuid=candidate_uuid,
                 )
-                return {
-                    "ok": True,
-                    "status": "success",
-                    "candidate_id": str(request.input["candidate_id"]),
-                    "verification": verification,
-                }
+                return _candidate_verification_action_result(candidate_uuid, verification)
 
             candidate_adapter = ControlPlaneExecutionAdapter(
                 specification=spec,
@@ -4228,7 +4236,58 @@ async def _execute_hunt_candidate_verification(
             str(policy["approval_receipt_id"]),
             created_by=f"hunt_v2:{run['id']}",
         )
+        verified_finding_id = (
+            result.get("verified_finding_id") if isinstance(result, Mapping) else None
+        )
+        if verified_finding_id:
+            result = {
+                **result,
+                "hunt_attributed": await _attribute_verified_finding(run, verified_finding_id),
+            }
     return result
+
+
+def _candidate_verification_action_result(
+    candidate_uuid: uuid.UUID, verification: Any,
+) -> dict[str, Any]:
+    """The candidate.verify action result whose typed references name real findings only."""
+    if isinstance(verification, Mapping):
+        # The web verifier echoes the candidate under ``finding_id`` for older callers; it is not
+        # a finding, so it must not reach the action's finding references.
+        verification = {
+            key: value for key, value in verification.items()
+            if not (key == "finding_id" and str(value) == str(candidate_uuid))
+        }
+    return {
+        "ok": True,
+        "status": "success",
+        "candidate_id": str(candidate_uuid),
+        "verification": verification,
+    }
+
+
+async def _attribute_verified_finding(run: Mapping[str, Any], finding_id: Any) -> bool:
+    """Attribute a finding this Hunt's deterministic verification materialized to the Hunt.
+
+    The same rule as authz.verify materialization (E2E H-19): the finding row names the Hunt
+    whose proof produced it, so the Hunt's finding list and outcome include it. Attribution grants
+    no edit authority: Hunt finding controls refuse any finding with verification history. A
+    failure here never turns a completed verification into a failed action.
+    """
+    try:
+        async with _pool().acquire() as conn:
+            updated = await conn.execute(
+                """UPDATE findings SET hunt_run_id=$1, updated_at=NOW()
+                   WHERE id=$2 AND target_id=$3 AND last_verified_at IS NOT NULL""",
+                run["id"], uuid.UUID(str(finding_id)), run["target_id"],
+            )
+    except Exception as exc:  # noqa: BLE001 - attribution is bookkeeping, not proof
+        print(
+            f"[hunt] verified finding attribution skipped: {type(exc).__name__}",
+            file=sys.stderr, flush=True,
+        )
+        return False
+    return str(updated).endswith(" 1")
 
 
 _AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment", "field_constraint", "workflow"})

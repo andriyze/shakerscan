@@ -162,13 +162,14 @@ def test_an_oversized_outcome_summary_keeps_its_counters_and_marks_the_trimmed_i
     record["outcome_summary"] = {
         "statuses": {"completed": 140, "partial": 10}, "executed_calls": 150, "successful_calls": 120,
         "partial_calls": 10, "unsuccessful_calls": 15, "indeterminate_calls": 5,
+        "rejected_calls": 3, "other_calls": 0,
         "evidence_ids": ids, "finding_ids": ids[:30], "candidate_ids": [],
     }
     compact = mcp._compact_hunt(record)
     summary = compact["outcome_summary"]
     assert "outcome_summary" not in compact["mcp_view"]["omitted"]
     assert (summary["executed_calls"], summary["successful_calls"], summary["partial_calls"],
-            summary["indeterminate_calls"]) == (150, 120, 10, 5)
+            summary["indeterminate_calls"], summary["rejected_calls"]) == (150, 120, 10, 5, 3)
     assert summary["evidence_ids"] == ids[:20] and summary["finding_ids"] == ids[:20]
     marked = compact["mcp_view"]["reduced"]["outcome_summary"]
     assert "evidence_ids (150 in all)" in marked and "finding_ids (30 in all)" in marked

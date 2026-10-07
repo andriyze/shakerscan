@@ -399,6 +399,8 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
         "total_capability_calls": 1,
         "attempted_calls": 1,
         "executed_calls": 1,
+        "rejected_calls": 0,
+        "other_calls": 0,
         "successful_calls": 0,
         "unsuccessful_calls": 0,
         "indeterminate_calls": 1,

@@ -227,7 +227,9 @@ Identity is target + family + locus. `GET /hunts/contract` (`candidates`) lists 
 `address`, `host`, `transport`, `port`, ...); any other lower-case key is kept, never dropped, and
 a value that does not fit (over 1000 characters, a list over 100 items, an invalid port) is refused
 rather than truncated. Put
-the attribute that distinguishes this issue in the locus (for a file exposure, its `path`). A
+the attribute that distinguishes this issue in the locus (for a file exposure, its `path`).
+Verification re-executes the first of `route`, `url` or `path` in the locus; `paths` only
+distinguishes candidates. A
 second record with the same identity and the same title or claim merges its evidence
 (`outcome: merged`); a different claim becomes its own candidate and never replaces a stored one.
 A merge never rewrites title, claim or severity: it lists them in `unapplied_fields`, so correct

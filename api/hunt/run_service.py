@@ -105,6 +105,8 @@ _ACTION_REFERENCE_FIELDS = {
     "queued_scan_id": "scan_ids",
     "finding_id": "finding_ids",
     "finding_ids": "finding_ids",
+    "verified_finding_id": "finding_ids",
+    "verified_finding_ids": "finding_ids",
     "candidate_id": "candidate_ids",
     "candidate_ids": "candidate_ids",
     "evidence_id": "evidence_ids",
@@ -427,6 +429,14 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
             ),
             "partial": result_summary.get("partial") is True,
             "timed_out": result_summary.get("timed_out") is True,
+            # False only when the action provably never ran (refused at admission); None when
+            # the record does not say.
+            "execution_started": (
+                False if refused_at_admission
+                else result_summary.get("execution_started")
+                if isinstance(result_summary.get("execution_started"), bool)
+                else None
+            ),
             "observation_count": observation_count,
             # Compatibility field. New clients should use budget_accounting so a
             # reservation ceiling can never be presented as measured consumption.
@@ -467,16 +477,21 @@ def hunt_action_outcome_summary(actions: list[dict[str, Any]]) -> dict[str, Any]
     observations = 0
     successful_calls = 0
     executed_calls = 0
+    rejected_calls = 0
     unsuccessful_calls = 0
     indeterminate_calls = 0
     partial_calls = 0
     for action in actions:
         status = str(action.get("status") or "unknown")
         statuses[status] = statuses.get(status, 0) + 1
+        result = action.get("result") if isinstance(action.get("result"), Mapping) else {}
+        if status in {"failed", "blocked"} and result.get("execution_started") is False:
+            # Refused before it ran (for example at budget admission): attempted, not executed.
+            rejected_calls += 1
+            continue
         if status not in {"completed", "failed", "partial"}:
             continue
         executed_calls += 1
-        result = action.get("result") if isinstance(action.get("result"), Mapping) else {}
         semantic_ok = result.get("ok") if isinstance(result.get("ok"), bool) else None
         if status == "partial":
             partial_calls += 1
@@ -499,7 +514,11 @@ def hunt_action_outcome_summary(actions: list[dict[str, Any]]) -> dict[str, Any]
         "capability_calls": successful_calls,
         "total_capability_calls": len(actions),
         "attempted_calls": len(actions),
+        # attempted = executed + rejected + other (running, reserved, cancelled, or a blocked
+        # action whose record does not say whether it ran).
         "executed_calls": executed_calls,
+        "rejected_calls": rejected_calls,
+        "other_calls": len(actions) - executed_calls - rejected_calls,
         "successful_calls": successful_calls,
         "unsuccessful_calls": unsuccessful_calls,
         "indeterminate_calls": indeterminate_calls,
