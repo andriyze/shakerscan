@@ -92,10 +92,12 @@ Hunt, Arsenal, shell or target management tools are available. When connected to
 Enterprise instance, MCP also exposes that check alongside the instance's existing tools and
 sends it to the instance's `POST /public/check` using the saved connection, but only when the
 instance serves that route: `tools/list` first probes it with a request the engine refuses before
-doing any work (no body, not JSON, answered 415), and a gateway that keeps the route closed
-(403, as the Enterprise beta does) or an engine without it (404) gets no such tool, so neither
-the agent nor `doctor` counts it. There is no public fallback or per-check approval prompt on a
-connected client.
+doing any work (no body, not JSON). Only the engine's own answer to that, 415 with error code
+`unsupported_media_type`, lists the tool. Any other answer leaves the tool out, so neither the
+agent nor `doctor` counts it. That covers a gateway that keeps the route closed (403, as the
+Enterprise beta does), an engine without the route (404), an engine image without the check
+engine (503), a redirect, a gateway's own 400 or 429, a 200 page, and no answer at all. There
+is no public fallback or per-check approval prompt on a connected client.
 
 The hosted service accepts only public DNS names and global IP addresses, refuses government and
 military targets, and applies per-caller limits: 30 requests a minute, and 25 uncached checks an

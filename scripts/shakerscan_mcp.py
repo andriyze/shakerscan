@@ -1273,12 +1273,14 @@ class ArsenalClient:
         return descriptors
 
     def serves_route(self, method: str, path: str) -> bool:
-        """Whether the instance serves ``path``, probed without doing any work.
+        """Whether the engine serves ``path``, probed without doing any work.
 
-        The probe has no body and is not JSON, so the engine refuses it with 415 before running
-        anything. A gateway that keeps the route closed answers 401/403, an engine without it
-        404/405; those, a server error and no answer are all "not served": a tool is listed only
-        when the instance will run it."""
+        The probe has no body and is not JSON. The engine's posture-check route answers exactly
+        that with 415 and error code ``unsupported_media_type`` before running anything, or with
+        503 when its image has no check engine (api/public_check.py). Only that 415 counts as
+        served: a gateway's closed route (401/403), an engine without the route (404/405), a
+        redirect, a gateway's own 400 or 429, a 200 page, a server error and no answer all leave
+        the tool out. A gateway that forwards the probe reports the engine's own answer."""
         request = urllib.request.Request(
             self.base_url + path, data=b"", method=method,
             headers={
@@ -1288,13 +1290,21 @@ class ArsenalClient:
             },
         )
         try:
-            with self.opener.open(request, timeout=self.timeout_seconds) as response:
-                status = response.status
+            with self.opener.open(request, timeout=self.timeout_seconds):
+                return False  # no success answers a request the engine refuses before any work
         except urllib.error.HTTPError as exc:
             status = exc.code
+            body = exc.read(4_096)
+            exc.close()
         except (urllib.error.URLError, TimeoutError, OSError):
             return False
-        return status < 500 and status not in {401, 403, 404, 405}
+        if status != 415:
+            return False
+        try:
+            error = json.loads(body.decode("utf-8")).get("error")
+        except (UnicodeDecodeError, ValueError, AttributeError):
+            return False
+        return isinstance(error, dict) and error.get("code") == "unsupported_media_type"
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "shakerscan_public_check":
