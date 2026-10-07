@@ -7,6 +7,7 @@ import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 // The server still ships the installed standalone documentation. Managed workspaces
 // use their server-owned capability manifest, not a second hard-coded product edition.
+// A managed workspace may be hosted or self-hosted, so this copy names neither.
 export default function WorkspaceDocs({ children }: { children: ReactNode }) {
   const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__
   if (!policy) return children
@@ -19,10 +20,10 @@ export default function WorkspaceDocs({ children }: { children: ReactNode }) {
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
-      <PageHeader title="Workspace guide" description="Use your hosted workspace. No local Docker installation is required." />
+      <PageHeader title="Workspace guide" description="Work in this managed workspace. Scans run on the deployment's own workers; nothing needs to be installed on your computer." />
       <Card className="space-y-4 p-6 text-gray-300">
         <h2 className="text-xl font-semibold text-white">Start with an approved target</h2>
-        <p>Your platform administrator controls approved domains, testing permissions, subscription expiry and capacity. Adding a target does not grant permission to test another domain.</p>
+        <p>Your platform administrator controls approved domains, testing permissions, workspace access and capacity. Adding a target does not grant permission to test another domain.</p>
         <ol className="list-decimal space-y-3 pl-5">
           <li>Open <Link href="/targets" className="text-blue-400 underline">Targets</Link> and add your application URL within an approved domain. If it is rejected, ask your platform administrator to review the domain policy.</li>
           <li>Open <Link href="/scan/new" className="text-blue-400 underline">New Scan</Link>, select the target and choose a coverage budget. Start with passive checks. Active checks require the administrator's testing permission and can affect the target application.</li>
@@ -43,7 +44,7 @@ export default function WorkspaceDocs({ children }: { children: ReactNode }) {
       </Card>
       <Card className="space-y-3 p-6 text-gray-300">
         <h2 className="text-xl font-semibold text-white">Workspace availability</h2>
-        <p>Capacity, worker operations, infrastructure and retention administration are managed by the platform operator. Contact that administrator for limits, backups or operational problems; local scanner commands do not manage this tenant.</p>
+        <p>Capacity, worker operations, infrastructure and retention administration are managed by the platform operator. Contact that administrator for limits, backups or operational problems; local scanner commands do not manage this workspace.</p>
         {unavailable.length > 0 && <p>Not available in this workspace: {unavailable.join(', ')}. These are not promised release dates or enabled features.</p>}
         <p>For support, provide the workspace address, operation ID and error message. Never include passwords, API tokens, raw traffic or unredacted evidence.</p>
       </Card>
