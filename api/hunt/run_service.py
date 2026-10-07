@@ -105,6 +105,8 @@ _ACTION_REFERENCE_FIELDS = {
     "queued_scan_id": "scan_ids",
     "finding_id": "finding_ids",
     "finding_ids": "finding_ids",
+    "verified_finding_id": "finding_ids",
+    "verified_finding_ids": "finding_ids",
     "candidate_id": "candidate_ids",
     "candidate_ids": "candidate_ids",
     "evidence_id": "evidence_ids",
