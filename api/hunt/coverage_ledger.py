@@ -1,8 +1,8 @@
 """Evidence-backed Hunt coverage angles and compact continuation checkpoints.
 
 The external planner may describe what it intends to test, but ShakerScan owns the
-ledger and only accepts settled coverage claims when they cite terminal actions from
-the same Hunt.  Coverage is deliberately finer grained than a vulnerability family:
+ledger and only accepts settled coverage claims when they cite same-Hunt actions that
+actually ran (rules in ``coverage_evidence``). Coverage is deliberately finer grained than a vulnerability family:
 method, route/object/sink, mechanism, principal context, and application state can all
 make one angle materially different from another.
 
@@ -12,7 +12,8 @@ experiments into one fingerprint.
 
 Events are append-only and ordered by ``event_seq``, which is assigned at insert while
 the writer holds the Hunt row lock, so it follows commit order. An angle's current state
-is its highest-sequence event.
+is its highest-sequence event. One supersession is refused: an event that cites no new
+same-Hunt evidence cannot drop the candidate an angle is bound to.
 
 This is investigation state, not proof.  A coverage event can point at a candidate,
 but neither a planner-written angle nor a checkpoint may create or verify a finding.
@@ -26,6 +27,13 @@ import json
 from typing import Any
 from uuid import UUID
 
+from .coverage_evidence import (
+    TERMINAL_ACTION_STATUSES,
+    CoverageLedgerError,
+    owned_action_evidence,
+    validate_evidence_claim,
+)
+
 COVERAGE_LEDGER_SCHEMA = "hunt-coverage-ledger/v1"
 HUNT_CHECKPOINT_SCHEMA = "hunt-checkpoint/v1"
 
@@ -37,7 +45,6 @@ COVERAGE_ANGLE_STATUSES = frozenset({
     "blocked",
     "candidate",
 })
-TERMINAL_ACTION_STATUSES = frozenset({"completed", "partial", "blocked"})
 MAX_EVIDENCE_ACTIONS = 50
 MAX_CHECKPOINT_ANGLES = 200
 MAX_CHECKPOINT_CANDIDATES = 100
@@ -91,23 +98,6 @@ COVERAGE_LOCUS_KEYS: tuple[str, ...] = (
     "variant",
 )
 _LOCUS_KEY_SET = frozenset(COVERAGE_LOCUS_KEYS)
-
-
-class CoverageLedgerError(ValueError):
-    """A coverage event is structurally invalid or overclaims its evidence."""
-
-    def __init__(
-        self,
-        code: str,
-        message: str,
-        *,
-        status_code: int = 422,
-        details: Mapping[str, Any] | None = None,
-    ):
-        super().__init__(message)
-        self.code = code
-        self.status_code = status_code
-        self.details = dict(details or {})
 
 
 def _text(value: Any, *, field: str, required: bool = False) -> str:
@@ -332,37 +322,6 @@ def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _owned_action_statuses(
-    conn: Any, *, hunt_run_id: str, action_ids: Sequence[str],
-) -> dict[str, str]:
-    if not action_ids:
-        return {}
-    rows = await conn.fetch(
-        """SELECT id, status
-           FROM hunt_actions
-           WHERE hunt_run_id=$1::uuid AND id = ANY($2::uuid[])""",
-        hunt_run_id,
-        [UUID(item) for item in action_ids],
-    )
-    statuses = {str(row["id"]): str(row["status"]) for row in rows}
-    missing = sorted(set(action_ids) - set(statuses))
-    if missing:
-        raise CoverageLedgerError(
-            "coverage_evidence_not_owned",
-            "Coverage evidence must be actions from this exact Hunt",
-        )
-    nonterminal = {
-        action_id: status for action_id, status in statuses.items()
-        if status not in TERMINAL_ACTION_STATUSES
-    }
-    if nonterminal:
-        raise CoverageLedgerError(
-            "coverage_evidence_not_terminal",
-            "Coverage evidence must be a completed, partial, or blocked Hunt action",
-        )
-    return statuses
-
-
 async def _require_owned_candidate(
     conn: Any, *, hunt_run_id: str, candidate_id: str | None,
 ) -> None:
@@ -383,26 +342,29 @@ async def _require_owned_candidate(
         )
 
 
-def _validate_evidence_claim(
-    angle: Mapping[str, Any], action_statuses: Mapping[str, str],
+async def _require_candidate_binding_preserved(
+    conn: Any, *, hunt_run_id: str, angle: Mapping[str, Any],
 ) -> None:
-    status = str(angle["status"])
-    evidence_ids = list(angle.get("evidence_action_ids") or [])
-    evidence_statuses = [action_statuses.get(item) for item in evidence_ids]
-    if status == "negative" and any(item != "completed" for item in evidence_statuses):
+    """An event without new evidence cannot replace the candidate an angle is bound to."""
+    if angle["evidence_action_ids"]:
+        return
+    previous = await conn.fetchrow(
+        """SELECT candidate_id
+           FROM hunt_coverage_angle_events
+           WHERE hunt_run_id=$1::uuid AND fingerprint=$2
+           ORDER BY event_seq DESC
+           LIMIT 1""",
+        hunt_run_id,
+        angle["fingerprint"],
+    )
+    bound = str(previous["candidate_id"]) if previous and previous["candidate_id"] else None
+    if bound and bound != angle["candidate_id"]:
         raise CoverageLedgerError(
-            "coverage_negative_requires_completed_actions",
-            "Negative coverage may cite only completed actions; partial/blocked work is a gap",
-        )
-    if status == "negative" and angle.get("contradictory_evidence_action_ids"):
-        raise CoverageLedgerError(
-            "coverage_negative_has_contradictory_evidence",
-            "Negative coverage cannot close an angle while contradictory evidence remains",
-        )
-    if status == "candidate" and any(item == "blocked" for item in evidence_statuses):
-        raise CoverageLedgerError(
-            "coverage_candidate_requires_executed_evidence",
-            "Candidate coverage cannot be based only on a blocked action",
+            "coverage_candidate_binding_superseded",
+            "This angle is bound to a Hunt candidate. Keep candidate_id "
+            f"{bound} or cite new same-Hunt evidence actions to change its state",
+            status_code=409,
+            details={"candidate_id": bound},
         )
 
 
@@ -453,12 +415,15 @@ async def record_coverage_angle(
         list(angle["evidence_action_ids"])
         + list(angle["contradictory_evidence_action_ids"])
     ))
-    statuses = await _owned_action_statuses(
+    evidence = await owned_action_evidence(
         conn, hunt_run_id=hunt_run_id, action_ids=all_refs,
     )
-    _validate_evidence_claim(angle, statuses)
+    validate_evidence_claim(angle, evidence)
     await _require_owned_candidate(
         conn, hunt_run_id=hunt_run_id, candidate_id=angle["candidate_id"],
+    )
+    await _require_candidate_binding_preserved(
+        conn, hunt_run_id=hunt_run_id, angle=angle,
     )
     row = await conn.fetchrow(
         """INSERT INTO hunt_coverage_angle_events (
@@ -797,6 +762,7 @@ __all__ = [
     "COVERAGE_LOCUS_KEYS",
     "CoverageLedgerError",
     "HUNT_CHECKPOINT_SCHEMA",
+    "TERMINAL_ACTION_STATUSES",
     "build_hunt_checkpoint",
     "canonical_coverage_locus",
     "coverage_fingerprint",

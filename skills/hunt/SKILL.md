@@ -149,10 +149,13 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   `protocol`, `service`, `service_name`, `operation`, `operation_id`, `object`, `object_id`,
   `object_kind`, `resource_kind`, `parameter`, `input`, `input_path`, `sink`,
   `application_state`, `variant`.
-  After execution append the final `negative`, `partial`,
-  `blocked`, or `candidate` state with the actual same-Hunt action IDs. The server rejects
-  clean/negative claims backed only by partial or blocked work. One negative angle never closes a
-  materially different method, identity, mechanism, input path, or state.
+  After execution append the final `negative`, `partial`, `blocked`, or `candidate` state with
+  the same-Hunt action IDs that settled it. `negative` must cite only completed actions that sent
+  target traffic; `partial`, and `blocked` when it cites actions, need at least one such action.
+  A queue handoff (an action whose result is only `queued`) is never evidence; record `testing`
+  until its result arrives. A policy refusal is recorded as `blocked` with the blocker text alone.
+  An event that cites no new evidence must keep the angle's existing `candidate_id`. One negative
+  angle never closes a materially different method, identity, mechanism, input path, or state.
 - Use `GET /hunts/{hunt_id}/checkpoint` after context compaction, planner handoff, or resume.
   It is a bounded server-derived view of current coverage, candidates, action outcomes, budgets,
   and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. Coverage

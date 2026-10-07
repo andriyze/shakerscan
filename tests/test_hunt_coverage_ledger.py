@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import re
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -227,30 +229,56 @@ def test_verified_is_deliberately_not_a_planner_coverage_state():
     assert exc.value.code == "coverage_status_invalid"
 
 
+EXECUTED = {"budget_accounting": {"actual": {"http_requests": 1, "tool_wall_seconds": 1}}}
+
+
 class _Conn:
-    def __init__(self, action_statuses: dict[str, str], *, candidate_owned: bool = True):
-        self.action_statuses = action_statuses
+    """Fake connection; each action is a status or a (status, result_summary) pair."""
+
+    def __init__(
+        self,
+        action_statuses: dict[str, Any],
+        *,
+        candidate_owned: bool = True,
+        latest_candidate_id: str | None = None,
+        recorded_events: int = 0,
+    ):
+        self.actions = {
+            key: value if isinstance(value, tuple) else (
+                value, EXECUTED if value in {"completed", "partial"} else {}
+            )
+            for key, value in action_statuses.items()
+        }
         self.candidate_owned = candidate_owned
+        self.latest_candidate_id = latest_candidate_id
+        self.recorded_events = recorded_events
         self.inserted = None
 
     async def fetch(self, query, *args):
         assert "FROM hunt_actions" in query
-        ids = args[1]
         return [
-            {"id": value, "status": self.action_statuses[str(value)]}
-            for value in ids
-            if str(value) in self.action_statuses
+            {"id": value, "status": self.actions[str(value)][0],
+             "result_summary": json.dumps(self.actions[str(value)][1])}
+            for value in args[1]
+            if str(value) in self.actions
         ]
 
     async def fetchval(self, query, *args):
+        if "SELECT COUNT(*) FROM hunt_coverage_angle_events" in query:
+            return self.recorded_events
         assert "investigation_candidate_observations" in query
         return 1 if self.candidate_owned else None
 
     async def fetchrow(self, query, *args):
+        if query.lstrip().startswith("SELECT candidate_id"):
+            if self.latest_candidate_id is None:
+                return None
+            return {"candidate_id": UUID(self.latest_candidate_id)}
         assert "INSERT INTO hunt_coverage_angle_events" in query
         self.inserted = args
         return {
             "id": uuid4(),
+            "event_seq": 1,
             "hunt_run_id": UUID(args[0]),
             "fingerprint": args[1],
             "family": args[2],
@@ -358,6 +386,153 @@ async def test_negative_cannot_close_an_angle_with_contradictory_evidence():
         )
     assert exc.value.code == "coverage_negative_has_contradictory_evidence"
     assert conn.inserted is None
+
+
+# A confirmed SSH plan and a device posture queue both settle their action as
+# "completed" while the downstream scan is only queued; the device queue even books
+# its port charges at enqueue time.
+SSH_PLAN_HANDOFF = {
+    "ok": True, "status": "queued", "scan_id": str(uuid4()),
+    "receipt_observations": [{"kind": "confirmed_ssh_execution_queue", "status": "queued"}],
+    "budget_consumed": {"tool_wall_seconds": 3},
+}
+DEVICE_QUEUE_HANDOFF = {
+    "ok": True, "partial": True,
+    "queued": {"scan_id": str(uuid4()), "status": "queued", "run_kind": "device_posture"},
+    "budget_accounting": {"actual": {"tcp_ports_attempted": 1000, "tool_wall_seconds": 2}},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["negative", "partial", "blocked", "planned", "candidate"])
+@pytest.mark.parametrize("handoff", [SSH_PLAN_HANDOFF, DEVICE_QUEUE_HANDOFF])
+async def test_queue_handoffs_are_never_coverage_evidence(status, handoff):
+    action_id = str(uuid4())
+    conn = _Conn({action_id: ("completed", handoff)})
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle(
+            status=status, evidence_action_ids=[action_id], candidate_id=str(uuid4()),
+            blocker="device scan pending",
+        ))
+    assert exc.value.code == "coverage_evidence_queued_handoff"
+    assert conn.inserted is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summary", [
+    {},
+    {"budget_accounting": {"actual": {"tool_wall_seconds": 4, "agent_actions": 1}}},
+    {"budget_consumed": {"http_requests": 0, "active_actions": 1}},
+    {"budget_consumed": {"http_requests": True}},
+])
+async def test_negative_needs_an_action_that_sent_target_traffic(summary):
+    action_id = str(uuid4())
+    conn = _Conn({action_id: ("completed", summary)})
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle(
+            status="negative", evidence_action_ids=[action_id],
+        ))
+    assert exc.value.code == "coverage_negative_requires_executed_actions"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summary", [
+    EXECUTED,
+    {"budget_consumed": {"hosts_attempted": 2, "tool_wall_seconds": 1}},
+    {"budget_accounting": {"actual": {"browser_actions": 3}}},
+])
+async def test_negative_accepts_completed_actions_with_measured_traffic(summary):
+    action_id = str(uuid4())
+    conn = _Conn({action_id: ("completed", summary)})
+    result = await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle(
+        status="negative", evidence_action_ids=[action_id],
+    ))
+    assert result["angle"]["status"] == "negative"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["partial", "blocked"])
+async def test_partial_and_blocked_citations_need_one_executed_action(status):
+    refused, quiet = str(uuid4()), str(uuid4())
+    conn = _Conn({refused: "blocked", quiet: ("completed", {})})
+    values = _angle(status=status, evidence_action_ids=[refused, quiet], blocker="scope refusal")
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=values)
+    assert exc.value.code == "coverage_evidence_not_executed"
+    ran = str(uuid4())
+    conn = _Conn({refused: "blocked", ran: "partial"})
+    result = await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values={
+        **values, "evidence_action_ids": [refused, ran],
+    })
+    assert result["angle"]["status"] == status
+
+
+@pytest.mark.asyncio
+async def test_blocked_may_still_be_recorded_from_its_blocker_alone():
+    conn = _Conn({})
+    result = await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle(
+        status="blocked", blocker="Second approved principal is unavailable",
+    ))
+    assert result["angle"]["evidence_action_ids"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action_status", ["running", "failed"])
+async def test_unsettled_or_failed_actions_are_not_evidence(action_status):
+    action_id = str(uuid4())
+    conn = _Conn({action_id: (action_status, EXECUTED)})
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle(
+            status="partial", evidence_action_ids=[action_id],
+        ))
+    assert exc.value.code == "coverage_evidence_not_terminal"
+
+
+@pytest.mark.asyncio
+async def test_candidate_coverage_cannot_cite_a_refused_action():
+    refused, ran = str(uuid4()), str(uuid4())
+    conn = _Conn({refused: "blocked", ran: "completed"})
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle(
+            status="candidate", evidence_action_ids=[ran, refused], candidate_id=str(uuid4()),
+        ))
+    assert exc.value.code == "coverage_candidate_requires_executed_evidence"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["planned", "testing", "blocked"])
+async def test_evidence_free_event_cannot_drop_the_bound_candidate(status):
+    bound = str(uuid4())
+    conn = _Conn({}, latest_candidate_id=bound)
+    values = _angle(status=status, blocker="waiting on a second principal")
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=values)
+    assert exc.value.code == "coverage_candidate_binding_superseded"
+    assert exc.value.status_code == 409
+    assert exc.value.details["candidate_id"] == bound
+    assert conn.inserted is None
+    kept = await record_coverage_angle(
+        conn, hunt_run_id=str(uuid4()), values={**values, "candidate_id": bound},
+    )
+    assert kept["angle"]["candidate_id"] == bound
+
+
+@pytest.mark.asyncio
+async def test_new_executed_evidence_may_change_a_candidate_bound_angle():
+    action_id = str(uuid4())
+    conn = _Conn({action_id: "completed"}, latest_candidate_id=str(uuid4()))
+    result = await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle(
+        status="negative", evidence_action_ids=[action_id],
+    ))
+    assert result["angle"]["status"] == "negative"
+
+
+def test_traffic_dimensions_are_canonical_budget_dimensions():
+    from api.hunt.coverage_evidence import EXECUTED_TRAFFIC_DIMENSIONS
+    from api.runtime.budgets import BUDGET_DIMENSIONS
+
+    assert EXECUTED_TRAFFIC_DIMENSIONS <= BUDGET_DIMENSIONS
+    assert not EXECUTED_TRAFFIC_DIMENSIONS & {"tool_wall_seconds", "agent_actions", "active_actions"}
 
 
 class _CheckpointConn:

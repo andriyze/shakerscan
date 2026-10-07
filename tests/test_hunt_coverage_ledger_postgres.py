@@ -46,22 +46,32 @@ async def test_coverage_persists_and_checkpoint_uses_latest_owned_evidence(boots
             CREATE TABLE investigation_candidate_observations(candidate_id UUID, hunt_run_id UUID);
         """)
         target, hunt, other_hunt, completed, partial, foreign, candidate = [uuid4() for _ in range(7)]
+        queued, quiet = uuid4(), uuid4()
         await conn.execute("INSERT INTO targets VALUES($1)", target)
         await conn.executemany(
             "INSERT INTO hunt_runs(id,target_kind,target_id,objective,budget_json,budget_used_json) "
             "VALUES($1,'web',$2,'Coverage acceptance','{\"max_http_requests\":20}','{\"http_requests\":2}')",
             [(hunt, target), (other_hunt, target)],
         )
+        ran = json.dumps({"budget_accounting": {"actual": {"http_requests": 1}}})
+        handoff = json.dumps({"ok": True, "status": "queued", "scan_id": str(uuid4()),
+                              "budget_consumed": {"tcp_ports_attempted": 100}})
         await conn.executemany(
-            "INSERT INTO hunt_actions(id,hunt_run_id,capability_name,status) VALUES($1,$2,'http.request',$3)",
-            [(completed, hunt, "completed"), (partial, hunt, "partial"), (foreign, other_hunt, "completed")],
+            "INSERT INTO hunt_actions(id,hunt_run_id,capability_name,status,result_summary) "
+            "VALUES($1,$2,'http.request',$3,$4::jsonb)",
+            [(completed, hunt, "completed", ran), (partial, hunt, "partial", ran),
+             (foreign, other_hunt, "completed", ran), (queued, hunt, "completed", handoff),
+             (quiet, hunt, "completed", "{}")],
         )
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2, server_settings={"search_path": schema})
         service = HuntRunService(lambda: pool)
         angle = {"family": "authorization", "locus": {"method": "GET", "route": "/records/{id}"},
                  "mechanism": "cross-principal read", "status": "planned"}
         await service.record_coverage_angle(str(hunt), values=angle)
-        for action, code in [(foreign, "coverage_evidence_not_owned"), (partial, "coverage_negative_requires_completed_actions")]:
+        for action, code in [(foreign, "coverage_evidence_not_owned"),
+                             (partial, "coverage_negative_requires_completed_actions"),
+                             (queued, "coverage_evidence_queued_handoff"),
+                             (quiet, "coverage_negative_requires_executed_actions")]:
             with pytest.raises(CoverageLedgerError) as exc:
                 await service.record_coverage_angle(str(hunt), values={
                     **angle, "status": "negative", "evidence_action_ids": [str(action)],
@@ -87,6 +97,10 @@ async def test_coverage_persists_and_checkpoint_uses_latest_owned_evidence(boots
         assert exc.value.code == "coverage_candidate_not_owned"
         await conn.execute("INSERT INTO investigation_candidate_observations VALUES($1,$2)", candidate, hunt)
         await service.record_coverage_angle(str(hunt), values=candidate_angle)
+        unbound = {**candidate_angle, "status": "planned", "evidence_action_ids": [], "candidate_id": None}
+        with pytest.raises(CoverageLedgerError) as exc:
+            await service.record_coverage_angle(str(hunt), values=unbound)
+        assert exc.value.code == "coverage_candidate_binding_superseded"
         checkpoint = await service.checkpoint(str(hunt))
         assert checkpoint["review_queue"][0]["fingerprint"] == "canonical-fingerprint"
         assert len(checkpoint["continuation_queue"]) == 1
