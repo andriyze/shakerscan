@@ -67,19 +67,6 @@ _TEXT_LIMITS = {
     "proof_gap": 4_000,
 }
 
-_SECRET_KEY_PARTS = (
-    "authorization",
-    "cookie",
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "api_key",
-    "apikey",
-    "private_key",
-    "session_key",
-)
-
 # The complete, published locus vocabulary: semantic dimensions only. Execution
 # provenance (request/action/capability/collection IDs) belongs in evidence references;
 # putting it in the fingerprint would make a retry of the same experiment look new.
@@ -110,6 +97,15 @@ COVERAGE_LOCUS_KEYS: tuple[str, ...] = (
     "variant",
 )
 _LOCUS_KEY_SET = frozenset(COVERAGE_LOCUS_KEYS)
+
+
+def _key_is_sensitive(key: Any, item: Any) -> bool:
+    """The shared receipt rule for secret-bearing key names; the ledger keeps no copy."""
+    try:
+        from runtime.receipts import key_is_sensitive
+    except ModuleNotFoundError:
+        from api.runtime.receipts import key_is_sensitive
+    return key_is_sensitive(key, item=item)
 
 
 def _redacted(value: Any) -> Any:
@@ -147,7 +143,7 @@ def _reject_secret_keys(value: Any, path: str = "context") -> None:
     if isinstance(value, Mapping):
         for raw_key, child in value.items():
             key = str(raw_key).strip().lower()
-            if any(part in key for part in _SECRET_KEY_PARTS):
+            if _key_is_sensitive(key, child):
                 raise CoverageLedgerError(
                     "coverage_secret_context_forbidden",
                     f"{path} must contain labels and state only, not secret-bearing fields",
