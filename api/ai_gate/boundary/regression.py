@@ -14,7 +14,9 @@ from typing import Any
 from uuid import UUID
 
 from .contract import BoundaryContract, ContractError, canonical_hash
-from .hypothesis import materialize_boundary_contract, normalize_boundary_source_binding
+from .hypothesis import (
+    boundary_source_matches_endpoint, materialize_boundary_contract, normalize_boundary_source_binding,
+)
 
 _AI_RUN_KINDS = frozenset({"ai_api", "ai_widget", "ai_rag", "ai_trace", "ai_mcp"})
 _ENVIRONMENTS = frozenset({"preview", "staging", "development"})
@@ -118,13 +120,23 @@ def _validate_proposal_artifact_shape(proposal: Any) -> None:
 
 def build_boundary_regression_artifact(
     *, proposal: dict[str, Any], boundary_base: dict[str, Any],
-    target_id: str, source_scan: Mapping[str, Any],
+    target_id: str, source_scan: Mapping[str, Any], endpoint_url: str | None = None,
 ) -> dict[str, Any]:
     """Export a reusable request only after a matching completed assessment."""
     target_id = _uuid(target_id)
     _validate_proposal_artifact_shape(proposal)
     materialized = materialize_boundary_contract(proposal, boundary_base=boundary_base)
     contract = BoundaryContract.parse(materialized["boundary_contract"])
+    # Hunt provenance is exported only as the source run recorded it after the
+    # verify route validated it, and only for the endpoint that binding names.
+    binding = materialized.get("source_binding")
+    recorded = normalize_boundary_source_binding(
+        _object(source_scan.get("options")).get("ai_boundary_source_binding"),
+    )
+    if binding != recorded:
+        raise ContractError("boundary_regression_source_binding_mismatch")
+    if binding is not None and not boundary_source_matches_endpoint(binding, endpoint_url):
+        raise ContractError("boundary_regression_source_binding_endpoint_mismatch")
     options, result, boundary = _scan_boundary(
         source_scan, target_id=target_id, contract_sha256=contract.digest,
     )
@@ -231,6 +243,8 @@ def evaluate_boundary_regression_artifact(
     if (options.get("ai_environment") != request.get("environment")
             or options.get("ai_scan_profile") != request.get("scan_profile")):
         raise ContractError("boundary_regression_run_profile_mismatch")
+    if normalize_boundary_source_binding(options.get("ai_boundary_source_binding")) != materialized.get("source_binding"):
+        raise ContractError("boundary_regression_run_source_binding_mismatch")
     missing_controls = _control_failures(boundary, required_controls)
     reasons: list[str] = []
     if boundary.get("coverage_complete") is not True or boundary.get("errors"):

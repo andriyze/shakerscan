@@ -279,13 +279,26 @@ async def _verify(proposal, base=None):
 
 
 @pytest.mark.asyncio
-async def test_discovery_binding_is_validated_against_hunt_then_queued(monkeypatch):
+async def test_discovery_binding_is_validated_against_hunt_then_queued_and_digest_bound(monkeypatch):
     store = HuntRecordStore()
     captured = _install(monkeypatch, store)
     result = await _verify(_bound_proposal())
     assert result["status"] == "queued"
-    assert captured["kwargs"]["target_override"]["metadata_json"]["boundary_proposal"]["source_binding"] == _binding()
+    # The run receives the validated binding for persistence, and the executable
+    # contract carries it so the recorded contract digest covers it.
+    assert captured["kwargs"]["boundary_source_binding"] == _binding()
+    contract = captured["kwargs"]["target_override"]["metadata_json"]["boundary_contract"]
+    assert contract["source_binding"] == _binding()
     assert any("FROM hunt_runs" in query for query in store.queries)
+
+    from ai_gate.boundary.hypothesis import materialize_boundary_contract
+    bound = materialize_boundary_contract(_bound_proposal(), boundary_base=_base())
+    unbound = materialize_boundary_contract(_bound_proposal(binding=None), boundary_base=_base())
+    moved = materialize_boundary_contract(
+        _bound_proposal(binding=_binding(agent_paths=["/v2/chat"])), boundary_base=_base(),
+    )
+    assert len({bound["boundary_contract_sha256"], unbound["boundary_contract_sha256"],
+                moved["boundary_contract_sha256"]}) == 3
 
 
 @pytest.mark.asyncio
@@ -362,7 +375,9 @@ async def test_unbound_proposals_without_discovery_provenance_keep_working(monke
     captured = _install(monkeypatch, store)
     plain = _bound_proposal(binding=None, provenance=[{"kind": "operator_review", "id": "fixture-review"}])
     assert (await _verify(plain))["status"] == "queued"
+    assert captured["kwargs"]["boundary_source_binding"] is None
     assert not any("hunt_runs" in q or "investigation_candidate" in q for q in store.queries)
+    assert "source_binding" not in captured["kwargs"]["target_override"]["metadata_json"]["boundary_contract"]
 
     # A Hunt candidate that discovery never prepared has no binding to require.
     store = HuntRecordStore(recorded=None)
@@ -378,3 +393,79 @@ async def test_unbound_proposals_without_discovery_provenance_keep_working(monke
         {"kind": "hunt_candidate", "id": hand_built}, {"kind": "evidence", "id": CAPTURE_ID},
     ])
     assert (await _verify(proposal))["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_queued_run_persists_hunt_binding_in_stored_scan_options(monkeypatch):
+    captured = {}
+
+    class Conn:
+        async def fetchrow(self, query, *_args):
+            if "FROM ai_targets" in query:
+                return await HuntRecordStore().fetchrow(query)
+            if "FROM ai_target_credentials" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query, *_args):
+            assert "FROM ai_target_principals" in query
+            return []
+
+        async def execute(self, query, *args):
+            assert "INSERT INTO scans" in query
+            captured["stored_options"] = json.loads(args[4])
+            return "INSERT 0 1"
+
+    class Acquire:
+        async def __aenter__(self): return Conn()
+        async def __aexit__(self, *_args): return False
+
+    class Pool:
+        def acquire(self): return Acquire()
+
+    class Redis:
+        def hset(self, *_args, **_kwargs): return 1
+
+    async def no_refs(*_args, **_kwargs):
+        return None, []
+
+    async def no_receipt(*_args, **_kwargs):
+        return {}
+
+    async def record(*_args, **_kwargs):
+        return {"id": "operation-1"}
+
+    monkeypatch.setattr(router, "_pool_provider", lambda: Pool())
+    monkeypatch.setattr(router, "get_redis", lambda: Redis())
+    monkeypatch.setattr(router, "_resolve_ai_gate_credential_refs", no_refs)
+    monkeypatch.setattr(router, "_validate_approval_receipt_for_action", no_receipt)
+    monkeypatch.setattr(router, "_record_command_result", record)
+    monkeypatch.setattr(router, "enqueue_job", lambda _r, _q, payload: captured.update(job=payload))
+
+    await router._queue_ai_target_scan(
+        AI_TARGET_ID,
+        router.AITargetScanRequest(probe_pack=PACK, scan_profile="standard", environment="preview"),
+        boundary_source_binding=_binding(),
+    )
+    assert captured["stored_options"]["ai_boundary_source_binding"] == _binding()
+    assert captured["job"]["options"]["ai_boundary_source_binding"] == _binding()
+
+
+def test_worker_refuses_a_contract_binding_the_verify_route_did_not_admit():
+    from ai_gate.boundary.contract import ContractError
+    from ai_gate.boundary.hypothesis import materialize_boundary_contract
+    from ai_gate.boundary.runner import prepare
+    contract = materialize_boundary_contract(_bound_proposal(), boundary_base=_base())["boundary_contract"]
+    options = {
+        "ai_probe_pack": PACK, "ai_environment": "preview",
+        "ai_target": {"target_type": "api_chat", "method": "POST", "streaming_mode": "json",
+                      "endpoint_url": "https://agent.example.test/chat",
+                      "metadata_json": {"boundary_contract": contract}},
+    }
+    with pytest.raises(ContractError, match="boundary_source_binding_not_admitted"):
+        prepare("https://agent.example.test/chat", options, header_builder=None)
+    # With the admitted binding recorded, preparation proceeds past the provenance check.
+    with pytest.raises(ContractError) as later:
+        prepare("https://agent.example.test/chat", {**options, "ai_boundary_source_binding": _binding()},
+                header_builder=None)
+    assert str(later.value) != "boundary_source_binding_not_admitted"

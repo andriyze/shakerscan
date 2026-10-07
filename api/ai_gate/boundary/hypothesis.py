@@ -550,6 +550,12 @@ def materialize_boundary_contract(
             raise ContractError("boundary_materialization_requires_one_execution_fragment")
         materialized[keys[0]] = copy.deepcopy(fragment[keys[0]])
 
+    if source_binding is not None:
+        # The binding is part of the executable contract, so the contract digest
+        # the worker records (and regression artifacts compare) covers it: a
+        # bound proposal cannot be stripped or re-pointed without a new digest.
+        materialized["source_binding"] = copy.deepcopy(source_binding)
+
     # Parse the exact final shape through the existing verifier contract parsers.
     # This catches drift between discovery/compiler output and executable proof.
     from .contract import BoundaryContract

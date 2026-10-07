@@ -40,8 +40,12 @@ class BoundaryContract:
  def digest(self):return canonical_hash(self.source)
  @classmethod
  def parse(cls,raw):
-  raw=_keys(raw,{"version","name","owner","attacker","identity","resource","response_path","baseline_prompt","attacks","repetitions","action","indirect","approval","tool","multiturn"},{"version","name","owner","attacker","identity","resource","response_path"})
+  raw=_keys(raw,{"version","name","owner","attacker","identity","resource","response_path","baseline_prompt","attacks","repetitions","action","indirect","approval","tool","multiturn","source_binding"},{"version","name","owner","attacker","identity","resource","response_path"})
   if type(raw["version"]) is not int or raw["version"]!=1:raise ContractError("unsupported_contract_version")
+  if "source_binding" in raw:
+   # Hunt discovery provenance only; it grants nothing but is covered by the digest.
+   from .hypothesis import normalize_boundary_source_binding
+   if raw["source_binding"] is None or normalize_boundary_source_binding(raw["source_binding"])!=raw["source_binding"]:raise ContractError("invalid_boundary_source_binding")
   ids=[]
   for slot in ("owner","attacker"):
    item=_keys(raw[slot],{"role","subject","tenant","resource_id"},{"role","subject","tenant","resource_id"});ids.append(Identity(**{k:_name(v) for k,v in item.items()}))

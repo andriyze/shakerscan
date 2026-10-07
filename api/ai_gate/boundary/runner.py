@@ -33,6 +33,11 @@ def prepare(target_url: str, options: dict[str, Any], header_builder: Callable) 
         raise ContractError("boundary_alpha_requires_nonstreaming_post_chat")
     metadata = target.get("metadata_json") or {}
     contract = BoundaryContract.parse(metadata.get("boundary_contract"))
+    # A Hunt source binding is admitted only by the verify route, which validates it
+    # against the Hunt record and records it in the run options. A contract that
+    # carries one any other way (for example saved target metadata) is not run.
+    if contract.source.get("source_binding") != options.get("ai_boundary_source_binding"):
+        raise ContractError("boundary_source_binding_not_admitted")
     endpoint = target.get("endpoint_url") or target_url
     origin = origin_of(endpoint)
     if origin_of(target_url) != origin:
