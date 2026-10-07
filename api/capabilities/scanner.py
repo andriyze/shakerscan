@@ -274,6 +274,17 @@ class ScannerExecutionAdapter:
                     else "within_ceiling"
                 ),
             }
+        record_limit = typed_output.get("record_limit")
+        if isinstance(record_limit, Mapping):
+            # How many parsed records the receipt kept against how many the tool emitted:
+            # a bounded set is labelled as one, never presented as the whole output.
+            redacted_execution["record_limit"] = {
+                name: (
+                    bool(record_limit.get(name)) if name == "truncated"
+                    else max(0, int(record_limit.get(name) or 0))
+                )
+                for name in ("kept", "seen", "limit", "lines_dropped", "truncated")
+            }
         browser_profile = process_result.get("browser_profile")
         if isinstance(browser_profile, Mapping) and browser_profile:
             redacted_execution["browser_profile"] = {

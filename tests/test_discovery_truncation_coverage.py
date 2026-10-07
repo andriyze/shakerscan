@@ -133,7 +133,7 @@ def test_the_whole_retained_crawl_output_is_read_for_distinct_routes():
     assert not any("elsewhere.test" in url for url in urls)
 
 
-def test_distinct_crawl_routes_stay_bounded():
+def test_distinct_crawl_routes_stay_bounded_and_the_bound_is_marked():
     import agent_tools
 
     lines = [
@@ -142,6 +142,18 @@ def test_distinct_crawl_routes_stay_bounded():
     ]
     parsed = agent_tools.parse_scanner_output("katana", "\n".join(lines), allowed_host="app.example.test")
     assert len(parsed["records"]) == agent_tools.MAX_TOOL_RECORDS
+    # The cap is never silent: kept against distinct routes seen, and a truncation reason.
+    assert parsed["records_truncated"] is True
+    assert parsed["record_limit"]["kept"] == agent_tools.MAX_TOOL_RECORDS
+    assert parsed["record_limit"]["seen"] == agent_tools.MAX_TOOL_RECORDS + 300
+    assert agent_tools.scanner_truncation_error(None, parsed) == "output_truncated"
+    # A crawl under the bound is complete and unmarked.
+    whole = agent_tools.parse_scanner_output(
+        "katana", "\n".join(lines[:200]), allowed_host="app.example.test",
+    )
+    assert whole["records_truncated"] is False
+    assert whole["record_limit"]["kept"] == whole["record_limit"]["seen"] == 200
+    assert agent_tools.scanner_truncation_error(None, whole) is None
 
 
 # --- the passive pack reaches the discovered surface ----------------------------------------
