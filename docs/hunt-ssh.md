@@ -21,6 +21,11 @@ The Live SSH tab streams stdout/stderr and supports cancellation and saving a
 command as a target action. Through MCP, `shakerscan_hunt_ssh_exec` emits progress
 notifications; `shakerscan_hunt_ssh_output` polls output and `shakerscan_hunt_ssh_cancel`
 cancels one action. Tool calls on the same MCP connection may overlap.
+A command that ends without a result is reported `refused` only when it provably did not run:
+the request was refused before the stream opened, or the engine recorded no such action. Any
+other failure, including an error after output was streamed, is `outcome: "unknown"` with the
+action ID to read through `shakerscan_hunt_ssh_output`; the adapter never suggests sending an
+uncertain command again.
 
 For log correlation, run a bounded watch through SSH and issue the external check
 while it is running. The dedicated agent worker admits at most three leased jobs

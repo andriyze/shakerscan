@@ -97,6 +97,8 @@ RETRY_LATER_RECOVERY = (
     "with this action blocked or failed, the server recorded the refusal under this key: wait again "
     "and use a new key."
 )
+# The engine's answer for an SSH action it never recorded (api/hunt/ssh_stream.py).
+SSH_ACTION_NOT_RECORDED = "SSH action not found in this Hunt"
 MAX_REQUEST_BYTES = 256_000
 MAX_RESPONSE_BYTES = 2_000_000
 DEFAULT_TARGET_PAGE_SIZE = 20
@@ -1044,6 +1046,63 @@ class ArsenalClient:
             raise last
         return {**last, "outcome": "running", "continue": _running_continue(str(payload.get("idempotency_key")))}
 
+    def _ssh_failure(self, exc: BaseException, identity: Mapping[str, Any]) -> MCPError:
+        """The error an SSH command that ended without a result reports.
+
+        The server opens the stream by accepting the action, before it runs anything, so an
+        ``error`` event can come before or after the command ran. Only what provably ran nothing
+        is "refused": an HTTP refusal before the stream opened, or a refusal for an action the
+        engine never recorded. Anything else is an unknown outcome, and an uncertain command is
+        never sent again: the agent reads that action's output instead."""
+        status = getattr(exc, "status_code", None)
+        status = status if isinstance(status, int) and not isinstance(status, bool) else None
+        before_stream = bool(getattr(exc, "before_stream", False))
+        action_id = getattr(exc, "action_id", None) or None
+        body = exc.body if before_stream else json.dumps({"detail": getattr(exc, "detail", None)}, default=str)
+        reason = _refusal_reason(body) if isinstance(body, str) else None
+        said = f"HTTP {status}" + (f": {reason}" if reason else "") if status is not None else None
+        definite = status is not None and 400 <= status < 500 and status not in RETRYABLE_HTTP_STATUSES
+        if definite and (before_stream or self._ssh_action_unrecorded(identity["hunt_id"], action_id)):
+            return MCPError(-32006, f"SSH command was refused and did not run ({said})", {
+                "outcome": "refused", "http_status": status, "detail": reason, **identity,
+                "recovery": REFUSED_RECOVERY,
+            }, http_status=status)
+        if before_stream and status in RETRYABLE_HTTP_STATUSES:
+            return MCPError(-32006, (
+                f"SSH command was not accepted ({said}). Wait, then send it again with idempotency_key "
+                f"{identity['mcp_idempotency_key']} and unchanged input."
+            ), {
+                "outcome": "retry_later", "http_status": status, "detail": reason, **identity,
+                "recovery": RETRY_LATER_RECOVERY,
+            }, http_status=status)
+        where = f"action {action_id}" if action_id else "the Hunt's latest ssh.exec action"
+        return MCPError(-32006, (
+            "SSH command outcome is unknown" + (f" ({said})" if said else "") + ": it may have run. "
+            f"Read shakerscan_hunt_ssh_output for {where} before anything else; do not send the "
+            "command again."
+        ), {
+            "outcome": "unknown", "http_status": status, "detail": reason, "action_id": action_id,
+            **identity,
+            "recovery": "The command may have run. Read its action's status and output before deciding "
+                        "anything; never re-send an uncertain command.",
+        }, http_status=status)
+
+    def _ssh_action_unrecorded(self, hunt_id: str, action_id: Any) -> bool:
+        """True only when the engine answers that it recorded no such SSH action: nothing ran.
+
+        Any other answer, including a gateway's 404 for a route it keeps closed, is not proof."""
+        try:
+            canonical = str(uuid.UUID(str(action_id)))
+        except (TypeError, ValueError, AttributeError):
+            return False
+        hunt = urllib.parse.quote(str(hunt_id), safe="")
+        try:
+            self.request_json("GET", f"/hunts/{hunt}/ssh/actions/{canonical}/output")
+        except MCPError as exc:
+            body = exc.data if isinstance(exc.data, str) else ""
+            return _http_status(exc) == 404 and _refusal_reason(body) == SSH_ACTION_NOT_RECORDED
+        return False
+
     def catalog(self) -> dict[str, dict[str, Any]]:
         payload = self.request_json("GET", "/arsenal/commands")
         commands = payload.get("commands")
@@ -1316,8 +1375,8 @@ class ArsenalClient:
                     "mcp_generated_idempotency_key": generated_idempotency_key is not None,
                     **({"experiment_key": payload["experiment_key"]} if "experiment_key" in payload else {}),
                 }
-                if streaming_ssh and isinstance(exc, ValueError) and str(exc).startswith("Canonical SSH action refused"):
-                    raise MCPError(-32006, str(exc)[:MAX_REASON_CHARS], {"outcome": "refused", **identity}) from exc
+                if streaming_ssh:
+                    raise self._ssh_failure(exc, identity) from exc
                 raise _capability_failure(exc, identity) from exc
             if name == "shakerscan_hunt_capability":
                 result = {
