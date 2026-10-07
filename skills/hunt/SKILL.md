@@ -269,6 +269,9 @@ or no useful authorized action fits the remaining budget. An exhausted optional 
 stop work that uses other remaining dimensions. Preserve observations and name material coverage gaps.
 An action rejected with `budget_insufficient_for_action` has not exhausted the run: use its
 reported shortages to select a smaller useful action. Do not retry an unchanged oversized action.
+A `budget_exhausted` Hunt still accepts candidates while its candidate budget has room: record the
+leads the gathered evidence supports before finishing. `hosts_attempted` counts distinct hosts, so
+repeated network actions on an already attempted host do not consume it again.
 
 Store no hidden chain-of-thought. Durable records should contain objectives, capability calls,
 receipts, observations, bounded notes, candidates, and the final debrief.

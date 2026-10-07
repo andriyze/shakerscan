@@ -43,6 +43,7 @@ from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
 from .candidate_evidence import CandidateEvidenceError, resolve_candidate_evidence
 from .action_replay import execution_started_from_budget, replay_observations
+from .host_accounting import distinct_host_charge
 from .boundary_handoff import compile_candidate_boundary_handoff
 from .boundary_discovery import discover_hunt_boundaries
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
@@ -254,6 +255,12 @@ class HuntQueryRequest(BaseModel):
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
     cursor: str | None = Field(default=None, max_length=2048)
+
+
+# Recording a candidate sends no target traffic and draws only on the candidate budget. A Hunt
+# stopped because another dimension ran out must still be able to record the leads its gathered
+# evidence supports; completed, cancelled and failed Hunts stay closed.
+CANDIDATE_RECORDING_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
 
 
 class HuntCandidateRequest(BaseModel):
@@ -1094,7 +1101,7 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
     async with _pool().acquire() as conn:
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
-            if run["status"] not in {"active", "awaiting_planner"}:
+            if run["status"] not in CANDIDATE_RECORDING_STATUSES:
                 raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
             discovery = await discover_hunt_boundaries(conn, run=dict(run))
             draft = next(
@@ -1206,7 +1213,7 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
     async with _pool().acquire() as conn:
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
-            if run["status"] not in {"active", "awaiting_planner"}:
+            if run["status"] not in CANDIDATE_RECORDING_STATUSES:
                 raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
             used = _hunt_json(run["budget_used_json"], {})
             budget = _hunt_json(run["budget_json"], {})
@@ -1873,10 +1880,10 @@ async def _execute_hunt_capability_lifecycle(
                     )
                 except (CapabilityInputError, ValueError) as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
-                charges = {
+                charges = distinct_host_charge(context, prepared_network, {
                     key: int(value) for key, value in prepared_network.estimated_budget.items()
                     if key in limits
-                }
+                })
             elif is_browser:
                 authority_context = _hunt_json(run["context_pack"], {})
                 target_context = (
