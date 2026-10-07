@@ -111,9 +111,9 @@ def test_restart_upgrades_the_first_release_coverage_ledger_in_place():
             await module.run_schema_migrations(BoundConnectionPool(conn))
             # Recreate the ledger exactly as the first release installed it (no event_seq,
             # auto-named status check, timestamp indexes) with one retained event.
-            from tests.test_hunt_coverage_ledger_postgres import FIRST_RELEASE_LEDGER_DDL
             await conn.execute('DROP TABLE hunt_coverage_angle_events')
-            await conn.execute(FIRST_RELEASE_LEDGER_DDL)
+            await conn.execute((Path(__file__).resolve().parent / 'fixtures' / 'hunt'
+                                / 'coverage_ledger_first_release.sql').read_text(encoding='utf-8'))
             target = await conn.fetchval("INSERT INTO targets(url) VALUES('https://ledger.test') RETURNING id")
             hunt = await conn.fetchval(
                 "INSERT INTO hunt_runs(target_kind,target_id) VALUES('web',$1) RETURNING id", target)
