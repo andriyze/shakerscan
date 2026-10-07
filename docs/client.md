@@ -90,8 +90,12 @@ The public MCP mode exposes only `shakerscan_public_check(target, path?, dkim_se
 uses the same credential-free `/v1/check` pipeline as `check`; no private-engine discovery,
 Hunt, Arsenal, shell or target management tools are available. When connected to an OSS or
 Enterprise instance, MCP also exposes that check alongside the instance's existing tools and
-sends it to the instance's `POST /public/check` using the saved connection. There is no public
-fallback or per-check approval prompt on a connected client.
+sends it to the instance's `POST /public/check` using the saved connection, but only when the
+instance serves that route: `tools/list` first probes it with a request the engine refuses before
+doing any work (no body, not JSON, answered 415), and a gateway that keeps the route closed
+(403, as the Enterprise beta does) or an engine without it (404) gets no such tool, so neither
+the agent nor `doctor` counts it. There is no public fallback or per-check approval prompt on a
+connected client.
 
 The hosted service accepts only public DNS names and global IP addresses, refuses government and
 military targets, and applies per-caller limits: 30 requests a minute, and 25 uncached checks an

@@ -565,6 +565,10 @@ def test_agent_prepares_the_workspace_against_the_connected_instance(monkeypatch
     text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
     assert text.startswith("# Connected ShakerScan instance") and "https://scanner.example.com" in text
     assert "shakerscan api METHOD PATH" in text
+    note = text.split("\n\n", 2)[1]
+    assert "/openapi.json` is refused here" in note and "GET /hunts/contract" in note, (
+        "the Enterprise note must not leave agents reading a route the gateway refuses"
+    )
     assert not (workspace / "CLAUDE.md").exists()
     mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
     assert mcp["mcpServers"]["shakerscan"]["args"] == ["mcp"]
