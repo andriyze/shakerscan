@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -808,6 +809,31 @@ def _is_unreachable(probe: tuple[str, int], not_found_for_prefix: list[tuple[str
     if verdict == "inconclusive":
         return None
     return verdict in ("hard_404", "soft_404")
+
+
+def _measured_response(status: Any, size: Any) -> tuple[str, int]:
+    if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+        return ("", -1)
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        size = -1
+    return (str(status), size)
+
+
+def measured_not_found_verdict(
+    status: Any, size: Any, absent_responses: Iterable[tuple[Any, Any]],
+) -> str:
+    """Classify an already-measured GET response against measured absent-path responses.
+
+    The same rule as the live decoy learner (``_reachability_verdict``), for callers that probed
+    paths which cannot exist inside their own request budget (content discovery's negative
+    controls) and need no further traffic. Each ``absent_responses`` item is ``(status, size)``.
+    Returns ``hard_404``, ``soft_404``, ``reachable`` or ``inconclusive``.
+    """
+    signatures = [
+        signature for signature in (_measured_response(*item) for item in absent_responses)
+        if signature[0]
+    ] if _soft404_enabled() else []
+    return _reachability_verdict(_measured_response(status, size), signatures)
 
 
 def _entry_is_get(entry: str) -> bool:
