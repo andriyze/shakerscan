@@ -56,9 +56,11 @@ def test_cancelling_an_already_terminal_hunt_does_not_cascade():
     source = _cancel_source()
     live_guard = source.index("status IN ('created','active','awaiting_planner','budget_exhausted')")
     assert "AND completed_at IS NULL" in source
-    early_return = source.index("return public_hunt_run(row)")
+    # A finished (not cancelled) Hunt is refused with 409 before the cascade; a repeated cancel
+    # of a cancelled Hunt skips the cascade branch entirely.
+    early_refusal = source.index("cannot be cancelled")
     cascade = source.index("options->'hunt_dispatch'")
-    assert live_guard < early_return < cascade
+    assert live_guard < early_refusal < cascade
 
 
 def test_reservations_are_left_to_settle_and_that_choice_is_recorded():

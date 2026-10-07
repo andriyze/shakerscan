@@ -1332,13 +1332,20 @@ class HuntRunService:
             async with connection.transaction():
                 run_uuid = _uuid_or_400(hunt_id, "hunt id")
                 row = await hunt_run_or_404(connection, hunt_id, for_update=True)
-                if row["status"] == "completed":
-                    return public_hunt_run(row)
-                if row["status"] not in {
+                debrief = {"summary": summary, "next_actions": next_actions}
+                if row.get("completed_at") is not None or row["status"] not in {
                     "active", "awaiting_planner", "budget_exhausted",
                 }:
+                    # Already finished. A retry of the same finish (a lost response) is answered
+                    # with the record and says nothing changed; anything else is refused, so a
+                    # new debrief is never silently dropped.
+                    if row["status"] in {"completed", "budget_exhausted"} and (
+                        _decode_json(row.get("final_debrief"), {}) == debrief
+                    ):
+                        return {**public_hunt_run(row), "already_terminal": True}
                     raise HTTPException(
-                        status_code=409, detail=f"Hunt is {row['status']}"
+                        status_code=409,
+                        detail=f"Hunt is already {row['status']}; it was not finished again",
                     )
                 in_flight = await connection.fetchrow(
                     """SELECT
@@ -1368,10 +1375,10 @@ class HuntRunService:
                          AND status IN ('active','awaiting_planner','budget_exhausted')
                        RETURNING *""",
                     run_uuid,
-                    json.dumps({"summary": summary, "next_actions": next_actions}),
+                    json.dumps(debrief),
                 )
                 await connection.execute("UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1", run_uuid)
-        return public_hunt_run(row)
+        return {**public_hunt_run(row), "already_terminal": False}
 
     async def cancel(self, hunt_id: str) -> dict[str, Any]:
         """Cancel a Hunt and the downstream work it queued.
@@ -1401,10 +1408,17 @@ class HuntRunService:
             )
             if row:
                 await connection.execute("UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1", run_uuid)
+            already_cancelled = not row
             if not row:
                 row = await hunt_run_or_404(connection, run_uuid)
                 if row["status"] != "cancelled":
-                    return public_hunt_run(row)
+                    # A finished Hunt cannot be cancelled; answering 200 with its record looked
+                    # like a successful cancellation. A repeated cancel still answers (and
+                    # re-signals the jobs below) and says it was already cancelled.
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Hunt is already {row['status']} and cannot be cancelled",
+                    )
             else:
                 cancelled = await connection.fetch(
                     """UPDATE scans
@@ -1481,6 +1495,7 @@ class HuntRunService:
         payload["cancelled_job_ids"] = signalled
         payload["pending_cancel_job_ids"] = pending_job_ids
         payload["cancellation_degraded"] = bool(pending_job_ids)
+        payload["already_terminal"] = already_cancelled
         return payload
 
     async def resume(self, hunt_id: str) -> dict[str, Any]:
