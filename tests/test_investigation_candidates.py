@@ -131,8 +131,9 @@ def test_terminal_upsert_is_immutable_and_every_sighting_appends_an_observation(
     # Terminal immutability and no-overwrite merging are exercised against real SQL in
     # tests/test_hunt_candidate_identity.py; the upsert never rewrites a stored claim.
     upsert = source[source.index("async def upsert_candidate("):source.index("async def _hunt_owned_candidate(")]
-    assert "in TERMINAL_STATUSES" in upsert
-    assert "SET title" not in upsert and "claim=EXCLUDED" not in upsert
+    assert "in TERMINAL_STATUSES" in upsert and "in IN_FLIGHT_STATUSES" in upsert
+    # Only a same-source refresh restates a row (behaviour in test_hunt_candidate_identity).
+    assert upsert.count("SET title") == 1 and "claim=EXCLUDED" not in upsert
     assert "INSERT INTO investigation_candidate_observations" in source
     assert "agent_hunt_run_id" in source
 

@@ -1139,18 +1139,21 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
                 evidence_refs=request["evidence_refs"],
                 source_kind="hunt_boundary_discovery",
             )
-            result = await investigation_candidates.upsert_candidate(
-                conn,
-                candidate,
-                created_by=f"hunt_boundary_discovery:{hunt_uuid}",
-                observation_context={
-                    "hunt_id": str(hunt_uuid),
-                    "objective": run["objective"],
-                    "discovery_draft_id": draft_id,
-                    "boundary_source_binding": draft["source_binding"],
-                    "authoritative": False,
-                },
-            )
+            try:
+                result = await investigation_candidates.upsert_candidate(
+                    conn,
+                    candidate,
+                    created_by=f"hunt_boundary_discovery:{hunt_uuid}",
+                    observation_context={
+                        "hunt_id": str(hunt_uuid),
+                        "objective": run["objective"],
+                        "discovery_draft_id": draft_id,
+                        "boundary_source_binding": draft["source_binding"],
+                        "authoritative": False,
+                    },
+                )
+            except investigation_candidates.CandidateLifecycleError as exc:
+                raise _candidate_sighting_http_error(exc) from exc
             used["candidates"] = int(used.get("candidates") or 0) + 1
             await conn.execute(
                 "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1",
@@ -1232,10 +1235,13 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
                 evidence_refs=request.evidence_refs, verifier_contract_id=request.verifier_contract_id,
                 source_kind="hunt_v2",
             )
-            result = await investigation_candidates.upsert_candidate(
-                conn, candidate, created_by=f"hunt_v2:{hunt_id}",
-                observation_context={"hunt_id": hunt_id, "objective": run["objective"]},
-            )
+            try:
+                result = await investigation_candidates.upsert_candidate(
+                    conn, candidate, created_by=f"hunt_v2:{hunt_id}",
+                    observation_context={"hunt_id": hunt_id, "objective": run["objective"]},
+                )
+            except investigation_candidates.CandidateLifecycleError as exc:
+                raise _candidate_sighting_http_error(exc) from exc
             used["candidates"] = int(used.get("candidates") or 0) + 1
             await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
     return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
@@ -1254,6 +1260,14 @@ async def _require_candidate_evidence(conn: Any, run: Any, references: list[str]
             "unresolved_evidence_refs": exc.references,
             "unsettled_evidence_refs": exc.unsettled,
         }) from exc
+
+
+def _candidate_sighting_http_error(
+    exc: investigation_candidates.CandidateLifecycleError,
+) -> HTTPException:
+    """A recorded sighting that would change an in-flight row or truncate its evidence."""
+    status = 422 if exc.code == "candidate_evidence_limit" else 409
+    return HTTPException(status_code=status, detail={"error": exc.code, "message": str(exc)})
 
 
 def _candidate_lifecycle_http_error(

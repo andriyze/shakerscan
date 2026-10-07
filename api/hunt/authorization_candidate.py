@@ -178,7 +178,7 @@ async def ensure_authorization_candidate(service: Any, hunt_id: Any, state: Mapp
                 )
                 created = await investigation_candidates.upsert_candidate(
                     conn, candidate, created_by="hunt_authorization_workflow",
-                    observation_context=plan["observation_context"],
+                    observation_context=plan["observation_context"], strict=False,
                 )
                 await service.repo.insert_node(
                     conn, run, link_id, LINK_TYPE, link_key,

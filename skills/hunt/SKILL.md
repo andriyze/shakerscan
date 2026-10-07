@@ -212,6 +212,10 @@ Identity is target + family + locus. `GET /hunts/contract` (`candidates`) lists 
 the attribute that distinguishes this issue in the locus (for a file exposure, its `path`). A
 second record with the same identity and the same title or claim merges its evidence
 (`outcome: merged`); a different claim becomes its own candidate and never replaces a stored one.
+A merge never rewrites title, claim or severity: it lists them in `unapplied_fields`, so correct
+them with PATCH. A candidate under verification is not changed (409
+`candidate_verification_in_flight`), and a merge that would exceed 100 evidence references is
+refused (422 `candidate_evidence_limit`) rather than truncated.
 Each evidence reference must be this Hunt's action, receipt or HTTP transaction ID (bare or
 `action:`/`receipt:`/`transaction:` prefixed), a `finding:` on the target, or a device `devref_N`;
 anything else is refused with `candidate_evidence_unresolved`. An action or its receipt counts only

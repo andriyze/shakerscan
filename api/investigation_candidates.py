@@ -327,7 +327,8 @@ async def _insert_or_match(
         if row is not None:
             return row, "inserted"
         existing = await conn.fetchrow(
-            """SELECT id, status, fingerprint, title, claim, evidence_refs, verifier_contract_id
+            """SELECT id, status, fingerprint, title, claim, claimed_severity, evidence_refs,
+                      verifier_contract_id, source_kind
                FROM investigation_candidates WHERE fingerprint=$1 FOR UPDATE""",
             fingerprint,
         )
@@ -336,20 +337,48 @@ async def _insert_or_match(
     raise RuntimeError("candidate fingerprint conflicted without a visible row")
 
 
+MAX_EVIDENCE_REFS = 100
+# Fields a later sighting carries but never writes onto a stored row (see upsert_candidate).
+_SIGHTING_FIELDS = (("title", "title"), ("claim", "claim"), ("severity", "claimed_severity"))
+
+
+def _unapplied_fields(row: Any, candidate: dict[str, Any], refs_merged: bool) -> list[str]:
+    fields = [
+        name for name, column in _SIGHTING_FIELDS
+        if str(row[column] or "") != str(candidate[column] or "")
+    ]
+    stored = {str(item) for item in _json_list(row["evidence_refs"])}
+    if not refs_merged and not set(candidate["evidence_refs"]) <= stored:
+        fields.append("evidence_refs")
+    return fields
+
+
 async def upsert_candidate(
     conn: Any,
     candidate: dict[str, Any],
     *,
     created_by: str,
     observation_context: dict[str, Any] | None = None,
+    strict: bool = True,
+    refresh_same_source: bool = False,
 ) -> dict[str, Any]:
     """Insert a candidate or merge a repeated sighting, and append one run-bound observation.
 
-    A stored candidate's title, claim and severity are never replaced by a later sighting. A
-    sighting with the same claim merges its evidence references into the row; a different claim
-    that shares the family and locus becomes its own row. Verified/refuted/expired rows are
-    immutable: a later sighting only refreshes ``last_seen_at``. Every sighting's own claim and
-    provenance remain in the observation ledger. ``outcome`` reports what actually happened.
+    A stored candidate's title, claim and severity are never replaced by a later sighting; the
+    response lists what the sighting carried but did not write (``unapplied_fields``), which a
+    Hunt corrects with PATCH. A sighting with the same claim merges its evidence references into
+    the row; a different claim that shares the family and locus becomes its own row, and a later
+    sighting of that claim merges into that row even after PATCH reworded it. Every sighting's
+    own claim and provenance remain in the observation ledger. ``outcome`` reports what happened.
+
+    A row is never changed while its verification is in flight, and evidence references are
+    never truncated. With ``strict`` (planner-facing routes) either case raises
+    ``CandidateLifecycleError`` (``candidate_verification_in_flight`` or
+    ``candidate_evidence_limit``); otherwise the sighting is only observed and ``reason`` says
+    why. Verified/refuted/expired rows are immutable: a later sighting only refreshes
+    ``last_seen_at``. ``refresh_same_source`` lets a deterministic producer (an advisory
+    correlation re-run on a newer snapshot) restate the title, claim and severity of a row that
+    the same ``source_kind`` produced.
     """
     fingerprint = candidate["fingerprint"]
     row, outcome = await _insert_or_match(conn, candidate, fingerprint, created_by)
@@ -357,22 +386,58 @@ async def upsert_candidate(
     if outcome == "existing" and not _same_claim(row, candidate):
         distinct_from = str(row["id"])
         fingerprint = claim_scoped_fingerprint(fingerprint, candidate["claim"])
+        # This fingerprint is the claim's own identity. A row found here was created for this
+        # claim; PATCH may since have reworded it, which makes it no less this claim's row.
         row, outcome = await _insert_or_match(conn, candidate, fingerprint, created_by)
-        if outcome == "existing" and not _same_claim(row, candidate):
-            raise RuntimeError("claim-scoped candidate fingerprint collided with another claim")
+    reason: str | None = None
+    unapplied: list[str] = []
     if outcome == "existing":
-        if str(row["status"]) in TERMINAL_STATUSES:
+        status = str(row["status"])
+        merged_refs = list(dict.fromkeys(
+            [str(item) for item in _json_list(row["evidence_refs"])]
+            + list(candidate["evidence_refs"])
+        ))
+        if status in TERMINAL_STATUSES:
+            reason = f"candidate_{status}"
+        elif status in IN_FLIGHT_STATUSES:
+            reason = "candidate_verification_in_flight"
+            if strict:
+                raise CandidateLifecycleError(
+                    reason,
+                    f"Candidate is {status}; wait for verification to settle before adding "
+                    "evidence to it",
+                )
+        elif len(merged_refs) > MAX_EVIDENCE_REFS:
+            reason = "candidate_evidence_limit"
+            if strict:
+                raise CandidateLifecycleError(
+                    reason,
+                    f"Merging would give the candidate {len(merged_refs)} evidence references; "
+                    f"at most {MAX_EVIDENCE_REFS} are kept. Replace them with PATCH instead.",
+                )
+        refresh = bool(
+            reason is None and refresh_same_source
+            and str(row["source_kind"] or "") == str(candidate.get("source_kind") or "")
+        )
+        if reason is not None:
             outcome = "observed"
             await conn.execute(
                 "UPDATE investigation_candidates SET last_seen_at=NOW() WHERE id=$1",
                 row["id"],
             )
+        elif refresh:
+            outcome = "merged"
+            await conn.execute(
+                """UPDATE investigation_candidates
+                   SET title=$4, claim=$5, claimed_severity=$6, evidence_refs=$2::jsonb,
+                       verifier_contract_id=COALESCE(verifier_contract_id, $3),
+                       last_seen_at=NOW(), updated_at=NOW()
+                   WHERE id=$1""",
+                row["id"], json.dumps(merged_refs), candidate.get("verifier_contract_id"),
+                candidate["title"], candidate["claim"], candidate["claimed_severity"],
+            )
         else:
             outcome = "merged"
-            merged_refs = list(dict.fromkeys(
-                [str(item) for item in _json_list(row["evidence_refs"])]
-                + list(candidate["evidence_refs"])
-            ))[:100]
             await conn.execute(
                 """UPDATE investigation_candidates
                    SET evidence_refs=$2::jsonb,
@@ -381,6 +446,8 @@ async def upsert_candidate(
                    WHERE id=$1""",
                 row["id"], json.dumps(merged_refs), candidate.get("verifier_contract_id"),
             )
+        if not refresh:
+            unapplied = _unapplied_fields(row, candidate, refs_merged=reason is None)
     await conn.execute(
         """INSERT INTO investigation_candidate_observations (
                candidate_id, research_episode_id, agent_hunt_run_id, device_agent_run_id, hunt_run_id,
@@ -405,6 +472,10 @@ async def upsert_candidate(
     }
     if distinct_from is not None:
         result["distinct_from_candidate_id"] = distinct_from
+    if reason is not None:
+        result["reason"] = reason
+    if unapplied:
+        result["unapplied_fields"] = unapplied
     return result
 
 
