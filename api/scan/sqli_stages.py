@@ -89,28 +89,39 @@ def prior_stages(
     extends, nearest first. The first finished checkpoint of a stage wins; the largest wall a
     stage was ever killed at is kept so it is not re-run on a hold no larger. The latest
     response time measured by the nearest action that measured one (seconds per request less
-    the delay the stage was paced at) is the latency the next stage is paced with.
+    the delay the stage was paced at) is the latency the next stage is paced with; a candidate
+    with no measurement of its own takes the latest one any candidate measured on the target.
     """
     prior = PriorStages()
     wanted = {
         stage_attempt_id(candidate_attempt_id, technique): technique
         for technique in SQLI_TECHNIQUE_STAGES
     }
+    target_latency: float | None = None
     for source, attempts in sources:
         source_latency: float | None = None
+        source_target_latency: float | None = None
         for item in attempts or ():
             if not isinstance(item, Mapping):
                 continue
-            technique = wanted.get(str(item.get("attempt_id") or ""))
-            if technique is None:
-                continue
             record = _stage_record(item)
+            if not record:
+                continue
             consumed = dict(item.get("budget_consumed") or {})
             sent = int(consumed.get("http_requests") or 0)
             wall = int(consumed.get("tool_wall_seconds") or 0)
-            if sent > 0 and wall > 0:
-                delay = float(record.get("delay_ms") or 0) / 1_000
-                source_latency = max(0.0, wall / sent - delay)
+            measured = (
+                max(0.0, wall / sent - float(record.get("delay_ms") or 0) / 1_000)
+                if sent > 0 and wall > 0 else None
+            )
+            if measured is not None:
+                # Any candidate's stage measured the same target's response time.
+                source_target_latency = measured
+            technique = wanted.get(str(item.get("attempt_id") or ""))
+            if technique is None:
+                continue
+            if measured is not None:
+                source_latency = measured
             if (
                 _status(item.get("status")) in _SUCCESS
                 and not item.get("timed_out")
@@ -123,6 +134,12 @@ def prior_stages(
                 )
         if prior.latency_seconds is None and source_latency is not None:
             prior.latency_seconds = source_latency
+        if target_latency is None and source_target_latency is not None:
+            target_latency = source_target_latency
+    if prior.latency_seconds is None:
+        # A candidate not yet attempted is paced by what the target's responses measured on
+        # another candidate, rather than starting with the blind full delay.
+        prior.latency_seconds = target_latency
     return prior
 
 

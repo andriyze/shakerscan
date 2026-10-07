@@ -3441,7 +3441,8 @@ class DatabaseNeutralScanActionDispatcher:
                         )
 
                     async def checkpoint_stage(stage: Mapping[str, Any]) -> None:
-                        await checkpoint_attempt(action.action_id, stage)
+                        # sqli_stages builds the stage payload, always with a terminal status.
+                        await checkpoint_attempt(action.action_id, dict(stage))
 
                     result = await run_staged_sqli_attempt(
                         candidate_attempt_id=attempt_id,
