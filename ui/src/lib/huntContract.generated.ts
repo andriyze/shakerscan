@@ -136,6 +136,46 @@ export const HUNT_START_CONTRACT = {
     }
   },
   "budget_schema_version": "hunt-budget/v3",
+  "coverage_ledger": {
+    "advisory_only": true,
+    "checkpoint_url_template": "/hunts/{hunt_id}/checkpoint",
+    "locus_keys": [
+      "method",
+      "route",
+      "path",
+      "url",
+      "origin",
+      "scheme",
+      "port",
+      "transport",
+      "protocol",
+      "service",
+      "service_name",
+      "operation",
+      "operation_id",
+      "object",
+      "object_id",
+      "object_kind",
+      "resource_kind",
+      "parameter",
+      "input",
+      "input_path",
+      "sink",
+      "application_state",
+      "variant"
+    ],
+    "max_events_per_hunt": 5000,
+    "statuses": [
+      "blocked",
+      "candidate",
+      "negative",
+      "partial",
+      "planned",
+      "testing"
+    ],
+    "unknown_locus_keys": "refused",
+    "url_template": "/hunts/{hunt_id}/coverage-angles"
+  },
   "credential_ref_fields": [
     "authorization_header_credential_id",
     "cookie_credential_id",
