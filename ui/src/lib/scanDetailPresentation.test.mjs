@@ -556,3 +556,27 @@ test('budget, kill and truncated-discovery coverage reasons read as operator lab
     'Surface discovery was cut short by its budget, so part of the application was never examined',
   ])
 })
+
+test('slow endpoints are counted and named, and an empty family selection is explained', () => {
+  const result = scanResultPresentation({
+    result: {
+      findings: [],
+      result: {},
+      coverage: {
+        reasons: ['slow_endpoints', 'no_families_selected'],
+        family_coverage: [{
+          family: 'nuclei_passive',
+          coverage_status: 'partial',
+          reason: 'slow_endpoints',
+          slow_endpoint_count: 2,
+          slow_endpoints: ['https://honey.example/api/v1/chat', 'https://honey.example/api/v1/rag/documents?q=1'],
+        }],
+      },
+    },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.deepEqual(result.coverageGapReasons, [
+    'Partial because 2 slow endpoints could not finish the passive templates in time: '
+      + 'https://honey.example/api/v1/chat, https://honey.example/api/v1/rag/documents?q=1',
+    'The scan policy selected no check family, so only the baseline probes ran',
+  ])
+})

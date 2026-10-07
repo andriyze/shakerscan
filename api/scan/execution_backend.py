@@ -976,12 +976,13 @@ class PostgresScanExecutionBackend:
             reason = CapabilityResultReason.CANCELLED
         elif (receipt.timed_out or raw_status == "timed_out") and self._receipt_reason(
             receipt, CapabilityResultReason.TIMED_OUT,
-        ) not in BUDGET_EXHAUSTION_REASONS.values():
+        ) not in {*BUDGET_EXHAUSTION_REASONS.values(), CapabilityResultReason.SLOW_ENDPOINTS}:
             status = CapabilityResultStatus.TIMED_OUT
             reason = CapabilityResultReason.TIMED_OUT
         elif raw_status == "partial" or receipt.partial or receipt.timed_out or raw_status == "timed_out":
             # Partial, or a batch that also saw a timed-out attempt but states that a
-            # non-time ceiling (requests, mutations) is what actually stopped it.
+            # non-time ceiling (requests, mutations) is what actually stopped it, or that the
+            # only work left is named endpoints too slow to finish inside its wall.
             status = CapabilityResultStatus.PARTIAL
             # A partial result is not automatically a truncated one. A batch that
             # deliberately funds fewer, viable attempts than it planned is

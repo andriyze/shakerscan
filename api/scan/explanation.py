@@ -79,6 +79,14 @@ _REASON_LABELS = {
     "source_not_published": "An optional discovery source was not published by the target",
     "declared_out_of_scope": "The target's API description declares its routes on another origin (a different host, port or scheme), outside this scan's scope",
     "declared_partly_out_of_scope": "Some routes in the target's API description are declared only on another origin (a different host, port or scheme); the rest were ingested",
+    "slow_endpoints": (
+        "Some endpoints answered too slowly to finish the passive templates inside the "
+        "batch's time allowance, even on a retry sized for a slow endpoint; each is named "
+        "in the family coverage"
+    ),
+    "no_families_selected": (
+        "The scan policy selected no check family, so only the baseline probes ran"
+    ),
     "active_verifier_zero_attempts": "An active verifier had candidates but made no bounded attempt",
     "unproven_critical_high": "High or critical candidates still require deterministic proof",
     "report_grade_unreliable": "The final report marked the grade as provisional",
