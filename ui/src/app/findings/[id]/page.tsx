@@ -34,6 +34,7 @@ import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/
 import { canonicalFindingProofVerified } from '@/lib/findingProof'
 import { formatRelativeTime } from '@/lib/format'
 import { findingObservation, hostOf, pathOf, verificationSource } from '@/lib/findingObservation'
+import { ANALYST_VERDICTS, FINDING_STATUS_LABELS, statusForVerdict, verdictChangeMessage, verdictOptionLabel, type AnalystVerdict } from '@/lib/analystVerdict'
 import {
   Button,
   ConfirmDialog,
@@ -228,20 +229,7 @@ function TriagePanel({ finding }: { finding: Finding }) {
   )
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  active: 'Active',
-  resolved: 'Resolved',
-  false_positive: 'False positive',
-  accepted_risk: 'Accepted risk',
-}
-
-const ANALYST_VERDICTS = [
-  { value: 'true_positive', label: 'True positive', status: 'active' },
-  { value: 'false_positive', label: 'False positive', status: 'false_positive' },
-  { value: 'duplicate', label: 'Duplicate', status: 'false_positive' },
-  { value: 'accepted_risk', label: 'Accepted risk', status: 'accepted_risk' },
-  { value: 'retest_needed', label: 'Retest needed', status: 'active' },
-] as const
+const STATUS_LABELS = FINDING_STATUS_LABELS
 
 function asEvidenceObject(rawEvidence: string): Record<string, unknown> | null {
   if (!rawEvidence) return null
@@ -395,13 +383,17 @@ function FindingDetailContent() {
     }
   }
 
-  async function handleAnalystVerdict(verdict: typeof ANALYST_VERDICTS[number]) {
+  // null clears the verdict and keeps the status. A verdict changes the status only where the two
+  // would contradict, and the toast reports the change the server stored.
+  async function handleAnalystVerdict(verdict: AnalystVerdict | null) {
     if (!finding || statusUpdating) return
     try {
       setStatusUpdating(true)
-      await updateFinding(finding.id, verdict.status, finding.notes, finding.scan_id, verdict.value)
+      const stored = await updateFinding(
+        finding.id, statusForVerdict(finding.status, verdict), finding.notes, finding.scan_id, verdict,
+      )
       await fetchFinding()
-      toast.success(`Analyst verdict set to ${verdict.label.toLowerCase()}`)
+      toast.success(verdictChangeMessage(stored))
     } catch (err) {
       console.error('Failed to update analyst verdict:', err)
       toast.error('Failed to update analyst verdict')
@@ -1185,14 +1177,14 @@ function FindingDetailContent() {
                   value={finding.analyst_verdict || ''}
                   onChange={(e) => {
                     const verdict = ANALYST_VERDICTS.find((item) => item.value === e.target.value)
-                    if (verdict) void handleAnalystVerdict(verdict)
+                    void handleAnalystVerdict(verdict ? verdict.value : null)
                   }}
                   disabled={statusUpdating}
                   className="rounded-lg border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-100 focus:border-blue-500 focus:outline-hidden disabled:opacity-50"
                 >
-                  <option value="" disabled>No verdict recorded</option>
+                  <option value="">No verdict recorded</option>
                   {ANALYST_VERDICTS.map((verdict) => (
-                    <option key={verdict.value} value={verdict.value}>{verdict.label}</option>
+                    <option key={verdict.value} value={verdict.value}>{verdictOptionLabel(finding.status, verdict)}</option>
                   ))}
                 </select>
               </label>
@@ -1200,7 +1192,8 @@ function FindingDetailContent() {
                 {finding.analyst_verdict && finding.analyst_verdict_at
                   ? `Recorded ${formatRelativeTime(finding.analyst_verdict_at)}. `
                   : ''}
-                Setting a verdict also updates the status.
+                A verdict that contradicts the status changes it, as the option says. Choose
+                {' '}&ldquo;No verdict recorded&rdquo; to clear the verdict without changing the status.
               </p>
               {finding.notes && (
                 <div className="rounded-md bg-gray-950/70 p-3">
