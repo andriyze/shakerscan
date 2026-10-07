@@ -159,6 +159,9 @@ def hunt_start_public_contract() -> dict[str, Any]:
     except ModuleNotFoundError:
         from .. import investigation_candidates as candidates
         from ..runtime.capability_registry import CAPABILITY_REGISTRY
+    from .candidate_verification_preflight import (
+        IDENTITY_ONLY_LOCATION_KEYS, ROUTE_LOCUS_KEYS,
+    )
     from .coverage_ledger import (
         COVERAGE_ANGLE_STATUSES, COVERAGE_LOCUS_KEYS, MAX_COVERAGE_EVENTS_PER_HUNT,
     )
@@ -236,6 +239,14 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "max_locus_value_chars": candidates.MAX_LOCUS_VALUE_CHARS,
             "max_locus_list_items": candidates.MAX_LOCUS_LIST_ITEMS,
             "identity": "target + family + locus",
+            "verification_route_keys": list(ROUTE_LOCUS_KEYS),
+            "identity_only_location_keys": list(IDENTITY_ONLY_LOCATION_KEYS),
+            "verification_route": (
+                "candidate.verify re-executes one concrete route, taken from the first of the "
+                "verification_route_keys present in the locus; identity_only_location_keys "
+                "distinguish candidates but never resolve a route "
+                "(otherwise 422 verification_route_unresolved, at no budget cost)."
+            ),
             "dedup": (
                 "A sighting with the same identity and the same title or claim merges its "
                 "evidence_refs into the existing candidate (outcome=merged). A different claim "

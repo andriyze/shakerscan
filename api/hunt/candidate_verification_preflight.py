@@ -25,8 +25,12 @@ VERIFIABLE_FAMILIES: frozenset[str] = frozenset({
     "bola", "auth_bypass", "data_exposure", "mass_assignment", "access_control",
     "field_constraint", "workflow",
 })
-# Locus keys a verification route is resolved from, in precedence order.
-ROUTE_LOCUS_KEYS: tuple[str, ...] = ("route", "url")
+# Locus keys a verification route is resolved from, in precedence order. ``path`` is what the
+# candidate contract tells planners to use for a concrete request path (a file exposure).
+ROUTE_LOCUS_KEYS: tuple[str, ...] = ("route", "url", "path")
+# Locus keys that locate a request but only distinguish candidates; a verifier re-executes one
+# concrete route, so a set of paths is never a verification route.
+IDENTITY_ONLY_LOCATION_KEYS: tuple[str, ...] = ("paths",)
 
 
 class CandidateVerificationRefused(ValueError):
