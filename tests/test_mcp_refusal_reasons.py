@@ -140,3 +140,37 @@ def test_reason_text_is_bounded_and_single_line():
     reason = mcp._refusal_reason(json.dumps({"detail": long}))
     assert "\n" not in reason and "\x1b" not in reason
     assert len(reason) <= mcp.MAX_REASON_CHARS
+
+
+@pytest.mark.parametrize("status", [408, 425, 429])
+def test_a_retry_later_status_is_not_a_refusal_and_names_the_key_to_retry_with(status):
+    # The broker treats the same statuses as retryable: "not now" is not "no".
+    body = {"detail": "Device HTTP requests must be spaced at least one second apart"}
+
+    class RetryLater(ScriptedOpener):
+        def open(self, request, timeout):
+            path = request.full_url.removeprefix("http://127.0.0.1:8080")
+            if request.get_method() == "GET":
+                return super().open(request, timeout)
+            self.seen.append(("POST", path))
+            raise urllib.error.HTTPError(request.full_url, status, "slow down", {"Retry-After": "3"},
+                                         io.BytesIO(json.dumps(body).encode()))
+
+    client = _client({})
+    client.opener = RetryLater({("GET", f"/hunts/{HUNT}"): HUNT_RECORD})
+    with pytest.raises(mcp.MCPError) as later:
+        _call_capability(client)
+    error = later.value
+    assert error.data["outcome"] == "retry_later"
+    assert "refused" not in error.message
+    assert f"HTTP {status}" in error.message and "spaced at least one second apart" in error.message
+    assert "key-refusal-1" in error.message and "Wait 3 s" in error.message
+    assert error.data["retry_after_seconds"] == 3 and "new key" in error.data["recovery"]
+    assert client.opener.seen.count(("POST", CAPABILITY_PATH)) == 1
+
+
+def test_other_tools_mark_a_retry_later_status_in_the_message():
+    client = _client({("POST", f"/hunts/{HUNT}/cancel"): (429, {"detail": "rate limited"})})
+    with pytest.raises(mcp.MCPError) as later:
+        client.call_tool("shakerscan_hunt_cancel", {"hunt_id": HUNT})
+    assert later.value.message == "ShakerScan API returned HTTP 429: rate limited (retryable: wait and try again)"

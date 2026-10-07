@@ -74,6 +74,20 @@ RUNNING_CONTINUE = (
     "its result; the server replays the recorded action and never runs it twice. Do not use a new key."
 )
 IN_FLIGHT_ACTION_STATUSES = frozenset({"requested", "reserved", "queued", "running"})
+# "Not now", not "no": the broker treats the same 4xx statuses as retryable (api/broker_worker.py).
+RETRYABLE_HTTP_STATUSES = frozenset({408, 425, 429})
+# A gateway's answer when the engine's own was lost: the POST may have been admitted.
+LOST_ANSWER_HTTP_STATUSES = frozenset({502, 503, 504})
+REFUSED_RECOVERY = (
+    "The server refused this call. Act on the reason (input, budget, policy or Hunt state); "
+    "replaying the same key returns the same answer."
+)
+RETRY_LATER_RECOVERY = (
+    "The server, or a proxy in front of it, asked for a retry later. Wait, then call again with the "
+    "same idempotency_key and unchanged input: the server never runs one key twice. If that answers "
+    "with this action blocked or failed, the server recorded the refusal under this key: wait again "
+    "and use a new key."
+)
 MAX_REQUEST_BYTES = 256_000
 MAX_RESPONSE_BYTES = 2_000_000
 DEFAULT_TARGET_PAGE_SIZE = 20
@@ -752,26 +766,41 @@ def _hunt_tools(contract: dict[str, Any]) -> tuple[HuntMCPTool, ...]:
 
 
 class MCPError(Exception):
-    def __init__(self, code: int, message: str, data: Any = None, *, http_status: int | None = None):
+    def __init__(
+        self, code: int, message: str, data: Any = None, *,
+        http_status: int | None = None, retry_after: int | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.message = message
         self.data = data
         self.http_status = http_status
+        self.retry_after = retry_after
 
 
 def _http_status(exc: BaseException) -> int | None:
-    status = getattr(exc, "http_status", None)
-    if isinstance(status, int):
-        return status
-    found = re.search(r"\bHTTP (\d{3})\b", str(getattr(exc, "message", "") or exc))
-    return int(found.group(1)) if found else None
+    """The HTTP status the server answered with, or None when no answer arrived.
+
+    Only the recorded number counts: the message also carries the server's reason text, which
+    may itself mention a status ("the target answered HTTP 503")."""
+    status = getattr(exc, "http_status", None) if isinstance(exc, MCPError) else None
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
 
 
 def _definite_refusal(exc: BaseException) -> bool:
-    """A 4xx answer is the server's decision, not a lost response (408 alone is a timeout)."""
-    status = _http_status(exc) if isinstance(exc, MCPError) else None
-    return status is not None and 400 <= status < 500 and status != 408
+    """A 4xx answer is the server's decision, except the statuses that mean "retry later"."""
+    status = _http_status(exc)
+    return status is not None and 400 <= status < 500 and status not in RETRYABLE_HTTP_STATUSES
+
+
+def _retryable_answer(exc: BaseException) -> bool:
+    return _http_status(exc) in RETRYABLE_HTTP_STATUSES
+
+
+def _retry_after(headers: Any) -> int | None:
+    """A ``Retry-After`` given in seconds; an HTTP date or anything else is ignored."""
+    value = str(headers.get("Retry-After") or "").strip() if headers is not None else ""
+    return int(value) if re.fullmatch(r"\d{1,6}", value) else None
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -796,7 +825,40 @@ def _unknown_outcome(exc: MCPError) -> bool:
     """A failure after which the POST may have been admitted: no answer, or a gateway's."""
     if exc.code == -32001:
         return True
-    return exc.code == -32002 and any(f"HTTP {code}" in str(exc) for code in (502, 503, 504))
+    return exc.code == -32002 and _http_status(exc) in LOST_ANSWER_HTTP_STATUSES
+
+
+def _capability_failure(exc: BaseException, identity: Mapping[str, Any]) -> MCPError:
+    """The error one failed capability call reports: refused, retry later, or unknown.
+
+    The agent reads the message, not ``error.data``: the status, the server's parsed reason (never
+    the raw body) and, when a retry is the way on, the key to retry with are all in it."""
+    capability = identity["capability_name"]
+    status = _http_status(exc)
+    reason = _refusal_reason(exc.data) if isinstance(exc, MCPError) and isinstance(exc.data, str) else None
+    if _definite_refusal(exc):
+        return MCPError(exc.code, f"Hunt capability {capability} was refused: {exc.message}", {
+            "outcome": "refused", "http_status": status, "detail": reason, **identity,
+            "recovery": REFUSED_RECOVERY,
+        }, http_status=status)
+    if _retryable_answer(exc):
+        retry_after = exc.retry_after if isinstance(exc, MCPError) else None
+        wait = f" {retry_after} s" if retry_after is not None else ""
+        return MCPError(exc.code, (
+            f"Hunt capability {capability} got a retry-later answer (HTTP {status}"
+            + (f": {reason}" if reason else "") + f"). Wait{wait}, then call again with idempotency_key "
+            f"{identity['mcp_idempotency_key']} and unchanged input."
+        ), {
+            "outcome": "retry_later", "http_status": status, "detail": reason,
+            "retry_after_seconds": retry_after, **identity, "recovery": RETRY_LATER_RECOVERY,
+        }, http_status=status, retry_after=retry_after)
+    # The POST may have been admitted before its response was lost.
+    # Preserve recovery identity, never raw upstream error bodies or inputs.
+    return MCPError(getattr(exc, "code", -32001), "Hunt capability response was not confirmed", {
+        "outcome": "unknown",
+        **identity,
+        "recovery": "Read Hunt action history; if retrying, use the same key and unchanged input. Do not submit a new key.",
+    })
 
 
 def _in_flight(result: Mapping[str, Any]) -> bool:
@@ -887,7 +949,12 @@ class ArsenalClient:
             # The agent sees the message, not error.data: a refusal must carry its reason there.
             reason = _refusal_reason(detail)
             message = f"ShakerScan API returned HTTP {exc.code}" + (f": {reason}" if reason else "")
-            raise MCPError(-32002, message, detail[:4_000], http_status=exc.code) from exc
+            retry_after = _retry_after(exc.headers) if exc.code in RETRYABLE_HTTP_STATUSES else None
+            if exc.code in RETRYABLE_HTTP_STATUSES:
+                message += " (retryable: wait" + (f" {retry_after} s" if retry_after is not None else "") + " and try again)"
+            raise MCPError(
+                -32002, message, detail[:4_000], http_status=exc.code, retry_after=retry_after,
+            ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise MCPError(-32001, "ShakerScan API is unavailable", str(exc)[:1_000]) from exc
         if len(raw) > self.max_response_bytes:
@@ -1232,27 +1299,9 @@ class ArsenalClient:
                     "mcp_generated_idempotency_key": generated_idempotency_key is not None,
                     **({"experiment_key": payload["experiment_key"]} if "experiment_key" in payload else {}),
                 }
-                if _definite_refusal(exc):
-                    # The server answered and said no: name the status and its reason in the
-                    # message the agent reads. Only the parsed reason, never the raw body.
-                    status = _http_status(exc)
-                    reason = _refusal_reason(exc.data) if isinstance(exc.data, str) else None
-                    raise MCPError(exc.code, f"Hunt capability {capability_name} was refused: {exc.message}", {
-                        "outcome": "refused",
-                        "http_status": status,
-                        "detail": reason,
-                        **identity,
-                        "recovery": "The server refused this call. Act on the reason (input, budget, policy or Hunt state); replaying the same key returns the same answer.",
-                    }, http_status=status) from exc
                 if streaming_ssh and isinstance(exc, ValueError) and str(exc).startswith("Canonical SSH action refused"):
                     raise MCPError(-32006, str(exc)[:MAX_REASON_CHARS], {"outcome": "refused", **identity}) from exc
-                # The POST may have been admitted before its response was lost.
-                # Preserve recovery identity, never raw upstream error bodies or inputs.
-                raise MCPError(getattr(exc,"code",-32001), "Hunt capability response was not confirmed", {
-                    "outcome": "unknown",
-                    **identity,
-                    "recovery": "Read Hunt action history; if retrying, use the same key and unchanged input. Do not submit a new key.",
-                }) from exc
+                raise _capability_failure(exc, identity) from exc
             if name == "shakerscan_hunt_capability":
                 result = {
                     **result,

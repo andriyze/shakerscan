@@ -101,8 +101,12 @@ adapter replays the same key and unchanged input, which the engine answers with 
 current state without starting it again, until the action is final or
 `SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 900, at most 3600) passes; only then does it report
 the unknown outcome and its recovery identity. `shakerscan hunt call` does the same, bounded by
-`SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS`. A definite refusal (4xx) is never replayed: its status and
-the server's stated reason are in the error message the agent reads (`error.data` keeps the body).
+`SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS`. The adapter classifies by the HTTP status it received, never
+by the text of the reason. A definite refusal (a 4xx other than 408, 425 and 429) is never replayed
+and reports `outcome: "refused"`: its status and the server's stated reason are in the error message
+the agent reads (`error.data` keeps the body). 408, 425 and 429 mean "not now": they report
+`outcome: "retry_later"` with any `Retry-After` seconds, and the message names the key to call again
+with after waiting.
 
 The capability request may run as long as the server's wall time for it
 (`budget_cost.tool_wall_seconds` in the Hunt manifest) plus a margin, never only the adapter's
