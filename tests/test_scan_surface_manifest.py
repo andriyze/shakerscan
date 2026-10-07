@@ -758,3 +758,27 @@ def test_discovered_subdomains_never_become_endpoints_of_the_scan():
         source_action_ids=("discover.surface",),
     )
     assert all(entry["source_tool"] != "subdomains.discover" for entry in endpoints.entries)
+
+
+def test_a_replayed_collection_request_is_labelled_as_a_replay():
+    """Soak N21 (c0e4480e): collection routes are merged into the declared endpoints before the
+    scan, so the three replayed reads were labelled `known_endpoints`, not `collections.replay`."""
+    surface = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=TARGET,
+        options={"custom_endpoints": ["GET /api/v1/rag/documents?q=x", "POST /api/orders"]},
+        collection_replay=_summary("success", [{
+            "kind": "request_replay",
+            "method": "GET",
+            "redacted_url": "https://app.example.test/api/v1/rag/documents?q=%3Credacted%3E",
+            "final_url": "https://app.example.test/api/v1/rag/documents?q=%3Credacted%3E",
+        }]),
+        probe=_summary("success"),
+        crawl=_summary("success"),
+        content=_summary("skipped"),
+        subdomains=_summary("skipped"),
+        max_endpoints=20,
+    )
+    sources = {item["concrete_path"]: item["source"] for item in surface["endpoints"]}
+    assert sources["/api/v1/rag/documents"] == "collections.replay"
+    assert sources["/api/orders"] == "known_endpoints"

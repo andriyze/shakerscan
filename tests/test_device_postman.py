@@ -373,3 +373,18 @@ def test_raw_body_content_type_follows_the_request_header_hint_or_json_shape():
     assert by_shape["headers"]["Content-Type"] == "application/json"
     assert plain["body_mode"] == "text/plain"
     assert header_beats_hint["body_mode"] == "application/xml"
+
+
+def test_scripts_on_items_and_folders_are_counted():
+    # Soak N21: a collection with 2 scripts reported scripts_ignored: 1. Postman keeps an item's
+    # scripts in item.event, beside the request, and folders carry their own.
+    collection = _collection()
+    collection["item"][0]["event"] = [{"listen": "test", "script": {"exec": ["pm.test('x')"]}}]
+    collection["item"].append({
+        "name": "Folder",
+        "event": [{"listen": "prerequest", "script": {"exec": ["1"]}}],
+        "item": [{"name": "Inner", "event": [{"listen": "test", "script": {"exec": ["2"]}}],
+                  "request": {"method": "GET", "url": "{{baseUrl}}/api/inner"}}],
+    })
+    _payload, summary = device_postman.validate_and_summarize(collection)
+    assert summary["scripts_ignored"] == 4

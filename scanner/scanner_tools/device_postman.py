@@ -191,6 +191,23 @@ def _auth_type(auth: Any) -> str:
     return str(auth.get("type") or "inherit").strip().lower() if isinstance(auth, dict) else "inherit"
 
 
+def _count_scripts(node: Any, depth: int = 0) -> int:
+    """Every pre-request/test script in the collection: on it, its folders and its items.
+
+    Postman keeps an item's scripts in ``item.event``, beside ``request``, not inside it; reading
+    only ``request.event`` counted 1 of the 2 scripts in the soak's test collection.
+    """
+    if not isinstance(node, dict) or depth > 64:
+        return 0
+    count = sum(1 for event in node.get("event") or [] if isinstance(event, dict))
+    request = node.get("request")
+    if isinstance(request, dict):
+        count += sum(1 for event in request.get("event") or [] if isinstance(event, dict))
+    for child in node.get("item") or []:
+        count += _count_scripts(child, depth + 1)
+    return count
+
+
 def _walk_items(
     items: Any,
     *,
@@ -311,7 +328,7 @@ def validate_and_summarize(
     methods: Counter[str] = Counter()
     port_hints: set[int] = set()
     summary_variables = _variable_map(collection, environment if isinstance(environment, dict) else None)
-    ignored_scripts = len(collection.get("event") or [])
+    ignored_scripts = _count_scripts(collection)
     for path, request, auth in rows:
         method = str(request.get("method") or "GET").strip().upper()
         raw_url = _url_raw(request.get("url"))
@@ -335,7 +352,6 @@ def validate_and_summarize(
                 port_hints.add(80)
         except ValueError:
             pass
-        ignored_scripts += len(request.get("event") or [])
         requests.append({
             "id": request_id,
             "name": _redacted_label(path[-1]),
