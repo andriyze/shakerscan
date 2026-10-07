@@ -41,6 +41,7 @@ except ModuleNotFoundError:
     from ..runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
+from .candidate_evidence import CandidateEvidenceError, resolve_candidate_evidence
 from .boundary_handoff import compile_candidate_boundary_handoff
 from .boundary_discovery import discover_hunt_boundaries
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
@@ -265,13 +266,14 @@ class HuntCandidateRequest(BaseModel):
     verifier_contract_id: Optional[str] = Field(default=None, max_length=160)
 
     @model_validator(mode="after")
-    def validate_boundary_context(self):
-        if "ai_boundary_context" in self.locus:
-            if not isinstance(self.locus["ai_boundary_context"], dict):
-                raise ValueError("ai_boundary_context must be a JSON object")
-            # Use the storage normalizer's bounds; malformed new input receives
-            # a validation response rather than an internal error after mutation.
-            investigation_candidates.canonical_locus(self.locus)
+    def validate_locus(self):
+        if "ai_boundary_context" in self.locus and not isinstance(
+            self.locus["ai_boundary_context"], dict
+        ):
+            raise ValueError("ai_boundary_context must be a JSON object")
+        # Use the storage normalizer's bounds; malformed new input receives
+        # a validation response rather than an internal error after mutation.
+        investigation_candidates.canonical_locus(self.locus)
         return self
 
 
@@ -1209,6 +1211,7 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
             budget = _hunt_json(run["budget_json"], {})
             if int(used.get("candidates") or 0) >= int(budget.get("max_candidates") or 0):
                 raise HTTPException(status_code=409, detail="Hunt candidate budget exhausted")
+            await _require_candidate_evidence(conn, run, request.evidence_refs)
             candidate = investigation_candidates.normalize_candidate(
                 plane="device" if run["device_target_id"] else "web",
                 target_id=str(run["target_id"]) if run["target_id"] else None,
@@ -1225,6 +1228,20 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
             used["candidates"] = int(used.get("candidates") or 0) + 1
             await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
     return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
+
+
+async def _require_candidate_evidence(conn: Any, run: Any, references: list[str] | None) -> None:
+    """Refuse a candidate whose evidence is not this Hunt's (see candidate_evidence)."""
+    if references is None:
+        return
+    try:
+        await resolve_candidate_evidence(conn, run=dict(run), references=list(references))
+    except CandidateEvidenceError as exc:
+        raise HTTPException(status_code=422, detail={
+            "error": "candidate_evidence_unresolved",
+            "message": str(exc),
+            "unresolved_evidence_refs": exc.references,
+        }) from exc
 
 
 def _candidate_lifecycle_http_error(
@@ -1255,7 +1272,8 @@ async def update_hunt_candidate(
     try:
         async with _pool().acquire() as conn:
             async with conn.transaction():
-                await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                run = await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                await _require_candidate_evidence(conn, run, request.evidence_refs)
                 result = await investigation_candidates.update_candidate_for_hunt(
                     conn,
                     hunt_run_id=str(hunt_uuid),

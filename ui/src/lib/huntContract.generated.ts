@@ -136,6 +136,53 @@ export const HUNT_START_CONTRACT = {
     }
   },
   "budget_schema_version": "hunt-budget/v3",
+  "candidates": {
+    "dedup": "A sighting with the same identity and the same title or claim merges its evidence_refs into the existing candidate (outcome=merged). A different claim with the same identity is stored as its own candidate (outcome=inserted, distinct_from_candidate_id). A stored claim is never replaced; use PATCH.",
+    "evidence_ref_forms": [
+      "<uuid>",
+      "action:<uuid>",
+      "receipt:<uuid>",
+      "transaction:<uuid>",
+      "finding:<uuid>",
+      "devref_<n>"
+    ],
+    "evidence_ref_scope": "Each reference must resolve to an action, receipt or HTTP transaction of this Hunt, a finding on its target, or a device evidence entry of this Hunt.",
+    "identity": "target + family + locus",
+    "locus_keys": {
+      "address": "IP address of the host",
+      "advisory_id": "advisory identifier",
+      "ai_boundary_context": "AI boundary context object (JSON, at most 16 KiB)",
+      "capability_id": "capability identifier",
+      "collection_id": "request collection identifier",
+      "cpe": "CPE string",
+      "host": "host name",
+      "host_key_fingerprint": "SSH host key fingerprint",
+      "method": "HTTP method, upper-cased",
+      "object_id": "object identifier the claim concerns",
+      "operation_id": "API operation identifier",
+      "origin": "scheme://host[:port] of the service",
+      "parameter": "query/body/header parameter name",
+      "path": "concrete request path, e.g. /.git-credentials",
+      "paths": "set of concrete paths; order-insensitive",
+      "port": "integer 1-65535",
+      "principal": "principal slot or role the claim concerns",
+      "request_id": "request identifier within a collection",
+      "route": "route template, e.g. /api/users/{id}",
+      "scheme": "URL scheme",
+      "service_name": "network service name",
+      "transport": "tcp or udp",
+      "url": "absolute URL",
+      "version": "software version"
+    },
+    "locus_other_keys": "Any other lower-case identifier key is preserved verbatim and is part of the candidate identity; nothing in the locus is silently dropped.",
+    "locus_schema_version": "hunt-candidate-locus/v1",
+    "locus_set_keys": [
+      "paths"
+    ],
+    "max_locus_bytes": 16384,
+    "max_locus_keys": 32,
+    "url_template": "/hunts/{hunt_id}/candidates"
+  },
   "credential_ref_fields": [
     "authorization_header_credential_id",
     "cookie_credential_id",
