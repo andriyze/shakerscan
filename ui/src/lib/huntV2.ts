@@ -76,6 +76,8 @@ export interface HuntV2 {
     total_capability_calls: number
     attempted_calls?: number
     executed_calls?: number
+    rejected_calls?: number
+    other_calls?: number
     successful_calls?: number
     unsuccessful_calls?: number
     indeterminate_calls?: number
