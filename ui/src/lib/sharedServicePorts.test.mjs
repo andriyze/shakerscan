@@ -36,3 +36,23 @@ test('Hunt is offered only for confirmed open ports at a current address', () =>
   assert.match(params.get('objective'), /Investigate observed tcp\/22 on this target/)
   assert.equal(sharedServiceHuntHref({ ...ssh, binding_status: 'historical_locator' }, targetId), null)
 })
+
+test('one port seen by a Hunt and by a scan is listed once, with both as evidence', () => {
+  // Soak N25: 22/tcp was listed twice on the device page, once per source.
+  const fromScan = { id: 's', port: 22, transport: 'tcp', presence: 'observed_open', address: '2.28.1.228',
+    service: 'ssh', binding_status: 'current', evidence: [{ scan_id: 'c2e71720-0000' }] }
+  const fromHunt = { id: 'h', port: 22, transport: 'TCP', presence: 'observed_open', address: null,
+    evidence: [{ hunt_id: 'a1b2c3d4-0000' }] }
+  const noReply = { id: 'n', port: 22, transport: 'tcp', presence: 'inconclusive', evidence: [{ hunt_id: 'x' }] }
+  const { confirmed, unconfirmed } = partitionSharedServices([fromScan, fromHunt, noReply])
+  assert.equal(confirmed.length, 1)
+  assert.equal(confirmed[0].address, '2.28.1.228')
+  assert.equal(confirmed[0].service, 'ssh')
+  assert.deepEqual(confirmed[0].evidence, [{ scan_id: 'c2e71720-0000' }, { hunt_id: 'a1b2c3d4-0000' }])
+  assert.deepEqual(unconfirmed, [])
+  // Distinct addresses stay distinct rows.
+  const other = { ...fromScan, id: 'o', address: '10.0.0.9', evidence: [] }
+  assert.equal(partitionSharedServices([fromScan, other]).confirmed.length, 2)
+  // The input records are not mutated.
+  assert.deepEqual(fromScan.evidence, [{ scan_id: 'c2e71720-0000' }])
+})
