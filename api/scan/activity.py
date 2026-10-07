@@ -75,6 +75,7 @@ _DIAGNOSTIC_ERROR_CLASSES = frozenset({
     "external_process_contract", "scanner_not_available",
     "cancelled_before_execution", "output_limit_exceeded", "output_truncated",
     "crawler_memory_bound_exceeded", "source_not_published", "declared_out_of_scope",
+    "declared_partly_out_of_scope",
     # A bound HTTP request that never got a response, by cause: a certificate the client
     # would not trust is a different finding from a port nobody answers on.
     "tls_certificate_untrusted", "request_error",

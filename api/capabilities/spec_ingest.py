@@ -174,7 +174,8 @@ def _server_bases(
         host = spec.get("host")
         schemes = spec.get("schemes")
         if schemes and (not isinstance(schemes, list) or urllib.parse.urlsplit(origin).scheme not in schemes):
-            _issue(issues, "spec_off_origin_server")
+            # Same host perhaps, but every declared scheme is another origin than the binding's.
+            _issue(issues, "spec_server_scheme_mismatch")
             return []
         base_path = str(spec.get("basePath") or "/")
         if not _safe_path(base_path):
@@ -192,6 +193,7 @@ def _server_bases(
     if len(raw_servers) > 16:
         _issue(issues, "spec_server_limit")
     bases: list[str] = []
+    off_origin = 0
     for server in raw_servers[:16]:
         if not isinstance(server, Mapping) or not isinstance(server.get("url"), str):
             _issue(issues, "spec_invalid_server")
@@ -211,7 +213,7 @@ def _server_bases(
         # Relative Server URLs are relative to the specification document, not the target root.
         resolved = urllib.parse.urljoin(source, url)
         if _origin_key(resolved) != _origin_key(origin) or _origin_key(origin) is None:
-            _issue(issues, "spec_off_origin_server")
+            off_origin += 1
             continue
         parsed = urllib.parse.urlsplit(resolved)
         if parsed.query or parsed.fragment or not _safe_path(parsed.path or "/"):
@@ -220,6 +222,11 @@ def _server_bases(
         base = origin.rstrip("/") + (parsed.path or "/").rstrip("/")
         if base not in bases:
             bases.append(base)
+    if off_origin and not bases:
+        # Every server this operation declares is another origin: its routes are dropped.
+        # An off-origin server listed beside one on the bound origin (a staging or production
+        # alternative) drops nothing -- the operation is ingested on the bound origin.
+        _issue(issues, "spec_off_origin_server")
     return bases
 
 
