@@ -84,10 +84,13 @@ tool before binding it. MCP never auto-binds a methodology or changes authority.
 
 Hunt lifecycle tools (`shakerscan_hunt_start`, `_get`, `_finish`, `_cancel`, `_skill_bind`,
 `_skill_unbind`, `_skill_usage`) answer with a compact projection of the Hunt record by default:
-identity, status, budget and use, next action, policy, each capability's name, input fields and
-budget cost, the last few actions, and counts, plus `mcp_view.omitted` naming what was left out
-(the context pack and any field over 4 KB). The full record is 70-150 KB, which agents' tool
-output truncates. `view: "full"` returns the record unchanged, and `shakerscan_hunt_get` with
+identity, status, budget and use, next action, policy and `policy_adjustments`, each capability's
+name, input fields and budget cost, each bound skill with its `withheld_capabilities` and
+`missing_capabilities`, the last few actions, and counts. `mcp_view.omitted` names what was left
+out (the context pack and any field over 4 KB that cannot be cut down) and `mcp_view.reduced`
+names each field that was cut down and what it kept; a field over 4 KB such as `outcome_summary`
+keeps its counters and its ID lists are cut to their first 20. The full record is 70-150 KB,
+which agents' tool output truncates. `view: "full"` returns the record unchanged, and `shakerscan_hunt_get` with
 `capability: "<name>"` adds that capability's full manifest entry. Neither argument is sent to
 the server.
 
