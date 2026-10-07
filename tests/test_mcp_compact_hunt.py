@@ -134,3 +134,47 @@ def test_hunt_start_offers_the_view_and_does_not_send_it():
     })
     assert contract_tool.properties["view"]["enum"] == ["compact", "full"]
     assert "view" not in contract_tool.required
+
+
+def test_a_bound_skill_keeps_its_capability_gaps_and_every_reduction_is_marked():
+    # AGENTS.md: report a bound skill's withheld/missing capabilities as coverage gaps. The bind
+    # answer is the Hunt record, so the compact view is where the agent learns them.
+    record = _record()
+    record["skills"] = [{
+        "skill_id": "web.idor", "title": "IDOR", "support": "partial", "phase": "verify",
+        "withheld_capabilities": ["authz.verify"], "missing_capabilities": ["browser.workflow"],
+        "methodology_url": "/x", "body_sha256": "0" * 64,
+    }]
+    compact = mcp._compact_hunt(record)
+    (skill,) = compact["skills"]
+    assert skill["withheld_capabilities"] == ["authz.verify"]
+    assert skill["missing_capabilities"] == ["browser.workflow"]
+    view = compact["mcp_view"]
+    # Nothing is cut down silently: each reduced field says what it kept.
+    assert set(view["reduced"]) == {"capabilities", "actions", "skills", "skill_activity"}
+    assert "withheld_capabilities" in view["reduced"]["skills"]
+    assert "last 5 of 12" in view["reduced"]["actions"]
+
+
+def test_an_oversized_outcome_summary_keeps_its_counters_and_marks_the_trimmed_ids():
+    record = _record()
+    ids = [f"{i:08d}-0000-4000-8000-000000000000" for i in range(150)]
+    record["outcome_summary"] = {
+        "statuses": {"completed": 140, "partial": 10}, "executed_calls": 150, "successful_calls": 120,
+        "partial_calls": 10, "unsuccessful_calls": 15, "indeterminate_calls": 5,
+        "evidence_ids": ids, "finding_ids": ids[:30], "candidate_ids": [],
+    }
+    compact = mcp._compact_hunt(record)
+    summary = compact["outcome_summary"]
+    assert "outcome_summary" not in compact["mcp_view"]["omitted"]
+    assert (summary["executed_calls"], summary["successful_calls"], summary["partial_calls"],
+            summary["indeterminate_calls"]) == (150, 120, 10, 5)
+    assert summary["evidence_ids"] == ids[:20] and summary["finding_ids"] == ids[:20]
+    marked = compact["mcp_view"]["reduced"]["outcome_summary"]
+    assert "evidence_ids (150 in all)" in marked and "finding_ids (30 in all)" in marked
+
+
+def test_a_field_that_cannot_be_cut_down_is_omitted_and_named():
+    record = {**_record(), "final_debrief": {"summary": "s" * 10_000}}
+    compact = mcp._compact_hunt(record)
+    assert "final_debrief" not in compact and "final_debrief" in compact["mcp_view"]["omitted"]

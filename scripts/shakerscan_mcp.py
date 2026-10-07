@@ -547,7 +547,8 @@ COMPACT_HUNT_TOOLS = frozenset({
 VIEW_PROPERTY = {
     "type": "string", "enum": ["compact", "full"],
     "description": "compact (default): ids, status, budget and use, next action, capability names with "
-                   "their input fields, counts. full: the complete Hunt record.",
+                   "their input fields, bound skills with their capability gaps, counts; mcp_view names "
+                   "what was reduced or omitted. full: the complete Hunt record.",
 }
 CAPABILITY_DETAIL_PROPERTY = {
     "type": "string", "minLength": 1, "maxLength": 128, "pattern": DEFAULT_CAPABILITY_PATTERN,
@@ -555,6 +556,11 @@ CAPABILITY_DETAIL_PROPERTY = {
 }
 COMPACT_FIELD_BYTES = 4_096
 RECENT_ACTIONS = 5
+COMPACT_ACTION_KEYS = ("action_id", "capability_name", "status", "receipt_id", "completed_at")
+# A bound skill's capability gaps stay: the agent reports them as coverage gaps (AGENTS.md).
+COMPACT_SKILL_KEYS = ("skill_id", "title", "support", "phase", "withheld_capabilities", "missing_capabilities")
+# A field over COMPACT_FIELD_BYTES keeps this many items of each list (outcome_summary's IDs).
+TRIMMED_LIST_ITEMS = 20
 HUNT_TOOLS = tuple(
     replace(tool, properties={
         **tool.properties, "view": VIEW_PROPERTY,
@@ -596,30 +602,62 @@ def _pick(item: Any, keys: tuple[str, ...]) -> Any:
     return {key: item[key] for key in keys if key in item} if isinstance(item, Mapping) else item
 
 
+def _trimmed_lists(value: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
+    """``value`` with each list cut to its first TRIMMED_LIST_ITEMS, and each cut list's length."""
+    trimmed: dict[str, Any] = {}
+    lengths: dict[str, int] = {}
+    for key, item in value.items():
+        if isinstance(item, list) and len(item) > TRIMMED_LIST_ITEMS:
+            trimmed[key] = item[:TRIMMED_LIST_ITEMS]
+            lengths[str(key)] = len(item)
+        else:
+            trimmed[key] = item
+    return trimmed, lengths
+
+
 def _compact_hunt(record: Any) -> Any:
-    """The compact view of a Hunt record; anything that is not one is returned unchanged."""
+    """The compact view of a Hunt record; anything that is not one is returned unchanged.
+
+    Every field is kept whole, reduced, or left out, and ``mcp_view`` says which: ``omitted``
+    names what was left out and ``reduced`` what was cut down and how. A bound skill keeps its
+    ``withheld_capabilities`` and ``missing_capabilities``, which the agent must report as
+    coverage gaps; a field over the size cap whose lists can be cut (``outcome_summary``'s ID
+    lists) keeps its counters and is listed in ``reduced``."""
     if not isinstance(record, dict) or "hunt_id" not in record or not isinstance(record.get("capabilities"), list):
         return record
     compact: dict[str, Any] = {}
     omitted: list[str] = []
+    reduced: dict[str, str] = {}
     counts: dict[str, int] = {}
     for key, value in record.items():
         if key == "capabilities":
             compact[key] = [_compact_capability(item) for item in value]
+            reduced[key] = ("name, risk tier, input fields and budget cost of each; "
+                            "capability=<name> returns one full contract")
         elif key == "actions" and isinstance(value, list):
-            compact["recent_actions"] = [
-                _pick(item, ("action_id", "capability_name", "status", "receipt_id", "completed_at"))
-                for item in value[-RECENT_ACTIONS:]
-            ]
+            compact["recent_actions"] = [_pick(item, COMPACT_ACTION_KEYS) for item in value[-RECENT_ACTIONS:]]
+            reduced[key] = (f"the last {min(len(value), RECENT_ACTIONS)} of {len(value)} as recent_actions, "
+                            "with " + ", ".join(COMPACT_ACTION_KEYS))
         elif key == "skills" and isinstance(value, list):
-            compact[key] = [_pick(item, ("skill_id", "title", "support", "phase")) for item in value]
+            compact[key] = [_pick(item, COMPACT_SKILL_KEYS) for item in value]
+            reduced[key] = "each bound skill's " + ", ".join(COMPACT_SKILL_KEYS)
         elif key == "skill_activity" and isinstance(value, list):
             compact["recent_skill_activity"] = [
                 _pick(item, ("event_type", "skill_id", "action_id", "created_at")) for item in value[-3:]
             ]
-        elif key == "context_pack" or len(json.dumps(value, default=str)) > COMPACT_FIELD_BYTES:
+            reduced[key] = f"the last {min(len(value), 3)} of {len(value)} as recent_skill_activity"
+        elif key == "context_pack":
             omitted.append(key)
             continue
+        elif len(json.dumps(value, default=str)) > COMPACT_FIELD_BYTES:
+            trimmed, lengths = _trimmed_lists(value) if isinstance(value, Mapping) else (None, {})
+            if not lengths or len(json.dumps(trimmed, default=str)) > COMPACT_FIELD_BYTES:
+                omitted.append(key)
+                continue
+            compact[key] = trimmed
+            reduced[key] = "lists cut to their first {}: {}".format(
+                TRIMMED_LIST_ITEMS, ", ".join(f"{name} ({length} in all)" for name, length in sorted(lengths.items())),
+            )
         else:
             compact[key] = value
         if key in {"capabilities", "actions", "skills", "skill_activity"} and isinstance(value, list):
@@ -628,6 +666,7 @@ def _compact_hunt(record: Any) -> Any:
     compact["mcp_view"] = {
         "view": "compact",
         "omitted": sorted(omitted),
+        "reduced": dict(sorted(reduced.items())),
         "full_view": "Call shakerscan_hunt_get with view=full for the complete record, or with "
                      "capability=<name> for one capability's full contract.",
     }
