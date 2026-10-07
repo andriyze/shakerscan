@@ -31,6 +31,22 @@ DEVICE_VERIFIER_CONTRACTS: dict[str, str] = {
 }
 
 
+# Schema installed by unified startup on every start, after the frozen baseline that creates the
+# candidate tables, so fresh and already-converted instances both receive it. GET /hunts/{id} and
+# the observation-ownership checks select observations by hunt_run_id.
+CANDIDATE_SCHEMA_STATEMENTS = (
+    """DO $$
+    BEGIN
+        IF to_regclass('investigation_candidate_observations') IS NOT NULL THEN
+            CREATE INDEX IF NOT EXISTS idx_investigation_candidate_observations_hunt_run
+            ON investigation_candidate_observations(hunt_run_id, candidate_id)
+            WHERE hunt_run_id IS NOT NULL;
+        END IF;
+    END
+    $$""",
+)
+
+
 class CandidateLifecycleError(ValueError):
     """A Hunt attempted an invalid candidate lifecycle transition."""
 
