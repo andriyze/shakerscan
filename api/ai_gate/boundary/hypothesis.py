@@ -633,6 +633,13 @@ def hypothesis_from_hunt_candidate(
     if not isinstance(typed, dict):
         typed = locus.get("ai_boundary_context")
     typed = typed if isinstance(typed, dict) else {}
+    # Discovery records the observed resource pair in the immutable locus. The
+    # caller declares subjects/tenants/roles, but cannot re-point the observed
+    # resources while keeping the candidate's capture provenance.
+    for slot, declared in (("owner", owner), ("attacker", attacker)):
+        observed = typed.get(f"{slot}_resource_id")
+        if observed is not None and declared.get("resource_id") != observed:
+            raise ContractError("boundary_principal_resource_mismatch")
 
     # Only explicit typed fields are projected. Never derive a prompt, expected
     # policy, state value or principal from free-form claim/title prose.

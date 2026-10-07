@@ -272,3 +272,34 @@ async def test_lifecycle_edits_neither_shadow_nor_exhaust_the_binding_lookup():
         })
     db.guard()
     assert await read_candidate_boundary_source_binding(db, run=RUN, candidate_id=CANDIDATE) == _local_binding()
+
+
+@pytest.mark.asyncio
+async def test_handoff_refuses_principal_resources_other_than_the_discovered_pair(monkeypatch):
+    db = DB()
+    db.db.execute("UPDATE investigation_candidates SET family=?, canonical_locus=?", (
+        "cross_tenant_retrieval",
+        json.dumps({"route": "/orders/{{resource_id}}", "ai_boundary_context": {
+            "discovery_draft_id": "a" * 64,
+            "owner_resource_id": "order-a", "attacker_resource_id": "order-b",
+        }}),
+    ))
+    db.guard()
+    assert (await handoff(db))["status"] == "ready"
+    swapped = {**PRINCIPALS, "attacker": {**PRINCIPALS["attacker"], "resource_id": "order-z"}}
+    with pytest.raises(ValueError, match="boundary_principal_resource_mismatch"):
+        await compile_candidate_boundary_handoff(
+            db, run=RUN, candidate_id=CANDIDATE, principal_context=swapped, expected_rule=None,
+        )
+
+    async def lookup(_conn, _hunt_id):
+        return RUN
+
+    monkeypatch.setattr(interaction_router, "_pool", lambda: db)
+    monkeypatch.setattr(interaction_router, "_hunt_run_or_404", lookup)
+    with pytest.raises(HTTPException) as exc:
+        await interaction_router.compile_hunt_candidate_boundary_proposal(
+            HUNT, CANDIDATE, interaction_router.HuntBoundaryHandoffRequest(**swapped),
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "boundary_principal_resource_mismatch"
