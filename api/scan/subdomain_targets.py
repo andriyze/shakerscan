@@ -23,6 +23,86 @@ except (ImportError, ModuleNotFoundError):  # top-level scan.* worker imports
 
 
 DISCOVERY_SOURCE = "subfinder"
+# The whole DNS check of one scan's names, not each lookup. Recording runs between finalization
+# and the saved result; with a dead resolver every name used to cost its full lookup timeout --
+# about a minute for a full window -- before the finished scan was stored.
+DNS_DEADLINE_SECONDS = 10.0
+
+
+async def _plan_with_deadline(hosts: list[str]) -> dict[str, Any]:
+    return await target_resolution.plan_discovered_targets(
+        hosts, deadline_seconds=DNS_DEADLINE_SECONDS,
+    )
+
+
+def _count(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _plan_accounting(plan: Mapping[str, Any], *, found: int, considered: int) -> dict[str, Any]:
+    """What the DNS plan left out and why, kept with the run's DNS outcome."""
+    classified = len(plan.get("scannable") or ()) + len(plan.get("unresolved") or ())
+    not_checked = len(plan.get("not_checked") or ())
+    scannable = len(plan.get("scannable") or ())
+    target_limit = int(target_resolution.DISCOVERY_TARGET_LIMIT)
+    return {
+        "found": found,
+        "considered": considered,
+        "judged": max(0, classified - not_checked),
+        "beyond_resolve_limit": max(0, _count(plan.get("submitted_count"), considered) - classified),
+        "resolve_limit": plan.get("resolve_limit"),
+        "dns_deadline_skipped": not_checked,
+        "target_limit": target_limit,
+        "over_target_limit": max(0, scannable - target_limit),
+    }
+
+
+def _recorded_outcome(discovery_id: str, resolution: Mapping[str, Any], *, found: int) -> dict[str, Any]:
+    """The report's account of the run: what was added and every name that was not checked.
+
+    Each cap is named: the report lists at most a bounded number of names, DNS checks a bounded
+    window of those within one deadline, and at most a bounded number become targets per run.
+    """
+    considered = _count(resolution.get("considered"), found)
+    scannable = _count(resolution.get("scannable"))
+    unresolved = _count(resolution.get("unresolved_count"))
+    deadline_skipped = _count(resolution.get("dns_deadline_skipped"))
+    # A run recorded before the accounting fields counted every planned name as checked.
+    judged = _count(resolution.get("judged"), max(
+        0, _count(resolution.get("checked"), scannable + unresolved) - deadline_skipped,
+    ))
+    beyond_window = _count(resolution.get("beyond_resolve_limit"))
+    over_target_limit = _count(resolution.get("over_target_limit"))
+    insert_failed = _count(resolution.get("insert_failed"))
+    reasons = [
+        reason for reason, applies in (
+            ("report_list_limit", found > considered),
+            ("dns_resolve_limit", beyond_window > 0),
+            ("dns_deadline", deadline_skipped > 0),
+            ("target_limit", over_target_limit > 0),
+            ("insert_failed", insert_failed > 0),
+        ) if applies
+    ]
+    return {
+        "status": "recorded",
+        "discovery_id": discovery_id,
+        "added": _count(resolution.get("added")),
+        "scannable": scannable,
+        "unresolved_count": unresolved,
+        "unknown_count": _count(resolution.get("unknown_count")),
+        "found": found,
+        "checked": judged,
+        "not_checked": max(0, found - judged),
+        "dns_deadline_skipped": deadline_skipped,
+        "target_limit": resolution.get("target_limit"),
+        "over_target_limit": over_target_limit,
+        "insert_failed": insert_failed,
+        "partial": bool(reasons),
+        "partial_reasons": reasons,
+    }
 
 
 async def record_scan_subdomain_discovery(
@@ -36,19 +116,21 @@ async def record_scan_subdomain_discovery(
 
     Idempotent per Scan: a redelivered job finds its own run and reports it again instead of
     recording a second one. Returns the outcome it wrote into the report section, or None when
-    the report lists no subdomains.
+    the report lists no subdomains. Every name the run did not check or add is counted with its
+    reason; nothing is dropped silently.
     """
     discovery = report.get("discovery") if isinstance(report, Mapping) else None
     section = discovery.get("subdomains") if isinstance(discovery, Mapping) else None
     if not isinstance(section, dict) or not section.get("hosts"):
         return None
     hosts = [str(host) for host in section.get("hosts") or () if str(host or "").strip()]
+    found = max(len(hosts), _count(section.get("total"), len(hosts)))
     root_domain = str(section.get("root_domain") or "").strip().lower()
     if not root_domain:
         outcome = {"status": "not_recorded", "reason": "ambiguous_root_domain"}
         section["targets"] = outcome
         return outcome
-    planner = plan_targets or target_resolution.plan_discovered_targets
+    planner = plan_targets or _plan_with_deadline
     try:
         async with pool.acquire() as conn:
             existing = await conn.fetchrow(
@@ -74,15 +156,19 @@ async def record_scan_subdomain_discovery(
                 resolution = await target_resolution.store_discovered_targets(
                     conn, plan, root_domain, source=DISCOVERY_SOURCE,
                 )
+                resolution = {
+                    **resolution,
+                    **_plan_accounting(plan, found=found, considered=len(hosts)),
+                }
                 await conn.execute(
                     """INSERT INTO discovery_runs
                            (id, root_domain, status, subdomains_found, new_subdomains,
                             result, sources_used, started_at, completed_at)
                        VALUES ($1, $2, 'completed', $3, $4, $5::jsonb, $6::jsonb, NOW(), NOW())""",
-                    uuid.UUID(discovery_id), root_domain, len(hosts),
+                    uuid.UUID(discovery_id), root_domain, found,
                     int(resolution.get("added") or 0), json.dumps(hosts),
                     json.dumps({
-                        DISCOVERY_SOURCE: len(hosts),
+                        DISCOVERY_SOURCE: found,
                         "scan_id": str(scan_id),
                         "dns_resolution": resolution,
                     }),
@@ -91,15 +177,9 @@ async def record_scan_subdomain_discovery(
         outcome = {"status": "failed", "error": type(exc).__name__}
         section["targets"] = outcome
         return outcome
-    outcome = {
-        "status": "recorded",
-        "discovery_id": discovery_id,
-        "added": int(resolution.get("added") or 0),
-        "scannable": int(resolution.get("scannable") or 0),
-        "unresolved_count": int(resolution.get("unresolved_count") or 0),
-    }
+    outcome = _recorded_outcome(discovery_id, resolution, found=found)
     section["targets"] = outcome
     return outcome
 
 
-__all__ = ["record_scan_subdomain_discovery"]
+__all__ = ["DNS_DEADLINE_SECONDS", "record_scan_subdomain_discovery"]

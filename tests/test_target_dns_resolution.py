@@ -19,6 +19,7 @@ import asyncio
 import json
 import socket
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -433,3 +434,22 @@ def test_scan_fallback_without_a_database_judges_under_production(monkeypatch):
     url, fallback = asyncio.run(target_resolution.scan_target_dns_fallback("https://example.com", None))
     assert url == "https://www.example.com"
     assert fallback["message"] == "example.com has no address record; using www.example.com."
+
+
+def test_one_deadline_bounds_the_whole_discovery_check():
+    """A dead resolver cost every name its full lookup timeout. With a deadline the names it
+    leaves unjudged are listed as not checked and, like any resolver fault, stay scannable."""
+    async def hangs(_hostname):
+        await asyncio.sleep(30)
+        return []
+
+    names = [f"h{index}.example.com" for index in range(40)]
+    started = time.monotonic()
+    plan = asyncio.run(target_resolution.plan_discovered_targets(
+        names, lookup=hangs, deadline_seconds=0.2,
+    ))
+    assert time.monotonic() - started < 2.0
+    assert len(plan["not_checked"]) == 40
+    assert len(plan["scannable"]) == 40 and plan["unresolved"] == []
+    assert plan["submitted_count"] == 40
+    assert plan["resolve_limit"] == target_resolution.DISCOVERY_RESOLVE_LIMIT
