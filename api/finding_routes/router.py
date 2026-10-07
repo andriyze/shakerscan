@@ -252,8 +252,9 @@ def _strip_pagination_for_count(query: str, params: list) -> tuple[str, list]:
 class FindingUpdate(BaseModel):
     status: str  # active, resolved, false_positive, accepted_risk
     notes: Optional[str] = None
-    # Omitted keeps the recorded verdict, a value records it, and an explicit null clears it.
-    # The status is always the caller's: the server never derives one from the verdict.
+    # Omitted keeps the recorded verdict, a value records it, and an explicit null clears it
+    # (the verdict and its time; its notes stay unless `notes` is sent). The status is always
+    # the caller's: the server never derives one from the verdict.
     analyst_verdict: Optional[str] = Field(
         default=None,
         pattern="^(needs_review|true_positive|false_positive|duplicate|accepted_risk|retest_needed)$",
@@ -1562,10 +1563,11 @@ FINDING_UPDATE_SQL = """
                                         ELSE findings.analyst_verdict END,
         analyst_verdict_at = CASE $5::text WHEN 'set' THEN NOW() WHEN 'clear' THEN NULL
                                            ELSE findings.analyst_verdict_at END,
-        analyst_verdict_notes = CASE $5::text
-                                    WHEN 'set' THEN COALESCE($2, findings.analyst_verdict_notes)
-                                    WHEN 'clear' THEN NULL
-                                    ELSE findings.analyst_verdict_notes END,
+        -- Clearing a verdict keeps its notes unless the request sends new ones: the notes are
+        -- the record of why a verdict was set, an automated retest's included, and survive it.
+        analyst_verdict_notes = CASE WHEN $5::text IN ('set', 'clear')
+                                     THEN COALESCE($2, findings.analyst_verdict_notes)
+                                     ELSE findings.analyst_verdict_notes END,
         updated_at = NOW()
     FROM (SELECT id, status FROM findings WHERE id = $4 FOR UPDATE) AS prior
     WHERE findings.id = prior.id
