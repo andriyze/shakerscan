@@ -159,6 +159,8 @@ test('a domain group deletes every target in it through one previewed approval',
   const writes = await mockApi(page, { grouped: true })
   await page.goto('/targets')
   const subject = 'example.invalid and all its subdomains'
+  // Domain-wide deletion sits in the domain group's menu.
+  await page.getByRole('button', { name: 'Actions for example.invalid', exact: true }).click()
   await page.getByRole('button', { name: `Delete ${subject}`, exact: true }).click()
   const dialog = page.getByRole('dialog', { name: `Delete ${subject}` })
   await expect(dialog.getByText(/2 targets in this domain/)).toBeVisible()

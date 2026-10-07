@@ -6,7 +6,7 @@ import Link from '@/components/WorkspaceLink'
 import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFindings, getScanDeploymentDecision, getTargetPosture, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding, type TargetPosture } from '@/lib/api'
 import { TargetPostureCard } from '@/components/TargetPostureCard'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
-import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
+import { buttonClasses, Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
 import ReportView, { ReportDownloads } from '@/components/ReportView'
 import FindingCard from '@/components/FindingCard'
 import { SectionTabPanel, SectionTabs, useSectionTab, type SectionTab } from '@/components/ui/SectionTabs'
@@ -170,10 +170,10 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
   const weakAssurance = ['none', 'weak', 'limited'].includes(String(assurance?.band || 'none'))
   const observedRiskColor = weakAssurance ? 'text-gray-200' : gradeTextColor(scorePresentation.grade)
   const conclusionTone = resultPresentation.tone === 'danger'
-    ? 'border-red-500/30 bg-red-500/10'
+    ? 'border-gray-800 bg-red-500/[0.06] shadow-[inset_3px_0_0_0_var(--color-red-500)]'
     : resultPresentation.tone === 'warning'
-      ? 'border-amber-500/30 bg-amber-500/10'
-      : 'border-blue-500/25 bg-blue-500/10'
+      ? 'border-gray-800 bg-amber-500/[0.04] shadow-[inset_3px_0_0_0_var(--color-amber-400)]'
+      : 'border-gray-800 bg-gray-900'
   const scopeSummary = [
     resultPresentation.budgetProfile !== 'unknown' ? `${resultPresentation.budgetProfile} budget` : null,
     resultPresentation.activeTesting ? 'active testing' : 'passive checks',
@@ -195,8 +195,8 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
       <section className={`border-b p-6 ${conclusionTone}`} aria-labelledby="scan-conclusion-heading">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-3xl">
-            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Run conclusion</p>
-            <h2 id="scan-conclusion-heading" className="mt-2 text-2xl font-semibold text-white">
+            <p className="text-xs font-medium text-gray-400">Run conclusion</p>
+            <h2 id="scan-conclusion-heading" className="readout mt-2 text-2xl font-semibold text-white">
               {resultPresentation.headline}
             </h2>
             <p className="mt-2 text-sm text-gray-300">{resultPresentation.explanation}</p>
@@ -211,12 +211,12 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
             </p>
             {resultPresentation.nextSteps.length > 0 && (
               <div className="mt-4 flex flex-wrap items-center gap-2" data-testid="next-steps">
-                <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Next</span>
+                <span className="text-xs font-medium text-gray-400">Next</span>
                 {resultPresentation.nextSteps.map((step: { key: string; label: string; href: string }) => (
                   <Link
                     key={step.key}
                     href={step.href}
-                    className="rounded-sm border border-blue-400/40 bg-blue-500/10 px-3 py-1 text-xs font-medium text-blue-100 hover:bg-blue-500/20"
+                    className={buttonClasses('secondary', 'sm')}
                   >
                     {step.label} →
                   </Link>
@@ -238,15 +238,15 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
       </section>
 
       <div className="grid gap-px bg-gray-800 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="bg-gray-950/80 p-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Observed risk from this run</p>
+        <div className="bg-gray-900 p-4">
+          <p className="text-xs font-medium text-gray-400">Observed risk from this run</p>
           {scorePresentation.status === 'not_examined' ? (
             <p className="mt-2 text-lg font-semibold text-amber-200">Not examined</p>
           ) : scorePresentation.status === 'unavailable' ? (
             <p className="mt-2 text-sm font-medium text-amber-200">Risk score unavailable</p>
           ) : (
             <div className="mt-1 flex items-baseline gap-2">
-              {hasGrade && <span className={`text-3xl font-bold ${observedRiskColor}`}>{scorePresentation.grade}</span>}
+              {hasGrade && <span className={`readout text-3xl font-semibold ${observedRiskColor}`}>{scorePresentation.grade}</span>}
               {hasScore && <span className="text-sm text-gray-300">{scorePresentation.score}/100</span>}
             </div>
           )}
@@ -265,12 +265,12 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
           )}
         </div>
 
-        <div className="bg-gray-950/80 p-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Examination strength</p>
+        <div className="bg-gray-900 p-4">
+          <p className="text-xs font-medium text-gray-400">Examination strength</p>
           {assurance ? (
             <>
               <div className="mt-1 flex items-baseline gap-2">
-                <span className={`text-3xl font-bold ${assuranceClass(assurance.band)}`}>{assurance.score}</span>
+                <span className={`readout text-3xl font-semibold ${assuranceClass(assurance.band)}`}>{assurance.score}</span>
                 <span className="text-sm text-gray-300">/100 · {assurance.label}</span>
               </div>
               <p className="mt-1 text-xs leading-5 text-gray-500">
@@ -288,8 +288,8 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
           )}
         </div>
 
-        <div className="bg-gray-950/80 p-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">This run found</p>
+        <div className="bg-gray-900 p-4">
+          <p className="text-xs font-medium text-gray-400">This run found</p>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {severityEntries.length > 0 ? severityEntries.map(([severity, count]) => (
               <Link
@@ -313,8 +313,8 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
           </p>
         </div>
 
-        <div className="bg-gray-950/80 p-4" data-testid="carried-over">
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Carried over</p>
+        <div className="bg-gray-900 p-4" data-testid="carried-over">
+          <p className="text-xs font-medium text-gray-400">Carried over</p>
           {carried.state === 'loading' ? (
             <p className="mt-2 text-sm text-gray-500">Loading target history…</p>
           ) : carried.state === 'error' ? (
@@ -565,7 +565,7 @@ function DeploymentDecisionCard({
       {exceptionSummary && (
         <div className="mt-3 rounded-sm border border-gray-800 bg-gray-950/40 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Exception hygiene</div>
+            <div className="text-xs font-medium text-gray-400">Exception hygiene</div>
             {exceptionSummary.profile_disables_exceptions && (
               <span className="rounded-sm bg-red-900/40 px-2 py-0.5 text-xs text-red-200">disabled by profile</span>
             )}
@@ -1008,7 +1008,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
       <div className="mt-4 rounded-sm border border-gray-800 bg-gray-950/50 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <div className="text-xs font-medium uppercase tracking-wide text-gray-500">Campaign History</div>
+            <div className="text-xs font-medium text-gray-400">Campaign History</div>
             <p className="mt-1 text-xs text-gray-500">
               Compares recent completed runs with the same target, probe pack, profile, and environment.
             </p>
@@ -1073,7 +1073,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
       <div className="mt-4 rounded-sm border border-gray-800 bg-gray-950/50 p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="text-xs font-medium uppercase tracking-wide text-gray-500">Campaign replay</div>
+            <div className="text-xs font-medium text-gray-400">Campaign replay</div>
             <p className="mt-1 text-xs text-gray-500">
               Queue a focused AI Gate run using the original target, probe pack, profile, and environment.
             </p>
@@ -1138,7 +1138,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
 
       <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
         <div className="min-w-0 rounded-sm border border-gray-800 bg-gray-950/50 p-3">
-          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Coverage Matrix</div>
+          <div className="mb-2 text-xs font-medium text-gray-400">Coverage Matrix</div>
           {review.families.length ? (
             <div className="space-y-2">
               {review.families.slice(0, 8).map((family) => (
@@ -1177,7 +1177,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
 
         <div className="min-w-0 space-y-3">
           <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Skipped / Blocked</div>
+            <div className="mb-2 text-xs font-medium text-gray-400">Skipped / Blocked</div>
             {review.skipped_reasons.length ? (
               <div className="space-y-2">
                 {review.skipped_reasons.slice(0, 6).map((reason) => (
@@ -1196,7 +1196,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
           </div>
 
           <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Evidence Pack</div>
+            <div className="mb-2 text-xs font-medium text-gray-400">Evidence Pack</div>
             <div className="space-y-1 text-xs text-gray-500">
               {review.planned_hash && <div className="truncate">planned: <span className="font-mono text-gray-300">{review.planned_hash}</span></div>}
               {review.executed_hash && <div className="truncate">executed: <span className="font-mono text-gray-300">{review.executed_hash}</span></div>}
@@ -1215,7 +1215,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
           </div>
 
           <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Transcript Replay</div>
+            <div className="mb-2 text-xs font-medium text-gray-400">Transcript Replay</div>
             {review.transcripts.length ? (
               <div className="space-y-2">
                 {review.transcripts.slice(0, 6).map((transcript) => (
@@ -1253,7 +1253,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
 
       {review.findings.length > 0 && (
         <div className="mt-4 rounded-sm border border-gray-800 bg-gray-950/50 p-3">
-          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Replay / Rerun Findings</div>
+          <div className="mb-2 text-xs font-medium text-gray-400">Replay / Rerun Findings</div>
           <div className="grid gap-2 lg:grid-cols-2">
             {review.findings.map((finding) => {
               const persistedFinding = linkedPersistedFinding(finding as unknown as Record<string, unknown>, persistedFindingIndex)

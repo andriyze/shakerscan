@@ -35,7 +35,6 @@ import {
 
 const navGroups: {
   heading: string | null
-  badge?: string
   // Advanced groups/items are hidden unless the sidebar "show all" switch is on.
   advanced?: boolean
   items: { href: string; label: string; icon: ReactNode; advanced?: boolean; fleetOnly?: boolean }[]
@@ -47,12 +46,11 @@ const navGroups: {
         href: '/',
         label: 'Dashboard',
         icon: (
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
           </svg>
         ),
       },
-      { href: '/docs', label: 'Docs', icon: <BookOpen className="w-5 h-5" /> },
     ],
   },
   {
@@ -62,7 +60,7 @@ const navGroups: {
         href: '/targets',
         label: 'Targets',
         icon: (
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
           </svg>
         ),
@@ -71,19 +69,19 @@ const navGroups: {
         href: '/scans',
         label: 'DAST Scans',
         icon: (
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
           </svg>
         ),
       },
-      { href: '/credentials', label: 'Credentials', icon: <KeyRound className="w-5 h-5" /> },
-      { href: '/request-collections', label: 'Request Collections', icon: <Braces className="w-5 h-5" /> },
-      { href: '/devices', label: 'Connected Devices', icon: <Router className="w-5 h-5" /> },
+      { href: '/credentials', label: 'Credentials', icon: <KeyRound className="h-4 w-4" /> },
+      { href: '/request-collections', label: 'Request Collections', icon: <Braces className="h-4 w-4" /> },
+      { href: '/devices', label: 'Connected Devices', icon: <Router className="h-4 w-4" /> },
       {
         href: '/findings',
         label: 'Findings',
         icon: (
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
         ),
@@ -92,7 +90,7 @@ const navGroups: {
         href: '/schedules',
         label: 'Schedules',
         icon: (
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
         ),
@@ -102,51 +100,50 @@ const navGroups: {
   {
     heading: 'Attack surface',
     items: [
-      { href: '/exposure', label: 'Exposure', icon: <Network className="w-5 h-5" /> },
-      { href: '/asm', label: 'Coverage', icon: <Radar className="w-5 h-5" /> },
+      { href: '/exposure', label: 'Exposure', icon: <Network className="h-4 w-4" /> },
+      { href: '/asm', label: 'Coverage', icon: <Radar className="h-4 w-4" /> },
     ],
   },
   {
     heading: 'AI Investigator',
-    badge: 'Agentic',
     items: [
-      { href: '/hunt', label: 'Hunts', icon: <Compass className="w-5 h-5" /> },
+      { href: '/hunt', label: 'Hunts', icon: <Compass className="h-4 w-4" /> },
     ],
   },
   {
     heading: 'Records',
     advanced: true,
     items: [
-      { href: '/evidence', label: 'Evidence', icon: <FileArchive className="w-5 h-5" /> },
-      { href: '/timeline', label: 'Timeline', icon: <Activity className="w-5 h-5" /> },
+      { href: '/evidence', label: 'Evidence', icon: <FileArchive className="h-4 w-4" /> },
+      { href: '/timeline', label: 'Timeline', icon: <Activity className="h-4 w-4" /> },
     ],
   },
   {
     heading: 'Operations',
     items: [
-      { href: '/workers', label: 'Worker Pools', icon: <Server className="w-5 h-5" /> },
-      { href: '/fleet', label: 'Fleet', icon: <ServerCog className="w-5 h-5" />, fleetOnly: true },
+      { href: '/workers', label: 'Worker Pools', icon: <Server className="h-4 w-4" /> },
+      { href: '/fleet', label: 'Fleet', icon: <ServerCog className="h-4 w-4" />, fleetOnly: true },
     ],
   },
   {
     heading: 'AI security',
     items: [
-      { href: '/ai-gate', label: 'AI Gate', icon: <Bot className="w-5 h-5" /> },
-      { href: '/model-intake', label: 'Model Intake', icon: <PackageCheck className="w-5 h-5" /> },
+      { href: '/ai-gate', label: 'AI Gate', icon: <Bot className="h-4 w-4" /> },
+      { href: '/model-intake', label: 'Model Intake', icon: <PackageCheck className="h-4 w-4" /> },
     ],
   },
   {
     heading: 'Governance',
     advanced: true,
     items: [
-      { href: '/settings/policy-profiles', label: 'Policy Profiles', icon: <ShieldCheck className="w-5 h-5" /> },
+      { href: '/settings/policy-profiles', label: 'Policy Profiles', icon: <ShieldCheck className="h-4 w-4" /> },
     ],
   },
   {
     heading: 'Developer',
     advanced: true,
     items: [
-      { href: '/settings/arsenal', label: 'Command Arsenal', icon: <Boxes className="w-5 h-5" /> },
+      { href: '/settings/arsenal', label: 'Command Arsenal', icon: <Boxes className="h-4 w-4" /> },
     ],
   },
 ]
@@ -177,7 +174,7 @@ function loadHealthBuildIdentity(force = false): Promise<HealthBuildIdentity | n
 
 function BrandMark({ className = 'w-6 h-6' }: { className?: string }) {
   return (
-    <svg className={`${className} text-blue-500`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <svg className={`${className} text-blue-500`} fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
     </svg>
   )
@@ -227,42 +224,22 @@ function NavContent({
 
   return (
     <>
-      <div className="mb-8">
+      <div className="mb-5 flex h-9 items-center px-2">
         <Link
           href="/"
           aria-label="ShakerScan dashboard"
-          className="flex items-center gap-2 rounded-sm text-xl font-bold text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="readout flex items-center gap-2 rounded-sm text-[15px] font-semibold text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
-          <BrandMark />
+          <BrandMark className="h-5 w-5" />
           ShakerScan
         </Link>
-        <p className="text-xs text-gray-500 mt-1">{editionLabel}</p>
-        {(buildIdentity.ui || buildIdentity.api || buildIdentity.workers) && (
-          <p
-            className={`mt-1 flex items-center gap-1 text-[11px] ${buildIdentity.skew ? 'text-amber-300' : 'text-gray-400'}`}
-            title={buildIdentity.skew ? 'Component build mismatch detected' : 'Component build identities'}
-            role={buildIdentity.skew ? 'status' : undefined}
-            aria-live={buildIdentity.skew ? 'polite' : undefined}
-          >
-            {buildIdentity.skew && <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden="true" />}
-            <span>{buildIdentity.skew ? `Build mismatch: ${buildLabel}` : buildLabel}</span>
-          </p>
-        )}
       </div>
 
-      <nav className="flex-1">
+      <nav className="flex-1" aria-label="Main">
         {visibleGroups.map((group, groupIndex) => (
-          <div key={group.heading ?? 'overview'} className={`space-y-1 ${groupIndex === 0 ? '' : 'mt-4'}`}>
+          <div key={group.heading ?? 'overview'} className={`space-y-0.5 ${groupIndex === 0 ? '' : 'mt-5'}`}>
             {group.heading ? (
-              <div className="flex items-center gap-1.5 px-3 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-600">
-                <span>{group.heading}</span>
-                {group.badge ? (
-                  <span className="inline-flex items-center gap-1 rounded-full border border-violet-400/40 bg-violet-500/20 px-1.5 py-px text-[8px] font-bold uppercase tracking-wider text-violet-200">
-                    <span className="h-1 w-1 rounded-full bg-violet-300 animate-pulse" aria-hidden="true" />
-                    {group.badge}
-                  </span>
-                ) : null}
-              </div>
+              <div className="px-2 pb-1 text-xs font-medium text-gray-500">{group.heading}</div>
             ) : null}
             {group.items.map((item) => {
               const active = isActive(item.href)
@@ -275,10 +252,10 @@ function NavContent({
                   // pair per link that the page's real API calls then queue behind.
                   prefetch={false}
                   aria-current={active ? 'page' : undefined}
-                  className={`flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     active
-                      ? 'bg-blue-600/20 text-blue-400 border-l-2 border-blue-500 ml-[-2px] pl-[14px]'
-                      : 'hover:bg-gray-800 text-gray-300'
+                      ? 'bg-gray-800 text-white [&>svg]:text-gray-100'
+                      : 'text-gray-400 hover:bg-gray-800/60 hover:text-gray-100 [&>svg]:text-gray-500 hover:[&>svg]:text-gray-300'
                   }`}
                 >
                   {item.icon}
@@ -290,58 +267,85 @@ function NavContent({
         ))}
       </nav>
 
-      <div className="pt-4 mt-4 border-t border-gray-800">
+      <div className="mt-5 space-y-3 border-t border-gray-800 pt-4">
         <Link
           href="/scan/new"
-          className={`${buttonClasses('primary', 'md')} w-full`}
+          className={`${buttonClasses('primary', 'sm')} w-full`}
         >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
           </svg>
           New Scan
         </Link>
-      </div>
 
-      <div className="pt-4 mt-4 border-t border-gray-800">
         <div className="flex items-center justify-between">
-          <a
-            href="https://github.com/andriyze/shakerscan"
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label="ShakerScan on GitHub"
-            className="flex items-center gap-2 px-3 py-2 text-sm text-gray-400 hover:text-white transition-colors rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-              <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
-            </svg>
-            GitHub
-          </a>
-          <div className="flex items-center gap-2">
-          <span title="Show advanced sections (Records, Governance, Developer)" className="inline-flex">
-            <Toggle checked={showAll} onChange={onToggleShowAll} label="Show all sidebar sections" />
-          </span>
-          <Link
-            href="/settings"
-            aria-label="Settings"
-            title="Settings"
-            aria-current={settingsActive ? 'page' : undefined}
-            className={`p-2 rounded-md transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
-              settingsActive
-                ? 'bg-blue-600/20 text-blue-400'
-                : 'text-gray-400 hover:text-white hover:bg-gray-800'
-            }`}
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M11.983 5.5a1.5 1.5 0 013.034 0l.184 1.145a1.5 1.5 0 001.126 1.192l1.132.286a1.5 1.5 0 01.76 2.49l-.773.862a1.5 1.5 0 000 1.998l.773.862a1.5 1.5 0 01-.76 2.49l-1.132.286a1.5 1.5 0 00-1.126 1.192l-.184 1.145a1.5 1.5 0 01-3.034 0l-.184-1.145a1.5 1.5 0 00-1.126-1.192l-1.132-.286a1.5 1.5 0 01-.76-2.49l.773-.862a1.5 1.5 0 000-1.998l-.773-.862a1.5 1.5 0 01.76-2.49l1.132-.286a1.5 1.5 0 001.126-1.192l.184-1.145z"
-              />
-              <circle cx="13.5" cy="12" r="2.5" strokeWidth={2} />
-            </svg>
-          </Link>
+          <div className="flex items-center gap-0.5">
+            <Link
+              href="/docs"
+              prefetch={false}
+              aria-current={pathname.startsWith('/docs') ? 'page' : undefined}
+              title="Documentation"
+              className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                pathname.startsWith('/docs') ? 'bg-gray-800 text-white' : 'text-gray-400 hover:bg-gray-800/60 hover:text-gray-100'
+              }`}
+            >
+              <BookOpen className="h-4 w-4" aria-hidden="true" />
+              Docs
+            </Link>
+            <a
+              href="https://github.com/andriyze/shakerscan"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="ShakerScan on GitHub"
+              title="ShakerScan on GitHub"
+              className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-gray-800/60 hover:text-gray-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+            >
+              <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
+              </svg>
+            </a>
           </div>
+          <div className="flex items-center gap-1.5">
+            <span title="Show advanced sections (Records, Governance, Developer)" className="inline-flex">
+              <Toggle checked={showAll} onChange={onToggleShowAll} label="Show all sidebar sections" />
+            </span>
+            <Link
+              href="/settings"
+              aria-label="Settings"
+              title="Settings"
+              aria-current={settingsActive ? 'page' : undefined}
+              className={`rounded-md p-1.5 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                settingsActive
+                  ? 'bg-gray-800 text-white'
+                  : 'text-gray-400 hover:bg-gray-800/60 hover:text-gray-100'
+              }`}
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M11.983 5.5a1.5 1.5 0 013.034 0l.184 1.145a1.5 1.5 0 001.126 1.192l1.132.286a1.5 1.5 0 01.76 2.49l-.773.862a1.5 1.5 0 000 1.998l.773.862a1.5 1.5 0 01-.76 2.49l-1.132.286a1.5 1.5 0 00-1.126 1.192l-.184 1.145a1.5 1.5 0 01-3.034 0l-.184-1.145a1.5 1.5 0 00-1.126-1.192l-1.132-.286a1.5 1.5 0 01-.76-2.49l.773-.862a1.5 1.5 0 000-1.998l-.773-.862a1.5 1.5 0 01.76-2.49l1.132-.286a1.5 1.5 0 001.126-1.192l.184-1.145z"
+                />
+                <circle cx="13.5" cy="12" r="2.5" strokeWidth={2} />
+              </svg>
+            </Link>
+          </div>
+        </div>
+
+        <div className="px-2 text-[11px] leading-4 text-gray-500">
+          <p>{editionLabel}</p>
+          {(buildIdentity.ui || buildIdentity.api || buildIdentity.workers) && (
+            <p
+              className={`mt-0.5 flex items-center gap-1 ${buildIdentity.skew ? 'text-amber-300' : 'text-gray-500'}`}
+              title={buildIdentity.skew ? 'Component build mismatch detected' : 'Component build identities'}
+              role={buildIdentity.skew ? 'status' : undefined}
+              aria-live={buildIdentity.skew ? 'polite' : undefined}
+            >
+              {buildIdentity.skew && <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden="true" />}
+              <span className="truncate">{buildIdentity.skew ? `Build mismatch: ${buildLabel}` : buildLabel}</span>
+            </p>
+          )}
         </div>
       </div>
     </>
@@ -445,9 +449,9 @@ export default function Sidebar() {
   return (
     <>
       {/* Mobile: slim top bar instead of a viewport-eating sidebar. */}
-      <div className="sticky top-0 z-40 flex items-center justify-between border-b border-gray-800 bg-gray-900 px-4 py-3 md:hidden">
-        <Link href="/" className="flex items-center gap-2 text-base font-bold text-white">
-          <BrandMark className="w-5 h-5" />
+      <div className="sticky top-0 z-40 flex items-center justify-between border-b border-gray-800 bg-gray-950 px-4 py-2.5 md:hidden">
+        <Link href="/" className="readout flex items-center gap-2 text-[15px] font-semibold text-white">
+          <BrandMark className="h-4 w-4" />
           ShakerScan
         </Link>
         <button
@@ -476,7 +480,7 @@ export default function Sidebar() {
           />
           <aside
             ref={drawerRef}
-            className="absolute left-0 top-0 flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto border-r border-gray-800 bg-gray-900 p-4"
+            className="absolute left-0 top-0 flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto border-r border-gray-800 bg-gray-950 p-3"
           >
             <div className="mb-2 flex justify-end">
               <button
@@ -494,7 +498,7 @@ export default function Sidebar() {
       )}
 
       {/* Desktop: persistent sidebar. */}
-      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overscroll-contain border-r border-gray-800 bg-gray-900 p-4 md:flex">
+      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overscroll-contain border-r border-gray-800 bg-gray-950 px-3 py-4 md:flex">
         <NavContent editionLabel={editionLabel} pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
       </aside>
     </>

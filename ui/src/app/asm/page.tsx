@@ -4,17 +4,13 @@ import { Suspense, useCallback, useEffect, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { useRouter } from 'next/navigation'
 import {
-  Activity,
   AlertTriangle,
-  ArrowLeft,
   BrainCircuit,
   CheckCircle2,
-  Crosshair,
+  ChevronLeft,
   ExternalLink,
   Play,
-  Radar,
   RefreshCw,
-  Repeat,
   Search,
   SlidersHorizontal,
   Sparkles,
@@ -67,9 +63,24 @@ import {
   ConfirmDialog,
   EmptyState,
   ErrorState,
+  HypothesisStatusBadge,
+  Input,
+  PageHeader,
+  ROW_ACTION_REVEAL,
+  ScanStatusBadge,
+  SectionCard,
+  Select,
   Skeleton,
+  Stat,
+  StatGroup,
+  StatusDot,
+  TableContainer,
   TableSkeleton,
+  Toolbar,
+  buttonClasses,
+  tableStyles,
   useToast,
+  type StatusTone,
 } from '@/components/ui'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 
@@ -89,36 +100,42 @@ const STATUS_OPTIONS = [
   { value: 'gone', label: 'Gone' },
 ]
 
-const STATUS_BADGE: Record<string, string> = {
-  tested: 'bg-green-500/15 text-green-400',
-  untested: 'bg-gray-700/50 text-gray-300',
-  in_progress: 'bg-blue-500/15 text-blue-400',
-  stale: 'bg-yellow-500/15 text-yellow-400',
-  gone: 'bg-red-500/15 text-red-400',
+// Endpoint, timeline and scheduler states render as StatusDot; the tone carries the meaning.
+const STATUS_TONE: Record<string, StatusTone> = {
+  tested: 'success',
+  completed: 'success',
+  untested: 'neutral',
+  in_progress: 'info',
+  running: 'info',
+  active: 'info',
+  stale: 'warning',
+  partial: 'warning',
+  blocked: 'warning',
+  waiting: 'warning',
+  gone: 'danger',
+  failed: 'danger',
+  error: 'danger',
 }
 
-const METHOD_BADGE: Record<string, string> = {
-  GET: 'bg-sky-500/15 text-sky-400',
-  POST: 'bg-emerald-500/15 text-emerald-400',
-  PUT: 'bg-amber-500/15 text-amber-400',
-  PATCH: 'bg-orange-500/15 text-orange-400',
-  DELETE: 'bg-red-500/15 text-red-400',
+const TIMELINE_TONE: Record<string, StatusTone> = {
+  active_scan: 'info',
+  next_eligible: 'warning',
 }
 
-const PROVENANCE_BADGE: Record<string, string> = {
-  response_observed: 'bg-emerald-500/15 text-emerald-300',
-  declared_or_imported: 'bg-violet-500/15 text-violet-300',
-  scanner_discovered: 'bg-sky-500/15 text-sky-300',
-  unknown: 'bg-gray-700/50 text-gray-300',
+// Provenance and reachability are evidence about a candidate route: only response or
+// reachability evidence earns a color; every other source stays neutral.
+const PROVENANCE_TONE: Record<string, StatusTone> = {
+  response_observed: 'success',
 }
 
-const REACHABILITY_BADGE: Record<string, string> = {
-  reachable_observed: 'bg-emerald-500/15 text-emerald-300',
-  unreachable_observed: 'bg-amber-500/15 text-amber-300',
-  retired_unreachable: 'bg-red-500/15 text-red-300',
-  not_checked: 'bg-gray-700/50 text-gray-300',
-  inconclusive: 'bg-yellow-500/15 text-yellow-300',
+const REACHABILITY_TONE: Record<string, StatusTone> = {
+  reachable_observed: 'success',
+  unreachable_observed: 'warning',
+  retired_unreachable: 'danger',
+  inconclusive: 'warning',
 }
+
+const SUBHEADING = 'text-xs font-medium text-gray-400'
 
 function pct(coverage: number): string {
   return `${(coverage * 100).toFixed(1)}%`
@@ -151,23 +168,19 @@ function nowLocalUtcLabel(): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())} local = ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`
 }
 
-function CoverageBar({ coverage }: { coverage: number }) {
+function CoverageBar({ coverage, className = 'w-full' }: { coverage: number; className?: string }) {
   const width = Math.max(0, Math.min(100, coverage * 100))
-  const color = width >= 80 ? 'bg-green-500' : width >= 30 ? 'bg-yellow-500' : 'bg-blue-500'
+  const color = width >= 80 ? 'bg-emerald-500' : 'bg-blue-500'
   return (
-    <div className="h-2 w-full rounded-full bg-gray-800" role="presentation">
-      <div className={`h-2 rounded-full ${color}`} style={{ width: `${width}%` }} />
+    <div className={`h-1.5 shrink-0 overflow-hidden rounded-full bg-gray-800 ${className}`} role="presentation">
+      <div className={`h-full rounded-full ${color}`} style={{ width: `${width}%` }} />
     </div>
   )
 }
 
-function CoverageStat({ label, value, accent = '' }: { label: string; value: number | string; accent?: string }) {
-  return (
-    <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
-      <div className={`text-xl font-semibold ${accent || 'text-white'}`}>{value}</div>
-      <div className="text-xs text-gray-500">{label}</div>
-    </div>
-  )
+/** Stats laid out inside a card: same typography as StatGroup, separated by hairlines only. */
+function CardStats({ className = '', children }: { className?: string; children: React.ReactNode }) {
+  return <div className={`-mx-4 grid grid-cols-2 border-y border-gray-800 ${className}`}>{children}</div>
 }
 
 // ---- Rollup view (no target selected) -------------------------------------
@@ -213,47 +226,87 @@ function RollupView({
   }, [load])
 
   const visible = filters.domain ? rows.filter((r) => r.root_domain === filters.domain) : rows
-
-  if (loading) return <TableSkeleton />
-  if (error) return <ErrorState message="Failed to load attack-surface inventory." onRetry={load} />
+  // Totals are sums of the per-row columns below, so the strip and the table always agree.
+  const totals = visible.reduce(
+    (sum, { target }) => {
+      const cov = target.asm_coverage!
+      const variants = asmCoverageDenominator(cov).value
+      const completed = currentCompletedVariantCount(cov)
+      return {
+        variants: sum.variants + variants,
+        completed: sum.completed + completed,
+        remaining: sum.remaining + Math.max(variants - completed, 0),
+      }
+    },
+    { variants: 0, completed: 0, remaining: 0 },
+  )
+  const ready = !loading && !error
 
   return (
-    <Card className="p-4 space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <select
+    <>
+      <PageHeader
+        title="Coverage"
+        description="How much of each target’s discovered endpoints has been security-tested, tracked over time by Continuous ASM."
+        actions={
+          <Button variant="secondary" onClick={load} disabled={loading}>
+            <RefreshCw className="h-4 w-4" aria-hidden="true" /> Refresh
+          </Button>
+        }
+      />
+
+      {ready && visible.length > 0 && (
+        <StatGroup columns={5} className="mb-6" ariaLabel="Coverage summary">
+          <Stat label="Targets" value={visible.length.toLocaleString()} caption="with a persistent inventory" />
+          <Stat label="Route variants" value={totals.variants.toLocaleString()} />
+          <Stat label="Completed" value={totals.completed.toLocaleString()} />
+          <Stat label="Remaining" value={totals.remaining.toLocaleString()} />
+          <Stat
+            label="Coverage"
+            value={pct(totals.variants > 0 ? totals.completed / totals.variants : 0)}
+            caption="completed ÷ route variants"
+          />
+        </StatGroup>
+      )}
+
+      <Toolbar>
+        <Select
+          fullWidth={false}
           value={filters.domain ?? ''}
           onChange={(e) => setFilter('domain', e.target.value || undefined)}
           aria-label="Filter endpoints by domain"
-          className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="min-w-52"
         >
           <option value="">All domains</option>
           {domains.map((d) => (
             <option key={d} value={d}>{d}</option>
           ))}
-        </select>
-        <span className="text-xs text-gray-500">
-          {visible.length} target{visible.length === 1 ? '' : 's'} with a persistent inventory
-        </span>
-        <Button variant="ghost" size="sm" className="ml-auto" onClick={load}>
-          <RefreshCw className="h-4 w-4" /> Refresh
-        </Button>
-      </div>
+        </Select>
+        {ready && (
+          <span className="text-xs text-gray-500">
+            {visible.length} target{visible.length === 1 ? '' : 's'} with a persistent inventory
+          </span>
+        )}
+      </Toolbar>
 
-      {visible.length === 0 ? (
+      {loading ? (
+        <Card><TableSkeleton /></Card>
+      ) : error ? (
+        <ErrorState message="Failed to load attack-surface inventory." onRetry={load} />
+      ) : visible.length === 0 ? (
         <EmptyState
           message="No attack-surface inventory yet"
           hint="Run a coverage scan on a target to populate its persistent endpoint inventory, then come back to track and close coverage over time."
         />
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-800 text-left text-xs uppercase text-gray-500">
-                <th className="px-3 py-2 font-medium">Target</th>
-                <th className="px-3 py-2 font-medium">Coverage</th>
-                <th className="px-3 py-2 font-medium text-right">Completed / Route variants</th>
-                <th className="px-3 py-2 font-medium text-right">Remaining</th>
-                <th className="px-3 py-2" />
+        <TableContainer>
+          <table className={tableStyles.table}>
+            <thead className={tableStyles.head}>
+              <tr>
+                <th scope="col" className={tableStyles.headerCell}>Target</th>
+                <th scope="col" className={tableStyles.headerCell}>Coverage</th>
+                <th scope="col" className={`${tableStyles.headerCell} text-right`}>Completed / Route variants</th>
+                <th scope="col" className={`${tableStyles.headerCell} text-right`}>Remaining</th>
+                <th scope="col" className={tableStyles.headerCell}><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -264,29 +317,29 @@ function RollupView({
                 const completed = currentCompletedVariantCount(cov)
                 const remaining = Math.max(denominator.value - completed, 0)
                 return (
-                  <tr key={target.id} className="border-b border-gray-800/60 hover:bg-gray-800/30">
-                    <td className="px-3 py-2">
+                  <tr key={target.id} className={tableStyles.row}>
+                    <td className={`${tableStyles.cell} max-w-0 w-1/2`}>
                       <button
                         type="button"
                         onClick={() => onSelect(target.id)}
-                        className="text-left text-blue-400 hover:text-blue-300"
+                        className="block max-w-full truncate text-left font-medium text-gray-100 hover:text-blue-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 rounded-sm"
                       >
                         {boundedTargetDisplay(target)}
                       </button>
-                      <div className="text-xs text-gray-500">{target.root_domain}</div>
+                      <div className="truncate text-xs text-gray-500">{target.root_domain}</div>
                     </td>
-                    <td className="px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <CoverageBar coverage={currentCoverage} />
-                        <span className="w-12 shrink-0 text-right text-xs text-gray-400">{pct(currentCoverage)}</span>
+                    <td className={tableStyles.cell}>
+                      <div className="flex items-center gap-3">
+                        <CoverageBar coverage={currentCoverage} className="w-24" />
+                        <span className="w-12 shrink-0 text-right text-xs tabular-nums text-gray-400">{pct(currentCoverage)}</span>
                       </div>
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-gray-300">
-                      {completed} / {denominator.value}
+                    <td className={`${tableStyles.cell} text-right tabular-nums`}>
+                      {completed.toLocaleString()} / {denominator.value.toLocaleString()}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-gray-400">{remaining}</td>
-                    <td className="px-3 py-2 text-right">
-                      <Button variant="secondary" size="sm" onClick={() => onSelect(target.id)}>
+                    <td className={`${tableStyles.cell} text-right tabular-nums text-gray-400`}>{remaining.toLocaleString()}</td>
+                    <td className={`${tableStyles.cell} py-2 text-right`}>
+                      <Button variant="ghost" size="sm" className={ROW_ACTION_REVEAL} onClick={() => onSelect(target.id)}>
                         View
                       </Button>
                     </td>
@@ -295,9 +348,9 @@ function RollupView({
               })}
             </tbody>
           </table>
-        </div>
+        </TableContainer>
       )}
-    </Card>
+    </>
   )
 }
 
@@ -313,14 +366,14 @@ function NumField({
   return (
     <label className="block">
       <span className="text-xs text-gray-400">{label}</span>
-      <input
+      <Input
         type="number"
         min={min}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="mt-1 tabular-nums"
       />
-      {hint && <span className="text-[11px] text-gray-600">{hint}</span>}
+      {hint && <span className="text-[11px] text-gray-500">{hint}</span>}
     </label>
   )
 }
@@ -401,7 +454,7 @@ function formatRiskLevel(value?: string): string | null {
 function riskBadgeClass(value?: string): string {
   const risk = String(value || '').trim().toLowerCase()
   if (risk === 'high') return 'bg-red-500/15 text-red-300'
-  if (risk === 'medium') return 'bg-yellow-500/15 text-yellow-300'
+  if (risk === 'medium') return 'bg-amber-500/15 text-amber-300'
   return 'bg-gray-800 text-gray-300'
 }
 
@@ -514,12 +567,9 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
   return (
     <Card className="p-4 space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Repeat className="h-5 w-5 text-blue-400" />
-          <h2 className="text-sm font-medium text-gray-300">Continuous testing</h2>
-          <Badge className={enabled ? 'bg-green-500/15 text-green-400' : 'bg-gray-700/50 text-gray-400'}>
-            {enabled ? 'on' : 'off'}
-          </Badge>
+        <div className="flex items-center gap-3">
+          <h2 className="text-sm font-semibold text-gray-100">Continuous testing</h2>
+          <StatusDot tone={enabled ? 'success' : 'neutral'}>{enabled ? 'on' : 'off'}</StatusDot>
         </div>
         <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-gray-300">
           <input
@@ -568,7 +618,7 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
             key={preset.key}
             type="button"
             onClick={() => set(preset.config)}
-            className="rounded-lg border border-gray-800 bg-gray-900/70 p-3 text-left hover:border-blue-700 hover:bg-blue-950/20"
+            className="rounded-lg border border-gray-800 p-3 text-left transition-colors hover:border-gray-600 hover:bg-gray-800/60 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <div className="text-sm font-medium text-gray-200">{preset.label}</div>
             <div className="mt-1 text-xs text-gray-500">{preset.description}</div>
@@ -576,12 +626,12 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
         ))}
       </div>
 
-      <div className="grid gap-3 rounded-lg border border-gray-800 bg-gray-950/60 p-3 sm:grid-cols-4">
-        <CoverageStat label="Batch" value={cfg.batch_size} />
-        <CoverageStat label="Daily cap" value={cfg.daily_endpoint_cap || '∞'} />
-        <CoverageStat label="Recon every" value={`${cfg.recon_interval_hours}h`} />
-        <CoverageStat label="Depth" value={cfg.exploit_depth ? 'Deep' : 'Standard'} accent={cfg.exploit_depth ? 'text-yellow-400' : 'text-gray-200'} />
-      </div>
+      <CardStats className="sm:grid-cols-4">
+        <Stat label="Batch" value={cfg.batch_size} />
+        <Stat label="Daily cap" value={cfg.daily_endpoint_cap || '∞'} />
+        <Stat label="Recon every" value={`${cfg.recon_interval_hours}h`} />
+        <Stat label="Depth" value={cfg.exploit_depth ? 'Deep' : 'Standard'} tone={cfg.exploit_depth ? 'warning' : 'default'} />
+      </CardStats>
 
       <button
         type="button"
@@ -593,7 +643,7 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
       </button>
 
       {showAdvanced && (
-        <div className="space-y-4 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+        <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <NumField label="Batch size" value={cfg.batch_size} min={1} onChange={(n) => set({ batch_size: n })} hint="endpoints / batch" />
             <NumField label="Re-test after (days)" value={cfg.stale_days} onChange={(n) => set({ stale_days: n })} hint="freshness TTL" />
@@ -615,27 +665,29 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
             </label>
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-400">Window (UTC h):</span>
-              <input
+              <Input
+                fullWidth={false}
                 type="number" min={0} max={23} placeholder="start"
                 aria-label="Coverage window start hour (UTC, 0-23)"
                 value={cfg.window_start_hour ?? ''}
                 onChange={(e) => set({ window_start_hour: e.target.value === '' ? null : Number(e.target.value) })}
-                className="w-16 rounded-sm border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+                className="w-20 tabular-nums"
               />
               <span className="text-gray-600">–</span>
-              <input
+              <Input
+                fullWidth={false}
                 type="number" min={0} max={23} placeholder="end"
                 aria-label="Coverage window end hour (UTC, 0-23)"
                 value={cfg.window_end_hour ?? ''}
                 onChange={(e) => set({ window_end_hour: e.target.value === '' ? null : Number(e.target.value) })}
-                className="w-16 rounded-sm border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+                className="w-20 tabular-nums"
               />
               {cfg.window_start_hour !== null && cfg.window_end_hour !== null ? (
-                <span className="text-[11px] text-blue-300">
+                <span className="text-[11px] text-gray-300">
                   = {utcHourToLocalLabel(cfg.window_start_hour)}–{utcHourToLocalLabel(cfg.window_end_hour)} {LOCAL_TZ}
                 </span>
               ) : (
-                <span className="text-[11px] text-gray-600">blank = any</span>
+                <span className="text-[11px] text-gray-500">blank = any</span>
               )}
             </div>
           </div>
@@ -654,14 +706,15 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
                 <button
                   key={d}
                   type="button"
+                  aria-pressed={on}
                   onClick={() => toggleDay(i)}
-                  className={`rounded-sm px-2 py-0.5 text-xs ${on ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                  className={`rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset transition-colors ${on ? 'bg-blue-500/15 text-blue-200 ring-blue-500/40' : 'text-gray-400 ring-gray-700 hover:bg-gray-800'}`}
                 >
                   {d}
                 </button>
               )
             })}
-            <span className="ml-1 text-[11px] text-gray-600">none = every day</span>
+            <span className="ml-1 text-[11px] text-gray-500">none = every day</span>
           </div>
         </div>
       )}
@@ -695,22 +748,18 @@ function NewSurfaceCard({ targetId }: { targetId: string }) {
   if (!loaded || !data || data.total_new === 0) return null
 
   return (
-    <Card className="p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <Radar className="h-5 w-5 text-yellow-400" />
-        <h2 className="text-sm font-medium text-gray-300">New surface</h2>
-        <Badge className="bg-yellow-500/15 text-yellow-400">{data.total_new} in 7 days</Badge>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+    <SectionCard
+      title="New surface"
+      actions={<span className="text-xs tabular-nums text-amber-300">{data.total_new} in 7 days</span>}
+    >
+      <div className="relative -mx-4 -mb-4 overflow-x-auto border-t border-gray-800">
+        <table className={tableStyles.table}>
           <tbody>
             {data.endpoints.slice(0, 15).map((e) => (
-              <tr key={e.id} className="border-b border-gray-800/60">
-                <td className="px-2 py-1.5">
-                  <Badge className={METHOD_BADGE[e.method] || 'bg-gray-700/50 text-gray-300'}>{e.method}</Badge>
-                </td>
-                <td className="px-2 py-1.5 font-mono text-xs text-gray-300">{e.path}</td>
-                <td className="px-2 py-1.5 text-right text-xs text-gray-500">
+              <tr key={e.id} className={tableStyles.row}>
+                <td className="w-16 px-4 py-2 font-mono text-xs font-medium text-gray-400">{e.method}</td>
+                <td className="px-4 py-2 font-mono text-xs text-gray-300">{e.path}</td>
+                <td className="px-4 py-2 text-right text-xs text-gray-500">
                   {e.first_seen_at ? formatDate(e.first_seen_at) : ''}
                 </td>
               </tr>
@@ -718,7 +767,7 @@ function NewSurfaceCard({ targetId }: { targetId: string }) {
           </tbody>
         </table>
       </div>
-    </Card>
+    </SectionCard>
   )
 }
 
@@ -881,17 +930,14 @@ function CoverageAdvisorCard({
       )}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="space-y-3">
-          <div className="flex items-center gap-2">
-            <Sparkles className="h-5 w-5 text-blue-400" />
-            <h2 className="text-sm font-medium text-gray-300">Coverage advisor</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 className="text-sm font-semibold text-gray-100">Coverage advisor</h2>
             {rec && (
-              <Badge className={next === 'wait' ? 'bg-yellow-500/15 text-yellow-400' : 'bg-blue-500/15 text-blue-300'}>
-                {rec.label}
-              </Badge>
+              <StatusDot tone={next === 'wait' ? 'warning' : 'info'}>{rec.label}</StatusDot>
             )}
           </div>
           <div>
-            <div className="text-2xl font-semibold text-white">{coveragePct}</div>
+            <div className="text-2xl font-semibold tracking-tight tabular-nums text-white">{coveragePct}</div>
             <p className="mt-1 text-sm text-gray-400">
               {recommendationReason}
             </p>
@@ -900,7 +946,7 @@ function CoverageAdvisorCard({
           {gaps?.recommendation?.blockers?.length ? (
             <div className="space-y-1">
               {gaps.recommendation.blockers.map((b) => (
-                <div key={b.kind} className="flex items-start gap-2 text-xs text-yellow-300">
+                <div key={b.kind} className="flex items-start gap-2 text-xs text-amber-300">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>
                     {b.message} ({b.count})
@@ -918,7 +964,7 @@ function CoverageAdvisorCard({
               ))}
             </div>
           ) : null}
-          <details className="rounded-lg border border-gray-800 bg-gray-950/40">
+          <details className="rounded-lg border border-gray-800">
             <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-400 hover:text-gray-200">
               Why this recommendation?
             </summary>
@@ -934,9 +980,9 @@ function CoverageAdvisorCard({
             </div>
           )}
           {decision && (
-            <div className="grid gap-2 rounded-sm border border-gray-800 bg-gray-950/50 p-2 text-xs sm:grid-cols-2">
+            <div className="grid gap-3 text-xs sm:grid-cols-2">
               <div>
-                <div className="text-[11px] uppercase text-gray-500">Scheduler decision</div>
+                <div className={SUBHEADING}>Scheduler decision</div>
                 <div className="mt-1 text-gray-300">
                   {decision.action || 'none'}{decision.blocked_by ? ` · blocked by ${decision.blocked_by.replace(/_/g, ' ')}` : ''}
                 </div>
@@ -951,7 +997,7 @@ function CoverageAdvisorCard({
                 )}
               </div>
               <div>
-                <div className="text-[11px] uppercase text-gray-500">Budget remaining</div>
+                <div className={SUBHEADING}>Budget remaining</div>
                 <div className="mt-1 flex flex-wrap gap-1.5">
                   <Badge className="bg-gray-800 text-gray-300">
                     daily: {decision.daily_cap_remaining ?? 'unlimited'}
@@ -974,7 +1020,7 @@ function CoverageAdvisorCard({
           )}
           {gaps?.family_coverage && Object.keys(gaps.family_coverage).length > 0 && (
             <div className="space-y-1">
-              <div className="text-[11px] uppercase text-gray-500">Family proof coverage</div>
+              <div className={SUBHEADING}>Family proof coverage</div>
               <div className="flex flex-wrap gap-1.5 text-xs">
                 {Object.entries(gaps.family_coverage).map(([fam, c]) => {
                   const coverage = normalizeFamilyCoverage(c as unknown as Record<string, unknown>)
@@ -993,7 +1039,7 @@ function CoverageAdvisorCard({
           )}
           {gaps?.confidence_distribution && Object.keys(gaps.confidence_distribution).length > 0 && (
             <div className="space-y-1">
-              <div className="text-[11px] uppercase text-gray-500" title="How trustworthy the findings are: 'verified' = proven by a deterministic re-test; 'suspected' = reported but not yet proven.">
+              <div className={SUBHEADING} title="How trustworthy the findings are: 'verified' = proven by a deterministic re-test; 'suspected' = reported but not yet proven.">
                 Proof quality (active findings)
               </div>
               <div className="flex flex-wrap gap-1.5 text-xs">
@@ -1028,35 +1074,33 @@ function CoverageAdvisorCard({
           <Button onClick={queueImprove} disabled={!!busy || next === 'wait' || activeApprovalMissing}>
             <Icon className="h-4 w-4" /> {busy === 'improve' ? 'Queuing…' : 'Improve coverage'}
           </Button>
-          <details className="rounded-lg border border-gray-800 bg-gray-950/40">
+          <details className="rounded-lg border border-gray-800">
             <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-400 hover:text-gray-200">
               Customize next batch
             </summary>
             <div className="space-y-2 border-t border-gray-800 p-3">
-              <label className="block space-y-1 text-xs text-gray-500">
+              <label className="block space-y-1 text-xs text-gray-400">
                 <span>Security check</span>
-                <select
+                <Select
                   value={checkFamily}
                   onChange={(e) => setCheckFamily(e.target.value)}
-                  className="w-full rounded-sm border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
                 >
                   {checkFamilyOptions.map((option) => (
                     <option key={option.value} value={option.value} disabled={option.disabled}>
                       {option.label}
                     </option>
                   ))}
-                </select>
+                </Select>
               </label>
-              <label className="block space-y-1 text-xs text-gray-500">
+              <label className="block space-y-1 text-xs text-gray-400">
                 <span>Endpoints</span>
-                <select
+                <Select
                   value={endpointFilter}
                   onChange={(e) => setEndpointFilter(e.target.value)}
-                  className="w-full rounded-sm border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
                 >
                   <option value="">All endpoints</option>
                   <option value="api">API-like only</option>
-                </select>
+                </Select>
               </label>
               {selectedFamilyOption && (
                 <div className="flex flex-wrap items-center gap-1.5 text-xs text-gray-400">
@@ -1068,7 +1112,7 @@ function CoverageAdvisorCard({
               )}
             </div>
           </details>
-          <details className="rounded-lg border border-gray-800 bg-gray-950/40">
+          <details className="rounded-lg border border-gray-800">
             <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-400 hover:text-gray-200">
               Advanced coverage actions
             </summary>
@@ -1090,13 +1134,13 @@ function CoverageAdvisorCard({
       </div>
       {gaps?.recommended_campaigns && gaps.recommended_campaigns.length > 0 && (
         <div className="space-y-1.5 border-t border-gray-800 pt-3">
-          <div className="text-[11px] uppercase text-gray-500">Recommended follow-up work</div>
-          <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
+          <div className={SUBHEADING}>Recommended follow-up work</div>
+          <div className="grid gap-x-4 gap-y-1.5 sm:grid-cols-2 xl:grid-cols-3">
             {gaps.recommended_campaigns.slice(0, 6).map((c) => (
-              <div key={c.campaign} className="flex items-start gap-2 rounded-sm border border-gray-800 bg-gray-950/40 p-2 text-xs">
+              <div key={c.campaign} className="flex items-start gap-2 py-1 text-xs">
                 <Badge className={
                   c.priority === 'high' ? 'bg-red-500/15 text-red-300'
-                  : c.priority === 'medium' ? 'bg-yellow-500/15 text-yellow-300'
+                  : c.priority === 'medium' ? 'bg-amber-500/15 text-amber-300'
                   : 'bg-gray-800 text-gray-400'}>
                   {c.label || c.campaign}
                 </Badge>
@@ -1128,15 +1172,11 @@ function GapsCard({ gaps, loading }: { gaps: AsmGaps | null; loading: boolean })
   const sample = gaps.sample_gaps.slice(0, 8)
 
   return (
-    <Card className="p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <AlertTriangle className="h-5 w-5 text-yellow-400" />
-        <h2 className="text-sm font-medium text-gray-300">Coverage gaps</h2>
-      </div>
-
-      <div className="grid gap-3 md:grid-cols-2">
-        <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3">
-          <div className="mb-2 text-xs uppercase text-gray-500">Auth states</div>
+    <SectionCard title="Coverage gaps">
+      <div className="space-y-4">
+      <div className="grid gap-4 md:grid-cols-2">
+        <div>
+          <div className={`mb-2 ${SUBHEADING}`}>Auth states</div>
           {authRows.length === 0 ? (
             <div className="text-sm text-gray-500">No inventory yet.</div>
           ) : (
@@ -1144,7 +1184,7 @@ function GapsCard({ gaps, loading }: { gaps: AsmGaps | null; loading: boolean })
               {authRows.map(([state, counts]) => (
                 <div key={state} className="flex items-center justify-between gap-3 text-sm">
                   <span className="text-gray-300">{state}</span>
-                  <span className="text-xs text-gray-500">
+                  <span className="text-xs tabular-nums text-gray-500">
                     tested {counts.tested || 0} · untested {(counts.untested || 0) + (counts.stale || 0)}
                   </span>
                 </div>
@@ -1152,8 +1192,8 @@ function GapsCard({ gaps, loading }: { gaps: AsmGaps | null; loading: boolean })
             </div>
           )}
         </div>
-        <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3">
-          <div className="mb-2 text-xs uppercase text-gray-500">Parameter shapes</div>
+        <div>
+          <div className={`mb-2 ${SUBHEADING}`}>Parameter shapes</div>
           <div className="flex flex-wrap gap-2">
             {Object.entries(gaps.by_param_location).length ? Object.entries(gaps.by_param_location).map(([loc, count]) => (
               <Badge key={loc} className="bg-gray-800 text-gray-300">{loc}: {count}</Badge>
@@ -1163,44 +1203,36 @@ function GapsCard({ gaps, loading }: { gaps: AsmGaps | null; loading: boolean })
       </div>
 
       {sample.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-800 text-left text-xs uppercase text-gray-500">
-                <th className="px-2 py-2 font-medium">Endpoint</th>
-                <th className="px-2 py-2 font-medium">State</th>
-                <th className="px-2 py-2 font-medium">Auth</th>
-                <th className="px-2 py-2 font-medium">Reason</th>
+        <div className="relative -mx-4 -mb-4 overflow-x-auto border-t border-gray-800">
+          <table className={tableStyles.table}>
+            <thead className={tableStyles.head}>
+              <tr>
+                <th scope="col" className={tableStyles.headerCell}>Endpoint</th>
+                <th scope="col" className={tableStyles.headerCell}>State</th>
+                <th scope="col" className={tableStyles.headerCell}>Auth</th>
+                <th scope="col" className={tableStyles.headerCell}>Reason</th>
               </tr>
             </thead>
             <tbody>
               {sample.map((e) => (
-                <tr key={e.id} className="border-b border-gray-800/60">
-                  <td className="px-2 py-2 font-mono text-xs text-gray-300">
+                <tr key={e.id} className={tableStyles.row}>
+                  <td className="px-4 py-2 font-mono text-xs text-gray-300">
                     <span className="mr-2 text-gray-500">{e.method}</span>{e.path}
                   </td>
-                  <td className="px-2 py-2">
-                    <Badge className={STATUS_BADGE[e.test_status] || 'bg-gray-700/50 text-gray-300'}>{e.test_status}</Badge>
+                  <td className="px-4 py-2">
+                    <StatusDot tone={STATUS_TONE[e.test_status] || 'neutral'}>{e.test_status.replace(/_/g, ' ')}</StatusDot>
                   </td>
-                  <td className="px-2 py-2 text-gray-400">{e.auth_state || 'anonymous'}</td>
-                  <td className="px-2 py-2 text-gray-400">{e.last_attempt_status || e.last_verdict || 'not attempted'}</td>
+                  <td className="px-4 py-2 text-gray-400">{e.auth_state || 'anonymous'}</td>
+                  <td className="px-4 py-2 text-gray-400">{e.last_attempt_status || e.last_verdict || 'not attempted'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
-    </Card>
+      </div>
+    </SectionCard>
   )
-}
-
-const TIMELINE_BADGE: Record<string, string> = {
-  active_scan: 'bg-blue-500/15 text-blue-300',
-  scheduler_decision: 'bg-gray-800 text-gray-300',
-  next_eligible: 'bg-yellow-500/15 text-yellow-300',
-  scheduled_wave: 'bg-purple-500/15 text-purple-300',
-  last_scheduler_decision: 'bg-gray-800 text-gray-400',
-  activity: 'bg-gray-800 text-gray-300',
 }
 
 function ActivityCard({
@@ -1248,16 +1280,13 @@ function ActivityCard({
   }
 
   return (
-    <Card className="p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <Activity className="h-5 w-5 text-blue-400" />
-        <h2 className="text-sm font-medium text-gray-300">Recent coverage activity</h2>
-      </div>
+    <SectionCard title="Recent coverage activity">
+      <div className="space-y-3">
       {schedulerState && (
-        <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3">
+        <div className="border-b border-gray-800 pb-3">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[11px] uppercase text-gray-500">Current automation status</div>
+              <div className={SUBHEADING}>Current automation status</div>
               <div className="mt-1 text-sm text-gray-200">{decisionLabel}</div>
               <div className="mt-1 text-xs text-gray-500">
                 {decision?.reason || lastDecision?.reason || 'No scheduler reason has been recorded yet.'}
@@ -1266,7 +1295,7 @@ function ActivityCard({
                 <div className="mt-1 text-xs text-gray-500">Next eligible: {formatDate(decision.next_eligible_at)}</div>
               )}
               {lastDecision?.recorded_at && (
-                <div className="mt-1 text-xs text-gray-600">
+                <div className="mt-1 text-xs text-gray-500">
                   Last recorded: {formatDate(lastDecision.recorded_at)}
                   {lastDecision.source ? ` · ${lastDecision.source}` : ''}
                 </div>
@@ -1292,7 +1321,7 @@ function ActivityCard({
         </div>
       )}
       {timeline && timeline.length > 0 ? (
-        <div className="space-y-2">
+        <div className="divide-y divide-gray-800">
           {timeline.map((event) => {
             const action = event.remediation
             const actionHref = safeRemediationHref(action?.href)
@@ -1300,14 +1329,14 @@ function ActivityCard({
               .replace(/^Scheduler decision:/i, 'Automation chose:')
               .replace(/\bcampaign\b/gi, 'coverage run')
             const content = (
-              <div className="flex items-start justify-between gap-3 rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 hover:border-gray-700">
+              <div className="flex items-start justify-between gap-3 py-2.5">
                 <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                     <span className="text-sm text-gray-200">{eventTitle}</span>
                     {event.status && (
-                      <Badge className={TIMELINE_BADGE[event.kind] || STATUS_BADGE[event.status] || 'bg-gray-700/50 text-gray-300'}>
+                      <StatusDot tone={TIMELINE_TONE[event.kind] || STATUS_TONE[event.status] || 'neutral'}>
                         {event.status.replace(/_/g, ' ')}
-                      </Badge>
+                      </StatusDot>
                     )}
                   </div>
                   <div className="mt-1 text-xs text-gray-500">{event.detail || 'No detail recorded.'}</div>
@@ -1343,24 +1372,22 @@ function ActivityCard({
       ) : activity.length === 0 ? (
         <EmptyState message="No coverage activity yet" hint="Run discovery or improve coverage to start building this target’s activity history." />
       ) : (
-        <div className="space-y-2">
+        <div className="divide-y divide-gray-800">
           {activity.slice(0, 8).map((item) => {
             const label = item.scan_role === 'asm_recon' ? 'Discovery' : 'Test batch'
             return (
               <Link
                 key={item.id}
                 href={`/scans/${item.id}`}
-                className="flex items-center justify-between gap-3 rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 hover:border-gray-700"
+                className="-mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-2.5 transition-colors hover:bg-gray-800/40"
               >
                 <div>
                   <div className="text-sm text-gray-200">{label}</div>
                   <div className="text-xs text-gray-500">{formatDate(item.created_at)}</div>
                 </div>
                 <div className="text-right">
-                  <Badge className={STATUS_BADGE[item.status] || 'bg-gray-700/50 text-gray-300'}>
-                    {item.status}
-                  </Badge>
-                  <div className="mt-1 text-xs text-gray-500">
+                  <ScanStatusBadge status={item.status} />
+                  <div className="mt-1 text-xs tabular-nums text-gray-500">
                     {item.findings_count || 0} findings
                   </div>
                 </div>
@@ -1369,25 +1396,26 @@ function ActivityCard({
           })}
         </div>
       )}
-    </Card>
+      </div>
+    </SectionCard>
   )
 }
 
 function LeadRow({ item }: { item: HypothesisReportItem }) {
   const displayStatus = item.effective_status || item.status
   return (
-    <div className="rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2">
+    <div className="py-2.5">
       <div className="flex flex-wrap items-center gap-2">
         <span className="break-all font-mono text-sm text-gray-100">{item.family}</span>
-        <Badge className={STATUS_BADGE[displayStatus] || 'bg-gray-700/50 text-gray-300'}>{displayStatus}</Badge>
+        <HypothesisStatusBadge status={displayStatus} />
         {item.severity_guess && <Badge className="bg-amber-500/15 text-amber-300">{item.severity_guess}</Badge>}
-        <Badge className="bg-gray-800 text-gray-300">{item.source}</Badge>
+        <span className="text-xs text-gray-400">{item.source}</span>
       </div>
       <div className="mt-1 wrap-break-word text-sm text-gray-400">{item.title || item.dedupe_key}</div>
-      <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
-        <Badge className="bg-gray-800 text-gray-300">{Math.round((item.confidence || 0) * 100)}% confidence</Badge>
-        <Badge className="bg-gray-800 text-gray-300">endorse {item.endorsement_count}</Badge>
-        <Badge className="bg-gray-800 text-gray-300">refute {item.refutation_count}</Badge>
+      <div className="mt-1 flex flex-wrap gap-x-3 text-xs tabular-nums text-gray-500">
+        <span>{Math.round((item.confidence || 0) * 100)}% confidence</span>
+        <span>endorse {item.endorsement_count}</span>
+        <span>refute {item.refutation_count}</span>
       </div>
     </div>
   )
@@ -1406,36 +1434,32 @@ function HypothesisLeadsCard({
   const missing = report?.missing_preconditions || []
 
   return (
-    <Card className="p-4 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Crosshair className="h-5 w-5 text-amber-300" />
-          <h2 className="text-sm font-medium text-gray-300">Proof leads</h2>
-        </div>
+    <SectionCard
+      title="Proof leads"
+      actions={
         <Link href={`/settings/arsenal?target_id=${targetId}`} className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300">
           Hypothesis Board <ExternalLink className="h-3.5 w-3.5" />
         </Link>
-      </div>
+      }
+    >
       {!report || report.summary.considered_count === 0 ? (
         <EmptyState message="No proof leads for this target" hint="Graph, source, AI, Model Intake, and scanner signals will appear here after they create runtime-proof hypotheses." />
       ) : (
         <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <CoverageStat label="considered" value={report.summary.considered_count} />
-            <CoverageStat label="hot leads" value={topLeads.length} accent="text-amber-300" />
-            <CoverageStat label="blockers" value={blockers.length} accent="text-red-300" />
-            <CoverageStat label="graph nodes" value={graphSummary?.node_count ?? 0} accent="text-cyan-300" />
-          </div>
+          <CardStats className="sm:grid-cols-4">
+            <Stat label="Considered" value={report.summary.considered_count} />
+            <Stat label="Hot leads" value={topLeads.length} tone={topLeads.length ? 'warning' : 'default'} />
+            <Stat label="Blockers" value={blockers.length} tone={blockers.length ? 'danger' : 'default'} />
+            <Stat label="Graph nodes" value={graphSummary?.node_count ?? 0} />
+          </CardStats>
           {topLeads.length > 0 ? (
-            <div className="grid gap-2">
+            <div className="divide-y divide-gray-800">
               {topLeads.slice(0, 3).map((item) => (
                 <LeadRow key={item.id} item={item} />
               ))}
             </div>
           ) : (
-            <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3 text-sm text-gray-500">
-              No unclaimed leads in the bounded report.
-            </div>
+            <p className="text-sm text-gray-500">No unclaimed leads in the bounded report.</p>
           )}
           {missing.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
@@ -1448,7 +1472,7 @@ function HypothesisLeadsCard({
           )}
         </div>
       )}
-    </Card>
+    </SectionCard>
   )
 }
 
@@ -1560,36 +1584,42 @@ function TargetView({ targetId }: { targetId: string }) {
   const coverageDenominator = asmCoverageDenominator(coverage)
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={() => setFilter('target_id', undefined)}
-          className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-200"
-        >
-          <ArrowLeft className="h-4 w-4" /> All targets
-        </button>
-        <div className="ml-auto flex items-center gap-2">
-          <Link
-            href={`/findings?target_id=${targetId}&status=active&freshness=all`}
-            className="inline-flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300"
-          >
-            View findings <ExternalLink className="h-3.5 w-3.5" />
-          </Link>
-          <Button variant="ghost" size="sm" onClick={load}>
-            <RefreshCw className="h-4 w-4" /> Refresh
-          </Button>
-          <button
-            type="button"
-            onClick={openHuntForGaps}
-            disabled={!target}
-            title="Open Hunt with this target and a coverage-gap objective."
-            className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            <BrainCircuit className="h-4 w-4" /> Open Hunt
-          </button>
-        </div>
-      </div>
+    <div>
+      {/* Back to the rollup is a shallow filter change, like every other control on this page. */}
+      <button
+        type="button"
+        onClick={() => setFilter('target_id', undefined)}
+        className="mb-2 -ml-0.5 inline-flex items-center gap-0.5 rounded-sm text-xs font-medium text-gray-400 transition-colors hover:text-gray-100 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+      >
+        <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" /> All targets
+      </button>
+      <PageHeader
+        title={target ? boundedTargetDisplay(target) : 'Target coverage'}
+        description={target?.root_domain ? `Endpoint coverage for ${target.root_domain}` : 'Endpoint coverage for this target'}
+        actions={
+          <>
+            <Link
+              href={`/findings?target_id=${targetId}&status=active&freshness=all`}
+              className={buttonClasses('ghost', 'md')}
+            >
+              View findings <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+            </Link>
+            <Button variant="secondary" onClick={load} disabled={loading}>
+              <RefreshCw className="h-4 w-4" aria-hidden="true" /> Refresh
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={openHuntForGaps}
+              disabled={!target}
+              title="Open Hunt with this target and a coverage-gap objective."
+            >
+              <BrainCircuit className="h-4 w-4" aria-hidden="true" /> Open Hunt
+            </Button>
+          </>
+        }
+      />
+
+      <div className="space-y-4">
 
       <CoverageAdvisorCard
         targetId={targetId}
@@ -1604,11 +1634,11 @@ function TargetView({ targetId }: { targetId: string }) {
       />
 
       {coverage && (
-        <Card className="p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-gray-400">Coverage</span>
+        <Card className="p-4 space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <h2 className="text-sm font-semibold text-gray-100">Coverage</h2>
             <div className="text-right">
-              <div className="text-sm text-gray-300">
+              <div className="text-sm tabular-nums text-gray-300">
                 {pct(resolvedCoverage(coverage))} · {currentCompletedVariantCount(coverage)} of {coverageDenominator.value} route variants currently completed
               </div>
               <div className="text-xs text-gray-500">
@@ -1617,17 +1647,17 @@ function TargetView({ targetId }: { targetId: string }) {
             </div>
           </div>
           <CoverageBar coverage={resolvedCoverage(coverage)} />
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-8">
-            <CoverageStat label="Canonical routes" value={coverage.metric_contract?.inventory.canonical_routes ?? coverageDenominator.value} />
-            <CoverageStat label="Route variants" value={coverageDenominator.value} />
-            <CoverageStat label="Ever completed" value={coverage.metric_contract?.examination.variants_ever_completed ?? coverage.tested} accent="text-green-400" />
-            <CoverageStat label="Fresh now" value={coverage.metric_contract?.examination.current_fresh_variants ?? coverage.tested} accent="text-blue-400" />
-            <CoverageStat label="In progress" value={coverage.in_progress} accent="text-blue-400" />
-            <CoverageStat label="Stale" value={coverage.stale} accent="text-yellow-400" />
-            <CoverageStat label="Attempts" value={coverage.metric_contract?.execution.attempts ?? coverage.attempted ?? 0} />
-            <CoverageStat label="Proof-bearing variants" value={coverage.metric_contract?.proof.proof_bearing_variants ?? 0} accent="text-emerald-400" />
-          </div>
-          <details className="rounded-sm border border-gray-800 bg-gray-950/40 p-3 text-xs text-gray-400">
+          <CardStats className="sm:grid-cols-4 xl:grid-cols-8">
+            <Stat label="Canonical routes" value={coverage.metric_contract?.inventory.canonical_routes ?? coverageDenominator.value} />
+            <Stat label="Route variants" value={coverageDenominator.value} />
+            <Stat label="Ever completed" value={coverage.metric_contract?.examination.variants_ever_completed ?? coverage.tested} />
+            <Stat label="Fresh now" value={coverage.metric_contract?.examination.current_fresh_variants ?? coverage.tested} />
+            <Stat label="In progress" value={coverage.in_progress} />
+            <Stat label="Stale" value={coverage.stale} tone={coverage.stale ? 'warning' : 'default'} />
+            <Stat label="Attempts" value={coverage.metric_contract?.execution.attempts ?? coverage.attempted ?? 0} />
+            <Stat label="Proof-bearing variants" value={coverage.metric_contract?.proof.proof_bearing_variants ?? 0} tone={coverage.metric_contract?.proof.proof_bearing_variants ? 'success' : 'default'} />
+          </CardStats>
+          <details className="text-xs text-gray-400">
             <summary className="cursor-pointer font-medium text-gray-300">How coverage is counted</summary>
             <div className="mt-2 space-y-1">
               <p><strong>Canonical route</strong>: one normalized path.</p>
@@ -1652,8 +1682,8 @@ function TargetView({ targetId }: { targetId: string }) {
         />
       </div>
 
-      <details className="rounded-xl border border-gray-800 bg-gray-900/40">
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+      <details className="rounded-lg border border-gray-800 bg-gray-900">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-gray-100 hover:text-white">
           Advanced: proof leads and continuous-testing policy
         </summary>
         <div className="space-y-4 border-t border-gray-800 p-4">
@@ -1665,29 +1695,30 @@ function TargetView({ targetId }: { targetId: string }) {
         </div>
       </details>
 
-      <details className="rounded-xl border border-gray-800 bg-gray-900/40">
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
-          Endpoint inventory <span className="ml-2 text-xs font-normal text-gray-500">({endpoints.length} shown)</span>
+      <details className="rounded-lg border border-gray-800 bg-gray-900">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-gray-100 hover:text-white">
+          Endpoint inventory <span className="ml-2 text-xs font-normal tabular-nums text-gray-500">({endpoints.length} shown)</span>
         </summary>
         <div className="space-y-4 border-t border-gray-800 p-4">
-        <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-gray-300">
-          <div className="font-medium text-blue-200">Inventory is a worklist, not a list of confirmed routes</div>
+        <div className="text-xs text-gray-300">
+          <div className="font-medium text-gray-200">Inventory is a worklist, not a list of confirmed routes</div>
           <p className="mt-1 text-gray-400">
             {inventorySemantics?.route_claim || 'Discovery and imported route variants remain candidates until response or reachability evidence establishes them.'}
             {' '}This information does not affect the DAST score or grade.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <select
+          <Select
+            fullWidth={false}
             value={filters.status ?? ''}
             onChange={(e) => setFilter('status', e.target.value || undefined)}
             aria-label="Filter endpoints by status"
-            className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="min-w-44"
           >
             {STATUS_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
-          </select>
+          </Select>
           <span className="text-xs text-gray-500">
             {endpoints.length} endpoint{endpoints.length === 1 ? '' : 's'} shown (top 200 by priority)
           </span>
@@ -1703,54 +1734,52 @@ function TargetView({ targetId }: { targetId: string }) {
             hint="No inventory endpoints match this filter. Try a different status or run a coverage scan to discover more surface."
           />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-800 text-left text-xs uppercase text-gray-500">
-                  <th className="px-3 py-2 font-medium">Method</th>
-                  <th className="px-3 py-2 font-medium">Path</th>
-                  <th className="px-3 py-2 font-medium">Status</th>
-                  <th className="px-3 py-2 font-medium text-right">Priority</th>
-                  <th className="px-3 py-2 font-medium">Provenance</th>
-                  <th className="px-3 py-2 font-medium">Reachability</th>
-                  <th className="px-3 py-2 font-medium">Auth</th>
-                  <th className="px-3 py-2 font-medium">Last tested</th>
-                  <th className="px-3 py-2 font-medium">Verdict</th>
+          <div className="relative -mx-4 -mb-4 overflow-x-auto border-t border-gray-800">
+            <table className={tableStyles.table}>
+              <thead className={tableStyles.head}>
+                <tr>
+                  <th scope="col" className={tableStyles.headerCell}>Method</th>
+                  <th scope="col" className={tableStyles.headerCell}>Path</th>
+                  <th scope="col" className={tableStyles.headerCell}>Status</th>
+                  <th scope="col" className={`${tableStyles.headerCell} text-right`}>Priority</th>
+                  <th scope="col" className={tableStyles.headerCell}>Provenance</th>
+                  <th scope="col" className={tableStyles.headerCell}>Reachability</th>
+                  <th scope="col" className={tableStyles.headerCell}>Auth</th>
+                  <th scope="col" className={tableStyles.headerCell}>Last tested</th>
+                  <th scope="col" className={tableStyles.headerCell}>Verdict</th>
                 </tr>
               </thead>
               <tbody>
                 {endpoints.map((e) => (
-                  <tr key={e.id} className="border-b border-gray-800/60 hover:bg-gray-800/30">
-                    <td className="px-3 py-2">
-                      <Badge className={METHOD_BADGE[e.method] || 'bg-gray-700/50 text-gray-300'}>{e.method}</Badge>
-                    </td>
-                    <td className="px-3 py-2 font-mono text-xs text-gray-300">
+                  <tr key={e.id} className={tableStyles.row}>
+                    <td className="px-4 py-2 font-mono text-xs font-medium text-gray-400">{e.method}</td>
+                    <td className="px-4 py-2 font-mono text-xs text-gray-300">
                       {e.path}
                       {e.param_shape ? <span className="text-gray-600"> ?{e.param_shape}</span> : null}
                     </td>
-                    <td className="px-3 py-2">
-                      <Badge className={STATUS_BADGE[e.test_status] || 'bg-gray-700/50 text-gray-300'}>
+                    <td className="px-4 py-2">
+                      <StatusDot tone={STATUS_TONE[e.test_status] || 'neutral'}>
                         {e.test_status.replace(/_/g, ' ')}
-                      </Badge>
+                      </StatusDot>
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-gray-400">{e.priority_score}</td>
-                    <td className="px-3 py-2" title={e.provenance_explanation}>
-                      <Badge className={PROVENANCE_BADGE[e.provenance_kind || 'unknown'] || PROVENANCE_BADGE.unknown}>
+                    <td className="px-4 py-2 text-right tabular-nums text-gray-400">{e.priority_score}</td>
+                    <td className="px-4 py-2" title={e.provenance_explanation}>
+                      <StatusDot tone={PROVENANCE_TONE[e.provenance_kind || 'unknown'] || 'neutral'}>
                         {e.provenance_label || 'Unknown source'}
-                      </Badge>
-                      <div className="mt-1 text-[11px] text-gray-600">{e.source || 'unspecified'}</div>
+                      </StatusDot>
+                      <div className="mt-0.5 pl-3 text-[11px] text-gray-500">{e.source || 'unspecified'}</div>
                     </td>
-                    <td className="px-3 py-2" title={e.reachability_explanation}>
-                      <Badge className={REACHABILITY_BADGE[e.reachability_state || 'not_checked'] || REACHABILITY_BADGE.not_checked}>
+                    <td className="px-4 py-2" title={e.reachability_explanation}>
+                      <StatusDot tone={REACHABILITY_TONE[e.reachability_state || 'not_checked'] || 'neutral'}>
                         {e.reachability_label || 'Not checked'}
-                      </Badge>
+                      </StatusDot>
                       {e.last_http_status ? (
-                        <div className="mt-1 text-[11px] text-gray-600">HTTP {e.last_http_status}</div>
+                        <div className="mt-0.5 pl-3 text-[11px] tabular-nums text-gray-500">HTTP {e.last_http_status}</div>
                       ) : null}
                     </td>
-                    <td className="px-3 py-2 text-gray-400">{e.auth_state || '—'}</td>
-                    <td className="px-3 py-2 text-gray-400">{e.last_tested_at ? formatDate(e.last_tested_at) : '—'}</td>
-                    <td className="px-3 py-2 text-gray-400">{e.last_verdict || '—'}</td>
+                    <td className="px-4 py-2 text-gray-400">{e.auth_state || '—'}</td>
+                    <td className="px-4 py-2 text-gray-400">{e.last_tested_at ? formatDate(e.last_tested_at) : '—'}</td>
+                    <td className="px-4 py-2 text-gray-400">{e.last_verdict || '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1772,7 +1801,7 @@ function TargetView({ targetId }: { targetId: string }) {
               checks over them as a background <code className="text-gray-300">asm_batch</code> scan.
             </p>
             {workerCount === 0 && (
-              <p className="text-yellow-400">
+              <p className="text-amber-300">
                 No workers are running — the batch will stay pending until you scale workers up.
               </p>
             )}
@@ -1800,6 +1829,7 @@ function TargetView({ targetId }: { targetId: string }) {
         onConfirm={runTest}
         onCancel={() => setConfirmOpen(false)}
       />
+      </div>
     </div>
   )
 }
@@ -1815,17 +1845,7 @@ function AsmContent() {
   }, [])
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Crosshair className="h-6 w-6 text-blue-500" />
-        <div>
-          <h1 className="text-2xl font-bold text-white">Coverage</h1>
-          <p className="text-sm text-gray-500">
-            How much of each target’s discovered endpoints have been security-tested — tracked over time (Continuous ASM).
-          </p>
-        </div>
-      </div>
-
+    <div>
       {filters.target_id ? (
         <TargetView targetId={String(filters.target_id)} />
       ) : (

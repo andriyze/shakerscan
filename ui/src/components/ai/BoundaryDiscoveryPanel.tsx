@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { buttonClasses } from '@/components/ui'
 import {
   discoverBoundaryDrafts, prepareBoundaryCandidate,
   type BoundaryDiscovery, type BoundaryDiscoveryDraft,
@@ -61,9 +62,9 @@ export function BoundaryDiscoveryPanel({ huntId, canPrepare, targetEndpoint, onP
       if (current === generation.current) setBusy(false)
     }
   }
-  const button = 'rounded-lg border border-blue-500/50 px-3 py-2 text-sm text-blue-100 disabled:opacity-40'
-  return <div className="space-y-3 rounded-lg border border-gray-700 p-3">
-    <h3 className="font-medium text-white">Discover from Hunt traffic</h3>
+  const button = buttonClasses('secondary', 'md')
+  return <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
+    <h3 className="text-sm font-medium text-gray-100">Discover from Hunt traffic</h3>
     <p className="text-sm text-gray-400">Review possible read boundaries from stored captures. Confirm the application relationship, controlled fixtures and principal facts before verification.</p>
     <button className={button} disabled={!huntId || busy} onClick={discover}>Discover boundary drafts</button>
     {error && <p role="alert" className="text-sm text-red-300">{error}</p>}

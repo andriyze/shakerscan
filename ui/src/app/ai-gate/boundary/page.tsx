@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
-import { Card } from '@/components/ui'
+import { Card, PageHeader, buttonClasses } from '@/components/ui'
 import { BoundaryDiscoveryPanel } from '@/components/ai/BoundaryDiscoveryPanel'
 import { getAITargets, getScan, type AITarget, type Scan } from '@/lib/api'
 import { getHuntV2, type HuntV2 } from '@/lib/huntV2'
@@ -21,8 +21,8 @@ type Environment = 'preview' | 'staging' | 'development'
 type Profile = 'smoke' | 'trace' | 'standard' | 'deep'
 type PrincipalKey = keyof BoundaryPrincipal
 
-const inputStyle = 'w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden'
-const buttonStyle = 'rounded-lg border border-blue-500/50 bg-blue-500/15 px-3 py-2 text-sm font-medium text-blue-100 hover:bg-blue-500/25 disabled:cursor-not-allowed disabled:opacity-40'
+const inputStyle = 'w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 shadow-xs focus:border-blue-500 focus:outline-hidden focus:ring-2 focus:ring-blue-500/40'
+const buttonStyle = buttonClasses('secondary', 'md')
 const emptyPrincipal = (): BoundaryPrincipal => ({ role: '', subject: '', tenant: '', resource_id: '' })
 const principalFields: Array<{ key: PrincipalKey; label: string }> = [
   { key: 'role', label: 'Role' }, { key: 'subject', label: 'Subject' },
@@ -299,21 +299,23 @@ function BoundaryWorkflow() {
   }
 
   return (
-    <div className="space-y-5 p-6 lg:p-8">
-      <div>
-        <Link href="/ai-gate" className="text-sm text-blue-300 hover:text-blue-200">← AI Gate</Link>
-        <h1 className="mt-2 text-2xl font-bold text-white">Agent boundary verification</h1>
-        <p className="mt-1 max-w-3xl text-sm text-gray-400">
+    <div className="space-y-5">
+      <PageHeader
+        backHref="/ai-gate"
+        backLabel="AI Gate"
+        title="Agent boundary verification"
+        className="mb-0"
+        description={<>
           Review one Hunt candidate, supply two controlled principals and any missing business rule,
           then submit the existing deterministic AI Boundary verifier. Export a versioned regression
           after a completed scan and compare a later run against the same allowed workflows.
-        </p>
-      </div>
+        </>}
+      />
       {error && <div role="alert" className="rounded-lg border border-red-500/40 bg-red-950/40 p-3 text-sm text-red-200">{error}</div>}
-      {notice && <div role="status" className="rounded-lg border border-blue-500/30 bg-blue-950/30 p-3 text-sm text-blue-100">{notice}</div>}
+      {notice && <div role="status" className="rounded-lg border border-gray-700 bg-gray-900 p-3 text-sm text-gray-200">{notice}</div>}
 
-      <Card className="space-y-4 p-5">
-        <h2 className="text-lg font-semibold text-white">1. Choose a Hunt candidate and AI target</h2>
+      <Card className="space-y-4 p-4">
+        <h2 className="text-sm font-semibold text-gray-100">1. Choose a Hunt candidate and AI target</h2>
         <div className="grid gap-3 xl:grid-cols-2">
           <label className="space-y-1 text-sm text-gray-300">Hunt ID
             <div className="flex gap-2"><input className={inputStyle} value={huntId} onChange={(event) => { setHuntId(event.target.value); setHunt(null); setContext(null); invalidateProposal() }} placeholder="Hunt UUID" />
@@ -349,8 +351,8 @@ function BoundaryWorkflow() {
         </div>}
       </Card>
 
-      <Card className="space-y-4 p-5">
-        <h2 className="text-lg font-semibold text-white">2. Confirm principal and policy facts</h2>
+      <Card className="space-y-4 p-4">
+        <h2 className="text-sm font-semibold text-gray-100">2. Confirm principal and policy facts</h2>
         <p className="text-sm text-gray-400">These values are declarations for a proposed test. The verifier establishes the actual bindings and backend effect.</p>
         <div className="grid gap-4 xl:grid-cols-2">
           {(['owner', 'attacker'] as const).map((slot) => <div key={slot} className="space-y-3 rounded-lg border border-gray-800 p-3">
@@ -371,8 +373,8 @@ function BoundaryWorkflow() {
         </div>}
       </Card>
 
-      <Card className="space-y-4 p-5">
-        <h2 className="text-lg font-semibold text-white">3. Verify the boundary</h2>
+      <Card className="space-y-4 p-4">
+        <h2 className="text-sm font-semibold text-gray-100">3. Verify the boundary</h2>
         <label className="block space-y-1 text-sm text-gray-300">Boundary fixture base · JSON, no credentials
           <textarea className={`${inputStyle} font-mono text-xs`} rows={11} value={baseText} onChange={(event) => { setBaseText(event.target.value); setMaterialized(null); setArtifact(null) }} placeholder="Use the saved target fixture or enter identity, resource, response, owner, and attacker bindings." />
         </label>
@@ -401,8 +403,8 @@ function BoundaryWorkflow() {
         {sourceScan && <p className="text-sm text-gray-300">Source: <Link className="text-blue-300" href={`/scans/${sourceScan.id}`}>{sourceScan.id}</Link> · {sourceScan.status}. {boundaryScanMessage(sourceScan.status)}</p>}
       </Card>
 
-      <Card className="space-y-4 p-5">
-        <h2 className="text-lg font-semibold text-white">4. Save and rerun the regression</h2>
+      <Card className="space-y-4 p-4">
+        <h2 className="text-sm font-semibold text-gray-100">4. Save and rerun the regression</h2>
         <div className="flex flex-wrap gap-2">
           <button className={buttonStyle} disabled={busy || !sourceScanId.trim() || sourceScan?.status !== 'completed' || !proposal || !baseText.trim() || !targetId} onClick={exportArtifact}>Export completed scan</button>
           <button className={buttonStyle} disabled={!artifact} onClick={downloadArtifact}>Download artifact</button>

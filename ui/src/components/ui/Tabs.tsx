@@ -13,16 +13,18 @@ export interface TabItem {
 }
 
 const ITEM_BASE =
-  'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ' +
+  'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-sm font-medium transition-colors ' +
   'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50'
 
 function activeClasses(active: boolean): string {
-  return active ? 'bg-blue-600 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+  return active
+    ? 'bg-gray-800 text-white shadow-xs ring-1 ring-inset ring-gray-700'
+    : 'text-gray-400 hover:bg-gray-800/60 hover:text-gray-200'
 }
 
 function Badge({ value }: { value: string | number }) {
   return (
-    <span className="rounded-full bg-black/20 px-1.5 text-[10px] font-semibold tabular-nums">{value}</span>
+    <span className="text-xs font-normal tabular-nums text-gray-500">{value}</span>
   )
 }
 
@@ -49,7 +51,7 @@ export function Tabs({
     <div
       role="group"
       aria-label={ariaLabel}
-      className={cn('inline-flex flex-wrap items-center gap-1 rounded-lg border border-gray-800 bg-gray-900 p-1', className)}
+      className={cn('inline-flex flex-wrap items-center gap-0.5 rounded-lg border border-gray-800 bg-gray-950 p-0.5', className)}
     >
       {items.map((item) => {
         const isActive = item.key === active

@@ -2,7 +2,6 @@
 
 import { useState } from 'react'
 import { ArrowDownWideNarrow, ArrowUpNarrowWide, SlidersHorizontal } from 'lucide-react'
-import { getSeverityBg } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import {
   SEVERITY_LEVELS,
@@ -14,7 +13,7 @@ import {
 import { STALE_AFTER_DAYS } from '@/lib/findingFreshness'
 import type { StatusView } from '@/lib/findingGroups'
 import { listFilterValues, toggleListFilterValue } from '@/lib/listFilterValues'
-import { Button, Card, Field, Input, Select, Tabs, Toggle } from '@/components/ui'
+import { Button, Card, Field, SearchInput, Select, Tabs, Toggle } from '@/components/ui'
 import { countActiveSecondaryFilters } from './triage'
 
 export const VERIFICATION_VERDICTS = [
@@ -60,19 +59,30 @@ const FRESHNESS_TAB_ITEMS: { key: FreshnessView; label: string }[] = [
 
 const SOURCE_TAB_ITEMS = SOURCE_TYPE_OPTIONS.map((option) => ({ key: option.value || 'all', label: option.label }))
 
-// Severity is a property you narrow by, so it gets free uppercase pills (echoing the row badge);
-// status is a partition of your work, so it gets the segmented Tabs control. Different shapes
-// for different questions.
+// Severity is a property you narrow by, so it gets toggle chips (each with the row badge's
+// color as a dot); status is a partition of your work, so it gets the segmented Tabs control.
+// Different shapes for different questions.
 // The list's proof badges, as filters: the server's projection, the same field the badge shows.
 const PROOF_FILTERS = [
-  { key: 'verified', label: 'Proven', hint: 'Deterministic proof confirmed these', activeClass: 'bg-emerald-500/20 text-emerald-300 ring-1 ring-inset ring-emerald-400/30' },
-  { key: 'suspected', label: 'Suspected', hint: 'Leads that are not proven yet', activeClass: 'bg-amber-500/20 text-amber-300 ring-1 ring-inset ring-amber-400/30' },
+  { key: 'verified', label: 'Proven', hint: 'Deterministic proof confirmed these', dot: 'bg-emerald-400' },
+  { key: 'suspected', label: 'Suspected', hint: 'Leads that are not proven yet', dot: 'bg-amber-400' },
 ] as const
 const PROOF_ORDER = ['verified', 'suspected', 'unverified'] as const
 
-const SEVERITY_PILL_BASE =
-  'rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors ' +
+const SEVERITY_DOTS: Record<string, string> = {
+  critical: 'bg-red-500',
+  high: 'bg-orange-500',
+  medium: 'bg-yellow-400',
+  low: 'bg-blue-400',
+  info: 'bg-gray-500',
+}
+
+// Quiet toggle chips: neutral outline at rest, a filled neutral chip when on (aria-pressed).
+const FILTER_CHIP_BASE =
+  'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ' +
   'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
+const FILTER_CHIP_IDLE = 'border-gray-800 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+const FILTER_CHIP_ACTIVE = 'border-gray-600 bg-gray-800 text-white'
 
 export function getSortOrderLabel(sortBy: SortOption, sortOrder: SortOrder): string {
   if (sortBy === 'last_seen' || sortBy === 'first_seen') {
@@ -141,15 +151,13 @@ export function FindingsToolbar({
   return (
     <div className="space-y-3">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-        <div className="min-w-0 flex-1">
-          <Input
-            type="search"
-            placeholder="Search findings by title or URL…"
-            value={searchInput}
-            onChange={(e) => onSearchInputChange(e.target.value)}
-            aria-label="Search findings by title or URL"
-          />
-        </div>
+        <SearchInput
+          wrapperClassName="flex-1"
+          placeholder="Search findings by title or URL…"
+          value={searchInput}
+          onValueChange={onSearchInputChange}
+          aria-label="Search findings by title or URL"
+        />
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="secondary"
@@ -285,7 +293,7 @@ export function FindingsToolbar({
           onChange={(key) => onStatusChange(key as StatusView)}
         />
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <div role="group" aria-label="Filter by proof" className="flex flex-wrap gap-1.5">
+        <div role="group" aria-label="Filter by proof" className="flex flex-wrap gap-1">
           {PROOF_FILTERS.map((proof) => {
             const active = listFilterValues(values.proofState).includes(proof.key)
             return (
@@ -295,18 +303,16 @@ export function FindingsToolbar({
                 aria-pressed={active}
                 title={proof.hint}
                 onClick={() => setFilter('proof_state', toggleListFilterValue(values.proofState, proof.key, PROOF_ORDER))}
-                className={cn(
-                  SEVERITY_PILL_BASE,
-                  active ? proof.activeClass : 'bg-gray-800/60 text-gray-500 hover:bg-gray-800 hover:text-gray-300'
-                )}
+                className={cn(FILTER_CHIP_BASE, active ? FILTER_CHIP_ACTIVE : FILTER_CHIP_IDLE)}
               >
+                <span className={cn('h-1.5 w-1.5 rounded-full', proof.dot)} aria-hidden="true" />
                 {proof.label}
               </button>
             )
           })}
         </div>
         {/* Several severities may be selected (critical and high together). */}
-        <div role="group" aria-label="Filter by severity" className="flex flex-wrap gap-1.5">
+        <div role="group" aria-label="Filter by severity" className="flex flex-wrap gap-1">
           {SEVERITY_LEVELS.map((sev) => {
             const active = listFilterValues(values.severity).includes(sev)
             return (
@@ -315,13 +321,9 @@ export function FindingsToolbar({
                 type="button"
                 aria-pressed={active}
                 onClick={() => setFilter('severity', toggleListFilterValue(values.severity, sev, SEVERITY_LEVELS))}
-                className={cn(
-                  SEVERITY_PILL_BASE,
-                  active
-                    ? `${getSeverityBg(sev)} ring-1 ring-inset ring-white/10`
-                    : 'bg-gray-800/60 text-gray-500 hover:bg-gray-800 hover:text-gray-300'
-                )}
+                className={cn(FILTER_CHIP_BASE, 'capitalize', active ? FILTER_CHIP_ACTIVE : FILTER_CHIP_IDLE)}
               >
+                <span className={cn('h-1.5 w-1.5 rounded-full', SEVERITY_DOTS[sev] || 'bg-gray-500')} aria-hidden="true" />
                 {sev}
               </button>
             )

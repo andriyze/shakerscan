@@ -57,7 +57,7 @@ export const SEVERITY_BADGE_STYLES: Record<SeverityLevel, string> = {
   critical: 'bg-red-500/20 text-red-400',
   high: 'bg-orange-500/20 text-orange-400',
   medium: 'bg-yellow-500/20 text-yellow-400',
-  low: 'bg-blue-500/20 text-blue-400',
+  low: 'bg-sky-500/15 text-sky-300',
   info: 'bg-gray-500/20 text-gray-400',
 }
 
@@ -65,7 +65,7 @@ export const SEVERITY_TEXT_COLORS: Record<SeverityLevel, string> = {
   critical: 'text-red-500',
   high: 'text-orange-500',
   medium: 'text-yellow-500',
-  low: 'text-blue-500',
+  low: 'text-sky-400',
   info: 'text-gray-500',
 }
 
@@ -74,7 +74,7 @@ export const SEVERITY_RAIL_CLASSES: Record<SeverityLevel, string> = {
   critical: 'border-l-red-500',
   high: 'border-l-orange-500',
   medium: 'border-l-yellow-500',
-  low: 'border-l-blue-500',
+  low: 'border-l-sky-500',
   info: 'border-l-gray-600',
 }
 
@@ -83,15 +83,6 @@ export const FINDING_STATUS_LABELS: Record<FindingStatus, string> = {
   resolved: 'Resolved',
   false_positive: 'False positive',
   accepted_risk: 'Accepted risk',
-}
-
-export const SCAN_STATUS_BADGE_STYLES: Record<ScanStatus, string> = {
-  pending: 'bg-gray-500/20 text-gray-400',
-  queued: 'bg-gray-500/20 text-gray-400',
-  running: 'bg-blue-500/20 text-blue-400',
-  completed: 'bg-green-500/20 text-green-400',
-  failed: 'bg-red-500/20 text-red-400',
-  cancelled: 'bg-orange-500/20 text-orange-400',
 }
 
 export const FINDING_STATUS_BADGE_STYLES: Record<FindingStatus, string> = {

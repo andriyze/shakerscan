@@ -9,8 +9,8 @@ import { cn } from '@/lib/cn'
 // strings scattered across the app (which also disagreed on bg-gray-800 vs
 // bg-gray-950). Focus shows a real ring, not just a 1px border color change.
 export const FIELD_BASE =
-  'rounded-lg border bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 ' +
-  'transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500 ' +
+  'rounded-lg border bg-gray-950 px-3 py-[7px] text-sm text-gray-100 placeholder-gray-500 shadow-xs ' +
+  'transition-colors focus:outline-hidden focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 ' +
   'disabled:cursor-not-allowed disabled:opacity-50'
 
 // Width-agnostic (no w-full) so inline filters can size to content. Bare

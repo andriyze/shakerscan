@@ -1,14 +1,17 @@
 'use client'
 
-import { useEffect, useState, useCallback, Suspense } from 'react'
+import { Fragment, useEffect, useState, useCallback, Suspense } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import {
   getSchedules, createSchedule, updateSchedule, deleteSchedule,
   getTargets,
   type Schedule, type Target
 } from '@/lib/api'
-import { Plus } from 'lucide-react'
-import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Modal, PageHeader, Select, useToast } from '@/components/ui'
+import { Pencil, Plus, Trash2 } from 'lucide-react'
+import {
+  ActionMenu, Button, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, MenuItem, Modal, PageHeader, ROW_ACTION_REVEAL, Select,
+  StatusDot, Table, TableCell, TableContainer, TableHead, TableHeaderCell, TableRow, TableSkeleton, Toggle, Toolbar, useToast,
+} from '@/components/ui'
 import { boundedTargetDisplay, usableWebTargets } from '@/lib/targetChoices'
 import { utcTimeToLocalLabel } from '@/lib/format'
 import {
@@ -315,10 +318,10 @@ function SchedulesContent() {
   const unhealthyCount = schedules.filter(schedule => ['attention', 'warning'].includes(schedule.schedule_health?.status || '')).length
 
   return (
-    <div className="space-y-6">
+    <div>
       <PageHeader
         title="Schedules"
-        description="Manage recurring scans"
+        description="Recurring scans and coverage waves, dispatched within a jitter window."
         actions={
           <Button onClick={() => setShowCreateModal(true)}>
             <Plus className="h-4 w-4" aria-hidden="true" />
@@ -327,35 +330,34 @@ function SchedulesContent() {
         }
       />
 
-      {/* Status Filter */}
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="text-sm text-gray-400">Status:</label>
+      <Toolbar>
         <Select
           fullWidth={false}
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
           aria-label="Filter schedules by status"
         >
-          <option value="all">All</option>
+          <option value="all">All statuses</option>
           <option value="active">Active</option>
           <option value="disabled">Disabled</option>
         </Select>
         <button
           type="button"
+          aria-pressed={healthFilter}
           onClick={() => setHealthFilter(value => !value)}
-          className={`rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
+          className={`rounded-lg border px-3 py-[7px] text-sm font-medium transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
             healthFilter
-              ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
-              : 'border-gray-800 bg-gray-900 text-gray-300 hover:border-gray-700'
+              ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+              : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-gray-600 hover:text-white'
           }`}
         >
           Needs attention{unhealthyCount ? ` (${unhealthyCount})` : ''}
         </button>
-      </div>
+        {!loading && !fetchError && <span className="text-sm tabular-nums text-gray-400">{visibleSchedules.length} schedule{visibleSchedules.length === 1 ? '' : 's'}</span>}
+      </Toolbar>
 
-      {/* Schedule Cards */}
       {loading ? (
-        <CardSkeleton count={3} />
+        <TableContainer><TableSkeleton rows={4} cols={5} /></TableContainer>
       ) : fetchError ? (
         <ErrorState message="Failed to load schedules. Is the API running?" onRetry={() => fetchSchedules()} />
       ) : schedules.length === 0 ? (
@@ -369,7 +371,20 @@ function SchedulesContent() {
           action={healthFilter ? { label: 'Show all schedules', onClick: () => setHealthFilter(false) } : undefined}
         />
       ) : (
-        <div className="space-y-3">
+        <TableContainer>
+          <Table aria-label="Schedules">
+            <TableHead>
+              <tr>
+                <TableHeaderCell className="w-14"><span className="sr-only">Enabled</span></TableHeaderCell>
+                <TableHeaderCell>Target</TableHeaderCell>
+                <TableHeaderCell>Type</TableHeaderCell>
+                <TableHeaderCell>Cadence</TableHeaderCell>
+                <TableHeaderCell>Next run</TableHeaderCell>
+                <TableHeaderCell>Last run</TableHeaderCell>
+                <TableHeaderCell className="text-right"><span className="sr-only">Actions</span></TableHeaderCell>
+              </tr>
+            </TableHead>
+            <tbody>
           {visibleSchedules.map((schedule) => {
             const localTime = (schedule.timezone || 'UTC') === 'UTC'
               ? utcTimeToLocalLabel(schedule.time_of_day.slice(0, 5))
@@ -377,104 +392,92 @@ function SchedulesContent() {
             const scheduleKind = getScheduleKind(schedule)
             const legacyRetention = scheduleKind === 'evidence_retention_sweep'
             const health = schedule.schedule_health
+            const needsAttention = Boolean(health && ['attention', 'warning'].includes(health.status))
+            const hasDetails = needsAttention || scheduleKind === 'asm_improve' || legacyRetention
+            const targetLabel = boundedTargetDisplay({ url: schedule.target_url }, { maxLength: 200, stripScheme: true })
             return (
-            <div
-              key={schedule.id}
-              className={`bg-gray-900 rounded-lg border ${
-                health?.status === 'attention'
-                  ? 'border-amber-600/70'
-                  : schedule.is_active ? 'border-gray-800' : 'border-gray-800/50 opacity-60'
-              } p-4`}
-            >
-              <div className="flex items-start gap-4">
-                {/* Toggle */}
-                <button
-                  type="button"
-                  onClick={() => handleToggle(schedule)}
-                  disabled={legacyRetention}
-                  role="switch"
-                  aria-checked={schedule.is_active}
-                  aria-label={legacyRetention ? 'Legacy retention schedule is disabled' : 'Schedule enabled'}
-                  className={`mt-1 relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                    schedule.is_active ? 'bg-blue-600' : 'bg-gray-700'
-                  } ${legacyRetention ? 'cursor-not-allowed opacity-50' : ''}`}
-                  title={legacyRetention ? 'Legacy retention schedules cannot be enabled' : schedule.is_active ? 'Disable schedule' : 'Enable schedule'}
-                >
-                  <span
-                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                      schedule.is_active ? 'translate-x-4' : 'translate-x-0'
-                    }`}
+            <Fragment key={schedule.id}>
+            <TableRow className={`${schedule.is_active ? '' : 'text-gray-500'} ${hasDetails ? '[&>td]:pb-2' : ''}`}>
+              <TableCell>
+                <span className="inline-flex" title={legacyRetention ? 'Legacy retention schedules cannot be enabled' : schedule.is_active ? 'Disable schedule' : 'Enable schedule'}>
+                  <Toggle
+                    checked={schedule.is_active}
+                    disabled={legacyRetention}
+                    onChange={() => handleToggle(schedule)}
+                    label={legacyRetention ? 'Legacy retention schedule is disabled' : 'Schedule enabled'}
                   />
-                </button>
-
-                {/* Info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-white truncate">
-                      {schedule.target_url?.replace(/^https?:\/\//, '')}
-                    </span>
-                    {schedule.name && (
-                      <span className="text-sm text-gray-500 truncate">
-                        ({schedule.name})
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-3 mt-1 text-sm text-gray-400">
-                    {scheduleKind === 'asm_improve' ? (
-                      <span className="px-2 py-0.5 bg-purple-500/15 text-purple-300 rounded-sm text-xs" title="Continuous-ASM coverage wave: picks recon vs test batch from current gaps">
-                        ASM coverage wave
-                      </span>
-                    ) : scheduleKind === 'evidence_retention_sweep' ? (
-                      <span className="px-2 py-0.5 bg-amber-500/15 text-amber-300 rounded-sm text-xs" title="Retired evidence retention schedule">
-                        Legacy retention schedule
-                      </span>
-                    ) : (
-                      <span className="px-2 py-0.5 bg-gray-800 rounded-sm text-xs">
-                        {getScanTypeLabel(schedule.scan_type)}
-                      </span>
-                    )}
-                    <span>
-                      {schedule.frequency === 'weekly'
-                        ? `Weekly ${DAYS_OF_WEEK.find(d => d.value === schedule.day_of_week)?.label || ''}`
-                        : 'Daily'}
-                    </span>
-                    <span>
-                      {schedule.time_of_day} {schedule.timezone || 'UTC'}
-                      {localTime && <span className="text-gray-500"> (= {localTime} local)</span>}
-                    </span>
-                    <span title="Each dispatch is chosen within this window to avoid every scanner starting simultaneously.">
-                      Dispatch jitter ±{schedule.jitter_minutes || 0}m
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
-                    {!schedule.is_active ? (
-                      <span className="text-amber-300">Paused — no next run</span>
-                    ) : schedule.next_run_at ? (
-                      <span title={new Date(schedule.next_run_at).toLocaleString()}>
-                        Next jittered dispatch: {formatRelativeTime(schedule.next_run_at)}
-                      </span>
-                    ) : (
-                      <span>Next dispatch unavailable</span>
-                    )}
-                    {schedule.last_run_at && (
-                      <span>Last: {formatRelativeTime(schedule.last_run_at)}</span>
-                    )}
-                    {!schedule.last_run_at && (
-                      <span>Never run</span>
-                    )}
-                  </div>
+                </span>
+              </TableCell>
+              <TableCell>
+                <span className={`block max-w-[20rem] truncate font-medium ${schedule.is_active ? 'text-gray-100' : 'text-gray-400'}`} title={targetLabel}>{targetLabel}</span>
+                {schedule.name && <span className="block max-w-[20rem] truncate text-xs text-gray-500">{schedule.name}</span>}
+              </TableCell>
+              <TableCell className="whitespace-nowrap text-sm">
+                {scheduleKind === 'asm_improve' ? (
+                  <span title="Continuous-ASM coverage wave: picks recon vs test batch from current gaps">ASM coverage wave</span>
+                ) : legacyRetention ? (
+                  <span className="text-amber-300" title="Retired evidence retention schedule">Legacy retention schedule</span>
+                ) : (
+                  getScanTypeLabel(schedule.scan_type)
+                )}
+              </TableCell>
+              <TableCell className="whitespace-nowrap">
+                <span className="block">
+                  {schedule.frequency === 'weekly'
+                    ? `Weekly ${DAYS_OF_WEEK.find(d => d.value === schedule.day_of_week)?.label || ''}`
+                    : 'Daily'}
+                  {' · '}<span className="tabular-nums">{schedule.time_of_day} {schedule.timezone || 'UTC'}</span>
+                </span>
+                <span className="block text-xs text-gray-500">
+                  {localTime && <span className="tabular-nums">= {localTime} local · </span>}
+                  <span title="Each dispatch is chosen within this window to avoid every scanner starting simultaneously.">
+                    Dispatch jitter ±{schedule.jitter_minutes || 0}m
+                  </span>
+                </span>
+              </TableCell>
+              <TableCell className="whitespace-nowrap">
+                {!schedule.is_active ? (
+                  <StatusDot tone="warning">Paused — no next run</StatusDot>
+                ) : schedule.next_run_at ? (
+                  <StatusDot tone={needsAttention ? 'danger' : 'success'} title={new Date(schedule.next_run_at).toLocaleString()}>
+                    Next jittered dispatch: {formatRelativeTime(schedule.next_run_at)}
+                  </StatusDot>
+                ) : (
+                  <StatusDot tone="neutral">Next dispatch unavailable</StatusDot>
+                )}
+              </TableCell>
+              <TableCell className="whitespace-nowrap text-xs tabular-nums text-gray-400">
+                {schedule.last_run_at ? formatRelativeTime(schedule.last_run_at) : 'Never run'}
+              </TableCell>
+              <TableCell className="whitespace-nowrap">
+                <span className="flex items-center justify-end gap-1">
+                  <Button size="sm" variant="secondary" className={ROW_ACTION_REVEAL} onClick={() => openEdit(schedule)} aria-label="Edit schedule" title="Edit schedule">
+                    <Pencil className="h-3.5 w-3.5" aria-hidden="true" />Edit
+                  </Button>
+                  <ActionMenu label={`More actions for ${targetLabel}`}>
+                    <MenuItem icon={<Pencil />} onSelect={() => openEdit(schedule)}>Edit schedule</MenuItem>
+                    <MenuItem icon={<Trash2 />} tone="danger" disabled={deleting === schedule.id} onSelect={() => setConfirmDelete(schedule)}>
+                      {deleting === schedule.id ? 'Deleting…' : 'Delete schedule'}
+                    </MenuItem>
+                  </ActionMenu>
+                </span>
+              </TableCell>
+            </TableRow>
+            {hasDetails && (
+              <tr className="group/row">
+                <td colSpan={7} className="px-4 pb-3 pl-[4.5rem]">
                   {scheduleKind === 'asm_improve' && (
-                    <div className="mt-2 text-xs text-gray-500">
+                    <div className="text-xs text-gray-500">
                       {asmSummary(schedule)}
                     </div>
                   )}
-                  {scheduleKind === 'evidence_retention_sweep' && (
-                    <div className="mt-2 rounded-md border border-amber-700/50 bg-amber-500/10 p-2 text-xs text-amber-100">
+                  {legacyRetention && (
+                    <div className="rounded-md border border-amber-700/50 bg-amber-500/10 p-2 text-xs text-amber-100">
                       Retention schedules are retired and cannot run. Edit this record to migrate it to a scan or ASM schedule, or delete it. Evidence cleanup now requires an interactive exact-preview approval.
                     </div>
                   )}
-                  {health && ['attention', 'warning'].includes(health.status) && (
-                    <div className="mt-3 rounded-md border border-amber-700/50 bg-amber-500/10 p-3">
+                  {health && needsAttention && (
+                    <div className="mt-2 rounded-md border border-amber-700/50 bg-amber-500/10 p-3 first:mt-0">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-sm font-medium text-amber-200">Schedule needs attention</div>
@@ -491,59 +494,27 @@ function SchedulesContent() {
                           {health.latest_failed_scan_id && (
                             <a
                               href={`/scans/${health.latest_failed_scan_id}`}
-                              className="inline-flex items-center rounded-sm border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs font-medium text-amber-100 hover:bg-amber-500/25 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+                              className="inline-flex items-center rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs font-medium text-amber-100 hover:bg-amber-500/25 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                             >
                               Failed scan
                             </a>
                           )}
                           {health.suggested_scan_type && (
-                            <button
-                              type="button"
-                              onClick={() => openEdit(schedule)}
-                              className="inline-flex items-center rounded-sm border border-gray-700 bg-gray-950 px-2.5 py-1.5 text-xs font-medium text-gray-200 hover:border-gray-600 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
-                            >
-                              Edit budget
-                            </button>
+                            <Button size="sm" variant="secondary" onClick={() => openEdit(schedule)}>Edit budget</Button>
                           )}
                         </div>
                       </div>
                     </div>
                   )}
-                </div>
-
-                {/* Actions */}
-                <button
-                  type="button"
-                  onClick={() => openEdit(schedule)}
-                  className="text-gray-500 hover:text-blue-300 transition-colors p-1 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 rounded-sm"
-                  title="Edit schedule"
-                  aria-label="Edit schedule"
-                >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16.862 3.487l3.651 3.651M4 20h4.5L19.293 9.207a1 1 0 000-1.414l-3.086-3.086a1 1 0 00-1.414 0L4 15.5V20z" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmDelete(schedule)}
-                  disabled={deleting === schedule.id}
-                  className="text-gray-500 hover:text-red-400 transition-colors p-1 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 rounded-sm"
-                  title="Delete schedule"
-                  aria-label="Delete schedule"
-                >
-                  {deleting === schedule.id ? (
-                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-red-400"></div>
-                  ) : (
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  )}
-                </button>
-              </div>
-            </div>
+                </td>
+              </tr>
+            )}
+            </Fragment>
             )
           })}
-        </div>
+            </tbody>
+          </Table>
+        </TableContainer>
       )}
 
       {/* Create Modal */}

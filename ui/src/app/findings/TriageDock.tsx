@@ -67,7 +67,7 @@ export function TriageDock({
     <div
       role="region"
       aria-label="Selection actions"
-      className="fixed inset-x-3 bottom-3 z-40 md:left-70 md:right-6 motion-safe:animate-[dock-rise_150ms_ease-out]"
+      className="fixed inset-x-3 bottom-3 z-40 md:left-72 md:right-8 motion-safe:animate-[dock-rise_150ms_ease-out]"
     >
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-700 bg-gray-900/95 px-3 py-2 shadow-2xl shadow-black/60 backdrop-blur-sm">
         <p className="text-sm text-gray-200" aria-live="polite">

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Globe, Play, Plus, ShieldCheck, X } from 'lucide-react'
-import { Button, ConfirmDialog, EmptyState, ErrorState, Field, Input, PageHeader, Skeleton, useToast } from '@/components/ui'
+import { Button, ConfirmDialog, ErrorState, Field, Input, PageHeader, Skeleton, useToast } from '@/components/ui'
 import { restoreTarget, scanTarget } from '@/lib/api'
 import {
   createWebTarget, enableTargetNetworkView, getTargetAssets, revokeTargetAsset,
@@ -12,7 +12,7 @@ import {
 import { filtersFromQuery, groupSections, inventoryParams, queryFromFilters } from '@/lib/targetInventoryModel.mjs'
 import { AddTargetsDialog } from './inventory/AddTargetsDialog'
 import { AuthorizeDialog } from './inventory/AuthorizeDialog'
-import { InventorySummary, InventoryToolbar, type InventoryFilters } from './inventory/InventoryControls'
+import { InventoryListBar, InventorySummary, InventoryToolbar, type InventoryFilters } from './inventory/InventoryControls'
 import { ColumnHeader, DomainGroup, NetworkGroup } from './inventory/TargetGroups'
 import { assetKind, type RowActions } from './inventory/TargetRow'
 
@@ -199,23 +199,29 @@ export function TargetInventory() {
     <PageHeader title="Targets" description="Every domain, host and device you test — one inventory for Scan and Hunt."
       actions={<Button onClick={() => setAdding(true)}><Plus className="h-4 w-4" aria-hidden="true" />Add targets</Button>} />
 
-    {firstRun ? <div className="rounded-2xl border border-dashed border-gray-700 bg-gray-900/40 px-6 py-16 text-center">
-      <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-blue-500/10 text-blue-300"><Globe className="h-6 w-6" aria-hidden="true" /></div>
-      <h2 className="text-lg font-semibold text-white">Add what you want to test</h2>
+    {firstRun ? <div className="rounded-lg border border-dashed border-gray-700 bg-gray-900/40 px-6 py-16 text-center">
+      <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-gray-800 text-gray-300"><Globe className="h-5 w-5" aria-hidden="true" /></div>
+      <h2 className="text-base font-semibold text-white">Add what you want to test</h2>
       <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-gray-400">Paste domains, URLs, IP addresses or hostnames. ShakerScan groups them by domain, works out HTTP or HTTPS and finds open ports when you scan.</p>
       <Button className="mt-6" onClick={() => setAdding(true)}><Plus className="h-4 w-4" aria-hidden="true" />Add targets</Button>
     </div> : <>
       <InventorySummary facets={facets} filters={filters} onChange={change} />
       <InventoryToolbar filters={filters} facets={facets} onChange={change} searchRef={searchInput} />
       {error && <div className="mb-4" role="alert"><ErrorState message={error} /></div>}
-      <div className="@container" role="table" aria-label="Targets" aria-busy={loading}>
+      <InventoryListBar filters={filters} facets={facets} onChange={change}
+        summary={loading && !groups.length ? 'Loading targets…' : `${totals.targets.toLocaleString()} target${totals.targets === 1 ? '' : 's'} in ${totals.groups.toLocaleString()} group${totals.groups === 1 ? '' : 's'}`} />
+      <div className="@container overflow-hidden rounded-lg border border-gray-800 bg-gray-900" role="table" aria-label="Targets" aria-busy={loading}>
         <ColumnHeader />
         {loading && !groups.length
-          ? <div className="space-y-4">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-24 w-full rounded-xl" />)}</div>
+          ? <div className="space-y-px border-t border-gray-800">{Array.from({ length: 6 }, (_, index) => <div key={index} className="px-4 py-3"><Skeleton className="h-8 w-full" /></div>)}</div>
           : !groups.length
-            ? <div className="rounded-xl border border-gray-800 p-6"><EmptyState message="No targets match" hint="Try a different search or clear the filters."
-                action={{ label: 'Clear filters', onClick: () => change({ search: '', environment: '', authorization: '', findings: '', activity: '', asset_type: '', archived: false }) }} /></div>
-            : <div className={`space-y-4 ${loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}`}>
+            ? <div className="border-t border-gray-800 px-6 py-12 text-center">
+                <p className="text-sm font-medium text-gray-300">No targets match</p>
+                <p className="mt-1 text-sm text-gray-500">Try a different search or clear the filters.</p>
+                <Button size="sm" variant="secondary" className="mt-4"
+                  onClick={() => change({ search: '', environment: '', authorization: '', findings: '', activity: '', asset_type: '', archived: false })}>Clear filters</Button>
+              </div>
+            : <div className={loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
                 {sections.domains.map(group => <DomainGroup key={group.root_domain} group={group} open={isOpen(group)} onDomainDeleted={refresh}
                   onToggle={() => setExpanded(current => ({ ...current, [group.root_domain]: !isOpen(group) }))}
                   onDiscovered={() => { setExpanded(current => ({ ...current, [group.root_domain]: true })); refresh() }}
@@ -223,16 +229,17 @@ export function TargetInventory() {
                 <NetworkGroup targets={sections.network} selection={selection} actions={actions} busy={busy} />
               </div>}
       </div>
-      {totals.groups > PAGE_GROUPS && <div className="mt-4 flex items-center justify-between gap-3">
-        <Button variant="secondary" size="sm" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0, offset - PAGE_GROUPS))}>Previous</Button>
-        <span className="text-xs text-gray-500">Groups {offset + 1}–{Math.min(totals.groups, offset + PAGE_GROUPS)} of {totals.groups} · {totals.targets} targets</span>
-        <Button variant="secondary" size="sm" disabled={offset + PAGE_GROUPS >= totals.groups || loading} onClick={() => setOffset(offset + PAGE_GROUPS)}>Next</Button>
+      {totals.groups > PAGE_GROUPS && <div className="mt-3 flex items-center justify-between gap-3">
+        <span className="text-sm tabular-nums text-gray-400">Groups {offset + 1}–{Math.min(totals.groups, offset + PAGE_GROUPS)} of {totals.groups}</span>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0, offset - PAGE_GROUPS))}>Previous</Button>
+          <Button variant="secondary" size="sm" disabled={offset + PAGE_GROUPS >= totals.groups || loading} onClick={() => setOffset(offset + PAGE_GROUPS)}>Next</Button>
+        </div>
       </div>}
-      {!loading && groups.length > 0 && totals.groups <= PAGE_GROUPS && <p className="mt-3 text-center text-xs text-gray-600" aria-live="polite">{totals.targets} target{totals.targets === 1 ? '' : 's'} in {totals.groups} group{totals.groups === 1 ? '' : 's'}</p>}
     </>}
 
     {selected.size > 0 && <div className="fixed inset-x-0 bottom-0 z-40 md:left-64" role="region" aria-label="Selected targets">
-      <div className="mx-auto mb-4 flex w-fit max-w-[calc(100%-2rem)] flex-wrap items-center gap-2 rounded-2xl border border-gray-700 bg-gray-900/95 px-3 py-2 shadow-2xl shadow-black/50 backdrop-blur">
+      <div className="mx-auto mb-4 flex w-fit max-w-[calc(100%-2rem)] flex-wrap items-center gap-2 rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 shadow-xl shadow-black/40">
         <span className="px-2 text-sm font-medium text-white">{selected.size} selected</span>
         <Button size="sm" loading={busy === 'bulk'} onClick={() => void bulkScan()}><Play className="h-3.5 w-3.5" aria-hidden="true" />Scan</Button>
         <Button size="sm" variant="secondary" disabled={!chosenAssets.some(asset => !asset.authorized && asset.is_active)} onClick={() => setAuthorizing(chosenAssets)}><ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />Authorize</Button>

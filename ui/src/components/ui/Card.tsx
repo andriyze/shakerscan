@@ -12,12 +12,15 @@ export function Card({
 
 export function SectionCard({
   title,
+  description,
   actions,
   className = '',
   id,
   children,
 }: {
   title: string
+  /** One short line under the title; leave it out when the title says enough. */
+  description?: React.ReactNode
   actions?: React.ReactNode
   className?: string
   /** Anchor id for in-page table-of-contents navigation. */
@@ -26,8 +29,11 @@ export function SectionCard({
 }) {
   return (
     <Card id={id} className={`p-4 ${id ? 'scroll-mt-6' : ''} ${className}`}>
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-medium text-gray-400">{title}</h2>
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-gray-100">{title}</h2>
+          {description && <p className="mt-0.5 text-xs text-gray-400">{description}</p>}
+        </div>
         {actions}
       </div>
       {children}

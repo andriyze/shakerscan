@@ -1,4 +1,8 @@
 import type { Metadata } from 'next'
+// Self-hosted faces: the CSP allows fonts from 'self' only.
+import '@fontsource-variable/archivo/wdth.css'
+import '@fontsource/ibm-plex-mono/400.css'
+import '@fontsource/ibm-plex-mono/500.css'
 import './globals.css'
 import Sidebar from '@/components/Sidebar'
 import WorkspaceBoundary from '@/components/WorkspaceBoundary'
@@ -30,8 +34,8 @@ export default function RootLayout({
           <WorkspaceBoundary managed={process.env.SHAKERSCAN_MANAGED_UI === 'true'}>
             <div className="flex min-h-screen flex-col md:flex-row">
               <Sidebar />
-              <main className="min-w-0 flex-1 overflow-auto p-4 md:p-6">
-                {children}
+              <main className="min-w-0 flex-1 overflow-auto px-4 py-5 md:px-8 md:py-7">
+                <div className="mx-auto w-full max-w-[1600px]">{children}</div>
               </main>
             </div>
           </WorkspaceBoundary>

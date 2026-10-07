@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { getServiceIntelligence, type ServicePage, type ServiceRecord, type ServiceTarget } from '@/lib/serviceIntelligence'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { Button, Card, EmptyState, ErrorState } from '@/components/ui'
+import { Button, Card, EmptyState, ErrorState, buttonClasses, fieldClasses } from '@/components/ui'
 
 const PAGE_SIZE = 10
 const readable = (value: string) => value.replaceAll('_', ' ')
@@ -62,11 +62,11 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
           <h3 className="mt-2 text-lg font-semibold text-white">{service.product || service.service} {service.version || '· version unknown'}</h3>
           <p className="mt-1 text-sm text-gray-400">Observation relationship—not a proven attack path.</p>
         </div>
-        <Button onClick={onClose}>Close details</Button>
+        <Button variant="secondary" onClick={onClose}>Close details</Button>
       </div>
       {service.binding_status === 'historical_locator' && <p role="status" className="mt-3 rounded-sm border border-amber-500/30 p-3 text-sm text-amber-200">Historical or unbound target locator. These observations are not rebound to the current target address.</p>}
       <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="Service details">
-        {tabs.map((item) => <button key={item} type="button" role="tab" aria-selected={tab === item} id={`service-tab-${item}`} aria-controls={`service-panel-${item}`} onClick={() => setTab(item)} className={`rounded-sm px-3 py-2 text-sm focus-visible:outline-solid focus-visible:outline-2 ${tab === item ? 'bg-teal-500/15 text-teal-200' : 'text-gray-400 hover:bg-gray-800'}`}>{item === 'evidence' ? 'Evidence / history' : item[0].toUpperCase() + item.slice(1)}</button>)}
+        {tabs.map((item) => <button key={item} type="button" role="tab" aria-selected={tab === item} id={`service-tab-${item}`} aria-controls={`service-panel-${item}`} onClick={() => setTab(item)} className={`rounded-md px-2.5 py-1 text-sm font-medium transition-colors focus-visible:outline-solid focus-visible:outline-2 ${tab === item ? 'bg-gray-800 text-white ring-1 ring-inset ring-gray-700' : 'text-gray-400 hover:bg-gray-800/60 hover:text-gray-200'}`}>{item === 'evidence' ? 'Evidence / history' : item[0].toUpperCase() + item.slice(1)}</button>)}
       </div>
       <div role="tabpanel" id={`service-panel-${tab}`} aria-labelledby={`service-tab-${tab}`} className="mt-4 space-y-3 text-sm">
         {tab === 'overview' && <>
@@ -110,7 +110,7 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
             <p className="mt-1 text-gray-400">{activity.reason}</p>
             {activity.capability && <p className="mt-2 text-xs text-gray-500">Canonical capability: {activity.capability} · risk: {activity.risk_tier} · approval: {activity.required_approval || 'Current run policy'}</p>}
           </div>)}
-          {service.hunt_href && <Link href={service.hunt_href} className="inline-block rounded-sm bg-blue-600 px-4 py-2 text-white hover:bg-blue-500">Prepare investigation in Hunt</Link>}
+          {service.hunt_href && <Link href={service.hunt_href} className={buttonClasses('primary', 'md')}>Prepare investigation in Hunt</Link>}
         </>}
         {tab === 'evidence' && <>
           {service.evidence_truncated && <p className="text-amber-300">Only the most recent evidence/history entries are shown.</p>}
@@ -161,12 +161,12 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
   return (
     <section className="space-y-4" aria-label="Service Intelligence">
       <Card className="p-4">
-        <h2 className="font-semibold text-white">Service Intelligence</h2>
+        <h2 className="text-sm font-semibold text-gray-100">Service Intelligence</h2>
         <p className="mt-1 text-sm text-gray-400">Domain → target → listener → service/version → candidate weaknesses → investigation activities.</p>
         <form className="mt-4 flex flex-wrap items-end gap-3" onSubmit={(event) => { event.preventDefault(); updateFilters({ service_query: search.trim() || undefined }) }}>
-          <label className="text-xs text-gray-400">Target kind<select aria-label="Service target kind" value={kind} onChange={(event) => updateFilters({ service_kind: event.target.value === 'all' ? undefined : event.target.value })} className="mt-1 block rounded-sm border border-gray-700 bg-gray-900 p-2 text-sm text-white"><option value="all">Web and devices</option><option value="web">Web targets</option><option value="device">Devices</option></select></label>
-          <label className="text-xs text-gray-400">Target name or locator<input aria-label="Search service targets" value={search} maxLength={200} onChange={(event) => setSearch(event.target.value)} className="mt-1 block w-64 rounded-sm border border-gray-700 bg-gray-900 p-2 text-sm text-white" placeholder="Search targets" /></label>
-          <Button type="submit">Search</Button>
+          <label className="text-xs text-gray-400">Target kind<select aria-label="Service target kind" value={kind} onChange={(event) => updateFilters({ service_kind: event.target.value === 'all' ? undefined : event.target.value })} className={`${fieldClasses()} mt-1 block`}><option value="all">Web and devices</option><option value="web">Web targets</option><option value="device">Devices</option></select></label>
+          <label className="text-xs text-gray-400">Target name or locator<input aria-label="Search service targets" value={search} maxLength={200} onChange={(event) => setSearch(event.target.value)} className={`${fieldClasses()} mt-1 block w-64 max-w-full`} placeholder="Search targets" /></label>
+          <Button type="submit" variant="secondary">Search</Button>
         </form>
       </Card>
       {loading && <p role="status" className="text-sm text-gray-400">Loading retained service evidence…</p>}
@@ -189,7 +189,7 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
                 const candidates = service.cve_candidates.length
                 const quiet = linked === 0 && candidates === 0
                 const seen = ago(service.last_seen_at)
-                return <tr key={service.id} className={service.id === selectedId ? 'bg-teal-500/10' : 'hover:bg-gray-800/40'}>
+                return <tr key={service.id} className={service.id === selectedId ? 'bg-blue-500/[0.06]' : 'hover:bg-gray-800/40'}>
                   <td className="px-4 py-3"><p className={quiet ? 'text-gray-400' : 'font-medium text-gray-100'}>{listener(service)} · {service.service}</p><p className="mt-1 text-xs text-gray-500">{readable(service.presence)}{service.address && <> · {service.address}</>}</p></td>
                   <td className="px-4 py-3 text-gray-300">{service.product ? <>{service.product}{service.version && <> {service.version}</>}</> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{readable(service.identity_basis)}{service.identity_stale && <> · <span className="text-gray-400">identity stale</span></>}</p></td>
                   <td className="px-4 py-3">{linked > 0 ? <span className="font-medium text-amber-200">{linked} finding{linked === 1 ? '' : 's'}</span> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{candidates > 0 ? `${candidates} CVE candidate${candidates === 1 ? '' : 's'}` : ''}</p></td>
@@ -202,7 +202,7 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
         </Card>)}
         {selected && selectedTarget && <ServiceDetails key={selected.id} service={selected} target={selectedTarget} onClose={() => setFilters({ service_id: undefined })} />}
         {selectedId && !selected && <p role="status" className="text-sm text-amber-200">The selected service is not in this evidence window. Refresh or inspect its owning target; no stale details are displayed.</p>}
-        <div className="flex items-center justify-between"><Button disabled={page <= 1} onClick={() => setFilters({ service_page: page <= 2 ? undefined : String(page - 1), service_id: undefined })}>Previous</Button><span className="text-sm text-gray-400">Target page {page}</span><Button disabled={!data.has_more} onClick={() => setFilters({ service_page: String(page + 1), service_id: undefined })}>Next</Button></div>
+        <div className="flex items-center justify-between"><Button variant="secondary" size="sm" disabled={page <= 1} onClick={() => setFilters({ service_page: page <= 2 ? undefined : String(page - 1), service_id: undefined })}>Previous</Button><span className="text-sm text-gray-400">Target page {page}</span><Button variant="secondary" size="sm" disabled={!data.has_more} onClick={() => setFilters({ service_page: String(page + 1), service_id: undefined })}>Next</Button></div>
       </>}
     </section>
   )

@@ -12,7 +12,7 @@ const SECTIONS: Array<{ id: SettingsSection; label: string }> = [
 
 function IntroBanner({ icon, title, text }: { icon: React.ReactNode; title: string; text: string }) {
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-900/60 px-4 py-3">
+    <div className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-900 px-4 py-3">
       <span className="mt-0.5 shrink-0">{icon}</span>
       <div>
         <p className="text-sm font-medium text-gray-100">{title}</p>
@@ -56,7 +56,7 @@ export default async function SettingsPage({
       {activeSection === 'automation' ? (
         <section aria-label="Scanning and coverage defaults" className="space-y-4">
           <IntroBanner
-            icon={<Cpu className="h-5 w-5 text-blue-400" />}
+            icon={<Cpu className="h-4 w-4 text-gray-400" />}
             title="Changes save immediately"
             text="These controls save as soon as you change them. They affect new work only unless the control says otherwise."
           />
@@ -65,7 +65,7 @@ export default async function SettingsPage({
       ) : (
         <section aria-label="AI provider and verification" className="space-y-4">
           <IntroBanner
-            icon={<Sparkles className="h-5 w-5 text-purple-400" />}
+            icon={<Sparkles className="h-4 w-4 text-gray-400" />}
             title="Review, then save"
             text="Provider changes are applied only after you select Save. Start with Basic; advanced controls are optional."
           />

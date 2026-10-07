@@ -56,7 +56,7 @@ export function TargetDomainDiscovery({ domain, onSettled, menuItem = false }: {
 
   if (menuItem) {
     return <button type="button" role="menuitem" disabled={running} aria-label={`Discover subdomains of ${domain}`} onClick={() => void discover()}
-      className="flex w-full items-start gap-2.5 rounded-md px-3 py-2 text-left text-sm text-gray-200 hover:bg-gray-800 focus:bg-gray-800 focus:outline-none disabled:opacity-50">
+      className="flex w-full items-start gap-2.5 rounded-md px-2.5 py-1.5 text-left text-sm text-gray-200 hover:bg-gray-800 focus:bg-gray-800 focus:outline-none disabled:opacity-50">
       <Search className="mt-0.5 h-4 w-4 text-gray-400" aria-hidden="true" />
       <span><span className="block">{running ? 'Discovering subdomains…' : 'Discover subdomains'}</span><span className="mt-0.5 block text-xs leading-4 text-gray-500">Find hosts under {domain}</span></span>
     </button>

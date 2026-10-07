@@ -19,8 +19,8 @@ export function EmptyState({
 }) {
   return (
     <Card className="p-8 text-center">
-      <p className="text-gray-500">{message}</p>
-      {hint && <p className="mt-1 text-sm text-gray-600">{hint}</p>}
+      <p className="text-sm font-medium text-gray-300">{message}</p>
+      {hint && <p className="mt-1 text-sm text-gray-500">{hint}</p>}
       {action &&
         (action.href ? (
           <Link href={action.href} className={`mt-4 ${buttonClasses('primary', 'sm')}`}>

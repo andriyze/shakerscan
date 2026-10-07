@@ -3,16 +3,21 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
-import { Bot, CheckCircle2, Clipboard, Download, Play, Plus, RefreshCw, ShieldCheck, Trash2, Wand2 } from 'lucide-react'
+import { CheckCircle2, Clipboard, Download, Play, Plus, Power, RefreshCw, ShieldCheck, Wand2 } from 'lucide-react'
 import AISurfaceInventoryPanel from '@/components/AISurfaceInventoryPanel'
 import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import {
+  ActionMenu,
   Button,
   Card,
   CardSkeleton,
   ConfirmDialog,
   EmptyState,
   ErrorState,
+  MenuItem,
+  MenuSeparator,
+  PageHeader,
+  buttonClasses,
   useToast,
 } from '@/components/ui'
 import {
@@ -127,9 +132,14 @@ type RunConfig = {
 }
 
 const inputClass =
-  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 placeholder-gray-500 shadow-xs focus:border-blue-500 focus:outline-hidden focus:ring-2 focus:ring-blue-500/40'
 const textareaClass =
-  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-gray-100 placeholder-gray-500 shadow-xs focus:border-blue-500 focus:outline-hidden focus:ring-2 focus:ring-blue-500/40'
+// Neutral facts next to a title (counts, kinds).
+const FACT_CHIP = 'rounded-sm bg-gray-800 px-1.5 py-0.5 text-xs text-gray-300'
+// Small labelled values in one hairline-divided strip.
+const FACT_STRIP = 'grid gap-px overflow-hidden rounded-lg border border-gray-800 bg-gray-800 text-xs'
+const FACT_CELL = 'min-w-0 bg-gray-950 px-3 py-2'
 
 function jsonText(value: unknown) {
   return JSON.stringify(value, null, 2)
@@ -860,24 +870,20 @@ export default function AIGateSettingsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <Bot className="h-6 w-6 text-blue-400" />
-            <h1 className="text-2xl font-bold text-white">AI Gate</h1>
-          </div>
-          <p className="mt-1 text-gray-400">Manage AI chat, RAG, agent trace, and MCP targets.</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Link href="/ai-gate/boundary" className="inline-flex items-center rounded-lg border border-blue-500/40 px-3 py-2 text-sm text-blue-200 hover:bg-blue-500/10">
+      <PageHeader
+        title="AI Gate"
+        description="Manage AI chat, RAG, agent trace, and MCP targets."
+        className="mb-0"
+        actions={<>
+          <Link href="/ai-gate/boundary" className={buttonClasses('secondary', 'md')}>
             Agent boundary workflow
           </Link>
           <Button onClick={() => setShowAddTarget((value) => !value)}>
             <Plus className="h-4 w-4" aria-hidden="true" />
             {showAddTarget ? 'Close' : 'Add Target'}
           </Button>
-        </div>
-      </div>
+        </>}
+      />
 
       {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
 
@@ -885,7 +891,7 @@ export default function AIGateSettingsPage() {
         <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span>Calibration Lab mode is enabled. Demo controls and lab targets are separated from normal AI targets.</span>
-            <Link href="/settings" className="rounded-sm border border-amber-400/30 px-2 py-1 text-xs text-amber-100 hover:bg-amber-500/10">
+            <Link href="/settings" className="rounded-md border border-amber-400/30 px-2.5 py-1 text-xs font-medium text-amber-100 hover:bg-amber-500/10">
               Manage in Settings
             </Link>
           </div>
@@ -896,16 +902,13 @@ export default function AIGateSettingsPage() {
         <Card className="p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
-              <div className="flex items-center gap-2 text-white">
-                <Bot className="h-4 w-4 text-purple-300" />
-                <h2 className="text-sm font-semibold">AI Inventory</h2>
-              </div>
+              <h2 className="text-sm font-semibold text-gray-100">AI Inventory</h2>
               <p role="alert" className="mt-2 wrap-break-word text-xs text-red-400">{inventoryError}</p>
             </div>
-            <button onClick={loadInventory} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
-              <RefreshCw className="h-4 w-4" />
+            <Button size="sm" variant="secondary" onClick={loadInventory}>
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
               Retry
-            </button>
+            </Button>
           </div>
         </Card>
       )}
@@ -914,31 +917,28 @@ export default function AIGateSettingsPage() {
         <Card className="p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="flex items-center gap-2 text-white">
-                <Bot className="h-4 w-4 text-purple-300" />
-                <h2 className="text-sm font-semibold">AI Inventory</h2>
-              </div>
+              <h2 className="text-sm font-semibold text-gray-100">AI Inventory</h2>
               <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-400">
-                <span className="rounded-sm bg-gray-950 px-2 py-1">{inventory.summary.asset_count} assets</span>
-                <span className="rounded-sm bg-gray-950 px-2 py-1">{inventory.summary.candidate_count} corroborated candidates</span>
-                <span className="rounded-sm bg-gray-950 px-2 py-1">{inventory.summary.lead_count || 0} speculative leads</span>
+                <span className={FACT_CHIP}>{inventory.summary.asset_count} assets</span>
+                <span className={FACT_CHIP}>{inventory.summary.candidate_count} corroborated candidates</span>
+                <span className={FACT_CHIP}>{inventory.summary.lead_count || 0} speculative leads</span>
                 {!!inventory.summary.quarantined_scan_count && (
-                  <span className="rounded-sm bg-gray-950 px-2 py-1">{inventory.summary.quarantined_scan_count} fixture scans quarantined</span>
+                  <span className={FACT_CHIP}>{inventory.summary.quarantined_scan_count} fixture scans quarantined</span>
                 )}
-                <span className="rounded-sm bg-gray-950 px-2 py-1">blast radius {inventory.summary.highest_blast_radius_score}</span>
+                <span className={FACT_CHIP}>blast radius {inventory.summary.highest_blast_radius_score}</span>
                 {inventory.summary.coverage_gaps.slice(0, 3).map((gap) => (
-                  <span key={gap} className="rounded-sm bg-yellow-500/10 px-2 py-1 text-yellow-200">{gap.replaceAll('_', ' ')}</span>
+                  <span key={gap} className="rounded-sm bg-yellow-500/10 px-1.5 py-0.5 text-yellow-200">{gap.replaceAll('_', ' ')}</span>
                 ))}
               </div>
             </div>
-            <button onClick={loadInventory} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
-              <RefreshCw className="h-4 w-4" />
+            <Button size="sm" variant="secondary" onClick={loadInventory}>
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
               Refresh
-            </button>
+            </Button>
           </div>
           {inventoryCandidates.length > 0 && (
             <div className="mt-4">
-              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-emerald-300">Corroborated request schemas</div>
+              <div className="mb-2 text-xs font-medium text-gray-400">Corroborated request schemas</div>
               <div className="grid gap-2 sm:grid-cols-1 lg:grid-cols-2">
               {inventoryCandidates.map((candidate) => {
                 const confidencePct = Number.isFinite(candidate.confidence)
@@ -953,9 +953,9 @@ export default function AIGateSettingsPage() {
                   >
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <span className="min-w-0 break-all text-sm font-medium text-white">{candidate.method} {candidate.endpoint_url}</span>
-                      <span className="rounded-sm bg-purple-500/10 px-2 py-0.5 text-xs text-purple-200">{candidate.target_type}</span>
+                      <span className={FACT_CHIP}>{candidate.target_type}</span>
                       {confidencePct !== null && (
-                        <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{confidencePct}%</span>
+                        <span className={`${FACT_CHIP} tabular-nums`}>{confidencePct}%</span>
                       )}
                     </div>
                     <div className="mt-2 wrap-break-word text-xs text-gray-500">{candidate.evidence.slice(0, 3).join(' · ')}</div>
@@ -968,13 +968,13 @@ export default function AIGateSettingsPage() {
           )}
           {inventoryLeads.length > 0 && (
             <div className="mt-4">
-              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">Speculative leads — not loadable</div>
+              <div className="mb-2 text-xs font-medium text-gray-400">Speculative leads — not loadable</div>
               <div className="grid gap-2 sm:grid-cols-1 lg:grid-cols-2">
                 {inventoryLeads.map((lead) => (
                   <div key={lead.candidate_id} className="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <span className="min-w-0 break-all text-sm font-medium text-gray-200">{lead.method} {lead.endpoint_url}</span>
-                      <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-300">path hint only</span>
+                      <span className={FACT_CHIP}>path hint only</span>
                     </div>
                     <div className="mt-2 text-xs text-gray-500">Needs request-schema or observed behavior evidence before it can become an AI target candidate.</div>
                   </div>
@@ -988,10 +988,7 @@ export default function AIGateSettingsPage() {
       {shouldShowCreate && (
       <div className="grid gap-6">
         <form onSubmit={handleCreate} className="space-y-4 rounded-lg border border-gray-800 bg-gray-900 p-4">
-          <div className="flex items-center gap-2 text-white">
-            <Plus className="h-4 w-4 text-blue-400" />
-            <h2 className="text-sm font-semibold">Add Target</h2>
-          </div>
+          <h2 className="text-sm font-semibold text-gray-100">Add Target</h2>
 
           <div className="grid gap-3 md:grid-cols-2">
             <label className="grid gap-1 text-sm text-gray-300">
@@ -1186,11 +1183,8 @@ export default function AIGateSettingsPage() {
           <Card className="p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <div className="flex items-center gap-2 text-white">
-                  <ShieldCheck className="h-4 w-4 text-emerald-300" />
-                  <h2 className="text-sm font-semibold">Starter Templates</h2>
-                </div>
-                <p className="mt-1 max-w-3xl text-sm text-gray-400">
+                <h2 className="text-sm font-semibold text-gray-100">Starter Templates</h2>
+                <p className="mt-0.5 max-w-3xl text-xs text-gray-400">
                   Optional quick-fill templates for common RAG, agent, and MCP target shapes. Replace the example URLs before saving.
                 </p>
               </div>
@@ -1203,11 +1197,11 @@ export default function AIGateSettingsPage() {
                     key={template.key}
                     type="button"
                     onClick={() => applyScenarioTemplate(template)}
-                    className="rounded-lg border border-gray-700 bg-gray-950 p-3 text-left hover:border-blue-500/60 hover:bg-gray-800"
+                    className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-left hover:border-gray-600 hover:bg-gray-800/60"
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-sm font-medium text-white">{template.name}</span>
-                      <Wand2 className="h-4 w-4 text-blue-300" />
+                      <Wand2 className="h-4 w-4 text-gray-500" aria-hidden="true" />
                     </div>
                     <div className="mt-2 text-xs text-gray-500">{template.recommended_scan?.probe_pack || 'custom'} · {template.recommended_scan?.scan_profile || 'standard'}</div>
                   </button>
@@ -1218,7 +1212,7 @@ export default function AIGateSettingsPage() {
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <div className="text-sm font-medium text-gray-200">Governance readiness</div>
                   {formControlSummary && (
-                    <span className={`rounded-sm px-2 py-1 text-xs ${formControlSummary.missing.length ? 'bg-yellow-900/50 text-yellow-200' : 'bg-green-900/50 text-green-200'}`}>
+                    <span className={`rounded-sm px-1.5 py-0.5 text-xs tabular-nums ${formControlSummary.missing.length ? 'bg-yellow-500/15 text-yellow-200' : 'bg-green-500/15 text-green-200'}`}>
                       {formControlSummary.present}/{formControlSummary.required}
                     </span>
                   )}
@@ -1244,8 +1238,8 @@ export default function AIGateSettingsPage() {
         <div className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-sm font-semibold text-gray-300">Targets</h2>
-              <p className="mt-1 text-xs text-gray-500">Saved AI surfaces ready for probe packs and deployment checks.</p>
+              <h2 className="text-sm font-semibold text-gray-100">Targets</h2>
+              <p className="mt-0.5 text-xs text-gray-400">Saved AI surfaces ready for probe packs and deployment checks.</p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <label className="inline-flex items-center gap-2 text-xs text-gray-400">
@@ -1268,10 +1262,10 @@ export default function AIGateSettingsPage() {
                   Show demo/lab targets
                 </label>
               )}
-              <button onClick={loadTargets} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50">
-                <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+              <Button size="sm" variant="secondary" onClick={loadTargets} disabled={loading}>
+                <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
                 Refresh
-              </button>
+              </Button>
             </div>
           </div>
 
@@ -1308,8 +1302,8 @@ export default function AIGateSettingsPage() {
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="font-medium text-white">{target.name}</h3>
-                        <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{TARGET_TYPES.find((type) => type.value === target.target_type)?.label || target.target_type}</span>
-                        {target.is_active === false && <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-400">Disabled</span>}
+                        <span className={FACT_CHIP}>{TARGET_TYPES.find((type) => type.value === target.target_type)?.label || target.target_type}</span>
+                        {target.is_active === false && <span className={FACT_CHIP}>Disabled</span>}
                         {isDemoTarget && <span className="rounded-sm bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">demo</span>}
                         {target.production_mode && <span className="rounded-sm bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-400">production</span>}
                         {isControlRemediationTarget && <span className="rounded-sm bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-200">control gap</span>}
@@ -1339,22 +1333,22 @@ export default function AIGateSettingsPage() {
                           )}
                         </div>
                       )}
-                      <div className="mt-3 grid gap-2 text-xs grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
-                        <div className="min-w-0 rounded-sm border border-gray-800 bg-gray-950 p-2">
+                      <div className={`mt-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 ${FACT_STRIP}`}>
+                        <div className={FACT_CELL}>
                           <div className="text-gray-500">Endpoint</div>
-                          <div className="mt-1 break-all text-gray-200">{target.method} {target.endpoint_url}</div>
+                          <div className="mt-0.5 break-all font-mono text-gray-200">{target.method} {target.endpoint_url}</div>
                         </div>
-                        <div className="min-w-0 rounded-sm border border-gray-800 bg-gray-950 p-2">
+                        <div className={FACT_CELL}>
                           <div className="text-gray-500">Prompt field</div>
-                          <div className="mt-1 wrap-break-word text-gray-200">{summarizeRequestTemplate(target.request_template)}</div>
+                          <div className="mt-0.5 wrap-break-word text-gray-200">{summarizeRequestTemplate(target.request_template)}</div>
                         </div>
-                        <div className="min-w-0 rounded-sm border border-gray-800 bg-gray-950 p-2">
+                        <div className={FACT_CELL}>
                           <div className="text-gray-500">Response field</div>
-                          <div className="mt-1 break-all font-mono text-gray-200">{target.response_path || '$'}</div>
+                          <div className="mt-0.5 break-all font-mono text-gray-200">{target.response_path || '$'}</div>
                         </div>
-                        <div className="min-w-0 rounded-sm border border-gray-800 bg-gray-950 p-2">
+                        <div className={FACT_CELL}>
                           <div className="text-gray-500">Last scan</div>
-                          <div className="mt-1 wrap-break-word text-gray-200">
+                          <div className="mt-0.5 wrap-break-word text-gray-200">
                             {target.last_scan_id ? (
                               <Link className="text-blue-400 hover:text-blue-300" href={`/scans/${target.last_scan_id}`}>Open result</Link>
                             ) : (
@@ -1364,22 +1358,17 @@ export default function AIGateSettingsPage() {
                         </div>
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      {target.is_active !== false && <button
-                        onClick={() => setConfirmDisableTarget(target)}
-                        className="inline-flex items-center gap-2 rounded-lg border border-gray-800 px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-red-400"
-                        aria-label={`Disable ${target.name}`}
-                        title="Disable target"
-                      >
-                        <Trash2 className="h-4 w-4" aria-hidden="true" />
-                        Disable
-                      </button>}
+                    {/* Disabling and deleting live in the overflow menu; each keeps its own confirmation. */}
+                    <ActionMenu label={`Actions for ${target.name}`}>
+                      {target.is_active !== false && <MenuItem icon={<Power />} onSelect={() => setConfirmDisableTarget(target)}
+                        description="Stop new runs; history is kept">Disable target</MenuItem>}
+                      {target.is_active !== false && <MenuSeparator />}
                       <DeleteRecordsButton
                         selection={{ kind: 'ai_target', id: target.id }} label="Delete permanently" subject={target.name}
-                        variant="secondary" className="px-2 py-1 text-xs"
+                        variant="ghost" className="w-full justify-start px-3! text-red-300 hover:bg-red-500/10"
                         onDeleted={() => { void loadTargets(); void loadInventory() }}
                       />
-                    </div>
+                    </ActionMenu>
                   </div>
 
                   <div className="mt-4 grid gap-3 md:grid-cols-3 lg:grid-cols-[1fr_0.8fr_0.8fr_auto_auto_auto]">
@@ -1401,17 +1390,17 @@ export default function AIGateSettingsPage() {
                         {ENVIRONMENTS.map((env) => <option key={env.value} value={env.value}>{env.label}</option>)}
                       </select>
                     </label>
-                    <button onClick={() => handleConnectivityTest(target)} disabled={testingTarget === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm font-medium text-gray-300 hover:bg-gray-800 disabled:opacity-50">
+                    <button onClick={() => handleConnectivityTest(target)} disabled={testingTarget === target.id} className={`${buttonClasses('secondary', 'md')} self-end`}>
                       {testingTarget === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
                       Test Connection
                     </button>
                     {target.target_type === 'mcp_trace' && (
-                      <button onClick={() => handleMCPReadiness(target)} disabled={testingMCP === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/30 px-4 py-2 text-sm font-medium text-purple-100 hover:bg-purple-500/10 disabled:opacity-50">
+                      <button onClick={() => handleMCPReadiness(target)} disabled={testingMCP === target.id} className={`${buttonClasses('secondary', 'md')} self-end`}>
                         {testingMCP === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
                         MCP
                       </button>
                     )}
-                    <button onClick={() => handleRun(target)} disabled={scanning === target.id} className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
+                    <button onClick={() => handleRun(target)} disabled={scanning === target.id} className={`${buttonClasses('secondary', 'md')} self-end`}>
                       {scanning === target.id ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                       {getRunButtonLabel(config)}
                     </button>
@@ -1442,7 +1431,7 @@ export default function AIGateSettingsPage() {
                     <div className={`mt-3 rounded-lg border p-3 text-xs ${
                       mcpReadinessResults[target.id].ok
                         ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'
-                        : 'border-purple-500/20 bg-purple-500/10 text-purple-100'
+                        : 'border-yellow-500/20 bg-yellow-500/10 text-yellow-100'
                     }`}>
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-medium">{mcpReadinessResults[target.id].ok ? 'MCP readiness passed' : 'MCP readiness warnings'}</span>
@@ -1460,11 +1449,11 @@ export default function AIGateSettingsPage() {
                       </div>
                     </div>
                   )}
-                  <div className="mt-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+                  <div className="-mx-4 -mb-4 mt-4 border-t border-gray-800 px-4 py-3">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <div className="text-sm font-medium text-gray-200">Run history</div>
-                        <p className="mt-1 text-xs text-gray-500">Recent AI Gate runs for this target across probe packs, profiles, and environments.</p>
+                        <p className="mt-0.5 text-xs text-gray-400">Recent AI Gate runs for this target across probe packs, profiles, and environments.</p>
                       </div>
                       <div className="flex flex-wrap gap-2">
                         {campaignHistory && (
@@ -1473,7 +1462,7 @@ export default function AIGateSettingsPage() {
                             aria-disabled={!runtimeApiUrl}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800"
+                            className={buttonClasses('secondary', 'sm')}
                           >
                             <Download className="h-3.5 w-3.5" aria-hidden="true" />
                             Export history
@@ -1483,7 +1472,7 @@ export default function AIGateSettingsPage() {
                           type="button"
                           onClick={() => loadTargetCampaignHistory(target.id)}
                           disabled={campaignHistoryLoading}
-                          className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                          className={buttonClasses('secondary', 'sm')}
                         >
                           <RefreshCw className={`h-3.5 w-3.5 ${campaignHistoryLoading ? 'animate-spin' : ''}`} />
                           {campaignHistory ? 'Refresh history' : 'Load history'}
@@ -1495,26 +1484,26 @@ export default function AIGateSettingsPage() {
                     )}
                     {campaignHistory && (
                       <div className="mt-3 space-y-3">
-                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
+                        <div className={`grid-cols-2 lg:grid-cols-5 ${FACT_STRIP}`}>
+                          <div className={FACT_CELL}>
                             <div className="text-gray-500">Runs</div>
-                            <div className="mt-1 text-lg font-semibold text-white">{campaignHistory.summary.total_runs}</div>
+                            <div className="mt-0.5 text-lg font-semibold tabular-nums text-white">{campaignHistory.summary.total_runs}</div>
                           </div>
-                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
+                          <div className={FACT_CELL}>
                             <div className="text-gray-500">Contexts</div>
-                            <div className="mt-1 text-lg font-semibold text-white">{campaignHistory.summary.contexts}</div>
+                            <div className="mt-0.5 text-lg font-semibold tabular-nums text-white">{campaignHistory.summary.contexts}</div>
                           </div>
-                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
+                          <div className={FACT_CELL}>
                             <div className="text-gray-500">Blocked</div>
-                            <div className="mt-1 text-lg font-semibold text-red-300">{campaignHistory.summary.blocked_runs}</div>
+                            <div className="mt-0.5 text-lg font-semibold tabular-nums text-red-300">{campaignHistory.summary.blocked_runs}</div>
                           </div>
-                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
+                          <div className={FACT_CELL}>
                             <div className="text-gray-500">Errored</div>
-                            <div className="mt-1 text-lg font-semibold text-yellow-200">{campaignHistory.summary.errored_runs}</div>
+                            <div className="mt-0.5 text-lg font-semibold tabular-nums text-yellow-200">{campaignHistory.summary.errored_runs}</div>
                           </div>
-                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
+                          <div className={FACT_CELL}>
                             <div className="text-gray-500">Budget stopped</div>
-                            <div className="mt-1 text-lg font-semibold text-blue-200">{campaignHistory.summary.budget_stopped_runs}</div>
+                            <div className="mt-0.5 text-lg font-semibold tabular-nums text-gray-200">{campaignHistory.summary.budget_stopped_runs}</div>
                           </div>
                         </div>
                         {campaignHistory.readiness_trends?.overall && (
@@ -1590,7 +1579,7 @@ export default function AIGateSettingsPage() {
                         {campaignHistory.runs.length > 0 ? (
                           <div className="overflow-x-auto">
                             <table className="min-w-full text-left text-xs">
-                              <thead className="text-gray-500">
+                              <thead className="text-gray-400">
                                 <tr>
                                   <th className="py-1 pr-3 font-medium">Completed</th>
                                   <th className="py-1 pr-3 font-medium">Campaign</th>
@@ -1634,8 +1623,8 @@ export default function AIGateSettingsPage() {
           )}
         </div>
 
-      <details className="rounded-lg border border-gray-800 bg-gray-950/30">
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-400 hover:text-gray-200">
+      <details className="rounded-lg border border-gray-800 bg-gray-900">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
           Advanced: browse all discovered AI surfaces
         </summary>
         <div className="border-t border-gray-800 p-4">
@@ -1646,11 +1635,8 @@ export default function AIGateSettingsPage() {
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2 text-white">
-              <Clipboard className="h-4 w-4 text-blue-300" />
-              <h2 className="text-sm font-semibold">AI Red-Team Resources</h2>
-            </div>
-            <p className="mt-1 max-w-3xl text-sm text-gray-400">
+            <h2 className="text-sm font-semibold text-gray-100">AI Red-Team Resources</h2>
+            <p className="mt-0.5 max-w-3xl text-xs text-gray-400">
               Generic probe catalogs, learning checkpoints, and eval seed exports for AI security practice.
             </p>
           </div>
@@ -1662,7 +1648,7 @@ export default function AIGateSettingsPage() {
                 aria-disabled={!runtimeApiUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+                className={buttonClasses('secondary', 'sm')}
               >
                 {item.label}
               </a>
@@ -1672,14 +1658,11 @@ export default function AIGateSettingsPage() {
       </Card>
 
       {aiSettings?.demo_mode_enabled && (
-        <section className="rounded-lg border border-emerald-500/20 bg-gray-900 p-4">
+        <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <div className="flex items-center gap-2 text-emerald-100">
-                <ShieldCheck className="h-4 w-4" />
-                <h2 className="text-sm font-semibold">Calibration Lab</h2>
-              </div>
-              <p className="mt-1 max-w-3xl text-sm text-gray-400">
+              <h2 className="text-sm font-semibold text-gray-100">Calibration Lab</h2>
+              <p className="mt-0.5 max-w-3xl text-xs text-gray-400">
                 Optional Honey demo scans for local practice and regression checks. Keep disabled for normal production-facing use.
               </p>
               {aiSettings.demo_honey_scanner_url && (
@@ -1692,7 +1675,7 @@ export default function AIGateSettingsPage() {
               type="button"
               onClick={handleRunDemo}
               disabled={demoRunning}
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+              className={buttonClasses('secondary', 'md')}
             >
               {demoRunning ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
               Run Demo Suite
@@ -1705,10 +1688,10 @@ export default function AIGateSettingsPage() {
                   <Link
                     key={item.scan_id}
                     href={`/scans/${item.scan_id}`}
-                    className="rounded-sm border border-emerald-500/20 bg-gray-950/50 px-3 py-2 text-sm text-emerald-100 hover:bg-gray-900"
+                    className="rounded-lg border border-gray-800 bg-gray-950 px-3 py-2 text-sm text-gray-200 hover:border-gray-600"
                   >
                     <div className="font-medium">{item.name}</div>
-                    <div className="mt-1 text-xs text-emerald-100/60">
+                    <div className="mt-1 text-xs text-gray-500">
                       {item.surface.toUpperCase()} · {item.expected_findings.length ? `${item.expected_findings.length} expected finding(s)` : 'safe fixture'}
                     </div>
                   </Link>

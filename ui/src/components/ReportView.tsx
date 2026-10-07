@@ -14,7 +14,7 @@ import {
   downloadModelIntakeSbom,
   type ModelIntakeSbomSummary,
 } from '@/lib/api'
-import { gradeTextColor } from '@/components/ui'
+import { buttonClasses, gradeTextColor } from '@/components/ui'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { AlertTriangle, CheckCircle2, Download } from 'lucide-react'
 import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
@@ -584,22 +584,22 @@ async function downloadAIRedTeamReport(scanId: string, format: 'json' | 'markdow
 // header). Export PDF prints every section.
 export function ReportDownloads({ scan, isAuthenticated }: { scan: any; isAuthenticated?: boolean }) {
   const isAIScan = Boolean(scan?.result?.ai_gate) || scan?.scan_type === 'ai_gate' || String(scan?.run_kind || '').startsWith('ai_')
-  const buttonClass = 'px-3 py-2 rounded-sm border text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
+  const buttonClass = buttonClasses('secondary', 'md')
   return (
     <div className="flex flex-wrap items-center gap-2 no-print">
       <ExportPDFButton />
       {isAuthenticated && isAIScan && (
         <>
-          <button type="button" onClick={() => downloadAIRedTeamReport(String(scan.id), 'markdown')} className={`${buttonClass} border-purple-500/60 text-purple-300 hover:bg-purple-500/10`}>
+          <button type="button" onClick={() => downloadAIRedTeamReport(String(scan.id), 'markdown')} className={buttonClass}>
             AI Report MD
           </button>
-          <button type="button" onClick={() => downloadAIRedTeamReport(String(scan.id), 'json')} className={`${buttonClass} border-purple-500/60 text-purple-300 hover:bg-purple-500/10`}>
+          <button type="button" onClick={() => downloadAIRedTeamReport(String(scan.id), 'json')} className={buttonClass}>
             AI Report JSON
           </button>
         </>
       )}
       {isAuthenticated && (
-        <button type="button" onClick={() => downloadScanJson(scan)} className={`${buttonClass} border-blue-500/60 text-blue-300 hover:bg-blue-500/10`}>
+        <button type="button" onClick={() => downloadScanJson(scan)} className={buttonClass}>
           Download JSON
         </button>
       )}
@@ -1113,16 +1113,16 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <ExportPDFButton />
               {isAuthenticated && (isAIScan || isModelIntakeScan) && (
                 <>
-                  <button type="button" onClick={() => handleDownloadAIRedTeamReport('markdown')} className="px-3 py-2 rounded-sm border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">
+                  <button type="button" onClick={() => handleDownloadAIRedTeamReport('markdown')} className={buttonClasses('secondary', 'md')}>
                     AI Report MD
                   </button>
-                  <button type="button" onClick={() => handleDownloadAIRedTeamReport('json')} className="px-3 py-2 rounded-sm border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">
+                  <button type="button" onClick={() => handleDownloadAIRedTeamReport('json')} className={buttonClasses('secondary', 'md')}>
                     AI Report JSON
                   </button>
                 </>
               )}
               {isAuthenticated && (
-                <button type="button" onClick={handleDownloadJson} className="px-3 py-2 rounded-sm border border-blue-500/60 text-blue-300 text-sm hover:bg-blue-500/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">
+                <button type="button" onClick={handleDownloadJson} className={buttonClasses('secondary', 'md')}>
                   Download JSON
                 </button>
               )}
@@ -1891,7 +1891,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <div className="no-print flex flex-wrap items-center gap-2">
                 <ExportPDFButton />
                 {isAuthenticated && (
-                  <button type="button" onClick={handleDownloadJson} className="px-3 py-2 rounded-sm border border-blue-500/60 text-blue-300 text-sm hover:bg-blue-500/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">
+                  <button type="button" onClick={handleDownloadJson} className={buttonClasses('secondary', 'md')}>
                     Download JSON
                   </button>
                 )}

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { BookOpen, Check, FilePenLine, Sparkles, Trash2 } from 'lucide-react'
+import { Check, FilePenLine, Sparkles, Trash2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import { Button, Card, Field, Input, Modal, Textarea } from '@/components/ui'
 import { targetInstructionState } from '@/lib/targetInstructionState.mjs'
@@ -92,11 +92,11 @@ export function TargetSkillEditor({targetId, targetName, compact = false, hasSki
   }
   const trigger = menuItem
     ? <button type="button" role="menuitem" onClick={() => void edit()} aria-label={`${exists ? 'Edit' : 'Create'} instructions for ${targetName}`} className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm text-gray-200 hover:bg-gray-800 focus:bg-gray-800 focus:outline-none"><FilePenLine className="h-4 w-4 text-gray-400" aria-hidden="true" />{exists ? 'Edit Hunt instructions' : 'Add Hunt instructions'}</button>
-    : <Button size={compact ? 'sm' : 'md'} variant="secondary" onClick={() => void edit()} aria-label={`${exists ? 'Edit' : 'Create'} instructions for ${targetName}`}><FilePenLine className="h-4 w-4" aria-hidden="true" />{compact ? 'Instructions' : exists ? 'Edit instructions' : 'Create instructions'}</Button>
+    : <Button size="sm" variant="secondary" onClick={() => void edit()} aria-label={`${exists ? 'Edit' : 'Create'} instructions for ${targetName}`}><FilePenLine className="h-4 w-4" aria-hidden="true" />{compact ? 'Instructions' : exists ? 'Edit instructions' : 'Create instructions'}</Button>
 
   return <>
-    {compact || menuItem ? <span className={menuItem ? 'block' : 'relative inline-flex'} onClick={event => event.stopPropagation()}>{trigger}<span role="status" className="sr-only">{notice}</span></span> : <Card className="relative mb-6 overflow-hidden p-5 border-blue-500/20 bg-linear-to-br from-blue-500/5 via-gray-900 to-gray-900">
-      <div className="flex flex-wrap items-start justify-between gap-4"><div className="flex gap-3"><div className="rounded-xl bg-blue-500/10 p-2.5 text-blue-300"><BookOpen className="h-5 w-5" aria-hidden="true" /></div><div><h2 className="text-base font-semibold text-white">Target instructions</h2><p className="mt-1 max-w-xl text-sm text-gray-400">Give Hunt a head start: how to log in, what matters, and what to skip.</p></div></div>{trigger}</div>
+    {compact || menuItem ? <span className={menuItem ? 'block' : 'relative inline-flex'} onClick={event => event.stopPropagation()}>{trigger}<span role="status" className="sr-only">{notice}</span></span> : <Card className="relative mb-4 overflow-hidden p-4">
+      <div className="flex flex-wrap items-start justify-between gap-4"><div><h2 className="text-sm font-semibold text-gray-100">Target instructions</h2><p className="mt-0.5 max-w-xl text-xs text-gray-400">Give Hunt a head start: how to log in, what matters, and what to skip.</p></div>{trigger}</div>
       {loading ? <p className="mt-4 text-sm text-gray-400" role="status">Loading instructions…</p> : error ? <p className="mt-4 text-sm text-red-300" role="alert">{error}</p> : instructionState.editable ? <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950/40 p-4"><div className="mb-3 flex flex-wrap items-center gap-2"><span className="text-sm font-medium text-gray-200">{instructionState.editable.title}</span><span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-xs text-blue-300">Version {instructionState.editable.version} · {instructionState.advisory ? 'Advisory knowledge' : 'Effective instructions'}</span></div><p className="whitespace-pre-wrap wrap-break-word text-sm leading-6 text-gray-400">{instructionState.editable.methodology.slice(0,300)}{instructionState.editable.methodology.length > 300 ? '…' : ''}</p></div> : <div className="mt-4 grid gap-2 text-xs text-gray-400 sm:grid-cols-3">{['Login steps & success signals','Priorities & known endpoints','Exclusions & fragile actions'].map(item => <div key={item} className="rounded-lg border border-dashed border-gray-700 px-3 py-3">{item}</div>)}</div>}
       <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-gray-500"><span className="inline-flex items-center gap-1.5"><Sparkles className="h-3.5 w-3.5 text-blue-300" aria-hidden="true" />Instructions and advisory learning are automatically loaded</span>{saved?.skill && <span>Saved {new Date(saved.skill.updated_at).toLocaleString()}</span>}</div><p role="status" className="mt-2 text-xs text-emerald-300">{notice}</p>
     </Card>}

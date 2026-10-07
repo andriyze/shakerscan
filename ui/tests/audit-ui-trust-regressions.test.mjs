@@ -73,7 +73,8 @@ test('docs and mobile operations expose truthful accessible labels', () => {
   const dashboard = read('src/app/page.tsx')
   const sidebar = read('src/components/Sidebar.tsx')
   assert.match(docs, /h1: \(\{ children \}\) => \(\s*<h2/)
-  assert.match(dashboard, />Emergency clear<\/span>/)
+  // Emergency clear lives in the queue's overflow menu, as a visibly labelled danger item.
+  assert.match(dashboard, /tone="danger"[\s\S]{0,200}>Emergency clear<\/MenuItem>/)
   assert.match(dashboard, /ready to scan/)
   assert.match(sidebar, /Show advanced sections \(Records, Governance, Developer\)/)
   assert.doesNotMatch(sidebar, /Interactive Testing, Leads/)

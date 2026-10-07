@@ -4,7 +4,7 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import AuthenticationProfiles from '@/components/AuthenticationProfiles'
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyRound, Plus, RefreshCw, RotateCw, Search, Share2, ShieldCheck, Trash2, X } from 'lucide-react'
+import { Plus, Power, RefreshCw, RotateCw, Share2, ShieldCheck, X } from 'lucide-react'
 import { targetOptions } from '@/lib/pickerOptions'
 import { ShareCredentialDialog, type ShareTargetChoice } from '@/components/credentials/ShareCredentialDialog'
 import {
@@ -26,6 +26,7 @@ import {
   type CredentialTargetKind,
 } from '@/lib/credentialApi'
 import {
+  ActionMenu,
   Button,
   Card,
   ConfirmDialog,
@@ -33,12 +34,27 @@ import {
   ErrorState,
   Field,
   Input,
+  MenuItem,
+  MenuSeparator,
   Modal,
   PageHeader,
+  ROW_ACTION_REVEAL,
+  SearchInput,
   Select,
+  StatusDot,
   Combobox,
+  Table,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableHeaderCell,
+  TableRow,
+  TableSkeleton,
+  Tabs,
   Textarea,
+  Toolbar,
   useToast,
+  type StatusTone,
 } from '@/components/ui'
 import { getAllTargetAssets, getTargetAsset, type TargetAsset } from '@/lib/targetAssetApi'
 import { useUrlFilters } from '@/lib/useUrlFilters'
@@ -215,14 +231,17 @@ function identityComposition(profile: CredentialProfile): string | null {
   return null
 }
 
-function statusClass(profile: CredentialProfile): string {
-  if (profile.status === 'active' && !profile.refresh_required) {
-    return 'bg-emerald-500/10 text-emerald-300'
-  }
-  if (profile.status === 'expired' || profile.refresh_required) {
-    return 'bg-amber-500/10 text-amber-300'
-  }
-  return 'bg-gray-800 text-gray-400'
+function statusTone(profile: CredentialProfile): StatusTone {
+  if (profile.status === 'active' && !profile.refresh_required) return 'success'
+  if (profile.status === 'expired' || profile.refresh_required) return 'warning'
+  return 'neutral'
+}
+
+const SLOT_LABELS: Record<CredentialPrincipalSlot, string> = {
+  primary: 'Primary',
+  secondary: 'Secondary',
+  service: 'Service',
+  ssh: 'SSH',
 }
 
 const TARGET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network', 'device']
@@ -537,70 +556,65 @@ function CredentialsContent() {
   if (loading) return <div className="p-6 text-sm text-gray-400">Loading credential targets…</div>
   if (error && !assets.length) return <ErrorState message={error} />
 
+  const deletionEnabled = featureEnabled('record_deletion')
+  const toggleCapabilities = (id: string) => setExpanded((current) => {
+    const next = new Set(current)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+
   return (
-    <div className="mx-auto max-w-6xl p-6">
+    <div>
       <PageHeader
         title="Credentials"
         description="Encrypted identities for Scan and Hunt. Each belongs to one target and can be shared with others. Secret values are accepted only when creating or rotating, and never shown again."
-        icon={<KeyRound className="h-6 w-6" />}
         actions={<><Button variant="secondary" onClick={() => void loadProfiles()} disabled={!targetId || profilesLoading}><RefreshCw className="h-4 w-4" /> Refresh</Button><Button onClick={openCreate} disabled={!targetId}><Plus className="h-4 w-4" /> New profile</Button></>}
       />
 
-      <Card className="mb-5 p-5">
-        <div className="grid gap-4 md:grid-cols-[180px_minmax(0,1fr)_auto] md:items-end">
-          <Field label="Target type">
-            <Select value={targetKind} onChange={(event) => changeTargetKind(event.target.value as CredentialTargetKind)}>
-              <option value="web">Web</option>
-              <option value="api">API</option>
-              {featureEnabled('network_testing') && <option value="network">Network / SSH</option>}
-              {featureEnabled('devices') && <option value="device">Connected device</option>}
-            </Select>
-          </Field>
-          <Field label="Target">
-            <Combobox value={choices.some((item) => item.id === targetId) ? targetId : ''} options={targetOptionList} noneLabel="All targets"
-              searchPlaceholder="Search targets by name, host or environment…"
-              onChange={(value) => { setMissingTarget(null); setTargetId(value) }} />
-          </Field>
-          <label className="flex h-10 items-center gap-2 text-sm text-gray-400">
-            <input type="checkbox" checked={includeInactive} onChange={(event) => setIncludeInactive(event.target.checked)} />
-            Show inactive
-          </label>
-        </div>
-        <div className="mt-4 flex flex-col gap-3 border-t border-gray-800 pt-4 lg:flex-row lg:items-center">
-          <div className="relative min-w-0 flex-1">
-            <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-gray-500" aria-hidden="true" />
-            <input aria-label="Search credentials" value={search} onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search by name, principal, authentication type or owner…"
-              className="h-9 w-full rounded-lg border border-gray-700 bg-gray-800 pl-9 pr-8 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden" />
-            {search && <button type="button" aria-label="Clear credential search" onClick={() => setSearch('')} className="absolute right-2 top-2.5 text-gray-500 hover:text-gray-200"><X className="h-4 w-4" /></button>}
-          </div>
-          <div role="group" aria-label="Filter by slot" className="flex flex-wrap gap-1">
-            {(['', 'primary', 'secondary', 'service', 'ssh'] as const).map((slot) => (
-              <button key={slot || 'all'} type="button" aria-pressed={slotFilter === slot} onClick={() => setSlotFilter(slot)}
-                className={`rounded-lg px-2.5 py-1.5 text-xs ${slotFilter === slot ? 'bg-blue-500/15 text-blue-200 ring-1 ring-inset ring-blue-400/30' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'}`}>
-                {slot ? `${slot === 'ssh' ? 'SSH' : slot.charAt(0).toUpperCase() + slot.slice(1)} ${slotCounts[slot] || 0}` : `All ${profiles.length}`}
-              </button>
-            ))}
-          </div>
-          <Select fullWidth={false} aria-label="Credential status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)} className="h-9 py-1.5">
-            <option value="">Any status</option>
-            <option value="active">Active</option>
-            <option value="expiring">Expiring soon</option>
-            <option value="expired">Expired</option>
-            {includeInactive && <option value="inactive">Inactive</option>}
-          </Select>
-        </div>
-      </Card>
+      <Toolbar>
+        <Select fullWidth={false} aria-label="Target type" value={targetKind} className="w-40"
+          onChange={(event) => changeTargetKind(event.target.value as CredentialTargetKind)}>
+          <option value="web">Web</option>
+          <option value="api">API</option>
+          {featureEnabled('network_testing') && <option value="network">Network / SSH</option>}
+          {featureEnabled('devices') && <option value="device">Connected device</option>}
+        </Select>
+        <Combobox aria-label="Target" className="sm:w-80" value={choices.some((item) => item.id === targetId) ? targetId : ''} options={targetOptionList} noneLabel="All targets"
+          searchPlaceholder="Search targets by name, host or environment…"
+          onChange={(value) => { setMissingTarget(null); setTargetId(value) }} />
+        <label className="flex items-center gap-2 whitespace-nowrap text-sm text-gray-400 sm:ml-auto">
+          <input type="checkbox" className="h-3.5 w-3.5 accent-blue-500" checked={includeInactive} onChange={(event) => setIncludeInactive(event.target.checked)} />
+          Show inactive
+        </label>
+      </Toolbar>
+      <Toolbar>
+        <Tabs ariaLabel="Filter by slot" active={slotFilter || 'all'}
+          onChange={(key) => setSlotFilter(key === 'all' ? '' : key as CredentialPrincipalSlot)}
+          items={[
+            { key: 'all', label: 'All', badge: profiles.length },
+            ...(['primary', 'secondary', 'service', 'ssh'] as const).map((slot) => ({ key: slot, label: SLOT_LABELS[slot], badge: slotCounts[slot] || 0 })),
+          ]} />
+        <SearchInput aria-label="Search credentials" value={search} onValueChange={setSearch}
+          placeholder="Search by name, principal, authentication type or owner…" wrapperClassName="min-w-60 flex-1" />
+        <Select fullWidth={false} aria-label="Credential status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)} className="w-40">
+          <option value="">Any status</option>
+          <option value="active">Active</option>
+          <option value="expiring">Expiring soon</option>
+          <option value="expired">Expired</option>
+          {includeInactive && <option value="inactive">Inactive</option>}
+        </Select>
+      </Toolbar>
 
       {missingTarget && (
-        <div role="alert" className="mb-4 rounded-sm border border-amber-900/60 bg-amber-950/30 p-3 text-sm text-amber-200">
+        <div role="alert" className="mb-4 rounded-lg border border-amber-900/60 bg-amber-950/30 p-3 text-sm text-amber-200">
           The linked target {missingTarget} was not found among active targets that can hold credentials. Choose a target above.
         </div>
       )}
       {targetId && (targetKind === 'web' || targetKind === 'api') && <AuthenticationProfiles targetId={targetId} credentials={profiles} />}
-      {error && <div className="mb-4 rounded-sm border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">{error}</div>}
+      {error && <div className="mb-4 rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">{error}</div>}
       {profilesLoading ? (
-        <Card className="p-6 text-sm text-gray-400">Loading profiles…</Card>
+        <Card><TableSkeleton rows={5} cols={6} /></Card>
       ) : !profiles.length ? (
         <EmptyState
           message={targetId ? 'No credentials for this target' : 'No credentials yet'}
@@ -610,85 +624,119 @@ function CredentialsContent() {
           action={targetId ? { label: 'Create profile', onClick: openCreate } : undefined}
         />
       ) : (
-        <div className="space-y-3">
-          {!visibleProfiles.length && <Card className="p-6 text-center text-sm text-gray-500">No credentials match these filters.</Card>}
-          {visibleProfiles.map((profile) => (
-            <Card key={profile.id} className="p-5">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="font-semibold text-white">{profile.name}</h2>
-                    <span className={`rounded-sm px-2 py-0.5 text-xs ${statusClass(profile)}`}>
-                      {profile.refresh_required && profile.status === 'active' ? 'expiring soon' : profile.status}
-                    </span>
-                    <span className="rounded-sm bg-blue-500/10 px-2 py-0.5 text-xs text-blue-300">{profile.principal_slot}</span>
-                    {profile.shared && (
-                      <span className="rounded-sm bg-violet-500/10 px-2 py-0.5 text-xs text-violet-300" data-testid="shared-from">
-                        shared from {profile.home_target_name || 'another target'}
-                      </span>
-                    )}
-                    {!targetId && (profile.shared_target_count || 0) > 0 && (
-                      <span className="rounded-sm bg-violet-500/10 px-2 py-0.5 text-xs text-violet-300">
-                        shared with {profile.shared_target_count} {profile.shared_target_count === 1 ? 'target' : 'targets'}
-                      </span>
-                    )}
-                  </div>
-                  {!targetId && (
-                    <p className="mt-1 text-xs text-gray-500">
-                      Owner{' '}
-                      <button
-                        type="button"
-                        className="text-blue-300 hover:text-blue-200"
-                        onClick={() => setFilters({ target_kind: profile.target_kind === 'web' ? undefined : profile.target_kind, target_id: profile.target_id })}
-                      >
-                        {profile.home_target_name || profile.target_id}
-                      </button>
-                      {profile.home_target_locator ? <span className="font-mono"> · {profile.home_target_locator}</span> : null}
-                    </p>
-                  )}
-                  <p className="mt-1 text-sm text-gray-400">
-                    {profile.auth_kind.replaceAll('_', ' ')} · version {profile.current_version}
-                    {identityComposition(profile) ? ` · ${identityComposition(profile)}` : ''}
-                    {profile.principal_label ? ` · ${profile.principal_label}` : ''}
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
-                    {profile.allowed_capabilities.length
-                      ? <>
-                          {(expanded.has(profile.id) ? profile.allowed_capabilities : profile.allowed_capabilities.slice(0, 6)).map((item) => <span key={item} className="rounded-sm bg-gray-900 px-2 py-1">{item}</span>)}
-                          {profile.allowed_capabilities.length > 6 && (
-                            <button type="button" className="rounded-sm px-2 py-1 text-blue-300 hover:bg-blue-500/10"
-                              aria-expanded={expanded.has(profile.id)}
-                              onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(profile.id)) next.delete(profile.id); else next.add(profile.id); return next })}>
-                              {expanded.has(profile.id) ? 'Show fewer' : `+${profile.allowed_capabilities.length - 6} more capabilities`}
+        <>
+          <TableContainer>
+            <Table aria-label="Credential profiles">
+              <TableHead>
+                <tr>
+                  <TableHeaderCell>Name</TableHeaderCell>
+                  <TableHeaderCell>Slot</TableHeaderCell>
+                  <TableHeaderCell>Status</TableHeaderCell>
+                  <TableHeaderCell>Owner</TableHeaderCell>
+                  <TableHeaderCell>Capabilities</TableHeaderCell>
+                  <TableHeaderCell className="text-right"><span className="sr-only">Actions</span></TableHeaderCell>
+                </tr>
+              </TableHead>
+              <tbody>
+                {!visibleProfiles.length && (
+                  <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-500">No credentials match these filters.</td></tr>
+                )}
+                {visibleProfiles.map((profile) => {
+                  const sharedFrom = profile.shared
+                    ? <span className="block truncate text-xs text-gray-400" data-testid="shared-from">shared from {profile.home_target_name || 'another target'}</span>
+                    : null
+                  return (
+                    <TableRow key={profile.id}>
+                      <TableCell>
+                        <span className="block max-w-[14rem] truncate font-medium text-gray-100 2xl:max-w-[22rem]" title={profile.name}>{profile.name}</span>
+                        <span className="block max-w-[14rem] truncate text-xs text-gray-500 2xl:max-w-[22rem]">
+                          {profile.auth_kind.replaceAll('_', ' ')} · version {profile.current_version}
+                          {identityComposition(profile) ? ` · ${identityComposition(profile)}` : ''}
+                          {profile.principal_label ? ` · ${profile.principal_label}` : ''}
+                        </span>
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap">{SLOT_LABELS[profile.principal_slot] || profile.principal_slot}</TableCell>
+                      <TableCell className="whitespace-nowrap">
+                        <StatusDot tone={statusTone(profile)}>
+                          {profile.refresh_required && profile.status === 'active' ? 'expiring soon' : profile.status}
+                        </StatusDot>
+                        {profile.expires_at && (
+                          <span className="mt-0.5 block pl-3 text-xs tabular-nums text-gray-500" title={new Date(profile.expires_at).toLocaleString()}>
+                            {profile.status === 'expired' ? 'expired' : 'expires'} {new Date(profile.expires_at).toLocaleDateString()}
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {!targetId ? (
+                          <div className="max-w-[12rem] 2xl:max-w-[20rem]">
+                            <button
+                              type="button"
+                              className="block max-w-full truncate text-left text-gray-200 hover:text-blue-300"
+                              onClick={() => setFilters({ target_kind: profile.target_kind === 'web' ? undefined : profile.target_kind, target_id: profile.target_id })}
+                            >
+                              {profile.home_target_name || profile.target_id}
                             </button>
+                            {profile.home_target_locator ? <span className="block truncate font-mono text-xs text-gray-500">{profile.home_target_locator}</span> : null}
+                            {sharedFrom}
+                            {(profile.shared_target_count || 0) > 0 && (
+                              <span className="block text-xs text-gray-500">
+                                shared with {profile.shared_target_count} {profile.shared_target_count === 1 ? 'target' : 'targets'}
+                              </span>
+                            )}
+                          </div>
+                        ) : sharedFrom || <span className="text-gray-400">This target</span>}
+                      </TableCell>
+                      <TableCell>
+                        {profile.allowed_capabilities.length ? (
+                          <>
+                            <button type="button" aria-expanded={expanded.has(profile.id)} title={profile.allowed_capabilities.join(', ')}
+                              onClick={() => toggleCapabilities(profile.id)}
+                              className="whitespace-nowrap rounded-sm text-xs text-gray-400 hover:text-gray-100 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">
+                              {profile.allowed_capabilities.length} {profile.allowed_capabilities.length === 1 ? 'capability' : 'capabilities'}
+                            </button>
+                            {expanded.has(profile.id) && (
+                              <span className="mt-1.5 flex max-w-xs flex-wrap gap-1">
+                                {profile.allowed_capabilities.map((item) => <code key={item} className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-300">{item}</code>)}
+                              </span>
+                            )}
+                          </>
+                        ) : <span className="block max-w-56 text-xs text-amber-300">no capabilities · legacy profile is unusable until narrowed explicitly</span>}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap">
+                        <span className="flex items-center justify-end gap-1">
+                          {profile.shared ? (
+                            // Rotate and deactivate belong to the owner; here it can only stop being shared.
+                            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void stopSharingHere(profile)}><X className="h-3.5 w-3.5" /> Stop sharing here</Button>
+                          ) : (
+                            <>
+                              {profile.is_active && <Button size="sm" variant="secondary" className={ROW_ACTION_REVEAL} onClick={() => openRotate(profile)}><RotateCw className="h-3.5 w-3.5" /> Rotate</Button>}
+                              {(profile.is_active || deletionEnabled) && (
+                                <ActionMenu label={`More actions for ${profile.name}`}>
+                                  {profile.is_active && <>
+                                    <MenuItem icon={<Share2 />} onSelect={() => setSharing(profile)} description="Make it selectable on another target">Share…</MenuItem>
+                                    <MenuItem icon={<Power />} onSelect={() => setDeactivating(profile)} description="Stop new Scan and Hunt use">Deactivate</MenuItem>
+                                  </>}
+                                  {profile.is_active && deletionEnabled && <MenuSeparator />}
+                                  <DeleteRecordsButton selection={{ kind: 'credential_profile', id: profile.id }} label="Delete permanently"
+                                    variant="ghost" subject={`credential ${profile.name}`} onDeleted={() => void loadProfiles()}
+                                    className="w-full justify-start px-3! text-red-300 hover:bg-red-500/10" />
+                                </ActionMenu>
+                              )}
+                            </>
                           )}
-                        </>
-                      : <span className="rounded-sm bg-amber-500/10 px-2 py-1 text-amber-300">no capabilities · legacy profile is unusable until narrowed explicitly</span>}
-                    {profile.expires_at && <span>expires {new Date(profile.expires_at).toLocaleString()}</span>}
-                  </div>
-                  <p className="mt-3 flex items-center gap-1.5 text-xs text-emerald-400">
-                    <ShieldCheck className="h-3.5 w-3.5" /> encrypted storage · secret values hidden
-                  </p>
-                </div>
-                <div className="flex shrink-0 flex-wrap gap-2">
-                  {profile.shared ? (
-                    // Rotate and deactivate belong to the owner; here it can only stop being shared.
-                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => void stopSharingHere(profile)}><X className="h-4 w-4" /> Stop sharing here</Button>
-                  ) : (
-                    <>
-                      {profile.is_active && <Button size="sm" variant="secondary" onClick={() => setSharing(profile)}><Share2 className="h-4 w-4" /> Share…</Button>}
-                      {profile.is_active && <Button size="sm" variant="secondary" onClick={() => openRotate(profile)}><RotateCw className="h-4 w-4" /> Rotate</Button>}
-                      {profile.is_active && <Button size="sm" variant="ghost" onClick={() => setDeactivating(profile)}><Trash2 className="h-4 w-4" /> Deactivate</Button>}
-                      <DeleteRecordsButton selection={{ kind: 'credential_profile', id: profile.id }} label="Delete permanently"
-                        variant="ghost" subject={`credential ${profile.name}`} onDeleted={() => void loadProfiles()}
-                        className="text-red-300 hover:text-red-200" />
-                    </>
-                  )}
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
+                        </span>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </tbody>
+            </Table>
+          </TableContainer>
+          <p className="mt-2 flex items-center gap-1.5 text-xs text-gray-500">
+            <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+            Encrypted storage · secret values hidden · {visibleProfiles.length} of {profiles.length} shown
+          </p>
+        </>
       )}
 
       <Modal

@@ -2,9 +2,8 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
-import { History } from 'lucide-react'
 import { getExposureChanges, type ExposureChangeCategory, type ExposureChangesResponse } from '@/lib/api'
-import styles from './exposure.module.css'
+import { Card } from '@/components/ui'
 
 type AnchorMode = '7d' | '30d' | 'visit'
 
@@ -32,12 +31,12 @@ function useLastVisitAnchor(storageKey: string): string | null {
 }
 
 const TILE_TONES: Record<string, string> = {
-  new_assets: 'text-teal-300',
+  new_assets: 'text-gray-100',
   new_critical: 'text-red-300',
   new_high: 'text-orange-300',
   resolved: 'text-emerald-300',
   failed_scans: 'text-red-200',
-  went_stale: 'text-yellow-300',
+  went_stale: 'text-amber-300',
 }
 
 function exampleTitle(category: ExposureChangeCategory): string | undefined {
@@ -48,12 +47,12 @@ function exampleTitle(category: ExposureChangeCategory): string | undefined {
 }
 
 function ChangeTile({ category }: { category: ExposureChangeCategory }) {
-  const tone = category.count > 0 ? TILE_TONES[category.key] || 'text-gray-200' : 'text-gray-600'
+  const tone = category.count > 0 ? TILE_TONES[category.key] || 'text-gray-200' : 'text-gray-500'
   const first = category.examples[0]
   const body = (
     <>
-      <div className={`text-lg font-semibold ${tone}`}>{category.count}</div>
-      <div className="text-[10px] uppercase tracking-wide text-gray-600">{category.label}</div>
+      <div className={`text-lg font-semibold tabular-nums ${tone}`}>{category.count}</div>
+      <div className="text-xs text-gray-400">{category.label}</div>
       {first && category.count > 0 && (
         <div className="mt-0.5 line-clamp-2 wrap-break-word text-[11px] leading-4 text-gray-500">{first.label}</div>
       )}
@@ -64,7 +63,7 @@ function ChangeTile({ category }: { category: ExposureChangeCategory }) {
       <Link
         href={category.href}
         title={exampleTitle(category)}
-        className="min-w-0 rounded-sm px-2.5 py-2 transition-colors hover:bg-gray-800/60 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="min-w-0 rounded-md px-2.5 py-2 transition-colors hover:bg-gray-800/60 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
       >
         {body}
       </Link>
@@ -107,8 +106,8 @@ export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDoma
       type="button"
       aria-pressed={mode === value}
       onClick={() => setMode(value)}
-      className={`rounded px-2 py-0.5 text-[11px] transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
-        mode === value ? 'bg-teal-500/15 text-teal-200 ring-1 ring-teal-400/40' : 'text-gray-500 hover:bg-gray-800/60 hover:text-gray-300'
+      className={`rounded-md px-2 py-0.5 text-xs font-medium transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
+        mode === value ? 'bg-gray-800 text-white ring-1 ring-inset ring-gray-700' : 'text-gray-400 hover:bg-gray-800/60 hover:text-gray-200'
       }`}
     >
       {label}
@@ -116,13 +115,12 @@ export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDoma
   )
 
   return (
-    <div className={`${styles.module} ${styles.corners} p-3`}>
+    <Card className="p-3">
       <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
         <div className="mr-1 flex shrink-0 items-center gap-2">
-          <History className="h-3.5 w-3.5 text-teal-200/50" aria-hidden="true" />
           <div>
-            <div className={`${styles.displayTitle} text-xs uppercase tracking-wide text-gray-400`}>What changed</div>
-            <div className="flex items-center gap-1 text-[11px] text-gray-600">
+            <div className="text-sm font-semibold text-gray-100">What changed</div>
+            <div className="mt-1 flex items-center gap-1">
               {modeButton('7d', '7d')}
               {modeButton('30d', '30d')}
               {lastVisit && modeButton('visit', 'Since last visit')}
@@ -135,7 +133,7 @@ export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDoma
             <button
               type="button"
               onClick={load}
-              className="rounded-sm px-2 py-0.5 text-teal-300 hover:bg-gray-800/60 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+              className="rounded-sm px-2 py-0.5 text-blue-400 hover:bg-gray-800/60 hover:text-blue-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               Retry
             </button>
@@ -147,13 +145,13 @@ export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDoma
             ))}
           </div>
         ) : data && data.total_changes === 0 ? (
-          <span className="text-xs text-gray-600">No changes in this window.</span>
+          <span className="text-xs text-gray-500">No changes in this window.</span>
         ) : (
           <div className="grid min-w-0 flex-1 grid-cols-2 gap-1 sm:grid-cols-3 xl:grid-cols-6">
             {data?.categories.map((category) => <ChangeTile key={category.key} category={category} />)}
           </div>
         )}
       </div>
-    </div>
+    </Card>
   )
 }

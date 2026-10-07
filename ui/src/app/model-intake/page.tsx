@@ -3,14 +3,13 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
-import { Card, CardSkeleton, ErrorState, Modal, useToast } from '@/components/ui'
+import { Button, Card, CardSkeleton, ErrorState, Modal, PageHeader, buttonClasses, fieldClasses, useToast } from '@/components/ui'
 import {
   AlertTriangle,
   CheckCircle2,
   Clipboard,
   Cloud,
   Database,
-  FileJson,
   GitBranch,
   Globe2,
   Info,
@@ -18,7 +17,6 @@ import {
   Play,
   RefreshCw,
   Server,
-  ShieldCheck,
   Wand2,
 } from 'lucide-react'
 import {
@@ -79,11 +77,15 @@ import {
   type IntakePhase,
 } from './IntakeShell'
 
-const inputClass =
-  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden'
+const inputClass = `min-w-0 w-full ${fieldClasses()}`
 const textareaClass =
-  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-gray-100 placeholder-gray-500 shadow-xs focus:border-blue-500 focus:outline-hidden focus:ring-2 focus:ring-blue-500/40'
 const fieldClass = 'grid min-w-0 gap-1 text-sm text-gray-300'
+// The workflow-mode switch mirrors the shared Tabs segmented control.
+const MODE_ACTIVE = 'bg-gray-800 text-white shadow-xs ring-1 ring-inset ring-gray-700'
+const MODE_IDLE = 'text-gray-400 hover:bg-gray-800/60 hover:text-gray-200'
+// A chosen option card: the accent border, a faint fill.
+const OPTION_SELECTED = 'border-blue-500/70 bg-blue-500/[0.07]'
 const COMPLETE_METADATA_EXAMPLE = {
   source_repo: 'https://github.com/example/model-release',
   commit_sha: '0123456789abcdef',
@@ -1414,26 +1416,16 @@ function ModelIntakeSettingsContent() {
 
   return (
     <div className="min-w-0 max-w-full space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <PackageCheck className="h-6 w-6 text-cyan-300" />
-            <h1 className="text-2xl font-bold text-white">Model Intake</h1>
-          </div>
-          <p className="mt-1 text-gray-400">
-            One pipeline: pick the model, produce technical evidence, then take that exact evidence
-            through controlled admission.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={openCheckCatalog}
-          className="inline-flex items-center gap-2 rounded-lg border border-cyan-700/60 bg-cyan-950/30 px-3 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-900/40 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-cyan-400"
-        >
-          <Info className="h-4 w-4" />
-          What ShakerScan checks
-        </button>
-      </div>
+      <PageHeader
+        title="Model Intake"
+        description="One pipeline: pick the model, produce technical evidence, then take that exact evidence through controlled admission."
+        actions={
+          <Button variant="secondary" onClick={openCheckCatalog}>
+            <Info className="h-4 w-4" aria-hidden="true" />
+            What ShakerScan checks
+          </Button>
+        }
+      />
 
       <Modal
         open={checkCatalogOpen}
@@ -1442,7 +1434,7 @@ function ModelIntakeSettingsContent() {
         size="xl"
       >
         <div className="space-y-4">
-          <div className="rounded-lg border border-cyan-800/50 bg-cyan-950/20 p-4 text-sm text-cyan-50">
+          <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-4 text-sm text-gray-300">
             This is the implemented capability catalog. Every completed report separately states whether each
             applicable check ran, what evidence it produced, and whether it passed, failed, was incomplete, or needs review.
             A catalog entry by itself is never proof that a check ran.
@@ -1488,12 +1480,12 @@ function ModelIntakeSettingsContent() {
         </div>
       </Modal>
 
-      <div role="group" className="inline-flex rounded-lg border border-gray-800 bg-gray-950 p-1" aria-label="Model Intake workflow mode">
+      <div role="group" className="inline-flex items-center gap-0.5 rounded-lg border border-gray-800 bg-gray-950 p-0.5" aria-label="Model Intake workflow mode">
         <button
           type="button"
           aria-pressed={workflowMode === 'automatic'}
           onClick={() => setWorkflowMode('automatic')}
-          className={`rounded-md px-4 py-2 text-sm font-medium ${workflowMode === 'automatic' ? 'bg-cyan-700 text-white' : 'text-gray-400 hover:text-white'}`}
+          className={`rounded-md px-2.5 py-1 text-sm font-medium transition-colors ${workflowMode === 'automatic' ? MODE_ACTIVE : MODE_IDLE}`}
         >
           Automatic review
         </button>
@@ -1501,7 +1493,7 @@ function ModelIntakeSettingsContent() {
           type="button"
           aria-pressed={workflowMode === 'advanced'}
           onClick={() => setWorkflowMode('advanced')}
-          className={`rounded-md px-4 py-2 text-sm font-medium ${workflowMode === 'advanced' ? 'bg-cyan-700 text-white' : 'text-gray-400 hover:text-white'}`}
+          className={`rounded-md px-2.5 py-1 text-sm font-medium transition-colors ${workflowMode === 'advanced' ? MODE_ACTIVE : MODE_IDLE}`}
         >
           Advanced / manual
         </button>
@@ -1509,12 +1501,9 @@ function ModelIntakeSettingsContent() {
 
       {workflowMode === 'automatic' && (
       <>
-      <Card className="border-cyan-500/30 bg-linear-to-br from-cyan-950/40 to-gray-950 p-5">
+      <Card className="p-5">
         <div className="max-w-3xl">
-          <div className="flex items-center gap-2 text-lg font-semibold text-white">
-            <PackageCheck className="h-5 w-5 text-cyan-300" />
-            Test a model end to end
-          </div>
+          <h2 className="text-sm font-semibold text-gray-100">Test a model end to end</h2>
           <p className="mt-1 text-sm text-gray-400">
             Paste one Hugging Face link and click Start. ShakerScan pins the revision, acquires and hashes the complete
             model repository, derives the exact inference runtime, runs every applicable scanner, creates the technical
@@ -1552,7 +1541,7 @@ function ModelIntakeSettingsContent() {
             type="button"
             onClick={runCompleteReview}
             disabled={quickSubmitting || !sourceRef.trim()}
-            className="inline-flex items-center justify-center gap-2 self-end rounded-lg bg-cyan-600 px-5 py-2 text-sm font-semibold text-white hover:bg-cyan-500 disabled:opacity-50"
+            className={`${buttonClasses('primary', 'md')} self-end`}
           >
             {quickSubmitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
             {quickSubmitting ? 'Starting review…' : 'Start review'}
@@ -1583,7 +1572,7 @@ function ModelIntakeSettingsContent() {
             <button
               type="button"
               onClick={() => { setWorkflowMode('advanced'); setPhase('status') }}
-              className="rounded-sm border border-yellow-600/50 px-3 py-1.5 text-xs font-medium hover:bg-yellow-900/40"
+              className="rounded-md border border-yellow-600/50 px-2.5 py-1 text-xs font-medium hover:bg-yellow-900/40"
             >
               Set up Firecracker
             </button>
@@ -1594,18 +1583,18 @@ function ModelIntakeSettingsContent() {
       <Card className="min-w-0 p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="text-sm font-semibold text-white">Automatic reviews</h2>
-            <p className="mt-1 text-xs text-gray-500">The controller keeps working if this page is closed or the API restarts.</p>
+            <h2 className="text-sm font-semibold text-gray-100">Automatic reviews</h2>
+            <p className="mt-0.5 text-xs text-gray-400">The controller keeps working if this page is closed or the API restarts.</p>
           </div>
-          <button type="button" onClick={loadAutomaticReviews} className="rounded-sm border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+          <Button size="sm" variant="secondary" onClick={loadAutomaticReviews}>Refresh</Button>
         </div>
         {automaticReviewsError && <div role="alert" className="mt-3 text-xs text-red-300">{automaticReviewsError}</div>}
         {!automaticReviewsError && automaticReviews.length === 0 ? (
-          <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-4 text-sm text-gray-500">
+          <div className="mt-4 rounded-lg border border-dashed border-gray-800 p-4 text-sm text-gray-500">
             No automatic review has been started yet.
           </div>
         ) : (
-          <div className="mt-4 grid gap-3">
+          <div className="-mx-4 mt-4 -mb-4 border-t border-gray-800">
             {automaticReviews.slice(0, showAllAutomaticReviews ? automaticReviews.length : 5).map((review, reviewIndex) => {
               const terminal = review.workflow_terminal ?? ['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
               const displayedProgress = review.effective_progress ?? review.progress
@@ -1627,31 +1616,31 @@ function ModelIntakeSettingsContent() {
                 ? `Review finished · ${outcome === 'BLOCK' ? 'blocked' : outcome === 'PASS' ? 'technical checks passed' : outcome.toLowerCase().replace(/_/g, ' ') || 'results ready'}`
                 : (queuedForRunner ? review.state.replace(/_running$/, '_queued') : review.state).replace(/_/g, ' ')
               return (
-                <div key={review.id} className="rounded-lg border border-gray-800 bg-gray-950 p-4">
+                <div key={review.id} className="border-b border-gray-800 px-4 py-4 last:border-b-0">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="truncate text-base font-semibold text-white" title={review.source_label || review.id}>
+                      <div className="truncate text-sm font-semibold text-gray-100" title={review.source_label || review.id}>
                         {review.source_label || 'Model review'}
                       </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className={`rounded-sm px-2 py-1 text-xs font-semibold ${passed ? 'bg-green-950/60 text-green-300' : blocked ? 'bg-red-950/60 text-red-300' : terminal ? 'bg-yellow-950/60 text-yellow-300' : 'bg-cyan-950/60 text-cyan-300'}`}>
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        <span className={`rounded-sm px-1.5 py-0.5 text-xs font-medium ${passed ? 'bg-green-500/15 text-green-300' : blocked ? 'bg-red-500/15 text-red-300' : terminal ? 'bg-yellow-500/15 text-yellow-300' : 'bg-blue-500/15 text-blue-300'}`}>
                           {outcomeLabel}
                         </span>
                         <span className="text-xs text-gray-500">{review.requested_environment}</span>
                         {supersededByNewerReview && (
-                          <span className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-400">Earlier run · newer review available</span>
+                          <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-xs text-gray-400">Earlier run · newer review available</span>
                         )}
                       </div>
                       <div className="mt-2 text-sm font-medium text-white">{displayedStep.replace(/_/g, ' ')}</div>
                       {review.state === 'static_scan_pending' && review.static_scan_progress != null && (
-                        <div className="mt-1 text-xs text-cyan-300">
+                        <div className="mt-1 text-xs text-blue-300">
                           Technical scan {review.static_scan_progress}% complete
                         </div>
                       )}
                       <div className="mt-1 text-[11px] text-gray-500">Started {new Date(review.created_at).toLocaleString()} · {review.source_kind}</div>
                       <div className="mt-1 font-mono text-[11px] text-gray-600">review {review.id} · scan {review.scan_id}</div>
                     </div>
-                    <div className="text-right text-sm font-semibold text-white">
+                    <div className="text-right text-sm font-medium tabular-nums text-gray-300">
                       {terminal ? 'Workflow ended' : `${displayedProgress}%`}
                     </div>
                   </div>
@@ -1668,8 +1657,8 @@ function ModelIntakeSettingsContent() {
                     </div>
                   )}
                   {!terminal && (
-                    <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-800" aria-label={`Workflow progress ${displayedProgress}%`}>
-                      <div className="h-full bg-cyan-500" style={{ width: `${displayedProgress}%` }} />
+                    <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-gray-800" aria-label={`Workflow progress ${displayedProgress}%`}>
+                      <div className="h-full bg-blue-500" style={{ width: `${displayedProgress}%` }} />
                     </div>
                   )}
                   {review.error_json?.message && (
@@ -1729,7 +1718,7 @@ function ModelIntakeSettingsContent() {
                         type="button"
                         onClick={() => exportAutomaticReport(review.id, 'html')}
                         disabled={automaticDownload === `${review.id}:html`}
-                        className="rounded-sm bg-cyan-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-600 disabled:opacity-50"
+                        className={buttonClasses('secondary', 'sm')}
                       >
                         {automaticDownload === `${review.id}:html` ? 'Preparing…' : 'HTML report'}
                       </button>
@@ -1739,13 +1728,13 @@ function ModelIntakeSettingsContent() {
                         type="button"
                         onClick={() => exportAutomaticBom(review.scan_id, 'aibom')}
                         disabled={automaticDownload === `${review.scan_id}:aibom`}
-                        className="rounded-sm border border-cyan-700 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-950/50 disabled:opacity-50"
+                        className={buttonClasses('secondary', 'sm')}
                       >
                         {automaticDownload === `${review.scan_id}:aibom` ? 'Preparing…' : 'AIBOM'}
                       </button>
                     )}
                     {review.submission_id && (
-                      <details className="relative rounded-sm border border-gray-700 px-3 py-1.5 text-xs text-gray-300">
+                      <details className="relative rounded-lg border border-gray-700 px-2.5 py-1.5 text-xs font-medium text-gray-300">
                         <summary className="cursor-pointer select-none">More exports</summary>
                         <div className="mt-3 grid gap-2 sm:grid-cols-2">
                           <Link href={`/scans/${review.scan_id}`} className="rounded-sm border border-gray-700 px-3 py-1.5 text-center hover:bg-gray-800">Static scan details</Link>
@@ -1775,7 +1764,7 @@ function ModelIntakeSettingsContent() {
               <button
                 type="button"
                 onClick={() => setShowAllAutomaticReviews((current) => !current)}
-                className="rounded-sm border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800"
+                className="w-full border-t border-gray-800 px-4 py-2.5 text-left text-xs font-medium text-gray-400 hover:bg-gray-800/40 hover:text-gray-200"
               >
                 {showAllAutomaticReviews ? 'Hide older reviews' : `Show ${automaticReviews.length - 5} older reviews`}
               </button>
@@ -1819,20 +1808,17 @@ function ModelIntakeSettingsContent() {
       {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
 
       {trustRemediationMode && (
-        <div className="rounded-lg border border-cyan-500/30 bg-cyan-950/30 p-4 text-sm text-cyan-100">
+        <div className="rounded-lg border border-blue-500/30 bg-blue-500/[0.06] p-4 text-sm text-gray-300">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="flex items-center gap-2 font-medium text-white">
-                <ShieldCheck className="h-4 w-4 text-cyan-300" />
-                Model trust remediation
-              </div>
-              <p className="mt-1 text-cyan-100/80">
+              <div className="font-medium text-white">Model trust remediation</div>
+              <p className="mt-1 text-gray-400">
                 Strict signing checks are selected. Add or select an operator trust anchor, provide
                 signature evidence, and confirm the preview before queueing the replacement intake scan.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <a href="#model-intake-trust-remediation" className="rounded-sm border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-100 hover:bg-cyan-500/20">
+              <a href="#model-intake-trust-remediation" className={buttonClasses('secondary', 'sm')}>
                 Trust controls
               </a>
             </div>
@@ -1842,11 +1828,8 @@ function ModelIntakeSettingsContent() {
 
       {phase === 'source' && (
         <Card className="min-w-0 p-4" id="model-intake-source">
-          <div className="flex items-center gap-2 text-white">
-            <Wand2 className="h-4 w-4 text-cyan-300" />
-            <h2 className="text-sm font-semibold">1. Model &amp; Target</h2>
-          </div>
-          <p className="mt-1 text-xs text-gray-500">
+          <h2 className="text-sm font-semibold text-gray-100">1. Model &amp; Target</h2>
+          <p className="mt-0.5 text-xs text-gray-400">
             Pick the model and where it is headed once. Every stage below — the preflight scan and the
             controlled admission workflow — reads this reference and this environment.
           </p>
@@ -1877,7 +1860,7 @@ function ModelIntakeSettingsContent() {
               type="button"
               onClick={() => resolveReference()}
               disabled={resolving || !sourceRef.trim()}
-              className="inline-flex w-full items-center justify-center gap-2 self-end whitespace-nowrap rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+              className="inline-flex w-full items-center justify-center gap-2 self-end whitespace-nowrap rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-xs hover:bg-blue-500 disabled:opacity-50"
             >
               {resolving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
               Resolve
@@ -1897,11 +1880,11 @@ function ModelIntakeSettingsContent() {
                     setResolverResult(null)
                   }}
                   className={`min-w-0 rounded-lg border p-3 text-left transition ${
-                    active ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                    active ? OPTION_SELECTED : 'border-gray-800 bg-gray-950 hover:border-gray-700'
                   }`}
                 >
                   <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-white">
-                    <Icon className="h-4 w-4 shrink-0 text-cyan-300" />
+                    <Icon className="h-4 w-4 shrink-0 text-gray-400" aria-hidden="true" />
                     <span className="min-w-0 wrap-break-word">{option.label}</span>
                   </div>
                   <div className="mt-1 wrap-break-word text-xs text-gray-500">{option.helper}</div>
@@ -1924,7 +1907,7 @@ function ModelIntakeSettingsContent() {
                   type="button"
                   onClick={() => applyEnvironment(option.value)}
                   className={`min-w-0 rounded-lg border p-3 text-left ${
-                    environment === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                    environment === option.value ? OPTION_SELECTED : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                   }`}
                 >
                   <div className="wrap-break-word text-sm font-medium text-white">{option.label}</div>
@@ -1948,7 +1931,7 @@ function ModelIntakeSettingsContent() {
                   type="button"
                   onClick={() => applyDepth(option.value)}
                   className={`min-w-0 rounded-lg border p-3 text-left ${
-                    activeDepth === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                    activeDepth === option.value ? OPTION_SELECTED : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                   }`}
                 >
                   <div className="wrap-break-word text-sm font-medium text-white">{option.label}</div>
@@ -2009,7 +1992,7 @@ function ModelIntakeSettingsContent() {
                           type="button"
                           onClick={() => resolveReference(file.path)}
                           className={`min-w-0 rounded border px-3 py-2 text-left text-xs ${
-                            selected ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                            selected ? OPTION_SELECTED : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                           }`}
                         >
                           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
@@ -2037,7 +2020,7 @@ function ModelIntakeSettingsContent() {
             <button
               type="button"
               onClick={() => setPhase('preflight')}
-              className="inline-flex items-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600"
+              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-xs hover:bg-blue-500"
             >
               Continue to preflight
             </button>
@@ -2049,11 +2032,8 @@ function ModelIntakeSettingsContent() {
         <>
         <Card className="min-w-0 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-white">
-              <ShieldCheck className="h-4 w-4 text-cyan-300" />
-              <h2 className="text-sm font-semibold">2. Policy Profile</h2>
-            </div>
-            <Link href="/settings/policy-profiles" className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+            <h2 className="text-sm font-semibold text-gray-100">2. Policy Profile</h2>
+            <Link href="/settings/policy-profiles" className={buttonClasses('secondary', 'sm')}>
               Manage
             </Link>
           </div>
@@ -2070,7 +2050,7 @@ function ModelIntakeSettingsContent() {
                 type="button"
                 onClick={() => applyPolicyProfile(profile.value)}
                 className={`min-w-0 rounded-lg border p-3 text-left ${
-                  policyProfile === profile.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                  policyProfile === profile.value ? OPTION_SELECTED : 'border-gray-800 bg-gray-950 hover:border-gray-700'
                 }`}
               >
                 <div className="wrap-break-word text-sm font-medium text-white">{profile.label}</div>
@@ -2083,7 +2063,7 @@ function ModelIntakeSettingsContent() {
                 type="button"
                 onClick={() => applyPolicyProfile(profile.environment)}
                 className={`min-w-0 rounded-lg border p-3 text-left ${
-                  policyProfile === profile.environment ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                  policyProfile === profile.environment ? OPTION_SELECTED : 'border-gray-800 bg-gray-950 hover:border-gray-700'
                 }`}
               >
                 <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
@@ -2094,7 +2074,7 @@ function ModelIntakeSettingsContent() {
                   Block {profile.minimum_block_severity}+{profile.strict_model_intake ? ' + verified signing' : ''}
                 </div>
                 {profile.strict_model_intake && (profile.required_trust_anchor_ids || []).length > 0 && (
-                  <div className="mt-2 text-xs text-cyan-200">
+                  <div className="mt-2 text-xs text-blue-300">
                     {(profile.required_trust_anchor_ids || []).length} policy-bound trust anchor{(profile.required_trust_anchor_ids || []).length === 1 ? '' : 's'}
                   </div>
                 )}
@@ -2110,11 +2090,8 @@ function ModelIntakeSettingsContent() {
         </Card>
 
         <form onSubmit={handleSubmit} className="min-w-0 space-y-5 rounded-lg border border-gray-800 bg-gray-900 p-4">
-          <div className="flex items-center gap-2 text-white">
-            <Play className="h-4 w-4 text-cyan-300" />
-            <h2 className="text-sm font-semibold">3. Preflight Evidence Scan</h2>
-          </div>
-          <p className="-mt-2 text-xs text-gray-500">
+          <h2 className="text-sm font-semibold text-gray-100">3. Preflight Evidence Scan</h2>
+          <p className="-mt-4 text-xs text-gray-400">
             Technical evidence for the model selected in step 1. This never grants deployment
             authority — step 4 does that.
           </p>
@@ -2128,7 +2105,7 @@ function ModelIntakeSettingsContent() {
                   type="button"
                   onClick={() => applyScanDepth(option.value)}
                   className={`min-w-0 rounded-lg border p-3 text-left ${
-                    scanDepth === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                    scanDepth === option.value ? OPTION_SELECTED : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                   }`}
                 >
                   <div className="wrap-break-word text-sm font-medium text-white">{option.label}</div>
@@ -2221,7 +2198,7 @@ function ModelIntakeSettingsContent() {
                   type="button"
                   onClick={() => setMaxDownloadBytes(String(preset.bytes))}
                   className={`min-w-0 rounded-lg border p-2 text-left ${
-                    Number(maxDownloadBytes) === preset.bytes ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                    Number(maxDownloadBytes) === preset.bytes ? OPTION_SELECTED : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                   }`}
                 >
                   <div className="text-sm font-medium text-white">{preset.label}</div>
@@ -2261,14 +2238,11 @@ function ModelIntakeSettingsContent() {
             id="model-intake-trust-remediation"
             ref={trustSectionRef}
             className={`min-w-0 scroll-mt-24 space-y-3 rounded-lg border bg-gray-950 p-3 ${
-              trustRemediationMode ? 'border-cyan-500/60 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]' : 'border-gray-800'
+              trustRemediationMode ? 'border-blue-500/60' : 'border-gray-800'
             }`}
           >
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
-                <ShieldCheck className="h-4 w-4 text-cyan-300" />
-                Trust mode
-              </div>
+              <div className="text-sm font-medium text-gray-200">Trust mode</div>
               <span className={`rounded px-2 py-1 text-xs ${
                 hasIntakeInput ? TRUST_PREVIEW_BADGE[trustPreview.headlineStatus] : 'bg-gray-800 text-gray-400'
               }`}>
@@ -2284,7 +2258,7 @@ function ModelIntakeSettingsContent() {
                   type="button"
                   onClick={() => applyTrustMode(mode.value)}
                   className={`min-w-0 rounded-lg border p-3 text-left ${
-                    trustMode === mode.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
+                    trustMode === mode.value ? OPTION_SELECTED : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                   }`}
                 >
                   <div className="wrap-break-word text-sm font-medium text-white">{mode.label}</div>
@@ -2409,7 +2383,7 @@ function ModelIntakeSettingsContent() {
                       {savedTrustAnchors.map((anchor) => {
                         const selected = selectedTrustAnchorIds.includes(anchor.id)
                         return (
-                          <div key={anchor.id} className={`rounded-sm border p-3 ${selected ? 'border-cyan-500 bg-cyan-950/30' : 'border-gray-800 bg-gray-950'}`}>
+                          <div key={anchor.id} className={`rounded-sm border p-3 ${selected ? OPTION_SELECTED : 'border-gray-800 bg-gray-950'}`}>
                             <label className="flex min-w-0 items-start gap-2 text-sm text-gray-300">
                               <input
                                 type="checkbox"
@@ -2451,7 +2425,7 @@ function ModelIntakeSettingsContent() {
                       type="button"
                       onClick={saveTrustAnchor}
                       disabled={savingAnchor || !newAnchorName.trim() || (!newAnchorSha256.trim() && !newAnchorPem.trim())}
-                      className="inline-flex items-center justify-center rounded-sm bg-cyan-700 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+                      className="inline-flex items-center justify-center rounded-sm bg-blue-600 px-3 py-2 text-sm font-medium text-white shadow-xs hover:bg-blue-500 disabled:opacity-50"
                     >
                       {savingAnchor ? 'Saving...' : 'Save'}
                     </button>
@@ -2522,10 +2496,7 @@ function ModelIntakeSettingsContent() {
             </summary>
             <div className="grid gap-3 border-t border-gray-800 p-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
             <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
-              <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
-                <FileJson className="h-4 w-4 text-cyan-300" />
-                Evidence fields
-              </div>
+              <div className="text-sm font-medium text-gray-200">Evidence fields</div>
               <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                 <label className={fieldClass}>
                   Source repo
@@ -2571,10 +2542,7 @@ function ModelIntakeSettingsContent() {
             </div>
 
             <div className="min-w-0 space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-3">
-              <div className="flex items-center gap-2 text-sm font-medium text-gray-200">
-                <FileJson className="h-4 w-4 text-cyan-300" />
-                Requirements and raw metadata
-              </div>
+              <div className="text-sm font-medium text-gray-200">Requirements and raw metadata</div>
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                 <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
                   <input type="checkbox" checked={requireHash} onChange={(e) => setRequireHash(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
@@ -2687,7 +2655,7 @@ function ModelIntakeSettingsContent() {
           </details>
 
           <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-            <button type="submit" disabled={submitting || scanBlockedByResolver || hasFieldErrors || hasTrustFailures} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50">
+            <button type="submit" disabled={submitting || scanBlockedByResolver || hasFieldErrors || hasTrustFailures} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-xs hover:bg-blue-500 disabled:opacity-50">
               {submitting ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}
               {scanBlockedByResolver ? 'Resolve an artifact file first' : 'Queue Model Intake Scan'}
             </button>
@@ -2715,22 +2683,19 @@ function ModelIntakeSettingsContent() {
 
         {scenario && (scenario.request_presets || []).length > 0 && (
           <Card className="p-4">
-            <div className="flex items-center gap-2 text-white">
-              <Wand2 className="h-4 w-4 text-cyan-300" />
-              <h2 className="text-sm font-semibold">Starter Presets</h2>
-            </div>
-            <p className="mt-1 text-sm text-gray-400">Optional quick-fill requests for model intake practice. Review every value before queueing a scan.</p>
+            <h2 className="text-sm font-semibold text-gray-100">Starter Presets</h2>
+            <p className="mt-0.5 text-xs text-gray-400">Optional quick-fill requests for model intake practice. Review every value before queueing a scan.</p>
             <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {(scenario.request_presets || []).map((preset) => (
                 <button
                   key={preset.key}
                   type="button"
                   onClick={() => applyPreset(preset)}
-                  className="rounded-lg border border-gray-700 bg-gray-950 p-3 text-left hover:border-cyan-500/60 hover:bg-gray-800"
+                  className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-left hover:border-gray-600 hover:bg-gray-800/60"
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-sm font-medium text-white">{preset.name}</span>
-                    <Wand2 className="h-4 w-4 text-cyan-300" />
+                    <Wand2 className="h-4 w-4 text-gray-500" aria-hidden="true" />
                   </div>
                   <div className={`mt-2 text-xs ${preset.should_pass ? 'text-green-300' : 'text-orange-300'}`}>
                     {preset.should_pass ? 'expected pass' : `expected ${preset.expected_min_severity || 'finding'}`}
@@ -2745,11 +2710,8 @@ function ModelIntakeSettingsContent() {
           <Card className="p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <div className="flex items-center gap-2 text-white">
-                  <ShieldCheck className="h-4 w-4 text-cyan-300" />
-                  <h2 className="text-sm font-semibold">Evidence Checklist</h2>
-                </div>
-                <p className="mt-1 max-w-3xl text-sm text-gray-400">
+                <h2 className="text-sm font-semibold text-gray-100">Evidence Checklist</h2>
+                <p className="mt-0.5 max-w-3xl text-xs text-gray-400">
                   ShakerScan generates the technical scan, SBOM, malware, runtime, and evaluation evidence. Add the organization-specific approval, private data context, production restrictions, and monitoring plan needed for your deployment.
                 </p>
               </div>
@@ -2800,10 +2762,10 @@ function ModelIntakeSettingsContent() {
         <Card className="min-w-0 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <h2 className="text-sm font-semibold text-white">Admission lifecycle</h2>
-              <p className="mt-1 text-xs text-gray-500">Deployment accepts only active, registered, non-expired signed subjects.</p>
+              <h2 className="text-sm font-semibold text-gray-100">Admission lifecycle</h2>
+              <p className="mt-0.5 text-xs text-gray-400">Deployment accepts only active, registered, non-expired signed subjects.</p>
             </div>
-            <button type="button" onClick={loadAdmissions} className="rounded-sm border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+            <Button size="sm" variant="secondary" onClick={loadAdmissions}>Refresh</Button>
           </div>
           {admissionsError ? (
             <div className="mt-3 text-xs text-red-300">{admissionsError}</div>
@@ -2845,8 +2807,8 @@ function ModelIntakeSettingsContent() {
         <Card className="min-w-0 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <h2 className="text-sm font-semibold text-white">Evidence adapter readiness</h2>
-              <p className="mt-1 text-xs text-gray-500">Strict intake requires applicable adapters; irrelevant formats report not applicable.</p>
+              <h2 className="text-sm font-semibold text-gray-100">Evidence adapter readiness</h2>
+              <p className="mt-0.5 text-xs text-gray-400">Strict intake requires applicable adapters; irrelevant formats report not applicable.</p>
             </div>
             <div className="flex items-center gap-2">
               {scannerReadiness && (
