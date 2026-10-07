@@ -97,15 +97,61 @@ def test_replay_never_returns_another_receipts_observations(monkeypatch):
     assert result["action_result"]["observations"] == []
 
 
+# Negative controls exactly as the worker's bounded wordlist emits them: paths that cannot exist.
+CONTROLS = [
+    {"kind": "content_discovery", "url": f"https://app.test/.shakerscan-absent-{index:016x}",
+     "status": 404, "length": 19, "negative_control": True}
+    for index in range(3)
+]
+
+
+def _catch_all(status, length, words):
+    return [
+        {"kind": "content_discovery", "url": f"https://app.test/{word}", "status": status,
+         "length": length}
+        for word in words
+    ]
+
+
 def test_content_discovery_hits_become_endpoints_but_controls_do_not():
     records = [
+        *CONTROLS,
         *HITS,
-        {"kind": "content_discovery", "url": "https://app.test/missing", "status": 404},
-        {"kind": "content_discovery", "url": "https://other.test/admin", "status": 200},
+        {"kind": "content_discovery", "url": "https://app.test/missing", "status": 404, "length": 19},
+        {"kind": "content_discovery", "url": "https://other.test/admin", "status": 200, "length": 5},
     ]
     assert endpoint_knowledge.content_discovery_worklist(records, origin="https://app.test/") == [
         "GET /.git/config", "GET /admin",
     ]
+
+
+def test_spa_catch_all_hits_never_enter_the_inventory():
+    # An SPA answers every unknown path with its index shell: the controls measure that response,
+    # so wordlist hits of the same status and size are not endpoints. A response that differs
+    # (a real file, or a forbidden route on a host whose unknown paths answer 200) still is.
+    controls = [{**item, "status": 200, "length": 75_210} for item in CONTROLS]
+    records = [
+        *controls,
+        *_catch_all(200, 75_210, ["admin", "backup", "wp-login.php", "server-status"]),
+        *_catch_all(200, 75_300, ["phpmyadmin"]),  # within the learned size tolerance
+        {"kind": "content_discovery", "url": "https://app.test/.git/config", "status": 200,
+         "length": 92},
+        {"kind": "content_discovery", "url": "https://app.test/ftp", "status": 403, "length": 75_210},
+    ]
+    assert endpoint_knowledge.content_discovery_worklist(records, origin="https://app.test/") == [
+        "GET /.git/config", "GET /ftp",
+    ]
+
+
+def test_blanket_forbidden_hits_never_enter_the_inventory():
+    controls = [{**item, "status": 403, "length": 199} for item in CONTROLS]
+    records = [*controls, *_catch_all(403, 199, [".env", ".htpasswd", "admin"])]
+    assert endpoint_knowledge.content_discovery_worklist(records, origin="https://app.test/") == []
+
+
+def test_uncalibrated_content_discovery_records_nothing():
+    # Without a measured absent path a status-only hit cannot be told from a catch-all.
+    assert endpoint_knowledge.content_discovery_worklist(HITS, origin="https://app.test/") == []
 
 
 def test_content_discovery_is_recorded_in_the_endpoint_inventory(monkeypatch):
@@ -118,7 +164,8 @@ def test_content_discovery_is_recorded_in_the_endpoint_inventory(monkeypatch):
     monkeypatch.setattr(endpoint_knowledge.asm_inventory, "upsert_endpoints", upsert)
     count = asyncio.run(endpoint_knowledge.enrich_crawl_endpoints(
         None, target=SimpleNamespace(target_kind="web", target_id="owned"),
-        origin="https://app.test/", capability="web.content_discover", input={}, records=HITS,
+        origin="https://app.test/", capability="web.content_discover", input={},
+        records=[*CONTROLS, *HITS],
     ))
     assert count == 2
     assert calls[0][1] == ["GET /.git/config", "GET /admin"]
