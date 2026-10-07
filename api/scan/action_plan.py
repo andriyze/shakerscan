@@ -835,6 +835,7 @@ class ScanActionPlanCompiler:
         available_placement_capabilities: Iterable[str] | None = None,
         placement_backends: Sequence[str] = ("local", "broker"),
         action_budgets: Mapping[str, Mapping[str, int]] | None = None,
+        verification_extensions: Sequence[Mapping[str, Any]] = (),
     ) -> ScanActionPlan:
         scope = str(action_scope or "").strip().lower()
         if scope not in {"full", "global", "discovery", "endpoint"}:
@@ -1307,9 +1308,14 @@ class ScanActionPlanCompiler:
         # shape used to hand a floor-tier slice the full per-candidate cost and fail the
         # child closed at allocation.
         slice_shapes: dict[str, tuple[int, Mapping[str, int]]] = {}
+        # An extension carries the holds its measured latency earned (see
+        # verification_extension); they are frozen per action like any other override.
+        extension_budgets: dict[str, Mapping[str, int]] = {}
 
         def blueprint_budget(blueprint: _ActionBlueprint) -> Mapping[str, int]:
-            override = dict(action_budgets or {}).get(blueprint.action_id)
+            override = {
+                **dict(action_budgets or {}), **extension_budgets,
+            }.get(blueprint.action_id)
             if override is not None:
                 return override
             if blueprint.capability_name in _BATCH_CAPABILITIES:
@@ -1943,6 +1949,24 @@ class ScanActionPlanCompiler:
                 ))),
                 required="bola" in explicitly_requested,
             )
+
+        if verification_extensions and (scope != "endpoint" or continuation_round < 2):
+            raise ScanActionPlanError(
+                "verification extensions belong to a later continuation round"
+            )
+        for extension in verification_extensions:
+            add(
+                _token(extension.get("action_id"), name="extension action"),
+                str(extension.get("stage") or "verify_candidates"),
+                str(extension.get("capability_name") or ""),
+                dict(extension.get("capability_args") or {}),
+                dependencies=tuple(extension.get("dependencies") or ()),
+                required=False,
+            )
+            extension_budgets[blueprints[-1].action_id] = {
+                str(name): int(amount)
+                for name, amount in dict(extension.get("budget") or {}).items()
+            }
 
         if include_finalizer:
             add(

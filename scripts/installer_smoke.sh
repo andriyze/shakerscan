@@ -75,6 +75,7 @@ required_files=(
   api/scan/execution.py
   api/scan/external_process.py
   api/scan/finalizer.py
+  api/scan/verification_extension.py
   api/authenticated_assurance/__init__.py
   api/authenticated_assurance/models.py
   api/authenticated_assurance/evaluation.py

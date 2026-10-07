@@ -173,6 +173,7 @@ except (ImportError, ModuleNotFoundError):
     )
 
 from .action_plan import ScanAction, ScanActionPlan
+from .verification_extension import EXTENDS_ARG
 from .capability_result import (
     BUDGET_EXHAUSTION_REASONS,
     CEILING_STOP_ERRORS,
@@ -3007,6 +3008,18 @@ class DatabaseNeutralScanActionDispatcher:
             for item in await load_attempts(action.action_id)
             if isinstance(item, Mapping)
         }
+        # An extension re-runs only what its slice could not finish: a candidate the extended
+        # action already took to a verdict is carried, with no budget and no repeat traffic.
+        extends = str(action.capability_args.get(EXTENDS_ARG) or "")
+        carried = {
+            str(item.get("attempt_id") or ""): dict(item)
+            for item in (await load_attempts(extends) if extends else ())
+            if isinstance(item, Mapping)
+            and str(item.get("status") or "") in _BATCH_SUCCESS_STATUSES
+            and not item.get("timed_out")
+            and str(item.get("attempt_id") or "") not in completed
+        }
+        carried_count = 0
         manifest_digest = manifest.reference().manifest_digest
         family = {
             "xss.verify_batch": "xss",
@@ -3078,6 +3091,16 @@ class DatabaseNeutralScanActionDispatcher:
             if retry_round:
                 attempt_key += f":retry:{retry_round}"
             attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
+            if not retry_round and attempt_id in carried and attempt_id not in completed:
+                carried_count += 1
+                attempted += 1
+                observations.extend(
+                    {**dict(item), "carried_from": extends}
+                    for item in carried[attempt_id].get("observations") or ()
+                    if isinstance(item, Mapping) and item.get("kind") == "candidate_attempt"
+                )
+                attempt_log.append((candidate_id, 0, True, False))
+                continue
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
@@ -3460,6 +3483,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "unexamined_count": len(still_empty),
                 "unexamined_candidate_ids": sorted(still_empty)[:50],
                 "checkpoint_mode": "after_each_candidate",
+                **({"extends": extends, "carried_count": carried_count} if extends else {}),
             },
         )
 

@@ -657,6 +657,7 @@ download "$REPO_RAW_BASE/api/scan/continuation.py" "$INSTALL_DIR/api/scan/contin
 download "$REPO_RAW_BASE/api/scan/execution.py" "$INSTALL_DIR/api/scan/execution.py"
 download "$REPO_RAW_BASE/api/scan/external_process.py" "$INSTALL_DIR/api/scan/external_process.py"
 download "$REPO_RAW_BASE/api/scan/finalizer.py" "$INSTALL_DIR/api/scan/finalizer.py"
+download "$REPO_RAW_BASE/api/scan/verification_extension.py" "$INSTALL_DIR/api/scan/verification_extension.py"
 download "$REPO_RAW_BASE/api/scan/reachability.py" "$INSTALL_DIR/api/scan/reachability.py"
 download "$REPO_RAW_BASE/api/scan/assessment.py" "$INSTALL_DIR/api/scan/assessment.py"
 download "$REPO_RAW_BASE/api/scan/redirect_evidence.py" "$INSTALL_DIR/api/scan/redirect_evidence.py"

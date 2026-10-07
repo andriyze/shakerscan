@@ -43,6 +43,7 @@ from .continuation import (
     reconciled_continuation_ceiling,
 )
 from .manifest_store import PostgresScanManifestStore
+from .verification_extension import plan_verification_extensions
 from .work_manifests import (
     ScanWorkManifest,
     ScanWorkManifestKind,
@@ -288,6 +289,20 @@ def compile_continuation_round(
         action_id: {}
         for action_id in interactive_auth_input_action_ids(credential_refs)
     }
+    # Admit against what the settled actions actually left, not the worst-case
+    # residual frozen at submission (see reconciled_continuation_ceiling).
+    residual = reconciled_continuation_ceiling(allocation, parent_results)
+    # A verifier slice that a slow target wall-killed with most of its requests unsent
+    # is carried into this round, its holds scaled by the latency it measured.
+    extensions = (
+        plan_verification_extensions(
+            parent_plan=parent_plan,
+            parent_results=parent_results,
+            profile_limits=execution_plan.budget.ledger_limits(),
+            residual=residual,
+        )
+        if revision_number >= 2 and not finalize_only else ()
+    )
     zero_cost_existing_inputs.update({
         f"inputs.collection_{index:02d}": {}
         for index, _item in enumerate(collection_refs)
@@ -329,14 +344,10 @@ def compile_continuation_round(
         # are opportunistic breadth and must stop cleanly when the residual can
         # no longer fund a fast-tier batch.
         require_family_minimums=revision_number == 1,
+        verification_extensions=extensions,
     )
     allocated_plan = allocate_scan_action_plan(
-        continuation_raw,
-        # Admit against what the settled actions actually left, not the
-        # worst-case residual frozen at submission (see reconciled_continuation_ceiling).
-        ContinuationBudgetCeiling(
-            reconciled_continuation_ceiling(allocation, parent_results),
-        ),
+        continuation_raw, ContinuationBudgetCeiling(residual),
     ).plan
     continuation_plan = select_continuation_actions(
         allocated_plan,
