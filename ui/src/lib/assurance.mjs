@@ -15,8 +15,9 @@ const GAP_LABELS = {
   no_examination_recorded: 'no examination recorded',
   required_actions_complete: 'required work did not finish',
   selected_families_complete: 'a selected check family is incomplete',
-  candidates_attempted: 'planned candidates were not attempted',
-  active_verification_attempted: 'active verification never ran',
+  candidates_attempted: 'some planned candidates were not attempted',
+  active_verification_attempted: 'no active verifier attempted a candidate',
+  application_not_observed: 'the application was not examined',
   authenticated_coverage: 'only anonymous traffic',
   placement_available: 'a worker placement was unavailable',
   examination_breadth: 'the examination was narrow',
@@ -53,6 +54,24 @@ export function scanAssurance(scan) {
     ? inner.assurance_score
     : (typeof scan.assurance_score === 'number' ? scan.assurance_score : null)
   if (score === null) return null
+  // A run that never reached the application examined none of it, whatever its planned work
+  // scored. Reports written before the engine said so still carry that score; it is not shown.
+  const notExamined = inner.application_observed === false
+    || inner.risk_assessment_state === 'not_examined'
+    || scan.application_observed === false
+    || scan.risk_assessment_state === 'not_examined'
+  if (notExamined) {
+    const gaps = Array.isArray(inner.assurance_gaps) ? inner.assurance_gaps : []
+    return {
+      score: 0,
+      band: 'none',
+      label: 'Application not examined',
+      gaps: assuranceGapLabels([
+        ...gaps.filter((gap) => gap !== 'application_not_observed'),
+        'application_not_observed',
+      ]),
+    }
+  }
   const band = assuranceBand(score)
   return {
     score,

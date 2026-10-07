@@ -471,7 +471,7 @@ be rebuilt with `scanner.sh report-rebuild` while outbound sockets are disabled;
 result, revision, or observation digests fail closed. File output uses an atomic same-directory
 write, refuses to overwrite by default, and requires an explicit `--force` replacement.
 
-**Scoring & grading** (`api/scan/scoring.py`, policy `risk_and_assurance/v8`): the report carries two
+**Scoring & grading** (`api/scan/scoring.py`, policy `risk_and_assurance/v9`): the report carries two
 independent axes which must not be blended. `risk_score` (0–100, higher is better) and `risk_grade`
 (A–F) describe the material risk observed by deterministic evidence, including only HTTP posture
 that was actually observed from an application response. `assurance_score` (0–100) and

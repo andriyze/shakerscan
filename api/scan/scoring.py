@@ -34,7 +34,7 @@ except ModuleNotFoundError:  # package import layout
     from scanner.score_bands import GRADE_BANDS, grade_for
 
 
-SCORE_POLICY = "risk_and_assurance/v8"
+SCORE_POLICY = "risk_and_assurance/v9"
 
 ASSURANCE_BANDS: tuple[tuple[int, str], ...] = (
     (85, "strong"), (70, "adequate"), (50, "limited"), (1, "weak"), (0, "none"),
@@ -62,6 +62,15 @@ ASSURANCE_COMPONENTS: tuple[tuple[str, int], ...] = (
     # the same 100 as a broad examination. This component is deliberately absolute.
     ("examination_breadth", 35),
 )
+
+
+# Families whose batches send active verification traffic at a candidate. A candidate one of
+# them attempted is active verification that ran, whether or not anything was then eligible
+# for proof escalation: crediting escalation alone told an operator "active verification never
+# ran" on a Scan whose XSS verifier had attempted its only candidate.
+ACTIVE_VERIFIER_FAMILIES = frozenset({
+    "xss", "sqli", "nosqli", "authz_surface", "bola", "sensitive_exposure",
+})
 
 
 def _ratio(done: float, planned: float) -> float:
@@ -118,13 +127,18 @@ def assurance(
         state for state in auth_states if str(state) != "anonymous"
     ])
 
-    # Proof escalation actually attempted, across every selected family.
+    # Active verification actually attempted, across every selected family: a candidate an
+    # active verifier attempted, or proof escalation that ran over one.
     verifier_attempts = sum(
         int((item.get("proof_escalation") or {}).get("attempted_candidates") or 0)
         + int(item.get("verified_findings") or 0)
         for item in families
         if isinstance(item.get("proof_escalation"), Mapping)
         or item.get("verified_findings") is not None
+    ) + sum(
+        int(item.get("attempted_candidates") or 0)
+        for item in selected
+        if str(item.get("family") or "") in ACTIVE_VERIFIER_FAMILIES
     )
     planned_actions = int(coverage.get("planned_action_count") or 0)
     terminal_actions = int(coverage.get("terminal_action_count") or 0)
@@ -382,6 +396,7 @@ def project_current_score_policy(report: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "ACTIVE_VERIFIER_FAMILIES",
     "ASSURANCE_BANDS",
     "ASSURANCE_COMPONENTS",
     "GRADE_BANDS",

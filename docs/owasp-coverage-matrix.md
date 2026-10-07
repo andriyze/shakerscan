@@ -17,7 +17,7 @@ Legend: ✅ meaningful implemented checks exist · 🟡 partial, heuristic, or n
 
 This matrix does not affect a scan score or grade. A category-level mechanism can produce
 unverified candidates, and a particular run may have weak assurance or may not examine the
-application at all. Use proof state, current coverage, and `risk_and_assurance/v8` result fields for
+application at all. Use proof state, current coverage, and `risk_and_assurance/v9` result fields for
 run-specific claims.
 
 ## OWASP Top 10 (2021)

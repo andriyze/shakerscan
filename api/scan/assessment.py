@@ -40,6 +40,15 @@ def withhold_unexamined_grade(report: dict[str, Any]) -> bool:
                     "grade_reliable": False,
                     "summary": "Application not examined; retained transport/header observations are not an application assessment."})
     summary.pop("original_grade", None)
+    # Examination strength measures how much of the application was examined, and none of it
+    # was: a not-examined run kept the 64/100 its planned work earned, beside "Not examined".
+    # A failed reachability preflight already settles at zero for the same reason.
+    summary.update({
+        "assurance_score": 0, "assurance_band": "none",
+        "assurance_gaps": sorted(
+            set(summary.get("assurance_gaps") or ()) | {"application_not_observed"}
+        ),
+    })
     coverage = report.setdefault("coverage", {})
     reliability = coverage.setdefault("grade_reliability", {})
     reliability["reliable"] = False
