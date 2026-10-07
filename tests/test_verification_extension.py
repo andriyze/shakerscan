@@ -122,7 +122,7 @@ def test_the_residual_bounds_the_extension_or_drops_it():
     ) is None, "an extension no larger than the slice buys nothing"
 
 
-def test_two_extensions_share_one_residual():
+def test_two_extensions_in_one_lane_share_one_lane_allowance():
     planned = plan_verification_extensions(
         parent_plan=_plan(
             _action("verify.sqli.r01", "sqli.verify_batch"),
@@ -135,9 +135,43 @@ def test_two_extensions_share_one_residual():
         profile_limits=BALANCED,
         residual={"http_requests": 14_000, "state_changing_requests": 1_700, "tool_wall_seconds": 2_000},
     )
-    assert [item["action_id"] for item in planned] == ["verify.sqli.r01.ext", "verify.sqli.001.r01.ext"]
-    # Each is sized against what the one before it left, and the finalizer keeps its second.
-    assert sum(item["budget"]["tool_wall_seconds"] for item in planned) <= 2_000 - 1
+    # The first extension takes the SQLi lane's quarter of the wall; the second slice waits
+    # for a later round's share instead of taking a second quarter.
+    assert [item["action_id"] for item in planned] == ["verify.sqli.r01.ext"]
+    lane_share = BALANCED["tool_wall_seconds"] // 4
+    assert sum(item["budget"]["tool_wall_seconds"] for item in planned) <= lane_share
+    # Another lane has its own allowance in the same round.
+    mixed = plan_verification_extensions(
+        parent_plan=_plan(
+            _action("verify.sqli.r01", "sqli.verify_batch"),
+            _action("verify.xss.r01", "xss.verify_batch"),
+        ),
+        parent_results={
+            "verify.sqli.r01": _settled("timed_out"),
+            "verify.xss.r01": _settled("timed_out"),
+        },
+        profile_limits=BALANCED,
+        residual={"http_requests": 14_000, "state_changing_requests": 1_700, "tool_wall_seconds": 2_000},
+    )
+    assert [item["action_id"] for item in mixed] == ["verify.sqli.r01.ext", "verify.xss.r01.ext"]
+    # A later round extends the slice that waited, from a fresh lane share.
+    later = plan_verification_extensions(
+        parent_plan=_plan(
+            _action("verify.sqli.r01", "sqli.verify_batch"),
+            _action("verify.sqli.001.r01", "sqli.verify_batch"),
+            _action("verify.sqli.r01.ext.r02", "sqli.verify_batch", args={
+                "slice": {"start": 0, "count": 1}, EXTENDS_ARG: "verify.sqli.r01",
+            }),
+        ),
+        parent_results={
+            "verify.sqli.r01": _settled("timed_out"),
+            "verify.sqli.001.r01": _settled("timed_out"),
+            "verify.sqli.r01.ext.r02": _settled("success"),
+        },
+        profile_limits=BALANCED,
+        residual={"http_requests": 14_000, "state_changing_requests": 1_700, "tool_wall_seconds": 2_000},
+    )
+    assert [item["action_id"] for item in later] == ["verify.sqli.001.r01.ext"]
     starved = plan_verification_extensions(
         parent_plan=_plan(
             _action("verify.sqli.r01", "sqli.verify_batch"),
