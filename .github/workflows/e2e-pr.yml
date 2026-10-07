@@ -162,6 +162,26 @@ jobs:
           echo "fingerprint=${fingerprint:-unknown}" >> "$GITHUB_OUTPUT"
           echo "build identity: $commit (API fingerprint ${fingerprint:-unknown})"
 
+      - name: Start the ShakerScan image build once the cached runtime is restored
+        if: steps.shard.outputs.stack == 'true'
+        shell: bash
+        env:
+          SCANNER_VERSION: ${{ steps.identity.outputs.version }}
+          GIT_COMMIT: ${{ steps.identity.outputs.version }}
+          NEXT_PUBLIC_APP_VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          # The API image builds FROM shakerscan-worker:local, which compose will not
+          # build for it -- see tests/test_ci_builds_before_composing.py. This is the
+          # same complete build as before. It starts as soon as the bake below has restored
+          # the scanner runtime, while the bake still restores the Model Intake toolchain and
+          # UI layers; BuildKit shares identical in-flight steps between the two builds.
+          # "Build ShakerScan images" waits for it and fails the shard if it failed.
+          (
+            until docker image inspect shakerscan-worker:local >/dev/null 2>&1; do sleep 3; done
+            ./scanner.sh build > "$RUNNER_TEMP/scanner-build.log" 2>&1
+            echo "$?" > "$RUNNER_TEMP/scanner-build.status"
+          ) &
+
       - name: Restore unchanged image layers from the build cache
         if: steps.shard.outputs.stack == 'true'
         uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
@@ -181,15 +201,14 @@ jobs:
 
       - name: Build ShakerScan images
         if: steps.shard.outputs.stack == 'true'
-        env:
-          SCANNER_VERSION: ${{ steps.identity.outputs.version }}
-          GIT_COMMIT: ${{ steps.identity.outputs.version }}
-          NEXT_PUBLIC_APP_VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
         run: |
-          # The API image builds FROM shakerscan-worker:local, which compose will not
-          # build for it -- see tests/test_ci_builds_before_composing.py. This is the
-          # same complete build as before; the bake above only warmed its layer cache.
-          ./scanner.sh build
+          # Wait for ./scanner.sh build and fail exactly as it failed.
+          until [ -f "$RUNNER_TEMP/scanner-build.status" ]; do sleep 2; done
+          cat "$RUNNER_TEMP/scanner-build.log"
+          status="$(cat "$RUNNER_TEMP/scanner-build.status")"
+          echo "./scanner.sh build exit status: $status"
+          exit "$status"
 
       - name: Start ShakerScan stack
         if: steps.shard.outputs.stack == 'true'
