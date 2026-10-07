@@ -36,7 +36,11 @@ class ApiCredentialConn(MemoryCredentialConn):
 
         return transaction_context()
 
+    grant_target_facts: dict = {}
+
     async def fetchrow(self, query, *args):
+        if "AS serves_http" in query:
+            return self.grant_target_facts.get(args[0])
         if query.lstrip().startswith("SELECT id FROM targets"):
             return {"id": args[0]} if args[0] == TARGET_ID else None
         if query.lstrip().startswith("SELECT id FROM device_targets"):
@@ -449,3 +453,54 @@ def test_migrated_device_profile_rotation_stays_synchronized_with_legacy_executi
     deleted = http.delete(f"/credential-profiles/{profile['id']}")
     assert deleted.status_code == 200, deleted.text
     assert pool.conn.legacy_device["is_active"] is False
+
+
+DEVICE_HOST = uuid.UUID("55555555-5555-4555-8555-555555555555")
+WEB_ORIGIN = uuid.UUID("66666666-6666-4666-8666-666666666666")
+WEB_HOST = uuid.UUID("77777777-7777-4777-8777-777777777777")
+
+
+@pytest.mark.parametrize(("declared", "auth_kind", "facts", "refused"), [
+    # Soak N6: a web basic-auth profile granted to the SSH-only client VPS, as device and as web.
+    ("device", "basic_auth", (False, False, True), True),
+    ("web", "basic_auth", (False, False, True), True),
+    # ...and to the honey web origin labelled as a network host.
+    ("network", "basic_auth", (True, True, False), True),
+    ("web", "basic_auth", (True, True, False), False),
+    ("network", "bearer_token", (False, True, False), False),  # a host with a web origin
+    ("device", "bearer_token", (False, True, False), True),    # a host that is not a device
+    ("device", "ssh_password", (False, False, True), False),
+    ("network", "ssh_password", (False, False, False), False),
+    ("web", "ssh_password", (True, True, False), True),
+])
+def test_a_grant_must_name_the_target_as_it_is_and_fit_the_credential_protocol(
+    declared, auth_kind, facts, refused,
+):
+    http_origin, serves_http, device = facts
+    reason = credential_api.grant_target_kind_error(
+        declared_kind=declared, auth_kind=auth_kind,
+        http_origin=http_origin, serves_http=serves_http, device=device,
+    )
+    assert (reason is not None) is refused, reason
+
+
+def test_the_grant_route_refuses_an_incompatible_target_with_422(client):
+    http, pool = client
+    created = http.post("/credential-profiles", json=_create_payload(
+        target_kind="web", auth_kind="basic_auth", username="alice",
+    ))
+    assert created.status_code == 201, created.text
+    profile_id = created.json()["profile"]["id"]
+    pool.conn.grant_target_facts = {
+        DEVICE_HOST: {"http_origin": False, "serves_http": False, "device": True},
+        WEB_ORIGIN: {"http_origin": True, "serves_http": True, "device": False},
+    }
+    for kind, target in (("device", DEVICE_HOST), ("web", DEVICE_HOST), ("network", WEB_ORIGIN)):
+        refused = http.post(f"/credential-profiles/{profile_id}/grants", json={
+            "target_kind": kind, "target_id": str(target),
+        })
+        assert refused.status_code == 422, (kind, refused.text)
+    missing = http.post(f"/credential-profiles/{profile_id}/grants", json={
+        "target_kind": "web", "target_id": str(WEB_HOST),
+    })
+    assert missing.status_code == 404

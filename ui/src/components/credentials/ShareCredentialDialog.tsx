@@ -20,6 +20,8 @@ export interface ShareTargetChoice {
   kind: CredentialTargetKind
   label: string
   detail: string
+  /** Whether the target has a web or API origin; undefined when the inventory did not say. */
+  servesHttp?: boolean
 }
 
 const ASSET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network', 'device']
@@ -27,6 +29,13 @@ const ASSET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network', 'device']
 // All physical-target kinds are views; sharing still needs an explicit target grant.
 function sharesAsset(profileKind: CredentialTargetKind, targetKind: CredentialTargetKind): boolean {
   return profileKind === targetKind || (ASSET_KINDS.includes(profileKind) && ASSET_KINDS.includes(targetKind))
+}
+
+// The credential's protocol needs something to authenticate to: SSH a host or device, every
+// other kind a web or API origin. The server enforces the same rule on the grant.
+export function protocolFits(authKind: string, target: ShareTargetChoice): boolean {
+  if (authKind.startsWith('ssh_')) return target.kind === 'network' || target.kind === 'device'
+  return target.servesHttp !== false
 }
 
 /**
@@ -82,7 +91,8 @@ export function ShareCredentialDialog({
 
   const used = useMemo(() => new Set(grants.filter((grant) => grant.active).map((grant) => grant.target_id)), [grants])
   const choices = useMemo(() => (profile ? targets.filter((target) =>
-    sharesAsset(profile.target_kind, target.kind) && target.id !== profile.target_id && !used.has(target.id)) : []),
+    sharesAsset(profile.target_kind, target.kind) && protocolFits(profile.auth_kind, target)
+    && target.id !== profile.target_id && !used.has(target.id)) : []),
   [profile, targets, used])
   const chosen = choices.find((target) => target.id === targetId)
   const needsApproval = activeCapabilities.length > 0
