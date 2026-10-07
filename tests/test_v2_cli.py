@@ -546,3 +546,52 @@ def test_cli_sends_a_service_token_over_https_only(monkeypatch, capsys):
     assert v2_cli.main(["--api-url", "https://gateway.example", "hunt", "list"]) == 0
     assert captured["authorization"] == "Bearer st_secret_token"
     assert v2_cli.ApiClient("http://localhost:8080").api_token is None
+
+
+def test_hunt_query_accepts_every_kind_the_mcp_tool_accepts():
+    # Soak 2026-10-07 (defect 19): MCP queried hypotheses and graph kinds; the CLI refused them.
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("shakerscan_mcp_kinds", Path("scripts") / "shakerscan_mcp.py")
+    mcp = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mcp  # dataclasses resolve their module while the file executes
+    spec.loader.exec_module(mcp)
+    mcp_kinds = mcp.HUNT_TOOL_BY_NAME["shakerscan_hunt_query"].properties["kind"]["enum"]
+    for kind in mcp_kinds:
+        assert _parse("hunt", "query", "hunt-1", kind).kind == kind
+
+    class FakeClient:
+        def post(self, path, payload=None, **_kwargs):
+            self.sent = (path, payload)
+            return {}
+
+    client = FakeClient()
+    v2_cli._run_hunt(_parse("hunt", "query", "hunt-1", "graph_edges", "--cursor", "c-2", "--limit", "5"), client)
+    assert client.sent == ("/hunts/hunt-1/query", {"kind": "graph_edges", "filter": {}, "limit": 5, "cursor": "c-2"})
+
+
+def test_the_request_timeout_is_an_option_and_reaches_every_request(monkeypatch):
+    seen = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read(_limit):
+            return b'{"hunts":[]}'
+
+    def urlopen(request, *, timeout):
+        seen["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(v2_cli, "_opener", lambda: types.SimpleNamespace(open=urlopen))
+    monkeypatch.delenv("SHAKERSCAN_API_TOKEN", raising=False)
+    assert v2_cli.main(["--api-url", "http://localhost:8080", "--timeout", "150", "hunt", "list"]) == 0
+    assert seen["timeout"] == 150.0
+    assert v2_cli.main(["--api-url", "http://localhost:8080", "hunt", "list"]) == 0
+    assert seen["timeout"] == 60.0

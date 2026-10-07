@@ -236,8 +236,9 @@ saved `shakerscan connect` instance is used, then `SHAKERSCAN_API_URL`.
 
 It materializes that kit (vendored into the package at build time) into a workspace
 (`~/.config/shakerscan/agent`, or `--here` for the current directory, or `--workspace DIR`),
-prepends a note naming the connected instance and the rules of a remote session (no local
-engine, use `shakerscan api`/`scan`/`hunt` and the MCP tools, refusals name what is missing),
+prepends a note naming the connected instance, the kit's release and client version, and the
+rules of a remote session (no local engine, use `shakerscan api`/`scan`/`hunt` and the MCP
+tools, refusals name what is missing),
 registers the MCP server for that workspace (`.mcp.json` for Claude Code, `opencode.json` for
 OpenCode, `codex mcp add` for Codex), exports the connection with the token left in its file,
 and starts the agent there. Pi has no MCP client: it is started with `--no-approve`, `--skill`
@@ -294,10 +295,15 @@ shakerscan hunt --url https://scanner.example.com --token-file ./token list
 shakerscan hunt --url https://scanner.example.com --token-file ./token start --help
 ```
 
-`shakerscan hunt` forwards everything after its connection options to the runtime's product CLI
+`shakerscan hunt` forwards everything except its connection options to the runtime's product CLI
 (`scripts/v2_cli.py … hunt`), so the subcommands are the runtime's: `start`, `get`, `list`,
-`query`, `call`, `candidate`, `verify`, `finish`, `cancel`, `resume`. Connection options come
-first; `shakerscan hunt --url URL` with nothing after it prints that CLI's own help.
+`query`, `call`, `candidate`, `verify`, `finish`, `cancel`, `resume` and the `skill-*` commands.
+The connection options (`--url`, `--token-file`, `--timeout`) may come before or after the
+subcommand, and everything after a `--` is forwarded untouched. `--timeout` is the seconds to
+wait for each API answer (default 60). `shakerscan hunt --help`, or `hunt` with nothing after
+it, prints the connection options and then that CLI's own help. `query` takes the same kinds as
+the MCP tool, including `hypotheses`, `graph_nodes` and `graph_edges`, and `--cursor` to follow
+`next_cursor`.
 
 ## Versioning and release
 
