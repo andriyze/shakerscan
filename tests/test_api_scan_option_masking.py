@@ -1617,6 +1617,24 @@ def test_sanitize_scan_options_masks_sensitive_keys():
     assert sanitized["metadata_json"]["nested"]["client_secret"] == "***"
 
 
+def test_sanitize_scan_options_scrubs_known_endpoint_query_and_body_secrets():
+    # Soak fe8264ff: GET /scans/{id} returned the canary query secrets of a known endpoint
+    # verbatim in options.custom_endpoints while result, findings, logs and HAR redacted them.
+    sanitized = api_module._sanitize_scan_options({
+        "custom_endpoints": [
+            "GET /api/x?access_token=TPLANQTOKEN1&api_key=TPLANQKEY2&page=2",
+            'POST /login json:{"username":"alice","password":"TPLANPASS3"}',
+            "GET /api/health",
+        ],
+    })
+
+    encoded = json.dumps(sanitized)
+    for canary in ("TPLANQTOKEN1", "TPLANQKEY2", "TPLANPASS3"):
+        assert canary not in encoded
+    assert sanitized["custom_endpoints"][0] == "GET /api/x?access_token=***&api_key=***&page=2"
+    assert sanitized["custom_endpoints"][2] == "GET /api/health"
+
+
 def test_sanitize_scan_options_decodes_json_string():
     raw = "{\"scan_type\":\"smart\",\"auth_header\":\"Bearer token\"}"
     sanitized = api_module._sanitize_scan_options(raw)

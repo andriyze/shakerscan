@@ -286,3 +286,18 @@ def redact_sensitive(
             out_str = redact_text(out_str, known_values=known_values)
         return out_str
     return value
+
+
+def redact_scan_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Redact stored Scan options for every read projection.
+
+    Keyed secrets are masked by :func:`redact_sensitive`. Declared known endpoints are request
+    lines (``GET /a?access_token=...``, ``POST /login json:{"password":...}``) whose secrets sit in
+    a query or body rather than under a key, so they are scrubbed with the same text redactor as
+    the result, logs and HAR; GET /scans/{id} otherwise returned them verbatim.
+    """
+    redacted = redact_sensitive(options)
+    endpoints = redacted.get("custom_endpoints") if isinstance(redacted, dict) else None
+    if isinstance(endpoints, list):
+        redacted["custom_endpoints"] = [redact_text(item) for item in endpoints]
+    return redacted
