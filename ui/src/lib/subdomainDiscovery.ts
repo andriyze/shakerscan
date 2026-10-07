@@ -21,6 +21,7 @@ export interface SubdomainDiscoverySection {
     found?: number
     checked?: number
     not_checked?: number
+    rejected?: number
     dns_deadline_skipped?: number
     target_limit?: number | null
     over_target_limit?: number
@@ -58,6 +59,8 @@ export function subdomainDiscoverySummary(section: SubdomainDiscoverySection | n
       parts.push(`${plural(overLimit, 'resolving name')} not added${limit !== null ? ` (at most ${limit} per run)` : ''}`)
     }
     if ((targets.unresolved_count ?? 0) > 0) parts.push(`${targets.unresolved_count} without an address record, not added`)
+    const rejected = count(targets.rejected) ?? 0
+    if (rejected > 0) parts.push(`${rejected} not under ${section.root_domain || 'the root domain'}, ignored`)
     const failed = count(targets.insert_failed) ?? 0
     if (failed > 0) parts.push(`${failed} could not be stored`)
   } else if (targets?.status === 'failed') {

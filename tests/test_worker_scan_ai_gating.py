@@ -4203,6 +4203,69 @@ def test_broker_shard_result_ingest_never_reclaims_execution_slots_or_budget(mon
     assert any(mapping.get("status") == "completed" for _key, _args, mapping in redis.hashes)
 
 
+def test_broker_shard_result_records_its_subdomain_discovery_before_persistence(monkeypatch):
+    """A fleet node finalizes the report but has no database: the control plane records the
+    report's discovered subdomains when it ingests the result, before the result is saved."""
+    redis = _FakeJobRedis()
+
+    class BrokerIngestConn(_FakeAsmConn):
+        async def fetchval(self, query, *args):
+            return datetime(2026, 7, 6, tzinfo=timezone.utc)
+
+    order = []
+    options = {"scan_type": "smart", "custom_endpoints": ["GET /bounded"]}
+
+    async def load_result(job_data, scan_id):
+        return {
+            "target": "https://example.test",
+            "result": {"score": 100, "grade": "A"},
+            "findings": [],
+            "discovery": {"subdomains": {"root_domain": "example.test", "hosts": ["a.example.test"]}},
+        }
+
+    async def record(pool, report, *, scan_id, options):
+        order.append(("record", scan_id, options.get("scan_type")))
+        report["discovery"]["subdomains"]["targets"] = {"status": "recorded"}
+
+    async def persist_result(result, *args, **kwargs):
+        order.append(("persist", result["discovery"]["subdomains"].get("targets")))
+        return "/tmp/broker-result.json"
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    async def no_merge(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(BrokerIngestConn(
+        child_status="running", parent_status="running",
+    )))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "_load_broker_result", load_result)
+    monkeypatch.setattr(worker, "record_ingested_report_subdomains", record)
+    monkeypatch.setattr(worker, "persist_result_artifact", persist_result)
+    monkeypatch.setattr(worker, "update_scan_progress", nothing)
+    monkeypatch.setattr(worker, "send_heartbeats", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker.parallel_scan, "reconcile_parallel_parent", no_merge)
+
+    asyncio.run(worker.process_scan_shard_job({
+        "job_id": "job-broker-subdomains",
+        "scan_id": "22222222-2222-4222-8222-222222222222",
+        "parent_scan_id": "55555555-5555-4555-8555-555555555555",
+        "target_id": "33333333-3333-4333-8333-333333333333",
+        "target": "https://example.test",
+        "options": options,
+        "shard_label": "discovery",
+        "shard_index": 0,
+        "shard_count": 1,
+        "_broker_result_id": "77777777-7777-4777-8777-777777777777",
+        "_broker_lease_id": "88888888-8888-4888-8888-888888888888",
+    }))
+
+    assert order[0] == ("record", "22222222-2222-4222-8222-222222222222", "smart")
+    assert ("persist", {"status": "recorded"}) in order
+
+
 def test_local_parallel_shard_archives_traffic_before_result_persistence(monkeypatch, tmp_path):
     redis = _FakeJobRedis()
     conn = _FakeAsmConn(child_status="running", parent_status="running")

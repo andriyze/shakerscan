@@ -13,7 +13,8 @@ It never widens a Scan: the names become targets for their own, separately autho
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+import re
+from typing import Any, Mapping, Sequence
 import uuid
 
 try:  # Preserve one module identity under api.scan.* host imports.
@@ -23,6 +24,7 @@ except (ImportError, ModuleNotFoundError):  # top-level scan.* worker imports
 
 
 DISCOVERY_SOURCE = "subfinder"
+_DNS_NAME = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 # The whole DNS check of one scan's names, not each lookup. Recording runs between finalization
 # and the saved result; with a dead resolver every name used to cost its full lookup timeout --
 # about a minute for a full window -- before the finished scan was stored.
@@ -42,7 +44,9 @@ def _count(value: Any, default: int = 0) -> int:
         return default
 
 
-def _plan_accounting(plan: Mapping[str, Any], *, found: int, considered: int) -> dict[str, Any]:
+def _plan_accounting(
+    plan: Mapping[str, Any], *, found: int, considered: int, rejected: int = 0,
+) -> dict[str, Any]:
     """What the DNS plan left out and why, kept with the run's DNS outcome."""
     classified = len(plan.get("scannable") or ()) + len(plan.get("unresolved") or ())
     not_checked = len(plan.get("not_checked") or ())
@@ -51,8 +55,11 @@ def _plan_accounting(plan: Mapping[str, Any], *, found: int, considered: int) ->
     return {
         "found": found,
         "considered": considered,
+        "rejected": rejected,
         "judged": max(0, classified - not_checked),
-        "beyond_resolve_limit": max(0, _count(plan.get("submitted_count"), considered) - classified),
+        "beyond_resolve_limit": max(
+            0, _count(plan.get("submitted_count"), considered) - classified,
+        ),
         "resolve_limit": plan.get("resolve_limit"),
         "dns_deadline_skipped": not_checked,
         "target_limit": target_limit,
@@ -60,13 +67,16 @@ def _plan_accounting(plan: Mapping[str, Any], *, found: int, considered: int) ->
     }
 
 
-def _recorded_outcome(discovery_id: str, resolution: Mapping[str, Any], *, found: int) -> dict[str, Any]:
+def _recorded_outcome(
+    discovery_id: str, resolution: Mapping[str, Any], *, found: int,
+) -> dict[str, Any]:
     """The report's account of the run: what was added and every name that was not checked.
 
     Each cap is named: the report lists at most a bounded number of names, DNS checks a bounded
     window of those within one deadline, and at most a bounded number become targets per run.
     """
     considered = _count(resolution.get("considered"), found)
+    rejected = _count(resolution.get("rejected"))
     scannable = _count(resolution.get("scannable"))
     unresolved = _count(resolution.get("unresolved_count"))
     deadline_skipped = _count(resolution.get("dns_deadline_skipped"))
@@ -79,7 +89,8 @@ def _recorded_outcome(discovery_id: str, resolution: Mapping[str, Any], *, found
     insert_failed = _count(resolution.get("insert_failed"))
     reasons = [
         reason for reason, applies in (
-            ("report_list_limit", found > considered),
+            ("report_list_limit", found > considered + rejected),
+            ("names_outside_root_domain", rejected > 0),
             ("dns_resolve_limit", beyond_window > 0),
             ("dns_deadline", deadline_skipped > 0),
             ("target_limit", over_target_limit > 0),
@@ -96,6 +107,7 @@ def _recorded_outcome(discovery_id: str, resolution: Mapping[str, Any], *, found
         "found": found,
         "checked": judged,
         "not_checked": max(0, found - judged),
+        "rejected": rejected,
         "dns_deadline_skipped": deadline_skipped,
         "target_limit": resolution.get("target_limit"),
         "over_target_limit": over_target_limit,
@@ -110,6 +122,7 @@ async def record_scan_subdomain_discovery(
     report: Mapping[str, Any],
     *,
     scan_id: str,
+    allowed_root_domains: Sequence[str] | None = None,
     plan_targets: Any = None,
 ) -> dict[str, Any] | None:
     """Store the report's discovered subdomains as a discovery run and targets.
@@ -118,18 +131,35 @@ async def record_scan_subdomain_discovery(
     recording a second one. Returns the outcome it wrote into the report section, or None when
     the report lists no subdomains. Every name the run did not check or add is counted with its
     reason; nothing is dropped silently.
+
+    The report may come from a fleet node, so its section is not authority: only a root domain
+    in the Scan's own binding (``allowed_root_domains``; none given records nothing) is recorded,
+    and only names that are DNS names under it.
     """
     discovery = report.get("discovery") if isinstance(report, Mapping) else None
     section = discovery.get("subdomains") if isinstance(discovery, Mapping) else None
     if not isinstance(section, dict) or not section.get("hosts"):
         return None
-    hosts = [str(host) for host in section.get("hosts") or () if str(host or "").strip()]
-    found = max(len(hosts), _count(section.get("total"), len(hosts)))
-    root_domain = str(section.get("root_domain") or "").strip().lower()
+    root_domain = str(section.get("root_domain") or "").strip().lower().rstrip(".")
     if not root_domain:
         outcome = {"status": "not_recorded", "reason": "ambiguous_root_domain"}
         section["targets"] = outcome
         return outcome
+    bound = {
+        str(item or "").strip().lower().rstrip(".") for item in (allowed_root_domains or ())
+    }
+    if root_domain not in bound:
+        outcome = {"status": "not_recorded", "reason": "root_domain_not_bound"}
+        section["targets"] = outcome
+        return outcome
+    suffix = "." + root_domain
+    listed = [str(host or "").strip().lower().rstrip(".") for host in section.get("hosts") or ()]
+    hosts = [host for host in listed if host.endswith(suffix) and _DNS_NAME.fullmatch(host)]
+    if not hosts:
+        outcome = {"status": "not_recorded", "reason": "no_names_under_root_domain"}
+        section["targets"] = outcome
+        return outcome
+    found = max(len(listed), _count(section.get("total"), len(listed)))
     planner = plan_targets or _plan_with_deadline
     try:
         async with pool.acquire() as conn:
@@ -158,7 +188,10 @@ async def record_scan_subdomain_discovery(
                 )
                 resolution = {
                     **resolution,
-                    **_plan_accounting(plan, found=found, considered=len(hosts)),
+                    **_plan_accounting(
+                        plan, found=found, considered=len(hosts),
+                        rejected=len(listed) - len(hosts),
+                    ),
                 }
                 await conn.execute(
                     """INSERT INTO discovery_runs
@@ -182,4 +215,76 @@ async def record_scan_subdomain_discovery(
     return outcome
 
 
-__all__ = ["DNS_DEADLINE_SECONDS", "record_scan_subdomain_discovery"]
+def bound_root_domains(options: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The root domains a canonical Scan job is bound to, or None when none can be derived."""
+    try:
+        from .executor import build_native_scan_execution
+        from .worker_dispatch import prepare_worker_dispatch
+
+        normalized, admission = prepare_worker_dispatch(options)
+        if not admission.canonical or admission.plan is None:
+            return None
+        execution = build_native_scan_execution(admission.plan, normalized)
+        return tuple(execution.target_binding.allowed_root_domains)
+    except Exception:  # noqa: BLE001 -- a job whose binding cannot be derived records nothing
+        return None
+
+
+async def load_recorded_scan_report(
+    pool: Any,
+    store: Any,
+    final_result: Any,
+    *,
+    scan_id: str,
+    root_domains: Sequence[str],
+    invalid_error: type[Exception] = ValueError,
+) -> dict[str, Any]:
+    """The finalized Scan report, with the Scan's subdomain discovery recorded into it.
+
+    Recording writes the outcome into the report section, so it runs before the caller saves
+    the report, and only under the root domains the Scan is bound to.
+    """
+    async with pool.acquire() as conn:
+        final_observations = await store.load(
+            conn,
+            reference=final_result.observation_manifest_ref,
+            scan_id=scan_id,
+            action_id="finalize.report",
+        )
+    if (
+        not final_observations
+        or final_observations[0].get("kind") != "scan_report"
+        or not isinstance(final_observations[0].get("report"), Mapping)
+    ):
+        raise invalid_error("canonical Scan report observation is invalid")
+    report = dict(final_observations[0]["report"])
+    await record_scan_subdomain_discovery(
+        pool, report, scan_id=scan_id, allowed_root_domains=tuple(root_domains),
+    )
+    return report
+
+
+async def record_ingested_report_subdomains(
+    pool: Any, report: Mapping[str, Any], *, scan_id: str, options: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Record the subdomain discovery of a report finalized on a fleet node.
+
+    The node finalizes the same report but has no database, so its names reached the report and
+    never the inventory. The control plane records them under the root domains it derives from
+    the job itself, never from the node's report.
+    """
+    discovery = report.get("discovery") if isinstance(report, Mapping) else None
+    if not isinstance(discovery, Mapping) or not isinstance(discovery.get("subdomains"), Mapping):
+        return None
+    return await record_scan_subdomain_discovery(
+        pool, report, scan_id=scan_id, allowed_root_domains=bound_root_domains(options),
+    )
+
+
+__all__ = [
+    "DNS_DEADLINE_SECONDS",
+    "bound_root_domains",
+    "load_recorded_scan_report",
+    "record_ingested_report_subdomains",
+    "record_scan_subdomain_discovery",
+]

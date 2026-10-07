@@ -31,6 +31,8 @@ from tests.test_scan_orchestrator import SCAN_ID, _action
 ROOT = Path(__file__).resolve().parents[1]
 
 HOSTS = ("api.shakerscan.com", "docs.shakerscan.com", "old.shakerscan.com")
+# The root domains the Scan is bound to; recording never takes them from the report.
+BOUND = ("shakerscan.com",)
 
 
 def _report_with_subdomains(hosts=HOSTS):
@@ -106,7 +108,7 @@ def test_discovered_subdomains_become_a_discovery_run_and_targets():
     report = _report_with_subdomains()
     conn = _FakeConn()
     outcome = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
-        _pool(conn), report, scan_id=str(SCAN_ID), plan_targets=_plan,
+        _pool(conn), report, scan_id=str(SCAN_ID), allowed_root_domains=BOUND, plan_targets=_plan,
     ))
     assert conn.inserted_targets == ["https://api.shakerscan.com", "https://docs.shakerscan.com"]
     assert len(conn.runs) == 1
@@ -129,7 +131,7 @@ def test_a_redelivered_scan_reports_its_existing_run_instead_of_recording_anothe
         raise AssertionError("an existing run needs no new lookups")
 
     outcome = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
-        _pool(conn), report, scan_id=str(SCAN_ID), plan_targets=_no_dns,
+        _pool(conn), report, scan_id=str(SCAN_ID), allowed_root_domains=BOUND, plan_targets=_no_dns,
     ))
     assert conn.inserted_targets == [] and conn.runs == []
     assert outcome["discovery_id"] == "5f9c0e0c-6f43-4d3c-9d2f-6f1b0b8f7a10"
@@ -143,7 +145,8 @@ def test_a_recording_fault_is_reported_and_never_fails_the_scan():
         raise OSError("resolver unavailable")
 
     outcome = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
-        _pool(_FakeConn()), report, scan_id=str(SCAN_ID), plan_targets=_resolver_down,
+        _pool(_FakeConn()), report, scan_id=str(SCAN_ID),
+        allowed_root_domains=BOUND, plan_targets=_resolver_down,
     ))
     assert outcome == {"status": "failed", "error": "OSError"}
     assert report["discovery"]["subdomains"]["targets"] == outcome
@@ -152,7 +155,7 @@ def test_a_recording_fault_is_reported_and_never_fails_the_scan():
 def test_a_report_without_subdomains_records_nothing():
     report = {"discovery": {"tech": {"items": []}}}
     assert asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
-        _pool(_FakeConn()), report, scan_id=str(SCAN_ID),
+        _pool(_FakeConn()), report, scan_id=str(SCAN_ID), allowed_root_domains=BOUND,
     )) is None
 
 
@@ -183,7 +186,7 @@ def test_every_name_the_recording_did_not_check_or_add_is_counted_with_its_cap()
         )
 
     outcome = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
-        _pool(conn), report, scan_id=str(SCAN_ID), plan_targets=plan,
+        _pool(conn), report, scan_id=str(SCAN_ID), allowed_root_domains=BOUND, plan_targets=plan,
     ))
     assert len(conn.inserted_targets) == 100
     assert outcome["found"] == 1_500
@@ -202,9 +205,39 @@ def test_every_name_the_recording_did_not_check_or_add_is_counted_with_its_cap()
     redelivered["discovery"]["subdomains"]["total"] = 1_500
     again = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
         _pool(_FakeConn(existing={"id": outcome["discovery_id"], "sources_used": run[5]})),
-        redelivered, scan_id=str(SCAN_ID),
+        redelivered, scan_id=str(SCAN_ID), allowed_root_domains=BOUND,
     ))
     assert again["checked"] == 300 and again["over_target_limit"] == 200
+
+
+def test_only_the_scans_bound_root_and_names_under_it_are_recorded():
+    """A fleet node's report is not authority: its root domain must be one the control plane
+    bound the Scan to, and only DNS names under that root become targets."""
+    conn = _FakeConn()
+    outcome = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
+        _pool(conn), _report_with_subdomains(), scan_id=str(SCAN_ID),
+        allowed_root_domains=("example.net",), plan_targets=_plan,
+    ))
+    assert outcome == {"status": "not_recorded", "reason": "root_domain_not_bound"}
+    assert conn.inserted_targets == [] and conn.runs == []
+
+    unbound = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
+        _pool(conn), _report_with_subdomains(), scan_id=str(SCAN_ID), plan_targets=_plan,
+    ))
+    assert unbound["reason"] == "root_domain_not_bound" and conn.inserted_targets == []
+
+    report = _report_with_subdomains()
+    report["discovery"]["subdomains"]["hosts"] = [
+        "api.shakerscan.com", "evil.example.org", "shakerscan.com.evil.test",
+        "bad_name.shakerscan.com",
+    ]
+    outcome = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
+        _pool(conn), report, scan_id=str(SCAN_ID), allowed_root_domains=BOUND,
+        plan_targets=_plan,
+    ))
+    assert conn.inserted_targets == ["https://api.shakerscan.com"]
+    assert outcome["rejected"] == 3
+    assert "names_outside_root_domain" in outcome["partial_reasons"]
 
 
 def test_a_dead_resolver_cannot_hold_the_finished_scan_beyond_the_dns_deadline(monkeypatch):
@@ -221,6 +254,7 @@ def test_a_dead_resolver_cannot_hold_the_finished_scan_beyond_the_dns_deadline(m
     started = time.monotonic()
     outcome = asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
         _pool(conn), _report_with_subdomains(hosts), scan_id=str(SCAN_ID),
+        allowed_root_domains=BOUND,
     ))
     assert time.monotonic() - started < 2.0
     assert outcome["status"] == "recorded"
@@ -248,10 +282,12 @@ def test_the_recorder_writes_the_real_discovery_and_target_tables():
             await conn.execute((ROOT / "db" / "init.sql").read_text(encoding="utf-8"))
             report = _report_with_subdomains()
             first = await subdomain_targets.record_scan_subdomain_discovery(
-                _pool(conn), report, scan_id=str(SCAN_ID), plan_targets=_plan,
+                _pool(conn), report, scan_id=str(SCAN_ID),
+                allowed_root_domains=BOUND, plan_targets=_plan,
             )
             again = await subdomain_targets.record_scan_subdomain_discovery(
-                _pool(conn), _report_with_subdomains(), scan_id=str(SCAN_ID), plan_targets=_plan,
+                _pool(conn), _report_with_subdomains(), scan_id=str(SCAN_ID),
+                allowed_root_domains=BOUND, plan_targets=_plan,
             )
             targets = await conn.fetch(
                 "SELECT url, discovery_source, root_domain FROM targets ORDER BY url"
