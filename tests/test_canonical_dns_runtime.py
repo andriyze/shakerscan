@@ -523,3 +523,14 @@ def test_a_stub_resolver_servfail_is_recovered_over_https_like_a_timeout():
     assert sorted(calls) == ["DNSKEY", "DS"]
     assert result["observation"]["records"]["host_dnskey"]
     assert set(result["observation"]["doh_fallback_queries"]) == {"root_ds", "host_dnskey"}
+
+
+def test_a_ds_digest_is_reported_as_hex_not_a_bytes_repr():
+    # Soak N17: the Posture tab showed the DS digest as `b',\xdaA...'`; dnspython holds it as bytes.
+    from types import SimpleNamespace
+
+    from api.capabilities.dns import _record_value
+
+    record = SimpleNamespace(key_tag=2371, algorithm=13, digest_type=2, digest=b",\xdaA\x01")
+    value = _record_value("DS", record)
+    assert value == {"key_tag": 2371, "algorithm": 13, "digest_type": 2, "digest": "2CDA4101"}

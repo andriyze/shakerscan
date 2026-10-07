@@ -193,6 +193,13 @@ def _txt_value(record: Any) -> str:
     return _safe_text(str(record).strip().strip('"'), 2_000)
 
 
+def _ds_digest(value: Any) -> str:
+    """The DS digest in its presentation form (hex), never the Python bytes repr ``b'...'``."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex().upper()[:1_000]
+    return _safe_text(str(value), 1_000)
+
+
 def _record_value(query_type: str, record: Any) -> Any:
     if query_type == "MX":
         return {
@@ -228,7 +235,7 @@ def _record_value(query_type: str, record: Any) -> Any:
             "key_tag": int(getattr(record, "key_tag", 0)),
             "algorithm": int(getattr(record, "algorithm", 0)),
             "digest_type": int(getattr(record, "digest_type", 0)),
-            "digest": _safe_text(str(getattr(record, "digest", "")), 1_000),
+            "digest": _ds_digest(getattr(record, "digest", "")),
         }
     if query_type == "SOA":
         return {
