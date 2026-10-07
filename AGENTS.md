@@ -51,10 +51,10 @@ ShakerScan has one deterministic Scan and one AI-driven Hunt. Preserve these bou
     through explicit target bindings/grants; same-host membership alone never grants secret access.
 
 The read-only posture check is a bounded standalone lookup outside Scan/Hunt capability execution.
-Unconfigured clients use the hosted service's public-target restrictions. Connected clients use
-their OSS or Enterprise instance's `/public/check` without a per-check target authorization; the
-instance's network boundary and authenticated connection, where present, govern access. This
-exception does not grant Scan or Hunt authority or relax their target binding.
+Unconfigured clients use the hosted service's public-target restrictions. Clients connected to an
+OSS instance use its `/public/check` without per-check target authorization, governed by its network
+boundary and authenticated connection. Enterprise does not serve it, so its clients lack the check.
+The check grants no Scan or Hunt authority and does not relax their target binding.
 
 ## Environment and startup
 
@@ -474,7 +474,7 @@ Unit tests do not replace migration, live API, and UI verification when those su
 
 ## Minimal command reference
 
-Set `API_BASE` and `UI_BASE` from `./scanner.sh status`. Use OpenAPI for bodies not shown here.
+Set `API_BASE`/`UI_BASE` from `./scanner.sh status`. Bodies: `/scan/contracts`, `/hunts/contract`.
 
 ```bash
 ./scanner.sh start
