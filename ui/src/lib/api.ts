@@ -6530,7 +6530,8 @@ export async function getFindingRetests(id: string, limit: number = 20): Promise
 
 export async function updateFinding(
   id: string,
-  status: string,
+  /** Omitted keeps the stored status (a verdict-only edit). */
+  status: string | undefined,
   notes?: string,
   scanId?: string,
   /** Omitted keeps the recorded verdict; null clears it. */

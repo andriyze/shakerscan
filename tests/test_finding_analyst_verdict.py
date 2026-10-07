@@ -44,6 +44,16 @@ def test_an_explicit_null_clears_and_an_absent_verdict_keeps():
     ).verdict_change() == "set"
 
 
+def test_a_verdict_only_edit_needs_no_status_and_an_empty_edit_is_refused():
+    request = findings_router.FindingUpdate.model_validate({"analyst_verdict": None})
+    assert request.status is None and request.verdict_change() == "clear"
+    assert findings_router.FindingUpdate.model_validate({"notes": "n"}).status is None
+    # Existing callers that always send a status are unchanged.
+    assert findings_router.FindingUpdate.model_validate({"status": "resolved"}).status == "resolved"
+    with pytest.raises(ValueError):
+        findings_router.FindingUpdate.model_validate({})
+
+
 class _StoredRowConn:
     """Answers the update with the row the database would hold, not with the request."""
 
@@ -92,6 +102,19 @@ def test_the_response_reports_the_stored_verdict_and_the_status_change(monkeypat
     assert response["status_changed"] is True
     _query, args = conn.calls[-1]
     assert args[-1] == "clear"
+
+
+def test_a_verdict_only_edit_sends_no_status_to_the_statement(monkeypatch):
+    stored = {
+        "id": FINDING, "target_id": None, "device_target_id": None,
+        "status": "false_positive", "previous_status": "false_positive",
+        "analyst_verdict": None, "analyst_verdict_at": None,
+    }
+    conn = _StoredRowConn(stored)
+    response = _run_update(monkeypatch, conn, {"analyst_verdict": None})
+    _query, args = conn.calls[-1]
+    assert args[0] is None and args[-1] == "clear"
+    assert response["status"] == "false_positive" and response["status_changed"] is False
 
 
 # --- the route's statement on real PostgreSQL ------------------------------------------------
@@ -200,5 +223,26 @@ def test_clearing_a_verdict_keeps_the_note_that_says_why_it_was_set():
             conn, {"status": "false_positive", "analyst_verdict": None, "notes": "checked by hand"},
         )
         assert stored["analyst_verdict_notes"] == "checked by hand"
+
+    _with_database(scenario)
+
+
+@postgres
+def test_a_verdict_only_edit_keeps_a_status_changed_since_the_page_loaded():
+    """The finding page re-sent the status it had loaded with every verdict edit, so clearing a
+    verdict after a retest closed the finding silently reopened it. Without a status the server
+    keeps the stored one."""
+    async def scenario(conn):
+        await _patch(conn, {"status": "active", "analyst_verdict": "retest_needed"})
+        # Elsewhere: a retest closes the finding while the page still shows it active.
+        await conn.execute("UPDATE findings SET status = 'false_positive' WHERE id = $1", FINDING)
+
+        response, stored = await _patch(conn, {"analyst_verdict": None})
+        assert stored["status"] == "false_positive" and stored["analyst_verdict"] is None
+        assert response["status"] == "false_positive" and response["status_changed"] is False
+
+        # A status sent with the verdict is still the caller's, as before.
+        response, stored = await _patch(conn, {"status": "active", "analyst_verdict": "true_positive"})
+        assert stored["status"] == "active" and response["previous_status"] == "false_positive"
 
     _with_database(scenario)
