@@ -19031,7 +19031,7 @@ async def _execute_agent_scanner_process(
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "elapsed_seconds": max(0, int(time.monotonic() - monotonic_started + 0.999)),
-        "partial": (status == "timeout" and record_count > 0) or abnormal_exit or error == "output_truncated",
+        "partial": (status == "timeout" or error == "connection_limit_exceeded") and record_count > 0 or abnormal_exit or error == "output_truncated",
         "timed_out": status == "timeout",
         "output_lines": safe_lines,
         "line_count": record_count,

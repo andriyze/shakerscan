@@ -50,6 +50,12 @@ class CapabilityResultReason(str, Enum):
     SCOPE_INVALID = "scope_invalid"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
+    # The action stopped because a non-time ceiling of its own reservation ran out: the
+    # pinned transport refused traffic past the HTTP ceiling, or what was left could not
+    # fund another attempt. Only wall-clock exhaustion is TIMED_OUT; reporting a request
+    # ceiling as a timeout pointed every reader at the wrong dimension.
+    HTTP_REQUEST_BUDGET_EXHAUSTED = "http_request_budget_exhausted"
+    STATE_CHANGING_BUDGET_EXHAUSTED = "state_changing_budget_exhausted"
     ADAPTER_FAILED = "adapter_failed"
     PARSER_FAILED = "parser_failed"
     OUTPUT_TRUNCATED = "output_truncated"
@@ -67,6 +73,18 @@ class CapabilityResultReason(str, Enum):
     # different origin (a Swagger `host`, an OpenAPI `servers` URL), so its routes are outside
     # this scan's binding. Nothing was misparsed; the declared surface is simply not this one.
     DECLARED_OUT_OF_SCOPE = "declared_out_of_scope"
+
+
+# The reason naming each non-time budget dimension an action can run out of.
+BUDGET_EXHAUSTION_REASONS: Mapping[str, CapabilityResultReason] = MappingProxyType({
+    "http_requests": CapabilityResultReason.HTTP_REQUEST_BUDGET_EXHAUSTED,
+    "state_changing_requests": CapabilityResultReason.STATE_CHANGING_BUDGET_EXHAUSTED,
+})
+# Tool error tokens that mean a non-time ceiling stopped the process. The pinned
+# transport's connection ceiling is the enforcement of the action's HTTP ceiling.
+CEILING_STOP_ERRORS: Mapping[str, str] = MappingProxyType({
+    "connection_limit_exceeded": "http_requests",
+})
 
 
 class CapabilityResultError(ValueError):
