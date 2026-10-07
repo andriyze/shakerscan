@@ -131,6 +131,43 @@ def order_batch_rows_by_cost_class(rows: Sequence[Any]) -> list[Any]:
     ))
 
 
+# One reviewed passive-pack attempt sends its seven GETs one at a time (concurrency 1, nuclei
+# `-timeout 5`), so the attempt can need up to seven request timeouts plus process start-up.
+# Measured in the scanner image against a 3-second origin: 7 requests, 23 seconds.
+PASSIVE_PACK_ATTEMPT_WALL_SECONDS = 7 * 5 + 5
+# An active template attempt may take this many times its planned share when earlier
+# attempts left the wall unspent.
+_TEMPLATE_ATTEMPT_SHARE_MULTIPLE = 3
+
+
+def template_attempt_wall(
+    *,
+    remaining_wall: int,
+    remaining_attempts: int,
+    planned_share: int,
+    passive_pack: bool,
+) -> int:
+    """The wall one template sweep attempt may hold, front-loading what earlier ones left.
+
+    An even split of what is left gave every endpoint of soak scan 146b6c03's required
+    passive batch 12 seconds. The fast endpoints finished in about three, and the slow AI
+    endpoint -- seven sequential GETs at ~3.7 s each -- was wall-killed at 13 seconds with
+    128 of the batch's 216 seconds never used. An attempt may now take what earlier attempts
+    left unspent, up to what the work can need, while every attempt after it keeps at least
+    its planned share: a later attempt is never funded below what the plan promised it.
+    """
+    remaining = max(0, int(remaining_wall))
+    attempts = max(1, int(remaining_attempts))
+    share = max(1, int(planned_share))
+    even = remaining // attempts
+    ceiling = (
+        max(share, PASSIVE_PACK_ATTEMPT_WALL_SECONDS) if passive_pack
+        else share * _TEMPLATE_ATTEMPT_SHARE_MULTIPLE
+    )
+    spare = remaining - (attempts - 1) * share
+    return max(even, min(ceiling, spare))
+
+
 def batch_attempt_capacity(
     capability_name: str, budget: dict[str, int] | None,
 ) -> int | None:

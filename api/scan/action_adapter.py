@@ -187,6 +187,7 @@ from .external_process import (
     BATCH_ATTEMPT_FLOORS,
     batch_attempt_floor,
     order_batch_rows_by_cost_class,
+    template_attempt_wall,
 )
 from .continuation import (
     ScanContinuationError,
@@ -414,6 +415,7 @@ def batch_stop_reason(
     ceiling_stops: Iterable[str] = (),
     exhausted: Iterable[str] = (),
     cancelled: bool = False,
+    unexamined: int = 0,
 ) -> str:
     """The one reason a partial batch states, naming the dimension that actually stopped it.
 
@@ -429,7 +431,15 @@ def batch_stop_reason(
         return CapabilityResultReason.CANCELLED.value
     lowered = [str(item).strip().lower() for item in attempt_errors or ()]
     stops = set(ceiling_stops)
-    spent = set(exhausted) if unattempted else set()
+    # Work left over -- a candidate never attempted, or an endpoint whose wall-killed attempt
+    # could not be retried -- was stopped by whichever dimension could not fund it. On the
+    # soak the required passive batch had every endpoint attempted and charged its pack's
+    # seven requests, so the retry its wall-killed endpoint needed found the request hold
+    # spent; the batch said `timed_out` and the request ceiling never appeared.
+    spent = set(exhausted) if unattempted or unexamined else set()
+    for dimension in ("http_requests", "state_changing_requests"):
+        if dimension in spent:
+            return BUDGET_EXHAUSTION_REASONS[dimension].value
     memory = CapabilityResultReason.CRAWLER_MEMORY_BOUND_EXCEEDED.value
     if lowered and not stops and all(
         item in {"timeout", memory} or is_process_kill_error(item) for item in lowered
@@ -3286,6 +3296,14 @@ class DatabaseNeutralScanActionDispatcher:
                     name: max(1, floor.get(name, 1), amount // remaining_attempts)
                     for name, amount in remaining_budget.items() if amount > 0
                 }
+                if tool == "nuclei" and sub_budget.get("tool_wall_seconds"):
+                    sub_budget["tool_wall_seconds"] = template_attempt_wall(
+                        remaining_wall=remaining_budget["tool_wall_seconds"],
+                        remaining_attempts=remaining_attempts,
+                        planned_share=int(action.requested_budget.get("tool_wall_seconds") or 0)
+                        // max(1, first_pass),
+                        passive_pack=action.capability_name == "templates.passive_batch",
+                    )
                 if body_request:
                     # Every request a body attempt sends is a mutation, so the body scanner
                     # requires state_changing_requests >= http_requests (capabilities/scanner.py).
@@ -3534,7 +3552,7 @@ class DatabaseNeutralScanActionDispatcher:
             stated = batch_stop_reason(
                 batch_errors, unattempted=unattempted,
                 ceiling_stops=ceiling_stops, exhausted=exhausted,
-                cancelled=stopped_by_cancel,
+                cancelled=stopped_by_cancel, unexamined=len(still_empty),
             )
             if stated == CapabilityResultReason.TIMED_OUT.value and unattempted:
                 # The action's own wall ran out with candidates left: a real timeout.

@@ -301,3 +301,51 @@ def test_allocator_result_is_independent_of_override_mapping_order():
     assert allocate_scan_action_plan(first, budget).plan == allocate_scan_action_plan(
         second, budget,
     ).plan
+
+
+def test_a_compiled_passive_slice_holds_its_pack_per_endpoint_plus_retry_headroom():
+    """The required passive slice is charged the pack's seven requests per endpoint; a slice
+    holding exactly that could not fund the retry a wall-killed endpoint needs (soak 146b6c03,
+    126 of 126 spent, slow endpoint unexamined)."""
+    from api.scan.action_plan import passive_batch_request_hold
+    from api.scan.work_manifests import build_endpoint_manifest
+
+    budget = ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 3_600, 4, 0, 200)
+    endpoints = build_endpoint_manifest(
+        scan_id=SCAN_ID, target_binding_digest=_target().digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2", "status": "complete", "reason": None,
+            "endpoints": [
+                {
+                    "method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                    "normalized_path": f"/route-{index}", "concrete_path": f"/route-{index}",
+                    "query_keys": [], "source": "web.crawl",
+                }
+                for index in range(18)
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    templates = build_canonical_scan_nuclei_template_manifest(
+        scan_id=SCAN_ID, target_binding_digest=_target().digest, include_active=False,
+    )
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=ScanExecutionPlan(
+            policy=ScanPolicy(active_testing=False), budget_profile="balanced", budget=budget,
+        ),
+        target_binding=_target(),
+        template_manifest_ref=templates.reference().canonical_dict(),
+        endpoint_manifest_ref=endpoints.reference().canonical_dict(),
+        action_scope="endpoint",
+    )
+    passive = [
+        action for action in plan.actions
+        if action.capability_name == "templates.passive_batch"
+        and int(action.capability_args["slice"]["count"]) >= 4
+    ]
+    assert passive
+    for action in passive:
+        count = int(action.capability_args["slice"]["count"])
+        assert action.requested_budget["http_requests"] >= passive_batch_request_hold(count)
+        assert action.requested_budget["http_requests"] > 7 * count

@@ -134,6 +134,22 @@ _BATCH_BODY_HOLD: Mapping[str, int] = {
     "sqli.verify_batch": 480,
 }
 _BATCH_BODY_HOLD_MIN_CEILING = 2_000
+# A passive-pack attempt the wall killed before the tool reported anything is retried once
+# from what the batch has left (see the template retry in action_adapter). Each attempt is
+# charged the pack's full seven requests -- its TLS traffic has no wire count -- so a slice
+# holding exactly seven per endpoint could never fund that retry: soak 146b6c03's required
+# batch spent 126 of 126 and left its slow endpoint unexamined. One retry per four endpoints;
+# a slice of fewer than four keeps exactly the pack per endpoint, so the single-route required
+# admission slice still fits the smallest parallel child budget it is admitted into (and its
+# 30-second wall floor already covers a slow pack).
+_PASSIVE_PACK_REQUESTS = 7
+_PASSIVE_RETRY_EVERY = 4
+
+
+def passive_batch_request_hold(slice_count: int) -> int:
+    """The request hold of a passive-pack slice: the pack per endpoint plus retry headroom."""
+    count = max(1, int(slice_count))
+    return _PASSIVE_PACK_REQUESTS * (count + count // _PASSIVE_RETRY_EVERY)
 _BATCH_MAX_SLICE = 50
 # No single lane may hold more than this share of the tool wall in one compile:
 # a verifier that could afford the whole wall used to starve the proof stage the
@@ -1422,6 +1438,11 @@ class ScanActionPlanCompiler:
                     )
                     for name, amount in maximum.items()
                 }
+                if blueprint.capability_name == "templates.passive_batch":
+                    budget["http_requests"] = max(
+                        int(budget.get("http_requests", 0)),
+                        passive_batch_request_hold(slice_count),
+                    )
                 if (
                     policy.allow_state_changing_http
                     and blueprint.capability_name == "xss.browser_prove_batch"
