@@ -388,6 +388,28 @@ def test_doctor_names_the_transport_reason(monkeypatch, capsys, clean_environ):
     assert "mcp:      ShakerScan API is unavailable: <urlopen error timed out>" in out
 
 
+def test_doctor_shows_a_refusal_reason_once_not_the_raw_body(monkeypatch, capsys, clean_environ):
+    mcp = load("_mcp")
+    body = '{"detail": "this action needs the operator role"}'
+
+    class RefusingClient:
+        def __init__(self, base_url, *, timeout_seconds, api_token):
+            pass
+
+        def request_json(self, method, path, payload=None):
+            return {"status": "ok"}
+
+        def list_tools(self):
+            raise mcp.MCPError(-32002, "ShakerScan API returned HTTP 403: this action needs the operator role",
+                               body, http_status=403)
+
+    monkeypatch.setattr(mcp, "ArsenalClient", RefusingClient)
+    assert cli.main(["doctor", "--url", "https://scanner.example.com"]) == 1
+    out = capsys.readouterr().out
+    assert "mcp:      ShakerScan API returned HTTP 403: this action needs the operator role\n" in out
+    assert '{"detail"' not in out
+
+
 def _connected(monkeypatch, tmp_path, *, role="operator"):
     """A connect link claim answered without the network, and a fake instance behind doctor."""
     monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
