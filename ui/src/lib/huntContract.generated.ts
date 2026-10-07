@@ -137,7 +137,7 @@ export const HUNT_START_CONTRACT = {
   },
   "budget_schema_version": "hunt-budget/v3",
   "candidates": {
-    "dedup": "A sighting with the same identity and the same title or claim merges its evidence_refs into the existing candidate (outcome=merged). A different claim with the same identity is stored as its own candidate (outcome=inserted, distinct_from_candidate_id). A stored claim is never replaced; use PATCH.",
+    "dedup": "A sighting with the same identity and the same title or claim merges its evidence_refs into the existing candidate (outcome=merged). A different claim with the same identity is stored as its own candidate (outcome=inserted, distinct_from_candidate_id). A stored claim is never replaced: title, claim or severity a sighting carried but did not write are listed in unapplied_fields; use PATCH. A candidate under verification is not changed (409 candidate_verification_in_flight), and evidence is never truncated (422 candidate_evidence_limit beyond 100 references).",
     "evidence_ref_forms": [
       "<uuid>",
       "action:<uuid>",
@@ -146,7 +146,7 @@ export const HUNT_START_CONTRACT = {
       "finding:<uuid>",
       "devref_<n>"
     ],
-    "evidence_ref_scope": "Each reference must resolve to an action, receipt or HTTP transaction of this Hunt, a finding on its target, or a device evidence entry of this Hunt.",
+    "evidence_ref_scope": "Each reference must resolve to an action, receipt or HTTP transaction of this Hunt, a finding on its target, or a device evidence entry of this Hunt (otherwise candidate_evidence_unresolved). An action or receipt counts only when the action completed or ended partial; a failed, admission-refused, blocked or unfinished action is refused as candidate_evidence_unsettled.",
     "identity": "target + family + locus",
     "locus_keys": {
       "address": "IP address of the host",
@@ -174,13 +174,15 @@ export const HUNT_START_CONTRACT = {
       "url": "absolute URL",
       "version": "software version"
     },
-    "locus_other_keys": "Any other lower-case identifier key is preserved verbatim and is part of the candidate identity; nothing in the locus is silently dropped.",
+    "locus_other_keys": "Any other identifier key (lower-cased, '-' read as '_') is preserved and is part of the candidate identity. Nothing in the locus is truncated or dropped: a value over max_locus_value_chars, a list over max_locus_list_items distinct items, a port outside 1-65535, or a locus over max_locus_keys or max_locus_bytes is refused.",
     "locus_schema_version": "hunt-candidate-locus/v1",
     "locus_set_keys": [
       "paths"
     ],
     "max_locus_bytes": 16384,
     "max_locus_keys": 32,
+    "max_locus_list_items": 100,
+    "max_locus_value_chars": 1000,
     "url_template": "/hunts/{hunt_id}/candidates"
   },
   "credential_ref_fields": [
