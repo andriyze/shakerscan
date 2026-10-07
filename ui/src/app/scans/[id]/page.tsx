@@ -2448,6 +2448,13 @@ function ScanDetailContent() {
         actions={<div className="flex flex-wrap items-center gap-2"><ReportDownloads scan={scan} isAuthenticated={true} />{deleteScan}</div>}
       />
       <ShardContextBanner scan={scan} />
+      {scan.status === 'cancelled' && (
+        // A cancelled scan otherwise rendered as a finished report with no status at all.
+        <div role="status" className="mb-4 rounded-sm border border-gray-600 bg-gray-800/60 px-3 py-2 text-sm text-gray-200">
+          <p className="font-medium">Scan cancelled{scan.error_message ? `: ${scan.error_message}` : ''}</p>
+          <p className="mt-1 text-xs text-gray-400">It stopped before finishing, so it has no final grade or conclusion; anything shown below is what ran before the cancellation.</p>
+        </div>
+      )}
       {targetWarning && (
         <p className="mb-4 rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
           {targetWarning}{originalTarget ? ` Original target: ${originalTarget}` : ''}
