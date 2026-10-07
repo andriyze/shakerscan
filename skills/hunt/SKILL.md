@@ -208,7 +208,9 @@ verifier. A candidate is non-authoritative.
 
 Identity is target + family + locus. `GET /hunts/contract` (`candidates`) lists the locus keys
 (`method`, `route`, `path`, `paths`, `url`, `origin`, `parameter`, `object_id`, `principal`,
-`address`, `host`, `transport`, `port`, ...); any other lower-case key is kept, never dropped. Put
+`address`, `host`, `transport`, `port`, ...); any other lower-case key is kept, never dropped, and
+a value that does not fit (over 1000 characters, a list over 100 items, an invalid port) is refused
+rather than truncated. Put
 the attribute that distinguishes this issue in the locus (for a file exposure, its `path`). A
 second record with the same identity and the same title or claim merges its evidence
 (`outcome: merged`); a different claim becomes its own candidate and never replaces a stored one.

@@ -79,9 +79,10 @@ def canonical_family(value: Any) -> str:
     return aliases.get(normalized, normalized)[:80] or "unknown"
 
 
-# Locus keys with a defined normalization. Every other key is preserved verbatim (bounded) because
-# the locus is the candidate's identity: dropping a natural key such as ``path`` or ``principal``
-# made unrelated issues collide on one fingerprint and overwrite each other.
+# Locus keys with a defined normalization. Every other key is preserved (bounded) because the
+# locus is the candidate's identity: dropping a natural key such as ``path`` or ``principal`` made
+# unrelated issues collide on one fingerprint and overwrite each other. For the same reason a value
+# that does not fit the bounds below is refused, never truncated or dropped.
 LOCUS_KEYS: dict[str, str] = {
     "method": "HTTP method, upper-cased",
     "route": "route template, e.g. /api/users/{id}",
@@ -111,6 +112,8 @@ LOCUS_KEYS: dict[str, str] = {
 LOCUS_SET_KEYS = frozenset({"paths"})
 MAX_LOCUS_KEYS = 32
 MAX_LOCUS_BYTES = 16384
+MAX_LOCUS_VALUE_CHARS = 1000
+MAX_LOCUS_LIST_ITEMS = 100
 _LOCUS_KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
@@ -120,7 +123,22 @@ def _locus_scalar(key: str, item: Any) -> str:
     text = str(item).strip()
     if key == "method":
         text = text.upper()
-    return text[:1000]
+    if len(text) > MAX_LOCUS_VALUE_CHARS:
+        raise ValueError(f"locus value for {key!r} exceeds {MAX_LOCUS_VALUE_CHARS} characters")
+    return text
+
+
+def _locus_port(item: Any) -> int:
+    message = "locus port must be an integer from 1 to 65535"
+    if isinstance(item, bool) or (isinstance(item, float) and not item.is_integer()):
+        raise ValueError(message)
+    try:
+        port = int(item.strip()) if isinstance(item, str) else int(item)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(message) from exc
+    if not 1 <= port <= 65535:
+        raise ValueError(message)
+    return port
 
 
 def canonical_locus(value: Any) -> dict[str, Any]:
@@ -155,23 +173,23 @@ def canonical_locus(value: Any) -> dict[str, Any]:
             result[key] = json.loads(encoded)
             continue
         if key == "port":
-            try:
-                port = int(item)
-            except (TypeError, ValueError):
-                continue
-            if 1 <= port <= 65535:
-                result[key] = port
+            result[key] = _locus_port(item)
             continue
         if isinstance(item, (list, tuple)):
             values = [
                 _locus_scalar(key, element) if not isinstance(element, (dict, list)) else element
-                for element in list(item)[:100]
+                for element in item
                 if element not in (None, "", [], {})
             ]
             if key in LOCUS_SET_KEYS:
+                # Order-insensitive identity: deduplicate and sort before any bound applies.
                 values = sorted(
                     {json.dumps(element, sort_keys=True): element for element in values}.values(),
                     key=lambda element: json.dumps(element, sort_keys=True),
+                )
+            if len(values) > MAX_LOCUS_LIST_ITEMS:
+                raise ValueError(
+                    f"locus list {key!r} has more than {MAX_LOCUS_LIST_ITEMS} distinct items"
                 )
             if values:
                 result[key] = values

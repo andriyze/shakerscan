@@ -2277,9 +2277,11 @@ async def _persist_agent_suspected_finding(
         research_episode_id=research_episode_id,
         agent_hunt_run_id=agent_hunt_run_id,
         family=family or retest_family or "unknown",
+        # The locus refuses values over 1000 characters; this legacy producer keeps the
+        # identity it always had by bounding the route itself.
         locus={
             "method": method,
-            "route": url_path or concrete_url,
+            "route": (url_path or concrete_url or "")[:1000],
             "parameter": finding_param,
         },
         title=title,

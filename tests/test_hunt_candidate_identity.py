@@ -134,6 +134,15 @@ def test_documented_locus_fingerprints_are_unchanged_for_existing_rows():
     {"path": "/a", "PATH": "/b"},
     {f"k{i}": "v" for i in range(40)},
     {f"note{i}": "x" * 1000 for i in range(20)},
+    {"url": "https://h.example/" + "a" * 990 + "?id=1"},
+    {"route": ["/r", "x" * 1001]},
+    {"paths": [f"/p{i:03d}" for i in range(101)]},
+    {"tags": [str(i) for i in range(101)]},
+    {"port": 70000},
+    {"port": 0},
+    {"port": "abc"},
+    {"port": True},
+    {"port": 80.5},
 ])
 def test_locus_that_cannot_be_kept_whole_is_refused_rather_than_truncated(locus):
     with pytest.raises(ValueError):
@@ -142,6 +151,17 @@ def test_locus_that_cannot_be_kept_whole_is_refused_rather_than_truncated(locus)
         router.HuntCandidateRequest(
             family="x", locus=locus, title="t", claim="c", evidence_refs=["a"],
         )
+
+
+def test_locus_bounds_apply_after_set_normalization_and_keep_existing_values():
+    # Duplicates collapse and the set is sorted before the item bound applies.
+    paths = [f"/p{i:03d}" for i in range(100)]
+    assert candidates.canonical_locus({"paths": paths + paths[:50]}) == candidates.canonical_locus(
+        {"paths": list(reversed(paths))}
+    )
+    # A value exactly at the bound (as stored by the previous normalizer) is still accepted.
+    assert candidates.canonical_locus({"url": "u" * 1000}) == {"url": "u" * 1000}
+    assert candidates.canonical_locus({"port": "443"}) == candidates.canonical_locus({"port": 443})
 
 
 def test_distinct_claim_with_same_identity_never_overwrites_the_stored_candidate():
