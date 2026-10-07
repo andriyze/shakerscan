@@ -174,6 +174,7 @@ except (ImportError, ModuleNotFoundError):
 
 from .action_plan import ScanAction, ScanActionPlan
 from .verification_extension import EXTENDS_ARG
+from .batch_carry import carried_records, finished_attempts, proof_signal_sources
 from .capability_result import (
     BUDGET_EXHAUSTION_REASONS,
     CEILING_STOP_ERRORS,
@@ -1630,7 +1631,7 @@ class DatabaseNeutralScanActionDispatcher:
         if not rows:
             return self._skip(action, self._empty_slice_reason(manifest))
         candidate_signals: set[str] = set()
-        for dependency in action.dependencies:
+        for dependency in proof_signal_sources(action, self.plan):
             for item in await self._observations(dependency):
                 if (
                     str(item.get("kind") or "") in {"xss_alert", "request_body_verification"}
@@ -1661,6 +1662,18 @@ class DatabaseNeutralScanActionDispatcher:
             for item in await load_attempts(action.action_id)
             if isinstance(item, Mapping)
         }
+
+        # A proof re-planned behind a verification extension carries every candidate the
+        # escalation it extends already took to a verdict: no candidate is proven twice.
+        extends = str(action.capability_args.get(EXTENDS_ARG) or "")
+        carried = {
+            attempt_id: item
+            for attempt_id, item in finished_attempts(
+                await load_attempts(extends) if extends else (),
+            ).items()
+            if attempt_id not in completed
+        }
+        carried_count = 0
         manifest_digest = manifest.reference().manifest_digest
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
@@ -1682,6 +1695,12 @@ class DatabaseNeutralScanActionDispatcher:
             attempt_id = hashlib.sha256(
                 f"{manifest_digest}:xss_browser_proof:{candidate_id}".encode()
             ).hexdigest()
+            if attempt_id in carried:
+                carried_count += 1
+                attempted += 1
+                attempt_statuses.append({"status": "success", "timed_out": False})
+                observations.extend(carried_records(carried[attempt_id], source=extends))
+                continue
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
@@ -1811,6 +1830,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "eligible_count": eligible, "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
                 "checkpoint_mode": "after_each_candidate",
+                **({"extends": extends, "carried_count": carried_count} if extends else {}),
                 "secret_values_visible": False,
             },
         )
@@ -1848,7 +1868,7 @@ class DatabaseNeutralScanActionDispatcher:
         if not rows:
             return self._skip(action, self._empty_slice_reason(manifest))
         candidate_signals: set[str] = set()
-        for dependency in action.dependencies:
+        for dependency in proof_signal_sources(action, self.plan):
             for item in await self._observations(dependency):
                 if (
                     str(item.get("kind") or "") in {
@@ -1870,6 +1890,18 @@ class DatabaseNeutralScanActionDispatcher:
             for item in await load_attempts(action.action_id)
             if isinstance(item, Mapping)
         }
+
+        # A proof re-planned behind a verification extension carries every candidate the
+        # escalation it extends already took to a verdict: no candidate is proven twice.
+        extends = str(action.capability_args.get(EXTENDS_ARG) or "")
+        carried = {
+            attempt_id: item
+            for attempt_id, item in finished_attempts(
+                await load_attempts(extends) if extends else (),
+            ).items()
+            if attempt_id not in completed
+        }
+        carried_count = 0
         manifest_digest = manifest.reference().manifest_digest
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
@@ -1898,6 +1930,12 @@ class DatabaseNeutralScanActionDispatcher:
             attempt_id = hashlib.sha256(
                 f"{manifest_digest}:sqli_proof:{candidate_id}".encode()
             ).hexdigest()
+            if attempt_id in carried:
+                carried_count += 1
+                attempted += 1
+                attempt_statuses.append({"status": "success", "timed_out": False})
+                observations.extend(carried_records(carried[attempt_id], source=extends))
+                continue
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
@@ -2067,6 +2105,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "eligible_count": eligible, "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
                 "checkpoint_mode": "after_each_candidate",
+                **({"extends": extends, "carried_count": carried_count} if extends else {}),
                 "secret_values_visible": False,
             },
         )

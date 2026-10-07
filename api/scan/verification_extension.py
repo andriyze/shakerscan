@@ -27,6 +27,9 @@ from typing import Any
 from .action_plan import CAPABILITY_REGISTRY, _LANE_WALL_SHARE
 
 EXTENDS_ARG = "extends"
+# A proof re-planned behind an extension also reads candidate signals from the verifier slices
+# its original escalation depended on (terminal actions of an earlier round).
+SIGNAL_SOURCES_ARG = "signal_sources"
 EXTENDABLE_CAPABILITIES = frozenset({"xss.verify_batch", "sqli.verify_batch"})
 # Proof escalation reads its candidates from the verifiers it depends on, so a slice whose
 # verifier is extended gets its escalation re-planned behind the extension.
@@ -40,7 +43,7 @@ _MINIMUM_SCALE = 1.25
 _MAXIMUM_SPENT_FRACTION = 0.5
 _SCALED_DIMENSIONS = ("http_requests", "state_changing_requests", "tool_wall_seconds")
 _ROUND_SUFFIX = re.compile(r"\.r\d{2}$")
-_CARRIED_ARGS_EXCLUDED = frozenset({"continuation_work_key", EXTENDS_ARG})
+_CARRIED_ARGS_EXCLUDED = frozenset({"continuation_work_key", EXTENDS_ARG, SIGNAL_SOURCES_ARG})
 
 
 def _status(result: Any) -> str:
@@ -149,11 +152,14 @@ def plan_verification_extensions(
         str(item["capability_args"][EXTENDS_ARG]): str(item["action_id"]) for item in planned
     }
     for action in actions:
+        # A proof escalation that already succeeded is re-planned too: its success covers
+        # only the candidates its verifiers had signalled before the wall, and the extension
+        # can signal new ones. The re-planned proof carries every candidate the original
+        # took to a verdict, so nothing already proven is proven again.
         if (
             action.capability_name not in PROOF_CAPABILITIES
             or action.capability_args.get(EXTENDS_ARG)
             or action.action_id in already
-            or _status(parent_results.get(action.action_id)) == "success"
         ):
             continue
         dependencies = tuple(
@@ -183,6 +189,9 @@ def plan_verification_extensions(
                     if key not in _CARRIED_ARGS_EXCLUDED
                 },
                 EXTENDS_ARG: action.action_id,
+                # Signals from every verifier slice the original escalation read, not just
+                # the extended ones: a non-extended sibling's candidates must not be dropped.
+                SIGNAL_SOURCES_ARG: list(action.dependencies),
             },
             "budget": budget,
             "dependencies": dependencies,
