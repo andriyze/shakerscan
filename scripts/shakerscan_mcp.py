@@ -432,7 +432,7 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query target-scoped Hunt knowledge pages. Follow next_cursor with unchanged kind/filter while has_more is true; count is this page, not a total.",
         {
             "hunt_id": {"type": "string", "format": "uuid"},
-            "kind": {"type": "string", "enum": ["summary", "endpoints", "findings", "hypotheses", "principals", "graph_nodes", "graph_edges", "services", "scans", "collections", "candidates", "notes", "receipts"]},
+            "kind": {"type": "string", "enum": ["summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals", "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections", "candidates", "notes", "receipts"]},
             "filter": {"type": "object"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 500},
             "cursor": {"type": "string", "maxLength": 2048},
