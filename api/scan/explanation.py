@@ -726,14 +726,23 @@ def build_scan_execution_explanation(
 
     counts = Counter(str(item["status"]) for item in capability_rows)
     required_rows = [item for item in capability_rows if item["required"]]
-    # A slice carried into a later round is decided by its extension's outcome.
+    # A slice carried into a later round is decided by its extension's outcome -- the newest
+    # one when a SQLi extension was itself extended.
     extensions = {
         str(item["extends"]): item for item in capability_rows if item.get("extends")
     }
+
+    def effective_row(item: Mapping[str, Any]) -> Mapping[str, Any]:
+        seen = {item["action_id"]}
+        while item["action_id"] in extensions:
+            item = extensions[item["action_id"]]
+            if item["action_id"] in seen:
+                break
+            seen.add(item["action_id"])
+        return item
+
     required_incomplete = [
-        effective for effective in (
-            extensions.get(item["action_id"], item) for item in required_rows
-        )
+        effective for effective in (effective_row(item) for item in required_rows)
         if effective["status"] not in _SUCCESS
     ]
     work_manifests = _work_manifests(

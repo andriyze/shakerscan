@@ -15,6 +15,14 @@ residual can still fund, so every hard ceiling stays where it was; the allocator
 extension like any other optional work or skips it. Candidates the original attempted to a
 verdict are carried into the extension rather than re-run, and the finalizer reads the
 extension's outcome in place of the slice it extends.
+
+SQLi verification is resumable (see ``sqli_stages``): each candidate's verification is a
+sequence of technique stages, every finished stage is checkpointed, and an extension continues
+at the first unfinished stage instead of re-sending what the slice already settled. Because a
+later extension makes progress rather than repeating its predecessor, a wall-killed SQLi
+extension is itself extended in the next round -- at the same lane share, bounded by the
+reconciled residual and the round bound -- until its candidates finish or the budget is gone.
+An XSS extension still re-runs Dalfox from scratch, so it is never extended again.
 """
 
 from __future__ import annotations
@@ -31,6 +39,9 @@ EXTENDS_ARG = "extends"
 # its original escalation depended on (terminal actions of an earlier round).
 SIGNAL_SOURCES_ARG = "signal_sources"
 EXTENDABLE_CAPABILITIES = frozenset({"xss.verify_batch", "sqli.verify_batch"})
+# Verifiers whose extension continues durable per-candidate progress, so extending an
+# extension again is not a repeat of the same work.
+RESUMABLE_CAPABILITIES = frozenset({"sqli.verify_batch"})
 # Proof escalation reads its candidates from the verifiers it depends on, so a slice whose
 # verifier is extended gets its escalation re-planned behind the extension.
 PROOF_CAPABILITIES = frozenset({"sqli.prove_batch", "xss.browser_prove_batch"})
@@ -63,6 +74,7 @@ def extension_scale(
     consumed: Mapping[str, int],
     wall_ceiling: int,
     residual: Mapping[str, int],
+    minimum: float = _MINIMUM_SCALE,
 ) -> float | None:
     """How much larger the extension's holds are than the slice's, or None for no extension."""
     held_requests = int(reserved.get("http_requests") or 0)
@@ -82,7 +94,7 @@ def extension_scale(
         amount = int(reserved.get(dimension) or 0)
         if amount > 0:
             scale = min(scale, max(0, int(residual.get(dimension, 0))) / amount)
-    return scale if scale >= _MINIMUM_SCALE else None
+    return scale if scale >= minimum else None
 
 
 def plan_verification_extensions(
@@ -112,9 +124,10 @@ def plan_verification_extensions(
     # A slice the share cannot fund now is extended in a later round, from a fresh share.
     lane_wall: dict[str, int] = {}
     for action in actions:
+        chained = bool(action.capability_args.get(EXTENDS_ARG))
         if (
             action.capability_name not in EXTENDABLE_CAPABILITIES
-            or action.capability_args.get(EXTENDS_ARG)
+            or (chained and action.capability_name not in RESUMABLE_CAPABILITIES)
             or action.action_id in already
         ):
             continue
@@ -127,6 +140,9 @@ def plan_verification_extensions(
             consumed=dict(getattr(result, "budget_consumed", {}) or {}),
             wall_ceiling=max(0, wall_ceiling - lane_wall.get(action.capability_name, 0)),
             residual=remaining,
+            # An extension already holds the lane share; continuing it at that same share is
+            # worth a round because it resumes where its predecessor stopped.
+            minimum=1.0 if chained else _MINIMUM_SCALE,
         )
         if scale is None:
             continue
@@ -167,7 +183,6 @@ def plan_verification_extensions(
         # took to a verdict, so nothing already proven is proven again.
         if (
             action.capability_name not in PROOF_CAPABILITIES
-            or action.capability_args.get(EXTENDS_ARG)
             or action.action_id in already
         ):
             continue
@@ -200,7 +215,14 @@ def plan_verification_extensions(
                 EXTENDS_ARG: action.action_id,
                 # Signals from every verifier slice the original escalation read, not just
                 # the extended ones: a non-extended sibling's candidates must not be dropped.
-                SIGNAL_SOURCES_ARG: list(action.dependencies),
+                # A proof re-planned again keeps the sources its predecessor already read.
+                SIGNAL_SOURCES_ARG: list(dict.fromkeys((
+                    *(
+                        str(item)
+                        for item in action.capability_args.get(SIGNAL_SOURCES_ARG) or ()
+                    ),
+                    *action.dependencies,
+                ))),
             },
             "budget": budget,
             "dependencies": dependencies,
@@ -211,14 +233,40 @@ def plan_verification_extensions(
 def superseding_results(
     actions: Any, action_results: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Map each extended slice to the settled result of the extension that superseded it."""
-    superseded: dict[str, Any] = {}
+    """Map each extended slice to the settled result of the last extension in its chain.
+
+    A SQLi extension can itself be extended; the slice and every intermediate extension are
+    then covered by the outcome of the newest settled one.
+    """
+    extended_by: dict[str, str] = {}
     for action in actions or ():
         original = str(action.capability_args.get(EXTENDS_ARG) or "")
-        result = action_results.get(action.action_id)
-        if original and result is not None:
-            superseded[original] = result
+        if original and action.action_id in action_results:
+            extended_by[original] = action.action_id
+    superseded: dict[str, Any] = {}
+    for original in extended_by:
+        latest, seen = extended_by[original], {original}
+        while latest in extended_by and latest not in seen:
+            seen.add(latest)
+            latest = extended_by[latest]
+        superseded[original] = action_results[latest]
     return superseded
+
+
+def extension_lineage(action: Any, plan: Any) -> tuple[str, ...]:
+    """The actions this one extends, nearest first: its slice's whole extension chain."""
+    by_id = {
+        item.action_id: item for item in getattr(plan, "actions", ()) or ()
+    }
+    lineage: list[str] = []
+    current = str(action.capability_args.get(EXTENDS_ARG) or "")
+    while current and current not in lineage and current != action.action_id:
+        lineage.append(current)
+        ancestor = by_id.get(current)
+        current = (
+            str(ancestor.capability_args.get(EXTENDS_ARG) or "") if ancestor is not None else ""
+        )
+    return tuple(lineage)
 
 
 def base_lane_id(action_id: str) -> str:
