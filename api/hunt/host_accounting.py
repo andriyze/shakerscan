@@ -11,6 +11,13 @@ settled action records the hosts it attempted in ``context_pack.hosts_attempted_
 Charging stays conservative where identity is unknown: an action whose commands do not name one
 address per charged host keeps its full charge, and hosts are recorded only after a settlement
 that measured them, so a failed or concurrent action can over-count but never under-count.
+
+A zero host hold uses the canonical durable shape: the dimension is omitted, exactly as
+``DurableBudgetReservation`` stores it. Admission digests that shape, the worker reconstructs it
+from the stored reservation (an omitted grant is a zero hold), and the adapter then neither
+measures nor reports the dimension. The worker adopts a reduced hold only when it still covers
+every host of the action that this Hunt has not recorded as attempted; otherwise its
+reconstruction keeps the full estimate, the digests disagree, and the action is refused.
 """
 from __future__ import annotations
 
@@ -60,35 +67,52 @@ def distinct_host_charge(
     hosts = action_hosts(prepared)
     if DIMENSION not in result or not hosts:
         return result
-    result[DIMENSION] = min(int(result[DIMENSION]), len(hosts - charged_hosts(context)))
+    held = min(int(result[DIMENSION]), len(hosts - charged_hosts(context)))
+    if held > 0:
+        result[DIMENSION] = held
+    else:
+        # Durable reservations omit zero grants; digest the shape that is persisted.
+        result.pop(DIMENSION)
     return result
 
 
 def bound_distinct_hosts(
     requested_budget: Mapping[str, int], prepared: Any, reserved: Mapping[str, int],
+    context: Any,
 ) -> tuple[dict[str, int], Any]:
     """Worker: adopt the admitted host hold (never above the estimate) and bound measurement to it.
 
     The admission and queue digests cover the reduced hold, so the recomputed request must use it;
-    the adapter measures hosts against its prepared estimate, so the estimate is bounded too.
+    the adapter measures hosts against its prepared estimate, so the estimate is bounded too. A
+    hold the stored reservation omits is zero. A hold below the action's hosts that this Hunt has
+    not recorded as attempted is not adopted, so no host can run uncharged.
     """
     budget = dict(requested_budget)
-    if DIMENSION not in budget or DIMENSION not in reserved:
+    hosts = action_hosts(prepared)
+    if DIMENSION not in budget or not hosts:
         return budget, prepared
-    held = int(reserved[DIMENSION])
-    if not 0 <= held <= int(budget[DIMENSION]) or not action_hosts(prepared):
+    held = int(dict(reserved).get(DIMENSION) or 0)
+    unattempted = len(hosts - charged_hosts(context))
+    if not unattempted <= held <= int(budget[DIMENSION]):
         return budget, prepared
-    budget[DIMENSION] = held
-    estimate = {**dict(prepared.estimated_budget), DIMENSION: held}
+    estimate = dict(prepared.estimated_budget)
+    if held:
+        budget[DIMENSION] = estimate[DIMENSION] = held
+    else:
+        budget.pop(DIMENSION)
+        estimate.pop(DIMENSION, None)
     return budget, replace(prepared, estimated_budget=estimate)
 
 
 async def record_attempted_hosts(
-    conn: Any, *, hunt_id: Any, run: Mapping[str, Any], prepared: Any,
+    conn: Any, *, hunt_id: Any, run: Mapping[str, Any], hosts: frozenset[str],
     reserved: Mapping[str, int], actual: Mapping[str, int],
 ) -> None:
-    """Settlement: remember hosts whose whole admitted hold was measured as attempted."""
-    hosts = action_hosts(prepared)
+    """Settlement: remember hosts whose whole admitted hold was measured as attempted.
+
+    ``hosts`` is ``action_hosts`` of the unbounded prepared action: a bounded estimate no longer
+    names one host per command, so it cannot identify them.
+    """
     held = int(reserved.get(DIMENSION) or 0)
     if not hosts or held <= 0 or int(actual.get(DIMENSION) or 0) < held:
         return
