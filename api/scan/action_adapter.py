@@ -174,7 +174,9 @@ except (ImportError, ModuleNotFoundError):
 
 from .action_plan import ScanAction, ScanActionPlan
 from .verification_extension import EXTENDS_ARG
-from .batch_carry import carried_records, finished_attempts, proof_signal_sources
+from .batch_carry import (
+    admission_template_source, carried_records, finished_attempts, proof_signal_sources,
+)
 from .capability_result import (
     BUDGET_EXHAUSTION_REASONS,
     CEILING_STOP_ERRORS,
@@ -3079,13 +3081,20 @@ class DatabaseNeutralScanActionDispatcher:
         # action already took to a verdict is carried, with no budget and no repeat traffic.
         extends = str(action.capability_args.get(EXTENDS_ARG) or "")
         carried = {
-            str(item.get("attempt_id") or ""): dict(item)
-            for item in (await load_attempts(extends) if extends else ())
-            if isinstance(item, Mapping)
-            and str(item.get("status") or "") in _BATCH_SUCCESS_STATUSES
-            and not item.get("timed_out")
-            and str(item.get("attempt_id") or "") not in completed
+            attempt_id: item
+            for attempt_id, item in finished_attempts(
+                await load_attempts(extends) if extends else (),
+            ).items()
+            if attempt_id not in completed
         }
+        # A passive continuation slice carries the routes the required admission pack
+        # already examined (the frozen origin and admitted seeds) instead of re-sending
+        # the pack to them. The manifests differ, so route identity is the key.
+        admission_source = admission_template_source(action, self.plan)
+        admitted = finished_attempts(
+            await load_attempts(admission_source) if admission_source else (),
+            key="candidate_id",
+        )
         carried_count = 0
         manifest_digest = manifest.reference().manifest_digest
         family = {
@@ -3162,14 +3171,16 @@ class DatabaseNeutralScanActionDispatcher:
             if retry_round:
                 attempt_key += f":retry:{retry_round}"
             attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
-            if not retry_round and attempt_id in carried and attempt_id not in completed:
+            route_identity = str(row.get("candidate_id") or row.get("route_id") or "")
+            carry = None if retry_round or attempt_id in completed else (
+                (carried[attempt_id], extends) if attempt_id in carried
+                else (admitted[route_identity], admission_source)
+                if route_identity and route_identity in admitted else None
+            )
+            if carry is not None:
                 carried_count += 1
                 attempted += 1
-                observations.extend(
-                    {**dict(item), "carried_from": extends}
-                    for item in carried[attempt_id].get("observations") or ()
-                    if isinstance(item, Mapping) and item.get("kind") == "candidate_attempt"
-                )
+                observations.extend(carried_records(carry[0], source=str(carry[1])))
                 attempt_log.append((candidate_id, 0, True, False))
                 continue
             prior = completed.get(attempt_id)
@@ -3557,7 +3568,9 @@ class DatabaseNeutralScanActionDispatcher:
                 "unexamined_count": len(still_empty),
                 "unexamined_candidate_ids": sorted(still_empty)[:50],
                 "checkpoint_mode": "after_each_candidate",
-                **({"extends": extends, "carried_count": carried_count} if extends else {}),
+                **({"extends": extends} if extends else {}),
+                **({"carried_from_admission": admission_source} if admission_source else {}),
+                **({"carried_count": carried_count} if extends or admission_source else {}),
             },
         )
 
