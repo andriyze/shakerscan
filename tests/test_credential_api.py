@@ -460,26 +460,30 @@ WEB_ORIGIN = uuid.UUID("66666666-6666-4666-8666-666666666666")
 WEB_HOST = uuid.UUID("77777777-7777-4777-8777-777777777777")
 
 
+# facts: (http_origin, serves_http, services_observed, device)
 @pytest.mark.parametrize(("declared", "auth_kind", "facts", "refused"), [
-    # Soak N6: a web basic-auth profile granted to the SSH-only client VPS, as device and as web.
-    ("device", "basic_auth", (False, False, True), True),
-    ("web", "basic_auth", (False, False, True), True),
+    # Soak N6: a web basic-auth profile granted to the client VPS, whose full port scan saw SSH
+    # only, as device and as web.
+    ("device", "basic_auth", (False, False, True, True), True),
+    ("web", "basic_auth", (False, False, True, True), True),
     # ...and to the honey web origin labelled as a network host.
-    ("network", "basic_auth", (True, True, False), True),
-    ("web", "basic_auth", (True, True, False), False),
-    ("network", "bearer_token", (False, True, False), False),  # a host with a web origin
-    ("device", "bearer_token", (False, True, False), True),    # a host that is not a device
-    ("device", "ssh_password", (False, False, True), False),
-    ("network", "ssh_password", (False, False, False), False),
-    ("web", "ssh_password", (True, True, False), True),
+    ("network", "basic_auth", (True, True, False, False), True),
+    ("web", "basic_auth", (True, True, False, False), False),
+    ("network", "bearer_token", (False, True, True, False), False),  # a host with a web origin
+    ("device", "bearer_token", (False, True, True, False), True),    # a host that is not a device
+    # A device with no service observations yet: absence of evidence is not "no HTTP".
+    ("device", "bearer_token", (False, False, False, True), False),
+    ("device", "ssh_password", (False, False, True, True), False),
+    ("network", "ssh_password", (False, False, False, False), False),
+    ("web", "ssh_password", (True, True, False, False), True),
 ])
 def test_a_grant_must_name_the_target_as_it_is_and_fit_the_credential_protocol(
     declared, auth_kind, facts, refused,
 ):
-    http_origin, serves_http, device = facts
+    http_origin, serves_http, services_observed, device = facts
     reason = credential_api.grant_target_kind_error(
-        declared_kind=declared, auth_kind=auth_kind,
-        http_origin=http_origin, serves_http=serves_http, device=device,
+        declared_kind=declared, auth_kind=auth_kind, http_origin=http_origin,
+        serves_http=serves_http, services_observed=services_observed, device=device,
     )
     assert (reason is not None) is refused, reason
 
@@ -492,8 +496,8 @@ def test_the_grant_route_refuses_an_incompatible_target_with_422(client):
     assert created.status_code == 201, created.text
     profile_id = created.json()["profile"]["id"]
     pool.conn.grant_target_facts = {
-        DEVICE_HOST: {"http_origin": False, "serves_http": False, "device": True},
-        WEB_ORIGIN: {"http_origin": True, "serves_http": True, "device": False},
+        DEVICE_HOST: {"http_origin": False, "serves_http": False, "services_observed": True, "device": True},
+        WEB_ORIGIN: {"http_origin": True, "serves_http": True, "services_observed": False, "device": False},
     }
     for kind, target in (("device", DEVICE_HOST), ("web", DEVICE_HOST), ("network", WEB_ORIGIN)):
         refused = http.post(f"/credential-profiles/{profile_id}/grants", json={

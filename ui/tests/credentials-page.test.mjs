@@ -84,7 +84,7 @@ test('a share names the target as it is and only offers targets the credential c
   // granted to an SSH-only device. The kind comes from the asset, and the protocol must fit.
   assert.doesNotMatch(page, /id: asset\.id, kind: 'network'/)
   assert.match(page, /kind: httpOrigin \? 'web' : asset\.connected_device \? 'device' : 'network'/)
-  assert.match(page, /servesHttp: httpOrigin \|\|/)
+  assert.match(page, /servesHttp: httpOrigin \|\| \(asset\.origin_count \?\? 0\) > 0\s*\|\| \(\(asset\.service_count \?\? 0\) > 0 \? false : undefined\)/)
   assert.match(dialog, /if \(authKind\.startsWith\('ssh_'\)\) return target\.kind === 'network' \|\| target\.kind === 'device'/)
   assert.match(dialog, /return target\.servesHttp !== false/)
   assert.match(dialog, /protocolFits\(profile\.auth_kind, target\)/)
