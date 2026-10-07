@@ -50,12 +50,17 @@ def test_unscheduled_is_distinct_from_unattempted():
     assert 'row["manifest_candidates"] = sum(' in source
 
 
-def test_the_scheduled_total_is_summed_per_capability_not_per_family():
-    # A family can plan several capabilities with different manifests; summing across them would
-    # let a large manifest mask a small one that was fully truncated.
+def test_the_scheduled_total_is_summed_per_worklist_not_per_family():
+    # A family can plan several capabilities with different manifests, and one capability can
+    # run over two worklists (a passive Scan's admitted and discovered surfaces); summing across
+    # them would let a large manifest mask a small one that was fully truncated. The behavioural
+    # case is tests/test_passive_admission_carry.py.
     source = definition_source("finalize_scan_report")
-    assert 'row["_scheduled_entries"][action.capability_name]' in source
-    assert "for capability, total in manifest_entries.items()" in source
+    assert "lane = _manifest_lane(action)" in source
+    assert 'row["_scheduled_entries"][lane]' in source
+    assert "for lane, total in manifest_entries.items()" in source
+    lane = definition_source("_manifest_lane")
+    assert 'return action.capability_name, str(reference["manifest_digest"])' in lane
 
 
 def test_unfinished_required_work_reaches_the_grade():
