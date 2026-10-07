@@ -309,7 +309,9 @@ function CredentialsContent() {
       kind: httpOrigin ? 'web' : asset.connected_device ? 'device' : 'network',
       label: asset.name || asset.locator,
       detail: httpOrigin ? asset.url : asset.locator,
-      servesHttp: httpOrigin || (typeof asset.origin_count === 'number' ? asset.origin_count > 0 : undefined),
+      // As the server decides: no HTTP only on evidence (services observed, no web app linked).
+      servesHttp: httpOrigin || (asset.origin_count ?? 0) > 0
+        || ((asset.service_count ?? 0) > 0 ? false : undefined),
     }
   }), [assets])
 

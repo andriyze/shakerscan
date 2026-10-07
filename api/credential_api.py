@@ -380,19 +380,25 @@ async def _require_target(conn: Any, *, target_kind: str, target_id: uuid.UUID) 
 # What the receiving target actually is, read from the inventory rather than the caller's label.
 _GRANT_TARGET_FACTS_SQL = """
 SELECT t.url ~* '^https?://' AS http_origin,
-       (t.url ~* '^https?://' OR EXISTS(
-            SELECT 1 FROM targets member
-            WHERE member.asset_owner_id=t.id AND member.is_active AND member.url ~* '^https?://'
-       )) AS serves_http,
+       (t.url ~* '^https?://'
+        OR EXISTS(SELECT 1 FROM targets member
+                  WHERE member.asset_owner_id=t.id AND member.is_active AND member.url ~* '^https?://')
+        OR EXISTS(SELECT 1 FROM device_services service
+                  WHERE service.target_id=t.id AND service.state='open'
+                    AND (service.web_origin IS NOT NULL OR service.service_name ~* 'http'))
+       ) AS serves_http,
+       EXISTS(SELECT 1 FROM device_services service
+              WHERE service.target_id=t.id AND service.state='open') AS services_observed,
        EXISTS(SELECT 1 FROM target_device_profiles profile WHERE profile.target_id=t.id) AS device
 FROM targets t WHERE t.id=$1 AND t.is_active=true
 UNION ALL
-SELECT false, false, true FROM device_targets d WHERE d.id=$1 AND d.is_active=true
+SELECT false, false, false, true FROM device_targets d WHERE d.id=$1 AND d.is_active=true
 LIMIT 1"""
 
 
 def grant_target_kind_error(
-    *, declared_kind: str, auth_kind: str, http_origin: bool, serves_http: bool, device: bool,
+    *, declared_kind: str, auth_kind: str, http_origin: bool, serves_http: bool,
+    services_observed: bool, device: bool,
 ) -> str | None:
     """Why a profile cannot be shared with this target, or None when the kinds agree.
 
@@ -400,6 +406,10 @@ def grant_target_kind_error(
     it is and the credential's protocol must have something to authenticate to there: a web basic
     auth profile granted to an SSH-only device, or a web origin labelled as a network host, was
     accepted with 201 and could never be used correctly.
+
+    A host or device is refused an HTTP credential only on evidence: its services were observed
+    and none of them is HTTP. With no service observations yet, missing evidence does not show
+    that it serves no HTTP, so the explicit share stands.
     """
     if declared_kind in {"web", "api"} and not http_origin:
         return f"a {declared_kind} grant needs a web or API origin; this target is a host or device"
@@ -407,9 +417,10 @@ def grant_target_kind_error(
         return f"a {declared_kind} grant needs a host or device; this target is a web or API origin"
     if declared_kind == "device" and not device:
         return "a device grant needs a connected device; this host is not one"
-    if auth_kind in HTTP_CREDENTIAL_KINDS and not serves_http:
+    if auth_kind in HTTP_CREDENTIAL_KINDS and not serves_http and services_observed:
         return (
-            f"a {auth_kind} credential authenticates HTTP; this target has no web or API origin"
+            f"a {auth_kind} credential authenticates HTTP; this target's observed services "
+            "include no web or API service"
         )
     if auth_kind in SSH_CREDENTIAL_KINDS and http_origin:
         return "an SSH credential needs a host or device, not a web origin"
@@ -425,7 +436,7 @@ async def _require_grant_target(
     reason = grant_target_kind_error(
         declared_kind=target_kind, auth_kind=auth_kind,
         http_origin=bool(facts["http_origin"]), serves_http=bool(facts["serves_http"]),
-        device=bool(facts["device"]),
+        services_observed=bool(facts["services_observed"]), device=bool(facts["device"]),
     )
     if reason:
         raise HTTPException(status_code=422, detail=reason)

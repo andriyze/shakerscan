@@ -39,6 +39,7 @@ HOME = uuid.UUID("11111111-1111-4111-8111-111111111111")
 SHARED = uuid.UUID("22222222-2222-4222-8222-222222222222")
 OTHER = uuid.UUID("33333333-3333-4333-8333-333333333333")
 DEVICE = uuid.UUID("44444444-4444-4444-8444-444444444444")
+SSH_ONLY = uuid.UUID("55555555-5555-4555-8555-555555555555")
 STORE = PostgresCredentialProfileStore()
 
 
@@ -211,13 +212,26 @@ def _routes(scenario):
         try:
             await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
             await STORE.ensure_schema(conn)
+            # The target columns and tables the routes read, as the unified asset migration
+            # (targets/asset_migration.py, applied at every startup) leaves them.
             await conn.execute("""
-                CREATE TABLE targets (id UUID PRIMARY KEY, name TEXT, url TEXT, is_active BOOLEAN DEFAULT true);
+                CREATE TABLE targets (id UUID PRIMARY KEY, name TEXT, url TEXT, is_active BOOLEAN DEFAULT true,
+                    asset_owner_id UUID REFERENCES targets(id) ON DELETE SET NULL);
+                CREATE TABLE target_device_profiles (target_id UUID PRIMARY KEY REFERENCES targets(id) ON DELETE CASCADE);
+                CREATE TABLE device_services (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    target_id UUID REFERENCES targets(id) ON DELETE CASCADE, transport TEXT NOT NULL,
+                    port INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'open',
+                    service_name TEXT NOT NULL DEFAULT 'unknown', web_origin TEXT);
                 CREATE TABLE device_targets (id UUID PRIMARY KEY, name TEXT, primary_locator TEXT, is_active BOOLEAN DEFAULT true);
             """)
             for target, name in ((HOME, "home.example.test"), (SHARED, "shared.example.test"), (OTHER, "other.example.test")):
                 await conn.execute("INSERT INTO targets (id, name, url) VALUES ($1, $2, $3)", target, name, f"https://{name}")
             await conn.execute("INSERT INTO device_targets (id, name, primary_locator) VALUES ($1, 'router', '10.0.0.1')", DEVICE)
+            # A connected device whose full port scan observed SSH only (the soak's client VPS).
+            await conn.execute("INSERT INTO targets (id, name, url) VALUES ($1, 'vps', 'host://203.0.113.5')", SSH_ONLY)
+            await conn.execute("INSERT INTO target_device_profiles (target_id) VALUES ($1)", SSH_ONLY)
+            await conn.execute("""INSERT INTO device_services (target_id, transport, port, service_name)
+                VALUES ($1, 'tcp', 22, 'ssh')""", SSH_ONLY)
             passive = await _profile(conn, capabilities=("http.request",))
             active = await _profile(conn, capabilities=("request.replay",))
             return passive.profile_id, active.profile_id
@@ -272,6 +286,15 @@ def test_grant_routes_share_list_and_revoke_with_target_names():
         assert [(item["id"], item["shared"]) for item in device_profiles] == [(passive_id, True)]
         assert client.delete(f"/credential-profiles/{passive_id}/grants/{DEVICE}").status_code == 200
         assert client.get("/credential-profiles", params=device_params).json()["profiles"] == []
+        # An HTTP credential has nothing to authenticate to on a device seen serving SSH only,
+        # under any label; a web label on a web origin still works (above).
+        for kind in ("device", "network", "web"):
+            refused = client.post(f"/credential-profiles/{passive_id}/grants",
+                                  json={"target_kind": kind, "target_id": str(SSH_ONLY)})
+            assert refused.status_code == 422, (kind, refused.text)
+        # A web origin cannot be labelled a network host.
+        assert client.post(f"/credential-profiles/{passive_id}/grants",
+                           json={"target_kind": "network", "target_id": str(OTHER)}).status_code == 422
         # A missing target is not granted anything.
         assert client.post(f"/credential-profiles/{passive_id}/grants",
                            json={"target_kind": "web", "target_id": str(uuid.uuid4())}).status_code == 404

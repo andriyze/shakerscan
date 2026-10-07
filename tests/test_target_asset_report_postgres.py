@@ -209,18 +209,22 @@ def test_credential_grant_target_facts_come_from_the_inventory():
             origin = await conn.fetchval("INSERT INTO targets(url) VALUES('https://facts-report.test') RETURNING id")
             await retest_contract.run_schema_migrations(BoundConnectionPool(conn))
             assert await conn.fetchval('SELECT asset_owner_id FROM targets WHERE id=$1', origin) == host
+            # Its full port scan observed SSH only.
+            await conn.execute("""INSERT INTO device_services(device_target_id,transport,port,service_name)
+                VALUES($1,'tcp',22,'ssh')""", device)
             facts = {}
             for name, target in (('device', device), ('host', host), ('origin', origin)):
                 row = await conn.fetchrow(credential_api._GRANT_TARGET_FACTS_SQL, target)
                 assert row is not None, name
-                facts[name] = (row['http_origin'], row['serves_http'], row['device'])
-            assert facts['origin'] == (True, True, False)
+                facts[name] = (row['http_origin'], row['serves_http'], row['services_observed'], row['device'])
+            assert facts['origin'][:2] == (True, True)
             assert facts['host'][:2] == (False, True)
-            assert facts['device'][:2] == (False, False)
+            assert facts['device'][:3] == (False, False, True)
             # The SSH-only VPS cannot take a web basic-auth credential under any label.
             for kind in ('device', 'network', 'web'):
                 assert credential_api.grant_target_kind_error(
                     declared_kind=kind, auth_kind='basic_auth', http_origin=facts['device'][0],
-                    serves_http=facts['device'][1], device=facts['device'][2]) is not None
+                    serves_http=facts['device'][1], services_observed=facts['device'][2],
+                    device=facts['device'][3]) is not None
             assert await conn.fetchrow(credential_api._GRANT_TARGET_FACTS_SQL, uuid.uuid4()) is None
     asyncio.run(run())
