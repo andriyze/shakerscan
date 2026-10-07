@@ -86,6 +86,24 @@ def test_restart_repairs_drifted_finding_badges_on_a_converted_database():
     asyncio.run(run())
 
 
+def test_converted_installation_adds_hunt_coverage_on_restart():
+    async def run():
+        async with startup_database() as conn:
+            module = importlib.import_module('retest_contract')
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            assert await conn.fetchval("SELECT relkind::text FROM pg_class WHERE oid='device_targets'::regclass") == 'v'
+            # Reproduce an already-converted installation from before coverage shipped.
+            # This is an isolated disposable database; no retained operator evidence exists.
+            await conn.execute('DROP TABLE hunt_coverage_angle_events')
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            assert await conn.fetchval("SELECT to_regclass('hunt_coverage_angle_events')") is not None
+            assert await conn.fetchval("SELECT to_regclass('idx_hunt_coverage_angle_events_run')") is not None
+            assert await conn.fetchval("SELECT to_regclass('idx_hunt_coverage_angle_events_fingerprint')") is not None
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            assert await conn.fetchval('SELECT count(*) FROM hunt_coverage_angle_events') == 0
+    asyncio.run(run())
+
+
 def test_restart_mirrors_an_unmirrored_legacy_web_credential_on_a_converted_database(monkeypatch):
     from cryptography.fernet import Fernet
     import secret_store

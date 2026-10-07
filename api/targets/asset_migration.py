@@ -203,6 +203,14 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                     f"{__package__}.asset_inputs_migration"
                 ).migrate_asset_inputs
                 await migrate_asset_inputs(conn)
+                # The frozen baseline is skipped after conversion. New Hunt schema
+                # must also be installed on already-converted instances under this lock.
+                try:
+                    from hunt.coverage_ledger import COVERAGE_LEDGER_SCHEMA_STATEMENTS
+                except ModuleNotFoundError:
+                    from api.hunt.coverage_ledger import COVERAGE_LEDGER_SCHEMA_STATEMENTS
+                for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
+                    await conn.execute(statement)
                 # Data migrations added after the conversion must run here: the baseline above
                 # never runs again on a converted database. Each is marker-gated.
                 try:
