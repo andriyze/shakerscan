@@ -218,7 +218,9 @@ Discovery reads only bounded same-Hunt stored structure and sends no target traf
 draft, call `POST /hunts/{hunt_id}/boundary-discovery/{draft_id}/prepare`; the server recomputes it
 and creates only an unverified candidate. Fill missing principal facts and the expected rule from
 operator-owned configuration/evidence, then compile `POST /hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal`
-and send the ready proposal through AI Boundary verification. Discovery drafts and action leads are
+and hand the ready proposal to the operator. AI Boundary verification runs on operator-only
+`/ai/targets/...` routes; a Hunt planner, including one using a planner lease, does not call them
+and must not describe the candidate as verified until that step reports. Discovery drafts and action leads are
 not authority or proof and never authorize a state-changing follow-up on their own.
 
 Correct a candidate with `PATCH /hunts/{hunt_id}/candidates/{candidate_id}` when its title, claim,

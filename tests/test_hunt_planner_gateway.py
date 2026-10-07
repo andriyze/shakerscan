@@ -183,3 +183,63 @@ def test_world_readable_or_symlink_grants_are_rejected(tmp_path):
     link = tmp_path/'link'; link.symlink_to(grant)
     if hasattr(os, 'O_NOFOLLOW'):
         with pytest.raises(OSError): load_lease(link)
+
+
+DRAFT = 'a' * 64
+
+
+@pytest.mark.parametrize('method,suffix', [
+    ('GET', '/coverage-angles'), ('POST', '/coverage-angles'), ('GET', '/checkpoint'),
+    ('POST', '/boundary-discovery'), ('POST', f'/boundary-discovery/{DRAFT}/prepare'),
+])
+def test_coverage_and_boundary_discovery_routes_reach_only_the_leased_hunt(tmp_path, method, suffix):
+    grant = tmp_path / 'lease.json'; save(grant, record())
+    backend = Backend()
+    async def run():
+        app = HuntPlannerGateway(backend, grant)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='https://gateway',
+                                     headers={'Authorization': f'Bearer {TOKEN}'}) as client:
+            assert (await client.request(method, f'/hunts/{HUNT}{suffix}', json={})).status_code == 200
+            other = await client.request(method, f'/hunts/{uuid4()}{suffix}', json={})
+            assert other.status_code == 403
+        assert [scope['path'] for scope, _ in backend.requests] == [f'/hunts/{HUNT}{suffix}']
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('method,path', [
+    ('POST', f'/hunts/{HUNT}/boundary-discovery/{DRAFT.upper()}/prepare'),
+    ('POST', f'/hunts/{HUNT}/boundary-discovery/{DRAFT}/prepare/extra'),
+    ('POST', f'/hunts/{HUNT}/boundary-discovery/not-a-draft/prepare'),
+    ('POST', f'/ai/targets/{uuid4()}/boundary/verify'),
+    ('POST', f'/ai/targets/{uuid4()}/boundary/hypotheses/compile'),
+    ('DELETE', f'/hunts/{HUNT}/coverage-angles'),
+])
+def test_operator_boundary_verification_and_malformed_discovery_routes_stay_closed(method, path):
+    assert not route_allowed(method, path, HUNT)
+
+
+# Steps the Hunt skill assigns to the operator, never to a leased planner.
+OPERATOR_ONLY_SKILL_ROUTES = {
+    ('POST', '/hunts'),
+    ('POST', '/hunts/{hunt_id}/budget-amendments'),
+    ('POST', '/hunts/{hunt_id}/shell-plans/{plan_id}/confirm'),
+}
+
+
+def test_every_hunt_route_the_skill_tells_the_planner_to_call_is_delegated():
+    import re
+    skill = (Path(__file__).resolve().parents[1] / 'skills/hunt/SKILL.md').read_text()
+    named = set(re.findall(r'\b(GET|POST|PATCH|DELETE|PUT) (/hunts[A-Za-z0-9_{}/.:-]*)', skill))
+    assert ('POST', '/hunts/{hunt_id}/coverage-angles') in named
+    assert not re.search(r'\b(?:GET|POST|PUT|PATCH|DELETE) /ai/targets', skill)
+    samples = {'{hunt_id}': HUNT, '{candidate_id}': str(uuid4()), '{draft_id}': DRAFT,
+               '{skill_id}': 'web-authz', '{capability_name}': 'http.request', '{plan_id}': str(uuid4())}
+    for method, template in sorted(named - OPERATOR_ONLY_SKILL_ROUTES):
+        path = template
+        for placeholder, value in samples.items():
+            path = path.replace(placeholder, value)
+        assert '{' not in path, template
+        assert route_allowed(method, path, HUNT), f'{method} {template}'
+    for method, template in OPERATOR_ONLY_SKILL_ROUTES & named:
+        path = template.replace('{hunt_id}', HUNT).replace('{plan_id}', str(uuid4()))
+        assert not route_allowed(method, path, HUNT)

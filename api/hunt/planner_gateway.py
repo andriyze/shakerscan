@@ -24,16 +24,21 @@ MAX_BODY_BYTES = 1024 * 1024
 BODY_TIMEOUT_SECONDS = 30
 _NAME = r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}'
 _UUID = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+_DRAFT = r'[0-9a-f]{64}'
 # These are existing route shapes, not capability or authority declarations.
 # All capability names still resolve through the one server-owned registry.
+# Every route is under the leased /hunts/{id} prefix, so each one acts on that Hunt only.
+# Operator-only steps (budget amendments, shell-plan confirmation, /ai/targets boundary
+# verification) are deliberately absent.
 _ROUTES = {
-    'GET': (r'', r'/record', r'/budget-amendments',
+    'GET': (r'', r'/record', r'/budget-amendments', r'/checkpoint', r'/coverage-angles',
             rf'/candidates/{_UUID}/boundary-context',
             rf'/authorization-investigations/{_UUID}',
             rf'/authorization-investigations/{_UUID}/reproduction', rf'/ssh/actions/{_UUID}/output'),
     'POST': (r'/ssh/exec', rf'/ssh/actions/{_UUID}/cancel', r'/query', r'/finish', r'/cancel', r'/resume',
-             rf'/capabilities/{_NAME}', r'/candidates',
+             rf'/capabilities/{_NAME}', r'/candidates', r'/coverage-angles',
              rf'/candidates/{_UUID}/verify', rf'/candidates/{_UUID}/boundary-proposal',
+             r'/boundary-discovery', rf'/boundary-discovery/{_DRAFT}/prepare',
              r'/skills/suggestions', rf'/skills/{_NAME}/(?:read|bind|usage)',
              r'/authorization-investigations', rf'/authorization-investigations/{_UUID}/skip'),
     'PATCH': (rf'/candidates/{_UUID}',),
