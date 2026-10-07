@@ -154,8 +154,10 @@ class HuntStartContractError(ValueError):
 def hunt_start_public_contract() -> dict[str, Any]:
     """Return the API/UI contract generated from the server's authority constants."""
     try:
+        import investigation_candidates as candidates
         from runtime.capability_registry import CAPABILITY_REGISTRY
     except ModuleNotFoundError:
+        from .. import investigation_candidates as candidates
         from ..runtime.capability_registry import CAPABILITY_REGISTRY
     from .coverage_ledger import (
         COVERAGE_ANGLE_STATUSES, COVERAGE_LOCUS_KEYS, MAX_COVERAGE_EVENTS_PER_HUNT,
@@ -216,6 +218,45 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "unknown_locus_keys": "refused",
             "max_events_per_hunt": MAX_COVERAGE_EVENTS_PER_HUNT,
             "advisory_only": True,
+        },
+        "candidates": {
+            "url_template": "/hunts/{hunt_id}/candidates",
+            "locus_schema_version": "hunt-candidate-locus/v1",
+            "locus_keys": dict(candidates.LOCUS_KEYS),
+            "locus_set_keys": sorted(candidates.LOCUS_SET_KEYS),
+            "locus_other_keys": (
+                "Any other identifier key (lower-cased, '-' read as '_') is preserved and is "
+                "part of the candidate identity. Nothing in the locus is truncated or dropped: "
+                "a value over max_locus_value_chars, a list over max_locus_list_items distinct "
+                "items, a port outside 1-65535, or a locus over max_locus_keys or "
+                "max_locus_bytes is refused."
+            ),
+            "max_locus_keys": candidates.MAX_LOCUS_KEYS,
+            "max_locus_bytes": candidates.MAX_LOCUS_BYTES,
+            "max_locus_value_chars": candidates.MAX_LOCUS_VALUE_CHARS,
+            "max_locus_list_items": candidates.MAX_LOCUS_LIST_ITEMS,
+            "identity": "target + family + locus",
+            "dedup": (
+                "A sighting with the same identity and the same title or claim merges its "
+                "evidence_refs into the existing candidate (outcome=merged). A different claim "
+                "with the same identity is stored as its own candidate (outcome=inserted, "
+                "distinct_from_candidate_id). A stored claim is never replaced: title, claim or "
+                "severity a sighting carried but did not write are listed in unapplied_fields; "
+                "use PATCH. A candidate under verification is not changed (409 "
+                "candidate_verification_in_flight), and evidence is never truncated (422 "
+                "candidate_evidence_limit beyond 100 references)."
+            ),
+            "evidence_ref_forms": [
+                "<uuid>", "action:<uuid>", "receipt:<uuid>", "transaction:<uuid>",
+                "finding:<uuid>", "devref_<n>",
+            ],
+            "evidence_ref_scope": (
+                "Each reference must resolve to an action, receipt or HTTP transaction of this "
+                "Hunt, a finding on its target, or a device evidence entry of this Hunt "
+                "(otherwise candidate_evidence_unresolved). An action or receipt counts only "
+                "when the action completed or ended partial; a failed, admission-refused, "
+                "blocked or unfinished action is refused as candidate_evidence_unsettled."
+            ),
         },
         "budget_profiles": {
             name: asdict(value) for name, value in HUNT_BUDGET_PROFILES.items()

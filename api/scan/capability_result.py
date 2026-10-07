@@ -50,6 +50,15 @@ class CapabilityResultReason(str, Enum):
     SCOPE_INVALID = "scope_invalid"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
+    # The action stopped because a non-time ceiling of its own reservation ran out: the
+    # pinned transport refused traffic past the HTTP ceiling, or what was left could not
+    # fund another attempt. Only wall-clock exhaustion is TIMED_OUT; reporting a request
+    # ceiling as a timeout pointed every reader at the wrong dimension.
+    HTTP_REQUEST_BUDGET_EXHAUSTED = "http_request_budget_exhausted"
+    STATE_CHANGING_BUDGET_EXHAUSTED = "state_changing_budget_exhausted"
+    # The tool process was killed by a signal the worker's deadline did not send (the
+    # kernel's OOM killer, a container limit): not a timeout, and nothing timed it out.
+    PROCESS_KILLED = "process_killed"
     ADAPTER_FAILED = "adapter_failed"
     PARSER_FAILED = "parser_failed"
     OUTPUT_TRUNCATED = "output_truncated"
@@ -63,6 +72,33 @@ class CapabilityResultReason(str, Enum):
     # shell: the target never published it. The action is partial because the coverage the
     # file would imply is not real, but nothing was cut off or misparsed.
     SOURCE_NOT_PUBLISHED = "source_not_published"
+    # The target published an API description that parsed, but every server it declares is a
+    # different origin (a Swagger `host` or `schemes`, an OpenAPI `servers` URL), so its routes
+    # are outside this scan's binding. Nothing was misparsed; the declared surface is not this one.
+    DECLARED_OUT_OF_SCOPE = "declared_out_of_scope"
+    # As above for some of its operations only: the routes on the bound origin were ingested and
+    # those declared only on another origin were not.
+    DECLARED_PARTLY_OUT_OF_SCOPE = "declared_partly_out_of_scope"
+
+
+# The reason naming each non-time budget dimension an action can run out of.
+BUDGET_EXHAUSTION_REASONS: Mapping[str, CapabilityResultReason] = MappingProxyType({
+    "http_requests": CapabilityResultReason.HTTP_REQUEST_BUDGET_EXHAUSTED,
+    "state_changing_requests": CapabilityResultReason.STATE_CHANGING_BUDGET_EXHAUSTED,
+})
+# Tool error tokens that mean a non-time ceiling stopped the process. The pinned
+# transport's connection ceiling is the enforcement of the action's HTTP ceiling.
+CEILING_STOP_ERRORS: Mapping[str, str] = MappingProxyType({
+    "connection_limit_exceeded": "http_requests",
+})
+# The worker's error for a tool that died on a signal it did not send itself: `exit_-9`.
+# A wall kill is reported as `timeout` and carries timed_out; this never does.
+_PROCESS_KILL_ERROR = re.compile(r"^exit_-[0-9]+$")
+
+
+def is_process_kill_error(value: Any) -> bool:
+    """True for the worker's error token of a tool killed by a signal it did not send."""
+    return bool(_PROCESS_KILL_ERROR.fullmatch(str(value or "").strip().lower()))
 
 
 class CapabilityResultError(ValueError):

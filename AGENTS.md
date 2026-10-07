@@ -9,8 +9,8 @@ API catalogue.
 Use the smallest source that answers the question:
 
 - **This file:** architectural invariants, safety gates, workflow decisions, and interpretation.
-- **Live API:** `GET /openapi.json`, `GET /scan/contracts`, and `GET /hunts/contract` for current
-  schemas, limits, enum values, and routes.
+- **Live API:** `GET /scan/contracts` and `GET /hunts/contract` for schemas, limits and enums;
+  `GET /openapi.json` for all routes on an open-source engine (an Enterprise gateway refuses it).
 - **Generated catalogue:** `docs/functionality-reference.md` in a source checkout, or the
   [public functionality reference](https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md),
   for exhaustive UI, API, CLI, registry, skill, adapter, and durable-state coverage.
@@ -484,7 +484,7 @@ Set `API_BASE` and `UI_BASE` from `./scanner.sh status`. Use OpenAPI for bodies 
 ./scanner.sh restart
 ./scanner.sh scan https://example.com --budget-profile balanced
 
-shakerscan api GET /openapi.json
+shakerscan api GET /openapi.json      # open-source engine only; an Enterprise gateway refuses it
 shakerscan api GET /scan/contracts
 shakerscan api GET /hunts/contract
 shakerscan api GET /workers

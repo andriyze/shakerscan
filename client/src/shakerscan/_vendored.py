@@ -28,7 +28,8 @@ RUNTIME_HELPERS = {
     "_api_stream": "api_stream.py",
 }
 # The agent kit as packaged (`_kit/claude` stands for the repository's `.claude`).
-KIT_PARTS = {"skills": "skills", ".claude": "claude", "AGENTS.md": "AGENTS.md"}
+# VERSION is the release the kit was built from, shown in the workspace note.
+KIT_PARTS = {"skills": "skills", ".claude": "claude", "AGENTS.md": "AGENTS.md", "VERSION": "VERSION"}
 
 
 def repository_scripts() -> Path | None:

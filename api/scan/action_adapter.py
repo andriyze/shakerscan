@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import functools
 import hashlib
-from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
 import json
 import urllib.parse
 
@@ -173,7 +173,16 @@ except (ImportError, ModuleNotFoundError):
     )
 
 from .action_plan import ScanAction, ScanActionPlan
-from .capability_result import CapabilityResultReason
+from .verification_extension import EXTENDS_ARG
+from .batch_carry import (
+    admission_template_source, carried_records, finished_attempts, proof_signal_sources,
+)
+from .capability_result import (
+    BUDGET_EXHAUSTION_REASONS,
+    CEILING_STOP_ERRORS,
+    CapabilityResultReason,
+    is_process_kill_error,
+)
 from .external_process import (
     BATCH_ATTEMPT_FLOORS,
     batch_attempt_floor,
@@ -392,6 +401,57 @@ def batch_outcome(
     return ("partial" if partial else "success", partial, timed_out)
 
 
+def attempt_ceiling_stops(errors: Sequence[Any]) -> set[str]:
+    """The non-time budget dimensions whose ceiling stopped one attempt's tool."""
+    tokens = (str(item or "").strip().lower().split(":", 1)[0] for item in errors or ())
+    return {CEILING_STOP_ERRORS[token] for token in tokens if token in CEILING_STOP_ERRORS}
+
+
+def batch_stop_reason(
+    attempt_errors: Sequence[Any],
+    *,
+    unattempted: int,
+    ceiling_stops: Iterable[str] = (),
+    exhausted: Iterable[str] = (),
+    cancelled: bool = False,
+) -> str:
+    """The one reason a partial batch states, naming the dimension that actually stopped it.
+
+    A batch whose attempts were all wall-killed timed out. A batch stopped by the pinned
+    transport's request ceiling, or left with candidates its remaining request or
+    mutation allowance could not fund, ran out of THAT dimension: reporting it as
+    ``timed_out`` (126 of 126 requests spent in 83 of 216 seconds) sent every reader to
+    the wall instead. A leftover candidate is a timeout only when the action's own wall
+    is what ran out; anything else unfunded stays ``insufficient_plan_budget``.
+    """
+    if cancelled:
+        # Cancellation stops execution; whatever budget was left is not why the batch ended.
+        return CapabilityResultReason.CANCELLED.value
+    lowered = [str(item).strip().lower() for item in attempt_errors or ()]
+    stops = set(ceiling_stops)
+    spent = set(exhausted) if unattempted else set()
+    memory = CapabilityResultReason.CRAWLER_MEMORY_BOUND_EXCEEDED.value
+    if lowered and not stops and all(
+        item in {"timeout", memory} or is_process_kill_error(item) for item in lowered
+    ):
+        # Only the worker's own deadline is a timeout (`timeout`, with timed_out set on
+        # the attempt). A tool killed by the kernel's OOM killer or the memory ceiling
+        # (`exit_-9`) was not timed out, and the receipt does not claim it was.
+        if "timeout" in lowered:
+            return CapabilityResultReason.TIMED_OUT.value
+        if all(item == memory for item in lowered):
+            return memory
+        return CapabilityResultReason.PROCESS_KILLED.value
+    for dimension in ("http_requests", "state_changing_requests"):
+        if dimension in stops or dimension in spent:
+            return BUDGET_EXHAUSTION_REASONS[dimension].value
+    if "tool_wall_seconds" in spent:
+        return CapabilityResultReason.TIMED_OUT.value
+    if unattempted:
+        return CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+    return CapabilityResultReason.ADAPTER_FAILED.value
+
+
 class ScanActionAdapterError(RuntimeError):
     """One immutable action has no safe database-neutral adapter mapping."""
 
@@ -443,19 +503,34 @@ def _directory_listing_child_url(directory_url: str, link: str) -> str:
     return urllib.parse.urljoin(base, link)
 
 
-def _spec_ingest_partial_reason(issues: Sequence[str]) -> CapabilityResultReason:
+_OFF_ORIGIN_SPEC_ISSUES = frozenset({"spec_off_origin_server", "spec_server_scheme_mismatch"})
+
+
+def _spec_ingest_partial_reason(
+    issues: Sequence[str], *, spec_routes: int = 0,
+) -> CapabilityResultReason:
     """The honest reason a spec/hint ingestion is partial, most severe first.
 
     A ``*_limit`` / ``*_limit_reached`` issue is a real bound: routes beyond it were dropped,
     so the output was truncated. A hint file the target answered with its HTML shell was never
-    published -- nothing was dropped or misparsed. Anything else is a document the parser could
-    only partly model (an unsupported media type, an unresolvable reference, a hint parse error).
+    published -- nothing was dropped or misparsed. A spec whose operations declare only servers
+    on another origin (another host, port or scheme) parsed, but those routes are outside the
+    binding: when no spec route was ingested the description is out of scope, and when some were
+    it is partly so. Anything else is a document the parser could only partly model (an
+    unsupported media type, an unresolvable reference, a hint parse error).
     """
     tokens = [str(issue or "").split(":", 1)[0] for issue in issues]
     if any(token.endswith(("_limit", "_limit_reached")) for token in tokens):
         return CapabilityResultReason.OUTPUT_TRUNCATED
     if tokens and all(token == "hint_document_is_markup" for token in tokens):
         return CapabilityResultReason.SOURCE_NOT_PUBLISHED
+    # A spec that names another origin parsed fine: its routes are out of scope, not misread.
+    if _OFF_ORIGIN_SPEC_ISSUES.intersection(tokens) and all(
+        token in _OFF_ORIGIN_SPEC_ISSUES or token == "hint_document_is_markup" for token in tokens
+    ):
+        if spec_routes > 0:
+            return CapabilityResultReason.DECLARED_PARTLY_OUT_OF_SCOPE
+        return CapabilityResultReason.DECLARED_OUT_OF_SCOPE
     return CapabilityResultReason.PARSER_FAILED
 
 
@@ -1384,6 +1459,8 @@ class DatabaseNeutralScanActionDispatcher:
         attempted = 0
         attempt_statuses: list[Mapping[str, Any]] = []
         resumed = 0
+        exhausted: set[str] = set()
+        stopped_by_cancel = False
         for offset, candidate in enumerate(rows):
             candidate_id = str(candidate["candidate_id"])
             attempt_id = hashlib.sha256(
@@ -1399,6 +1476,7 @@ class DatabaseNeutralScanActionDispatcher:
                     consumed[name] = consumed.get(name, 0) + int(amount)
                 continue
             if self.cancelled():
+                stopped_by_cancel = True
                 break
             request_class = str(candidate.get("request_class") or "")
             request = self._private_requests.get(str(candidate["request_ref_id"]))
@@ -1419,15 +1497,16 @@ class DatabaseNeutralScanActionDispatcher:
                 name: amount // remaining_attempts
                 for name, amount in remaining.items() if amount // remaining_attempts > 0
             }
-            if (
-                request is None or not authorized
-                or sub_budget.get("http_requests", 0) < 2
-                or sub_budget.get("tool_wall_seconds", 0) < 1
-                or (
-                    request_class == "confirmed_mutation"
-                    and sub_budget.get("state_changing_requests", 0) < 2
+            short = {
+                name for name, minimum in (
+                    ("http_requests", 2), ("tool_wall_seconds", 1),
+                    *((("state_changing_requests", 2),)
+                      if request_class == "confirmed_mutation" else ()),
                 )
-            ):
+                if sub_budget.get(name, 0) < minimum
+            }
+            if request is None or not authorized or short:
+                exhausted |= short
                 break
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             adapter = RequestMutationVerificationAdapter(
@@ -1500,6 +1579,7 @@ class DatabaseNeutralScanActionDispatcher:
                     consumed.get(name, 0) + int(amount),
                 )
             if result.status == "cancelled":
+                stopped_by_cancel = True
                 break
         unattempted = max(0, len(rows) - attempted)
         # State why the batch is partial. Attempts stop when the remaining
@@ -1510,12 +1590,11 @@ class DatabaseNeutralScanActionDispatcher:
         # is not a reason code, so without this the result fell back to
         # "output_truncated" and put a false reason on a required action.
         batch_errors = list(errors[:20])
-        if unattempted:
-            stated = (
-                CapabilityResultReason.TIMED_OUT.value
-                if all(str(item).strip().lower() == "timeout" for item in batch_errors)
-                and batch_errors
-                else CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+        if unattempted or stopped_by_cancel:
+            stated = batch_stop_reason(
+                batch_errors, unattempted=unattempted, exhausted=exhausted,
+                ceiling_stops=attempt_ceiling_stops(batch_errors),
+                cancelled=stopped_by_cancel,
             )
             batch_errors.insert(0, stated)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
@@ -1523,7 +1602,7 @@ class DatabaseNeutralScanActionDispatcher:
         )
         return self._receipt(
             action,
-            status=_batch_status,
+            status="cancelled" if stopped_by_cancel else _batch_status,
             parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
             started_at=started_at,
             observations=tuple(observations),
@@ -1571,7 +1650,7 @@ class DatabaseNeutralScanActionDispatcher:
         if not rows:
             return self._skip(action, self._empty_slice_reason(manifest))
         candidate_signals: set[str] = set()
-        for dependency in action.dependencies:
+        for dependency in proof_signal_sources(action, self.plan):
             for item in await self._observations(dependency):
                 if (
                     str(item.get("kind") or "") in {"xss_alert", "request_body_verification"}
@@ -1602,6 +1681,18 @@ class DatabaseNeutralScanActionDispatcher:
             for item in await load_attempts(action.action_id)
             if isinstance(item, Mapping)
         }
+
+        # A proof re-planned behind a verification extension carries every candidate the
+        # escalation it extends already took to a verdict: no candidate is proven twice.
+        extends = str(action.capability_args.get(EXTENDS_ARG) or "")
+        carried = {
+            attempt_id: item
+            for attempt_id, item in finished_attempts(
+                await load_attempts(extends) if extends else (),
+            ).items()
+            if attempt_id not in completed
+        }
+        carried_count = 0
         manifest_digest = manifest.reference().manifest_digest
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
@@ -1623,6 +1714,12 @@ class DatabaseNeutralScanActionDispatcher:
             attempt_id = hashlib.sha256(
                 f"{manifest_digest}:xss_browser_proof:{candidate_id}".encode()
             ).hexdigest()
+            if attempt_id in carried:
+                carried_count += 1
+                attempted += 1
+                attempt_statuses.append({"status": "success", "timed_out": False})
+                observations.extend(carried_records(carried[attempt_id], source=extends))
+                continue
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
@@ -1752,6 +1849,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "eligible_count": eligible, "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
                 "checkpoint_mode": "after_each_candidate",
+                **({"extends": extends, "carried_count": carried_count} if extends else {}),
                 "secret_values_visible": False,
             },
         )
@@ -1789,7 +1887,7 @@ class DatabaseNeutralScanActionDispatcher:
         if not rows:
             return self._skip(action, self._empty_slice_reason(manifest))
         candidate_signals: set[str] = set()
-        for dependency in action.dependencies:
+        for dependency in proof_signal_sources(action, self.plan):
             for item in await self._observations(dependency):
                 if (
                     str(item.get("kind") or "") in {
@@ -1811,6 +1909,18 @@ class DatabaseNeutralScanActionDispatcher:
             for item in await load_attempts(action.action_id)
             if isinstance(item, Mapping)
         }
+
+        # A proof re-planned behind a verification extension carries every candidate the
+        # escalation it extends already took to a verdict: no candidate is proven twice.
+        extends = str(action.capability_args.get(EXTENDS_ARG) or "")
+        carried = {
+            attempt_id: item
+            for attempt_id, item in finished_attempts(
+                await load_attempts(extends) if extends else (),
+            ).items()
+            if attempt_id not in completed
+        }
+        carried_count = 0
         manifest_digest = manifest.reference().manifest_digest
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
@@ -1839,6 +1949,12 @@ class DatabaseNeutralScanActionDispatcher:
             attempt_id = hashlib.sha256(
                 f"{manifest_digest}:sqli_proof:{candidate_id}".encode()
             ).hexdigest()
+            if attempt_id in carried:
+                carried_count += 1
+                attempted += 1
+                attempt_statuses.append({"status": "success", "timed_out": False})
+                observations.extend(carried_records(carried[attempt_id], source=extends))
+                continue
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
@@ -2008,6 +2124,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "eligible_count": eligible, "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
                 "checkpoint_mode": "after_each_candidate",
+                **({"extends": extends, "carried_count": carried_count} if extends else {}),
                 "secret_values_visible": False,
             },
         )
@@ -2084,6 +2201,7 @@ class DatabaseNeutralScanActionDispatcher:
                 target.append((spec_url, result.response_body, content_type))
         ingestion_issues: list[str] = []
         routes = ingest_spec_bodies(documents, origin=base_origin, issues=ingestion_issues)
+        spec_route_count = len(routes)
         # The hint files are an optional extra source. Whatever they do, the
         # specification results this action already parsed must survive them.
         try:
@@ -2099,7 +2217,9 @@ class DatabaseNeutralScanActionDispatcher:
             # State why the action is partial. Without a stated reason the backend falls back to
             # output_truncated, which told the operator a bounded limit was reached when the
             # target had only answered robots.txt with its HTML shell.
-            errors.insert(0, _spec_ingest_partial_reason(ingestion_issues).value)
+            errors.insert(0, _spec_ingest_partial_reason(
+                ingestion_issues, spec_routes=spec_route_count,
+            ).value)
         errors.extend(ingestion_issues)
         # Value-free: the observation carries the route shape and field names, never a spec value.
         observations = tuple(dict(route) for route in routes)
@@ -2957,6 +3077,25 @@ class DatabaseNeutralScanActionDispatcher:
             for item in await load_attempts(action.action_id)
             if isinstance(item, Mapping)
         }
+        # An extension re-runs only what its slice could not finish: a candidate the extended
+        # action already took to a verdict is carried, with no budget and no repeat traffic.
+        extends = str(action.capability_args.get(EXTENDS_ARG) or "")
+        carried = {
+            attempt_id: item
+            for attempt_id, item in finished_attempts(
+                await load_attempts(extends) if extends else (),
+            ).items()
+            if attempt_id not in completed
+        }
+        # A passive continuation slice carries the routes the required admission pack
+        # already examined (the frozen origin and admitted seeds) instead of re-sending
+        # the pack to them. The manifests differ, so route identity is the key.
+        admission_source = admission_template_source(action, self.plan)
+        admitted = finished_attempts(
+            await load_attempts(admission_source) if admission_source else (),
+            key="candidate_id",
+        )
+        carried_count = 0
         manifest_digest = manifest.reference().manifest_digest
         family = {
             "xss.verify_batch": "xss",
@@ -2973,6 +3112,11 @@ class DatabaseNeutralScanActionDispatcher:
         inapplicable = 0
         terminal_failure = False
         attempt_timed_out = False
+        # The non-time dimensions that stopped an attempt (the pinned transport refused
+        # traffic past the request ceiling) or left a candidate unfundable.
+        ceiling_stops: set[str] = set()
+        exhausted: set[str] = set()
+        stopped_by_cancel = False
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=legacy_capability,
         )
@@ -2994,7 +3138,10 @@ class DatabaseNeutralScanActionDispatcher:
         position = 0
         while True:
             if position >= len(work):
-                if position != first_pass or not still_empty or self.cancelled():
+                if position != first_pass or not still_empty:
+                    break
+                if self.cancelled():
+                    stopped_by_cancel = True
                     break
                 work.extend(
                     (manifest_index, row, 1) for manifest_index, row in rows
@@ -3024,6 +3171,18 @@ class DatabaseNeutralScanActionDispatcher:
             if retry_round:
                 attempt_key += f":retry:{retry_round}"
             attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
+            route_identity = str(row.get("candidate_id") or row.get("route_id") or "")
+            carry = None if retry_round or attempt_id in completed else (
+                (carried[attempt_id], extends) if attempt_id in carried
+                else (admitted[route_identity], admission_source)
+                if route_identity and route_identity in admitted else None
+            )
+            if carry is not None:
+                carried_count += 1
+                attempted += 1
+                observations.extend(carried_records(carry[0], source=str(carry[1])))
+                attempt_log.append((candidate_id, 0, True, False))
+                continue
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
@@ -3039,8 +3198,11 @@ class DatabaseNeutralScanActionDispatcher:
                 prior_status = str(prior.get("status") or "success")
                 if prior_status not in {"success", "succeeded", "completed"}:
                     terminal_failure = True
-                if prior_status in {"timed_out", "partial"}:
+                # Only a wall-killed attempt timed out; partial is not a timeout.
+                prior_wall_killed = bool(prior.get("timed_out")) or prior_status == "timed_out"
+                if prior_wall_killed:
                     attempt_timed_out = True
+                ceiling_stops |= attempt_ceiling_stops(prior.get("errors") or ())
                 observations.extend(prior.get("observations") or ())
                 prior_timed_out = (
                     prior_status in {"timed_out", "partial"} or bool(prior.get("timed_out"))
@@ -3061,16 +3223,15 @@ class DatabaseNeutralScanActionDispatcher:
                 )
                 attempt_log.append((
                     candidate_id, retry_round,
-                    prior_status in _BATCH_SUCCESS_STATUSES, prior_timed_out,
+                    prior_status in _BATCH_SUCCESS_STATUSES, prior_wall_killed,
                 ))
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
                 if str(prior.get("status") or "") not in _BATCH_SUCCESS_STATUSES:
                     terminal_failure = True
-                if bool(prior.get("timed_out")) or str(prior.get("status")) == "timed_out":
-                    attempt_timed_out = True
                 continue
             if self.cancelled():
+                stopped_by_cancel = True
                 break
             try:
                 body_request: dict[str, Any] = {}
@@ -3111,13 +3272,15 @@ class DatabaseNeutralScanActionDispatcher:
                 # slice: a dimension that has run out is absent from the slice
                 # entirely, so testing only the dimensions present would let an
                 # unfundable attempt through and fail it downstream instead.
-                if any(
-                    remaining_budget.get(name, 0) < amount
-                    for name, amount in floor.items()
-                ):
+                unfundable = {
+                    name for name, amount in floor.items()
+                    if remaining_budget.get(name, 0) < amount
+                }
+                if unfundable:
                     # Candidate cost classes can be mixed. An expensive body entry
                     # must not suppress a later fundable query entry in the same
                     # immutable slice.
+                    exhausted |= unfundable
                     continue
                 sub_budget = {
                     name: max(1, floor.get(name, 1), amount // remaining_attempts)
@@ -3152,6 +3315,10 @@ class DatabaseNeutralScanActionDispatcher:
                             sub_budget["http_requests"]
                         )
                 if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
+                    exhausted |= {
+                        name for name in ("http_requests", "tool_wall_seconds")
+                        if not sub_budget.get(name)
+                    }
                     break
                 if retry_round and int(sub_budget["tool_wall_seconds"]) <= empty_timeouts.get(
                     candidate_id, 0,
@@ -3283,9 +3450,11 @@ class DatabaseNeutralScanActionDispatcher:
                     deferred_errors=deferred_errors, still_empty=still_empty,
                     recovered=recovered,
                 )
+                wall_killed = bool(getattr(result, "timed_out", False)) or result.status == "timed_out"
+                ceiling_stops |= attempt_ceiling_stops(result.errors)
                 attempt_log.append((
                     candidate_id, retry_round,
-                    result.status in _BATCH_SUCCESS_STATUSES, result_timed_out,
+                    result.status in _BATCH_SUCCESS_STATUSES, wall_killed,
                 ))
                 for name, amount in result.actual_budget.items():
                     consumed[name] = min(
@@ -3300,9 +3469,10 @@ class DatabaseNeutralScanActionDispatcher:
                 # coverage while proving nothing at all.
                 if result.status not in {"success", "succeeded", "completed"}:
                     terminal_failure = True
-                if result.status in {"timed_out", "partial"} or getattr(result, "timed_out", False):
+                if wall_killed:
                     attempt_timed_out = True
                 if result.status == "cancelled":
+                    stopped_by_cancel = True
                     break
             except (ScanWorkManifestError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
                 # One candidate that raises anywhere in its setup or execution must never fail the
@@ -3353,27 +3523,26 @@ class DatabaseNeutralScanActionDispatcher:
         # without this the result fell back to "output_truncated" and put a false
         # reason on a required action -- which alone made the grade unreliable.
         batch_errors = list(errors[:20])
-        if partial:
-            attempt_errors = [str(item).strip().lower() for item in batch_errors]
+        if partial or stopped_by_cancel:
             # A batch that attempted every candidate it had did not run out of plan
             # budget, whatever went wrong inside those attempts. Claiming otherwise put a
             # false reason on a required action -- `verify.xss` reported
             # "insufficient_plan_budget" while holding 650 unused requests, its attempts
             # having been wall-killed (exit -9) -- and that alone made the grade
-            # unreliable while pointing every reader at the wrong cause.
-            wall_killed = attempt_errors and all(
-                item == "timeout" or item.startswith("exit_-") for item in attempt_errors
+            # unreliable while pointing every reader at the wrong cause. The same holds
+            # for the dimension: a request ceiling is not a timeout.
+            stated = batch_stop_reason(
+                batch_errors, unattempted=unattempted,
+                ceiling_stops=ceiling_stops, exhausted=exhausted,
+                cancelled=stopped_by_cancel,
             )
-            if wall_killed:
-                stated = CapabilityResultReason.TIMED_OUT.value
-            elif unattempted:
-                stated = CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
-            else:
-                stated = CapabilityResultReason.ADAPTER_FAILED.value
+            if stated == CapabilityResultReason.TIMED_OUT.value and unattempted:
+                # The action's own wall ran out with candidates left: a real timeout.
+                attempt_timed_out = attempt_timed_out or "tool_wall_seconds" in exhausted
             batch_errors.insert(0, stated)
         return self._receipt(
             action,
-            status="partial" if partial else "success",
+            status="cancelled" if stopped_by_cancel else "partial" if partial else "success",
             parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
             started_at=started_at,
             observations=tuple(observations),
@@ -3399,6 +3568,9 @@ class DatabaseNeutralScanActionDispatcher:
                 "unexamined_count": len(still_empty),
                 "unexamined_candidate_ids": sorted(still_empty)[:50],
                 "checkpoint_mode": "after_each_candidate",
+                **({"extends": extends} if extends else {}),
+                **({"carried_from_admission": admission_source} if admission_source else {}),
+                **({"carried_count": carried_count} if extends or admission_source else {}),
             },
         )
 

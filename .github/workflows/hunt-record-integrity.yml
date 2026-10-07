@@ -17,6 +17,12 @@ on:
       - 'scripts/*hunt*'
       - 'tests/test_authorization*'
       - 'tests/test_hunt*'
+      - 'tests/hunt_candidate_pg_schema.py'
+      - 'api/asm_inventory.py'
+      - 'api/retest_contract.py'
+      - 'api/runtime/budget_reservations.py'
+      - 'api/targets/asset_migration.py'
+      - 'db/init.sql'
       - 'ui/**'
       - '.github/workflows/hunt-record-integrity.yml'
   pull_request:
@@ -34,6 +40,12 @@ on:
       - 'scripts/*hunt*'
       - 'tests/test_authorization*'
       - 'tests/test_hunt*'
+      - 'tests/hunt_candidate_pg_schema.py'
+      - 'api/asm_inventory.py'
+      - 'api/retest_contract.py'
+      - 'api/runtime/budget_reservations.py'
+      - 'api/targets/asset_migration.py'
+      - 'db/init.sql'
       - 'ui/**'
       - '.github/workflows/hunt-record-integrity.yml'
   workflow_dispatch:
@@ -98,6 +110,19 @@ jobs:
             tests/test_hunt_coverage_ledger_postgres.py \
             tests/test_service_intelligence_postgres.py
           python scripts/check_module_size.py
+      - name: Hunt candidates, host holds and endpoint inventory in real PostgreSQL
+        env:
+          PYTHONPATH: .:api:scanner
+        run: |
+          test -n "$HUNT_TEST_POSTGRES_DSN"
+          for test_file in \
+            tests/test_hunt_candidate_identity.py \
+            tests/test_hunt_action_outcomes.py \
+            tests/test_hunt_budget_exhaustion.py \
+            tests/test_hunt_content_discover_replay.py; do
+            python -m pytest -q -p no:cacheprovider \
+              --junitxml="artifacts/$(basename "$test_file" .py).xml" "$test_file"
+          done
       - name: Canonical authorization proof and real PostgreSQL materialization
         run: |
           test -n "$HUNT_TEST_POSTGRES_DSN"

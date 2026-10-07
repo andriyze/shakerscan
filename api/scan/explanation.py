@@ -55,7 +55,17 @@ _REASON_LABELS = {
     "authentication_uncertain": "Credential authority could not be confirmed; review the identity and approval before starting new work",
     "scope_invalid": "Target scope no longer matched the approved scope",
     "cancelled": "The scan was cancelled",
-    "timed_out": "The action reached its fixed time limit",
+    "timed_out": "The action, or one of its attempts, reached its wall-clock time limit",
+    "http_request_budget_exhausted": (
+        "The action used up its HTTP request allowance before it finished"
+    ),
+    "state_changing_budget_exhausted": (
+        "The action used up its state-changing request allowance before it finished"
+    ),
+    "process_killed": (
+        "A tool process was killed by the system (for example, out of memory) before it "
+        "finished; output it wrote before that is kept"
+    ),
     "adapter_failed": "The capability adapter failed",
     "parser_failed": "The capability output could not be parsed safely",
     "output_truncated": "The bounded output limit was reached",
@@ -67,6 +77,8 @@ _REASON_LABELS = {
     "unsupported_output_schema": "The worker returned an unsupported result format",
     "not_applicable": "The capability did not apply to this target",
     "source_not_published": "An optional discovery source was not published by the target",
+    "declared_out_of_scope": "The target's API description declares its routes on another origin (a different host, port or scheme), outside this scan's scope",
+    "declared_partly_out_of_scope": "Some routes in the target's API description are declared only on another origin (a different host, port or scheme); the rest were ingested",
     "active_verifier_zero_attempts": "An active verifier had candidates but made no bounded attempt",
     "unproven_critical_high": "High or critical candidates still require deterministic proof",
     "report_grade_unreliable": "The final report marked the grade as provisional",
@@ -74,6 +86,10 @@ _REASON_LABELS = {
     "missing_terminal_result": "A required capability has no terminal result",
     "parallel_child_incomplete": "At least one parallel shard completed with partial coverage",
     "no_injection_candidates": "Selected injection families had no candidate to test",
+    "discovery_truncated": (
+        "Surface discovery was cut short by its budget, so part of the application was "
+        "never examined"
+    ),
 }
 
 
@@ -584,6 +600,10 @@ def build_scan_execution_explanation(
         capability = str(
             raw_plan.get("capability_name") or row.get("capability_name") or "unknown"
         )
+        extends = _text(
+            _object(raw_plan.get("capability_args") or row.get("capability_args")).get("extends"),
+            maximum=128,
+        )
         action = {
             "action_id": action_id,
             "occurrence_id": occurrence_id,
@@ -630,6 +650,8 @@ def build_scan_execution_explanation(
             "action_digest": _text(
                 raw_plan.get("action_digest") or row.get("action_digest"), maximum=64,
             ),
+            # A verifier slice carried into a later round names the slice it extends.
+            **({"extends": extends} if extends else {}),
         }
         actions.append(action)
     actions.sort(key=lambda item: (item["ordinal"], item["occurrence_id"]))
@@ -704,8 +726,15 @@ def build_scan_execution_explanation(
 
     counts = Counter(str(item["status"]) for item in capability_rows)
     required_rows = [item for item in capability_rows if item["required"]]
+    # A slice carried into a later round is decided by its extension's outcome.
+    extensions = {
+        str(item["extends"]): item for item in capability_rows if item.get("extends")
+    }
     required_incomplete = [
-        item for item in required_rows if item["status"] not in _SUCCESS
+        effective for effective in (
+            extensions.get(item["action_id"], item) for item in required_rows
+        )
+        if effective["status"] not in _SUCCESS
     ]
     work_manifests = _work_manifests(
         report_execution if parallel_actions else execution

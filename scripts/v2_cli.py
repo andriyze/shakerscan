@@ -526,7 +526,8 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
             raise CliError("Hunt query filter must be one JSON object")
         return client.post(
             f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/query",
-            {"kind": args.kind, "filter": filters, "limit": args.limit},
+            {"kind": args.kind, "filter": filters, "limit": args.limit,
+             **({"cursor": args.cursor} if getattr(args, "cursor", None) else {})},
         )
     if args.hunt_command == "call":
         run = client.get(f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}")
@@ -881,12 +882,29 @@ def _run_evidence(args: argparse.Namespace, client: ApiClient) -> Any:
         raise CliError("running server returned invalid evidence JSON") from exc
 
 
+DEFAULT_TIMEOUT_SECONDS = 60.0
+
+
+def _positive_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a number of seconds") from None
+    if not 0 < seconds <= 3600:
+        raise argparse.ArgumentTypeError("must be between 0 and 3600 seconds")
+    return seconds
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="shakerscan",
         description="Canonical ShakerScan V2 command line",
     )
     parser.add_argument("--api-url", required=True, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--timeout", type=_positive_seconds, metavar="SECONDS",
+        help=f"seconds to wait for each API answer (default {DEFAULT_TIMEOUT_SECONDS:g})",
+    )
     products = parser.add_subparsers(dest="product", required=True)
 
     hunt = products.add_parser("hunt", help="Manage the complete canonical Hunt lifecycle")
@@ -970,10 +988,17 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_query.add_argument("hunt_id")
     hunt_query.add_argument(
         "kind",
-        choices=("summary", "endpoints", "findings", "principals", "services", "scans", "collections", "candidates", "notes", "receipts"),
+        choices=(
+            "summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals",
+            "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections",
+            "candidates", "notes", "receipts",
+        ),
     )
     hunt_query.add_argument("--filter", metavar="FILE", help="JSON object; use - for stdin")
     hunt_query.add_argument("--limit", type=int, choices=range(1, 501), default=100, metavar="N", help="1-500 (default: 100)")
+    hunt_query.add_argument(
+        "--cursor", help="next_cursor from the previous page; keep kind and filter unchanged",
+    )
 
     hunt_call = hunt_commands.add_parser("call", help="Call one server-returned capability")
     hunt_call.add_argument("hunt_id")
@@ -1132,7 +1157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         token = os.environ.get("SHAKERSCAN_API_TOKEN", "").strip() or None
         if token and (len(token) > 4096 or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token)):
             raise CliError("SHAKERSCAN_API_TOKEN must be printable ASCII without spaces")
-        client = ApiClient(args.api_url, api_token=token)
+        client = ApiClient(args.api_url, api_token=token, timeout=args.timeout or DEFAULT_TIMEOUT_SECONDS)
         if args.product == "hunt":
             result = _run_hunt(args, client)
         elif args.product == "credentials":

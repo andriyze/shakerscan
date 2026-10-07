@@ -265,6 +265,69 @@ def test_raw_har_stays_on_by_default_for_a_loopback_install(monkeypatch, bind):
     assert archive_router.raw_har_enabled() is True
 
 
+def _export_transactions(monkeypatch, archive_router):
+    """Run the transactions export over an empty archive without a database."""
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def acquire():
+        yield object()
+
+    class _Pool:
+        def acquire(self):
+            return acquire()
+
+    async def _ids(conn, scan_id):
+        return (scan_id,)
+
+    async def _count(conn, **kwargs):
+        return 0
+
+    async def _stats(conn, **kwargs):
+        return {}
+
+    async def _rows(conn, **kwargs):
+        return []
+
+    monkeypatch.setattr(archive_router, "_pool", lambda: _Pool())
+    monkeypatch.setattr(archive_router, "_scan_archive_ids", _ids)
+    monkeypatch.setattr(archive_router, "count_transactions", _count)
+    monkeypatch.setattr(archive_router, "read_archive_stats", _stats)
+    monkeypatch.setattr(archive_router, "read_transactions", _rows)
+    response = asyncio.run(archive_router._export(
+        request=object(), scan_id="11111111-1111-4111-8111-111111111111", hunt_run_id=None,
+        export_format="transactions", redaction="redacted", method=None, status_code=None,
+        search=None, limit=10, offset=0,
+    ))
+    return json.loads(response.body), response.headers
+
+
+def test_the_archive_says_whether_verbatim_har_is_available_before_it_is_asked_for(monkeypatch):
+    """The UI offered Raw HAR on a deployment with SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=0 and the
+    refused download failed silently. The archive envelope now carries the deployment's answer
+    and its reason, so the option can be disabled with that reason instead."""
+    from api.runtime import http_archive_router as archive_router
+
+    monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", "0")
+    document, headers = _export_transactions(monkeypatch, archive_router)
+    assert document["raw_har"]["available"] is False
+    assert "masked HAR" in document["raw_har"]["reason"]
+    assert headers["x-shakerscan-raw-har"] == "disabled"
+
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", "0.0.0.0")
+    monkeypatch.delenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", raising=False)
+    document, _headers = _export_transactions(monkeypatch, archive_router)
+    assert document["raw_har"]["available"] is False
+    assert "SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1" in document["raw_har"]["reason"]
+
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", "1")
+    document, headers = _export_transactions(monkeypatch, archive_router)
+    assert document["raw_har"] == {"available": True, "reason": None}
+    assert headers["x-shakerscan-raw-har"] == "available"
+
+
 def test_the_evidence_surface_withholds_unmasked_captured_traffic(tmp_path):
     """GET /evidence/{id} served a raw archive blob verbatim, bypassing the archive's masking."""
     from api.evidence_storage import public_evidence_object
@@ -1216,3 +1279,35 @@ def test_recorded_replay_transport_keeps_hunt_slot_and_records_scan_slot_as_give
     assert [item["principal_slot"] for item in recorded] == ["anonymous", None, "primary"]
     assert [item["workflow_values_private"] for item in recorded] == [False, False, True]
     assert recorded[0]["request_headers"] == {"A": "b"}
+
+
+def test_a_refused_archive_export_says_whether_verbatim_har_is_available(monkeypatch):
+    """The header was set only on a successful export, while a refusal -- the response a client
+    reads to learn the deployment's answer -- carried none."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.runtime import http_archive_router as archive_router
+
+    def _reached_database():
+        raise AssertionError("a refused export must not reach the database")
+
+    monkeypatch.setattr(archive_router, "_pool", _reached_database)
+    monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", "0")
+    app = FastAPI()
+    app.include_router(archive_router.router)
+    client = TestClient(app)
+    scan = "/scans/11111111-1111-4111-8111-111111111111/http-transactions"
+
+    refused = client.get(scan, params={"format": "har", "redaction": "raw"})
+    assert refused.status_code == 403
+    assert refused.headers["x-shakerscan-raw-har"] == "disabled"
+    assert "masked HAR" in refused.json()["detail"]
+
+    unknown = client.get(scan, params={"format": "pcap"})
+    assert unknown.status_code == 400
+    assert unknown.headers["x-shakerscan-raw-har"] == "disabled"
+
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", "1")
+    assert client.get(scan, params={"format": "pcap"}).headers["x-shakerscan-raw-har"] == "available"

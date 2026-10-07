@@ -136,6 +136,55 @@ export const HUNT_START_CONTRACT = {
     }
   },
   "budget_schema_version": "hunt-budget/v3",
+  "candidates": {
+    "dedup": "A sighting with the same identity and the same title or claim merges its evidence_refs into the existing candidate (outcome=merged). A different claim with the same identity is stored as its own candidate (outcome=inserted, distinct_from_candidate_id). A stored claim is never replaced: title, claim or severity a sighting carried but did not write are listed in unapplied_fields; use PATCH. A candidate under verification is not changed (409 candidate_verification_in_flight), and evidence is never truncated (422 candidate_evidence_limit beyond 100 references).",
+    "evidence_ref_forms": [
+      "<uuid>",
+      "action:<uuid>",
+      "receipt:<uuid>",
+      "transaction:<uuid>",
+      "finding:<uuid>",
+      "devref_<n>"
+    ],
+    "evidence_ref_scope": "Each reference must resolve to an action, receipt or HTTP transaction of this Hunt, a finding on its target, or a device evidence entry of this Hunt (otherwise candidate_evidence_unresolved). An action or receipt counts only when the action completed or ended partial; a failed, admission-refused, blocked or unfinished action is refused as candidate_evidence_unsettled.",
+    "identity": "target + family + locus",
+    "locus_keys": {
+      "address": "IP address of the host",
+      "advisory_id": "advisory identifier",
+      "ai_boundary_context": "AI boundary context object (JSON, at most 16 KiB)",
+      "capability_id": "capability identifier",
+      "collection_id": "request collection identifier",
+      "cpe": "CPE string",
+      "host": "host name",
+      "host_key_fingerprint": "SSH host key fingerprint",
+      "method": "HTTP method, upper-cased",
+      "object_id": "object identifier the claim concerns",
+      "operation_id": "API operation identifier",
+      "origin": "scheme://host[:port] of the service",
+      "parameter": "query/body/header parameter name",
+      "path": "concrete request path, e.g. /.git-credentials",
+      "paths": "set of concrete paths; order-insensitive",
+      "port": "integer 1-65535",
+      "principal": "principal slot or role the claim concerns",
+      "request_id": "request identifier within a collection",
+      "route": "route template, e.g. /api/users/{id}",
+      "scheme": "URL scheme",
+      "service_name": "network service name",
+      "transport": "tcp or udp",
+      "url": "absolute URL",
+      "version": "software version"
+    },
+    "locus_other_keys": "Any other identifier key (lower-cased, '-' read as '_') is preserved and is part of the candidate identity. Nothing in the locus is truncated or dropped: a value over max_locus_value_chars, a list over max_locus_list_items distinct items, a port outside 1-65535, or a locus over max_locus_keys or max_locus_bytes is refused.",
+    "locus_schema_version": "hunt-candidate-locus/v1",
+    "locus_set_keys": [
+      "paths"
+    ],
+    "max_locus_bytes": 16384,
+    "max_locus_keys": 32,
+    "max_locus_list_items": 100,
+    "max_locus_value_chars": 1000,
+    "url_template": "/hunts/{hunt_id}/candidates"
+  },
   "coverage_ledger": {
     "advisory_only": true,
     "checkpoint_url_template": "/hunts/{hunt_id}/checkpoint",

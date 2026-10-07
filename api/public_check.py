@@ -68,9 +68,18 @@ async def run_engine(body: bytes) -> tuple[int, object]:
     return result['status'], result['body']
 
 
+def engine_installed() -> bool:
+    return os.path.isfile(ENGINE_PATH) and os.access(NODE_BINARY, os.X_OK)
+
+
 @router.post('/public/check')
 async def public_check(request: Request):
     """DNS, email, HTTP and TLS posture observations (schema 2) for a hostname or IP address."""
+    # Before any request validation: a client probing whether this instance runs checks (a
+    # non-JSON request, refused with 415 when it does) must learn that an image without the
+    # engine does not, instead of advertising a tool whose every call would fail.
+    if not engine_installed():
+        return _error(503, 'service_unavailable', 'The check engine is not installed in this image.')
     if 'json' not in request.headers.get('content-type', '').lower():
         return _error(415, 'unsupported_media_type', 'Use application/json encoded as UTF-8.')
     body = b''

@@ -323,18 +323,33 @@ _BROWSER_HEADLESS_OPTIONS = (
 # profile reserves, and ended it as a failure that discarded the records it
 # had. The cap follows the reservation the operator already paid for.
 AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST = 512
+# A crawler is the exception to one record per request: katana writes a JSONL line for every
+# link and JavaScript-extracted endpoint of each page it fetches, most of them repeats of the
+# site's navigation. Measured on a Balanced crawl of a documentation site: the 768 KB allowance
+# a 1,500-request reservation bought at 512 bytes per request filled in 21 of 300 seconds --
+# at most ~105 fetches at 5 requests/second, so over 7 KB of output per page -- and the crawl
+# was stopped `output_truncated` with 93% of its wall unused. Size the crawler's allowance to
+# what a page emits; the ceiling still bounds the retained bytes.
+AGENT_TOOL_OUTPUT_BYTES_PER_CRAWL_REQUEST = 8_192
 AGENT_TOOL_OUTPUT_BYTES_CEILING = 8_000_000
 
 
-def agent_tool_output_bytes(reserved_budget: Mapping[str, Any] | None, *, floor: int) -> int:
+def agent_tool_output_bytes(
+    reserved_budget: Mapping[str, Any] | None, *, floor: int, tool: str | None = None,
+) -> int:
     """Bytes of tool output to retain for a reservation, never below ``floor``."""
     try:
         requests = int((reserved_budget or {}).get("http_requests") or 0)
     except (TypeError, ValueError):
         requests = 0
+    per_request = (
+        AGENT_TOOL_OUTPUT_BYTES_PER_CRAWL_REQUEST
+        if str(tool or "").strip().lower() in KATANA_TOOLS
+        else AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST
+    )
     return max(
         int(floor),
-        min(AGENT_TOOL_OUTPUT_BYTES_CEILING, requests * AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST),
+        min(AGENT_TOOL_OUTPUT_BYTES_CEILING, requests * per_request),
     )
 
 
@@ -347,6 +362,10 @@ def agent_tool_output_bytes(reserved_budget: Mapping[str, Any] | None, *, floor:
 # on .js chunks and reached the endpoint manifest with almost no query
 # parameters, leaving every active family with no work to do.
 _MAX_TOOL_OUTPUT_LINES = 4_000
+# A crawl's retained output (see AGENT_TOOL_OUTPUT_BYTES_PER_CRAWL_REQUEST) is read whole: the
+# record bound applies to distinct same-host routes, not to raw lines. Cutting the first 1,500
+# lines kept 165 routes from a crawl whose output was mostly repeated navigation links.
+_MAX_CRAWL_OUTPUT_LINES = 60_000
 MAX_TOOL_RECORDS = 1_500
 
 EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
@@ -1950,6 +1969,7 @@ def parse_scanner_output(
     scanner = str(name or "").strip().lower()
     decoded: list[dict[str, Any]] = []
     text = str(stdout or "")
+    lines_dropped = 0
     try:
         whole = json.loads(text)
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -1961,7 +1981,13 @@ def parse_scanner_output(
     elif isinstance(whole, dict):
         decoded.append(whole)
     else:
-        for line in text.splitlines()[:_MAX_TOOL_OUTPUT_LINES]:
+        line_window = (
+            _MAX_CRAWL_OUTPUT_LINES if scanner in KATANA_TOOLS else _MAX_TOOL_OUTPUT_LINES
+        )
+        lines = text.splitlines()
+        # Output beyond the parse window is retained evidence the records never examined.
+        lines_dropped = sum(1 for line in lines[line_window:] if line.strip())
+        for line in lines[:line_window]:
             try:
                 item = json.loads(line)
             except (TypeError, ValueError, json.JSONDecodeError):
@@ -1971,7 +1997,7 @@ def parse_scanner_output(
         if scanner in KATANA_TOOLS and not decoded:
             # Compact Katana mode emits one absolute URL per line. Preserve only URL-shaped
             # records; banners and diagnostics are not route observations.
-            for line in text.splitlines()[:_MAX_TOOL_OUTPUT_LINES]:
+            for line in lines[:line_window]:
                 candidate = line.strip()
                 try:
                     parsed_candidate = urllib.parse.urlsplit(candidate)
@@ -1984,7 +2010,10 @@ def parse_scanner_output(
     seen_katana_requests: set[
         tuple[str, str, str | None, tuple[str, ...]]
     ] = set()
-    for item in decoded[:MAX_TOOL_RECORDS]:
+    # A crawl is read whole and bounded by distinct routes (every one is still counted);
+    # other tools are bounded by the items they emitted.
+    items_dropped = 0 if scanner in KATANA_TOOLS else max(0, len(decoded) - MAX_TOOL_RECORDS)
+    for item in decoded if scanner in KATANA_TOOLS else decoded[:MAX_TOOL_RECORDS]:
         if scanner == "nuclei":
             info = item.get("info") if isinstance(item.get("info"), dict) else {}
             template_id = str(item.get("template-id") or item.get("template_id") or "")[:200] or None
@@ -2027,6 +2056,8 @@ def parse_scanner_output(
             if request_identity in seen_katana_requests:
                 continue
             seen_katana_requests.add(request_identity)
+            if len(records) >= MAX_TOOL_RECORDS:
+                continue
             record = {
                 "kind": "discovered_route",
                 "url": observed_url,
@@ -2154,12 +2185,36 @@ def parse_scanner_output(
                 "proof_state": "candidate",
             })
     records = [record for record in records if any(value not in (None, "", [], {}) for key, value in record.items() if key != "kind")]
+    kept = min(len(records), MAX_TOOL_RECORDS)
+    seen = (
+        len(seen_katana_requests) if scanner in KATANA_TOOLS
+        else len(records) + items_dropped
+    )
+    truncated = seen > kept or lines_dropped > 0
     return {
         "parser": f"{scanner}-typed-v1",
         "parser_status": "parsed" if records else ("partial" if decoded else "not_applicable"),
         "records": records[:MAX_TOOL_RECORDS],
         "record_count": len(records),
+        # The record bound is explicit, never silent: a capped set must not read as the
+        # complete surface (a crawl that found 4,000 routes kept 1,500 and settled success).
+        "record_limit": {
+            "kept": kept, "seen": max(seen, kept), "limit": MAX_TOOL_RECORDS,
+            "lines_dropped": lines_dropped, "truncated": truncated,
+        },
+        "records_truncated": truncated,
     }
+
+
+def scanner_truncation_error(error: Any, typed_output: Any) -> Any:
+    """The error a finished tool reports when its parsed records were cut at a bound.
+
+    The worker settles `output_truncated` as partial, exactly as it does for the byte
+    allowance: the retained records are trustworthy, the remainder was never examined.
+    """
+    if error or not (isinstance(typed_output, Mapping) and typed_output.get("records_truncated")):
+        return error
+    return "output_truncated"
 
 
 # --------------------------------------------------------------------------------------

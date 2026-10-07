@@ -325,10 +325,17 @@ def test_a_timed_out_batch_reports_a_timeout_not_truncated_output():
     ).read_text(encoding="utf-8")
     batch = adapter[adapter.index("async def _external_batch"):]
     batch = batch[:batch.index("    async def _authz(")]
-    assert "CapabilityResultReason.TIMED_OUT.value" in batch
-    assert "CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value" in batch
+    assert "stated = batch_stop_reason(" in batch
     # The stated reason must lead, so _receipt_reason finds it before tool noise.
     assert "batch_errors.insert(0, stated)" in batch
+    from scan.action_adapter import batch_stop_reason
+
+    assert batch_stop_reason(["timeout", "timeout"], unattempted=0) == (
+        CapabilityResultReason.TIMED_OUT.value
+    )
+    assert batch_stop_reason([], unattempted=2) == (
+        CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+    )
     assert CapabilityResultReason.TIMED_OUT.value == "timed_out"
 
 

@@ -13,12 +13,19 @@ export interface ResponsePair {
   payload: string
 }
 
+export interface ResponseHeader {
+  name: string
+  value: string
+}
+
 export interface FindingObservation {
   facts: ObservationFact[]
   excerpt: string | null
   signatures: string[]
   responsePairs: ResponsePair[]
   signals: string[]
+  /** The recorded response's headers, for a finding about a header (sorted by name). */
+  responseHeaders: ResponseHeader[]
 }
 
 type EvidenceRecord = Record<string, unknown>
@@ -56,22 +63,29 @@ export function humanizeToken(value: string): string {
 // Fact order follows the reading order of an observation: what was exposed or injected, where and
 // how it was requested, what came back, how it was found.
 const FACTS: Array<{ keys: string[]; label: string; humanize?: boolean; mono?: boolean }> = [
+  { keys: ['header_absent', 'header_name'], label: 'Missing header', mono: true },
   { keys: ['exposure_class'], label: 'Exposed', humanize: true },
   { keys: ['dbms'], label: 'Database' },
   { keys: ['technique'], label: 'Technique', humanize: true },
+  { keys: ['request_line'], label: 'Request', mono: true },
   { keys: ['method', 'request_method'], label: 'Method', mono: true },
   { keys: ['field_path', 'param', 'parameter'], label: 'Parameter', mono: true },
   { keys: ['payload'], label: 'Payload', mono: true },
   { keys: ['response_status', 'status_code'], label: 'HTTP status', mono: true },
   { keys: ['content_type'], label: 'Content type', mono: true },
   { keys: ['repetitions'], label: 'Confirmed', },
+  { keys: ['matched_url_count'], label: 'Pages matched' },
   { keys: ['discovered_via'], label: 'Found via', humanize: true },
   { keys: ['evidence_type'], label: 'Evidence', humanize: true },
 ]
 
 export function findingObservation(evidence: unknown): FindingObservation {
-  const data = record(evidence)
-  if (!data) return { facts: [], excerpt: null, signatures: [], responsePairs: [], signals: [] }
+  const stored = record(evidence)
+  if (!stored) return { facts: [], excerpt: null, signatures: [], responsePairs: [], signals: [], responseHeaders: [] }
+  // A header finding carries the scan's recorded response for its origin; its request line,
+  // status and header set read as part of the same observation.
+  const observed = record(stored.observed_response)
+  const data: EvidenceRecord = observed ? { ...observed, ...stored } : stored
 
   const facts: ObservationFact[] = []
   for (const spec of FACTS) {
@@ -98,7 +112,15 @@ export function findingObservation(evidence: unknown): FindingObservation {
     ...strings(data.extraction_evidence),
   ]))
 
-  return { facts, excerpt, signatures, responsePairs, signals }
+  const headers = record(observed?.observed_headers)
+  const responseHeaders = headers
+    ? Object.entries(headers)
+        .map(([name, value]) => ({ name, value: text(value) }))
+        .filter((header) => header.name && header.value)
+        .sort((a, b) => a.name.localeCompare(b.name))
+    : []
+
+  return { facts, excerpt, signatures, responsePairs, signals, responseHeaders }
 }
 
 export function hasObservation(observation: FindingObservation): boolean {
@@ -107,6 +129,7 @@ export function hasObservation(observation: FindingObservation): boolean {
     || observation.signatures.length > 0
     || observation.responsePairs.length > 0
     || observation.signals.length > 0
+    || observation.responseHeaders.length > 0
 }
 
 // The API's latest_retest_verdict falls back to the scan-time verification verdict when no retest

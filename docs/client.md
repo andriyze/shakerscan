@@ -90,8 +90,14 @@ The public MCP mode exposes only `shakerscan_public_check(target, path?, dkim_se
 uses the same credential-free `/v1/check` pipeline as `check`; no private-engine discovery,
 Hunt, Arsenal, shell or target management tools are available. When connected to an OSS or
 Enterprise instance, MCP also exposes that check alongside the instance's existing tools and
-sends it to the instance's `POST /public/check` using the saved connection. There is no public
-fallback or per-check approval prompt on a connected client.
+sends it to the instance's `POST /public/check` using the saved connection, but only when the
+instance serves that route: `tools/list` first probes it with a request the engine refuses before
+doing any work (no body, not JSON). Only the engine's own answer to that, 415 with error code
+`unsupported_media_type`, lists the tool. Any other answer leaves the tool out, so neither the
+agent nor `doctor` counts it. That covers a gateway that keeps the route closed (403, as the
+Enterprise beta does), an engine without the route (404), an engine image without the check
+engine (503), a redirect, a gateway's own 400 or 429, a 200 page, and no answer at all. There
+is no public fallback or per-check approval prompt on a connected client.
 
 The hosted service accepts only public DNS names and global IP addresses, refuses government and
 military targets, and applies per-caller limits: 30 requests a minute, and 25 uncached checks an
@@ -232,8 +238,9 @@ saved `shakerscan connect` instance is used, then `SHAKERSCAN_API_URL`.
 
 It materializes that kit (vendored into the package at build time) into a workspace
 (`~/.config/shakerscan/agent`, or `--here` for the current directory, or `--workspace DIR`),
-prepends a note naming the connected instance and the rules of a remote session (no local
-engine, use `shakerscan api`/`scan`/`hunt` and the MCP tools, refusals name what is missing),
+prepends a note naming the connected instance, the kit's release and client version, and the
+rules of a remote session (no local engine, use `shakerscan api`/`scan`/`hunt` and the MCP
+tools, refusals name what is missing),
 registers the MCP server for that workspace (`.mcp.json` for Claude Code, `opencode.json` for
 OpenCode, `codex mcp add` for Codex), exports the connection with the token left in its file,
 and starts the agent there. Pi has no MCP client: it is started with `--no-approve`, `--skill`
@@ -290,10 +297,16 @@ shakerscan hunt --url https://scanner.example.com --token-file ./token list
 shakerscan hunt --url https://scanner.example.com --token-file ./token start --help
 ```
 
-`shakerscan hunt` forwards everything after its connection options to the runtime's product CLI
+`shakerscan hunt` forwards everything except its connection options to the runtime's product CLI
 (`scripts/v2_cli.py … hunt`), so the subcommands are the runtime's: `start`, `get`, `list`,
-`query`, `call`, `candidate`, `verify`, `finish`, `cancel`, `resume`. Connection options come
-first; `shakerscan hunt --url URL` with nothing after it prints that CLI's own help.
+`query`, `call`, `candidate`, `verify`, `finish`, `cancel`, `resume` and the `skill-*` commands.
+The connection options (`--url`, `--token-file`, `--timeout`) may come before or after the
+subcommand, and everything after a `--` is forwarded untouched. `--timeout` is the seconds to
+wait for each API answer (default 60). `shakerscan hunt --help`, or `hunt` with nothing after
+it, prints the connection options and then that CLI's own help. `query` takes every kind the
+engine's `/hunts/{id}/query` accepts, the same as the MCP tool, including `hypotheses`,
+`graph_nodes`, `graph_edges`, `endpoint_groups` and `service_intelligence`, and `--cursor` to
+follow `next_cursor`.
 
 ## Versioning and release
 

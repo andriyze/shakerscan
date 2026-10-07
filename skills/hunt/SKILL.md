@@ -212,7 +212,8 @@ current run's `expected_revision`, new **total** `limits`, a stable retry `idemp
 headroom; no action starts automatically. Existing usage, queued holds, identities and permissions
 stay in place. Device pauses and independent device/per-action limits still apply. Inspect current
 state after a conflict; retry a lost response with the same key/body, not an extra increase.
-Completed/cancelled/finalized runs stay terminal. Read `GET /openapi.json` for the request schema;
+Completed/cancelled/finalized runs stay terminal. Read `GET /openapi.json` for the request schema
+on an open-source engine (an Enterprise gateway refuses it; the fields above are the request);
 `GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
 
 ## Candidates and proof
@@ -220,6 +221,24 @@ Completed/cancelled/finalized runs stay terminal. Read `GET /openapi.json` for t
 Create a candidate with `POST /hunts/{hunt_id}/candidates` only when the claim cites real evidence
 references from this investigation. Include a canonical locus precise enough for a registered
 verifier. A candidate is non-authoritative.
+
+Identity is target + family + locus. `GET /hunts/contract` (`candidates`) lists the locus keys
+(`method`, `route`, `path`, `paths`, `url`, `origin`, `parameter`, `object_id`, `principal`,
+`address`, `host`, `transport`, `port`, ...); any other lower-case key is kept, never dropped, and
+a value that does not fit (over 1000 characters, a list over 100 items, an invalid port) is refused
+rather than truncated. Put
+the attribute that distinguishes this issue in the locus (for a file exposure, its `path`). A
+second record with the same identity and the same title or claim merges its evidence
+(`outcome: merged`); a different claim becomes its own candidate and never replaces a stored one.
+A merge never rewrites title, claim or severity: it lists them in `unapplied_fields`, so correct
+them with PATCH. A candidate under verification is not changed (409
+`candidate_verification_in_flight`), and a merge that would exceed 100 evidence references is
+refused (422 `candidate_evidence_limit`) rather than truncated.
+Each evidence reference must be this Hunt's action, receipt or HTTP transaction ID (bare or
+`action:`/`receipt:`/`transaction:` prefixed), a `finding:` on the target, or a device `devref_N`;
+anything else is refused with `candidate_evidence_unresolved`. An action or its receipt counts only
+once the action completed or ended partial; cite no failed, admission-refused, blocked or unfinished
+action (`candidate_evidence_unsettled`).
 
 When multi-principal Hunt evidence shows same-service identity/resource structure and an observed
 agent endpoint, call `POST /hunts/{hunt_id}/boundary-discovery` before hand-building the candidate.
@@ -280,6 +299,11 @@ or no useful authorized action fits the remaining budget. An exhausted optional 
 stop work that uses other remaining dimensions. Preserve observations and name material coverage gaps.
 An action rejected with `budget_insufficient_for_action` has not exhausted the run: use its
 reported shortages to select a smaller useful action. Do not retry an unchanged oversized action.
+A `budget_exhausted` Hunt still accepts candidates while its candidate budget has room: record the
+leads the gathered evidence supports before finishing. `hosts_attempted` counts distinct hosts: once
+a network action on a host has settled, later network actions on that host do not charge it again.
+An action admitted while the first is still running, or after one that failed before reaching the
+host, is charged in full.
 
 Store no hidden chain-of-thought. Durable records should contain objectives, capability calls,
 receipts, observations, bounded notes, candidates, and the final debrief.

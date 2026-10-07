@@ -78,7 +78,7 @@ def test_the_build_vendors_the_runtime_scripts_and_the_agent_kit(tmp_path):
         (unpacked / module).write_text("# vendored\n", encoding="utf-8")
     for target in hatch_build.KIT.values():
         path = unpacked / target
-        if target.endswith(".md"):
+        if target.endswith((".md", "VERSION")):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("# kit\n", encoding="utf-8")
         else:
@@ -256,6 +256,69 @@ def test_hunt_forwards_to_the_product_cli_with_the_connection_first(monkeypatch,
     assert seen["argv"] == ["--api-url", "https://scanner.example.com", "hunt", "--help"]
 
 
+def test_hunt_connection_options_work_after_the_subcommand(monkeypatch, tmp_path, clean_environ):
+    # Soak 2026-10-07 (defect 19): `hunt get ID --timeout 120` was refused by the runtime CLI, and
+    # --timeout never reached the runtime CLI's requests even before the subcommand.
+    token_file = tmp_path / "token"
+    token_file.write_text(SECRET + "\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    class FakeProductCli:
+        @staticmethod
+        def main(argv):
+            seen["argv"] = list(argv)
+            seen["token"] = os.environ.get(cli.ENV_TOKEN)
+            return 0
+
+    monkeypatch.setattr(cli, "load", lambda name: FakeProductCli if name == "_v2_cli" else pytest.fail(name))
+    code = cli.main([
+        "hunt", "get", "hunt-1", "--timeout", "120", "--url", "https://scanner.example.com",
+        f"--token-file={token_file}",
+    ])
+    assert code == 0
+    assert seen["argv"] == ["--api-url", "https://scanner.example.com", "--timeout", "120.0", "hunt", "get", "hunt-1"]
+    assert seen["token"] == SECRET
+    # A value after `--` belongs to the runtime CLI, untouched.
+    cli.main(["hunt", "--url", "https://scanner.example.com", "--", "finish", "h", "--summary", "--timeout"])
+    assert seen["argv"][-4:] == ["finish", "h", "--summary", "--timeout"]
+
+
+@pytest.mark.parametrize("argv", [["hunt", "--help"], ["hunt", "-h"], ["hunt", "--url", "https://scanner.example.com", "--help"]])
+def test_hunt_help_lists_the_runtime_subcommands(argv, capsys, clean_environ):
+    with pytest.raises(SystemExit) as done:
+        cli.main(argv)
+    assert done.value.code == 0
+    out = capsys.readouterr().out
+    for subcommand in ("start", "get", "query", "call", "candidate", "finish", "skill-bind"):
+        assert subcommand in out
+    assert "--timeout" in out and "--url" in out, "the client's connection options are named too"
+
+
+def test_the_installed_kit_names_its_release_not_unknown(tmp_path):
+    """The installed layout has no repository VERSION beside AGENTS.md: the kit carries its own."""
+    site = tmp_path / "site"
+    shutil.copytree(SRC / "shakerscan", site / "shakerscan", ignore=shutil.ignore_patterns("__pycache__"))
+    for source, target in hatch_build.plan_force_include("wheel", CLIENT).items():
+        if Path(source).is_dir():
+            shutil.copytree(source, site / target)
+        else:
+            shutil.copyfile(source, site / target)
+    workspace = tmp_path / "ws"
+    script = (
+        "from pathlib import Path\n"
+        "from shakerscan import cli\n"
+        f"cli.prepare_workspace(Path({str(workspace)!r}), 'https://scanner.example.com', 'x', 'shakerscan')\n"
+    )
+    env = {key: value for key, value in os.environ.items() if not key.startswith("SHAKERSCAN_")}
+    env["PYTHONPATH"] = str(site)
+    result = subprocess.run([sys.executable, "-c", script], env=env, cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+    release = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert f"Kit version: ShakerScan {release} (client {__version__})." in text
+    assert "unknown" not in text.split("\n\n", 2)[1]
+
+
 def test_doctor_reports_the_catalogue_the_instance_offers(monkeypatch, capsys, clean_environ):
     mcp = load("_mcp")
 
@@ -386,6 +449,28 @@ def test_doctor_names_the_transport_reason(monkeypatch, capsys, clean_environ):
     out = capsys.readouterr().out
     assert "engine:   ShakerScan API is unavailable: <urlopen error timed out>" in out
     assert "mcp:      ShakerScan API is unavailable: <urlopen error timed out>" in out
+
+
+def test_doctor_shows_a_refusal_reason_once_not_the_raw_body(monkeypatch, capsys, clean_environ):
+    mcp = load("_mcp")
+    body = '{"detail": "this action needs the operator role"}'
+
+    class RefusingClient:
+        def __init__(self, base_url, *, timeout_seconds, api_token):
+            pass
+
+        def request_json(self, method, path, payload=None):
+            return {"status": "ok"}
+
+        def list_tools(self):
+            raise mcp.MCPError(-32002, "ShakerScan API returned HTTP 403: this action needs the operator role",
+                               body, http_status=403)
+
+    monkeypatch.setattr(mcp, "ArsenalClient", RefusingClient)
+    assert cli.main(["doctor", "--url", "https://scanner.example.com"]) == 1
+    out = capsys.readouterr().out
+    assert "mcp:      ShakerScan API returned HTTP 403: this action needs the operator role\n" in out
+    assert '{"detail"' not in out
 
 
 def _connected(monkeypatch, tmp_path, *, role="operator"):
@@ -543,6 +628,10 @@ def test_agent_prepares_the_workspace_against_the_connected_instance(monkeypatch
     text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
     assert text.startswith("# Connected ShakerScan instance") and "https://scanner.example.com" in text
     assert "shakerscan api METHOD PATH" in text
+    note = text.split("\n\n", 2)[1]
+    assert "/openapi.json` is refused here" in note and "GET /hunts/contract" in note, (
+        "the Enterprise note must not leave agents reading a route the gateway refuses"
+    )
     assert not (workspace / "CLAUDE.md").exists()
     mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
     assert mcp["mcpServers"]["shakerscan"]["args"] == ["mcp"]

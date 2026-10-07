@@ -654,7 +654,7 @@ export default function NewScanPage() {
             </label>
           )}
           <div className="grid gap-3 md:grid-cols-2">
-            {featureEnabled('scan_discovery') && <label className="flex items-center gap-3 text-sm text-gray-300"><input type="checkbox" checked={subdomainDiscovery} onChange={(event) => setSubdomainDiscovery(event.target.checked)} />Discover subdomains</label>}
+            {featureEnabled('scan_discovery') && <label className="flex items-center gap-3 text-sm text-gray-300"><input type="checkbox" checked={subdomainDiscovery} onChange={(event) => setSubdomainDiscovery(event.target.checked)} /><span>Discover subdomains<span className="block text-xs text-gray-500">Found names are listed in the report and added as targets; this scan does not test them.</span></span></label>}
             {featureEnabled('network_testing') && <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={networkDiscovery} onChange={(event) => setNetworkDiscovery(event.target.checked)} />Discover network services</label>}
             <label className={`flex items-center gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}><input type="checkbox" disabled={!activeTesting} checked={allowStateChanging} onChange={(event) => { setAllowStateChanging(event.target.checked); if (!event.target.checked) removeConfirmedActiveSelections() }} />Allow explicitly selected state-changing HTTP requests</label>
           </div>

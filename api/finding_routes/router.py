@@ -23,7 +23,7 @@ from typing import Any, Callable, Literal, Optional
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 try:
     from api_utils import (
@@ -250,12 +250,30 @@ def _strip_pagination_for_count(query: str, params: list) -> tuple[str, list]:
 
 
 class FindingUpdate(BaseModel):
-    status: str  # active, resolved, false_positive, accepted_risk
+    # active, resolved, false_positive, accepted_risk. Omitted (or null) keeps the stored status:
+    # a verdict-only edit must not write back a status the client saw before a retest or another
+    # session changed it.
+    status: Optional[str] = None
     notes: Optional[str] = None
+    # Omitted keeps the recorded verdict, a value records it, and an explicit null clears it
+    # (the verdict and its time; its notes stay unless `notes` is sent). The status is always
+    # the caller's: the server never derives one from the verdict.
     analyst_verdict: Optional[str] = Field(
         default=None,
         pattern="^(needs_review|true_positive|false_positive|duplicate|accepted_risk|retest_needed)$",
     )
+
+    def verdict_change(self) -> str:
+        """'set', 'clear' or 'keep' -- an explicit null is a request, an absent field is not."""
+        if "analyst_verdict" not in self.model_fields_set:
+            return "keep"
+        return "clear" if self.analyst_verdict is None else "set"
+
+    @model_validator(mode="after")
+    def _changes_something(self) -> "FindingUpdate":
+        if self.status is None and self.notes is None and self.verdict_change() == "keep":
+            raise ValueError("send a status, notes or analyst_verdict")
+        return self
 
 
 class FindingRetestRequest(BaseModel):
@@ -1532,25 +1550,53 @@ async def update_finding(
         )
         if resolved_id is None:
             raise HTTPException(status_code=404, detail="Finding not found")
-        result = await conn.fetchrow("""
-            UPDATE findings
-            SET status = $1,
-                resolved_at = CASE WHEN $1 = 'resolved' THEN COALESCE(resolved_at, NOW())
-                                   WHEN $1 = 'active' THEN NULL
-                                   ELSE resolved_at END,
-                notes = COALESCE($2, notes),
-                analyst_verdict = COALESCE($3, analyst_verdict),
-                analyst_verdict_at = CASE WHEN $3 IS NULL THEN analyst_verdict_at ELSE NOW() END,
-                analyst_verdict_notes = CASE WHEN $3 IS NULL THEN analyst_verdict_notes ELSE COALESCE($2, analyst_verdict_notes) END,
-                updated_at = NOW()
-            WHERE id = $4
-            RETURNING id, target_id, device_target_id
-        """, request.status, request.notes, request.analyst_verdict, resolved_id)
+        result = await conn.fetchrow(FINDING_UPDATE_SQL, request.status, request.notes,
+                                     request.analyst_verdict, resolved_id, request.verdict_change())
         if not result:
             raise HTTPException(status_code=404, detail="Finding not found")
         await _refresh_finding_owner_counts(conn, [result])
 
-    return {'id': str(result['id']), 'status': request.status, 'analyst_verdict': request.analyst_verdict}
+    return finding_update_response(result)
+
+
+# The prior status is read in the same statement so the response can say what changed: a client
+# that sets a verdict and a status together must be able to show the status change it caused.
+FINDING_UPDATE_SQL = """
+    UPDATE findings
+    SET status = COALESCE($1::text, findings.status),
+        resolved_at = CASE WHEN $1::text = 'resolved' THEN COALESCE(findings.resolved_at, NOW())
+                           WHEN $1::text = 'active' THEN NULL
+                           ELSE findings.resolved_at END,
+        notes = COALESCE($2, findings.notes),
+        analyst_verdict = CASE $5::text WHEN 'set' THEN $3::text WHEN 'clear' THEN NULL
+                                        ELSE findings.analyst_verdict END,
+        analyst_verdict_at = CASE $5::text WHEN 'set' THEN NOW() WHEN 'clear' THEN NULL
+                                           ELSE findings.analyst_verdict_at END,
+        -- Clearing a verdict keeps its notes unless the request sends new ones: the notes are
+        -- the record of why a verdict was set, an automated retest's included, and survive it.
+        analyst_verdict_notes = CASE WHEN $5::text IN ('set', 'clear')
+                                     THEN COALESCE($2, findings.analyst_verdict_notes)
+                                     ELSE findings.analyst_verdict_notes END,
+        updated_at = NOW()
+    FROM (SELECT id, status FROM findings WHERE id = $4 FOR UPDATE) AS prior
+    WHERE findings.id = prior.id
+    RETURNING findings.id, findings.target_id, findings.device_target_id, findings.status,
+              prior.status AS previous_status, findings.analyst_verdict,
+              findings.analyst_verdict_at
+"""
+
+
+def finding_update_response(row: Any) -> dict[str, Any]:
+    """What the update persisted, read back from the row rather than echoed from the request."""
+    verdict_at = row["analyst_verdict_at"]
+    return {
+        "id": str(row["id"]),
+        "status": row["status"],
+        "previous_status": row["previous_status"],
+        "status_changed": row["status"] != row["previous_status"],
+        "analyst_verdict": row["analyst_verdict"],
+        "analyst_verdict_at": verdict_at.isoformat() if hasattr(verdict_at, "isoformat") else verdict_at,
+    }
 
 
 @router.delete("/findings/{finding_id:path}")

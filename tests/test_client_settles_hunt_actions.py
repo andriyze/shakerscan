@@ -60,8 +60,8 @@ def _call(client):
 
 @pytest.mark.parametrize("lost", [
     mcp.MCPError(-32001, "ShakerScan API is unavailable", "timed out"),
-    mcp.MCPError(-32002, "ShakerScan API returned HTTP 502", "engine unavailable"),
-    mcp.MCPError(-32002, "ShakerScan API returned HTTP 504", ""),
+    mcp.MCPError(-32002, "ShakerScan API returned HTTP 502", "engine unavailable", http_status=502),
+    mcp.MCPError(-32002, "ShakerScan API returned HTTP 504", "", http_status=504),
 ])
 def test_mcp_settles_a_lost_answer_by_replaying_the_same_key(lost):
     client = ScriptedHunt([lost, _action("running"), _action("running"), _action("success")])
@@ -73,24 +73,49 @@ def test_mcp_settles_a_lost_answer_by_replaying_the_same_key(lost):
     )
 
 
+def test_mcp_classifies_by_the_status_not_by_the_reason_text():
+    # A definite 422 whose reason quotes a target's 503 is still a refusal: one POST, no replays.
+    client = ScriptedHunt([mcp.MCPError(
+        -32002, "ShakerScan API returned HTTP 422: the login origin answered HTTP 503",
+        '{"detail": "the login origin answered HTTP 503"}', http_status=422,
+    )] + [_action("running")] * 100)
+    with pytest.raises(mcp.MCPError) as refused:
+        _call(client)
+    assert len(client.posts) == 1
+    assert refused.value.data["outcome"] == "refused"
+
+
 def test_mcp_settles_an_in_flight_first_answer():
     client = ScriptedHunt([_action("running"), _action("success")])
     assert _call(client)["structuredContent"]["action_result"]["status"] == "success"
 
 
 def test_mcp_never_replays_a_definite_refusal():
-    client = ScriptedHunt([mcp.MCPError(-32002, "ShakerScan API returned HTTP 409", "budget")])
+    client = ScriptedHunt([mcp.MCPError(
+        -32002, "ShakerScan API returned HTTP 409: budget exhausted", '{"detail": "budget exhausted"}',
+        http_status=409,
+    )])
     with pytest.raises(mcp.MCPError) as refused:
         _call(client)
     assert len(client.posts) == 1
-    assert refused.value.data["outcome"] == "unknown"  # the existing recovery envelope
+    # A definite answer is reported as one, with its reason, and keeps the recovery identity.
+    assert refused.value.data["outcome"] == "refused"
+    assert "HTTP 409: budget exhausted" in refused.value.message
+    assert refused.value.data["mcp_idempotency_key"] == "key-mcp-1"
 
 
 def test_mcp_wait_is_bounded_and_keeps_the_recovery_identity():
+    # The server said the action is still running: a known state, returned with the key to collect it.
     client = ScriptedHunt([mcp.MCPError(-32001, "unavailable")] + [_action("running")] * 1000, wait=0.05)
+    running = _call(client)["structuredContent"]
+    assert running["outcome"] == "running"
+    assert running["mcp_idempotency_key"] == "key-mcp-1"
+    # No answer ever arrived: the outcome stays unknown.
+    client = ScriptedHunt([mcp.MCPError(-32001, "unavailable")] * 1000, wait=0.05)
     with pytest.raises(mcp.MCPError) as unsettled:
         _call(client)
-    assert unsettled.value.message == "Hunt capability response was not confirmed"
+    assert unsettled.value.message.startswith("Hunt capability response was not confirmed")
+    assert "key-mcp-1" in unsettled.value.message
     assert unsettled.value.data["mcp_idempotency_key"] == "key-mcp-1"
     assert "same key" in unsettled.value.data["recovery"]
 

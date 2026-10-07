@@ -2501,6 +2501,101 @@ def test_spec_ingest_an_unpublished_hint_file_is_not_reported_as_truncated_outpu
     assert _persisted_partial_reason(receipt) == "source_not_published"
 
 
+def test_spec_ingest_a_spec_for_another_host_is_out_of_scope_not_a_parse_failure(monkeypatch):
+    """honey.shakerscan.com serves /swagger.json declaring `host: api.halvern.internal`.
+
+    The document parses; its routes are declared on another origin, so none belongs to this
+    binding. The scan reported parser_failed ("could not be parsed safely"), which sent an
+    operator looking for a parser bug that does not exist.
+    """
+    spec_body = json.dumps({
+        "swagger": "2.0", "host": "api.halvern.internal", "basePath": "/v1",
+        "schemes": ["https"],
+        "paths": {"/users": {"get": {"responses": {"200": {"description": "ok"}}}}},
+    }).encode()
+
+    def respond(path):
+        if path == "/swagger.json":
+            return 200, "application/json", spec_body
+        if path == "/robots.txt":
+            return 200, "text/plain", b"User-agent: *\nDisallow: /admin/\n"
+        return 404, "text/plain", b"Not Found"
+
+    receipt = _spec_ingest_receipt(monkeypatch, respond)
+    assert receipt.status == "partial"
+    assert receipt.errors[0] == "declared_out_of_scope"
+    assert "spec_off_origin_server" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "declared_out_of_scope"
+
+
+def _serve_spec(document):
+    body = json.dumps(document).encode()
+
+    def respond(path):
+        if path == "/swagger.json":
+            return 200, "application/json", body
+        return 404, "text/plain", b"Not Found"
+
+    return respond
+
+
+def _spec_routes(receipt):
+    return sorted(
+        (item["method"], item["url"]) for item in receipt.observations
+        if item.get("kind") == "discovered_route" and item.get("source") == "spec"
+    )
+
+
+def test_spec_ingest_a_server_list_with_an_off_origin_alternative_is_ingested_in_full(monkeypatch):
+    """Servers ["/", "https://api.other.example"]: every operation is ingested on the bound
+    origin, so nothing in scope was lost. It was reported as partial and "declares its routes
+    on another host", as if the description were out of scope."""
+    receipt = _spec_ingest_receipt(monkeypatch, _serve_spec({
+        "openapi": "3.0.0", "info": {"title": "x", "version": "1"},
+        "servers": [{"url": "/"}, {"url": "https://api.other.example"}],
+        "paths": {"/users": {"get": {"responses": {"200": {"description": "ok"}}}}},
+    }))
+    assert receipt.status == "success"
+    assert not receipt.errors
+    assert _spec_routes(receipt) == [("GET", "https://app.example.test/users")]
+
+
+def test_spec_ingest_operations_declared_only_off_origin_make_it_partly_out_of_scope(monkeypatch):
+    receipt = _spec_ingest_receipt(monkeypatch, _serve_spec({
+        "openapi": "3.0.0", "info": {"title": "x", "version": "1"},
+        "paths": {
+            "/users": {"get": {"responses": {"200": {"description": "ok"}}}},
+            "/billing": {"get": {
+                "servers": [{"url": "https://billing.other.example"}],
+                "responses": {"200": {"description": "ok"}},
+            }},
+        },
+    }))
+    assert receipt.status == "partial"
+    assert receipt.errors[0] == "declared_partly_out_of_scope"
+    assert "spec_off_origin_server" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "declared_partly_out_of_scope"
+    # The in-scope operation is ingested; the off-origin one never becomes a request.
+    assert _spec_routes(receipt) == [("GET", "https://app.example.test/users")]
+
+
+def test_spec_ingest_a_swagger_scheme_on_another_origin_is_named_as_a_scheme(monkeypatch):
+    """Swagger 2.0 on the bound host declaring only `schemes: [http]` while the scan is bound to
+    https is another origin, not another host."""
+    receipt = _spec_ingest_receipt(monkeypatch, _serve_spec({
+        "swagger": "2.0", "host": "app.example.test", "basePath": "/v1", "schemes": ["http"],
+        "paths": {"/users": {"get": {"responses": {"200": {"description": "ok"}}}}},
+    }))
+    assert receipt.status == "partial"
+    assert receipt.errors[0] == "declared_out_of_scope"
+    assert "spec_server_scheme_mismatch" in receipt.errors
+    assert "spec_off_origin_server" not in receipt.errors
+    assert _spec_routes(receipt) == []
+    from scan.explanation import _REASON_LABELS
+
+    assert "scheme" in _REASON_LABELS["declared_out_of_scope"]
+
+
 def test_spec_ingest_a_partly_modelled_spec_is_a_parser_limitation_not_truncation(monkeypatch):
     spec_body = json.dumps({
         "openapi": "3.0.0",

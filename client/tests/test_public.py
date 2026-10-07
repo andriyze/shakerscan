@@ -225,8 +225,11 @@ def test_leading_connection_options_stay_with_the_client():
                             "--active-testing", "https://t.example"])
     assert forwarded[:2] == ["--api-url", "http://10.0.0.5:8080"]
     assert forwarded[4:] == ["--active-testing", "https://t.example"]
-    # After the first forwarded token, a --timeout belongs to the runtime CLI.
-    assert _forwarded(["hunt", "list", "--timeout", "5"])[-3:] == ["list", "--timeout", "5"]
+    # After the first forwarded token, a --timeout belongs to the runtime CLI (scan, api) --
+    # except for hunt, whose runtime CLI has none: there it is the client's at any position
+    # and reaches the runtime CLI as its request timeout (soak 2026-10-07).
+    assert _forwarded(["hunt", "list", "--timeout", "5"])[-4:] == ["--timeout", "5.0", "hunt", "list"]
+    assert _forwarded(["hunt", "--", "list", "--timeout", "5"])[-3:] == ["list", "--timeout", "5"]
     assert _forwarded(["api", "--url=http://10.0.0.5:8080", "GET", "/health"]) == [
         "--api-url", "http://10.0.0.5:8080", "GET", "/health",
     ]

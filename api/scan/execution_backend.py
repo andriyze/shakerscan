@@ -25,6 +25,9 @@ from .action_reservations import (
     settle_scan_action_reservation,
 )
 from .capability_result import (
+    BUDGET_EXHAUSTION_REASONS,
+    CEILING_STOP_ERRORS,
+    is_process_kill_error,
     CapabilityReceiptReference,
     CapabilityResultReason,
     CapabilityResultError,
@@ -303,6 +306,19 @@ def _json_object(value: Any, *, name: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ScanExecutionBackendError(f"{name} must be an object")
     return dict(value)
+
+
+def _json_array(value: Any, *, name: str) -> list[Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ScanExecutionBackendError(f"{name} is invalid JSON") from exc
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ScanExecutionBackendError(f"{name} must be an array")
+    return list(value)
 
 
 class PostgresScanExecutionBackend:
@@ -907,37 +923,7 @@ class PostgresScanExecutionBackend:
             or dict(receipt.budget_reserved) != dict(action.requested_budget)
         ):
             raise ScanExecutionBackendError("capability receipt conflicts with action authority")
-        raw_status = receipt.status.strip().lower()
-        if raw_status in {"success", "succeeded", "completed"}:
-            status = CapabilityResultStatus.SUCCESS
-            reason = None
-        elif receipt.timed_out or raw_status == "timed_out":
-            status = CapabilityResultStatus.TIMED_OUT
-            reason = CapabilityResultReason.TIMED_OUT
-        elif raw_status == "partial" or receipt.partial:
-            status = CapabilityResultStatus.PARTIAL
-            # A partial result is not automatically a truncated one. A batch that
-            # deliberately funds fewer, viable attempts than it planned is
-            # partial for budget reasons and nothing was cut off; labelling that
-            # "output_truncated" put a false reason on the action and made the
-            # whole grade unreliable. Honour whatever reason the adapter stated,
-            # exactly as the skipped and blocked branches already do, and keep
-            # truncation as the fallback for adapters that state nothing.
-            reason = self._receipt_reason(
-                receipt, CapabilityResultReason.OUTPUT_TRUNCATED,
-            )
-        elif raw_status == "skipped":
-            status = CapabilityResultStatus.SKIPPED
-            reason = self._receipt_reason(receipt, CapabilityResultReason.NOT_APPLICABLE)
-        elif raw_status == "blocked":
-            status = CapabilityResultStatus.BLOCKED
-            reason = self._receipt_reason(receipt, CapabilityResultReason.ADAPTER_FAILED)
-        elif raw_status == "cancelled":
-            status = CapabilityResultStatus.CANCELLED
-            reason = CapabilityResultReason.CANCELLED
-        else:
-            status = CapabilityResultStatus.FAILED
-            reason = self._receipt_reason(receipt, CapabilityResultReason.ADAPTER_FAILED)
+        status, reason = self._receipt_outcome(receipt)
         manifest_ref = None
         if status in {
             CapabilityResultStatus.SUCCESS,
@@ -975,6 +961,49 @@ class PostgresScanExecutionBackend:
             budget_consumed=receipt.budget_consumed,
         )
 
+    def _receipt_outcome(
+        self, receipt: CapabilityReceipt,
+    ) -> tuple[CapabilityResultStatus, CapabilityResultReason | None]:
+        """The durable status and reason one capability receipt settles to."""
+        raw_status = receipt.status.strip().lower()
+        if raw_status in {"success", "succeeded", "completed"}:
+            status = CapabilityResultStatus.SUCCESS
+            reason = None
+        elif raw_status == "cancelled":
+            # Cancellation is distinct: a batch cancelled after a wall-killed attempt or with
+            # candidates left is cancelled, not timed out and not out of budget.
+            status = CapabilityResultStatus.CANCELLED
+            reason = CapabilityResultReason.CANCELLED
+        elif (receipt.timed_out or raw_status == "timed_out") and self._receipt_reason(
+            receipt, CapabilityResultReason.TIMED_OUT,
+        ) not in BUDGET_EXHAUSTION_REASONS.values():
+            status = CapabilityResultStatus.TIMED_OUT
+            reason = CapabilityResultReason.TIMED_OUT
+        elif raw_status == "partial" or receipt.partial or receipt.timed_out or raw_status == "timed_out":
+            # Partial, or a batch that also saw a timed-out attempt but states that a
+            # non-time ceiling (requests, mutations) is what actually stopped it.
+            status = CapabilityResultStatus.PARTIAL
+            # A partial result is not automatically a truncated one. A batch that
+            # deliberately funds fewer, viable attempts than it planned is
+            # partial for budget reasons and nothing was cut off; labelling that
+            # "output_truncated" put a false reason on the action and made the
+            # whole grade unreliable. Honour whatever reason the adapter stated,
+            # exactly as the skipped and blocked branches already do, and keep
+            # truncation as the fallback for adapters that state nothing.
+            reason = self._receipt_reason(
+                receipt, CapabilityResultReason.OUTPUT_TRUNCATED,
+            )
+        elif raw_status == "skipped":
+            status = CapabilityResultStatus.SKIPPED
+            reason = self._receipt_reason(receipt, CapabilityResultReason.NOT_APPLICABLE)
+        elif raw_status == "blocked":
+            status = CapabilityResultStatus.BLOCKED
+            reason = self._receipt_reason(receipt, CapabilityResultReason.ADAPTER_FAILED)
+        else:
+            status = CapabilityResultStatus.FAILED
+            reason = self._receipt_reason(receipt, CapabilityResultReason.ADAPTER_FAILED)
+        return status, reason
+
     @staticmethod
     def _receipt_reason(
         receipt: CapabilityReceipt,
@@ -985,6 +1014,14 @@ class PostgresScanExecutionBackend:
             candidate = str(error or "").strip().lower().split(":", 1)[0]
             if candidate in known:
                 return known[candidate]
+            if candidate in CEILING_STOP_ERRORS:
+                # A tool the pinned transport stopped at its request ceiling ran out of
+                # that dimension; it did not fail and it did not time out.
+                return BUDGET_EXHAUSTION_REASONS[CEILING_STOP_ERRORS[candidate]]
+            if is_process_kill_error(candidate):
+                # Killed by a signal the worker's deadline did not send: its retained
+                # output is partial for that reason, not because a bound was reached.
+                return CapabilityResultReason.PROCESS_KILLED
         return default
 
     async def _load_result_with_conn(

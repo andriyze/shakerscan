@@ -53,7 +53,7 @@ target binding, approvals, budgets, evidence, and finding proof.
 | Content-discovery seeds | Use the `content-discovery` skill |
 | Health, queue, and workers | `/health`, `/queue/stats`, `/workers` |
 | Multi-node fleet setup or operations | Check `/workers.fleet`, then use `shakerscan fleet *`, `shakerscan join`, and `/fleet/*` only when supported/enabled |
-| Exhaustive operation or schema lookup | Read `AGENTS.md` and the live `/openapi.json` |
+| Exhaustive operation or schema lookup | Read `AGENTS.md` and the live `/openapi.json` (open-source engine; an Enterprise gateway refuses it, use `/hunts/contract`, `/scan/contracts` and the MCP tool schemas) |
 
 Web Scan and Hunt use one durable target per host. Different HTTP(S) schemes and ports share
 findings, inventory, credentials, and history, while each scan or hunt keeps its exact concrete
@@ -225,7 +225,8 @@ credentials, active authority, budgets, evidence, and proof.
 - Read `skills/ai-security-session/references/api.md` for interactive session schemas.
 - Read `skills/shakerscan/references/model-intake.md` before corporate Model Intake admission, Firecracker,
   conversion, or Codex-guided Model Intake operations.
-- Use `$API_BASE/openapi.json` when an API contract may have changed.
+- Use `$API_BASE/openapi.json` when an API contract may have changed (open-source engine only; an
+  Enterprise gateway refuses it, so read `/hunts/contract` and `/scan/contracts` there).
 - Use the public
   `https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md` for the
   exhaustive product map. A source checkout also has it at `docs/functionality-reference.md`.

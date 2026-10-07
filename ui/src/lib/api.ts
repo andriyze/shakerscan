@@ -6530,11 +6530,20 @@ export async function getFindingRetests(id: string, limit: number = 20): Promise
 
 export async function updateFinding(
   id: string,
-  status: string,
+  /** Omitted keeps the stored status (a verdict-only edit). */
+  status: string | undefined,
   notes?: string,
   scanId?: string,
-  analystVerdict?: string
-) {
+  /** Omitted keeps the recorded verdict; null clears it. */
+  analystVerdict?: string | null
+): Promise<{
+  id: string
+  status: string
+  previous_status?: string | null
+  status_changed?: boolean
+  analyst_verdict: string | null
+  analyst_verdict_at?: string | null
+}> {
   const url = scanId
     ? `${API_URL}/findings/${id}?scan_id=${scanId}`
     : `${API_URL}/findings/${id}`

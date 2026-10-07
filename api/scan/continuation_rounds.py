@@ -22,6 +22,7 @@ from .action_plan import (
     ScanAction,
     ScanActionPlan,
     ScanActionPlanCompiler,
+    body_candidate_positions,
     credential_profile_action_refs,
     interactive_auth_input_action_ids,
     request_collection_action_refs,
@@ -43,6 +44,7 @@ from .continuation import (
     reconciled_continuation_ceiling,
 )
 from .manifest_store import PostgresScanManifestStore
+from .verification_extension import plan_verification_extensions
 from .work_manifests import (
     ScanWorkManifest,
     ScanWorkManifestKind,
@@ -132,6 +134,11 @@ def select_continuation_actions(
     selected_ids: set[str] = set()
     append_slots = max(0, _PLAN_ACTION_BOUND - parent_action_count)
     appended_work = 0
+    # The next round resumes a lane after the furthest slice this one appended
+    # (continuation_manifest_offsets), so a lane's appended slices must be a contiguous
+    # prefix. A small trailing slice the residual could fund behind larger skipped ones
+    # moved the offset past them, and those manifest entries were never scheduled.
+    interrupted_lanes: set[str] = set()
     for action in allocated_plan.actions:
         if action.action_id.startswith(_INPUT_ACTION_PREFIXES):
             selected.append(action)
@@ -139,11 +146,15 @@ def select_continuation_actions(
             continue
         if action.action_id == "finalize.report":
             continue
-        if finalize_only or action.admission_status != "planned":
-            continue
-        if any(dependency not in selected_ids for dependency in action.dependencies):
-            continue
-        if appended_work >= append_slots:
+        lane = str(action.capability_args.get("continuation_work_key") or "")
+        if (
+            finalize_only or action.admission_status != "planned"
+            or lane in interrupted_lanes
+            or any(dependency not in selected_ids for dependency in action.dependencies)
+            or appended_work >= append_slots
+        ):
+            if lane:
+                interrupted_lanes.add(lane)
             continue
         selected.append(action)
         selected_ids.add(action.action_id)
@@ -288,6 +299,20 @@ def compile_continuation_round(
         action_id: {}
         for action_id in interactive_auth_input_action_ids(credential_refs)
     }
+    # Admit against what the settled actions actually left, not the worst-case
+    # residual frozen at submission (see reconciled_continuation_ceiling).
+    residual = reconciled_continuation_ceiling(allocation, parent_results)
+    # A verifier slice that a slow target wall-killed with most of its requests unsent
+    # is carried into this round, its holds scaled by the latency it measured.
+    extensions = (
+        plan_verification_extensions(
+            parent_plan=parent_plan,
+            parent_results=parent_results,
+            profile_limits=execution_plan.budget.ledger_limits(),
+            residual=residual,
+        )
+        if revision_number >= 2 and not finalize_only else ()
+    )
     zero_cost_existing_inputs.update({
         f"inputs.collection_{index:02d}": {}
         for index, _item in enumerate(collection_refs)
@@ -328,15 +353,21 @@ def compile_continuation_round(
         # The first continuation satisfies explicit family floors. Later rounds
         # are opportunistic breadth and must stop cleanly when the residual can
         # no longer fund a fast-tier batch.
-        require_family_minimums=revision_number == 1,
+        # A passive Scan already holds the pack's required baseline in its admission
+        # plan; its continuation is breadth over the discovered surface, admitted when the
+        # residual funds it and never a reason to fail the Scan.
+        require_family_minimums=revision_number == 1 and not any(
+            action.required and action.capability_name == "templates.passive_batch"
+            for action in parent_plan.actions[:len(allocation.parent_action_ids)]
+        ),
+        verification_extensions=extensions,
+        # The round's candidates are materialized, so each verifier slice holds the
+        # mutation allowance of the body candidates it actually holds, and none for a
+        # slice of query candidates.
+        body_positions=body_candidate_positions(candidates),
     )
     allocated_plan = allocate_scan_action_plan(
-        continuation_raw,
-        # Admit against what the settled actions actually left, not the
-        # worst-case residual frozen at submission (see reconciled_continuation_ceiling).
-        ContinuationBudgetCeiling(
-            reconciled_continuation_ceiling(allocation, parent_results),
-        ),
+        continuation_raw, ContinuationBudgetCeiling(residual),
     ).plan
     continuation_plan = select_continuation_actions(
         allocated_plan,

@@ -82,6 +82,18 @@ credential references, capability allowlist, request-collection references, and 
 records and no bodies; the planner loads exactly one relevant method through the Hunt-specific read
 tool before binding it. MCP never auto-binds a methodology or changes authority.
 
+Hunt lifecycle tools (`shakerscan_hunt_start`, `_get`, `_finish`, `_cancel`, `_skill_bind`,
+`_skill_unbind`, `_skill_usage`) answer with a compact projection of the Hunt record by default:
+identity, status, budget and use, next action, policy and `policy_adjustments`, each capability's
+name, input fields and budget cost, each bound skill with its `withheld_capabilities` and
+`missing_capabilities`, the last few actions, and counts. `mcp_view.omitted` names what was left
+out (the context pack and any field over 4 KB that cannot be cut down) and `mcp_view.reduced`
+names each field that was cut down and what it kept; a field over 4 KB such as `outcome_summary`
+keeps its counters and its ID lists are cut to their first 20. The full record is 70-150 KB,
+which agents' tool output truncates. `view: "full"` returns the record unchanged, and `shakerscan_hunt_get` with
+`capability: "<name>"` adds that capability's full manifest entry. Neither argument is sent to
+the server.
+
 Before capability execution, the adapter reloads `GET /hunts/{id}`, requires an active or
 awaiting-planner run, finds the capability in that Hunt's returned manifest, and validates input
 against its published schema. The client may provide an `idempotency_key`; if omitted, the adapter
@@ -92,7 +104,26 @@ adapter replays the same key and unchanged input, which the engine answers with 
 current state without starting it again, until the action is final or
 `SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 900, at most 3600) passes; only then does it report
 the unknown outcome and its recovery identity. `shakerscan hunt call` does the same, bounded by
-`SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS`. A definite refusal (4xx) is never replayed.
+`SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS`. The adapter classifies by the HTTP status it received, never
+by the text of the reason. A definite refusal (a 4xx other than 408, 425 and 429) is never replayed
+and reports `outcome: "refused"`: its status and the server's stated reason are in the error message
+the agent reads (`error.data` keeps the body). 408, 425 and 429 mean "not now": they report
+`outcome: "retry_later"` with any `Retry-After` seconds, and the message names the key to call again
+with after waiting.
+
+The capability request may run as long as the server's wall time for it
+(`budget_cost.tool_wall_seconds` in the Hunt manifest) plus a margin, never only the adapter's
+20-second request timeout. MCP clients usually end a request after 60 seconds, so the adapter never outlives it: a
+client that sent a progress token receives progress notifications every 10 seconds while the
+action runs (clients that reset their timeout on progress, such as OpenCode, keep waiting); any
+other client gets an answer within `SHAKERSCAN_MCP_CALL_SECONDS` (default 45, at most 55). The
+engine answers the first request only when the action is done, so that request ends 10 seconds
+before the call's wait does, and a replay of the same key learns the recorded action's state. An
+action still running then is returned as a normal result with `outcome: "running"` and its
+`mcp_idempotency_key`, and the `continue` text names that key: calling the tool again with the same
+key and unchanged input collects the result, because the engine replays the recorded action and
+never runs it twice. When no answer arrives at all, the error message itself names the key to call
+again with.
 The runtime still revalidates target binding, approval, budgets, evidence, and proof contracts.
 Catalog/contract drift, redirects, oversized responses, unavailable APIs, and unexpected dispatch
 results fail closed.

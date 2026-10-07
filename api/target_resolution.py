@@ -40,6 +40,9 @@ except ModuleNotFoundError:  # package-native import layout
 RESOLVES = "resolves"
 NO_ADDRESS = "no_address"
 UNKNOWN = "unknown"
+# A name an overall deadline left unjudged. Like UNKNOWN it says nothing about the name, so it
+# stays scannable, but it is counted apart so a caller can say the names were never checked.
+NOT_CHECKED = "not_checked"
 
 LOOKUP_TIMEOUT_SECONDS = 3.0
 DISCOVERY_CONCURRENCY = 16
@@ -272,14 +275,31 @@ async def classify_hosts(
     lookup: Lookup | None = None,
     concurrency: int = DISCOVERY_CONCURRENCY,
     timeout: float = LOOKUP_TIMEOUT_SECONDS,
+    deadline_seconds: float | None = None,
 ) -> list[tuple[str, str]]:
-    """``(name, status)`` for each distinct name, in input order, at bounded concurrency."""
+    """``(name, status)`` for each distinct name, in input order, at bounded concurrency.
+
+    ``deadline_seconds`` bounds the whole classification, not each lookup: a dead resolver
+    otherwise costs every name its full timeout, about a minute for a full discovery window.
+    Names the deadline leaves unjudged are ``not_checked``.
+    """
     unique = list(dict.fromkeys(_clean_host(name) for name in names if _clean_host(name)))
     gate = asyncio.Semaphore(max(1, int(concurrency)))
+    loop = asyncio.get_running_loop()
+    stop_at = None if deadline_seconds is None else loop.time() + max(0.0, float(deadline_seconds))
 
     async def one(name: str) -> tuple[str, str]:
         async with gate:
-            status, _addresses = await lookup_host(name, lookup=lookup, timeout=timeout)
+            budget = timeout
+            if stop_at is not None:
+                remaining = stop_at - loop.time()
+                if remaining <= 0:
+                    return name, NOT_CHECKED
+                budget = min(timeout, remaining)
+            status, _addresses = await lookup_host(name, lookup=lookup, timeout=budget)
+            if status == UNKNOWN and stop_at is not None and loop.time() >= stop_at:
+                # Cut off by the deadline, not answered by the resolver.
+                return name, NOT_CHECKED
             return name, status
 
     return list(await asyncio.gather(*(one(name) for name in unique)))
@@ -290,6 +310,7 @@ async def plan_discovered_targets(
     *,
     lookup: Lookup | None = None,
     resolve_limit: int = DISCOVERY_RESOLVE_LIMIT,
+    deadline_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Split discovered names into those that can be scanned and those that cannot.
 
@@ -297,14 +318,19 @@ async def plan_discovered_targets(
     is reported rather than inserted. A name the resolver could not judge stays scannable, as
     before: a resolver fault must not silently empty the inventory, and Scan admission still
     explains a name that does not resolve. Runs before a database connection is taken, so a slow
-    resolver never holds one.
+    resolver never holds one. A name an overall deadline left unjudged is treated the same way
+    and listed under ``not_checked``; names beyond ``resolve_limit`` are counted, not resolved.
     """
-    candidates = list(names or [])[: max(0, int(resolve_limit))]
-    classified = await classify_hosts(candidates, lookup=lookup)
+    submitted = list(names or [])
+    candidates = submitted[: max(0, int(resolve_limit))]
+    classified = await classify_hosts(candidates, lookup=lookup, deadline_seconds=deadline_seconds)
     return {
         "scannable": [name for name, status in classified if status != NO_ADDRESS],
         "unresolved": [name for name, status in classified if status == NO_ADDRESS],
         "unknown": [name for name, status in classified if status == UNKNOWN],
+        "not_checked": [name for name, status in classified if status == NOT_CHECKED],
+        "submitted_count": len(submitted),
+        "resolve_limit": max(0, int(resolve_limit)),
     }
 
 

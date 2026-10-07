@@ -255,6 +255,10 @@ function structuredLogWarning(raw, source) {
 // for a code this table does not know.
 const COVERAGE_REASON_LABELS = {
   timed_out: 'A planned step ran out of its time allowance before it finished',
+  http_request_budget_exhausted: 'A planned step used up its HTTP request allowance before it finished',
+  state_changing_budget_exhausted: 'A planned step used up its state-changing request allowance before it finished',
+  process_killed: 'A tool was killed by the system (for example, out of memory) before it finished; what it wrote before that is kept',
+  discovery_truncated: 'Surface discovery was cut short by its budget, so part of the application was never examined',
   cancelled: 'The run was cancelled before all planned work finished',
   budget_exhausted: 'The run exhausted its budget before all planned work finished',
   insufficient_plan_budget: 'Planned steps were skipped because the admitted budget did not reach them',
@@ -265,6 +269,8 @@ const COVERAGE_REASON_LABELS = {
   authentication_uncertain: 'Credential authority could not be confirmed',
   output_truncated: 'A step produced more output than it may keep, so part of its result was cut off',
   source_not_published: 'An optional discovery file (robots.txt or llms.txt) was not published by the target',
+  declared_out_of_scope: "The target's API description declares its routes on another origin (a different host, port or scheme), outside this scan's scope",
+  declared_partly_out_of_scope: "Some routes in the target's API description are declared only on another origin (a different host, port or scheme); the rest were ingested",
   parser_failed: 'A step returned output that could only be partly read',
   parallel_child_incomplete: 'One of the parallel parts of this scan did not finish',
   connection_limit_exceeded: 'A step hit its connection limit before it finished',

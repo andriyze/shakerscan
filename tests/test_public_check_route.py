@@ -82,3 +82,17 @@ def test_real_engine_bundle_validates_requests_like_the_public_service(tmp_path,
     response = TestClient(app).post("/public/check", json={"target": "example.com", "unexpected": True})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_an_image_without_the_engine_says_so_before_validating_the_request(client, monkeypatch):
+    # The MCP adapter probes the route with a non-JSON request and lists the posture-check tool only
+    # on the 415 answer; an image without the engine must not give that answer.
+    probe = {"content": b"", "headers": {"content-type": "text/plain"}}
+    assert client.post("/public/check", **probe).status_code == 415
+    engine = public_check.ENGINE_PATH
+    monkeypatch.setattr(public_check, "ENGINE_PATH", "/nonexistent/instance.cjs")
+    missing = client.post("/public/check", **probe)
+    assert missing.status_code == 503 and missing.json()["error"]["code"] == "service_unavailable"
+    monkeypatch.setattr(public_check, "ENGINE_PATH", engine)
+    monkeypatch.setattr(public_check, "NODE_BINARY", "/nonexistent/node")
+    assert client.post("/public/check", **probe).status_code == 503

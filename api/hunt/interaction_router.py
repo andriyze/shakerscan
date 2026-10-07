@@ -41,6 +41,9 @@ except ModuleNotFoundError:
     from ..runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
+from .candidate_evidence import CandidateEvidenceError, resolve_candidate_evidence
+from .action_replay import execution_started_from_budget, replay_observations
+from .host_accounting import distinct_host_charge
 from .boundary_handoff import compile_candidate_boundary_handoff
 from .boundary_discovery import discover_hunt_boundaries
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
@@ -254,6 +257,12 @@ class HuntQueryRequest(BaseModel):
     cursor: str | None = Field(default=None, max_length=2048)
 
 
+# Recording a candidate sends no target traffic and draws only on the candidate budget. A Hunt
+# stopped because another dimension ran out must still be able to record the leads its gathered
+# evidence supports; completed, cancelled and failed Hunts stay closed.
+CANDIDATE_RECORDING_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
+
+
 class HuntCandidateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     family: str = Field(min_length=1, max_length=80)
@@ -265,13 +274,14 @@ class HuntCandidateRequest(BaseModel):
     verifier_contract_id: Optional[str] = Field(default=None, max_length=160)
 
     @model_validator(mode="after")
-    def validate_boundary_context(self):
-        if "ai_boundary_context" in self.locus:
-            if not isinstance(self.locus["ai_boundary_context"], dict):
-                raise ValueError("ai_boundary_context must be a JSON object")
-            # Use the storage normalizer's bounds; malformed new input receives
-            # a validation response rather than an internal error after mutation.
-            investigation_candidates.canonical_locus(self.locus)
+    def validate_locus(self):
+        if "ai_boundary_context" in self.locus and not isinstance(
+            self.locus["ai_boundary_context"], dict
+        ):
+            raise ValueError("ai_boundary_context must be a JSON object")
+        # Use the storage normalizer's bounds; malformed new input receives
+        # a validation response rather than an internal error after mutation.
+        investigation_candidates.canonical_locus(self.locus)
         return self
 
 
@@ -341,6 +351,9 @@ async def execute_hunt_capability(
     hunt_id: str, capability_name: str, request: HuntCapabilityRequest,
 ):
     name = str(capability_name or "").strip().lower()
+    # State before schema: a call on a finished Hunt is refused for that reason, whatever its
+    # input. Only an idempotent replay of an action the Hunt already recorded stays answerable.
+    await _require_executable_hunt_or_recorded_action(hunt_id, request.idempotency_key)
     try:
         return await HUNT_ACTION_SERVICE.execute(
             name,
@@ -1091,7 +1104,7 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
     async with _pool().acquire() as conn:
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
-            if run["status"] not in {"active", "awaiting_planner"}:
+            if run["status"] not in CANDIDATE_RECORDING_STATUSES:
                 raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
             discovery = await discover_hunt_boundaries(conn, run=dict(run))
             draft = next(
@@ -1113,33 +1126,45 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
             if int(used.get("candidates") or 0) >= int(budget.get("max_candidates") or 0):
                 raise HTTPException(status_code=409, detail="Hunt candidate budget exhausted")
             request = draft["candidate_request"]
-            candidate = investigation_candidates.normalize_candidate(
-                plane="device" if run["device_target_id"] else "web",
-                target_id=str(run["target_id"]) if run["target_id"] else None,
-                device_target_id=str(run["device_target_id"]) if run["device_target_id"] else None,
-                hunt_run_id=str(run["id"]),
-                family=request["family"],
-                locus=request["locus"],
-                title=request["title"],
-                claim=request["claim"],
-                severity=request["severity"],
-                evidence_refs=request["evidence_refs"],
-                source_kind="hunt_boundary_discovery",
-            )
-            result = await investigation_candidates.upsert_candidate(
-                conn,
-                candidate,
-                created_by=f"hunt_boundary_discovery:{hunt_uuid}",
-                observation_context={
-                    "hunt_id": str(hunt_uuid),
-                    "objective": run["objective"],
-                    "discovery_draft_id": draft_id,
-                    "boundary_source_binding": draft["source_binding"],
-                    "evidence_refs_total": draft["evidence_refs_total"],
-                    "provenance_omitted": draft["provenance_omitted"],
-                    "authoritative": False,
-                },
-            )
+            try:
+                candidate = investigation_candidates.normalize_candidate(
+                    plane="device" if run["device_target_id"] else "web",
+                    target_id=str(run["target_id"]) if run["target_id"] else None,
+                    device_target_id=(
+                        str(run["device_target_id"]) if run["device_target_id"] else None
+                    ),
+                    hunt_run_id=str(run["id"]),
+                    family=request["family"],
+                    locus=request["locus"],
+                    title=request["title"],
+                    claim=request["claim"],
+                    severity=request["severity"],
+                    evidence_refs=request["evidence_refs"],
+                    source_kind="hunt_boundary_discovery",
+                )
+            except ValueError as exc:
+                # A draft whose locus cannot be kept whole (an over-long URL) is refused, not
+                # truncated into another candidate's identity.
+                raise HTTPException(status_code=422, detail={
+                    "error": "candidate_locus_invalid", "message": str(exc),
+                }) from exc
+            try:
+                result = await investigation_candidates.upsert_candidate(
+                    conn,
+                    candidate,
+                    created_by=f"hunt_boundary_discovery:{hunt_uuid}",
+                    observation_context={
+                        "hunt_id": str(hunt_uuid),
+                        "objective": run["objective"],
+                        "discovery_draft_id": draft_id,
+                        "boundary_source_binding": draft["source_binding"],
+                        "evidence_refs_total": draft["evidence_refs_total"],
+                        "provenance_omitted": draft["provenance_omitted"],
+                        "authoritative": False,
+                    },
+                )
+            except investigation_candidates.CandidateLifecycleError as exc:
+                raise _candidate_sighting_http_error(exc) from exc
             used["candidates"] = int(used.get("candidates") or 0) + 1
             await conn.execute(
                 "UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1",
@@ -1208,12 +1233,13 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
     async with _pool().acquire() as conn:
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
-            if run["status"] not in {"active", "awaiting_planner"}:
+            if run["status"] not in CANDIDATE_RECORDING_STATUSES:
                 raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
             used = _hunt_json(run["budget_used_json"], {})
             budget = _hunt_json(run["budget_json"], {})
             if int(used.get("candidates") or 0) >= int(budget.get("max_candidates") or 0):
                 raise HTTPException(status_code=409, detail="Hunt candidate budget exhausted")
+            await _require_candidate_evidence(conn, run, request.evidence_refs)
             candidate = investigation_candidates.normalize_candidate(
                 plane="device" if run["device_target_id"] else "web",
                 target_id=str(run["target_id"]) if run["target_id"] else None,
@@ -1223,13 +1249,39 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
                 evidence_refs=request.evidence_refs, verifier_contract_id=request.verifier_contract_id,
                 source_kind="hunt_v2",
             )
-            result = await investigation_candidates.upsert_candidate(
-                conn, candidate, created_by=f"hunt_v2:{hunt_id}",
-                observation_context={"hunt_id": hunt_id, "objective": run["objective"]},
-            )
+            try:
+                result = await investigation_candidates.upsert_candidate(
+                    conn, candidate, created_by=f"hunt_v2:{hunt_id}",
+                    observation_context={"hunt_id": hunt_id, "objective": run["objective"]},
+                )
+            except investigation_candidates.CandidateLifecycleError as exc:
+                raise _candidate_sighting_http_error(exc) from exc
             used["candidates"] = int(used.get("candidates") or 0) + 1
             await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
     return {"hunt_id": hunt_id, "candidate": result, "authoritative": False, "verified": False}
+
+
+async def _require_candidate_evidence(conn: Any, run: Any, references: list[str] | None) -> None:
+    """Refuse a candidate whose evidence is not this Hunt's (see candidate_evidence)."""
+    if references is None:
+        return
+    try:
+        await resolve_candidate_evidence(conn, run=dict(run), references=list(references))
+    except CandidateEvidenceError as exc:
+        raise HTTPException(status_code=422, detail={
+            "error": exc.code,
+            "message": str(exc),
+            "unresolved_evidence_refs": exc.references,
+            "unsettled_evidence_refs": exc.unsettled,
+        }) from exc
+
+
+def _candidate_sighting_http_error(
+    exc: investigation_candidates.CandidateLifecycleError,
+) -> HTTPException:
+    """A recorded sighting that would change an in-flight row or truncate its evidence."""
+    status = 422 if exc.code == "candidate_evidence_limit" else 409
+    return HTTPException(status_code=status, detail={"error": exc.code, "message": str(exc)})
 
 
 def _candidate_lifecycle_http_error(
@@ -1260,7 +1312,8 @@ async def update_hunt_candidate(
     try:
         async with _pool().acquire() as conn:
             async with conn.transaction():
-                await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                run = await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                await _require_candidate_evidence(conn, run, request.evidence_refs)
                 result = await investigation_candidates.update_candidate_for_hunt(
                     conn,
                     hunt_run_id=str(hunt_uuid),
@@ -1443,6 +1496,20 @@ async def _hunt_confirmed_shell_dispatch(
     }
 
 
+async def _require_executable_hunt_or_recorded_action(hunt_id: str, idempotency_key: str) -> None:
+    async with _pool().acquire() as conn:
+        run = await _hunt_run_or_404(conn, hunt_id)
+        if run["status"] in {"active", "awaiting_planner"}:
+            return
+        recorded = await conn.fetchrow(
+            "SELECT id FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2",
+            uuid.uuid5(uuid.UUID(str(run["id"])), f"hunt-capability:{idempotency_key}"),
+            run["id"],
+        )
+    if recorded is None:
+        raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
+
+
 def _hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
     return {
         "agent_actions": int(budget.get("max_capability_calls") or 0),
@@ -1566,6 +1633,10 @@ async def _execute_hunt_capability_lifecycle(
                     existing_action["result_summary"], {}
                 )
                 existing_status = str(existing_action["status"])
+                replayed_observations = await replay_observations(
+                    conn, hunt_id=run["id"], action_id=action_id,
+                    receipt_id=existing_action["receipt_id"], summary=existing_summary,
+                )
                 lifecycle.mark_replayed()
                 return {
                     "hunt_id": hunt_id,
@@ -1585,11 +1656,7 @@ async def _execute_hunt_capability_lifecycle(
                             if existing_status == "completed"
                             else existing_status
                         ),
-                        observations=tuple(
-                            dict(item)
-                            for item in existing_summary.get("observations") or ()
-                            if isinstance(item, Mapping)
-                        ),
+                        observations=replayed_observations,
                         errors=(
                             (str(existing_summary.get("error")),)
                             if existing_summary.get("error")
@@ -1600,6 +1667,9 @@ async def _execute_hunt_capability_lifecycle(
                         ),
                         partial=bool(existing_summary.get("partial")),
                         timed_out=bool(existing_summary.get("timed_out")),
+                        execution_started=execution_started_from_budget(
+                            existing_summary.get("budget_consumed")
+                        ),
                         parser_version=str(spec.output_schema),
                     ).public_dict(),
                     "result": existing_summary,
@@ -1856,10 +1926,10 @@ async def _execute_hunt_capability_lifecycle(
                     )
                 except (CapabilityInputError, ValueError) as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
-                charges = {
+                charges = distinct_host_charge(context, prepared_network, {
                     key: int(value) for key, value in prepared_network.estimated_budget.items()
                     if key in limits
-                }
+                })
             elif is_browser:
                 authority_context = _hunt_json(run["context_pack"], {})
                 target_context = (

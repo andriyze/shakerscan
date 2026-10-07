@@ -226,6 +226,7 @@ from scan.action_plan import (
 )
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.activity import scan_action_activity_event, scan_action_diagnostic_line
+from scan.subdomain_targets import load_recorded_scan_report, record_ingested_report_subdomains
 from scan.action_store import PostgresScanActionStore
 from scan.operational_metrics import record_operational_event
 from scan.budget_allocator import (
@@ -4123,7 +4124,7 @@ async def correlate_device_advisory_lifecycle(
                     family="device_firmware_advisory",
                     locus={
                         "transport": service.get("transport"),
-                        "port": service.get("port"),
+                        "port": service.get("port") or None,  # package identities report 0
                         "service_name": service.get("service_name"),
                         "advisory_id": advisory_id,
                         "cpe": cpe,
@@ -4151,7 +4152,7 @@ async def correlate_device_advisory_lifecycle(
                 }
                 candidate_record = await investigation_candidates.upsert_candidate(
                     conn, candidate, created_by="device_advisory_correlation",
-                    observation_context=advisory_context,
+                    observation_context=advisory_context, strict=False, refresh_same_source=True,
                 )
                 current_candidate_ids.add(uuid.UUID(candidate_record["id"]))
                 summary["candidates"] += 1
@@ -11655,23 +11656,11 @@ async def _execute_reserved_deterministic_scan(
         raise ScanCapabilityContractError(
             "canonical Scan finalization produced no report manifest"
         )
-    async with db_pool.acquire() as conn:
-        final_observations = await PostgresObservationManifestStore().load(
-            conn,
-            reference=final_result.observation_manifest_ref,
-            scan_id=scan_id,
-            action_id="finalize.report",
-        )
-    if (
-        not final_observations
-        or final_observations[0].get("kind") != "scan_report"
-        or not isinstance(final_observations[0].get("report"), Mapping)
-    ):
-        raise ScanCapabilityContractError(
-            "canonical Scan report observation is invalid"
-        )
-    report = dict(final_observations[0]["report"])
-    return report
+    return await load_recorded_scan_report(
+        db_pool, PostgresObservationManifestStore(), final_result, scan_id=scan_id,
+        root_domains=execution.target_binding.allowed_root_domains,
+        invalid_error=ScanCapabilityContractError,
+    )
 
 
 async def _execute_scan_subdomain_discovery(
@@ -13375,6 +13364,7 @@ async def process_scan_job(job_data: dict):
         try:
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
+                await record_ingested_report_subdomains(db_pool, result, scan_id=scan_id, options=options)
             else:
                 if device_target_id:
                     from devices.network_authorization import revalidate_network_authorization
@@ -16210,6 +16200,7 @@ async def process_scan_shard_job(job_data: dict):
         try:
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
+                await record_ingested_report_subdomains(db_pool, result, scan_id=scan_id, options=options)
             else:
                 options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
@@ -18831,7 +18822,7 @@ async def _execute_agent_scanner_process(
         read_streams = asyncio.create_task(
             _read_agent_tool_streams(
                 proc,
-                max_bytes=agent_tools.agent_tool_output_bytes(reserved_budget, floor=_AGENT_TOOL_OUTPUT_BYTES),
+                max_bytes=agent_tools.agent_tool_output_bytes(reserved_budget, floor=_AGENT_TOOL_OUTPUT_BYTES, tool=name),
                 overflow=overflow,
             )
         )
@@ -19024,12 +19015,12 @@ async def _execute_agent_scanner_process(
     return {
         "job_id": job_id,
         "status": status,
-        "error": error,
+        "error": agent_tools.scanner_truncation_error(error, typed_output),
         "returncode": returncode,
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "elapsed_seconds": max(0, int(time.monotonic() - monotonic_started + 0.999)),
-        "partial": (status == "timeout" and record_count > 0) or abnormal_exit or error == "output_truncated",
+        "partial": (status == "timeout" or error == "connection_limit_exceeded") and record_count > 0 or abnormal_exit or agent_tools.scanner_truncation_error(error, typed_output) == "output_truncated",
         "timed_out": status == "timeout",
         "output_lines": safe_lines,
         "line_count": record_count,
@@ -19915,6 +19906,7 @@ def _worker_terminal_network_result(
 
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
+from hunt.host_accounting import bound_distinct_hosts, record_attempted_hosts
 
 
 async def _revalidate_hunt_action_authority(
@@ -20654,8 +20646,8 @@ async def process_canonical_scanner_capability_job(
                     capability_input, observations, target_kind=target.target_kind,
                     allowed_origins=target.allowed_origins,
                 )
-                from hunt.endpoint_knowledge import enrich_crawl_endpoints
-                await enrich_crawl_endpoints(conn, target=target, origin=execution_target,
+                from hunt.endpoint_knowledge import record_discovered_endpoints
+                await record_discovered_endpoints(conn, target=target, origin=execution_target,
                     capability=capability_name, input=capability_input, records=observations)
                 persisted = await store.persist_terminal(
                     conn,
@@ -21408,6 +21400,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                 ).requires_active_approval:
                     requested_budget["active_actions"] = 1
                 reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
+                requested_budget, prepared, attempted_hosts = bound_distinct_hosts(requested_budget, prepared, stored.record.requested, context)
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
                     action_id=action_id,
@@ -21619,6 +21612,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     hunt_id,
                     json.dumps(current_used),
                 )
+                await record_attempted_hosts(conn, hunt_id=hunt_id, run=locked, hosts=attempted_hosts, reserved=latest.record.requested, actual=terminal.actual)
                 action_result = {
                     "status": status,
                     "ok": status == "success",

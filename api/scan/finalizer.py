@@ -13,6 +13,7 @@ from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
+from .verification_extension import superseding_results
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
@@ -75,6 +76,18 @@ _EXPECTED_SECURITY_HEADERS: tuple[str, ...] = (
     "x-content-type-options",
     "x-frame-options",
 )
+# The posture headers every baseline response records whether present or not (the HTTP
+# capability's _SECURITY_POSTURE_HEADERS; a test pins the two together). Only for these does an
+# absent key prove the response lacked the header.
+_BASELINE_RECORDED_HEADERS: frozenset[str] = frozenset({
+    "strict-transport-security", "content-security-policy",
+    "content-security-policy-report-only", "x-frame-options", "x-content-type-options",
+    "referrer-policy", "permissions-policy", "cross-origin-opener-policy",
+    "cross-origin-embedder-policy", "cross-origin-resource-policy",
+    "access-control-allow-origin", "access-control-allow-credentials", "server", "x-powered-by",
+})
+# Hosts listed in the report's subdomain section; the discovery capability itself is bounded.
+_REPORTED_SUBDOMAIN_LIMIT = 1_000
 _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
     "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
@@ -109,6 +122,23 @@ _PROOF_CAPABILITIES = frozenset({
     "xss.browser_prove_batch",
     "sqli.prove_batch",
 })
+# Optional surface discovery feeds every later stage. When its own budget cut it short --
+# its output allowance, request ceiling or wall, or the plan could not fund it at all --
+# part of the application was never examined, so the Scan's coverage is not complete even
+# though no required action failed. A crawl that spent 1,500 of 1,500 requests in 21 of
+# 300 seconds and stopped `output_truncated` still reported `coverage: complete`.
+_SURFACE_DISCOVERY_CAPABILITIES = frozenset({
+    "web.crawl", "web.browser_crawl", "web.content_discover", "web.spec_ingest",
+})
+_DISCOVERY_TRUNCATION_REASONS = frozenset({
+    "output_truncated",
+    "timed_out",
+    "http_request_budget_exhausted",
+    "insufficient_plan_budget",
+    "crawler_memory_bound_exceeded",
+    # Killed mid-crawl by a signal (the kernel's OOM killer): cut short like the bound.
+    "process_killed",
+})
 _FAMILY_BY_CAPABILITY = {
     "xss.verify_batch": "xss",
     "xss.request_verify_batch": "xss",
@@ -127,6 +157,22 @@ _FAMILY_BY_CAPABILITY = {
 
 class ScanFinalizationError(ValueError):
     """Terminal receipts are incomplete or inconsistent with the Scan plan."""
+
+
+# The manifest a batch slice indexes, in the order a slice's capability reads them.
+_SLICE_MANIFEST_ARGS = (
+    "request_candidate_manifest_ref", "candidate_manifest_ref",
+    "target_manifest_ref", "endpoint_manifest_ref",
+)
+
+
+def _manifest_lane(action: Any) -> tuple[str, str]:
+    """One worklist: the capability and the digest of the manifest its slices index."""
+    for name in _SLICE_MANIFEST_ARGS:
+        reference = action.capability_args.get(name)
+        if isinstance(reference, Mapping) and reference.get("manifest_digest"):
+            return action.capability_name, str(reference["manifest_digest"])
+    return action.capability_name, ""
 
 
 def _receipt(result: CapabilityResultReference) -> dict[str, Any]:
@@ -240,6 +286,77 @@ def _header_template_title(item: Mapping[str, Any]) -> tuple[str, str | None]:
         display = "-".join(part.capitalize() for part in matcher.split("-"))
         return f"Missing HTTP response header: {display}", matcher
     return str(item.get("name") or item.get("template_id") or "Template match")[:300], None
+
+
+def _baseline_header_responses(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    """The scan's own baseline response per origin: request line, status and response headers.
+
+    Nuclei runs its passive templates with ``-omit-raw`` (the full request/response of every
+    matcher result overflows the worker's output ceiling), so a missing-header match carries no
+    exchange of its own. The baseline request to the same origin is the scan's recorded
+    observation of that origin's response headers, and is what such a finding is evidence of.
+    """
+    responses: dict[str, dict[str, Any]] = {}
+    for row in observations.get("baseline.http", ()) or ():
+        if not isinstance(row, Mapping) or row.get("kind") != "http_observation":
+            continue
+        request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
+        response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+        status = response.get("status")
+        origin = _http_origin(request.get("origin"))
+        if (
+            type(status) is not int or not origin or origin in responses
+            or not isinstance(response.get("security_headers"), Mapping)
+        ):
+            continue
+        headers: dict[str, str] = {}
+        for source in (response.get("selected_headers"), response.get("security_headers")):
+            if isinstance(source, Mapping):
+                headers.update({
+                    str(name).lower()[:120]: str(value)[:2_000] for name, value in source.items()
+                })
+        method = str(request.get("method") or "GET").upper()[:16]
+        path = str(request.get("path") or "/")[:2_000]
+        responses[origin] = {
+            "request_line": f"{method} {origin}{path if path.startswith('/') else '/' + path}",
+            "response_status": status,
+            "observed_headers": dict(sorted(headers.items())),
+            "source_action_id": "baseline.http",
+        }
+    return responses
+
+
+def _attach_observed_header_responses(
+    findings: Sequence[dict[str, Any]],
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> None:
+    """Give each missing-header finding the recorded response that lacks the header.
+
+    Attached only where the baseline response proves the finding: the header is one the
+    baseline always records, and it is absent. A header present on the baseline but missing on
+    another page keeps the matched URLs as its evidence rather than a response that contradicts
+    it, and a header the baseline does not record is never claimed absent from it.
+    """
+    responses = _baseline_header_responses(observations)
+    if not responses:
+        return
+    for finding in findings:
+        evidence = finding.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        header = str(evidence.get("header_name") or "").lower()
+        if evidence.get("template_id") != "http-missing-security-headers" or not header:
+            continue
+        observed = responses.get(_http_origin(finding.get("url")) or "")
+        if (
+            observed is None
+            or header not in _BASELINE_RECORDED_HEADERS
+            or header in observed["observed_headers"]
+        ):
+            continue
+        evidence["observed_response"] = {**observed, "header_absent": header}
 
 
 def canonical_authz_findings(
@@ -1182,6 +1299,8 @@ def _posture_sections(
     server_versions: dict[str, Any] = {}
     seen_tech: set[str] = set()
     infrastructure_observation: dict[str, Any] = {}
+    subdomain_hosts: dict[str, str] = {}
+    subdomain_seen: set[str] = set()
 
     for action_id, rows in observations.items():
         for row in rows or ():
@@ -1290,6 +1409,12 @@ def _posture_sections(
                     tls_section = candidate
             elif kind == "dns_posture":
                 dns_section = _dns_section(row)
+            elif kind == "subdomain":
+                host = str(row.get("host") or "").lower().rstrip(".")
+                if host:
+                    subdomain_seen.add(host)
+                if host and len(subdomain_hosts) < _REPORTED_SUBDOMAIN_LIMIT:
+                    subdomain_hosts.setdefault(host, str(row.get("root_domain") or ""))
             elif kind == "infrastructure_intelligence":
                 infrastructure_observation = dict(row)
             elif kind == "http_fingerprint":
@@ -1383,12 +1508,29 @@ def _posture_sections(
             "limitations": list(infrastructure_observation.get("limitations") or ()),
             "errors": list(infrastructure_observation.get("errors") or ()),
         }
-    if technologies or server_versions:
+    if technologies or server_versions or subdomain_hosts:
         discovery: dict[str, Any] = {}
         if technologies:
             discovery["tech"] = {"items": technologies}
         if server_versions:
             discovery["server_versions"] = server_versions
+        if subdomain_hosts:
+            # The scan's own subdomain discovery used to stop at the endpoint manifest: the
+            # action said success while no report section or target named a single host.
+            # Listing them here is what the worker records as targets afterwards.
+            roots = sorted({root for root in subdomain_hosts.values() if root})
+            discovery["subdomains"] = {
+                "root_domain": roots[0] if len(roots) == 1 else None,
+                "hosts": sorted(subdomain_hosts),
+                # `count` is how many are listed; `total` how many distinct names discovery
+                # returned. A list cut at the limit says so instead of reading as complete.
+                "count": len(subdomain_hosts),
+                "total": len(subdomain_seen),
+                "truncated": len(subdomain_seen) > len(subdomain_hosts),
+                "listed_limit": _REPORTED_SUBDOMAIN_LIMIT,
+                "source": "subfinder",
+                "scope": "discovered_names_not_scanned_by_this_scan",
+            }
         sections["discovery"] = discovery
     return sections
 
@@ -1512,6 +1654,10 @@ def finalize_scan_report(
         raise ScanFinalizationError(
             "finalization requires every pre-finalization action result"
         )
+    # A verifier slice carried into a later round (see verification_extension) is
+    # covered by its extension: the extension's outcome decides the slice's coverage,
+    # while both actions' spend and evidence stay on the record.
+    superseded = superseding_results(expected_actions, action_results)
     findings_by_id: dict[str, dict[str, Any]] = {}
     action_rows: list[dict[str, Any]] = []
     runtime_destinations: list[dict[str, Any]] = []
@@ -1584,6 +1730,7 @@ def finalize_scan_report(
             "budget_consumed": dict(result.budget_consumed),
         })
     findings = list(findings_by_id.values())
+    _attach_observed_header_responses(findings, observations)
 
     # Family-aware coverage: every selected family (one that produced a batch or
     # verifier action) is reported with attempts, findings, budget, and a status.
@@ -1637,7 +1784,10 @@ def finalize_scan_report(
             },
         })
         row["required"] = row["required"] or bool(action.required)
-        if action.capability_name in _PROOF_CAPABILITIES:
+        if action.action_id in superseded:
+            # Its extension re-plans the same slice and is counted instead.
+            pass
+        elif action.capability_name in _PROOF_CAPABILITIES:
             # Escalation over candidates the verifier already counted: record it
             # separately so it can neither double-count nor fail its family.
             proof = row["proof_escalation"]
@@ -1653,13 +1803,17 @@ def finalize_scan_report(
             row["_statuses"].append(result.status.value)
             row["_reasons"].append(result.reason_code.value if result.reason_code is not None else "")
             declared = action.capability_args.get("manifest_entries")
+            # Every slice of one worklist declares the same manifest size. A passive Scan
+            # runs the pack over two worklists -- the admitted surface and the discovered
+            # one -- and counting the admission slice against the discovered manifest let
+            # it cancel out an unscheduled discovered route.
+            lane = _manifest_lane(action)
             if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
-                # Every slice of one capability declares the same manifest size.
-                row["_manifest_entries"][action.capability_name] = max(
-                    int(row["_manifest_entries"].get(action.capability_name, 0)), declared,
+                row["_manifest_entries"][lane] = max(
+                    int(row["_manifest_entries"].get(lane, 0)), declared,
                 )
-            row["_scheduled_entries"][action.capability_name] = (
-                int(row["_scheduled_entries"].get(action.capability_name, 0)) + planned
+            row["_scheduled_entries"][lane] = (
+                int(row["_scheduled_entries"].get(lane, 0)) + planned
             )
         # Budget is real spend either way and stays aggregated for the family.
         for name, amount in result.budget_reserved.items():
@@ -1726,8 +1880,8 @@ def finalize_scan_report(
         scheduled_entries = row.pop("_scheduled_entries", {}) or {}
         row["manifest_candidates"] = sum(int(value) for value in manifest_entries.values())
         row["unscheduled_candidates"] = sum(
-            max(0, int(total) - int(scheduled_entries.get(capability, 0)))
-            for capability, total in manifest_entries.items()
+            max(0, int(total) - int(scheduled_entries.get(lane, 0)))
+            for lane, total in manifest_entries.items()
         )
         action_incomplete = any(status != "success" for status in statuses)
         zero_attempts = (
@@ -1780,7 +1934,7 @@ def finalize_scan_report(
         if action.capability_name not in _INFORMATIONAL_CAPABILITIES
     ]
     required_rows = [
-        (action, action_results[action.action_id])
+        (action, superseded.get(action.action_id, action_results[action.action_id]))
         for action in coverage_actions if action.required
     ]
     # Skipped as not applicable is a settled "nothing to do", not degraded
@@ -1900,6 +2054,15 @@ def finalize_scan_report(
         if isinstance(explicit_http_status, int)
         else "unknown"
     )
+    truncated_discovery = sorted(
+        action.action_id
+        for action in coverage_actions
+        if not action.required
+        and action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
+        and action_results[action.action_id].status is not CapabilityResultStatus.SUCCESS
+        and action_results[action.action_id].reason_code is not None
+        and action_results[action.action_id].reason_code.value in _DISCOVERY_TRUNCATION_REASONS
+    )
     reliability_reasons = sorted({
         (
             result.reason_code.value
@@ -1908,6 +2071,7 @@ def finalize_scan_report(
         )
         for _action, result in required_incomplete
     } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
+      | ({"discovery_truncated"} if truncated_discovery else set())
       | ({"placement_unavailable"} if placement_gaps else set())
       | ({"selected_family_incomplete"} if selected_family_gaps else set())
       | ({"unproven_critical_high"} if unproven_critical_high else set())
@@ -1917,6 +2081,7 @@ def finalize_scan_report(
     coverage_reasons = sorted(
         set(reasons)
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
+        | ({"discovery_truncated"} if truncated_discovery else set())
         | ({"placement_unavailable"} if placement_gaps else set())
         | ({"bound_origin_redirects_off_origin"}
            if application_forwarded_off_origin else set())
@@ -1991,7 +2156,7 @@ def finalize_scan_report(
     candidate_coverage: dict[str, dict[str, Any]] = {}
     for action in expected_actions:
         family = batch_families.get(action.capability_name)
-        if family is None:
+        if family is None or action.action_id in superseded:
             continue
         raw_slice = action.capability_args.get("slice")
         planned = (
@@ -2033,7 +2198,7 @@ def finalize_scan_report(
         )
         if row["unattempted_candidates"] or row["incomplete_candidates"]:
             row["status"] = "partial"
-    if zero_attempt_actions and coverage_status == "complete":
+    if (zero_attempt_actions or truncated_discovery) and coverage_status == "complete":
         coverage_status = "partial"
     verified = sum(1 for item in findings if item.get("verified") is True)
     suspected = sum(1 for item in findings if item.get("suspected") is True)
@@ -2050,6 +2215,7 @@ def finalize_scan_report(
             "reasons": reliability_reasons,
         },
         "optional_gaps": optional_gaps,
+        "truncated_discovery_actions": truncated_discovery,
         "active_zero_attempt_actions": zero_attempt_actions,
         "candidate_coverage": candidate_coverage,
         "family_coverage": sorted(

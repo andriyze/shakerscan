@@ -74,10 +74,15 @@ _DIAGNOSTIC_ERROR_CLASSES = frozenset({
     "timed_out", "timeout", "connection_limit_exceeded",
     "external_process_contract", "scanner_not_available",
     "cancelled_before_execution", "output_limit_exceeded", "output_truncated",
-    "crawler_memory_bound_exceeded", "source_not_published",
+    "crawler_memory_bound_exceeded", "source_not_published", "declared_out_of_scope",
+    "declared_partly_out_of_scope",
     # A bound HTTP request that never got a response, by cause: a certificate the client
     # would not trust is a different finding from a port nobody answers on.
     "tls_certificate_untrusted", "request_error",
+    # The dimension that stopped a batch, a tool killed by a signal the worker did not
+    # send, and cancellation are stated reasons, not unclassified adapter errors.
+    "http_request_budget_exhausted", "state_changing_budget_exhausted",
+    "process_killed", "cancelled",
 })
 # Labels a batch prepends to say *that* it failed rather than *why*. They are honest answers
 # only when nothing more specific follows, so the scan must look past them.

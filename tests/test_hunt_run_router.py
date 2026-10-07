@@ -373,7 +373,7 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
         async def fetch(self, query, *args):
             if "FROM hunt_skill_events" in query:
                 return []
-            if "FROM findings" in query:
+            if "FROM findings" in query or "FROM investigation_candidates" in query:
                 return []
             assert "FROM hunt_actions WHERE hunt_run_id=$1" in query
             assert args == (uuid.UUID(hunt_id),)
@@ -409,6 +409,8 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
         "finding_count": 0,
         "finding_ids_truncated": False,
         "candidate_ids": [],
+        "candidate_count": 0,
+        "candidate_ids_truncated": False,
         "evidence_ids": [],
     }
 

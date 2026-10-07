@@ -465,6 +465,44 @@ async def test_server_owned_prepare_reports_evidence_beyond_the_candidate_bound(
 
 
 @pytest.mark.asyncio
+async def test_prepare_refuses_a_draft_whose_locus_cannot_be_kept_whole(monkeypatch):
+    draft = build_boundary_discovery(run=RUN, rows=rows())["drafts"][0]
+    request = draft["candidate_request"]
+    draft = {**draft, "candidate_request": {
+        **request, "locus": {**request["locus"], "url": "https://app.test/" + "a" * 1100},
+    }}
+
+    class PreparedStore:
+        @asynccontextmanager
+        async def acquire(self):
+            yield self
+        @asynccontextmanager
+        async def transaction(self, **_kwargs):
+            yield self
+        async def execute(self, query, *args):
+            raise AssertionError("a refused draft must not be stored or charged")
+
+    async def lookup(_conn, _hunt_id, for_update=False):
+        return {**RUN, "status": "active", "objective": "o",
+                "budget_used_json": {"candidates": 0}, "budget_json": {"max_candidates": 4}}
+
+    async def discovery(_conn, *, run):
+        return {"drafts": [draft]}
+
+    async def upsert_candidate(*_args, **_kwargs):
+        raise AssertionError("a refused draft must not be stored")
+
+    monkeypatch.setattr(router, "_pool", lambda: PreparedStore())
+    monkeypatch.setattr(router, "_hunt_run_or_404", lookup)
+    monkeypatch.setattr(router, "discover_hunt_boundaries", discovery)
+    monkeypatch.setattr(router.investigation_candidates, "upsert_candidate", upsert_candidate)
+    with pytest.raises(router.HTTPException) as exc:
+        await router.prepare_hunt_boundary_discovery(RUN["id"], draft["draft_id"])
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "candidate_locus_invalid"
+
+
+@pytest.mark.asyncio
 async def test_server_owned_prepare_rejects_stale_or_missing_draft(monkeypatch):
     class PreparedStore:
         @asynccontextmanager
