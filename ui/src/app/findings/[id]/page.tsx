@@ -389,8 +389,10 @@ function FindingDetailContent() {
     if (!finding || statusUpdating) return
     try {
       setStatusUpdating(true)
+      // A verdict edit sends no notes: re-sending the finding's notes overwrote the verdict's own
+      // (an automated retest's reason included) with them.
       const stored = await updateFinding(
-        finding.id, statusForVerdict(finding.status, verdict), finding.notes, finding.scan_id, verdict,
+        finding.id, statusForVerdict(finding.status, verdict), undefined, finding.scan_id, verdict,
       )
       await fetchFinding()
       toast.success(verdictChangeMessage(stored))

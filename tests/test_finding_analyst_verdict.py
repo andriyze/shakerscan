@@ -161,12 +161,44 @@ def test_a_verdict_is_recorded_kept_and_cleared_on_the_real_schema():
         assert stored["analyst_verdict"] == "true_positive"
         assert response["analyst_verdict"] == "true_positive"
 
-        # An explicit null clears the verdict, its time and its notes, and says so.
+        # An explicit null clears the verdict and its time, keeps its notes, and says so.
         response, stored = await _patch(conn, {"status": "resolved", "analyst_verdict": None})
         assert stored["analyst_verdict"] is None
         assert stored["analyst_verdict_at"] is None
-        assert stored["analyst_verdict_notes"] is None
+        assert stored["analyst_verdict_notes"] == "confirmed"
         assert response["analyst_verdict"] is None and response["analyst_verdict_at"] is None
         assert response["status"] == "resolved" and response["status_changed"] is False
+
+    _with_database(scenario)
+
+
+AUTO_FP_NOTE = (
+    "Auto-set false positive by retest 9f1c (mode=deterministic, confidence=0.97). "
+    "Reversible by an analyst."
+)
+
+
+@postgres
+def test_clearing_a_verdict_keeps_the_note_that_says_why_it_was_set():
+    """A retest that auto-closes a finding records why only in the verdict notes. Clearing the
+    verdict used to erase that note while the finding stayed a false positive."""
+    async def scenario(conn):
+        await conn.execute(
+            """UPDATE findings SET analyst_verdict = 'false_positive', analyst_verdict_at = NOW(),
+                   analyst_verdict_notes = $2 WHERE id = $1""",
+            FINDING, AUTO_FP_NOTE,
+        )
+        response, stored = await _patch(
+            conn, {"status": "false_positive", "analyst_verdict": None},
+        )
+        assert stored["analyst_verdict"] is None and stored["analyst_verdict_at"] is None
+        assert stored["analyst_verdict_notes"] == AUTO_FP_NOTE
+        assert stored["status"] == "false_positive"
+
+        # Notes sent with the clear are the analyst's account and replace it.
+        _response, stored = await _patch(
+            conn, {"status": "false_positive", "analyst_verdict": None, "notes": "checked by hand"},
+        )
+        assert stored["analyst_verdict_notes"] == "checked by hand"
 
     _with_database(scenario)
