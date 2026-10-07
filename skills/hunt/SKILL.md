@@ -233,8 +233,8 @@ proposal, with its `source_binding` unchanged, to the operator. AI Boundary veri
 operator-only `/ai/targets/...` routes; a Hunt planner, including one using a planner lease, does
 not call them and must not describe the candidate as verified until that step reports. Verification
 refuses a discovery proposal whose binding is missing, altered or superseded; re-prepare and
-recompile instead. Discovery drafts and action leads are not authority or proof and never authorize
-a state-changing follow-up on their own.
+recompile instead. Discovery drafts and action leads are not authority or proof and
+never authorize a state-changing follow-up on their own.
 
 Correct a candidate with `PATCH /hunts/{hunt_id}/candidates/{candidate_id}` when its title, claim,
 severity, evidence references, or verifier contract needs revision. Delete a mistaken, duplicate,
