@@ -1704,7 +1704,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 399 | Python sources + Compose manifests |
+| Runtime environment keys | 400 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 126 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2831,6 +2831,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MCP_ALLOW_REMOTE_API` | `scripts/shakerscan_mcp.py` |
+| `SHAKERSCAN_MCP_CALL_SECONDS` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MODEL_INTAKE_ADAPTER_SELF_TEST` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_MODEL_INTAKE_RUNTIME_LOCK` | `scanner/scanner_tools/model_intake_scanners.py` |

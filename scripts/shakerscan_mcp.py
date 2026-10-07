@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +30,11 @@ from typing import Any, BinaryIO, Mapping
 
 SERVER_NAME = "shakerscan"
 _SSH_PROGRESS = ContextVar('ssh_progress',default=None)
+# Set for one tools/call when the client sent a progress token: progress keeps such a client
+# (OpenCode, the MCP SDK with resetTimeoutOnProgress) waiting past its request timeout.
+_KEEPALIVE = ContextVar("mcp_keepalive", default=None)
+# A per-request timeout override for the capability POST, sized from the server's wall time.
+_REQUEST_TIMEOUT = ContextVar("mcp_request_timeout", default=None)
 PUBLIC_API_URL = "https://pub.shakerscan.com"
 
 
@@ -51,6 +59,20 @@ DEFAULT_TIMEOUT_SECONDS = 20.0
 # settled by replaying until the action is no longer in flight, within this bound.
 DEFAULT_ACTION_WAIT_SECONDS = 900.0
 ACTION_POLL_SECONDS = 5.0
+# MCP clients commonly end a request after 60 s (the MCP SDK default; OpenCode; Codex). A client
+# that sent no progress token cannot be kept waiting, so its call returns outcome "running" with
+# the idempotency key before then. A client that sent one gets progress every HEARTBEAT_SECONDS.
+DEFAULT_CALL_SECONDS = 45.0
+MAX_CALL_SECONDS = 55.0
+HEARTBEAT_SECONDS = 10.0
+# The capability POST may run as long as the server's own wall time for it, plus this margin.
+CAPABILITY_TIMEOUT_MARGIN_SECONDS = 15
+MAX_CAPABILITY_REQUEST_SECONDS = 900.0
+RUNNING_CONTINUE = (
+    "The action is still running on the server. Call shakerscan_hunt_capability again with the same "
+    "hunt_id, capability_name, input and the same idempotency_key (mcp_idempotency_key) to collect "
+    "its result; the server replays the recorded action and never runs it twice. Do not use a new key."
+)
 IN_FLIGHT_ACTION_STATUSES = frozenset({"requested", "reserved", "queued", "running"})
 MAX_REQUEST_BYTES = 256_000
 MAX_RESPONSE_BYTES = 2_000_000
@@ -392,7 +414,10 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
     ),
     HuntMCPTool(
         "shakerscan_hunt_capability", "POST", "/hunts/{hunt_id}/capabilities/{capability_name}",
-        "Execute one capability from the Hunt's server-returned manifest.",
+        "Execute one capability from the Hunt's server-returned manifest. A long capability "
+        "(content discovery, port discovery) may answer outcome=running with mcp_idempotency_key: "
+        "call again with the same idempotency_key and unchanged input to collect the result; the "
+        "server replays the recorded action and never runs it twice.",
         {
             "hunt_id": {"type": "string", "format": "uuid"},
             "capability_name": {
@@ -681,6 +706,40 @@ def _in_flight(result: Mapping[str, Any]) -> bool:
     return status in IN_FLIGHT_ACTION_STATUSES
 
 
+def _capability_wall_seconds(capability: Mapping[str, Any], capability_input: Mapping[str, Any]) -> float:
+    """The server's wall time for one capability call: the manifest's ``tool_wall_seconds``, or
+    a larger ``timeout_seconds`` the caller asked for in the input."""
+    cost = capability.get("budget_cost") if isinstance(capability.get("budget_cost"), Mapping) else {}
+    candidates = [cost.get("tool_wall_seconds"), capability_input.get("timeout_seconds")]
+    numbers = [float(v) for v in candidates if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return max([n for n in numbers if math.isfinite(n) and n > 0] or [0.0])
+
+
+@contextmanager
+def _heartbeat(beat: Any, what: str):
+    """Send MCP progress every HEARTBEAT_SECONDS while the body waits on the server."""
+    if beat is None:
+        yield
+        return
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def run() -> None:
+        while not stop.wait(HEARTBEAT_SECONDS):
+            try:
+                beat("waiting", {"capability": what, "elapsed_seconds": round(time.monotonic() - started)})
+            except Exception:  # a closed client must not break the call itself
+                return
+
+    thread = threading.Thread(target=run, name="hunt-mcp-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+
+
 class ArsenalClient:
     def __init__(
         self,
@@ -691,8 +750,13 @@ class ArsenalClient:
         api_token: str | None = None,
         action_wait_seconds: float = DEFAULT_ACTION_WAIT_SECONDS,
         poll_seconds: float = ACTION_POLL_SECONDS,
+        call_seconds: float = DEFAULT_CALL_SECONDS,
     ) -> None:
         self.base_url = base_url
+        call_seconds = float(call_seconds)
+        self.call_seconds = (
+            max(1.0, min(call_seconds, MAX_CALL_SECONDS)) if math.isfinite(call_seconds) else DEFAULT_CALL_SECONDS
+        )
         self.action_wait_seconds = max(0.0, min(float(action_wait_seconds), 3600.0))
         self.poll_seconds = max(0.01, float(poll_seconds))
         if api_token and not base_url.startswith("https://"):
@@ -716,7 +780,7 @@ class ArsenalClient:
             },
         )
         try:
-            with self.opener.open(request, timeout=self.timeout_seconds) as response:
+            with self.opener.open(request, timeout=_REQUEST_TIMEOUT.get() or self.timeout_seconds) as response:
                 raw = response.read(self.max_response_bytes + 1)
         except urllib.error.HTTPError as exc:
             raw = exc.read(min(self.max_response_bytes, 64_000))
@@ -737,15 +801,50 @@ class ArsenalClient:
             raise MCPError(-32004, "ShakerScan API response must be a JSON object")
         return decoded
 
-    def _settle_capability(self, path: str, payload: dict[str, Any], first: Any) -> dict[str, Any]:
+    def _run_capability(self, path: str, payload: dict[str, Any], wall_seconds: float, what: str) -> dict[str, Any]:
+        """POST one capability and settle it within what the MCP client will wait for.
+
+        The POST may run for the server's own wall time. A client that sent a progress token
+        gets progress while it waits, up to the action wait; any other client gets its answer
+        within ``call_seconds``. A still-running action is returned as ``outcome: running``."""
+        keepalive = _KEEPALIVE.get()
+        wait = self.action_wait_seconds if keepalive else min(self.call_seconds, self.action_wait_seconds)
+        deadline = time.monotonic() + wait
+        request_seconds = min(
+            max(self.timeout_seconds, wall_seconds + CAPABILITY_TIMEOUT_MARGIN_SECONDS),
+            MAX_CAPABILITY_REQUEST_SECONDS,
+            max(1.0, wait),
+        )
+        with _heartbeat(keepalive, what):
+            override = _REQUEST_TIMEOUT.set(request_seconds)
+            try:
+                try:
+                    first: Any = self.request_json("POST", path, payload)
+                except MCPError as exc:
+                    if not _unknown_outcome(exc):
+                        raise
+                    first = exc
+            finally:
+                _REQUEST_TIMEOUT.reset(override)
+            if isinstance(first, dict) and not _in_flight(first):
+                return first
+            return self._settle_capability(path, payload, first, deadline=deadline)
+
+    def _settle_capability(
+        self, path: str, payload: dict[str, Any], first: Any, *, deadline: float | None = None,
+    ) -> dict[str, Any]:
         """Replay the same key and input until the action is final or the wait ends.
 
         `first` is either the in-flight result the engine returned or the unknown-outcome
-        error. A replay never starts new work: the engine returns the recorded action."""
-        deadline = time.monotonic() + self.action_wait_seconds
+        error. A replay never starts new work: the engine returns the recorded action. An
+        action still in flight at the deadline is returned as ``outcome: running``; a wait
+        that never reached the server raises the unknown outcome."""
+        if deadline is None:
+            deadline = time.monotonic() + self.action_wait_seconds
         last = first
-        while time.monotonic() < deadline:
-            time.sleep(self.poll_seconds)
+        while (remaining := deadline - time.monotonic()) > 0:
+            time.sleep(min(self.poll_seconds, remaining))
+            override = _REQUEST_TIMEOUT.set(max(1.0, min(self.timeout_seconds, deadline - time.monotonic())))
             try:
                 result = self.request_json("POST", path, payload)
             except MCPError as exc:
@@ -753,12 +852,14 @@ class ArsenalClient:
                     raise
                 last = exc
                 continue
+            finally:
+                _REQUEST_TIMEOUT.reset(override)
             if not _in_flight(result):
                 return result
             last = result
         if isinstance(last, MCPError):
             raise last
-        raise MCPError(-32001, "Hunt capability is still running", {"outcome": "running"})
+        return {**last, "outcome": "running", "continue": RUNNING_CONTINUE}
 
     def catalog(self) -> dict[str, dict[str, Any]]:
         payload = self.request_json("GET", "/arsenal/commands")
@@ -981,22 +1082,19 @@ class ArsenalClient:
                     **({"experiment_key": payload["experiment_key"]} if "experiment_key" in payload else {}),
                 }
             try:
-                try:
-                    if streaming_ssh:
-                        try:
-                            from mcp_ssh_stream import ssh_events
-                        except ModuleNotFoundError:
-                            from scripts.mcp_ssh_stream import ssh_events
-                        path = "/hunts/"+urllib.parse.quote(hunt_id,safe="")+"/ssh/exec"
-                        result = ssh_events(self,path,payload,_SSH_PROGRESS.get())
-                    else:
-                        result = self.request_json(hunt_tool.method, path, payload or None)
-                except MCPError as exc:
-                    if streaming_ssh or name != "shakerscan_hunt_capability" or not _unknown_outcome(exc):
-                        raise
-                    result = self._settle_capability(path, payload, exc)
-                if not streaming_ssh and name == "shakerscan_hunt_capability" and _in_flight(result):
-                    result = self._settle_capability(path, payload, result)
+                if streaming_ssh:
+                    try:
+                        from mcp_ssh_stream import ssh_events
+                    except ModuleNotFoundError:
+                        from scripts.mcp_ssh_stream import ssh_events
+                    path = "/hunts/"+urllib.parse.quote(hunt_id,safe="")+"/ssh/exec"
+                    result = ssh_events(self,path,payload,_SSH_PROGRESS.get())
+                elif name == "shakerscan_hunt_capability":
+                    result = self._run_capability(
+                        path, payload, _capability_wall_seconds(capability, capability_input), capability_name,
+                    )
+                else:
+                    result = self.request_json(hunt_tool.method, path, payload or None)
             except (MCPError, ValueError, urllib.error.URLError, OSError) as exc:
                 if name != "shakerscan_hunt_capability":
                     raise
@@ -1177,9 +1275,11 @@ class MCPServer:
                         "progressToken":token,"progress":count,
                         "message":json.dumps({"event":event,**value},separators=(',',':'))}})
             progress_context = _SSH_PROGRESS.set(progress)
+            keepalive_context = _KEEPALIVE.set(progress if self.notify and token is not None else None)
             try:
                 result = self.client.call_tool(name, arguments)
             finally:
+                _KEEPALIVE.reset(keepalive_context)
                 _SSH_PROGRESS.reset(progress_context)
         else:
             raise MCPError(-32601, f"Method not found: {method}")
@@ -1221,6 +1321,7 @@ def main() -> int:
         base_url = normalize_api_url(os.environ.get("SHAKERSCAN_API_URL", DEFAULT_API_URL), allow_remote=allow_remote)
         timeout = float(os.environ.get("SHAKERSCAN_MCP_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
         action_wait = float(os.environ.get("SHAKERSCAN_MCP_ACTION_WAIT_SECONDS", DEFAULT_ACTION_WAIT_SECONDS))
+        call_seconds = float(os.environ.get("SHAKERSCAN_MCP_CALL_SECONDS", DEFAULT_CALL_SECONDS))
         parsed = urllib.parse.urlsplit(base_url)
         public = parsed.scheme == "https" and parsed.hostname == "pub.shakerscan.com" and parsed.port in {None, 443}
         client = PublicClient(timeout_seconds=timeout) if public else ArsenalClient(
@@ -1228,6 +1329,7 @@ def main() -> int:
             timeout_seconds=timeout,
             api_token=api_token_from_env(os.environ),
             action_wait_seconds=action_wait,
+            call_seconds=call_seconds,
         )
     except (TypeError, ValueError) as exc:
         print(f"shakerscan-mcp: {exc}", file=sys.stderr)
