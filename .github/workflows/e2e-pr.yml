@@ -123,7 +123,7 @@ jobs:
             (
               set -e
               npm --prefix ui ci
-              npx --prefix ui playwright install --with-deps chromium
+              npx --prefix ui playwright install chromium
             ) > "$RUNNER_TEMP/browser-toolchain.log" 2>&1
             echo "$?" > "$RUNNER_TEMP/browser-toolchain.status"
           ) &
@@ -202,9 +202,25 @@ jobs:
         if: steps.shard.outputs.stack == 'true'
         shell: bash
         run: |
-          # Wait for ./scanner.sh build and fail exactly as it failed.
-          until [ -f "$RUNNER_TEMP/scanner-build.status" ]; do sleep 2; done
-          cat "$RUNNER_TEMP/scanner-build.log"
+          # Wait for ./scanner.sh build and fail exactly as it failed. Stream its log while
+          # waiting so a slow or hung build is visible in the job log, and stop at a bound
+          # below the job timeout so it fails with its last output instead of a silent cancel.
+          log="$RUNNER_TEMP/scanner-build.log"
+          touch "$log"
+          tail -n +1 -f "$log" &
+          tail_pid=$!
+          deadline=$(( $(date +%s) + 35 * 60 ))
+          until [ -f "$RUNNER_TEMP/scanner-build.status" ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              kill "$tail_pid" 2>/dev/null || true
+              echo "::error::./scanner.sh build did not finish within 35 minutes; last 200 lines:"
+              tail -n 200 "$log"
+              exit 1
+            fi
+            sleep 2
+          done
+          sleep 1
+          kill "$tail_pid" 2>/dev/null || true
           status="$(cat "$RUNNER_TEMP/scanner-build.status")"
           echo "./scanner.sh build exit status: $status"
           exit "$status"
@@ -386,7 +402,7 @@ jobs:
           npm --prefix ui run test:unit
           npm --prefix ui run build
           if [ "$SHARD" = browser ]; then
-            npx --prefix ui playwright install --with-deps chromium
+            npx --prefix ui playwright install chromium
           fi
 
       - name: Report the browser test toolchain install
@@ -438,6 +454,7 @@ jobs:
             artifacts/hunt-ssh-acceptance.log
             ui/test-results/browser-results.json
             trivy-*.json
+            ${{ runner.temp }}/scanner-build.log
           if-no-files-found: ignore
           retention-days: 14
 

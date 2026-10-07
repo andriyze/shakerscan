@@ -96,7 +96,7 @@ jobs:
       - name: Desktop and mobile deletion interactions (mocked API, no scan traffic)
         working-directory: ui
         run: |
-          npx playwright install --with-deps chromium
+          npx playwright install chromium
           npm run start -- --hostname 127.0.0.1 > /tmp/lifecycle-ui.log 2>&1 &
           trap 'kill $(jobs -pr) 2>/dev/null || true' EXIT
           for attempt in $(seq 1 60); do
