@@ -433,10 +433,12 @@ async def read_archive_stats(
         )
         scan_param: Any = list(owners) if len(owners) > 1 else scan_id
         missing_rows = await conn.fetch(
-            f"""SELECT DISTINCT action.capability_name
+            f"""SELECT action.capability_name, action.status,
+                      COALESCE(NULLIF(
+                          action.result_json->'budget_consumed'->>'http_requests',''
+                      )::int,0) AS http_consumed
                FROM scan_capability_actions action
                WHERE {scan_filter}
-                 AND action.status IN ('success','partial')
                  AND COALESCE(NULLIF(action.requested_budget->>'http_requests','')::int,0) > 0
                  AND NOT EXISTS (
                      SELECT 1 FROM http_transactions tx
@@ -446,7 +448,10 @@ async def read_archive_stats(
                ORDER BY action.capability_name""",
             scan_param,
         )
-        missing = [str(item["capability_name"]) for item in missing_rows]
+        missing = sorted({
+            str(item["capability_name"]) for item in missing_rows
+            if scan_action_sent_traffic(item)
+        })
         external, engine = split_unarchived_capabilities(missing)
         stats["unarchived_external_tool_capabilities"] = external
         stats["unarchived_engine_capabilities"] = engine
@@ -488,6 +493,22 @@ def _runs_external_scanner(name: str) -> bool:
         spec.process_tool_name or spec.binary
         or (spec.placement_requirements or {}).get("binary")
     )
+
+
+def scan_action_sent_traffic(row: Mapping[str, Any]) -> bool:
+    """Whether a Scan action's traffic belongs in the archive's account of the run.
+
+    A verifier the wall stopped settles ``timed_out`` after sending real traffic: soak scans
+    sent 340 and 905 SQLi verification requests under ``sqli.verify_batch`` actions that ended
+    ``timed_out``, and the capture note, which read only success and partial actions, neither
+    archived nor named them. Any action that consumed requests sent traffic, whatever it ended.
+    """
+    status = str(row.get("status") or "")
+    try:
+        consumed = int(row.get("http_consumed") or 0)
+    except (TypeError, ValueError):
+        consumed = 0
+    return status in {"success", "partial", "timed_out"} or consumed > 0
 
 
 def split_unarchived_capabilities(names: Sequence[str]) -> tuple[list[str], list[str]]:

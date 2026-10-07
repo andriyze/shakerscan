@@ -691,7 +691,7 @@ async def test_scan_stats_find_successful_http_capabilities_with_no_archive_rows
 
         async def fetch(self, query, *params):
             assert "requested_budget->>'http_requests'" in query
-            return [{"capability_name": "web.crawl"}]
+            return [{"capability_name": "web.crawl", "status": "success", "http_consumed": 71}]
 
     stats = await read_archive_stats(Conn(), scan_id="scan-1", hunt_run_id=None)
     assert stats["unarchived_http_capabilities"] == ["web.crawl"]
@@ -1206,10 +1206,10 @@ async def test_scan_stats_separate_external_tool_gaps_from_engine_gaps():
 
         async def fetch(self, query, *params):
             return [
-                {"capability_name": "not.a.capability"},
-                {"capability_name": "templates.passive_batch"},
-                {"capability_name": "web.crawl"},
-                {"capability_name": "web.spec_ingest"},
+                {"capability_name": "not.a.capability", "status": "success", "http_consumed": 1},
+                {"capability_name": "templates.passive_batch", "status": "success", "http_consumed": 7},
+                {"capability_name": "web.crawl", "status": "success", "http_consumed": 71},
+                {"capability_name": "web.spec_ingest", "status": "partial", "http_consumed": 11},
             ]
 
     stats = await read_archive_stats(Conn(), scan_id="scan-1", hunt_run_id=None)
@@ -1311,3 +1311,35 @@ def test_a_refused_archive_export_says_whether_verbatim_har_is_available(monkeyp
 
     monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", "1")
     assert client.get(scan, params={"format": "pcap"}).headers["x-shakerscan-raw-har"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_scan_stats_name_verifier_traffic_that_ended_at_its_wall():
+    """Soak 146b6c03/da4c0531: 340 and 905 SQLi requests went out under ``sqli.verify_batch``
+    actions that settled ``timed_out``. They are tunnel traffic like any other external tool and
+    must be named, not dropped because the action did not end success or partial."""
+    class Conn:
+        async def fetchrow(self, query, *params):
+            return {"attempted": 13, "stored": 13, "failed": 0, "dropped": 0}
+
+        async def fetchval(self, query, *params):
+            return 0
+
+        async def fetch(self, query, *params):
+            return [
+                {"capability_name": "sqli.verify_batch", "status": "timed_out", "http_consumed": 110},
+                {"capability_name": "sqli.verify_batch", "status": "timed_out", "http_consumed": 230},
+                {"capability_name": "xss.verify_batch", "status": "success", "http_consumed": 5},
+                # Refused before any traffic: nothing to archive, nothing to name.
+                {"capability_name": "templates.active_batch", "status": "failed", "http_consumed": 0},
+                # Failed after sending traffic: that traffic is part of the run.
+                {"capability_name": "web.content_discover", "status": "failed", "http_consumed": 40},
+            ]
+
+    stats = await read_archive_stats(Conn(), scan_id="scan-1", hunt_run_id=None)
+    assert stats["unarchived_external_tool_capabilities"] == [
+        "sqli.verify_batch", "web.content_discover", "xss.verify_batch",
+    ]
+    fidelity, detail = archive_fidelity(stats, total=13)
+    assert fidelity == "partial"
+    assert "sqli.verify_batch" in detail
