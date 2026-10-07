@@ -217,27 +217,52 @@ def test_the_completeness_gate_still_rejects_an_area_missing_from_every_shard(tm
     assert "Required area missing: hunt" in json.loads(result.stdout)["validation_errors"]
 
 
-def test_browser_shard_ui_contracts_still_gate_the_shard(tmp_path):
-    """The UI contracts start before the image build; their exit status still fails the shard."""
+def _github_if(expression: str, **values: str) -> bool:
+    """Evaluate one of this workflow's step conditions (==, !=, &&, ||, parentheses only)."""
+    import re
+    python = expression
+    for name, value in values.items():
+        python = python.replace(name, repr(value))
+    python = python.replace("&&", " and ").replace("||", " or ")
+    assert not re.search(r"[a-z_]+\.[a-z_]+", python.replace("'", " ' ")), python
+    return eval(python, {"__builtins__": {}})  # noqa: S307 - fixed workflow text, no names
+
+
+def test_ui_contracts_run_in_exactly_one_shard_for_every_scope():
+    shard_job = _workflow("e2e-pr.yml")["jobs"]["smoke-shard"]
+    contracts = _step(shard_job, "Run UI contracts and production build")
+    for command in ("npm --prefix ui ci", "npm --prefix ui run test:unit", "npm --prefix ui run build"):
+        assert command in contracts["run"]
+    for event in ("pull_request", "merge_group"):
+        for stack in ("true", "false"):
+            running = [shard for shard in SHARDS if _github_if(
+                contracts["if"], **{"steps.changes.outputs.ui": "true",
+                                    "steps.changes.outputs.stack": stack,
+                                    "github.event_name": event, "matrix.shard": shard})]
+            assert len(running) == 1, (event, stack, running)
+            mocked = _github_if(_step(shard_job, "Run mocked browser contracts")["if"], **{
+                "steps.changes.outputs.ui": "true", "steps.changes.outputs.stack": stack,
+                "github.event_name": event, "matrix.shard": "browser"})
+            # Wherever the mocked contracts run, the production build they serve ran in that shard.
+            assert not mocked or running == ["browser"]
+
+
+def test_browser_toolchain_install_still_gates_the_shard(tmp_path):
+    """The install starts before the image build; its exit status still fails the shard."""
     shard_job = _workflow("e2e-pr.yml")["jobs"]["smoke-shard"]
     names = [step.get("name") for step in shard_job["steps"]]
-    start = _step(shard_job, "Run UI contracts and production build")
-    report = _step(shard_job, "Report UI contracts and production build")
-    for command in ("npm --prefix ui ci", "npm --prefix ui run test:unit",
-                    "npm --prefix ui run build", "playwright install --with-deps chromium"):
-        assert command in start["run"]
-    assert "set -e" in start["run"]
+    start = _step(shard_job, "Install the browser test toolchain while the images build")
+    report = _step(shard_job, "Report the browser test toolchain install")
+    assert "set -e" in start["run"] and "playwright install --with-deps chromium" in start["run"]
     assert names.index(start["name"]) < names.index("Build ShakerScan images")
     assert names.index(report["name"]) < names.index("Run real-stack browser acceptance")
-    assert names.index(report["name"]) < names.index("Run mocked browser contracts")
-    assert start["if"] == report["if"]
-    # Execute the report step against a recorded failure: it must fail with that status.
-    (tmp_path / "ui-contracts.log").write_text("unit test failed\n")
-    (tmp_path / "ui-contracts.status").write_text("3\n")
+    assert start["if"] == report["if"] == _step(shard_job, "Run real-stack browser acceptance")["if"]
+    (tmp_path / "browser-toolchain.log").write_text("npm ci failed\n")
+    (tmp_path / "browser-toolchain.status").write_text("3\n")
     result = subprocess.run(["bash", "-e", "-c", report["run"]], capture_output=True,
                             env={**os.environ, "RUNNER_TEMP": str(tmp_path)}, timeout=10)
     assert result.returncode == 3
-    assert b"unit test failed" in result.stdout
+    assert b"npm ci failed" in result.stdout
 
 
 def test_the_image_build_step_fails_with_the_background_build_status(tmp_path):
