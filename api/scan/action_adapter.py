@@ -411,6 +411,7 @@ def batch_stop_reason(
     unattempted: int,
     ceiling_stops: Iterable[str] = (),
     exhausted: Iterable[str] = (),
+    cancelled: bool = False,
 ) -> str:
     """The one reason a partial batch states, naming the dimension that actually stopped it.
 
@@ -421,6 +422,9 @@ def batch_stop_reason(
     the wall instead. A leftover candidate is a timeout only when the action's own wall
     is what ran out; anything else unfunded stays ``insufficient_plan_budget``.
     """
+    if cancelled:
+        # Cancellation stops execution; whatever budget was left is not why the batch ended.
+        return CapabilityResultReason.CANCELLED.value
     lowered = [str(item).strip().lower() for item in attempt_errors or ()]
     stops = set(ceiling_stops)
     spent = set(exhausted) if unattempted else set()
@@ -1454,6 +1458,7 @@ class DatabaseNeutralScanActionDispatcher:
         attempt_statuses: list[Mapping[str, Any]] = []
         resumed = 0
         exhausted: set[str] = set()
+        stopped_by_cancel = False
         for offset, candidate in enumerate(rows):
             candidate_id = str(candidate["candidate_id"])
             attempt_id = hashlib.sha256(
@@ -1469,6 +1474,7 @@ class DatabaseNeutralScanActionDispatcher:
                     consumed[name] = consumed.get(name, 0) + int(amount)
                 continue
             if self.cancelled():
+                stopped_by_cancel = True
                 break
             request_class = str(candidate.get("request_class") or "")
             request = self._private_requests.get(str(candidate["request_ref_id"]))
@@ -1571,6 +1577,7 @@ class DatabaseNeutralScanActionDispatcher:
                     consumed.get(name, 0) + int(amount),
                 )
             if result.status == "cancelled":
+                stopped_by_cancel = True
                 break
         unattempted = max(0, len(rows) - attempted)
         # State why the batch is partial. Attempts stop when the remaining
@@ -1581,10 +1588,11 @@ class DatabaseNeutralScanActionDispatcher:
         # is not a reason code, so without this the result fell back to
         # "output_truncated" and put a false reason on a required action.
         batch_errors = list(errors[:20])
-        if unattempted:
+        if unattempted or stopped_by_cancel:
             stated = batch_stop_reason(
                 batch_errors, unattempted=unattempted, exhausted=exhausted,
                 ceiling_stops=attempt_ceiling_stops(batch_errors),
+                cancelled=stopped_by_cancel,
             )
             batch_errors.insert(0, stated)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
@@ -1592,7 +1600,7 @@ class DatabaseNeutralScanActionDispatcher:
         )
         return self._receipt(
             action,
-            status=_batch_status,
+            status="cancelled" if stopped_by_cancel else _batch_status,
             parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
             started_at=started_at,
             observations=tuple(observations),
@@ -3099,6 +3107,7 @@ class DatabaseNeutralScanActionDispatcher:
         # traffic past the request ceiling) or left a candidate unfundable.
         ceiling_stops: set[str] = set()
         exhausted: set[str] = set()
+        stopped_by_cancel = False
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=legacy_capability,
         )
@@ -3120,7 +3129,10 @@ class DatabaseNeutralScanActionDispatcher:
         position = 0
         while True:
             if position >= len(work):
-                if position != first_pass or not still_empty or self.cancelled():
+                if position != first_pass or not still_empty:
+                    break
+                if self.cancelled():
+                    stopped_by_cancel = True
                     break
                 work.extend(
                     (manifest_index, row, 1) for manifest_index, row in rows
@@ -3208,6 +3220,7 @@ class DatabaseNeutralScanActionDispatcher:
                     terminal_failure = True
                 continue
             if self.cancelled():
+                stopped_by_cancel = True
                 break
             try:
                 body_request: dict[str, Any] = {}
@@ -3448,6 +3461,7 @@ class DatabaseNeutralScanActionDispatcher:
                 if wall_killed:
                     attempt_timed_out = True
                 if result.status == "cancelled":
+                    stopped_by_cancel = True
                     break
             except (ScanWorkManifestError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
                 # One candidate that raises anywhere in its setup or execution must never fail the
@@ -3498,7 +3512,7 @@ class DatabaseNeutralScanActionDispatcher:
         # without this the result fell back to "output_truncated" and put a false
         # reason on a required action -- which alone made the grade unreliable.
         batch_errors = list(errors[:20])
-        if partial:
+        if partial or stopped_by_cancel:
             # A batch that attempted every candidate it had did not run out of plan
             # budget, whatever went wrong inside those attempts. Claiming otherwise put a
             # false reason on a required action -- `verify.xss` reported
@@ -3509,6 +3523,7 @@ class DatabaseNeutralScanActionDispatcher:
             stated = batch_stop_reason(
                 batch_errors, unattempted=unattempted,
                 ceiling_stops=ceiling_stops, exhausted=exhausted,
+                cancelled=stopped_by_cancel,
             )
             if stated == CapabilityResultReason.TIMED_OUT.value and unattempted:
                 # The action's own wall ran out with candidates left: a real timeout.
@@ -3516,7 +3531,7 @@ class DatabaseNeutralScanActionDispatcher:
             batch_errors.insert(0, stated)
         return self._receipt(
             action,
-            status="partial" if partial else "success",
+            status="cancelled" if stopped_by_cancel else "partial" if partial else "success",
             parser_version=CAPABILITY_REGISTRY.require(action.capability_name).output_schema,
             started_at=started_at,
             observations=tuple(observations),
