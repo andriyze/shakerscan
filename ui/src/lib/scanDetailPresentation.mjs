@@ -265,6 +265,7 @@ const COVERAGE_REASON_LABELS = {
   authentication_uncertain: 'Credential authority could not be confirmed',
   output_truncated: 'A step produced more output than it may keep, so part of its result was cut off',
   source_not_published: 'An optional discovery file (robots.txt or llms.txt) was not published by the target',
+  declared_out_of_scope: "The target's API description declares its routes on another host, outside this scan's scope",
   parser_failed: 'A step returned output that could only be partly read',
   parallel_child_incomplete: 'One of the parallel parts of this scan did not finish',
   connection_limit_exceeded: 'A step hit its connection limit before it finished',

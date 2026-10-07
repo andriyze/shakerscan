@@ -448,14 +448,21 @@ def _spec_ingest_partial_reason(issues: Sequence[str]) -> CapabilityResultReason
 
     A ``*_limit`` / ``*_limit_reached`` issue is a real bound: routes beyond it were dropped,
     so the output was truncated. A hint file the target answered with its HTML shell was never
-    published -- nothing was dropped or misparsed. Anything else is a document the parser could
-    only partly model (an unsupported media type, an unresolvable reference, a hint parse error).
+    published -- nothing was dropped or misparsed. A spec whose declared servers are all another
+    origin parsed, but its routes are outside the binding. Anything else is a document the parser
+    could only partly model (an unsupported media type, an unresolvable reference, a hint parse
+    error).
     """
     tokens = [str(issue or "").split(":", 1)[0] for issue in issues]
     if any(token.endswith(("_limit", "_limit_reached")) for token in tokens):
         return CapabilityResultReason.OUTPUT_TRUNCATED
     if tokens and all(token == "hint_document_is_markup" for token in tokens):
         return CapabilityResultReason.SOURCE_NOT_PUBLISHED
+    # A spec that names another host parsed fine: its routes are out of scope, not misread.
+    if "spec_off_origin_server" in tokens and all(
+        token in {"spec_off_origin_server", "hint_document_is_markup"} for token in tokens
+    ):
+        return CapabilityResultReason.DECLARED_OUT_OF_SCOPE
     return CapabilityResultReason.PARSER_FAILED
 
 

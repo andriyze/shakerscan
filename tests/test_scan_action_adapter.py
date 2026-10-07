@@ -2501,6 +2501,33 @@ def test_spec_ingest_an_unpublished_hint_file_is_not_reported_as_truncated_outpu
     assert _persisted_partial_reason(receipt) == "source_not_published"
 
 
+def test_spec_ingest_a_spec_for_another_host_is_out_of_scope_not_a_parse_failure(monkeypatch):
+    """honey.shakerscan.com serves /swagger.json declaring `host: api.halvern.internal`.
+
+    The document parses; its routes are declared on another origin, so none belongs to this
+    binding. The scan reported parser_failed ("could not be parsed safely"), which sent an
+    operator looking for a parser bug that does not exist.
+    """
+    spec_body = json.dumps({
+        "swagger": "2.0", "host": "api.halvern.internal", "basePath": "/v1",
+        "schemes": ["https"],
+        "paths": {"/users": {"get": {"responses": {"200": {"description": "ok"}}}}},
+    }).encode()
+
+    def respond(path):
+        if path == "/swagger.json":
+            return 200, "application/json", spec_body
+        if path == "/robots.txt":
+            return 200, "text/plain", b"User-agent: *\nDisallow: /admin/\n"
+        return 404, "text/plain", b"Not Found"
+
+    receipt = _spec_ingest_receipt(monkeypatch, respond)
+    assert receipt.status == "partial"
+    assert receipt.errors[0] == "declared_out_of_scope"
+    assert "spec_off_origin_server" in receipt.errors
+    assert _persisted_partial_reason(receipt) == "declared_out_of_scope"
+
+
 def test_spec_ingest_a_partly_modelled_spec_is_a_parser_limitation_not_truncation(monkeypatch):
     spec_body = json.dumps({
         "openapi": "3.0.0",

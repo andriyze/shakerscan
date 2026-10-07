@@ -67,6 +67,7 @@ _REASON_LABELS = {
     "unsupported_output_schema": "The worker returned an unsupported result format",
     "not_applicable": "The capability did not apply to this target",
     "source_not_published": "An optional discovery source was not published by the target",
+    "declared_out_of_scope": "The target's API description declares its routes on another host, outside this scan's scope",
     "active_verifier_zero_attempts": "An active verifier had candidates but made no bounded attempt",
     "unproven_critical_high": "High or critical candidates still require deterministic proof",
     "report_grade_unreliable": "The final report marked the grade as provisional",
