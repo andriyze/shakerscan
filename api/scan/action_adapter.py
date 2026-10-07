@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import functools
 import hashlib
-from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
 import json
 import urllib.parse
 
@@ -173,7 +173,11 @@ except (ImportError, ModuleNotFoundError):
     )
 
 from .action_plan import ScanAction, ScanActionPlan
-from .capability_result import CapabilityResultReason
+from .capability_result import (
+    BUDGET_EXHAUSTION_REASONS,
+    CEILING_STOP_ERRORS,
+    CapabilityResultReason,
+)
 from .external_process import (
     BATCH_ATTEMPT_FLOORS,
     batch_attempt_floor,
@@ -390,6 +394,45 @@ def batch_outcome(
     timed_out = any(status == "timed_out" or explicit for status, explicit in normalized)
     partial = bool(unattempted) or failed
     return ("partial" if partial else "success", partial, timed_out)
+
+
+def attempt_ceiling_stops(errors: Sequence[Any]) -> set[str]:
+    """The non-time budget dimensions whose ceiling stopped one attempt's tool."""
+    tokens = (str(item or "").strip().lower().split(":", 1)[0] for item in errors or ())
+    return {CEILING_STOP_ERRORS[token] for token in tokens if token in CEILING_STOP_ERRORS}
+
+
+def batch_stop_reason(
+    attempt_errors: Sequence[Any],
+    *,
+    unattempted: int,
+    ceiling_stops: Iterable[str] = (),
+    exhausted: Iterable[str] = (),
+) -> str:
+    """The one reason a partial batch states, naming the dimension that actually stopped it.
+
+    A batch whose attempts were all wall-killed timed out. A batch stopped by the pinned
+    transport's request ceiling, or left with candidates its remaining request or
+    mutation allowance could not fund, ran out of THAT dimension: reporting it as
+    ``timed_out`` (126 of 126 requests spent in 83 of 216 seconds) sent every reader to
+    the wall instead. A leftover candidate is a timeout only when the action's own wall
+    is what ran out; anything else unfunded stays ``insufficient_plan_budget``.
+    """
+    lowered = [str(item).strip().lower() for item in attempt_errors or ()]
+    stops = set(ceiling_stops)
+    spent = set(exhausted) if unattempted else set()
+    if lowered and not stops and all(
+        item == "timeout" or item.startswith("exit_-") for item in lowered
+    ):
+        return CapabilityResultReason.TIMED_OUT.value
+    for dimension in ("http_requests", "state_changing_requests"):
+        if dimension in stops or dimension in spent:
+            return BUDGET_EXHAUSTION_REASONS[dimension].value
+    if "tool_wall_seconds" in spent:
+        return CapabilityResultReason.TIMED_OUT.value
+    if unattempted:
+        return CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+    return CapabilityResultReason.ADAPTER_FAILED.value
 
 
 class ScanActionAdapterError(RuntimeError):
@@ -1391,6 +1434,7 @@ class DatabaseNeutralScanActionDispatcher:
         attempted = 0
         attempt_statuses: list[Mapping[str, Any]] = []
         resumed = 0
+        exhausted: set[str] = set()
         for offset, candidate in enumerate(rows):
             candidate_id = str(candidate["candidate_id"])
             attempt_id = hashlib.sha256(
@@ -1426,15 +1470,16 @@ class DatabaseNeutralScanActionDispatcher:
                 name: amount // remaining_attempts
                 for name, amount in remaining.items() if amount // remaining_attempts > 0
             }
-            if (
-                request is None or not authorized
-                or sub_budget.get("http_requests", 0) < 2
-                or sub_budget.get("tool_wall_seconds", 0) < 1
-                or (
-                    request_class == "confirmed_mutation"
-                    and sub_budget.get("state_changing_requests", 0) < 2
+            short = {
+                name for name, minimum in (
+                    ("http_requests", 2), ("tool_wall_seconds", 1),
+                    *((("state_changing_requests", 2),)
+                      if request_class == "confirmed_mutation" else ()),
                 )
-            ):
+                if sub_budget.get(name, 0) < minimum
+            }
+            if request is None or not authorized or short:
+                exhausted |= short
                 break
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             adapter = RequestMutationVerificationAdapter(
@@ -1518,11 +1563,9 @@ class DatabaseNeutralScanActionDispatcher:
         # "output_truncated" and put a false reason on a required action.
         batch_errors = list(errors[:20])
         if unattempted:
-            stated = (
-                CapabilityResultReason.TIMED_OUT.value
-                if all(str(item).strip().lower() == "timeout" for item in batch_errors)
-                and batch_errors
-                else CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
+            stated = batch_stop_reason(
+                batch_errors, unattempted=unattempted, exhausted=exhausted,
+                ceiling_stops=attempt_ceiling_stops(batch_errors),
             )
             batch_errors.insert(0, stated)
         _batch_status, _batch_partial, _batch_timed_out = batch_outcome(
@@ -2980,6 +3023,10 @@ class DatabaseNeutralScanActionDispatcher:
         inapplicable = 0
         terminal_failure = False
         attempt_timed_out = False
+        # The non-time dimensions that stopped an attempt (the pinned transport refused
+        # traffic past the request ceiling) or left a candidate unfundable.
+        ceiling_stops: set[str] = set()
+        exhausted: set[str] = set()
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=legacy_capability,
         )
@@ -3046,8 +3093,11 @@ class DatabaseNeutralScanActionDispatcher:
                 prior_status = str(prior.get("status") or "success")
                 if prior_status not in {"success", "succeeded", "completed"}:
                     terminal_failure = True
-                if prior_status in {"timed_out", "partial"}:
+                # Only a wall-killed attempt timed out; partial is not a timeout.
+                prior_wall_killed = bool(prior.get("timed_out")) or prior_status == "timed_out"
+                if prior_wall_killed:
                     attempt_timed_out = True
+                ceiling_stops |= attempt_ceiling_stops(prior.get("errors") or ())
                 observations.extend(prior.get("observations") or ())
                 prior_timed_out = (
                     prior_status in {"timed_out", "partial"} or bool(prior.get("timed_out"))
@@ -3068,14 +3118,12 @@ class DatabaseNeutralScanActionDispatcher:
                 )
                 attempt_log.append((
                     candidate_id, retry_round,
-                    prior_status in _BATCH_SUCCESS_STATUSES, prior_timed_out,
+                    prior_status in _BATCH_SUCCESS_STATUSES, prior_wall_killed,
                 ))
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
                 if str(prior.get("status") or "") not in _BATCH_SUCCESS_STATUSES:
                     terminal_failure = True
-                if bool(prior.get("timed_out")) or str(prior.get("status")) == "timed_out":
-                    attempt_timed_out = True
                 continue
             if self.cancelled():
                 break
@@ -3118,13 +3166,15 @@ class DatabaseNeutralScanActionDispatcher:
                 # slice: a dimension that has run out is absent from the slice
                 # entirely, so testing only the dimensions present would let an
                 # unfundable attempt through and fail it downstream instead.
-                if any(
-                    remaining_budget.get(name, 0) < amount
-                    for name, amount in floor.items()
-                ):
+                unfundable = {
+                    name for name, amount in floor.items()
+                    if remaining_budget.get(name, 0) < amount
+                }
+                if unfundable:
                     # Candidate cost classes can be mixed. An expensive body entry
                     # must not suppress a later fundable query entry in the same
                     # immutable slice.
+                    exhausted |= unfundable
                     continue
                 sub_budget = {
                     name: max(1, floor.get(name, 1), amount // remaining_attempts)
@@ -3159,6 +3209,10 @@ class DatabaseNeutralScanActionDispatcher:
                             sub_budget["http_requests"]
                         )
                 if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
+                    exhausted |= {
+                        name for name in ("http_requests", "tool_wall_seconds")
+                        if not sub_budget.get(name)
+                    }
                     break
                 if retry_round and int(sub_budget["tool_wall_seconds"]) <= empty_timeouts.get(
                     candidate_id, 0,
@@ -3290,9 +3344,11 @@ class DatabaseNeutralScanActionDispatcher:
                     deferred_errors=deferred_errors, still_empty=still_empty,
                     recovered=recovered,
                 )
+                wall_killed = bool(getattr(result, "timed_out", False)) or result.status == "timed_out"
+                ceiling_stops |= attempt_ceiling_stops(result.errors)
                 attempt_log.append((
                     candidate_id, retry_round,
-                    result.status in _BATCH_SUCCESS_STATUSES, result_timed_out,
+                    result.status in _BATCH_SUCCESS_STATUSES, wall_killed,
                 ))
                 for name, amount in result.actual_budget.items():
                     consumed[name] = min(
@@ -3307,7 +3363,7 @@ class DatabaseNeutralScanActionDispatcher:
                 # coverage while proving nothing at all.
                 if result.status not in {"success", "succeeded", "completed"}:
                     terminal_failure = True
-                if result.status in {"timed_out", "partial"} or getattr(result, "timed_out", False):
+                if wall_killed:
                     attempt_timed_out = True
                 if result.status == "cancelled":
                     break
@@ -3361,22 +3417,20 @@ class DatabaseNeutralScanActionDispatcher:
         # reason on a required action -- which alone made the grade unreliable.
         batch_errors = list(errors[:20])
         if partial:
-            attempt_errors = [str(item).strip().lower() for item in batch_errors]
             # A batch that attempted every candidate it had did not run out of plan
             # budget, whatever went wrong inside those attempts. Claiming otherwise put a
             # false reason on a required action -- `verify.xss` reported
             # "insufficient_plan_budget" while holding 650 unused requests, its attempts
             # having been wall-killed (exit -9) -- and that alone made the grade
-            # unreliable while pointing every reader at the wrong cause.
-            wall_killed = attempt_errors and all(
-                item == "timeout" or item.startswith("exit_-") for item in attempt_errors
+            # unreliable while pointing every reader at the wrong cause. The same holds
+            # for the dimension: a request ceiling is not a timeout.
+            stated = batch_stop_reason(
+                batch_errors, unattempted=unattempted,
+                ceiling_stops=ceiling_stops, exhausted=exhausted,
             )
-            if wall_killed:
-                stated = CapabilityResultReason.TIMED_OUT.value
-            elif unattempted:
-                stated = CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
-            else:
-                stated = CapabilityResultReason.ADAPTER_FAILED.value
+            if stated == CapabilityResultReason.TIMED_OUT.value and unattempted:
+                # The action's own wall ran out with candidates left: a real timeout.
+                attempt_timed_out = attempt_timed_out or "tool_wall_seconds" in exhausted
             batch_errors.insert(0, stated)
         return self._receipt(
             action,

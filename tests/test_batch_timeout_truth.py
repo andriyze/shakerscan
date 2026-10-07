@@ -23,15 +23,21 @@ SUCCESS_STATUSES = {"success", "succeeded", "completed"}
 
 
 def _aggregate(attempt_statuses, declared):
-    """The aggregation rule, restated so its outcome can be asserted directly."""
+    """The aggregation rule, restated so its outcome can be asserted directly.
+
+    Each attempt is a status or a ``(status, timed_out)`` pair. Only an attempt that was
+    wall-killed timed out: a partial attempt may instead have been stopped by its request
+    ceiling, and calling that a timeout is how a request ceiling read as ``timed_out``.
+    """
     attempted = 0
     terminal_failure = False
     timed_out = False
-    for status in attempt_statuses:
+    for item in attempt_statuses:
+        status, wall_killed = item if isinstance(item, tuple) else (item, item == "timed_out")
         attempted += 1
         if status not in SUCCESS_STATUSES:
             terminal_failure = True
-        if status in {"timed_out", "partial"}:
+        if wall_killed:
             timed_out = True
         if status == "cancelled":
             break
@@ -45,10 +51,18 @@ def _aggregate(attempt_statuses, declared):
 
 
 def test_a_batch_of_nothing_but_timeouts_is_not_success():
-    result = _aggregate(["partial", "partial", "partial"], declared=3)
+    # The scanner normalizes a wall-killed tool to partial with timed_out set.
+    result = _aggregate([("partial", True)] * 3, declared=3)
     assert result["status"] == "partial"
     assert result["timed_out"] is True
     assert result["unattempted"] == 0, "every candidate was started; nothing was unfunded"
+
+
+def test_a_partial_attempt_that_was_not_wall_killed_is_not_a_timeout():
+    """A request-ceiling stop, truncated output or a crash is partial, never a timeout."""
+    result = _aggregate([("partial", False), ("success", False)], declared=2)
+    assert result["status"] == "partial"
+    assert result["timed_out"] is False
 
 
 def test_the_upstream_normalization_this_depends_on_still_holds():
@@ -70,6 +84,7 @@ def test_one_failure_among_successes_still_marks_the_batch():
 def test_the_adapter_uses_this_rule():
     assert 'result.status not in {"success", "succeeded", "completed"}' in SOURCE
     assert "timed_out=attempt_timed_out" in SOURCE
+    assert 'wall_killed = bool(getattr(result, "timed_out", False))' in SOURCE
 
 
 # `_exposure_probe_batch` is the one handler exempt from the rule below: its attempts are
@@ -132,18 +147,18 @@ def test_replaying_checkpoints_does_not_launder_failure_into_success():
         terminal_failure = False
         timed_out = False
         attempted = 0
-        for status in prior_statuses:
+        for status, wall_killed in prior_statuses:
             attempted += 1
             if status not in SUCCESS_STATUSES:
                 terminal_failure = True
-            if status in {"timed_out", "partial"}:
+            if wall_killed:
                 timed_out = True
         unattempted = max(0, declared - attempted)
         partial = unattempted > 0 or terminal_failure
         return ("partial" if partial else "success", timed_out)
 
-    assert _replay(["partial", "partial"], 2) == ("partial", True)
-    assert _replay(["success", "success"], 2) == ("success", False)
+    assert _replay([("partial", True), ("partial", True)], 2) == ("partial", True)
+    assert _replay([("success", False), ("success", False)], 2) == ("success", False)
 
 
 def test_the_external_batch_resume_branch_reads_the_prior_status():

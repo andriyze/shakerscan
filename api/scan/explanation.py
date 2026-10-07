@@ -55,7 +55,13 @@ _REASON_LABELS = {
     "authentication_uncertain": "Credential authority could not be confirmed; review the identity and approval before starting new work",
     "scope_invalid": "Target scope no longer matched the approved scope",
     "cancelled": "The scan was cancelled",
-    "timed_out": "The action reached its fixed time limit",
+    "timed_out": "The action, or one of its attempts, reached its wall-clock time limit",
+    "http_request_budget_exhausted": (
+        "The action used up its HTTP request allowance before it finished"
+    ),
+    "state_changing_budget_exhausted": (
+        "The action used up its state-changing request allowance before it finished"
+    ),
     "adapter_failed": "The capability adapter failed",
     "parser_failed": "The capability output could not be parsed safely",
     "output_truncated": "The bounded output limit was reached",
