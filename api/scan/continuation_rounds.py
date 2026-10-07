@@ -134,6 +134,11 @@ def select_continuation_actions(
     selected_ids: set[str] = set()
     append_slots = max(0, _PLAN_ACTION_BOUND - parent_action_count)
     appended_work = 0
+    # The next round resumes a lane after the furthest slice this one appended
+    # (continuation_manifest_offsets), so a lane's appended slices must be a contiguous
+    # prefix. A small trailing slice the residual could fund behind larger skipped ones
+    # moved the offset past them, and those manifest entries were never scheduled.
+    interrupted_lanes: set[str] = set()
     for action in allocated_plan.actions:
         if action.action_id.startswith(_INPUT_ACTION_PREFIXES):
             selected.append(action)
@@ -141,11 +146,15 @@ def select_continuation_actions(
             continue
         if action.action_id == "finalize.report":
             continue
-        if finalize_only or action.admission_status != "planned":
-            continue
-        if any(dependency not in selected_ids for dependency in action.dependencies):
-            continue
-        if appended_work >= append_slots:
+        lane = str(action.capability_args.get("continuation_work_key") or "")
+        if (
+            finalize_only or action.admission_status != "planned"
+            or lane in interrupted_lanes
+            or any(dependency not in selected_ids for dependency in action.dependencies)
+            or appended_work >= append_slots
+        ):
+            if lane:
+                interrupted_lanes.add(lane)
             continue
         selected.append(action)
         selected_ids.add(action.action_id)
