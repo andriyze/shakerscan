@@ -211,3 +211,26 @@ def test_the_completeness_gate_still_rejects_an_area_missing_from_every_shard(tm
     result = subprocess.run(command, capture_output=True, timeout=10)
     assert result.returncode == 1
     assert "Required area missing: hunt" in json.loads(result.stdout)["validation_errors"]
+
+
+def test_browser_shard_ui_contracts_still_gate_the_shard(tmp_path):
+    """The UI contracts start before the image build; their exit status still fails the shard."""
+    shard_job = _workflow("e2e-pr.yml")["jobs"]["smoke-shard"]
+    names = [step.get("name") for step in shard_job["steps"]]
+    start = _step(shard_job, "Run UI contracts and production build")
+    report = _step(shard_job, "Report UI contracts and production build")
+    for command in ("npm --prefix ui ci", "npm --prefix ui run test:unit",
+                    "npm --prefix ui run build", "playwright install --with-deps chromium"):
+        assert command in start["run"]
+    assert "set -e" in start["run"]
+    assert names.index(start["name"]) < names.index("Build ShakerScan images")
+    assert names.index(report["name"]) < names.index("Run real-stack browser acceptance")
+    assert names.index(report["name"]) < names.index("Run mocked browser contracts")
+    assert start["if"] == report["if"]
+    # Execute the report step against a recorded failure: it must fail with that status.
+    (tmp_path / "ui-contracts.log").write_text("unit test failed\n")
+    (tmp_path / "ui-contracts.status").write_text("3\n")
+    result = subprocess.run(["bash", "-e", "-c", report["run"]], capture_output=True,
+                            env={**os.environ, "RUNNER_TEMP": str(tmp_path)}, timeout=10)
+    assert result.returncode == 3
+    assert b"unit test failed" in result.stdout
