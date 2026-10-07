@@ -471,10 +471,13 @@ def prepare_workspace(
     for hook in (workspace / ".claude" / "hooks").glob("*.sh"):
         hook.chmod(hook.stat().st_mode | 0o111)
     written.append(".claude/")
-    kit_version = "unknown"
-    version_file = sources["AGENTS.md"].parent / "VERSION"
-    if version_file.is_file():
-        kit_version = version_file.read_text(encoding="utf-8").strip() or kit_version
+    # The release the kit was built from (the repository VERSION, vendored as _kit/VERSION),
+    # and the client carrying it.
+    release = ""
+    version_file = sources.get("VERSION")
+    if version_file is not None and version_file.is_file():
+        release = version_file.read_text(encoding="utf-8").strip()
+    kit_version = f"{release} (client {__version__})" if release else f"client {__version__}"
     template = INSTANCE_NOTE if authenticated else ENGINE_NOTE
     note = template.format(url=url, who=who, kit_version=kit_version)
     for name in ("AGENTS.md",):
@@ -960,12 +963,23 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return int(mcp.main())
 
 
+HUNT_HELP_NOTE = """\
+shakerscan hunt [--url URL] [--token-file FILE] [--timeout SECONDS] <subcommand> ...
+  The connection options may come before or after the subcommand; --timeout is the number of
+  seconds to wait for each API answer (default 60). The runtime Hunt CLI's own help follows.
+"""
+
+
 def cmd_hunt(args: argparse.Namespace) -> int:
     url = apply_connection(args)
     rest = list(args.args) or ["--help"]
     if rest and rest[0] == "--":
         rest = rest[1:]
-    return int(load("_v2_cli").main(["--api-url", url, "hunt", *rest]))
+    if rest and rest[0] in ("-h", "--help"):
+        sys.stdout.write(HUNT_HELP_NOTE + "\n")
+        sys.stdout.flush()
+    timeout = ["--timeout", str(args.timeout)] if args.timeout is not None else []
+    return int(load("_v2_cli").main(["--api-url", url, *timeout, "hunt", *rest]))
 
 
 def _with_reason(exc: Exception) -> str:
@@ -1065,6 +1079,33 @@ def split_connection_options(tokens: Sequence[str]) -> tuple[list[str], list[str
         else:
             break
     return own, tokens[index:]
+
+
+def extract_connection_options(tokens: Sequence[str]) -> tuple[list[str], list[str]]:
+    """``hunt``: take the client's connection options from anywhere before a ``--``.
+
+    The runtime Hunt CLI has no --url, --token-file or --timeout of its own, so
+    `shakerscan hunt get ID --timeout 120` means the client's option. Everything from a ``--``
+    on is forwarded untouched."""
+    own: list[str] = []
+    forwarded: list[str] = []
+    tokens = list(tokens)
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            forwarded.extend(tokens[index:])
+            break
+        if token in _CONNECTION_OPTIONS and index + 1 < len(tokens):
+            own.extend(tokens[index:index + 2])
+            index += 2
+            continue
+        if token.split("=", 1)[0] in _CONNECTION_OPTIONS and "=" in token:
+            own.append(token)
+        else:
+            forwarded.append(token)
+        index += 1
+    return own, forwarded
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1168,7 +1209,7 @@ def build_parser() -> argparse.ArgumentParser:
     hunt.add_argument(
         "args",
         nargs=argparse.REMAINDER,
-        help="the hunt subcommand and its options; nothing prints the runtime CLI's own help",
+        help="the hunt subcommand and its options (`shakerscan hunt --help` lists the subcommands)",
     )
     doctor = commands.add_parser(
         "doctor",
@@ -1197,6 +1238,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `shakerscan scan --budget-profile fast URL` failed unless `--` came first.
         # Only the leading connection options are the client's; the rest is forwarded as is.
         own, forwarded = split_connection_options(argv[1:])
+        if argv[0] == "hunt":
+            # The runtime Hunt CLI's subcommands are what `hunt --help` should list.
+            if any(token in ("-h", "--help") for token in own):
+                own = [token for token in own if token not in ("-h", "--help")]
+                forwarded = ["--help", *forwarded]
+            extra, forwarded = extract_connection_options(forwarded)
+            own += extra
         args = parser.parse_args([argv[0], *own])
         args.args = forwarded
     else:
