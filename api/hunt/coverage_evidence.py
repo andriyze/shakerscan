@@ -14,7 +14,7 @@ Evidence rules (documented in docs/hunt-architecture.md and skills/hunt/SKILL.md
   contradictory evidence. ``partial`` needs at least one executed action.
   ``blocked`` may be recorded from its blocker text alone; when it cites actions,
   at least one must have executed. A pure policy refusal is a blocker sentence,
-  not evidence. ``candidate`` cannot rest only on refused actions.
+  not evidence. ``candidate`` may not cite a refused (``blocked``) action.
 """
 
 from __future__ import annotations
@@ -175,7 +175,7 @@ def validate_evidence_claim(
     if status == "candidate" and any(item["status"] == "blocked" for item in cited):
         raise CoverageLedgerError(
             "coverage_candidate_requires_executed_evidence",
-            "Candidate coverage cannot be based only on a blocked action",
+            "Candidate coverage cannot cite a blocked (refused) action",
         )
 
 
