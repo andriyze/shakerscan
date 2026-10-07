@@ -6,8 +6,10 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
+from scripts.pytest_shard_select import SELECT_ENV
 from scripts.run_complete_python_suite import (
     SHARD_MANIFEST_SCHEMA,
+    SHARD_SELECT_ENV,
     CompleteSuiteError,
     _environment,
     _package_import_styles,
@@ -191,3 +193,40 @@ def test_a_failed_shard_report_fails_the_merged_suite(tmp_path):
         encoding="utf-8",
     )
     assert merge_shards(tmp_path, artifacts, 2) == 1
+
+
+def test_a_shard_collects_its_whole_group_but_runs_only_its_files(tmp_path):
+    """Collection order, and so module-level import side effects, match the unsharded run."""
+    import os
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_a.py").write_text(
+        "import sys, types\n"
+        "sys.modules.setdefault('shard_probe', types.SimpleNamespace(source='a'))\n"
+        "def test_a():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tests / "test_b.py").write_text(
+        "import shard_probe\n"
+        "def test_b():\n    assert shard_probe.source == 'a'\n",
+        encoding="utf-8",
+    )
+    selection = tmp_path / "select.json"
+    selection.write_text(json.dumps(["tests/test_b.py"]), encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(root), SHARD_SELECT_ENV: str(selection)}
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "scripts.pytest_shard_select", "--rootdir", str(tmp_path),
+         "tests/test_a.py", "tests/test_b.py"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed, 1 deselected" in result.stdout
+
+
+def test_the_runner_and_the_plugin_agree_on_the_selection_variable():
+    assert SHARD_SELECT_ENV == SELECT_ENV
