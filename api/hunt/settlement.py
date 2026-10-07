@@ -45,4 +45,35 @@ def blocked_actual_charges(
     return settled
 
 
-__all__ = ["blocked_actual_charges"]
+def unstarted_refusal_charges(charges: Mapping[str, int]) -> dict[str, int]:
+    """Release every hold of an action its verifier refused before any request was sent.
+
+    Unlike ``blocked_actual_charges`` this keeps nothing: the refusal is the verifier's own
+    admission check (candidate state, proof route, approval receipt, proof contract), so it is
+    charged exactly like a refusal at Hunt admission, which is ``not_charged``.
+    """
+    # Only held dimensions: a reservation records no zero amount, and its receipt may not report
+    # a dimension it never reserved.
+    return {str(dimension): 0 for dimension, amount in charges.items() if int(amount or 0) > 0}
+
+
+def refund_verification(used: dict) -> None:
+    """Return the verification slot admission took for a verification that never ran."""
+    used["verifications"] = max(0, int(used.get("verifications") or 0) - 1)
+
+
+def capability_charge_basis(capability_name: str, *, refused_before_traffic: bool) -> str:
+    """How an inline action's settled charge was derived, as published on the action."""
+    if refused_before_traffic:
+        return "not_charged"
+    if capability_name == "candidate.verify":
+        return "conservative_full_reservation"
+    return "capability_reported_settlement"
+
+
+__all__ = [
+    "blocked_actual_charges",
+    "capability_charge_basis",
+    "refund_verification",
+    "unstarted_refusal_charges",
+]

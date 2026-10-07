@@ -90,11 +90,13 @@ function ActionEntry({ action, outcome, requests, expanded, onToggle }: {
         <summary className="w-fit cursor-pointer text-[11px] text-gray-600 hover:text-gray-300">IDs and budget</summary>
         {(accounting.basis === 'no_reservation' || accounting.basis === 'legacy_reported_charge') && <p className="mt-2 text-amber-300/80">{unsettledText(accounting.basis)}</p>}
         {accounting.basis === 'legacy_reported_charge' && legacyBudget.length > 0 && <p className="mt-1">Reported charge: {formatBudget(legacyBudget)}</p>}
-        {(accounting.basis === 'exact_settlement' || accounting.basis === 'conservative_settlement') && (
+        {(accounting.basis === 'exact_settlement' || accounting.basis === 'conservative_settlement' || accounting.basis === 'refused_before_execution') && (
           <div className="mt-2 space-y-1">
             <p>Settled charge: {actualBudget.length > 0 ? formatBudget(actualBudget) : 'none'}</p>
             <p>
-              Charge basis: {accounting.basis === 'conservative_settlement' || accounting.charge_basis === 'conservative_full_reservation'
+              Charge basis: {accounting.charge_basis === 'not_charged'
+                ? 'refused before any request reached the target; nothing was charged'
+                : accounting.basis === 'conservative_settlement' || accounting.charge_basis === 'conservative_full_reservation'
                 ? 'conservative upper bound; measured consumption was unavailable'
                 : 'capability-reported settlement'}
             </p>

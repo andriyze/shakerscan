@@ -261,6 +261,7 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         redacted_execution: Mapping[str, Any],
         blocked_exceptions: tuple[type[BaseException], ...],
         conservative_full_budget: bool = False,
+        unstarted_exceptions: tuple[type[BaseException], ...] = (),
     ) -> None:
         super().__init__(
             specification=specification,
@@ -270,6 +271,9 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         )
         self._blocked_exceptions = blocked_exceptions
         self._conservative_full_budget = conservative_full_budget
+        # Blocks the operation guarantees it raised before reaching the target. They are the
+        # one case a conservative operation can prove it consumed nothing.
+        self._unstarted_exceptions = unstarted_exceptions
         self.blocked_exception: BaseException | None = None
 
     async def execute(
@@ -290,12 +294,18 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
             result.get("ok")
             or str(result.get("status") or "").strip().lower() == "success"
         )
+        unstarted = bool(self._unstarted_exceptions) and isinstance(
+            self.blocked_exception, self._unstarted_exceptions,
+        )
         # A conservative control-plane operation may have emitted traffic or
         # mutated verifier state before returning a failure/blocked result.
         # Once invoked, settle its complete hold rather than claiming the
-        # unobservable partial execution consumed nothing.
+        # unobservable partial execution consumed nothing -- unless it refused
+        # with an exception it raises only before any traffic.
         actual = (
-            dict(self._requested_budget)
+            {}
+            if unstarted
+            else dict(self._requested_budget)
             if self._conservative_full_budget
             else self._wall_budget(started, execution_started=succeeded)
         )
@@ -329,7 +339,11 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
             observations=(observation,),
             errors=(error,) if error else (),
             actual_budget=actual,
-            execution_started=(True if self._conservative_full_budget else succeeded),
+            execution_started=(
+                False if unstarted
+                else True if self._conservative_full_budget
+                else succeeded
+            ),
             parser_version=self._specification.output_schema,
             redacted_execution=dict(self._redacted_execution),
         )
