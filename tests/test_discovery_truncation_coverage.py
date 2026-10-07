@@ -281,3 +281,12 @@ def test_the_reviewed_passive_pack_stays_a_required_baseline_of_every_passive_sc
     ]
     assert breadth, "discovered routes still get the pack as additional breadth"
     assert not any(a.required for a in breadth), "breadth can never fail the Scan"
+
+
+def test_a_crawl_killed_mid_run_is_truncated_discovery():
+    coverage = _report(
+        CapabilityResultStatus.PARTIAL, CapabilityResultReason.PROCESS_KILLED,
+    )["coverage"]
+
+    assert coverage["status"] == "partial"
+    assert "discovery_truncated" in coverage["reasons"]

@@ -70,16 +70,3 @@ def test_only_negative_exit_codes_are_kills():
     assert is_process_kill_error("exit_-9") and is_process_kill_error("EXIT_-15")
     assert not is_process_kill_error("exit_2")
     assert not is_process_kill_error("timeout")
-
-
-def test_a_crawl_killed_mid_run_is_truncated_discovery():
-    from api.scan.capability_result import (
-        CapabilityResultReason as Reason,
-        CapabilityResultStatus as Status,
-    )
-    from tests.test_discovery_truncation_coverage import _report
-
-    coverage = _report(Status.PARTIAL, Reason.PROCESS_KILLED)["coverage"]
-
-    assert coverage["status"] == "partial"
-    assert "discovery_truncated" in coverage["reasons"]
