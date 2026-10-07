@@ -198,6 +198,24 @@ def batch_profile_shape(
             if int(query_floor.get(dimension, 0)) > 0
         ]
         size = min(size, min(mixed_capacities)) if mixed_capacities else size
+        # The candidate manifest's reference reveals a count, not which entries carry a
+        # body, so a slice may be all body candidates. One body-attempt mutation hold per
+        # slice funded only the first: a balanced XSS slice of two declared POST
+        # endpoints left its second candidate unattempted (insufficient_plan_budget).
+        # Hold the mutation floor for every body attempt the slice's own request and wall
+        # holds could fund; query attempts settle zero mutations and the adapter settles
+        # body attempts to what they sent, so the unused hold is released at settlement.
+        body_slots = min(
+            [size] + [
+                int(budget.get(dimension, 0)) // int(amount)
+                for dimension, amount in body_floor.items()
+                if dimension != "state_changing_requests" and int(amount) > 0
+            ]
+        )
+        budget["state_changing_requests"] = max(
+            int(budget.get("state_changing_requests", 0)),
+            int(body_floor.get("state_changing_requests", 0)) * max(1, body_slots),
+        )
     if allow_state_changing_http and capability_name == "templates.active_batch":
         # Active Nuclei may send non-GET templates once state-changing HTTP is
         # authorized. Reserve a conservative mutation hold equal to the slice's
