@@ -145,6 +145,26 @@ def test_official_ubuntu_sources_use_https_without_changing_repository_identity(
     assert len(apt_calls(calls, "install")) == 1
 
 
+def test_the_bases_azure_mirror_becomes_the_official_archive_over_https(tmp_path):
+    # The pinned Playwright Noble base points at Microsoft's Azure mirror over plain HTTP.
+    # It refused connections on 2026-10-07 and every cold image build failed.
+    before = (
+        "Types: deb\nURIs: http://azure.archive.ubuntu.com/ubuntu/\n"
+        "Suites: noble noble-updates noble-backports\nComponents: main universe restricted multiverse\n"
+        "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+        "Types: deb\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: noble-security\n"
+        "Components: main universe restricted multiverse\n"
+        "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+    )
+    result, _ = run_install(tmp_path, sources={"sources.list.d/ubuntu.sources": before})
+    assert result.returncode == 0
+    after = (tmp_path / "apt/sources.list.d/ubuntu.sources").read_text()
+    assert "azure" not in after and "http://" not in after
+    assert after == before.replace(
+        "http://azure.archive.ubuntu.com/", "https://archive.ubuntu.com/"
+    ).replace("http://security.", "https://security.")
+
+
 def test_other_sources_and_existing_tls_are_unchanged(tmp_path):
     before = (
         "deb http://deb.debian.org/debian bookworm main\n"
