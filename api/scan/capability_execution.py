@@ -121,9 +121,12 @@ SCAN_DISCOVERY_CAPABILITY_SCALING: Mapping[str, Mapping[str, tuple[int, int]]] =
             # dimension: (ceiling, divisor of the matching Scan ceiling)
             # The divisor is the backbone share these producers have always
             # taken; only the ceiling moved. The request ceiling tracks what the
-            # unchanged polite crawl rate can emit in the wall time it holds.
-            "http_requests": (1_500, 10),
-            "tool_wall_seconds": (300, 10),
+            # unchanged polite crawl rate can emit in the wall time it holds:
+            # 5 requests/s over the crawler's reviewed 600-second time box. A
+            # 300-second ceiling stopped Balanced and Thorough at the same 1,500
+            # while every other discovery producer scaled between them.
+            "http_requests": (3_000, 10),
+            "tool_wall_seconds": (600, 10),
         }),
         "web.browser_crawl": MappingProxyType({
             "http_requests": (2_400, 10),

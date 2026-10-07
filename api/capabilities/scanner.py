@@ -15,6 +15,44 @@ from scan.external_process import (
 ScannerProcessRunner = Callable[..., Awaitable[Mapping[str, Any]]]
 
 
+def settled_request_bound(
+    *,
+    reserved: int,
+    enforcement: Mapping[str, Any],
+    observed_minimum: int,
+    elapsed_seconds: int,
+) -> tuple[int, str]:
+    """Charge an unmeasured run its tightest proven bound, not the whole reservation.
+
+    A tool whose traffic crosses the pinned tunnel as TLS has no wire count, and charging it
+    the full hold made a crawl that ran 14 of its 300 seconds cost 1,500 requests and a
+    content sweep of a 108-entry wordlist cost 2,000 or 6,000: "HTTP requests used" overstated
+    the traffic several times over and the reservation stopped reflecting the work done. The
+    run's own launch proof still bounds it from above -- the hard ceiling (an exact wordlist,
+    a reviewed template allowlist) and, for a rate-limited tool, the enforced rate over the
+    seconds it actually ran plus its initial burst. The charge is the smallest of those and
+    the hold, never below what the proxy saw. The hold itself is unchanged and still enforced.
+    """
+    hold = max(0, int(reserved))
+    bound, basis = hold, "reservation"
+    hard = dict(enforcement.get("hard_budget") or {}) if enforcement else {}
+    hard_http = int(hard.get("http_requests") or 0)
+    if 0 < hard_http < bound:
+        bound, basis = hard_http, "process_upper_bound"
+    rate_bound = enforcement.get("rate_bound") if enforcement else None
+    if isinstance(rate_bound, Mapping):
+        rate = int(rate_bound.get("rate_per_second") or 0)
+        burst = int(rate_bound.get("startup_burst") or 0)
+        if rate > 0 and elapsed_seconds > 0:
+            elapsed_bound = rate * int(elapsed_seconds) + max(1, burst)
+            if elapsed_bound < bound:
+                bound, basis = elapsed_bound, "rate_time_bound"
+    observed = max(0, int(observed_minimum))
+    if observed > bound:
+        return min(hold, observed), "observed_minimum"
+    return bound, basis
+
+
 class ScannerExecutionAdapter:
     """Normalize a fixed-template scanner process into one capability result."""
 
@@ -173,6 +211,7 @@ class ScannerExecutionAdapter:
         primary_error = str(process_result.get("error") or "").strip()
         errors = ([primary_error] if primary_error else []) + parser_errors
         execution_started = not not_executed
+        charge_basis = "reservation"
         if process_result.get("execution_uncertain"):
             actual = dict(self._requested_budget)
             execution_started = True
@@ -189,10 +228,13 @@ class ScannerExecutionAdapter:
                         int(self._requested_budget["http_requests"]),
                         max(0, int(settlement.get("actual") or 0)),
                     )
+                    charge_basis = "wire_count"
                 elif execution_started:
-                    # Tools without exact wire telemetry retain the full hold.
-                    actual["http_requests"] = int(
-                        self._requested_budget["http_requests"]
+                    actual["http_requests"], charge_basis = settled_request_bound(
+                        reserved=int(self._requested_budget["http_requests"]),
+                        enforcement=enforcement,
+                        observed_minimum=int(settlement.get("observed_minimum") or 0),
+                        elapsed_seconds=int(process_result.get("elapsed_seconds") or 0),
                     )
             if "state_changing_requests" in self._requested_budget:
                 reserved_state_changing = int(
@@ -253,6 +295,11 @@ class ScannerExecutionAdapter:
                 "http_request_upper_bound": int(
                     hard_budget.get("http_requests") or 0
                 ),
+                # What the HTTP charge rests on. Only `wire_count` is a measurement; the
+                # others are bounds on what the tool could have sent, so the charge they
+                # produce is an estimate from above, never below the observed minimum.
+                "http_charge_basis": charge_basis,
+                "http_charge_estimated": charge_basis != "wire_count",
                 "tcp_attempt_upper_bound": int(
                     hard_budget.get("tcp_ports_attempted") or 0
                 ),

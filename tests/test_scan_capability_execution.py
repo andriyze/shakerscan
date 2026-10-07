@@ -206,8 +206,15 @@ def test_web_crawl_allocation_preserves_the_scan_backbone():
     assert scan_web_crawl_capability_allocation(
         _budget(max_http_requests=20_000, max_tool_wall_seconds=2_700)
     ) == {
-        "http_requests": 1_500,
+        "http_requests": 2_000,
         "tool_wall_seconds": 270,
+    }
+    # The ceiling itself is the polite rate over the crawler's reviewed time box.
+    assert scan_web_crawl_capability_allocation(
+        _budget(max_http_requests=60_000, max_tool_wall_seconds=10_800)
+    ) == {
+        "http_requests": 3_000,
+        "tool_wall_seconds": 600,
     }
     assert scan_web_crawl_capability_allocation(
         _budget(max_http_requests=3)
@@ -697,3 +704,25 @@ def test_discovery_reservations_scale_with_the_authority_the_operator_granted():
 
     # A capability outside the discovery set keeps its fixed registry profile.
     assert scan_discovery_reservation(large, "tls.inspect", registry_cost={}) is None
+
+
+def test_the_crawl_ceiling_scales_from_balanced_to_thorough_like_its_siblings():
+    """Soak 2026-10-07: Thorough's crawl held 1,500 requests / 300 s, exactly Balanced's,
+    while browser crawl and content discovery scaled between the two profiles."""
+    from scan.capability_execution import scan_discovery_reservation
+    from scan.contracts import BUDGET_PROFILES
+
+    def reservation(profile, name):
+        return scan_discovery_reservation(
+            BUDGET_PROFILES[profile], name,
+            registry_cost=dict(CAPABILITY_REGISTRY.require(name).budget_cost),
+        )
+
+    for name in ("web.crawl", "web.browser_crawl", "web.content_discover"):
+        balanced, thorough = reservation("balanced", name), reservation("thorough", name)
+        assert thorough["http_requests"] > balanced["http_requests"], name
+        assert thorough["tool_wall_seconds"] > balanced["tool_wall_seconds"], name
+    # The crawler's rate is unchanged: the larger grant buys a longer look, not a louder one.
+    crawl = reservation("thorough", "web.crawl")
+    assert crawl["http_requests"] <= 5 * crawl["tool_wall_seconds"]
+    assert crawl["tool_wall_seconds"] <= 600

@@ -479,3 +479,36 @@ def test_a_reserved_browser_dimension_is_actually_charged_on_success():
         "a browser reservation must settle against the browser ceiling"
     )
     assert charged["browser_actions"] <= reserved["browser_actions"]
+
+
+def test_rate_limited_plans_carry_the_rate_their_settlement_is_bounded_by():
+    """A tool with no wire log is settled at its enforced rate over the seconds it ran, so the
+    content-free enforcement receipt carries that rate (and nothing else from the argv)."""
+    crawl = _plan("katana", {"http_requests": 1_500, "tool_wall_seconds": 300})
+    receipt = validate_enforcement_receipt(
+        crawl.enforcement_receipt(), reserved={"http_requests": 1_500, "tool_wall_seconds": 300},
+    )
+    rate = int(crawl.argv[crawl.argv.index("-rate-limit") + 1])
+    assert receipt["rate_bound"] == {"rate_per_second": rate, "startup_burst": 1}
+
+    # The reviewed passive pack is bounded by its allowlist, not a rate.
+    passive = agent_tools.build_enforced_scanner_plan(
+        "nuclei", TARGET, {
+            "template_ids": agent_tools._CANONICAL_PASSIVE_NUCLEI_IDS,
+            "template_request_cost_upper_bound": (
+                agent_tools.canonical_passive_nuclei_request_upper_bound()
+            ),
+        },
+        reserved_budget={"http_requests": 7, "tool_wall_seconds": 30},
+        pinned_address=PIN, pinned_proxy_url=PROXY,
+    )
+    assert "rate_bound" not in passive.enforcement_receipt()
+
+
+def test_a_malformed_rate_bound_fails_the_enforcement_contract():
+    crawl = _plan("katana", {"http_requests": 1_500, "tool_wall_seconds": 300})
+    receipt = {**crawl.enforcement_receipt(), "rate_bound": {"rate_per_second": 0}}
+    with pytest.raises(ExternalProcessContractError):
+        validate_enforcement_receipt(
+            receipt, reserved={"http_requests": 1_500, "tool_wall_seconds": 300},
+        )

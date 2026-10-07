@@ -1039,8 +1039,10 @@ arbitrary state-changing HTTP. Capability calls, requests, active actions, wall 
 browser actions, device fragility, and candidate counts are bounded. A
 direct HTTP call consumes one request; external scanners reserve their fail-closed maximum wire
 request allowance before execution, and cannot run when that reservation does not fit. Receipts
-report reserved traffic, exact settled traffic when the scanner exposes it, and observed-minimum
-traffic otherwise. Scanner subprocesses run on the worker plane, which independently rebuilds fixed
+report reserved traffic, exact settled traffic when the scanner exposes it, and otherwise an
+estimated charge from the run's own launch proof (its enforced rate over the seconds it ran, or
+its hard ceiling), never below the observed minimum and never above the reservation; the
+receipt's `http_charge_basis` names which. Scanner subprocesses run on the worker plane, which independently rebuilds fixed
 argv and revalidates the target host; the API never spawns them. The external coding agent owns its
 model context: ShakerScan cannot meter an external coding agent's tokens, and makes no token-budget
 claim for that planner. It meters every executable capability.

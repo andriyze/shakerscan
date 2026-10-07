@@ -289,3 +289,26 @@ def test_a_batch_carrying_only_its_generic_label_names_that_label():
         },
     )
     assert line is not None and "error=adapter_failed" in line
+
+
+def test_the_diagnostic_line_says_an_unmeasured_charge_is_an_estimate_and_what_bounds_it():
+    plan = _plan()
+    action = plan.actions[0]
+    result = _result(action, status=CapabilityResultStatus.SUCCESS)
+    result = result.__class__(**{
+        **result.digest_material(), "receipt_ref": result.receipt_ref,
+        "observation_manifest_ref": result.observation_manifest_ref,
+        "budget_reserved": {"http_requests": 1500, "tool_wall_seconds": 300},
+        "budget_consumed": {"http_requests": 71, "tool_wall_seconds": 14},
+    })
+    line = scan_action_diagnostic_line(
+        action=action, result=result,
+        receipt={"redacted_execution": {
+            "process_enforcement": {"hard_budget": {"http_requests": 1476, "tool_wall_seconds": 300}},
+            "wire_telemetry": {
+                "observed_http_requests_minimum": 0, "wall_seconds": 14,
+                "http_charge_basis": "rate_time_bound", "limiter_status": "within_ceiling",
+            },
+        }},
+    )
+    assert "charged=71 estimated (rate_time_bound)" in line
