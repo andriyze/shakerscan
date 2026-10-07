@@ -1279,3 +1279,35 @@ def test_recorded_replay_transport_keeps_hunt_slot_and_records_scan_slot_as_give
     assert [item["principal_slot"] for item in recorded] == ["anonymous", None, "primary"]
     assert [item["workflow_values_private"] for item in recorded] == [False, False, True]
     assert recorded[0]["request_headers"] == {"A": "b"}
+
+
+def test_a_refused_archive_export_says_whether_verbatim_har_is_available(monkeypatch):
+    """The header was set only on a successful export, while a refusal -- the response a client
+    reads to learn the deployment's answer -- carried none."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.runtime import http_archive_router as archive_router
+
+    def _reached_database():
+        raise AssertionError("a refused export must not reach the database")
+
+    monkeypatch.setattr(archive_router, "_pool", _reached_database)
+    monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", "0")
+    app = FastAPI()
+    app.include_router(archive_router.router)
+    client = TestClient(app)
+    scan = "/scans/11111111-1111-4111-8111-111111111111/http-transactions"
+
+    refused = client.get(scan, params={"format": "har", "redaction": "raw"})
+    assert refused.status_code == 403
+    assert refused.headers["x-shakerscan-raw-har"] == "disabled"
+    assert "masked HAR" in refused.json()["detail"]
+
+    unknown = client.get(scan, params={"format": "pcap"})
+    assert unknown.status_code == 400
+    assert unknown.headers["x-shakerscan-raw-har"] == "disabled"
+
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", "1")
+    assert client.get(scan, params={"format": "pcap"}).headers["x-shakerscan-raw-har"] == "available"
