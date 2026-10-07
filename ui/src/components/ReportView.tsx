@@ -22,6 +22,7 @@ import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { buildFindingLinkageIndex, linkedPersistedFinding, observedReportFinding } from '@/lib/findingLinkage'
 import ScanCoverageSection, { type ScanCoverage } from '@/components/report/ScanCoverageSection'
 import InfrastructureIntelligenceSection from '@/components/report/InfrastructureIntelligenceSection'
+import SubdomainDiscoverySection from '@/components/report/SubdomainDiscoverySection'
 
 type RemediationStatus = 'open' | 'in_progress' | 'remediated' | 'false_positive' | 'accepted_risk'
 
@@ -3777,6 +3778,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       )}
+
+      {show('coverage') && <SubdomainDiscoverySection section={discovery.subdomains} />}
 
       {/* Discovery */}
       {show('coverage') && discovery.katana_sample?.length > 0 && (
