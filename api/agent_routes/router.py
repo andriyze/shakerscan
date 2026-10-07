@@ -2308,7 +2308,7 @@ async def _persist_agent_suspected_finding(
     }
     candidate_record = await investigation_candidates.upsert_candidate(
         conn, candidate, created_by="autonomous_agent",
-        observation_context=candidate_context,
+        observation_context=candidate_context, strict=False,
     )
     await conn.execute(
         """UPDATE investigation_candidates

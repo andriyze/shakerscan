@@ -4152,7 +4152,7 @@ async def correlate_device_advisory_lifecycle(
                 }
                 candidate_record = await investigation_candidates.upsert_candidate(
                     conn, candidate, created_by="device_advisory_correlation",
-                    observation_context=advisory_context,
+                    observation_context=advisory_context, strict=False, refresh_same_source=True,
                 )
                 current_candidate_ids.add(uuid.UUID(candidate_record["id"]))
                 summary["candidates"] += 1

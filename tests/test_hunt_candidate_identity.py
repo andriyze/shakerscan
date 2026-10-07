@@ -36,7 +36,8 @@ CREATE TABLE investigation_candidates(id TEXT PRIMARY KEY DEFAULT (lower(hex(ran
  plane TEXT,target_id TEXT,device_target_id TEXT,research_episode_id TEXT,agent_hunt_run_id TEXT,
  device_agent_run_id TEXT,hunt_run_id TEXT,family TEXT,canonical_locus TEXT,title TEXT,claim TEXT,
  claimed_severity TEXT,evidence_refs TEXT,verifier_contract_id TEXT,source_kind TEXT,
- fingerprint TEXT UNIQUE,status TEXT,created_by TEXT,last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ fingerprint TEXT UNIQUE,status TEXT,created_by TEXT,latest_verification_id TEXT,
+ last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
  created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE investigation_candidate_observations(id INTEGER PRIMARY KEY AUTOINCREMENT,
  candidate_id TEXT,research_episode_id TEXT,agent_hunt_run_id TEXT,device_agent_run_id TEXT,
@@ -215,6 +216,150 @@ def test_repeated_distinct_claim_merges_into_its_own_row():
     assert b1["outcome"] == "inserted" and b2["outcome"] == "merged"
     assert b2["id"] == b1["id"]
     assert len(conn.rows()) == 2
+
+
+def _set_status(conn, candidate_id, status):
+    conn.db.execute("UPDATE investigation_candidates SET status=? WHERE id=?", [status, candidate_id])
+
+
+def test_post_after_patch_merges_into_the_claims_own_row_instead_of_failing():
+    conn = SqliteConnection()
+    first = asyncio.run(candidates.upsert_candidate(conn, _candidate(title="T1", claim="C1"), created_by="t"))
+    second = asyncio.run(candidates.upsert_candidate(conn, _candidate(title="T2", claim="C2"), created_by="t"))
+    assert second["distinct_from_candidate_id"] == first["id"]
+    patched = asyncio.run(candidates.update_candidate_for_hunt(
+        conn, hunt_run_id=HUNT, candidate_id=second["id"],
+        changes={"claim": "C2 reworded"}, created_by="t",
+    ))
+    assert patched["id"] == second["id"]
+    new_ref = "action:" + str(uuid.uuid4())
+    again = asyncio.run(candidates.upsert_candidate(
+        conn, _candidate(title="T5", claim="C2", refs=[new_ref]), created_by="t",
+    ))
+    assert again["outcome"] == "merged" and again["id"] == second["id"]
+    assert again["unapplied_fields"] == ["title", "claim"]
+    row = {item["id"]: item for item in conn.rows()}[second["id"]]
+    assert row["claim"] == "C2 reworded" and new_ref in json.loads(row["evidence_refs"])
+    assert len(conn.rows()) == 2
+
+
+@pytest.mark.parametrize("status", ["verification_queued", "verifying"])
+def test_sighting_never_changes_a_candidate_under_verification(status):
+    conn = SqliteConnection()
+    first_ref = "action:" + str(uuid.uuid4())
+    first = asyncio.run(candidates.upsert_candidate(
+        conn, _candidate(title="T1", claim="C1", refs=[first_ref]), created_by="t"))
+    _set_status(conn, first["id"], status)
+    sighting = _candidate(title="T1", claim="C1", refs=["action:" + str(uuid.uuid4())])
+    with pytest.raises(candidates.CandidateLifecycleError) as exc:
+        asyncio.run(candidates.upsert_candidate(conn, sighting, created_by="t"))
+    assert exc.value.code == "candidate_verification_in_flight"
+    observed = asyncio.run(candidates.upsert_candidate(conn, sighting, created_by="t", strict=False))
+    assert observed["outcome"] == "observed"
+    assert observed["reason"] == "candidate_verification_in_flight"
+    assert observed["unapplied_fields"] == ["evidence_refs"]
+    (row,) = conn.rows()
+    assert json.loads(row["evidence_refs"]) == [first_ref]
+
+
+def test_sighting_refuses_to_truncate_evidence_beyond_the_limit():
+    conn = SqliteConnection()
+    refs = ["action:" + str(uuid.uuid4()) for _ in range(candidates.MAX_EVIDENCE_REFS)]
+    asyncio.run(candidates.upsert_candidate(conn, _candidate(title="T1", claim="C1", refs=refs), created_by="t"))
+    extra = _candidate(title="T1", claim="C1", refs=["action:" + str(uuid.uuid4())])
+    with pytest.raises(candidates.CandidateLifecycleError) as exc:
+        asyncio.run(candidates.upsert_candidate(conn, extra, created_by="t"))
+    assert exc.value.code == "candidate_evidence_limit"
+    observed = asyncio.run(candidates.upsert_candidate(conn, extra, created_by="t", strict=False))
+    assert observed["reason"] == "candidate_evidence_limit"
+    (row,) = conn.rows()
+    assert json.loads(row["evidence_refs"]) == refs
+
+
+def test_merge_reports_the_severity_it_did_not_apply():
+    conn = SqliteConnection()
+    asyncio.run(candidates.upsert_candidate(
+        conn, _candidate(title="T1", claim="C1", severity="low"), created_by="t"))
+    merged = asyncio.run(candidates.upsert_candidate(
+        conn, _candidate(title="T1", claim="C1", severity="critical"), created_by="t"))
+    assert merged["outcome"] == "merged" and merged["unapplied_fields"] == ["severity"]
+    (row,) = conn.rows()
+    assert row["claimed_severity"] == "low"
+
+
+def _advisory(severity, title, source_kind="automatic_device_advisory_correlation"):
+    return candidates.normalize_candidate(
+        plane="device", device_target_id=TARGET, family="device_firmware_advisory",
+        locus={"transport": "tcp", "port": 443, "advisory_id": "CVE-2026-0001",
+               "cpe": "cpe:2.3:o:vendor:fw:1.0", "version": "1.0"},
+        title=title, claim="Offline advisory CVE-2026-0001 matched cpe version 1.0.",
+        severity=severity, evidence_refs=[], source_kind=source_kind,
+    )
+
+
+def test_advisory_recorrelation_restates_severity_and_title_from_the_same_source():
+    conn = SqliteConnection()
+    first = asyncio.run(candidates.upsert_candidate(
+        conn, _advisory("medium", "Old advisory title"), created_by="d",
+        strict=False, refresh_same_source=True))
+    again = asyncio.run(candidates.upsert_candidate(
+        conn, _advisory("critical", "Revised advisory title"), created_by="d",
+        strict=False, refresh_same_source=True))
+    assert again["outcome"] == "merged" and again["id"] == first["id"]
+    assert "unapplied_fields" not in again
+    (row,) = conn.rows()
+    assert (row["claimed_severity"], row["title"]) == ("critical", "Revised advisory title")
+    # Another producer's sighting never restates the row, even when refresh is requested.
+    other = asyncio.run(candidates.upsert_candidate(
+        conn, _advisory("low", "Revised advisory title", source_kind="hunt_v2"), created_by="h",
+        strict=False, refresh_same_source=True))
+    assert other["unapplied_fields"] == ["severity"]
+    (row,) = conn.rows()
+    assert row["claimed_severity"] == "critical"
+
+
+@pytest.mark.asyncio
+async def test_candidate_route_answers_409_for_a_candidate_under_verification(monkeypatch):
+    action = str(uuid.uuid4())
+
+    class Store:
+        @asynccontextmanager
+        async def acquire(self):
+            yield self
+
+        @asynccontextmanager
+        async def transaction(self, **_kwargs):
+            yield self
+
+        async def fetch(self, _sql, *args):
+            return [{"id": action, "kind": "action", "status": "completed"}]
+
+        async def execute(self, query, *args):
+            raise AssertionError("a refused sighting must not charge the candidate budget")
+
+    run = {**_run(), "status": "active", "objective": "o",
+           "budget_used_json": {"candidates": 0}, "budget_json": {"max_candidates": 5}}
+
+    async def lookup(_conn, _hunt_id, for_update=False):
+        return run
+
+    async def upsert(*_args, **kwargs):
+        assert kwargs.get("strict", True) is True
+        raise router.investigation_candidates.CandidateLifecycleError(
+            "candidate_verification_in_flight", "busy",
+        )
+
+    monkeypatch.setattr(router, "_pool", lambda: Store())
+    monkeypatch.setattr(router, "_hunt_run_or_404", lookup)
+    monkeypatch.setattr(router.investigation_candidates, "upsert_candidate", upsert)
+    request = router.HuntCandidateRequest(
+        family="data_exposure", locus={"path": "/x"}, title="t", claim="c",
+        evidence_refs=[action],
+    )
+    with pytest.raises(router.HTTPException) as exc:
+        await router.create_hunt_candidate(HUNT, request)
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"] == "candidate_verification_in_flight"
 
 
 class EvidenceConnection:
@@ -484,4 +629,43 @@ def test_postgres_evidence_must_cite_a_settled_action():
                         )
                     assert exc.value.code == "candidate_evidence_unsettled"
                     assert exc.value.unsettled == [reference] and exc.value.references == []
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not configured")
+def test_postgres_sightings_after_patch_in_flight_and_refresh():
+    async def scenario():
+        async with _postgres() as conn:
+            async with conn.transaction():
+                first = await candidates.upsert_candidate(
+                    conn, _candidate(title="T1", claim="C1"), created_by="t")
+                second = await candidates.upsert_candidate(
+                    conn, _candidate(title="T2", claim="C2"), created_by="t")
+                await candidates.update_candidate_for_hunt(
+                    conn, hunt_run_id=HUNT, candidate_id=second["id"],
+                    changes={"claim": "C2 reworded", "title": "T2 reworded"}, created_by="t",
+                )
+                again = await candidates.upsert_candidate(
+                    conn, _candidate(title="T5", claim="C2"), created_by="t")
+                assert again["outcome"] == "merged" and again["id"] == second["id"]
+                await conn.execute(
+                    "UPDATE investigation_candidates SET status='verifying' WHERE id=$1",
+                    uuid.UUID(first["id"]))
+                with pytest.raises(candidates.CandidateLifecycleError):
+                    async with conn.transaction():
+                        await candidates.upsert_candidate(
+                            conn, _candidate(title="T1", claim="C1"), created_by="t")
+                observed = await candidates.upsert_candidate(
+                    conn, _candidate(title="T1", claim="C1"), created_by="t", strict=False)
+                assert observed["reason"] == "candidate_verification_in_flight"
+                await candidates.upsert_candidate(
+                    conn, _advisory("medium", "Old"), created_by="d", strict=False,
+                    refresh_same_source=True)
+                refreshed = await candidates.upsert_candidate(
+                    conn, _advisory("critical", "New"), created_by="d", strict=False,
+                    refresh_same_source=True)
+                row = await conn.fetchrow(
+                    "SELECT title, claimed_severity FROM investigation_candidates WHERE id=$1",
+                    uuid.UUID(refreshed["id"]))
+                assert (row["title"], row["claimed_severity"]) == ("New", "critical")
     asyncio.run(scenario())

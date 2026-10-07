@@ -223,7 +223,11 @@ def hunt_start_public_contract() -> dict[str, Any]:
                 "A sighting with the same identity and the same title or claim merges its "
                 "evidence_refs into the existing candidate (outcome=merged). A different claim "
                 "with the same identity is stored as its own candidate (outcome=inserted, "
-                "distinct_from_candidate_id). A stored claim is never replaced; use PATCH."
+                "distinct_from_candidate_id). A stored claim is never replaced: title, claim or "
+                "severity a sighting carried but did not write are listed in unapplied_fields; "
+                "use PATCH. A candidate under verification is not changed (409 "
+                "candidate_verification_in_flight), and evidence is never truncated (422 "
+                "candidate_evidence_limit beyond 100 references)."
             ),
             "evidence_ref_forms": [
                 "<uuid>", "action:<uuid>", "receipt:<uuid>", "transaction:<uuid>",
