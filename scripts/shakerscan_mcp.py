@@ -903,14 +903,83 @@ def _start_failure(exc: BaseException, key: str, generated: bool) -> MCPError:
     ), {"outcome": "unknown", "http_status": status, **identity}, http_status=status)
 
 
+def _dispatch_evidence(document: Any) -> dict[str, Any] | None:
+    """What a server answer says about an action that was already dispatched, or None.
+
+    The server reports dispatch either as ``execution_started: true`` or as the action's own
+    state (``action_result.status``). Either may arrive in a result or in an error body's
+    ``detail``. ``execution_started: false`` is the server saying the action never ran."""
+    if not isinstance(document, Mapping):
+        return None
+    detail = document.get("detail") if isinstance(document.get("detail"), Mapping) else {}
+    scopes = [
+        item for item in (document, detail, document.get("action_result"), detail.get("action_result"),
+                          document.get("result"), detail.get("result"))
+        if isinstance(item, Mapping)
+    ]
+    if any(item.get("execution_started") is False for item in scopes):
+        return None
+    action = next((item for item in (document.get("action_result"), detail.get("action_result"))
+                   if isinstance(item, Mapping)), {})
+    state = str(action.get("status") or "")
+    started = any(item.get("execution_started") is True for item in scopes)
+    if not started and not state:
+        return None
+    action_id = next((
+        str(item.get("action_id")) for item in (document, detail, action) if item.get("action_id")
+    ), None)
+    return {
+        "action_id": action_id,
+        **({"action_status": state} if state else {}),
+        **({"execution_started": True} if started else {}),
+    }
+
+
+def _error_dispatch(exc: BaseException) -> dict[str, Any] | None:
+    """Dispatch evidence for a failed call: recorded while settling it, or in its own body."""
+    recorded = getattr(exc, "dispatch", None)
+    if isinstance(recorded, Mapping):
+        return dict(recorded)
+    body = exc.data if isinstance(exc, MCPError) and isinstance(exc.data, str) else None
+    try:
+        return _dispatch_evidence(json.loads(body)) if body else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _capability_failure(exc: BaseException, identity: Mapping[str, Any]) -> MCPError:
     """The error one failed capability call reports: refused, retry later, or unknown.
 
     The agent reads the message, not ``error.data``: the status, the server's parsed reason (never
-    the raw body) and, when a retry is the way on, the key to retry with are all in it."""
+    the raw body) and, when a retry is the way on, the key to retry with are all in it.
+
+    A 4xx is a definite refusal only before dispatch. Once the server has reported that the
+    action started (``execution_started`` or its in-flight state), a later 4xx -- a replay
+    answered 409 because the Hunt finished meanwhile, say -- cannot prove the action did not
+    run, so it is an unknown outcome naming the action and the key to recover with."""
     capability = identity["capability_name"]
     status = _http_status(exc)
     reason = _refusal_reason(exc.data) if isinstance(exc, MCPError) and isinstance(exc.data, str) else None
+    dispatched = _error_dispatch(exc) if _definite_refusal(exc) else None
+    if dispatched is not None:
+        action_id = dispatched.get("action_id")
+        said = f"HTTP {status}" + (f": {reason}" if reason else "")
+        where = f"action {action_id}" if action_id else "the action recorded under this key"
+        return MCPError(getattr(exc, "code", -32002), (
+            f"Hunt capability {capability} outcome is unknown: the server reported {where} as "
+            f"dispatched, then answered {said}. It may have run. Read the Hunt's actions for {where}, "
+            f"or call again with idempotency_key {identity['mcp_idempotency_key']} and unchanged "
+            "input, never a new key."
+        ), {
+            "outcome": "unknown", "indeterminate": True, "http_status": status, "detail": reason,
+            "action_id": action_id, **{k: v for k, v in dispatched.items() if k != "action_id"},
+            **identity,
+            "recovery": (
+                "The server had dispatched this action before the error, so it may have run. Read "
+                "the Hunt's action history for this action; if retrying, use the same key and "
+                "unchanged input. Do not submit a new key."
+            ),
+        }, http_status=status)
     if _definite_refusal(exc):
         return MCPError(exc.code, f"Hunt capability {capability} was refused: {exc.message}", {
             "outcome": "refused", "http_status": status, "detail": reason, **identity,
@@ -1092,6 +1161,7 @@ class ArsenalClient:
         if deadline is None:
             deadline = time.monotonic() + self.action_wait_seconds
         last = first
+        dispatched = _dispatch_evidence(first) if isinstance(first, dict) else None
         while (remaining := deadline - time.monotonic()) > 0:
             time.sleep(min(self.poll_seconds, remaining))
             override = _REQUEST_TIMEOUT.set(max(1.0, min(self.timeout_seconds, deadline - time.monotonic())))
@@ -1099,6 +1169,8 @@ class ArsenalClient:
                 result = self.request_json("POST", path, payload)
             except MCPError as exc:
                 if not _unknown_outcome(exc):
+                    if dispatched is not None:
+                        exc.dispatch = dispatched
                     raise
                 last = exc
                 continue
@@ -1106,6 +1178,7 @@ class ArsenalClient:
                 _REQUEST_TIMEOUT.reset(override)
             if not _in_flight(result):
                 return result
+            dispatched = _dispatch_evidence(result) or dispatched
             last = result
         if isinstance(last, MCPError):
             raise last
