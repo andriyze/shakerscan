@@ -225,12 +225,16 @@ When multi-principal Hunt evidence shows same-service identity/resource structur
 agent endpoint, call `POST /hunts/{hunt_id}/boundary-discovery` before hand-building the candidate.
 Discovery reads only bounded same-Hunt stored structure and sends no target traffic. For a relevant
 draft, call `POST /hunts/{hunt_id}/boundary-discovery/{draft_id}/prepare`; the server recomputes it
-and creates only an unverified candidate. Fill missing principal facts and the expected rule from
-operator-owned configuration/evidence, then compile `POST /hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal`
-and hand the ready proposal to the operator. AI Boundary verification runs on operator-only
-`/ai/targets/...` routes; a Hunt planner, including one using a planner lease, does not call them
-and must not describe the candidate as verified until that step reports. Discovery drafts and action leads are
-not authority or proof and never authorize a state-changing follow-up on their own.
+and creates only an unverified candidate. Report `evidence_refs_truncated` or `provenance_omitted`
+on the result as a coverage gap. Fill missing principal facts and the expected rule from
+operator-owned configuration/evidence, keeping the discovered owner/attacker resource IDs, then
+compile `POST /hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal` and hand the ready
+proposal, with its `source_binding` unchanged, to the operator. AI Boundary verification runs on
+operator-only `/ai/targets/...` routes; a Hunt planner, including one using a planner lease, does
+not call them and must not describe the candidate as verified until that step reports. Verification
+refuses a discovery proposal whose binding is missing, altered or superseded; re-prepare and
+recompile instead. Discovery drafts and action leads are not authority or proof and never authorize
+a state-changing follow-up on their own.
 
 Correct a candidate with `PATCH /hunts/{hunt_id}/candidates/{candidate_id}` when its title, claim,
 severity, evidence references, or verifier contract needs revision. Delete a mistaken, duplicate,
