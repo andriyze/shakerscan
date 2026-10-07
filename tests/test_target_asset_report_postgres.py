@@ -153,3 +153,45 @@ def test_device_retirement_keeps_historical_other_locator_active(monkeypatch):
             await conn.execute('UPDATE device_targets SET is_active=false WHERE id=$1',host)
             assert await conn.fetchval('SELECT is_active FROM targets WHERE id=$1',origin)
     asyncio.run(run())
+
+
+def test_restoring_an_archived_host_restores_exactly_the_services_archived_with_it():
+    # Soak N7: archive covered the host and its web app, but Restore (PATCH is_active=true)
+    # reactivated only the host, which then showed 0 origins.
+    async def run():
+        from targets.archive import archive, restore_archived_members
+        import retest_contract
+        async with startup_database() as conn:
+            host = await conn.fetchval("INSERT INTO device_targets(name,primary_locator) VALUES('TV','restore-report.test') RETURNING id")
+            origin = await conn.fetchval("INSERT INTO targets(url) VALUES('https://restore-report.test') RETURNING id")
+            alone = await conn.fetchval("INSERT INTO targets(url) VALUES('https://restore-report.test:8443') RETURNING id")
+            await retest_contract.run_schema_migrations(BoundConnectionPool(conn))
+            for member in (origin, alone):
+                assert await conn.fetchval('SELECT asset_owner_id FROM targets WHERE id=$1', member) == host
+            # One service was archived on its own before the host was.
+            await conn.execute('UPDATE targets SET is_active=false WHERE id=$1', alone)
+            await archive(BoundConnectionPool(conn), host)
+            assert await conn.fetchval('SELECT count(*) FROM targets WHERE is_active') == 0
+
+            # The UI's Restore button sends PATCH is_active=true for the host.
+            from targets import router as targets_router
+            previous = targets_router._pool_provider
+            targets_router._pool_provider = lambda: BoundConnectionPool(conn)
+            try:
+                restored = await targets_router.update_target(
+                    str(host), targets_router.TargetUpdate(is_active=True))
+            finally:
+                targets_router._pool_provider = previous
+            assert restored['services_restored'] == 1
+            active = {row['id'] for row in await conn.fetch('SELECT id FROM targets WHERE is_active')}
+            assert active == {host, origin}
+            metadata = json.loads(await conn.fetchval('SELECT metadata_json FROM targets WHERE id=$1', origin))
+            assert 'archived_with' not in metadata
+
+            # An archive made before members were stamped is recognised by its shared timestamp.
+            await conn.execute("""UPDATE targets SET is_active=false, updated_at='2026-10-01T00:00:00Z'
+                WHERE id=ANY($1::uuid[])""", [host, origin])
+            assert await restore_archived_members(conn, host) == 1
+            assert await conn.fetchval('SELECT is_active FROM targets WHERE id=$1', origin)
+            assert not await conn.fetchval('SELECT is_active FROM targets WHERE id=$1', alone)
+    asyncio.run(run())

@@ -32,7 +32,7 @@ class Connection:
         self.active = False
     async def fetch(self, sql, *args):
         self.events.append(sql)
-        return [{'id':uuid4()}]
+        return [{'id':uuid4(), 'is_active': True}]
 
 
 class Pool:

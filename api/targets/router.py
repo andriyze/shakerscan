@@ -921,12 +921,21 @@ async def update_target(target_id: str, request: TargetUpdate):
         params.append(uuid.UUID(target_id))
 
         query = f"UPDATE targets SET {', '.join(updates)} WHERE id = ${param_idx} RETURNING id"
-        result = await conn.fetchval(query, *params)
+        restored_services = 0
+        async with conn.transaction():
+            if request.is_active is True:
+                # Restore is the inverse of archive: the host's web apps archived with it come back
+                # with it. This runs first, while the host still carries its archive timestamp.
+                from .archive import restore_archived_members
+                restored_services = await restore_archived_members(conn, uuid.UUID(target_id))
+            result = await conn.fetchval(query, *params)
+            if not result:
+                raise HTTPException(status_code=404, detail="Target not found")
 
-        if not result:
-            raise HTTPException(status_code=404, detail="Target not found")
-
-    return {'id': target_id, 'status': 'updated'}
+    response = {'id': target_id, 'status': 'updated'}
+    if request.is_active is True:
+        response['services_restored'] = restored_services
+    return response
 
 
 @router.get("/targets/{target_id}/credential-profiles")
