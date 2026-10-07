@@ -57,6 +57,55 @@ MAX_RESPONSE_BYTES = 2_000_000
 DEFAULT_TARGET_PAGE_SIZE = 20
 DEFAULT_IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
 DEFAULT_CAPABILITY_PATTERN = r"^[a-z0-9][a-z0-9_.:-]{0,127}$"
+MAX_REASON_CHARS = 600
+_REASON_NOISE = re.compile(r"(?:\x1b\[[0-9;]*[A-Za-z]|[\x00-\x1f\x7f])+")
+
+
+def _reason_text(value: Any, depth: int = 0) -> str | None:
+    """The human reason in one error ``detail``: a string, a ``{code, message}`` object, or a
+    list of validation errors (``loc: msg``; the echoed ``input`` is never used)."""
+    if isinstance(value, str):
+        return value
+    if depth > 2:
+        return None
+    if isinstance(value, list):
+        parts = []
+        for item in value[:5]:
+            if isinstance(item, dict):
+                where = ".".join(str(part) for part in item.get("loc") or () if part != "body")
+                said = _reason_text(item.get("msg") or item.get("message"), depth + 1) or ""
+                parts.append(f"{where}: {said}" if where and said else said or where)
+            else:
+                parts.append(_reason_text(item, depth + 1) or "")
+        return "; ".join(part for part in parts if part) or None
+    if isinstance(value, dict):
+        code = value.get("code") if isinstance(value.get("code"), str) else None
+        for key in ("message", "detail", "reason", "error"):
+            said = _reason_text(value.get(key), depth + 1)
+            if said:
+                return f"{said} ({code})" if code and code not in said else said
+        return code
+    return None
+
+
+def _refusal_reason(body: str) -> str | None:
+    """The server's stated reason in an error body, as one bounded line, or None.
+
+    Only the JSON ``detail``/``error``/``message``/``reason`` field is read: an HTML page or an
+    unstructured body from a proxy is never shown to the agent."""
+    try:
+        document = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    for key in ("detail", "error", "message", "reason"):
+        said = _reason_text(document.get(key))
+        if said:
+            text = " ".join(_REASON_NOISE.sub(" ", said).split())
+            if text:
+                return text if len(text) <= MAX_REASON_CHARS else text[: MAX_REASON_CHARS - 1] + "…"
+    return None
 
 
 def _bounded_text(value: Any, limit: int) -> str | None:
@@ -579,11 +628,26 @@ def _hunt_tools(contract: dict[str, Any]) -> tuple[HuntMCPTool, ...]:
 
 
 class MCPError(Exception):
-    def __init__(self, code: int, message: str, data: Any = None):
+    def __init__(self, code: int, message: str, data: Any = None, *, http_status: int | None = None):
         super().__init__(message)
         self.code = code
         self.message = message
         self.data = data
+        self.http_status = http_status
+
+
+def _http_status(exc: BaseException) -> int | None:
+    status = getattr(exc, "http_status", None)
+    if isinstance(status, int):
+        return status
+    found = re.search(r"\bHTTP (\d{3})\b", str(getattr(exc, "message", "") or exc))
+    return int(found.group(1)) if found else None
+
+
+def _definite_refusal(exc: BaseException) -> bool:
+    """A 4xx answer is the server's decision, not a lost response (408 alone is a timeout)."""
+    status = _http_status(exc) if isinstance(exc, MCPError) else None
+    return status is not None and 400 <= status < 500 and status != 408
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -657,7 +721,10 @@ class ArsenalClient:
         except urllib.error.HTTPError as exc:
             raw = exc.read(min(self.max_response_bytes, 64_000))
             detail = raw.decode("utf-8", errors="replace")
-            raise MCPError(-32002, f"ShakerScan API returned HTTP {exc.code}", detail[:4_000]) from exc
+            # The agent sees the message, not error.data: a refusal must carry its reason there.
+            reason = _refusal_reason(detail)
+            message = f"ShakerScan API returned HTTP {exc.code}" + (f": {reason}" if reason else "")
+            raise MCPError(-32002, message, detail[:4_000], http_status=exc.code) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise MCPError(-32001, "ShakerScan API is unavailable", str(exc)[:1_000]) from exc
         if len(raw) > self.max_response_bytes:
@@ -933,15 +1000,32 @@ class ArsenalClient:
             except (MCPError, ValueError, urllib.error.URLError, OSError) as exc:
                 if name != "shakerscan_hunt_capability":
                     raise
-                # The POST may have been admitted before its response was lost.
-                # Preserve recovery identity, never raw upstream error bodies or inputs.
-                raise MCPError(getattr(exc,"code",-32001), "Hunt capability response was not confirmed", {
-                    "outcome": "unknown",
+                identity = {
                     "hunt_id": hunt_id,
                     "capability_name": capability_name,
                     "mcp_idempotency_key": payload["idempotency_key"],
                     "mcp_generated_idempotency_key": generated_idempotency_key is not None,
                     **({"experiment_key": payload["experiment_key"]} if "experiment_key" in payload else {}),
+                }
+                if _definite_refusal(exc):
+                    # The server answered and said no: name the status and its reason in the
+                    # message the agent reads. Only the parsed reason, never the raw body.
+                    status = _http_status(exc)
+                    reason = _refusal_reason(exc.data) if isinstance(exc.data, str) else None
+                    raise MCPError(exc.code, f"Hunt capability {capability_name} was refused: {exc.message}", {
+                        "outcome": "refused",
+                        "http_status": status,
+                        "detail": reason,
+                        **identity,
+                        "recovery": "The server refused this call. Act on the reason (input, budget, policy or Hunt state); replaying the same key returns the same answer.",
+                    }, http_status=status) from exc
+                if streaming_ssh and isinstance(exc, ValueError) and str(exc).startswith("Canonical SSH action refused"):
+                    raise MCPError(-32006, str(exc)[:MAX_REASON_CHARS], {"outcome": "refused", **identity}) from exc
+                # The POST may have been admitted before its response was lost.
+                # Preserve recovery identity, never raw upstream error bodies or inputs.
+                raise MCPError(getattr(exc,"code",-32001), "Hunt capability response was not confirmed", {
+                    "outcome": "unknown",
+                    **identity,
                     "recovery": "Read Hunt action history; if retrying, use the same key and unchanged input. Do not submit a new key.",
                 }) from exc
             if name == "shakerscan_hunt_capability":

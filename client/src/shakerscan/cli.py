@@ -970,6 +970,8 @@ def _with_reason(exc: Exception) -> str:
     """The adapter's error message plus the transport reason it carries (a timeout, a refused
     connection, a certificate failure), so `doctor` says why and not only that."""
     message = str(getattr(exc, "message", None) or exc)
+    if getattr(exc, "http_status", None) is not None:
+        return message  # the server answered: its reason is already in the message
     reason = getattr(exc, "data", None)
     return f"{message}: {reason}" if reason else message
 

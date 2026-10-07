@@ -79,11 +79,17 @@ def test_mcp_settles_an_in_flight_first_answer():
 
 
 def test_mcp_never_replays_a_definite_refusal():
-    client = ScriptedHunt([mcp.MCPError(-32002, "ShakerScan API returned HTTP 409", "budget")])
+    client = ScriptedHunt([mcp.MCPError(
+        -32002, "ShakerScan API returned HTTP 409: budget exhausted", '{"detail": "budget exhausted"}',
+        http_status=409,
+    )])
     with pytest.raises(mcp.MCPError) as refused:
         _call(client)
     assert len(client.posts) == 1
-    assert refused.value.data["outcome"] == "unknown"  # the existing recovery envelope
+    # A definite answer is reported as one, with its reason, and keeps the recovery identity.
+    assert refused.value.data["outcome"] == "refused"
+    assert "HTTP 409: budget exhausted" in refused.value.message
+    assert refused.value.data["mcp_idempotency_key"] == "key-mcp-1"
 
 
 def test_mcp_wait_is_bounded_and_keeps_the_recovery_identity():
