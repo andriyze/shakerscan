@@ -44,6 +44,12 @@ RUN set -eu; \
     /out/trivy --version | grep -Fx "Version: ${TRIVY_VERSION}"; \
     /out/osv-scanner --version 2>&1 | grep -Fx "osv-scanner version: ${OSV_SCANNER_VERSION}"
 
+# Only the two verified binaries the image installs. Copying through this stage changes nothing in
+# the image, but a cached build can reuse these files without restoring the Go build stage above,
+# whose layers carry the cloned sources and module cache (several GB).
+FROM scratch AS model-intake-go-tools-out
+COPY --from=model-intake-go-tools /out/trivy /out/osv-scanner /out/
+
 FROM ${SCANNER_RUNTIME_IMAGE}
 
 # The scanner base strips its C toolchain and pip/venv machinery. The Model Intake adapters compile
@@ -123,8 +129,8 @@ RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,r
     rm -rf /var/lib/apt/lists/*
 
 # Native scanners are rebuilt from tagged upstream source using a patched Go toolchain.
-COPY --from=model-intake-go-tools /out/trivy /opt/tools/trivy
-COPY --from=model-intake-go-tools /out/osv-scanner /opt/tools/osv-scanner
+COPY --from=model-intake-go-tools-out /out/trivy /opt/tools/trivy
+COPY --from=model-intake-go-tools-out /out/osv-scanner /opt/tools/osv-scanner
 ARG TRIVY_DOWNLOAD_ATTEMPTS=4
 RUN set -eu; \
     chmod 755 /opt/tools/trivy /opt/tools/osv-scanner; \

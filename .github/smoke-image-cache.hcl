@@ -51,7 +51,7 @@ target "model-intake-signer" {
 target "model-intake-toolchain" {
   context    = "."
   dockerfile = "scanner/Dockerfile.model-intake"
-  target     = "model-intake-go-tools"
+  target     = "model-intake-go-tools-out"
   tags       = ["shakerscan-smoke-cache/model-intake-go-tools:local"]
   cache-from = cache_from("model-intake")
   cache-to   = cache_to("model-intake")

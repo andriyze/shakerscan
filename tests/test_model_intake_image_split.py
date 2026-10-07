@@ -61,7 +61,13 @@ def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():
     assert "golang:1.26.6-bookworm@sha256:" in MI
     assert "golang.org/x/crypto@v0.55.0" in MI
     assert "google.golang.org/grpc@v1.83.2" in MI
-    assert "COPY --from=model-intake-go-tools /out/trivy" in MI
+    assert "COPY --from=model-intake-go-tools /out/trivy /out/osv-scanner /out/" in MI
+    # The image installs exactly the two binaries, through the binaries-only stage, so cached
+    # builds need not restore the Go build stage.
+    assert "FROM scratch AS model-intake-go-tools-out" in MI
+    assert "COPY --from=model-intake-go-tools-out /out/trivy /opt/tools/trivy" in MI
+    assert "COPY --from=model-intake-go-tools-out /out/osv-scanner /opt/tools/osv-scanner" in MI
+    assert MI.count("COPY --from=model-intake-go-tools") == 3
     assert "aquasecurity/trivy/releases/download" not in MI
 
 
