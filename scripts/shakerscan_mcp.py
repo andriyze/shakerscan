@@ -68,11 +68,20 @@ HEARTBEAT_SECONDS = 10.0
 # The capability POST may run as long as the server's own wall time for it, plus this margin.
 CAPABILITY_TIMEOUT_MARGIN_SECONDS = 15
 MAX_CAPABILITY_REQUEST_SECONDS = 900.0
-RUNNING_CONTINUE = (
-    "The action is still running on the server. Call shakerscan_hunt_capability again with the same "
-    "hunt_id, capability_name, input and the same idempotency_key (mcp_idempotency_key) to collect "
-    "its result; the server replays the recorded action and never runs it twice. Do not use a new key."
-)
+# The engine answers the first POST only when the action is done. That POST ends this long before
+# the call's wait does, so a replay still fits: it finds the recorded action and reports it
+# "running" instead of the call ending on an unanswered request.
+SETTLE_RESERVE_SECONDS = 10.0
+
+
+def _running_continue(key: str) -> str:
+    return (
+        "The action is still running on the server. Call shakerscan_hunt_capability again with the "
+        f"same hunt_id, capability_name and input and idempotency_key {key} to collect its result; "
+        "the server replays the recorded action and never runs it twice. Do not use a new key."
+    )
+
+
 IN_FLIGHT_ACTION_STATUSES = frozenset({"requested", "reserved", "queued", "running"})
 # "Not now", not "no": the broker treats the same 4xx statuses as retryable (api/broker_worker.py).
 RETRYABLE_HTTP_STATUSES = frozenset({408, 425, 429})
@@ -854,7 +863,10 @@ def _capability_failure(exc: BaseException, identity: Mapping[str, Any]) -> MCPE
         }, http_status=status, retry_after=retry_after)
     # The POST may have been admitted before its response was lost.
     # Preserve recovery identity, never raw upstream error bodies or inputs.
-    return MCPError(getattr(exc, "code", -32001), "Hunt capability response was not confirmed", {
+    return MCPError(getattr(exc, "code", -32001), (
+        "Hunt capability response was not confirmed: read the Hunt's actions, or call again with "
+        f"idempotency_key {identity['mcp_idempotency_key']} and unchanged input, never a new key."
+    ), {
         "outcome": "unknown",
         **identity,
         "recovery": "Read Hunt action history; if retrying, use the same key and unchanged input. Do not submit a new key.",
@@ -972,14 +984,19 @@ class ArsenalClient:
 
         The POST may run for the server's own wall time. A client that sent a progress token
         gets progress while it waits, up to the action wait; any other client gets its answer
-        within ``call_seconds``. A still-running action is returned as ``outcome: running``."""
+        within ``call_seconds``. A still-running action is returned as ``outcome: running``.
+
+        The engine answers the POST only when the action is done, so a POST still blocked when
+        the wait ends would leave the outcome unknown. It therefore ends a reserve before the
+        wait does, and a replay of the same key, which the engine answers at once with the
+        recorded action's state, settles whether the action is running."""
         keepalive = _KEEPALIVE.get()
         wait = self.action_wait_seconds if keepalive else min(self.call_seconds, self.action_wait_seconds)
         deadline = time.monotonic() + wait
         request_seconds = min(
             max(self.timeout_seconds, wall_seconds + CAPABILITY_TIMEOUT_MARGIN_SECONDS),
             MAX_CAPABILITY_REQUEST_SECONDS,
-            max(1.0, wait),
+            max(0.5, wait - min(SETTLE_RESERVE_SECONDS, wait / 2)),
         )
         with _heartbeat(keepalive, what):
             override = _REQUEST_TIMEOUT.set(request_seconds)
@@ -1025,7 +1042,7 @@ class ArsenalClient:
             last = result
         if isinstance(last, MCPError):
             raise last
-        return {**last, "outcome": "running", "continue": RUNNING_CONTINUE}
+        return {**last, "outcome": "running", "continue": _running_continue(str(payload.get("idempotency_key")))}
 
     def catalog(self) -> dict[str, dict[str, Any]]:
         payload = self.request_json("GET", "/arsenal/commands")

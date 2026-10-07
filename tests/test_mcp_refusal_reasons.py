@@ -107,7 +107,8 @@ def test_a_lost_answer_is_still_reported_as_unknown_with_its_recovery_identity()
     client = _client({("GET", f"/hunts/{HUNT}"): HUNT_RECORD, ("POST", CAPABILITY_PATH): lost})
     with pytest.raises(mcp.MCPError) as unknown:
         _call_capability(client)
-    assert unknown.value.message == "Hunt capability response was not confirmed"
+    assert unknown.value.message.startswith("Hunt capability response was not confirmed")
+    assert "key-refusal-1" in unknown.value.message
     assert unknown.value.data["outcome"] == "unknown"
     assert unknown.value.data["mcp_idempotency_key"] == "key-refusal-1"
 

@@ -46,8 +46,10 @@ class Response(io.BytesIO):
 
 
 class SlowEngine:
-    """The engine behind the opener: the first POST runs for ``first_seconds``; every POST
-    records the timeout the adapter allowed it, and replays answer the current state."""
+    """The engine behind the opener. Like the real one, it answers the first POST only when the
+    action is done (``first_seconds`` of work): a request that gives up sooner times out with
+    no answer. A replay of the same key answers at once with the action's current state. Every
+    POST records the timeout the adapter allowed it."""
 
     def __init__(self, answers, *, first_seconds=0.0, wall=75):
         self.answers = list(answers)
@@ -67,6 +69,9 @@ class SlowEngine:
         assert path == PATH
         self.posts.append((json.loads(request.data), timeout))
         if len(self.posts) == 1 and self.first_seconds:
+            if timeout < self.first_seconds:
+                time.sleep(timeout)
+                raise TimeoutError("timed out")  # the socket read gave up; the action runs on
             time.sleep(self.first_seconds)
         answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
         return Response(json.dumps(answer).encode())
@@ -82,8 +87,9 @@ ARGUMENTS = {"hunt_id": HUNT, "capability_name": "web.content_discover", "input"
 
 
 def test_a_client_without_progress_gets_running_and_the_key_before_its_timeout():
-    engine = SlowEngine([_action("running")])
-    client = _client(engine, call_seconds=0.2)
+    # The first POST blocks for the whole action (5 s here, 60-120 s live), past the call's wait.
+    engine = SlowEngine([_action("running")], first_seconds=5.0)
+    client = _client(engine, call_seconds=1.0)
     started = time.monotonic()
     result = client.call_tool("shakerscan_hunt_capability", dict(ARGUMENTS))
     assert time.monotonic() - started < 2
@@ -91,12 +97,39 @@ def test_a_client_without_progress_gets_running_and_the_key_before_its_timeout()
     structured = result["structuredContent"]
     assert structured["outcome"] == "running"
     assert structured["mcp_idempotency_key"] == "key-long-1"
-    assert "same idempotency_key" in structured["continue"]
+    # The key is in the text the agent reads, not only in a field it may never look at.
+    assert "idempotency_key key-long-1" in structured["continue"]
+    assert "key-long-1" in result["content"][0]["text"]
+    # The first POST gave up before the wait did, so a replay could still learn the state.
+    assert engine.posts[0][1] < 1.0 and len(engine.posts) >= 2
     assert all(body == {"idempotency_key": "key-long-1", "input": {}} for body, _ in engine.posts)
     # Calling again with the same key collects the settled action; nothing new is started.
     engine.answers = [_action("success")]
     again = client.call_tool("shakerscan_hunt_capability", dict(ARGUMENTS))["structuredContent"]
     assert again["action_result"]["status"] == "success" and "outcome" not in again
+
+
+def test_the_first_post_leaves_the_default_call_wait_room_for_a_replay():
+    # ports.discover top_1000 runs 120 s; the default wait is 45 s for a client without progress.
+    engine = SlowEngine([_action("success")], wall=120)
+    _client(engine).call_tool("shakerscan_hunt_capability", dict(ARGUMENTS))
+    (_, timeout), = engine.posts
+    assert timeout == mcp.DEFAULT_CALL_SECONDS - mcp.SETTLE_RESERVE_SECONDS
+
+
+def test_an_answer_that_never_arrives_names_the_key_in_the_message():
+    class Silent(SlowEngine):
+        def open(self, request, timeout):
+            if request.get_method() == "GET":
+                return super().open(request, timeout)
+            self.posts.append((json.loads(request.data), timeout))
+            raise TimeoutError("timed out")
+
+    client = _client(Silent([_action("running")]), call_seconds=1.0)
+    with pytest.raises(mcp.MCPError) as unknown:
+        client.call_tool("shakerscan_hunt_capability", dict(ARGUMENTS))
+    assert unknown.value.data["outcome"] == "unknown"
+    assert "not confirmed" in unknown.value.message and "key-long-1" in unknown.value.message
 
 
 def test_the_capability_request_is_sized_from_the_server_wall_time():
