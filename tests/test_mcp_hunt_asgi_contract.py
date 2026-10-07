@@ -43,6 +43,7 @@ class MCPAgainstASGI(mcp.ArsenalClient):
                 -32002,
                 f"ShakerScan API returned HTTP {response.status_code}",
                 response.text,
+                http_status=response.status_code,
             )
         decoded = response.json()
         assert isinstance(decoded, dict)

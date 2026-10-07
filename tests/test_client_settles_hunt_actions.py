@@ -60,8 +60,8 @@ def _call(client):
 
 @pytest.mark.parametrize("lost", [
     mcp.MCPError(-32001, "ShakerScan API is unavailable", "timed out"),
-    mcp.MCPError(-32002, "ShakerScan API returned HTTP 502", "engine unavailable"),
-    mcp.MCPError(-32002, "ShakerScan API returned HTTP 504", ""),
+    mcp.MCPError(-32002, "ShakerScan API returned HTTP 502", "engine unavailable", http_status=502),
+    mcp.MCPError(-32002, "ShakerScan API returned HTTP 504", "", http_status=504),
 ])
 def test_mcp_settles_a_lost_answer_by_replaying_the_same_key(lost):
     client = ScriptedHunt([lost, _action("running"), _action("running"), _action("success")])
@@ -71,6 +71,18 @@ def test_mcp_settles_a_lost_answer_by_replaying_the_same_key(lost):
     assert all(p == {"idempotency_key": "key-mcp-1", "input": {}} for p in client.posts), (
         "a replay must carry the same key and unchanged input, never a new key"
     )
+
+
+def test_mcp_classifies_by_the_status_not_by_the_reason_text():
+    # A definite 422 whose reason quotes a target's 503 is still a refusal: one POST, no replays.
+    client = ScriptedHunt([mcp.MCPError(
+        -32002, "ShakerScan API returned HTTP 422: the login origin answered HTTP 503",
+        '{"detail": "the login origin answered HTTP 503"}', http_status=422,
+    )] + [_action("running")] * 100)
+    with pytest.raises(mcp.MCPError) as refused:
+        _call(client)
+    assert len(client.posts) == 1
+    assert refused.value.data["outcome"] == "refused"
 
 
 def test_mcp_settles_an_in_flight_first_answer():
