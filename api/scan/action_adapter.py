@@ -179,6 +179,7 @@ from .capability_result import (
     BUDGET_EXHAUSTION_REASONS,
     CEILING_STOP_ERRORS,
     CapabilityResultReason,
+    is_process_kill_error,
 )
 from .external_process import (
     BATCH_ATTEMPT_FLOORS,
@@ -423,10 +424,18 @@ def batch_stop_reason(
     lowered = [str(item).strip().lower() for item in attempt_errors or ()]
     stops = set(ceiling_stops)
     spent = set(exhausted) if unattempted else set()
+    memory = CapabilityResultReason.CRAWLER_MEMORY_BOUND_EXCEEDED.value
     if lowered and not stops and all(
-        item == "timeout" or item.startswith("exit_-") for item in lowered
+        item in {"timeout", memory} or is_process_kill_error(item) for item in lowered
     ):
-        return CapabilityResultReason.TIMED_OUT.value
+        # Only the worker's own deadline is a timeout (`timeout`, with timed_out set on
+        # the attempt). A tool killed by the kernel's OOM killer or the memory ceiling
+        # (`exit_-9`) was not timed out, and the receipt does not claim it was.
+        if "timeout" in lowered:
+            return CapabilityResultReason.TIMED_OUT.value
+        if all(item == memory for item in lowered):
+            return memory
+        return CapabilityResultReason.PROCESS_KILLED.value
     for dimension in ("http_requests", "state_changing_requests"):
         if dimension in stops or dimension in spent:
             return BUDGET_EXHAUSTION_REASONS[dimension].value

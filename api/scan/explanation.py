@@ -62,6 +62,10 @@ _REASON_LABELS = {
     "state_changing_budget_exhausted": (
         "The action used up its state-changing request allowance before it finished"
     ),
+    "process_killed": (
+        "A tool process was killed by the system (for example, out of memory) before it "
+        "finished; output it wrote before that is kept"
+    ),
     "adapter_failed": "The capability adapter failed",
     "parser_failed": "The capability output could not be parsed safely",
     "output_truncated": "The bounded output limit was reached",

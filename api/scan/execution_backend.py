@@ -27,6 +27,7 @@ from .action_reservations import (
 from .capability_result import (
     BUDGET_EXHAUSTION_REASONS,
     CEILING_STOP_ERRORS,
+    is_process_kill_error,
     CapabilityReceiptReference,
     CapabilityResultReason,
     CapabilityResultError,
@@ -1015,6 +1016,10 @@ class PostgresScanExecutionBackend:
                 # A tool the pinned transport stopped at its request ceiling ran out of
                 # that dimension; it did not fail and it did not time out.
                 return BUDGET_EXHAUSTION_REASONS[CEILING_STOP_ERRORS[candidate]]
+            if is_process_kill_error(candidate):
+                # Killed by a signal the worker's deadline did not send: its retained
+                # output is partial for that reason, not because a bound was reached.
+                return CapabilityResultReason.PROCESS_KILLED
         return default
 
     async def _load_result_with_conn(

@@ -56,6 +56,9 @@ class CapabilityResultReason(str, Enum):
     # ceiling as a timeout pointed every reader at the wrong dimension.
     HTTP_REQUEST_BUDGET_EXHAUSTED = "http_request_budget_exhausted"
     STATE_CHANGING_BUDGET_EXHAUSTED = "state_changing_budget_exhausted"
+    # The tool process was killed by a signal the worker's deadline did not send (the
+    # kernel's OOM killer, a container limit): not a timeout, and nothing timed it out.
+    PROCESS_KILLED = "process_killed"
     ADAPTER_FAILED = "adapter_failed"
     PARSER_FAILED = "parser_failed"
     OUTPUT_TRUNCATED = "output_truncated"
@@ -88,6 +91,14 @@ BUDGET_EXHAUSTION_REASONS: Mapping[str, CapabilityResultReason] = MappingProxyTy
 CEILING_STOP_ERRORS: Mapping[str, str] = MappingProxyType({
     "connection_limit_exceeded": "http_requests",
 })
+# The worker's error for a tool that died on a signal it did not send itself: `exit_-9`.
+# A wall kill is reported as `timeout` and carries timed_out; this never does.
+_PROCESS_KILL_ERROR = re.compile(r"^exit_-[0-9]+$")
+
+
+def is_process_kill_error(value: Any) -> bool:
+    """True for the worker's error token of a tool killed by a signal it did not send."""
+    return bool(_PROCESS_KILL_ERROR.fullmatch(str(value or "").strip().lower()))
 
 
 class CapabilityResultError(ValueError):

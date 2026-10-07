@@ -136,6 +136,8 @@ _DISCOVERY_TRUNCATION_REASONS = frozenset({
     "http_request_budget_exhausted",
     "insufficient_plan_budget",
     "crawler_memory_bound_exceeded",
+    # Killed mid-crawl by a signal (the kernel's OOM killer): cut short like the bound.
+    "process_killed",
 })
 _FAMILY_BY_CAPABILITY = {
     "xss.verify_batch": "xss",

@@ -2,7 +2,7 @@
 
 `verify.xss` reported `insufficient_plan_budget` on a run where it attempted every
 candidate it had and left 650 of its 2,210 reserved requests unspent. Its attempts had
-been wall-killed (`exit_-9`) -- a timeout, not a shortage. Because `verify.xss` is a
+been killed (`exit_-9`) -- not a shortage. Because `verify.xss` is a
 required action, that false reason made the whole grade unreliable and pointed every
 reader at plan budget instead of at the tool's own wall.
 
@@ -19,11 +19,16 @@ def _stated_reason(attempt_errors, unattempted, **kwargs):
     return batch_stop_reason(attempt_errors, unattempted=unattempted, **kwargs)
 
 
-def test_wall_killed_attempts_are_a_timeout_not_a_shortage():
-    # The exact errors the live scan recorded.
-    assert _stated_reason(["exit_-9", "exit_-9", "exit_-9"], unattempted=0) == "timed_out"
+def test_killed_attempts_are_not_a_shortage():
+    # The exact errors the live scan recorded. `exit_-9` is a signal the worker's deadline
+    # did not send (a wall kill is reported `timeout`), so it is a killed process, and
+    # only a batch with a wall-killed attempt timed out.
+    assert _stated_reason(["exit_-9", "exit_-9", "exit_-9"], unattempted=0) == "process_killed"
     assert _stated_reason(["exit_-9", "exit_-9", "timeout"], unattempted=0) == "timed_out"
     assert _stated_reason(["timeout"], unattempted=0) == "timed_out"
+    assert _stated_reason(
+        ["crawler_memory_bound_exceeded"], unattempted=0,
+    ) == "crawler_memory_bound_exceeded"
 
 
 def test_only_unfunded_candidates_mean_insufficient_budget():
