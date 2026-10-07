@@ -114,7 +114,8 @@ def test_mcp_wait_is_bounded_and_keeps_the_recovery_identity():
     client = ScriptedHunt([mcp.MCPError(-32001, "unavailable")] * 1000, wait=0.05)
     with pytest.raises(mcp.MCPError) as unsettled:
         _call(client)
-    assert unsettled.value.message == "Hunt capability response was not confirmed"
+    assert unsettled.value.message.startswith("Hunt capability response was not confirmed")
+    assert "key-mcp-1" in unsettled.value.message
     assert unsettled.value.data["mcp_idempotency_key"] == "key-mcp-1"
     assert "same key" in unsettled.value.data["recovery"]
 

@@ -113,10 +113,14 @@ The capability request may run as long as the server's wall time for it
 20-second request timeout. MCP clients usually end a request after 60 seconds, so the adapter never outlives it: a
 client that sent a progress token receives progress notifications every 10 seconds while the
 action runs (clients that reset their timeout on progress, such as OpenCode, keep waiting); any
-other client gets an answer within `SHAKERSCAN_MCP_CALL_SECONDS` (default 45, at most 55). An
+other client gets an answer within `SHAKERSCAN_MCP_CALL_SECONDS` (default 45, at most 55). The
+engine answers the first request only when the action is done, so that request ends 10 seconds
+before the call's wait does, and a replay of the same key learns the recorded action's state. An
 action still running then is returned as a normal result with `outcome: "running"` and its
-`mcp_idempotency_key`: calling the tool again with the same key and unchanged input collects the
-result, because the engine replays the recorded action and never runs it twice.
+`mcp_idempotency_key`, and the `continue` text names that key: calling the tool again with the same
+key and unchanged input collects the result, because the engine replays the recorded action and
+never runs it twice. When no answer arrives at all, the error message itself names the key to call
+again with.
 The runtime still revalidates target binding, approval, budgets, evidence, and proof contracts.
 Catalog/contract drift, redirects, oversized responses, unavailable APIs, and unexpected dispatch
 results fail closed.
