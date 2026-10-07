@@ -969,6 +969,11 @@ class PostgresScanExecutionBackend:
         if raw_status in {"success", "succeeded", "completed"}:
             status = CapabilityResultStatus.SUCCESS
             reason = None
+        elif raw_status == "cancelled":
+            # Cancellation is distinct: a batch cancelled after a wall-killed attempt or with
+            # candidates left is cancelled, not timed out and not out of budget.
+            status = CapabilityResultStatus.CANCELLED
+            reason = CapabilityResultReason.CANCELLED
         elif (receipt.timed_out or raw_status == "timed_out") and self._receipt_reason(
             receipt, CapabilityResultReason.TIMED_OUT,
         ) not in BUDGET_EXHAUSTION_REASONS.values():
@@ -994,9 +999,6 @@ class PostgresScanExecutionBackend:
         elif raw_status == "blocked":
             status = CapabilityResultStatus.BLOCKED
             reason = self._receipt_reason(receipt, CapabilityResultReason.ADAPTER_FAILED)
-        elif raw_status == "cancelled":
-            status = CapabilityResultStatus.CANCELLED
-            reason = CapabilityResultReason.CANCELLED
         else:
             status = CapabilityResultStatus.FAILED
             reason = self._receipt_reason(receipt, CapabilityResultReason.ADAPTER_FAILED)
