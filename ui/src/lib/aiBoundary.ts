@@ -7,6 +7,55 @@ export interface BoundaryPrincipal {
   resource_id: string
 }
 
+export interface BoundarySourceBinding {
+  schema_version: 'hunt-boundary-source/v1'
+  hunt_id: string
+  target_id: string
+  origin: string
+  agent_paths: string[]
+}
+
+export interface BoundaryDiscoveryDraft {
+  draft_id: string
+  origin: string
+  kind: 'cross_tenant_read'
+  agent_paths: string[]
+  fixture_prefill: {
+    owner: { resource_id: string }; attacker: { resource_id: string }
+    [key: string]: unknown
+  }
+  missing_facts: string[]
+  source_binding: BoundarySourceBinding | null
+  field_provenance: Record<string, Array<{ capture_id: string; action_id: string }>>
+  candidate_request: {
+    family: string; locus: Record<string, unknown>; title: string; claim: string
+    severity: 'info'; evidence_refs: string[]
+  }
+}
+
+export interface BoundaryActionLead {
+  origin: string
+  path: string
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  principal_slot?: string | null
+  missing_facts: string[]
+  execution_enabled: false
+  provenance: Array<{ origin_kind: string; capture_id: string; action_id: string; authority: false }>
+}
+
+export interface BoundaryDiscovery {
+  status: 'drafts_available' | 'needs_evidence'
+  drafts: BoundaryDiscoveryDraft[]
+  action_leads?: BoundaryActionLead[]
+  coverage: {
+    captures_read: number; captures_truncated: boolean; structure_unavailable: number
+    conflicting_resource_observations?: number
+    drafts_truncated: boolean; action_leads_truncated?: boolean
+    historical_backfill_performed: false
+  }
+  execution_enabled: false
+}
+
 export interface BoundaryProposal {
   schema_version: 'boundary-proposal/v1'
   status: 'ready' | 'needs_context'
@@ -16,6 +65,7 @@ export interface BoundaryProposal {
   missing_facts: string[]
   contract_fragment: Record<string, unknown> | null
   provenance: Array<Record<string, string>>
+  source_binding?: BoundarySourceBinding | null
   principal_bindings: { owner: BoundaryPrincipal; attacker: BoundaryPrincipal }
 }
 
@@ -71,6 +121,21 @@ async function responseJson<T>(responsePromise: Promise<Response>, fallback: str
 
 function candidateUrl(huntId: string, candidateId: string): string {
   return `${API_URL}/hunts/${encodeURIComponent(huntId)}/candidates/${encodeURIComponent(candidateId)}`
+}
+
+export async function discoverBoundaryDrafts(huntId: string): Promise<BoundaryDiscovery> {
+  return responseJson(fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/boundary-discovery`, {
+    method: 'POST', cache: 'no-store',
+  }), 'Failed to discover boundary drafts')
+}
+
+export async function prepareBoundaryCandidate(
+  huntId: string, draft: BoundaryDiscoveryDraft,
+): Promise<{ candidate: { id: string } }> {
+  return responseJson(fetch(
+    `${API_URL}/hunts/${encodeURIComponent(huntId)}/boundary-discovery/${encodeURIComponent(draft.draft_id)}/prepare`,
+    { method: 'POST', cache: 'no-store' },
+  ), 'Failed to prepare boundary candidate')
 }
 
 export async function inspectBoundaryCandidate(huntId: string, candidateId: string): Promise<BoundaryContext> {

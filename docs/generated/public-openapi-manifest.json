@@ -204,9 +204,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "a38d9350a34bcd1f80e580764968367e9df6d79b60b1bf21960872352e2e0e7a",
+  "contract_sha256": "7b4b713f9c3dbe8d6c812fd893899802423dc1a9e86d96ae0925d26e8770ba52",
   "openapi": "3.1.0",
-  "operation_count": 452,
+  "operation_count": 454,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -4786,6 +4786,32 @@
         "Hunt"
       ]
     },
+    "POST /hunts/{hunt_id}/boundary-discovery": {
+      "deprecated": false,
+      "operation_id": "discover_hunt_boundary_context_hunts__hunt_id__boundary_discovery_post",
+      "parameters_sha256": "cc413fdb829ef94954b9a5eca8dc4a5d489194b070cc781a444e9f5f17c1fc09",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": []
+    },
+    "POST /hunts/{hunt_id}/boundary-discovery/{draft_id}/prepare": {
+      "deprecated": false,
+      "operation_id": "prepare_hunt_boundary_discovery_hunts__hunt_id__boundary_discovery__draft_id__prepare_post",
+      "parameters_sha256": "f6ea05cbb404569c2325710b2787a96363dba969bc066ab0bf89c3c584026cbd",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": []
+    },
     "POST /hunts/{hunt_id}/budget-amendments": {
       "deprecated": false,
       "operation_id": "amend_hunt_budget_hunts__hunt_id__budget_amendments_post",
@@ -6259,6 +6285,8 @@
       "POST /hunts/{hunt_id}/authorization-investigations",
       "POST /hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve",
       "POST /hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip",
+      "POST /hunts/{hunt_id}/boundary-discovery",
+      "POST /hunts/{hunt_id}/boundary-discovery/{draft_id}/prepare",
       "POST /hunts/{hunt_id}/budget-amendments",
       "POST /hunts/{hunt_id}/cancel",
       "POST /hunts/{hunt_id}/candidates",

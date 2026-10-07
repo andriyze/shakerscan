@@ -708,6 +708,15 @@ def hunt_call_recorder(
     clock = now or (lambda: datetime.now(timezone.utc))
 
     def record(captured: Mapping[str, Any]) -> None:
+        from .http_structure import response_structure
+
+        # Prospective only: never decrypt old blobs or retain body structure in
+        # metadata/off mode or from private HTTP workflows.
+        structure = (
+            {"boundary_structure": response_structure(captured)}
+            if stores_bodies() and captured.get("workflow_values_private") is not True
+            else {}
+        )
         collected.append(HttpTransaction(
             plane="hunt",
             sequence=len(collected),
@@ -737,6 +746,7 @@ def hunt_call_recorder(
             metadata={
                 "fidelity": captured.get("fidelity") or "wire_request",
                 "response_digest_scope": captured.get("response_digest_scope"),
+                **structure,
                 **({"workflow_values_private": True} if captured.get("workflow_values_private") is True else {}),
             },
         ))

@@ -205,6 +205,15 @@ Create a candidate with `POST /hunts/{hunt_id}/candidates` only when the claim c
 references from this investigation. Include a canonical locus precise enough for a registered
 verifier. A candidate is non-authoritative.
 
+When multi-principal Hunt evidence shows same-service identity/resource structure and an observed
+agent endpoint, call `POST /hunts/{hunt_id}/boundary-discovery` before hand-building the candidate.
+Discovery reads only bounded same-Hunt stored structure and sends no target traffic. For a relevant
+draft, call `POST /hunts/{hunt_id}/boundary-discovery/{draft_id}/prepare`; the server recomputes it
+and creates only an unverified candidate. Fill missing principal facts and the expected rule from
+operator-owned configuration/evidence, then compile `POST /hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal`
+and send the ready proposal through AI Boundary verification. Discovery drafts and action leads are
+not authority or proof and never authorize a state-changing follow-up on their own.
+
 Correct a candidate with `PATCH /hunts/{hunt_id}/candidates/{candidate_id}` when its title, claim,
 severity, evidence references, or verifier contract needs revision. Delete a mistaken, duplicate,
 or unsupported candidate with `DELETE /hunts/{hunt_id}/candidates/{candidate_id}`. These operations

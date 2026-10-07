@@ -63,6 +63,13 @@ FROM investigation_candidate_observations
 WHERE candidate_id=$1::uuid AND hunt_run_id=$2::uuid
 ORDER BY observed_at DESC, id DESC LIMIT $3
 """
+BOUNDARY_SOURCE_OBSERVATIONS_QUERY = """
+SELECT observation_context
+FROM investigation_candidate_observations
+WHERE candidate_id=$1::uuid AND hunt_run_id=$2::uuid
+  AND source_kind='hunt_boundary_discovery'
+ORDER BY observed_at DESC, id DESC LIMIT $3
+"""
 EVIDENCE_QUERY = """
 SELECT a.id, 'hunt_action' AS kind
 FROM hunt_actions a
@@ -139,6 +146,54 @@ def _context_summary(locus: Any, kind: str | None) -> dict[str, Any]:
         "field_presence_is_not_validation": True,
         "unassessed": ["principal_bindings", "business_policy", "postcondition_validity"],
     }
+
+
+async def read_candidate_boundary_source_binding(
+    conn: Any, *, run: Mapping[str, Any], candidate_id: str,
+) -> dict[str, Any] | None:
+    """Load one consistent discovery binding from this exact Hunt's observations."""
+    hunt_id, candidate_id = _uuid(run.get("id")), _uuid(candidate_id)
+    target_id = _uuid(run["target_id"]) if run.get("target_id") else None
+    device_id = _uuid(run["device_target_id"]) if run.get("device_target_id") else None
+    target_ref = device_id or target_id
+    if target_ref is None:
+        raise BoundaryContextError("candidate_not_found")
+    rows = await conn.fetch(
+        BOUNDARY_SOURCE_OBSERVATIONS_QUERY,
+        candidate_id, hunt_id, MAX_OBSERVATIONS + 1,
+    )
+    if len(rows) > MAX_OBSERVATIONS:
+        raise BoundaryContextError("boundary_source_binding_observations_truncated")
+    if not rows:
+        return None
+    try:
+        from ai_gate.boundary.hypothesis import normalize_boundary_source_binding
+    except ModuleNotFoundError:
+        from ..ai_gate.boundary.hypothesis import normalize_boundary_source_binding
+    bindings: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            context = _json(row["observation_context"], dict)
+        except BoundaryContextError as exc:
+            raise BoundaryContextError("boundary_source_binding_context_invalid") from exc
+        raw = context.get("boundary_source_binding")
+        if raw is None:
+            continue
+        try:
+            binding = normalize_boundary_source_binding(
+                raw, hunt_id=hunt_id, target_id=target_ref,
+            )
+        except ValueError as exc:
+            raise BoundaryContextError(str(exc)) from exc
+        if binding is None:
+            continue
+        digest = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+        bindings[digest] = binding
+    if not bindings:
+        return None
+    if len(bindings) != 1:
+        raise BoundaryContextError("boundary_source_binding_ambiguous")
+    return next(iter(bindings.values()))
 
 
 async def inspect_candidate_boundary_context(

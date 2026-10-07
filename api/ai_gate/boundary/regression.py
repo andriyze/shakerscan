@@ -14,7 +14,7 @@ from typing import Any
 from uuid import UUID
 
 from .contract import BoundaryContract, ContractError, canonical_hash
-from .hypothesis import materialize_boundary_contract
+from .hypothesis import materialize_boundary_contract, normalize_boundary_source_binding
 
 _AI_RUN_KINDS = frozenset({"ai_api", "ai_widget", "ai_rag", "ai_trace", "ai_mcp"})
 _ENVIRONMENTS = frozenset({"preview", "staging", "development"})
@@ -86,12 +86,16 @@ def _control_failures(boundary: dict[str, Any], required: list[str]) -> list[str
 
 def _validate_proposal_artifact_shape(proposal: Any) -> None:
     """Reject ignored fields before copying an operator proposal into an export."""
-    fields = {
+    required = {
         "schema_version", "status", "hypothesis_id", "hypothesis_sha256",
         "kind", "missing_facts", "contract_fragment", "provenance", "principal_bindings",
     }
-    if not isinstance(proposal, dict) or set(proposal) != fields:
+    allowed = required | {"source_binding"}
+    if (not isinstance(proposal, dict) or required - set(proposal)
+            or set(proposal) - allowed):
         raise ContractError("boundary_regression_proposal_extra_or_missing_fields")
+    if "source_binding" in proposal:
+        normalize_boundary_source_binding(proposal.get("source_binding"))
     fragment = proposal.get("contract_fragment")
     kind = proposal.get("kind")
     if kind == "cross_tenant_read":
