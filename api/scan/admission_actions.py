@@ -75,8 +75,19 @@ def _compile_scan_admission_action_authority(
     request_candidate_manifest_ref: Mapping[str, Any] | None = None,
     template_manifest_ref: Mapping[str, Any] | None = None,
 ) -> tuple[ScanActionPlan, ScanContinuationAllocation | None]:
-    """Compile admission traffic and freeze all residual active-test authority."""
-    if not scan_contract.policy.active_testing:
+    """Compile admission traffic and freeze all residual continuation authority.
+
+    The reviewed passive template pack is part of that authority too. A passive Scan used
+    to compile it once against the base origin -- the pack's seven requests -- while its
+    discovery spent thousands of requests mapping routes the pack then never examined: a
+    Balanced passive Scan of a documentation site crawled 165 routes and ran its templates
+    against one. Discovery now continues into ranked passive batches over the discovered
+    surface, sized by the profile like any other lane. A Scan with neither active testing
+    nor the passive pack still has nothing to continue into.
+    """
+    if not scan_contract.policy.active_testing and "nuclei_passive" not in set(
+        scan_contract.execution_plan.resolved_families
+    ):
         return (
             _compile_allocated_scan_action_plan(
                 scan_id=scan_id,

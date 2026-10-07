@@ -122,6 +122,21 @@ _PROOF_CAPABILITIES = frozenset({
     "xss.browser_prove_batch",
     "sqli.prove_batch",
 })
+# Optional surface discovery feeds every later stage. When its own budget cut it short --
+# its output allowance, request ceiling or wall, or the plan could not fund it at all --
+# part of the application was never examined, so the Scan's coverage is not complete even
+# though no required action failed. A crawl that spent 1,500 of 1,500 requests in 21 of
+# 300 seconds and stopped `output_truncated` still reported `coverage: complete`.
+_SURFACE_DISCOVERY_CAPABILITIES = frozenset({
+    "web.crawl", "web.browser_crawl", "web.content_discover", "web.spec_ingest",
+})
+_DISCOVERY_TRUNCATION_REASONS = frozenset({
+    "output_truncated",
+    "timed_out",
+    "http_request_budget_exhausted",
+    "insufficient_plan_budget",
+    "crawler_memory_bound_exceeded",
+})
 _FAMILY_BY_CAPABILITY = {
     "xss.verify_batch": "xss",
     "xss.request_verify_batch": "xss",
@@ -2009,6 +2024,15 @@ def finalize_scan_report(
         if isinstance(explicit_http_status, int)
         else "unknown"
     )
+    truncated_discovery = sorted(
+        action.action_id
+        for action in coverage_actions
+        if not action.required
+        and action.capability_name in _SURFACE_DISCOVERY_CAPABILITIES
+        and action_results[action.action_id].status is not CapabilityResultStatus.SUCCESS
+        and action_results[action.action_id].reason_code is not None
+        and action_results[action.action_id].reason_code.value in _DISCOVERY_TRUNCATION_REASONS
+    )
     reliability_reasons = sorted({
         (
             result.reason_code.value
@@ -2017,6 +2041,7 @@ def finalize_scan_report(
         )
         for _action, result in required_incomplete
     } | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
+      | ({"discovery_truncated"} if truncated_discovery else set())
       | ({"placement_unavailable"} if placement_gaps else set())
       | ({"selected_family_incomplete"} if selected_family_gaps else set())
       | ({"unproven_critical_high"} if unproven_critical_high else set())
@@ -2026,6 +2051,7 @@ def finalize_scan_report(
     coverage_reasons = sorted(
         set(reasons)
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
+        | ({"discovery_truncated"} if truncated_discovery else set())
         | ({"placement_unavailable"} if placement_gaps else set())
         | ({"bound_origin_redirects_off_origin"}
            if application_forwarded_off_origin else set())
@@ -2142,7 +2168,7 @@ def finalize_scan_report(
         )
         if row["unattempted_candidates"] or row["incomplete_candidates"]:
             row["status"] = "partial"
-    if zero_attempt_actions and coverage_status == "complete":
+    if (zero_attempt_actions or truncated_discovery) and coverage_status == "complete":
         coverage_status = "partial"
     verified = sum(1 for item in findings if item.get("verified") is True)
     suspected = sum(1 for item in findings if item.get("suspected") is True)
@@ -2159,6 +2185,7 @@ def finalize_scan_report(
             "reasons": reliability_reasons,
         },
         "optional_gaps": optional_gaps,
+        "truncated_discovery_actions": truncated_discovery,
         "active_zero_attempt_actions": zero_attempt_actions,
         "candidate_coverage": candidate_coverage,
         "family_coverage": sorted(

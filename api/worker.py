@@ -18833,7 +18833,7 @@ async def _execute_agent_scanner_process(
         read_streams = asyncio.create_task(
             _read_agent_tool_streams(
                 proc,
-                max_bytes=agent_tools.agent_tool_output_bytes(reserved_budget, floor=_AGENT_TOOL_OUTPUT_BYTES),
+                max_bytes=agent_tools.agent_tool_output_bytes(reserved_budget, floor=_AGENT_TOOL_OUTPUT_BYTES, tool=name),
                 overflow=overflow,
             )
         )

@@ -21901,7 +21901,8 @@ def test_fast_active_scan_admission_preserves_finalizer_authority():
     assert continuation.budget_ceiling["tool_wall_seconds"] >= 1
 
 
-def test_passive_scan_admission_needs_no_continuation():
+def test_passive_scan_admission_continues_its_template_pack_over_discovery():
+    """A passive Scan continues into passive batches, and gains no active authority."""
     from runtime.models import TargetBinding
     from scan.contracts import resolve_scan_contract
 
@@ -21929,8 +21930,22 @@ def test_passive_scan_admission_needs_no_continuation():
         template_manifest_ref=template_manifest.reference().canonical_dict(),
     )
 
-    assert continuation is None
-    assert plan.actions[-1].action_id == "finalize.report"
+    # The pack is deferred to the continuation instead of running once at the base origin.
+    assert continuation is not None
+    assert plan.actions[-1].action_id != "finalize.report"
+    assert not any(
+        action.capability_name in {"templates.passive_scan", "templates.passive_batch"}
+        for action in plan.actions
+    )
+    assert "templates.passive_batch" in continuation.allowed_capabilities
+    assert continuation.required_capabilities == ()
+    active = {
+        "xss.verify_batch", "sqli.verify_batch", "templates.active_batch",
+        "xss.request_verify_batch", "sqli.request_verify_batch", "authz.verify",
+        "exposure.verify_batch", "nosqli.verify_batch", "authz_surface.verify_batch",
+    }
+    assert not active & set(continuation.allowed_capabilities)
+    assert continuation.budget_ceiling["state_changing_requests"] == 0
 
 
 def test_parallel_recovery_requeues_canonical_continuation_without_private_options(monkeypatch):
