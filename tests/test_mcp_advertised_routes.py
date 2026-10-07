@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import re
 import sys
 import urllib.error
@@ -26,26 +27,41 @@ sys.modules[SPEC.name] = mcp
 SPEC.loader.exec_module(mcp)
 
 
-class Opener:
-    """Answers the public-check probe with one status and records what was sent."""
+ENGINE_415 = {"error": {"code": "unsupported_media_type", "message": "Use application/json encoded as UTF-8."}}
 
-    def __init__(self, status):
+
+class Page(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class Opener:
+    """Answers the public-check probe with one status and body and records what was sent."""
+
+    def __init__(self, status, body=None):
         self.status = status
+        self.body = {"detail": "x"} if body is None else body
         self.requests = []
 
     def open(self, request, timeout):
         self.requests.append(request)
         if isinstance(self.status, BaseException):
             raise self.status
-        raise urllib.error.HTTPError(request.full_url, self.status, "x", {}, io.BytesIO(b'{"detail":"x"}'))
+        if self.status == 200:
+            return Page(b"<html>sign in</html>")
+        raise urllib.error.HTTPError(request.full_url, self.status, "x", {"Location": "/sso"},
+                                     io.BytesIO(json.dumps(self.body).encode()))
 
 
 class Instance(mcp.ArsenalClient):
     """A catalogue and Hunt contract that list nothing beyond the fixed Arsenal tools."""
 
-    def __init__(self, probe_status):
+    def __init__(self, probe_status, body=None):
         super().__init__("http://127.0.0.1:8080")
-        self.opener = Opener(probe_status)
+        self.opener = Opener(probe_status, body)
 
     def catalog(self):
         return {tool.command: {"status": "read_only", "risk_tier": "read_only", "method": "GET"} for tool in mcp.TOOLS}
@@ -59,18 +75,25 @@ def _no_hunt_tools(monkeypatch):
     monkeypatch.setattr(mcp, "_hunt_tools", lambda contract: ())
 
 
-@pytest.mark.parametrize(("status", "listed"), [
-    (415, True),   # the engine serves the route and refused the probe before any work
-    (422, True),
-    (403, False),  # an Enterprise gateway that keeps the route closed
-    (404, False),  # an engine without the route
-    (401, False),
-    (405, False),
-    (502, False),
-    (urllib.error.URLError("refused"), False),
+@pytest.mark.parametrize(("status", "body", "listed"), [
+    (415, ENGINE_415, True),   # the engine serves the route and refused the probe before any work
+    (415, None, False),        # a 415 that is not the engine's own answer
+    (422, None, False),
+    (400, None, False),        # a gateway or WAF refusing the probe itself
+    (429, None, False),        # a gateway's rate limit says nothing about the route
+    (302, None, False),        # a redirect, e.g. to a sign-in page
+    (307, None, False),
+    (200, None, False),        # a soft page answering every path
+    (403, None, False),        # an Enterprise gateway that keeps the route closed
+    (404, None, False),        # an engine without the route
+    (401, None, False),
+    (405, None, False),
+    (502, None, False),
+    (503, {"error": {"code": "service_unavailable", "message": "not installed"}}, False),  # no engine
+    (urllib.error.URLError("refused"), None, False),
 ])
-def test_public_check_is_listed_only_when_the_instance_serves_it(status, listed):
-    instance = Instance(status)
+def test_public_check_is_listed_only_when_the_instance_serves_it(status, body, listed):
+    instance = Instance(status, body)
     names = {tool["name"] for tool in instance.list_tools()}
     assert ("shakerscan_public_check" in names) is listed
     (probe,) = instance.opener.requests
