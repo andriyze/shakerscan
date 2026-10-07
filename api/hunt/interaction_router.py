@@ -351,6 +351,9 @@ async def execute_hunt_capability(
     hunt_id: str, capability_name: str, request: HuntCapabilityRequest,
 ):
     name = str(capability_name or "").strip().lower()
+    # State before schema: a call on a finished Hunt is refused for that reason, whatever its
+    # input. Only an idempotent replay of an action the Hunt already recorded stays answerable.
+    await _require_executable_hunt_or_recorded_action(hunt_id, request.idempotency_key)
     try:
         return await HUNT_ACTION_SERVICE.execute(
             name,
@@ -1462,6 +1465,20 @@ async def _hunt_confirmed_shell_dispatch(
         "safety_profile": "authenticated_active",
         "ui_url": f"/scans/{row['id']}",
     }
+
+
+async def _require_executable_hunt_or_recorded_action(hunt_id: str, idempotency_key: str) -> None:
+    async with _pool().acquire() as conn:
+        run = await _hunt_run_or_404(conn, hunt_id)
+        if run["status"] in {"active", "awaiting_planner"}:
+            return
+        recorded = await conn.fetchrow(
+            "SELECT id FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2",
+            uuid.uuid5(uuid.UUID(str(run["id"])), f"hunt-capability:{idempotency_key}"),
+            run["id"],
+        )
+    if recorded is None:
+        raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
 
 
 def _hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:

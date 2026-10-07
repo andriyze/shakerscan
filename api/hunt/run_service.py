@@ -285,6 +285,32 @@ def _action_reference_ids(value: Any) -> dict[str, list[str]]:
     return references
 
 
+BUDGET_REFUSAL_PREFIXES = ("budget_exhausted:", "budget_insufficient_for_action:")
+
+
+def _public_action_error(summary: Mapping[str, Any], refused: bool) -> dict[str, Any]:
+    """The bounded reason an action failed or was refused; absent when none was recorded."""
+    error = str(summary.get("error") or "").strip()
+    if not error:
+        return {}
+    public: dict[str, Any] = {"error": error[:500]}
+    if refused:
+        public["refusal"] = {
+            "stage": "admission",
+            "reason": error[:500],
+            "retryable_with_smaller_action": bool(summary.get("retryable_with_smaller_action")),
+            "shortages": {
+                str(key): int(value) for key, value in dict(summary.get("shortages") or {}).items()
+                if isinstance(value, int) and not isinstance(value, bool)
+            },
+            "remaining": {
+                str(key): int(value) for key, value in dict(summary.get("remaining") or {}).items()
+                if isinstance(value, int) and not isinstance(value, bool)
+            },
+        }
+    return public
+
+
 def public_hunt_action(row: Any) -> dict[str, Any]:
     """Return a content-safe projection of one canonical capability action."""
 
@@ -331,8 +357,20 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
     )
     budget_actual = numeric_budget(accounting.get("actual"))
     conservative = str(accounting.get("charge_basis") or "").startswith("conservative")
+    # A budget shortage refuses the action at admission: it never dispatched, holds no receipt
+    # and was charged nothing. Report that, with the reason, rather than a reason-less legacy row.
+    refused_at_admission = (
+        item.get("status") == "failed"
+        and not item.get("receipt_id")
+        and not has_accounting
+        and str(result_summary.get("error") or "").startswith(BUDGET_REFUSAL_PREFIXES)
+    )
+    if refused_at_admission:
+        reservation_id = str(result_summary.get("budget_reservation_id") or "") or None
+        settlement_status = str(result_summary.get("budget_reservation_state") or "not_reserved")
     accounting_basis = (
-        "conservative_settlement" if has_exact_accounting and conservative
+        "refused_at_admission" if refused_at_admission
+        else "conservative_settlement" if has_exact_accounting and conservative
         else "exact_settlement" if has_exact_accounting
         else "settlement_failed" if settlement_status == "failed"
         else "no_reservation" if has_accounting and not reservation_id
@@ -380,6 +418,7 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
             "ok": (
                 result_summary.get("ok")
                 if isinstance(result_summary.get("ok"), bool)
+                else False if refused_at_admission
                 else result_summary.get("status") == "success"
                 if has_exact_accounting and item.get("status") == "completed"
                 else None
@@ -397,7 +436,9 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
                 "reservation_id": reservation_id,
                 "charge_basis": (
                     str(accounting.get("charge_basis") or "capability_reported_settlement")
-                    if has_exact_accounting else "legacy_unknown"
+                    if has_exact_accounting
+                    else "not_charged" if refused_at_admission
+                    else "legacy_unknown"
                 ),
                 "reserved": numeric_budget(accounting.get("reserved")),
                 "actual": budget_actual,
@@ -408,6 +449,7 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
                 ),
             },
             "reference_ids": _action_reference_ids(result_summary),
+            **_public_action_error(result_summary, refused_at_admission),
             "captures": public_capture_references(result_summary.get("captures"), source_action_id=item.get("id"))
                 if item.get("status") == "completed" and item.get("capability_name") == "http.request" else [],
         },
@@ -612,6 +654,14 @@ async def hunt_run_or_404(
     return row
 
 
+HUNT_CANDIDATES_QUERY = """SELECT c.id, COUNT(*) OVER() AS total_count
+   FROM investigation_candidates c
+   WHERE c.status <> 'expired'
+     AND EXISTS (SELECT 1 FROM investigation_candidate_observations o
+                 WHERE o.candidate_id=c.id AND o.hunt_run_id=$1)
+   ORDER BY c.id LIMIT 500"""
+
+
 class HuntRunService:
     """Own read/list/finish/cancel/resume persistence for canonical Hunts."""
 
@@ -648,12 +698,25 @@ class HuntRunService:
             live_findings = await connection.fetch(
                 "SELECT id, COUNT(*) OVER() AS total_count FROM findings WHERE hunt_run_id=$1 ORDER BY id LIMIT 500", hunt_uuid,
             )
+            # Candidates are recorded through /candidates, not as capability results, so the
+            # action ledger never named them. The immutable observation ledger does.
+            live_candidates = await connection.fetch(HUNT_CANDIDATES_QUERY, hunt_uuid)
         result = public_hunt_run(row)
         result["actions"] = [public_hunt_action(action) for action in actions]
         result["outcome_summary"] = hunt_action_outcome_summary(result["actions"])
         result["outcome_summary"]["finding_ids"] = sorted(str(item["id"]) for item in live_findings)
         count = int(live_findings[0]["total_count"]) if live_findings else 0
         result["outcome_summary"].update(finding_count=count, finding_ids_truncated=count > len(live_findings))
+        candidate_count = int(live_candidates[0]["total_count"]) if live_candidates else 0
+        candidate_ids = sorted(
+            set(result["outcome_summary"]["candidate_ids"])
+            | {str(item["id"]) for item in live_candidates}
+        )
+        result["outcome_summary"].update(
+            candidate_ids=candidate_ids,
+            candidate_count=max(candidate_count, len(candidate_ids)),
+            candidate_ids_truncated=candidate_count > len(live_candidates),
+        )
         result["skill_activity"] = [
             public_hunt_skill_event(event) for event in skill_events
         ]
