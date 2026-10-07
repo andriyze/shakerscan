@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 
@@ -78,20 +79,68 @@ def canonical_family(value: Any) -> str:
     return aliases.get(normalized, normalized)[:80] or "unknown"
 
 
+# Locus keys with a defined normalization. Every other key is preserved verbatim (bounded) because
+# the locus is the candidate's identity: dropping a natural key such as ``path`` or ``principal``
+# made unrelated issues collide on one fingerprint and overwrite each other.
+LOCUS_KEYS: dict[str, str] = {
+    "method": "HTTP method, upper-cased",
+    "route": "route template, e.g. /api/users/{id}",
+    "path": "concrete request path, e.g. /.git-credentials",
+    "paths": "set of concrete paths; order-insensitive",
+    "url": "absolute URL",
+    "origin": "scheme://host[:port] of the service",
+    "parameter": "query/body/header parameter name",
+    "object_id": "object identifier the claim concerns",
+    "principal": "principal slot or role the claim concerns",
+    "address": "IP address of the host",
+    "host": "host name",
+    "transport": "tcp or udp",
+    "port": "integer 1-65535",
+    "service_name": "network service name",
+    "operation_id": "API operation identifier",
+    "capability_id": "capability identifier",
+    "scheme": "URL scheme",
+    "collection_id": "request collection identifier",
+    "request_id": "request identifier within a collection",
+    "advisory_id": "advisory identifier",
+    "cpe": "CPE string",
+    "version": "software version",
+    "host_key_fingerprint": "SSH host key fingerprint",
+    "ai_boundary_context": "AI boundary context object (JSON, at most 16 KiB)",
+}
+LOCUS_SET_KEYS = frozenset({"paths"})
+MAX_LOCUS_KEYS = 32
+MAX_LOCUS_BYTES = 16384
+_LOCUS_KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _locus_scalar(key: str, item: Any) -> str:
+    # Scalars are compared as text, exactly as before, so fingerprints of existing
+    # candidates with documented keys do not change.
+    text = str(item).strip()
+    if key == "method":
+        text = text.upper()
+    return text[:1000]
+
+
 def canonical_locus(value: Any) -> dict[str, Any]:
+    """Return the candidate identity locus; documented keys are normalized, others preserved.
+
+    Keys outside ``LOCUS_KEYS`` are kept (lower-case identifiers only) so a distinct issue never
+    loses the attribute that distinguishes it. Values must be JSON; the result is bounded and an
+    oversized or malformed locus is rejected instead of being truncated into a collision.
+    """
     source = value if isinstance(value, dict) else {}
-    allowed = (
-        "method", "route", "url", "parameter", "object_id", "transport", "port",
-        "service_name", "operation_id", "capability_id", "scheme",
-        "collection_id", "request_id", "advisory_id", "cpe", "version",
-        "host_key_fingerprint",
-        "ai_boundary_context",
-    )
     result: dict[str, Any] = {}
-    for key in allowed:
-        item = source.get(key)
+    for raw_key in sorted(source, key=str):
+        key = str(raw_key).strip().lower().replace("-", "_")
+        item = source[raw_key]
         if item in (None, "", [], {}):
             continue
+        if not _LOCUS_KEY_RE.fullmatch(key):
+            raise ValueError(f"locus key {key[:64]!r} must be a lower-case identifier")
+        if key in result:
+            raise ValueError(f"locus key {key!r} is given more than once")
         if key == "ai_boundary_context" and isinstance(item, dict):
             # Preserve JSON types and take an independent copy. str(dict) both
             # corrupted the payload and truncated it through the scalar path.
@@ -113,11 +162,30 @@ def canonical_locus(value: Any) -> dict[str, Any]:
             if 1 <= port <= 65535:
                 result[key] = port
             continue
-        text = str(item).strip()
-        if key == "method":
-            text = text.upper()
-        result[key] = text[:1000]
-    return result
+        if isinstance(item, (list, tuple)):
+            values = [
+                _locus_scalar(key, element) if not isinstance(element, (dict, list)) else element
+                for element in list(item)[:100]
+                if element not in (None, "", [], {})
+            ]
+            if key in LOCUS_SET_KEYS:
+                values = sorted(
+                    {json.dumps(element, sort_keys=True): element for element in values}.values(),
+                    key=lambda element: json.dumps(element, sort_keys=True),
+                )
+            if values:
+                result[key] = values
+            continue
+        result[key] = item if isinstance(item, dict) else _locus_scalar(key, item)
+    if len(result) > MAX_LOCUS_KEYS:
+        raise ValueError(f"locus has more than {MAX_LOCUS_KEYS} keys")
+    try:
+        encoded = json.dumps(result, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("locus must contain finite JSON values") from exc
+    if len(encoded.encode("utf-8")) > MAX_LOCUS_BYTES:
+        raise ValueError(f"locus exceeds {MAX_LOCUS_BYTES} bytes")
+    return json.loads(encoded)
 
 
 def candidate_fingerprint(
@@ -205,6 +273,69 @@ def normalize_candidate(
     }
 
 
+def _claim_identity(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _same_claim(existing: Any, candidate: dict[str, Any]) -> bool:
+    """Whether a stored row asserts the same issue as ``candidate``.
+
+    The fingerprint (target, family, locus) is a dedup key, not proof that two claims describe one
+    issue: an empty or coarse locus made a critical credential exposure and an unrelated RAG claim
+    share a fingerprint. Equal title or equal claim text is required before two sightings merge.
+    """
+    return bool(
+        _claim_identity(existing["claim"]) == _claim_identity(candidate["claim"])
+        or _claim_identity(existing["title"]) == _claim_identity(candidate["title"])
+    )
+
+
+def claim_scoped_fingerprint(base_fingerprint: str, claim: Any) -> str:
+    """Fingerprint for a distinct claim that shares its family and locus with another row."""
+    material = f"{base_fingerprint}:claim:{_claim_identity(claim)}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+_INSERT_CANDIDATE_SQL = """INSERT INTO investigation_candidates (
+       plane, target_id, device_target_id, research_episode_id, agent_hunt_run_id,
+       device_agent_run_id, hunt_run_id,
+       family, canonical_locus, title, claim, claimed_severity, evidence_refs,
+       verifier_contract_id, source_kind, fingerprint, status, created_by
+   ) VALUES (
+       $1,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::uuid,$7::uuid,$8,$9::jsonb,$10,$11,$12,$13::jsonb,
+       $14,$15,$16,'new',$17
+   )
+   ON CONFLICT (fingerprint) DO NOTHING
+   RETURNING id, status, fingerprint"""
+
+
+async def _insert_or_match(
+    conn: Any, candidate: dict[str, Any], fingerprint: str, created_by: str,
+) -> tuple[Any, str]:
+    """Insert a new row, or lock the existing row with this fingerprint."""
+    for _attempt in range(3):
+        row = await conn.fetchrow(
+            _INSERT_CANDIDATE_SQL,
+            candidate["plane"], candidate.get("target_id"), candidate.get("device_target_id"),
+            candidate.get("research_episode_id"), candidate.get("agent_hunt_run_id"),
+            candidate.get("device_agent_run_id"), candidate.get("hunt_run_id"), candidate["family"],
+            json.dumps(candidate["canonical_locus"]), candidate["title"], candidate["claim"],
+            candidate["claimed_severity"], json.dumps(candidate["evidence_refs"]),
+            candidate.get("verifier_contract_id"), candidate.get("source_kind"), fingerprint,
+            str(created_by or "hunt")[:120],
+        )
+        if row is not None:
+            return row, "inserted"
+        existing = await conn.fetchrow(
+            """SELECT id, status, fingerprint, title, claim, evidence_refs, verifier_contract_id
+               FROM investigation_candidates WHERE fingerprint=$1 FOR UPDATE""",
+            fingerprint,
+        )
+        if existing is not None:
+            return existing, "existing"
+    raise RuntimeError("candidate fingerprint conflicted without a visible row")
+
+
 async def upsert_candidate(
     conn: Any,
     candidate: dict[str, Any],
@@ -212,45 +343,44 @@ async def upsert_candidate(
     created_by: str,
     observation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Insert/refresh a candidate and append one immutable, run-bound observation.
+    """Insert a candidate or merge a repeated sighting, and append one run-bound observation.
 
-    Verified/refuted/expired candidate assertions are immutable. A later hunt may update only
-    ``last_seen_at`` on the canonical row while its distinct claim and provenance remain in the
-    observation ledger.
+    A stored candidate's title, claim and severity are never replaced by a later sighting. A
+    sighting with the same claim merges its evidence references into the row; a different claim
+    that shares the family and locus becomes its own row. Verified/refuted/expired rows are
+    immutable: a later sighting only refreshes ``last_seen_at``. Every sighting's own claim and
+    provenance remain in the observation ledger. ``outcome`` reports what actually happened.
     """
-    row = await conn.fetchrow(
-        """INSERT INTO investigation_candidates (
-               plane, target_id, device_target_id, research_episode_id, agent_hunt_run_id,
-               device_agent_run_id, hunt_run_id,
-               family, canonical_locus, title, claim, claimed_severity, evidence_refs,
-               verifier_contract_id, source_kind, fingerprint, status, created_by
-           ) VALUES (
-               $1,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6::uuid,$7::uuid,$8,$9::jsonb,$10,$11,$12,$13::jsonb,
-               $14,$15,$16,'new',$17
-           )
-           ON CONFLICT (fingerprint) DO UPDATE SET
-               title=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
-                          THEN investigation_candidates.title ELSE EXCLUDED.title END,
-               claim=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
-                          THEN investigation_candidates.claim ELSE EXCLUDED.claim END,
-               claimed_severity=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
-                          THEN investigation_candidates.claimed_severity ELSE EXCLUDED.claimed_severity END,
-               evidence_refs=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
-                          THEN investigation_candidates.evidence_refs ELSE EXCLUDED.evidence_refs END,
-               verifier_contract_id=CASE WHEN investigation_candidates.status IN ('verified','refuted','expired')
-                          THEN investigation_candidates.verifier_contract_id
-                          ELSE COALESCE(EXCLUDED.verifier_contract_id, investigation_candidates.verifier_contract_id) END,
-               last_seen_at=NOW(),
-               updated_at=NOW()
-           RETURNING id, status, fingerprint, created_at, updated_at, (xmax = 0) AS inserted""",
-        candidate["plane"], candidate.get("target_id"), candidate.get("device_target_id"),
-        candidate.get("research_episode_id"), candidate.get("agent_hunt_run_id"),
-        candidate.get("device_agent_run_id"), candidate.get("hunt_run_id"), candidate["family"],
-        json.dumps(candidate["canonical_locus"]), candidate["title"], candidate["claim"],
-        candidate["claimed_severity"], json.dumps(candidate["evidence_refs"]),
-        candidate.get("verifier_contract_id"), candidate.get("source_kind"), candidate["fingerprint"],
-        str(created_by or "hunt")[:120],
-    )
+    fingerprint = candidate["fingerprint"]
+    row, outcome = await _insert_or_match(conn, candidate, fingerprint, created_by)
+    distinct_from: str | None = None
+    if outcome == "existing" and not _same_claim(row, candidate):
+        distinct_from = str(row["id"])
+        fingerprint = claim_scoped_fingerprint(fingerprint, candidate["claim"])
+        row, outcome = await _insert_or_match(conn, candidate, fingerprint, created_by)
+        if outcome == "existing" and not _same_claim(row, candidate):
+            raise RuntimeError("claim-scoped candidate fingerprint collided with another claim")
+    if outcome == "existing":
+        if str(row["status"]) in TERMINAL_STATUSES:
+            outcome = "observed"
+            await conn.execute(
+                "UPDATE investigation_candidates SET last_seen_at=NOW() WHERE id=$1",
+                row["id"],
+            )
+        else:
+            outcome = "merged"
+            merged_refs = list(dict.fromkeys(
+                [str(item) for item in _json_list(row["evidence_refs"])]
+                + list(candidate["evidence_refs"])
+            ))[:100]
+            await conn.execute(
+                """UPDATE investigation_candidates
+                   SET evidence_refs=$2::jsonb,
+                       verifier_contract_id=COALESCE(verifier_contract_id, $3),
+                       last_seen_at=NOW(), updated_at=NOW()
+                   WHERE id=$1""",
+                row["id"], json.dumps(merged_refs), candidate.get("verifier_contract_id"),
+            )
     await conn.execute(
         """INSERT INTO investigation_candidate_observations (
                candidate_id, research_episode_id, agent_hunt_run_id, device_agent_run_id, hunt_run_id,
@@ -265,13 +395,17 @@ async def upsert_candidate(
         candidate.get("verifier_contract_id"), json.dumps(observation_context or {}),
         str(created_by or "hunt")[:120],
     )
-    return {
+    result = {
         "id": str(row["id"]),
         "status": str(row["status"]),
         "fingerprint": str(row["fingerprint"]),
-        "inserted": bool(row.get("inserted", False)),
+        "inserted": outcome == "inserted",
+        "outcome": outcome,
         "authoritative": False,
     }
+    if distinct_from is not None:
+        result["distinct_from_candidate_id"] = distinct_from
+    return result
 
 
 async def _hunt_owned_candidate(

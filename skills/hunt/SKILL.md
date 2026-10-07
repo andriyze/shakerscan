@@ -206,6 +206,16 @@ Create a candidate with `POST /hunts/{hunt_id}/candidates` only when the claim c
 references from this investigation. Include a canonical locus precise enough for a registered
 verifier. A candidate is non-authoritative.
 
+Identity is target + family + locus. `GET /hunts/contract` (`candidates`) lists the locus keys
+(`method`, `route`, `path`, `paths`, `url`, `origin`, `parameter`, `object_id`, `principal`,
+`address`, `host`, `transport`, `port`, ...); any other lower-case key is kept, never dropped. Put
+the attribute that distinguishes this issue in the locus (for a file exposure, its `path`). A
+second record with the same identity and the same title or claim merges its evidence
+(`outcome: merged`); a different claim becomes its own candidate and never replaces a stored one.
+Each evidence reference must be this Hunt's action, receipt or HTTP transaction ID (bare or
+`action:`/`receipt:`/`transaction:` prefixed), a `finding:` on the target, or a device `devref_N`;
+anything else is refused with `candidate_evidence_unresolved`.
+
 When multi-principal Hunt evidence shows same-service identity/resource structure and an observed
 agent endpoint, call `POST /hunts/{hunt_id}/boundary-discovery` before hand-building the candidate.
 Discovery reads only bounded same-Hunt stored structure and sends no target traffic. For a relevant
