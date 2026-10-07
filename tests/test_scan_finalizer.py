@@ -542,6 +542,80 @@ def test_finalizer_reports_a_missing_header_once_per_origin_with_the_urls_as_evi
     csp = by_title["Missing HTTP response header: Content-Security-Policy"]
     assert csp["evidence"]["matched_url_count"] == 1
 
+def _baseline_and_header_matches(security_headers, matchers):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    templates = _action(
+        "passive.templates", 1, dependencies=(baseline.action_id,),
+        capability_name="templates.passive_batch",
+    )
+    final = _action("finalize.report", 2, dependencies=(templates.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(baseline, templates, final),
+    )
+    results = {
+        baseline.action_id: _result_with_observation_count(baseline, 1),
+        templates.action_id: _result_with_observation_count(templates, len(matchers)),
+    }
+    observations = {
+        baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"method": "GET", "origin": "https://app.example.test", "path": "/"},
+            "response": {
+                "status": 200,
+                "security_headers": security_headers,
+                "selected_headers": {"server": "nginx"},
+            },
+        },),
+        templates.action_id: tuple({
+            "kind": "template_match",
+            "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers",
+            "severity": "info",
+            "matched_at": "https://app.example.test/",
+            "matcher_name": matcher,
+        } for matcher in matchers),
+    }
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+    return {
+        item["evidence"]["header_name"]: item for item in report["findings"]
+        if item["evidence"].get("template_id") == "http-missing-security-headers"
+    }
+
+
+def test_a_missing_header_finding_carries_the_recorded_response_that_lacks_it():
+    """Missing-header findings stored no evidence beyond the template id: nuclei's passive pack
+    runs with -omit-raw. The baseline request to the same origin is the scan's own record of the
+    response headers, so the finding carries that request line, status and header set."""
+    by_header = _baseline_and_header_matches(
+        {"x-frame-options": "DENY", "server": "nginx"},
+        ["permissions-policy", "x-frame-options", "x-permitted-cross-domain-policies"],
+    )
+    observed = by_header["permissions-policy"]["evidence"]["observed_response"]
+    assert observed == {
+        "request_line": "GET https://app.example.test/",
+        "response_status": 200,
+        "observed_headers": {"server": "nginx", "x-frame-options": "DENY"},
+        "source_action_id": "baseline.http",
+        "header_absent": "permissions-policy",
+    }
+    # A header the baseline saw contradicts the match there: no contradicting response is attached.
+    assert "observed_response" not in by_header["x-frame-options"]["evidence"]
+    # A header the baseline never records cannot be claimed absent from it.
+    assert "observed_response" not in by_header["x-permitted-cross-domain-policies"]["evidence"]
+
+
+def test_the_recorded_header_set_matches_what_the_http_capability_records():
+    from api.capabilities import http as http_capability
+
+    assert finalizer_module._BASELINE_RECORDED_HEADERS == frozenset(
+        http_capability._SECURITY_POSTURE_HEADERS
+    )
+
+
 def test_finalizer_promotes_only_deterministic_proof_contracts():
     xss = _action("verify.xss", 0, capability_name="xss.verify")
     sqli = _action(

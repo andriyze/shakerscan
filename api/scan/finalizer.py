@@ -75,6 +75,16 @@ _EXPECTED_SECURITY_HEADERS: tuple[str, ...] = (
     "x-content-type-options",
     "x-frame-options",
 )
+# The posture headers every baseline response records whether present or not (the HTTP
+# capability's _SECURITY_POSTURE_HEADERS; a test pins the two together). Only for these does an
+# absent key prove the response lacked the header.
+_BASELINE_RECORDED_HEADERS: frozenset[str] = frozenset({
+    "strict-transport-security", "content-security-policy",
+    "content-security-policy-report-only", "x-frame-options", "x-content-type-options",
+    "referrer-policy", "permissions-policy", "cross-origin-opener-policy",
+    "cross-origin-embedder-policy", "cross-origin-resource-policy",
+    "access-control-allow-origin", "access-control-allow-credentials", "server", "x-powered-by",
+})
 _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "templates.scan", "xss.verify", "sqli.verify", "authz.verify",
     "templates.active_batch", "xss.verify_batch", "sqli.verify_batch",
@@ -240,6 +250,77 @@ def _header_template_title(item: Mapping[str, Any]) -> tuple[str, str | None]:
         display = "-".join(part.capitalize() for part in matcher.split("-"))
         return f"Missing HTTP response header: {display}", matcher
     return str(item.get("name") or item.get("template_id") or "Template match")[:300], None
+
+
+def _baseline_header_responses(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    """The scan's own baseline response per origin: request line, status and response headers.
+
+    Nuclei runs its passive templates with ``-omit-raw`` (the full request/response of every
+    matcher result overflows the worker's output ceiling), so a missing-header match carries no
+    exchange of its own. The baseline request to the same origin is the scan's recorded
+    observation of that origin's response headers, and is what such a finding is evidence of.
+    """
+    responses: dict[str, dict[str, Any]] = {}
+    for row in observations.get("baseline.http", ()) or ():
+        if not isinstance(row, Mapping) or row.get("kind") != "http_observation":
+            continue
+        request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
+        response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+        status = response.get("status")
+        origin = _http_origin(request.get("origin"))
+        if (
+            type(status) is not int or not origin or origin in responses
+            or not isinstance(response.get("security_headers"), Mapping)
+        ):
+            continue
+        headers: dict[str, str] = {}
+        for source in (response.get("selected_headers"), response.get("security_headers")):
+            if isinstance(source, Mapping):
+                headers.update({
+                    str(name).lower()[:120]: str(value)[:2_000] for name, value in source.items()
+                })
+        method = str(request.get("method") or "GET").upper()[:16]
+        path = str(request.get("path") or "/")[:2_000]
+        responses[origin] = {
+            "request_line": f"{method} {origin}{path if path.startswith('/') else '/' + path}",
+            "response_status": status,
+            "observed_headers": dict(sorted(headers.items())),
+            "source_action_id": "baseline.http",
+        }
+    return responses
+
+
+def _attach_observed_header_responses(
+    findings: Sequence[dict[str, Any]],
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> None:
+    """Give each missing-header finding the recorded response that lacks the header.
+
+    Attached only where the baseline response proves the finding: the header is one the
+    baseline always records, and it is absent. A header present on the baseline but missing on
+    another page keeps the matched URLs as its evidence rather than a response that contradicts
+    it, and a header the baseline does not record is never claimed absent from it.
+    """
+    responses = _baseline_header_responses(observations)
+    if not responses:
+        return
+    for finding in findings:
+        evidence = finding.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        header = str(evidence.get("header_name") or "").lower()
+        if evidence.get("template_id") != "http-missing-security-headers" or not header:
+            continue
+        observed = responses.get(_http_origin(finding.get("url")) or "")
+        if (
+            observed is None
+            or header not in _BASELINE_RECORDED_HEADERS
+            or header in observed["observed_headers"]
+        ):
+            continue
+        evidence["observed_response"] = {**observed, "header_absent": header}
 
 
 def canonical_authz_findings(
@@ -1584,6 +1665,7 @@ def finalize_scan_report(
             "budget_consumed": dict(result.budget_consumed),
         })
     findings = list(findings_by_id.values())
+    _attach_observed_header_responses(findings, observations)
 
     # Family-aware coverage: every selected family (one that produced a batch or
     # verifier action) is reported with attempts, findings, budget, and a status.
