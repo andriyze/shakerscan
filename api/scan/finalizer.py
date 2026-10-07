@@ -13,6 +13,7 @@ from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
+from .verification_extension import superseding_results
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
@@ -1612,6 +1613,10 @@ def finalize_scan_report(
         raise ScanFinalizationError(
             "finalization requires every pre-finalization action result"
         )
+    # A verifier slice carried into a later round (see verification_extension) is
+    # covered by its extension: the extension's outcome decides the slice's coverage,
+    # while both actions' spend and evidence stay on the record.
+    superseded = superseding_results(expected_actions, action_results)
     findings_by_id: dict[str, dict[str, Any]] = {}
     action_rows: list[dict[str, Any]] = []
     runtime_destinations: list[dict[str, Any]] = []
@@ -1738,7 +1743,10 @@ def finalize_scan_report(
             },
         })
         row["required"] = row["required"] or bool(action.required)
-        if action.capability_name in _PROOF_CAPABILITIES:
+        if action.action_id in superseded:
+            # Its extension re-plans the same slice and is counted instead.
+            pass
+        elif action.capability_name in _PROOF_CAPABILITIES:
             # Escalation over candidates the verifier already counted: record it
             # separately so it can neither double-count nor fail its family.
             proof = row["proof_escalation"]
@@ -1881,7 +1889,7 @@ def finalize_scan_report(
         if action.capability_name not in _INFORMATIONAL_CAPABILITIES
     ]
     required_rows = [
-        (action, action_results[action.action_id])
+        (action, superseded.get(action.action_id, action_results[action.action_id]))
         for action in coverage_actions if action.required
     ]
     # Skipped as not applicable is a settled "nothing to do", not degraded
@@ -2092,7 +2100,7 @@ def finalize_scan_report(
     candidate_coverage: dict[str, dict[str, Any]] = {}
     for action in expected_actions:
         family = batch_families.get(action.capability_name)
-        if family is None:
+        if family is None or action.action_id in superseded:
             continue
         raw_slice = action.capability_args.get("slice")
         planned = (

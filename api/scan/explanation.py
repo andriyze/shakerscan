@@ -591,6 +591,10 @@ def build_scan_execution_explanation(
         capability = str(
             raw_plan.get("capability_name") or row.get("capability_name") or "unknown"
         )
+        extends = _text(
+            _object(raw_plan.get("capability_args") or row.get("capability_args")).get("extends"),
+            maximum=128,
+        )
         action = {
             "action_id": action_id,
             "occurrence_id": occurrence_id,
@@ -637,6 +641,8 @@ def build_scan_execution_explanation(
             "action_digest": _text(
                 raw_plan.get("action_digest") or row.get("action_digest"), maximum=64,
             ),
+            # A verifier slice carried into a later round names the slice it extends.
+            **({"extends": extends} if extends else {}),
         }
         actions.append(action)
     actions.sort(key=lambda item: (item["ordinal"], item["occurrence_id"]))
@@ -711,8 +717,15 @@ def build_scan_execution_explanation(
 
     counts = Counter(str(item["status"]) for item in capability_rows)
     required_rows = [item for item in capability_rows if item["required"]]
+    # A slice carried into a later round is decided by its extension's outcome.
+    extensions = {
+        str(item["extends"]): item for item in capability_rows if item.get("extends")
+    }
     required_incomplete = [
-        item for item in required_rows if item["status"] not in _SUCCESS
+        effective for effective in (
+            extensions.get(item["action_id"], item) for item in required_rows
+        )
+        if effective["status"] not in _SUCCESS
     ]
     work_manifests = _work_manifests(
         report_execution if parallel_actions else execution

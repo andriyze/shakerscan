@@ -307,6 +307,19 @@ def _json_object(value: Any, *, name: str) -> dict[str, Any]:
     return dict(value)
 
 
+def _json_array(value: Any, *, name: str) -> list[Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ScanExecutionBackendError(f"{name} is invalid JSON") from exc
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ScanExecutionBackendError(f"{name} must be an array")
+    return list(value)
+
+
 class PostgresScanExecutionBackend:
     """Transactional action leases for the local control-plane scheduler.
 

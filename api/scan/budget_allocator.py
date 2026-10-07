@@ -246,7 +246,10 @@ def allocate_scan_action_plan(
             continue
 
         missing = shortages(action)
-        if missing:
+        # An extension is admitted at the holds its measured latency earned or not at
+        # all: shrinking it to a reviewed floor tier would re-run the slice on less than
+        # the slice already had, and supersede it with a result that proves nothing.
+        if missing and not action.capability_args.get("extends"):
             scaled = fit_reservation_scaled_profile(
                 action.capability_name,
                 requested=action.requested_budget,
