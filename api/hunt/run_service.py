@@ -292,15 +292,19 @@ def _action_reference_ids(value: Any) -> dict[str, list[str]]:
 BUDGET_REFUSAL_PREFIXES = ("budget_exhausted:", "budget_insufficient_for_action:")
 
 
-def _public_action_error(summary: Mapping[str, Any], refused: bool) -> dict[str, Any]:
-    """The bounded reason an action failed or was refused; absent when none was recorded."""
+def _public_action_error(summary: Mapping[str, Any], refusal_stage: str | None) -> dict[str, Any]:
+    """The bounded reason an action failed or was refused; absent when none was recorded.
+
+    ``refusal_stage`` is ``admission`` for a Hunt budget refusal and ``verification`` for a
+    verifier that refused before sending any request; both were charged nothing.
+    """
     error = str(summary.get("error") or "").strip()
     if not error:
         return {}
     public: dict[str, Any] = {"error": error[:500]}
-    if refused:
+    if refusal_stage:
         public["refusal"] = {
-            "stage": "admission",
+            "stage": refusal_stage,
             "reason": error[:500],
             "retryable_with_smaller_action": bool(summary.get("retryable_with_smaller_action")),
             "shortages": {
@@ -361,6 +365,12 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
     )
     budget_actual = numeric_budget(accounting.get("actual"))
     conservative = str(accounting.get("charge_basis") or "").startswith("conservative")
+    # A verifier that refused before any request reached the target settled with nothing charged.
+    refused_before_execution = (
+        has_exact_accounting
+        and item.get("status") == "blocked"
+        and str(accounting.get("charge_basis") or "") == "not_charged"
+    )
     # A budget shortage refuses the action at admission: it never dispatched, holds no receipt
     # and was charged nothing. Report that, with the reason, rather than a reason-less legacy row.
     refused_at_admission = (
@@ -374,6 +384,7 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
         settlement_status = str(result_summary.get("budget_reservation_state") or "not_reserved")
     accounting_basis = (
         "refused_at_admission" if refused_at_admission
+        else "refused_before_execution" if refused_before_execution
         else "conservative_settlement" if has_exact_accounting and conservative
         else "exact_settlement" if has_exact_accounting
         else "settlement_failed" if settlement_status == "failed"
@@ -432,7 +443,7 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
             # False only when the action provably never ran (refused at admission); None when
             # the record does not say.
             "execution_started": (
-                False if refused_at_admission
+                False if refused_at_admission or refused_before_execution
                 else result_summary.get("execution_started")
                 if isinstance(result_summary.get("execution_started"), bool)
                 else None
@@ -461,7 +472,12 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
                 ),
             },
             "reference_ids": _action_reference_ids(result_summary),
-            **_public_action_error(result_summary, refused_at_admission),
+            **_public_action_error(
+                result_summary,
+                "admission" if refused_at_admission
+                else "verification" if refused_before_execution
+                else None,
+            ),
             "captures": public_capture_references(result_summary.get("captures"), source_action_id=item.get("id"))
                 if item.get("status") == "completed" and item.get("capability_name") == "http.request" else [],
         },

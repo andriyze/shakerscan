@@ -56,7 +56,13 @@ from .cancellation import (
     HuntCancellationWatch,
     record_cancellable_job_durable,
 )
-from .settlement import blocked_actual_charges as _hunt_blocked_actual
+from .settlement import (
+    blocked_actual_charges as _hunt_blocked_actual,
+    capability_charge_basis,
+    refund_verification,
+    unstarted_refusal_charges,
+)
+from .verification_refusal import VerificationRefused, refused_before_traffic
 from .device_policy import DeviceHuntPolicyState
 from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
 from .service_binding import collection_uses_service_origin
@@ -2441,6 +2447,9 @@ async def _execute_hunt_capability_lifecycle(
     execution_started = time.perf_counter()
     status, result = "failed", {}
     capability_execution = None
+    # Set when the verifier refused before any request reached the target: settlement then
+    # releases the whole reservation and the verification slot instead of the conservative hold.
+    verification_refused_before_traffic = False
     try:
         if name == "candidate.verify":
             assert candidate_record is not None
@@ -2466,6 +2475,7 @@ async def _execute_hunt_capability_lifecycle(
                 ),
                 blocked_exceptions=(HTTPException,),
                 conservative_full_budget=True,
+                unstarted_exceptions=(VerificationRefused,),
             )
             capability_execution = await dispatch_registered_adapter(
                 candidate_adapter,
@@ -2473,6 +2483,9 @@ async def _execute_hunt_capability_lifecycle(
                 requested_budget=durable_reservation.record.requested,
             )
             result = candidate_adapter.result
+            verification_refused_before_traffic = isinstance(
+                candidate_adapter.blocked_exception, VerificationRefused,
+            )
             if candidate_adapter.blocked_exception is not None:
                 raise candidate_adapter.blocked_exception
         elif name in ASSET_ACTION_NAMES:
@@ -2920,6 +2933,8 @@ async def _execute_hunt_capability_lifecycle(
                     device_http_attempted=bool(device_http_attempted),
                     elapsed_wall=elapsed_wall,
                 )
+            if verification_refused_before_traffic:
+                actual_charges = unstarted_refusal_charges(charges)
             if (
                 is_device_queue
                 and not device_queue_enqueued
@@ -2989,6 +3004,8 @@ async def _execute_hunt_capability_lifecycle(
                 if isinstance(receipt_payload, Mapping)
                 else {}
             )
+            if verification_refused_before_traffic:
+                receipt_contract_payload["execution_started"] = False
             if capability_execution is not None:
                 normalized_observations = [
                     dict(item) for item in capability_execution.observations
@@ -3063,6 +3080,8 @@ async def _execute_hunt_capability_lifecycle(
                 async with conn.transaction():
                     locked = await _hunt_run_or_404(conn, hunt_id, for_update=True)
                     current_used = _hunt_json(locked["budget_used_json"], {})
+                    if verification_refused_before_traffic:
+                        refund_verification(current_used)
                     merged_device_context = None
                     if is_device_adapter:
                         merge_device_context = (
@@ -3255,10 +3274,9 @@ async def _execute_hunt_capability_lifecycle(
                                 terminal_record.requested,
                                 terminal_record.actual,
                                 reconciled_used,
-                                charge_basis=(
-                                    "conservative_full_reservation"
-                                    if name == "candidate.verify"
-                                    else "capability_reported_settlement"
+                                charge_basis=capability_charge_basis(
+                                    name,
+                                    refused_before_traffic=verification_refused_before_traffic,
                                 ),
                                 settlement_status="succeeded",
                                 reservation_id=terminal_record.reservation_id,
@@ -3429,10 +3447,9 @@ async def _execute_hunt_capability_lifecycle(
                         charges,
                         actual_charges,
                         reconciled_used,
-                        charge_basis=(
-                            "conservative_full_reservation"
-                            if name == "candidate.verify"
-                            else "capability_reported_settlement"
+                        charge_basis=capability_charge_basis(
+                            name,
+                            refused_before_traffic=verification_refused_before_traffic,
                         ),
                         settlement_status=settlement_status,
                         reservation_id=(
@@ -4234,12 +4251,13 @@ async def _execute_hunt_candidate_verification(
         # A Hunt verification is requested by its operator or planner inside the Hunt's own
         # authority, budget and proof contract, so it is not autonomous router execution and does
         # not depend on AI_OPS_ROUTER_EXECUTE_ENABLED. Every other verifier gate still applies.
-        result = await _verify_suspected_finding_workflow(
-            candidate_uuid,
-            str(policy["approval_receipt_id"]),
-            created_by=f"hunt_v2:{run['id']}",
-            autonomous=False,
-        )
+        with refused_before_traffic():
+            result = await _verify_suspected_finding_workflow(
+                candidate_uuid,
+                str(policy["approval_receipt_id"]),
+                created_by=f"hunt_v2:{run['id']}",
+                autonomous=False,
+            )
         verified_finding_id = (
             result.get("verified_finding_id") if isinstance(result, Mapping) else None
         )
