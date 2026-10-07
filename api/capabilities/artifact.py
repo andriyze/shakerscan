@@ -123,6 +123,21 @@ def _redacted_text_sample(body: bytes) -> str:
     return str(_shared_redact_text(text))
 
 
+_CONTENT_RANGE_TOTAL = re.compile(r"\s*bytes\s+\d+-\d+/(\d+)\s*", re.IGNORECASE)
+
+
+def _resource_bytes(private: WorkerPrivateHTTPResponse) -> int | None:
+    """The artifact's full size, when the response establishes it."""
+    headers = private.headers()
+    if private.status_code == 206:
+        match = _CONTENT_RANGE_TOTAL.fullmatch(headers.get("content-range") or "")
+        return int(match.group(1)) if match else None
+    if not private.body_truncated:
+        return len(private.body())
+    length = str(headers.get("content-length") or "").strip()
+    return int(length) if length.isdigit() and int(length) > len(private.body()) else None
+
+
 async def _fetch_artifact(
     target_url: str,
     *,
@@ -188,7 +203,9 @@ async def inspect_target_artifact(
             "error": "artifact_range_not_supported",
             "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
         }
-    body = private.body()[:length]
+    received = private.body()
+    body = received[:length]
+    resource_bytes = _resource_bytes(private)
     terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]
     lowered = body.decode("utf-8", errors="replace").lower()
     observation = {
@@ -196,6 +213,16 @@ async def inspect_target_artifact(
         "path": path,
         "offset": offset,
         "returned_bytes": len(body),
+        # The resource's full size when the response states it (Content-Range total, or a
+        # complete 200 body); None when unknown. A window that may not reach the end of the
+        # resource is truncated, so a zero search count is not evidence of absence.
+        "resource_bytes": resource_bytes,
+        "window_truncated": (
+            offset + len(body) < resource_bytes if resource_bytes is not None
+            else private.body_truncated or len(received) > length or len(body) >= length
+        ),
+        # search_matches counts the returned window only, never the rest of the resource.
+        "search_scope": "window",
         "window_sha256": hashlib.sha256(body).hexdigest(),
         "content_type": private.headers().get("content-type"),
         "text_sample": _redacted_text_sample(body),

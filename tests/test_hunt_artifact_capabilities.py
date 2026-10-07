@@ -132,3 +132,106 @@ def test_worker_persists_semantic_ok_for_future_hunt_outcomes():
     assert 'capability_name in {"artifact.inspect", "javascript.analyze"}' in source
     assert '"ok": status == "success"' in source
     assert "ArtifactInspectionExecutionAdapter" in source
+
+
+def _inspect_with(monkeypatch, response, args):
+    async def fake_execute(_target_url, _args, **kwargs):
+        kwargs["private_response_sink"](response)
+        return {"ok": True, "response": {"status": response.status_code}}
+
+    monkeypatch.setattr(artifact_capability, "execute_bound_http_request", fake_execute)
+    binding = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test",), allowed_addresses=("192.0.2.10",),
+    )
+    return asyncio.run(artifact_capability.inspect_target_artifact(
+        "https://app.example.test", {"path": "/ftp/", **args}, target=binding,
+    ))["observation"]
+
+
+LISTING = (b"<li>quarantine/</li>\n" * 300) + b'<li><a href="jwt.pub">jwt.pub</a></li>\n'
+
+
+def test_a_search_inside_a_truncated_window_says_the_resource_was_larger(monkeypatch):
+    """Live: search_terms ["jwt.pub"] counted 0 on a 7,913-byte listing that contains it,
+    with nothing saying only the first 4,096 bytes were searched."""
+    assert len(LISTING) > 4096 and b"jwt.pub" not in LISTING[:4096]
+    ranged = WorkerPrivateHTTPResponse(
+        status_code=206, final_url="https://app.example.test/ftp/", _body=LISTING[:4096],
+        _headers={"content-type": "text/html", "content-range": f"bytes 0-4095/{len(LISTING)}"},
+        _cookies={},
+    )
+    observation = _inspect_with(monkeypatch, ranged, {"search_terms": ["jwt.pub"]})
+    assert observation["search_matches"] == [{"term": "jwt.pub", "count": 0}]
+    assert observation["search_scope"] == "window"
+    assert observation["resource_bytes"] == len(LISTING)
+    assert observation["window_truncated"] is True
+    assert observation["returned_bytes"] == 4096
+
+    # A server that ignores Range: the bounded read kept a prefix and says so.
+    whole = WorkerPrivateHTTPResponse(
+        status_code=200, final_url="https://app.example.test/ftp/", _body=LISTING[:4096],
+        _headers={"content-type": "text/html", "content-length": str(len(LISTING))},
+        _cookies={}, body_truncated=True,
+    )
+    observation = _inspect_with(monkeypatch, whole, {"search_terms": ["jwt.pub"]})
+    assert (observation["resource_bytes"], observation["window_truncated"]) == (len(LISTING), True)
+    assert len(observation["text_sample"]) <= artifact_capability.MAX_PUBLIC_TEXT
+
+
+def test_a_complete_small_resource_is_not_called_truncated(monkeypatch):
+    body = b'<li><a href="jwt.pub">jwt.pub</a></li>\n'
+    complete = WorkerPrivateHTTPResponse(
+        status_code=200, final_url="https://app.example.test/ftp/", _body=body,
+        _headers={"content-type": "text/html"}, _cookies={},
+    )
+    observation = _inspect_with(monkeypatch, complete, {"search_terms": ["jwt.pub"]})
+    assert observation["search_matches"] == [{"term": "jwt.pub", "count": 2}]
+    assert (observation["resource_bytes"], observation["window_truncated"]) == (len(body), False)
+
+
+def test_a_window_narrower_than_the_body_read_is_truncated(monkeypatch):
+    response = WorkerPrivateHTTPResponse(
+        status_code=200, final_url="https://app.example.test/ftp/", _body=LISTING[:4096],
+        _headers={"content-type": "text/html"}, _cookies={},
+    )
+    observation = _inspect_with(monkeypatch, response, {"max_bytes": 100})
+    assert observation["returned_bytes"] == 100
+    assert observation["resource_bytes"] == 4096 and observation["window_truncated"] is True
+
+
+def test_loopback_listing_larger_than_the_window_is_reported_truncated():
+    """The real bounded HTTP read against a server that ignores Range."""
+    from aiohttp import web
+
+    async def scenario():
+        async def listing(_request):
+            return web.Response(body=LISTING, content_type="text/html")
+
+        app = web.Application()
+        app.router.add_get("/ftp/", listing)
+        runner = web.AppRunner(app, shutdown_timeout=1)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        base = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        try:
+            binding = TargetBinding(
+                target_id="target-1", target_kind="web", canonical_host="127.0.0.1",
+                allowed_origins=(base,), allowed_addresses=("127.0.0.1",),
+                allowed_root_domains=("127.0.0.1",), environment="lab",
+            )
+            return await artifact_capability.inspect_target_artifact(
+                base, {"path": "/ftp/", "search_terms": ["jwt.pub"]}, target=binding,
+            )
+        finally:
+            await runner.cleanup()
+
+    result = asyncio.run(scenario())
+    assert result["ok"] is True, result
+    observation = result["observation"]
+    assert observation["returned_bytes"] == 4096
+    assert observation["search_matches"] == [{"term": "jwt.pub", "count": 0}]
+    assert observation["window_truncated"] is True
+    assert observation["resource_bytes"] == len(LISTING)
+    assert observation["search_scope"] == "window"
