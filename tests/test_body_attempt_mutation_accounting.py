@@ -18,7 +18,7 @@ from capabilities.scanner import ScannerExecutionAdapter
 from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import ScanPolicy
-from scan.action_plan import ScanActionPlan, batch_profile_shape
+from scan.action_plan import ScanActionPlan, batch_profile_shape, slice_body_mutation_hold
 from scan.external_process import batch_attempt_floor
 from scan.work_manifests import build_candidate_manifest, build_endpoint_manifest
 from tests.test_scan_action_adapter import TARGET, Backend, _action, _dispatcher, _lease, _noop
@@ -100,29 +100,48 @@ def test_an_unmeasured_body_attempt_still_keeps_its_whole_hold():
     assert result.actual_budget["state_changing_requests"] == 480
 
 
-def test_a_slice_holds_a_mutation_floor_for_every_body_slot_it_can_fund():
+def _slice_hold(capability, manifest_digest, bodies, slice_count, budget):
+    return slice_body_mutation_hold(
+        capability,
+        {
+            "candidate_manifest_ref": {"manifest_digest": manifest_digest},
+            "slice": {"start": 0, "count": slice_count},
+        },
+        budget,
+        (manifest_digest, frozenset(bodies)),
+    )
+
+
+def test_a_slice_holds_one_body_allowance_per_body_candidate_it_holds():
+    digest = "d" * 64
+    for capability in ("xss.verify_batch", "sqli.verify_batch"):
+        body = batch_attempt_floor(capability, body_candidate=True)
+        roomy = {name: amount * 4 for name, amount in body.items()}
+        # Two body candidates in the slice: two allowances.
+        assert _slice_hold(capability, digest, {0, 1}, 2, roomy) == (
+            2 * body["state_changing_requests"]
+        )
+        # A slice of query candidates holds no mutation allowance at all.
+        assert _slice_hold(capability, digest, set(), 2, roomy) == 0
+        assert _slice_hold(capability, digest, {5}, 2, roomy) == 0, "outside the slice"
+        # Only the body attempts the slice's own request and wall holds can fund.
+        assert _slice_hold(capability, digest, {0, 1}, 2, body) == body["state_changing_requests"]
+    # An unknown composition (another manifest) keeps the shape's single hold.
+    assert slice_body_mutation_hold(
+        "xss.verify_batch",
+        {"candidate_manifest_ref": {"manifest_digest": "e" * 64}, "slice": {"start": 0, "count": 2}},
+        {"http_requests": 1400}, ("d" * 64, frozenset({0})),
+    ) is None
+
+
+def test_the_shape_keeps_a_single_body_hold_for_an_unknown_slice():
     for profile in ("balanced", "thorough", "deep"):
         for capability in ("xss.verify_batch", "sqli.verify_batch"):
-            size, budget = batch_profile_shape(
+            _size, budget = batch_profile_shape(
                 profile, capability, allow_state_changing_http=True,
             )
             body = batch_attempt_floor(capability, body_candidate=True)
-            slots = min(
-                [size] + [
-                    budget[name] // amount for name, amount in body.items()
-                    if name != "state_changing_requests"
-                ]
-            )
-            assert slots >= 1
-            assert budget["state_changing_requests"] >= body["state_changing_requests"] * slots, (
-                profile, capability,
-            )
-    # The soak shape: a balanced XSS slice of two can fund two body attempts.
-    size, budget = batch_profile_shape("balanced", "xss.verify_batch", allow_state_changing_http=True)
-    assert size == 2 and budget["state_changing_requests"] == 480
-    # Without state-changing authority nothing about the mutation hold changes.
-    _size, query_only = batch_profile_shape("balanced", "xss.verify_batch")
-    assert query_only["state_changing_requests"] == 240
+            assert budget["state_changing_requests"] == body["state_changing_requests"]
 
 
 def _two_body_candidate_batch(requested):
@@ -182,7 +201,10 @@ def _two_body_candidate_batch(requested):
 
 def test_the_soak_slice_funds_both_body_candidates():
     _size, shape = batch_profile_shape("balanced", "xss.verify_batch", allow_state_changing_http=True)
-    receipt, calls = _two_body_candidate_batch(shape)
+    held = dict(shape)
+    held["state_changing_requests"] = _slice_hold("xss.verify_batch", "d" * 64, {0, 1}, 2, shape)
+    assert held["state_changing_requests"] == 480
+    receipt, calls = _two_body_candidate_batch(held)
 
     assert len(calls) == 2, "the second body candidate must get its real allowance"
     assert receipt.status == "success"

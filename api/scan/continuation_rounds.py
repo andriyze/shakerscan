@@ -22,6 +22,7 @@ from .action_plan import (
     ScanAction,
     ScanActionPlan,
     ScanActionPlanCompiler,
+    body_candidate_positions,
     credential_profile_action_refs,
     interactive_auth_input_action_ids,
     request_collection_action_refs,
@@ -351,6 +352,10 @@ def compile_continuation_round(
             for action in parent_plan.actions[:len(allocation.parent_action_ids)]
         ),
         verification_extensions=extensions,
+        # The round's candidates are materialized, so each verifier slice holds the
+        # mutation allowance of the body candidates it actually holds, and none for a
+        # slice of query candidates.
+        body_positions=body_candidate_positions(candidates),
     )
     allocated_plan = allocate_scan_action_plan(
         continuation_raw, ContinuationBudgetCeiling(residual),

@@ -45,6 +45,7 @@ from .work_manifests import (
 from .external_process import (
     batch_attempt_floor,
     batch_attempt_capacity,
+    batch_row_cost_class,
     minimum_reservation_scaled_profile,
 )
 
@@ -198,24 +199,9 @@ def batch_profile_shape(
             if int(query_floor.get(dimension, 0)) > 0
         ]
         size = min(size, min(mixed_capacities)) if mixed_capacities else size
-        # The candidate manifest's reference reveals a count, not which entries carry a
-        # body, so a slice may be all body candidates. One body-attempt mutation hold per
-        # slice funded only the first: a balanced XSS slice of two declared POST
-        # endpoints left its second candidate unattempted (insufficient_plan_budget).
-        # Hold the mutation floor for every body attempt the slice's own request and wall
-        # holds could fund; query attempts settle zero mutations and the adapter settles
-        # body attempts to what they sent, so the unused hold is released at settlement.
-        body_slots = min(
-            [size] + [
-                int(budget.get(dimension, 0)) // int(amount)
-                for dimension, amount in body_floor.items()
-                if dimension != "state_changing_requests" and int(amount) > 0
-            ]
-        )
-        budget["state_changing_requests"] = max(
-            int(budget.get("state_changing_requests", 0)),
-            int(body_floor.get("state_changing_requests", 0)) * max(1, body_slots),
-        )
+        # The shape keeps one body-attempt mutation hold: it is what a slice of unknown
+        # composition may need. A compiled slice whose candidates are known holds exactly
+        # what its own body candidates need instead (see slice_body_mutation_hold).
     if allow_state_changing_http and capability_name == "templates.active_batch":
         # Active Nuclei may send non-GET templates once state-changing HTTP is
         # authorized. Reserve a conservative mutation hold equal to the slice's
@@ -226,6 +212,80 @@ def batch_profile_shape(
         # reserved and the slice stays GET-only.
         budget["state_changing_requests"] = int(budget.get("http_requests", 0))
     return max(1, size), MappingProxyType(budget)
+
+
+_BODY_VERIFIER_CAPABILITIES = frozenset({"xss.verify_batch", "sqli.verify_batch"})
+
+
+def body_candidate_positions(manifest: Any) -> tuple[str, frozenset[int]]:
+    """The candidate manifest's digest and the indexes of its body (mutation) candidates."""
+    return (
+        manifest.reference().manifest_digest,
+        frozenset(
+            index for index, row in enumerate(manifest.entries)
+            if batch_row_cost_class(row)
+        ),
+    )
+
+
+def lane_may_hold_body_candidates(
+    capability_name: str,
+    capability_args: Mapping[str, Any],
+    body_positions: tuple[str, frozenset[int]] | None,
+    offset: int,
+) -> bool:
+    """False only when a verifier lane's remaining candidates are known to be query-only."""
+    if capability_name not in _BODY_VERIFIER_CAPABILITIES or body_positions is None:
+        return True
+    reference = capability_args.get("candidate_manifest_ref")
+    if (
+        not isinstance(reference, Mapping)
+        or str(reference.get("manifest_digest") or "") != body_positions[0]
+    ):
+        return True
+    return any(index >= offset for index in body_positions[1])
+
+
+def slice_body_mutation_hold(
+    capability_name: str,
+    capability_args: Mapping[str, Any],
+    budget: Mapping[str, int],
+    body_positions: tuple[str, frozenset[int]] | None,
+) -> int | None:
+    """The mutation hold one verifier slice needs for the body candidates it holds.
+
+    ``None`` when the slice's composition is unknown (no positions for its manifest), which
+    keeps the shape's single body hold. Otherwise the hold is the body floor for every body
+    candidate in the slice that the slice's request and wall holds can fund after its query
+    candidates' floors -- zero for a slice of query candidates. Holding a body allowance for
+    every slot a slice could hold, whatever it held, pushed active templates and verifier
+    slices out of the same mutation ceiling on targets without a single body candidate.
+    """
+    if capability_name not in _BODY_VERIFIER_CAPABILITIES or body_positions is None:
+        return None
+    reference = capability_args.get("candidate_manifest_ref")
+    raw_slice = capability_args.get("slice")
+    if (
+        not isinstance(reference, Mapping)
+        or str(reference.get("manifest_digest") or "") != body_positions[0]
+        or not isinstance(raw_slice, Mapping)
+    ):
+        return None
+    start = int(raw_slice.get("start") or 0)
+    count = int(raw_slice.get("count") or 0)
+    bodies = sum(1 for index in range(start, start + count) if index in body_positions[1])
+    if not bodies:
+        return 0
+    queries = max(0, count - bodies)
+    query_floor = batch_attempt_floor(capability_name)
+    body_floor = batch_attempt_floor(capability_name, body_candidate=True)
+    fundable = min([bodies] + [
+        max(0, int(budget.get(name, 0)) - queries * int(query_floor.get(name, 0)))
+        // int(amount)
+        for name, amount in body_floor.items()
+        if name != "state_changing_requests" and int(amount) > 0
+    ])
+    return int(body_floor.get("state_changing_requests", 0)) * fundable
 
 
 def _affordable_batch_tier(
@@ -836,6 +896,7 @@ class ScanActionPlanCompiler:
         placement_backends: Sequence[str] = ("local", "broker"),
         action_budgets: Mapping[str, Mapping[str, int]] | None = None,
         verification_extensions: Sequence[Mapping[str, Any]] = (),
+        body_positions: tuple[str, frozenset[int]] | None = None,
     ) -> ScanActionPlan:
         scope = str(action_scope or "").strip().lower()
         if scope not in {"full", "global", "discovery", "endpoint"}:
@@ -1384,6 +1445,17 @@ class ScanActionPlanCompiler:
                     and "candidate_manifest_ref" in blueprint.capability_args
                 ):
                     budget.pop("state_changing_requests", None)
+                body_hold = (
+                    slice_body_mutation_hold(
+                        blueprint.capability_name, blueprint.capability_args,
+                        budget, body_positions,
+                    )
+                    if policy.allow_state_changing_http else None
+                )
+                if body_hold is not None:
+                    budget.pop("state_changing_requests", None)
+                    if body_hold > 0:
+                        budget["state_changing_requests"] = body_hold
                 return budget
             specification = self._registry.require(blueprint.capability_name)
             # Discovery decides whether every later family has work, so its
@@ -1562,18 +1634,26 @@ class ScanActionPlanCompiler:
             # already planned, not the raw ceiling: the shortfall that failed a
             # sharded Scan was 483 requests of a 600-request slice, i.e. the ledger
             # was large enough until its siblings were counted.
+            entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
+            manifest_offset = min(entry_count, offsets.get(base_action_id, 0))
             batch_size, batch_budget = _affordable_batch_tier(
                 capability_name,
                 budget_profile=execution_plan.budget_profile,
-                allow_state_changing_http=policy.allow_state_changing_http,
+                # A verifier lane whose remaining candidates are known to hold no body
+                # candidate is shaped for query candidates: the body-attempt expansion of
+                # its request, wall and mutation holds would fund work that cannot exist.
+                allow_state_changing_http=bool(
+                    policy.allow_state_changing_http
+                    and lane_may_hold_body_candidates(
+                        capability_name, capability_args, body_positions, manifest_offset,
+                    )
+                ),
                 batches=minimum_batches if required else 1,
                 limits={
                     name: max(0, int(limit) - int(reserved.get(name, 0)))
                     for name, limit in limits.items()
                 },
             )
-            entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
-            manifest_offset = min(entry_count, offsets.get(base_action_id, 0))
             remaining_entries = max(0, entry_count - manifest_offset)
             if continuation_round > 0 and manifest_ref and entry_count == 0:
                 # A materialized empty worklist is exhaustion, not the unknown
