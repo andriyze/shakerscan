@@ -96,6 +96,20 @@ export function WhatWeFound({
           </div>
         )}
 
+        {observation.responseHeaders.length > 0 && (
+          <div>
+            <Label>Response headers recorded <span className="font-normal text-gray-600">· the scan&apos;s baseline request to this origin</span></Label>
+            <dl className="max-h-64 overflow-auto rounded-md border border-gray-800 bg-gray-950 p-3 font-mono text-xs leading-5">
+              {observation.responseHeaders.map((header) => (
+                <div key={header.name} className="flex gap-2">
+                  <dt className="shrink-0 text-gray-400">{header.name}:</dt>
+                  <dd className="min-w-0 break-all text-gray-200">{header.value}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        )}
+
         {observation.signatures.length > 0 && (
           <div>
             <Label>Matched {observation.signatures.length === 1 ? 'signature' : 'signatures'}</Label>

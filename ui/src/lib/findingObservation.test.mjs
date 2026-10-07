@@ -66,3 +66,36 @@ test('locations show the host and the path with query names only', () => {
   assert.equal(hostOf('/relative'), '')
   assert.equal(humanizeToken('error_based_repeated'), 'Error based repeated')
 })
+
+test('a missing-header finding reads as the header, the recorded request and its response headers', () => {
+  const observation = findingObservation(JSON.stringify({
+    template_id: 'http-missing-security-headers',
+    header_name: 'permissions-policy',
+    matched_url_count: 25,
+    observed_response: {
+      request_line: 'GET https://honey.example.test/',
+      response_status: 200,
+      observed_headers: { 'x-frame-options': 'DENY', server: 'nginx' },
+      header_absent: 'permissions-policy',
+    },
+  }))
+  assert.deepEqual(observation.facts.map((fact) => `${fact.label}: ${fact.value}`), [
+    'Missing header: permissions-policy',
+    'Request: GET https://honey.example.test/',
+    'HTTP status: 200',
+    'Pages matched: 25',
+  ])
+  assert.deepEqual(observation.responseHeaders, [
+    { name: 'server', value: 'nginx' },
+    { name: 'x-frame-options', value: 'DENY' },
+  ])
+  assert.equal(hasObservation(observation), true)
+})
+
+test('a missing-header finding stored before the recorded response still names its header', () => {
+  const observation = findingObservation(JSON.stringify({
+    template_id: 'http-missing-security-headers', header_name: 'permissions-policy', matched_url_count: 3,
+  }))
+  assert.equal(hasObservation(observation), true)
+  assert.deepEqual(observation.responseHeaders, [])
+})
