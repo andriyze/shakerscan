@@ -45,6 +45,9 @@ COVERAGE_ANGLE_STATUSES = frozenset({
     "blocked",
     "candidate",
 })
+# Coverage may be appended while a Hunt is unfinished. budget_exhausted is resumable, so
+# it accepts evidence-bound events; a set completed_at marks a finished run.
+COVERAGE_WRITABLE_RUN_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
 MAX_EVIDENCE_ACTIONS = 50
 MAX_CHECKPOINT_ANGLES = 200
 MAX_CHECKPOINT_CANDIDATES = 100
@@ -407,10 +410,25 @@ def _public_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def record_coverage_angle(
-    conn: Any, *, hunt_run_id: str, values: Mapping[str, Any],
+    conn: Any,
+    *,
+    hunt_run_id: str,
+    values: Mapping[str, Any],
+    run_status: str = "active",
 ) -> dict[str, Any]:
-    """Append one immutable angle event after binding evidence to this Hunt."""
+    """Append one immutable angle event after binding evidence to this Hunt.
+
+    The caller holds the Hunt row lock, so every check below and the sequence assigned
+    at insert are serialized with every other write to this Hunt.
+    """
     angle = normalize_coverage_angle(values)
+    if run_status == "budget_exhausted" and not angle["evidence_action_ids"]:
+        raise CoverageLedgerError(
+            "coverage_budget_exhausted_requires_evidence",
+            "Hunt is budget_exhausted; until it resumes, coverage must cite the same-Hunt "
+            "actions that settle the angle",
+            status_code=409,
+        )
     all_refs = list(dict.fromkeys(
         list(angle["evidence_action_ids"])
         + list(angle["contradictory_evidence_action_ids"])
@@ -760,6 +778,7 @@ __all__ = [
     "COVERAGE_LEDGER_SCHEMA",
     "COVERAGE_LEDGER_SCHEMA_STATEMENTS",
     "COVERAGE_LOCUS_KEYS",
+    "COVERAGE_WRITABLE_RUN_STATUSES",
     "CoverageLedgerError",
     "HUNT_CHECKPOINT_SCHEMA",
     "TERMINAL_ACTION_STATUSES",

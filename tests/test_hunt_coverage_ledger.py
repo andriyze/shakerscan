@@ -647,3 +647,105 @@ async def test_checkpoint_queues_nonterminal_candidate_for_adversarial_review():
     ]
     assert checkpoint["continuation_queue"][0]["candidate_status"] == "new"
 
+
+
+class _RunConn(_Conn):
+    """_Conn plus the locked hunt_runs row the service reads before writing."""
+
+    def __init__(self, run, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.run = run
+        self.locked = False
+
+    def transaction(self, **_kwargs):
+        conn = self
+
+        class _Txn:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Txn()
+
+    async def fetchrow(self, query, *args):
+        if query.startswith("SELECT * FROM hunt_runs"):
+            self.locked = "FOR UPDATE" in query
+            return self.run
+        return await super().fetchrow(query, *args)
+
+
+def _service_for(conn):
+    from api.hunt.run_service import HuntRunService
+
+    class _Acquire:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    return HuntRunService(lambda: _Pool())
+
+
+def _run(status, *, finished=False):
+    return {"id": uuid4(), "status": status,
+            "completed_at": datetime.now(timezone.utc) if finished else None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,finished,shown", [
+    ("completed", True, "Hunt is completed;"),
+    ("cancelled", True, "Hunt is cancelled;"),
+    ("failed", True, "Hunt is failed;"),
+    ("created", False, "Hunt is created;"),
+    ("budget_exhausted", True, "Hunt is budget_exhausted and finished;"),
+])
+async def test_finished_cancelled_or_unstarted_hunts_refuse_coverage_writes(status, finished, shown):
+    from fastapi import HTTPException
+
+    action_id = str(uuid4())
+    run = _run(status, finished=finished)
+    conn = _RunConn(run, {action_id: "completed"})
+    with pytest.raises(HTTPException) as exc:
+        await _service_for(conn).record_coverage_angle(str(run["id"]), values=_angle(
+            status="negative", evidence_action_ids=[action_id],
+        ))
+    assert exc.value.status_code == 409
+    assert shown in exc.value.detail
+    assert "read-only" in exc.value.detail
+    assert conn.locked and conn.inserted is None
+
+
+@pytest.mark.asyncio
+async def test_unfinished_budget_exhausted_hunt_accepts_evidence_bound_coverage():
+    action_id = str(uuid4())
+    run = _run("budget_exhausted")
+    conn = _RunConn(run, {action_id: "completed"})
+    service = _service_for(conn)
+    settled = await service.record_coverage_angle(str(run["id"]), values=_angle(
+        status="negative", evidence_action_ids=[action_id],
+    ))
+    assert settled["angle"]["status"] == "negative"
+    conn.inserted = None
+    with pytest.raises(CoverageLedgerError) as exc:
+        await service.record_coverage_angle(str(run["id"]), values=_angle(status="planned"))
+    assert exc.value.code == "coverage_budget_exhausted_requires_evidence"
+    assert exc.value.status_code == 409
+    assert conn.inserted is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["active", "awaiting_planner"])
+async def test_active_hunts_accept_planned_coverage(status):
+    run = _run(status)
+    conn = _RunConn(run, {})
+    result = await _service_for(conn).record_coverage_angle(
+        str(run["id"]), values=_angle(status="planned"),
+    )
+    assert result["angle"]["status"] == "planned"

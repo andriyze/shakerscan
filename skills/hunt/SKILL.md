@@ -156,6 +156,8 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   until its result arrives. A policy refusal is recorded as `blocked` with the blocker text alone.
   An event that cites no new evidence must keep the angle's existing `candidate_id`. One negative
   angle never closes a materially different method, identity, mechanism, input path, or state.
+  An unfinished `budget_exhausted` Hunt still accepts evidence-bound events, so settle the angles
+  the last actions examined before finishing; finished and cancelled Hunts are read-only.
 - Use `GET /hunts/{hunt_id}/checkpoint` after context compaction, planner handoff, or resume.
   It is a bounded server-derived view of current coverage, candidates, action outcomes, budgets,
   and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. Coverage

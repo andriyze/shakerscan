@@ -122,10 +122,21 @@ async def test_coverage_persists_and_checkpoint_uses_latest_owned_evidence(boots
         assert checkpoint["review_queue"] == []
         assert checkpoint["budget_used"] == {"http_requests": 2}
         assert json.loads(await conn.fetchval("SELECT budget_used_json FROM hunt_runs WHERE id=$1", hunt)) == {"http_requests": 2}
-        await conn.execute("UPDATE hunt_runs SET status='completed' WHERE id=$1", hunt)
-        with pytest.raises(HTTPException) as exc:
+        # Resumable budget exhaustion: evidence-bound settlement is accepted, planning is not.
+        await conn.execute("UPDATE hunt_runs SET status='budget_exhausted' WHERE id=$1", hunt)
+        settled = {**angle, "locus": {"route": "/unexamined/0"}, "status": "negative",
+                   "evidence_action_ids": [str(completed)]}
+        await restarted.record_coverage_angle(str(hunt), values=settled)
+        with pytest.raises(CoverageLedgerError) as exc:
             await restarted.record_coverage_angle(str(hunt), values=angle)
-        assert exc.value.status_code == 409
+        assert exc.value.code == "coverage_budget_exhausted_requires_evidence"
+        for update in ("UPDATE hunt_runs SET completed_at=NOW() WHERE id=$1",
+                       "UPDATE hunt_runs SET status='cancelled' WHERE id=$1",
+                       "UPDATE hunt_runs SET status='completed' WHERE id=$1"):
+            await conn.execute(update, hunt)
+            with pytest.raises(HTTPException) as exc:
+                await restarted.record_coverage_angle(str(hunt), values=settled)
+            assert exc.value.status_code == 409
     finally:
         if pool is not None:
             await pool.close()
