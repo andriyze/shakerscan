@@ -129,6 +129,9 @@ Planned: AI-5 (judge guard) · D-5 (truncation + crash) · AI-6 / MI-8 (policy w
 - `.github/workflows/e2e-pr.yml` runs on every pull request so it can be a required check, but starts
   the stack and executes the platform, deterministic Model Intake, and AI Gate cases only when backend, database,
   Compose, harness, or workflow code changed. Documentation/UI-only PRs pass without starting Docker.
+  Its work runs in parallel shards on separate stacks built from the same source (`dast`, `core` for
+  the other areas, `browser`, `images`); the required `smoke` job merges the shard scorecards with
+  `scripts/merge_e2e_scorecards.py` and applies the unchanged completeness gate to the union.
 - `.github/workflows/e2e.yml` is a manual full release gate. It starts the pinned Juice Shop profile,
   proves worker-to-target reachability, and runs `--area all`. Run it on the exact approved candidate
   before creating a release tag.

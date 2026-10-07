@@ -88,7 +88,9 @@ def test_pr_smoke_keeps_full_backend_acceptance_and_scopes_ui_only_changes():
     assert "steps.changes.outputs.stack == 'true'" in smoke
     areas_step = smoke[smoke.index("Run selected E2E areas on the built stack"):]
     assert "github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true'" in areas_step[:200]
-    assert 'python3 tests/e2e/run_e2e.py --area "$E2E_AREA" --scorecard artifacts/e2e-scorecard.json' in smoke
+    # The selected areas are split across shards; test_pr_smoke_shards_run_each_selected_area_once
+    # proves the split selects exactly what `--area "$E2E_AREA"` selected, each area once.
+    assert 'python3 tests/e2e/run_e2e.py "${selection[@]}" --scorecard artifacts/e2e-scorecard.json' in smoke
     assert "COMPOSE_PROFILES=e2e ./scanner.sh start" in smoke
     assert 'SHAKERSCAN_E2E_REQUIRE_NETWORK_WORKER: "true"' in smoke
     assert "SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000" in smoke
@@ -132,7 +134,8 @@ def test_pr_smoke_applies_the_candidate_vulnerability_gate_to_the_built_images()
     policy_keys = ("format", "severity", "scanners", "ignore-unfixed", "exit-code")
     certify_policy = {key: certify["with"][key] for key in policy_keys}
 
-    smoke_steps = _steps("e2e-pr.yml", "smoke")
+    # The image gate runs in the `images` shard, which builds and starts the same stack.
+    smoke_steps = _steps("e2e-pr.yml", "smoke-shard")
     scans = [
         step for step in smoke_steps
         if str(step.get("uses", "")).startswith("aquasecurity/trivy-action@")
@@ -140,7 +143,11 @@ def test_pr_smoke_applies_the_candidate_vulnerability_gate_to_the_built_images()
     assert len(scans) == len(matrix)
     for step in scans:
         assert step["uses"] == certify["uses"]
-        assert step["if"] == "github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'"
+        assert step["if"] == (
+            "github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'"
+            " && matrix.shard == 'images'"
+        )
+        assert not step.get("continue-on-error")
         assert {key: step["with"][key] for key in policy_keys} == certify_policy
         image = step["with"]["trivyignores"].removeprefix(".trivyignore-")
         assert image in matrix, image
@@ -153,7 +160,8 @@ def test_pr_smoke_applies_the_candidate_vulnerability_gate_to_the_built_images()
     assert "for image in scanner api model-intake ui signer; do" in resolve["run"]
     assert "security/image-vulnerability-waivers.json" in resolve["run"]
     assert 'skip_files="/usr/local/bin/docker"' in resolve["run"]
-    upload = next(step for step in smoke_steps if step.get("name") == "Upload E2E scorecard and browser results")
+    upload = next(step for step in smoke_steps
+                  if step.get("name") == "Upload this shard's E2E scorecard, browser and image results")
     assert "trivy-*.json" in upload["with"]["path"]
 
 
@@ -190,22 +198,33 @@ def test_model_intake_trust_anchor_lifecycle_is_a_hard_release_gate():
         "MI-6B operator-created durable anchor verifies exact signature",
         "MI-6C deactivated durable anchor stops verification",
     )
-    for workflow, job in (("e2e.yml", "e2e"), ("e2e-pr.yml", "smoke"),
-                          ("release-candidate.yml", "certify")):
+    # The PR smoke produces its scorecards in parallel shard jobs; the required `smoke` job waits
+    # for them, merges them, and gates the union. The other two produce and gate in one job.
+    for workflow, job, producer_job in (("e2e.yml", "e2e", "e2e"),
+                                        ("e2e-pr.yml", "smoke", "smoke-shard"),
+                                        ("release-candidate.yml", "certify", "certify")):
         steps = _steps(workflow, job)
         gate = next(step for step in steps
                     if "scripts/summarize_e2e_debt.py" in step.get("run", "")
                     and "--require-pass" in step["run"])
         assert not gate.get("continue-on-error"), workflow
-        assert not _yaml(workflow)["jobs"][job].get("continue-on-error"), workflow
+        for name in {job, producer_job}:
+            assert not _yaml(workflow)["jobs"][name].get("continue-on-error"), workflow
         assert gate.get("if") in (None, "always()",
                                   "${{ always() && github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' }}")
         assert "|| true" not in gate["run"] and "set +e" not in gate["run"]
         for check in expected:
             assert f"--require-pass 'model_intake:{check}'" in gate["run"]
             assert check in e2e  # These are real assertions, not imaginary scorecard labels.
-        producers = [step for step in steps[:steps.index(gate)]
+        if producer_job == job:
+            candidates = steps[:steps.index(gate)]
+        else:
+            needs = _yaml(workflow)["jobs"][job]["needs"]
+            assert producer_job in ([needs] if isinstance(needs, str) else needs), workflow
+            candidates = _steps(workflow, producer_job)
+        producers = [step for step in candidates
                      if "tests/e2e/run_e2e.py --area " in step.get("run", "")
+                     or 'tests/e2e/run_e2e.py "${selection[@]}"' in step.get("run", "")
                      or ("make installed-stack-smoke" in step.get("run", "")
                          and step.get("env", {}).get("INSTALLED_STACK_SMOKE_E2E") == "1")]
         assert producers and all(not step.get("continue-on-error") for step in producers)
