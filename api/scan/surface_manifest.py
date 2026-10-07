@@ -106,15 +106,6 @@ def _record_origin(record: EndpointRecord) -> str:
     return f"{record.scheme}://{authority}"
 
 
-def _host_in_roots(host: str, roots: Iterable[str]) -> bool:
-    normalized = str(host or "").lower().rstrip(".")
-    return any(
-        normalized == root or normalized.endswith("." + root)
-        for raw_root in roots
-        if (root := str(raw_root or "").lower().rstrip("."))
-    )
-
-
 def _summary_status(summary: Any) -> tuple[str, str | None, bool]:
     """Preserve execution evidence; missing or unfamiliar output is not success."""
     if not isinstance(summary, Mapping):
@@ -274,7 +265,6 @@ def build_scan_surface_manifest(
         for item in target.allowed_origins
         if str(item).strip()
     }
-    roots = target.allowed_root_domains or (target.canonical_host,)
     parsed_target = urllib.parse.urlsplit(str(target_url or ""))
     target_origin = urllib.parse.urlunsplit((
         parsed_target.scheme.lower(), parsed_target.netloc.lower(), "", "", "",
@@ -288,7 +278,6 @@ def build_scan_surface_manifest(
         candidates: Iterable[tuple[Any, Any]],
         *,
         summary: Mapping[str, Any] | None = None,
-        root_scoped: bool = False,
         extra_reasons: Iterable[str] = (),
     ) -> None:
         nonlocal cancelled
@@ -314,9 +303,7 @@ def build_scan_surface_manifest(
                 invalid += 1
                 continue
             in_scope = (
-                _host_in_roots(record.host, roots)
-                if root_scoped
-                else _record_origin(record).lower() in allowed_origins
+                _record_origin(record).lower() in allowed_origins
                 and record.host == target.canonical_host
             )
             if not in_scope:
@@ -438,19 +425,11 @@ def build_scan_surface_manifest(
         ),
         summary=spec,
     )
-    collect(
-        "subdomains.discover",
-        (
-            (
-                "GET",
-                f"{parsed_target.scheme.lower()}://{str(item.get('host') or '').lower().rstrip('.')}/",
-            )
-            for item in subdomains.get("observations") or ()
-            if isinstance(item, Mapping) and item.get("kind") == "subdomain"
-        ),
-        summary=subdomains,
-        root_scoped=True,
-    )
+    # Discovered names are reported and become targets for their own, separately authorized scans
+    # (``automatically_scanned_discovered_hosts: False``). They are never endpoints of this scan:
+    # entered here they were scheduled for passive templates, and the soak scan 6d25cc89 tested
+    # seven sibling hosts and filed their findings under the scanned target.
+    collect("subdomains.discover", (), summary=subdomains)
     manifest.finalize(cancelled=cancelled)
     payload = manifest.to_dict()
     # Defense in depth: the public manifest must remain JSON-safe and detached

@@ -63,7 +63,8 @@ def test_surface_manifest_unifies_producers_and_redacts_values():
     encoded = json.dumps(manifest, sort_keys=True)
     assert manifest["schema_version"] == "endpoint-manifest/v1"
     assert manifest["status"] == "complete"
-    assert manifest["endpoint_count"] == 7
+    # The discovered subdomain is reported, never an endpoint of this scan.
+    assert manifest["endpoint_count"] == 6
     assert set(manifest["producers"]) == {
         "seed", "known_endpoints", "collections.replay", "web.probe",
         "web.crawl", "web.browser_crawl", "web.content_discover", "web.spec_ingest",
@@ -97,7 +98,6 @@ def test_surface_manifest_marks_out_of_scope_or_truncated_output_partial():
     assert manifest["endpoint_count"] == 2
     assert manifest["producers"]["known_endpoints"]["status"] == "partial"
     assert manifest["producers"]["web.crawl"]["status"] == "partial"
-    assert manifest["producers"]["subdomains.discover"]["status"] == "partial"
     assert "out_of_scope_observations" in (
         manifest["producers"]["web.crawl"]["reason"] or ""
     )
@@ -726,3 +726,35 @@ def test_an_observation_without_the_producer_fact_claims_nothing():
         row.pop("redirect_preserves_request_target")
 
     assert indistinguishable_from_absent(rows) == frozenset()
+
+
+def test_discovered_subdomains_never_become_endpoints_of_the_scan():
+    """Soak 6d25cc89: "Discover subdomains" says found names are not tested, yet seven sibling
+    hosts entered the endpoint manifest, got passive templates, and their 58 findings were filed
+    under the scanned target. Discovered names are recorded for their own authorized scans only.
+    """
+    surface = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=TARGET,
+        options={},
+        collection_replay=_summary("skipped"),
+        probe=_summary("success"),
+        crawl=_summary("success"),
+        content=_summary("skipped"),
+        subdomains=_summary("success", [
+            {"kind": "subdomain", "host": "api.example.test"},
+            {"kind": "subdomain", "host": "mail.example.test"},
+        ]),
+        max_endpoints=20,
+    )
+
+    hosts = {item["host"] for item in surface["endpoints"]}
+    assert hosts == {"app.example.test"}
+    assert surface["producers"]["subdomains.discover"]["status"] == "complete"
+    endpoints = build_endpoint_manifest(
+        scan_id="00000000-0000-4000-8000-000000000001",
+        target_binding_digest="a" * 64,
+        surface_manifest=surface,
+        source_action_ids=("discover.surface",),
+    )
+    assert all(entry["source_tool"] != "subdomains.discover" for entry in endpoints.entries)
