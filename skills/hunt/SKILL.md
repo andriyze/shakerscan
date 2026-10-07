@@ -142,7 +142,14 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
 - Track materially distinct tests with the coverage ledger. Before a focused probe, append
   `planned` or `testing` to `POST /hunts/{hunt_id}/coverage-angles` using the concrete
   family plus route/operation/object/input, mechanism, principal context, and application state
-  that make the angle distinct. After execution append the final `negative`, `partial`,
+  that make the angle distinct. `locus` accepts only the keys below, with string or integer
+  values. The server refuses any other key and an empty locus; `GET /hunts/contract` publishes
+  the same list as `coverage_ledger.locus_keys`.
+  Locus keys: `method`, `route`, `path`, `url`, `origin`, `scheme`, `port`, `transport`,
+  `protocol`, `service`, `service_name`, `operation`, `operation_id`, `object`, `object_id`,
+  `object_kind`, `resource_kind`, `parameter`, `input`, `input_path`, `sink`,
+  `application_state`, `variant`.
+  After execution append the final `negative`, `partial`,
   `blocked`, or `candidate` state with the actual same-Hunt action IDs. The server rejects
   clean/negative claims backed only by partial or blocked work. One negative angle never closes a
   materially different method, identity, mechanism, input path, or state.

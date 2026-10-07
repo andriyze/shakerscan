@@ -6,6 +6,10 @@ the same Hunt.  Coverage is deliberately finer grained than a vulnerability fami
 method, route/object/sink, mechanism, principal context, and application state can all
 make one angle materially different from another.
 
+The locus vocabulary is closed and published (``COVERAGE_LOCUS_KEYS``). An unknown key
+is refused instead of dropped, because a dropped dimension silently merges two different
+experiments into one fingerprint.
+
 This is investigation state, not proof.  A coverage event can point at a candidate,
 but neither a planner-written angle nor a checkpoint may create or verify a finding.
 """
@@ -34,6 +38,11 @@ MAX_EVIDENCE_ACTIONS = 50
 MAX_CHECKPOINT_ANGLES = 200
 MAX_CHECKPOINT_CANDIDATES = 100
 MAX_JSON_BYTES = 16_384
+MAX_LOCUS_VALUE_CHARS = 1_000
+_TEXT_LIMITS = {
+    "family": 80, "mechanism": 1_000, "hypothesis": 8_000, "blocker": 2_000,
+    "proof_gap": 4_000,
+}
 
 _SECRET_KEY_PARTS = (
     "authorization",
@@ -48,42 +57,66 @@ _SECRET_KEY_PARTS = (
     "session_key",
 )
 
-# Semantic dimensions only. Execution provenance (request/action/capability/collection
-# IDs) belongs in evidence references; putting it in the fingerprint would make a retry
-# of the same experiment look like new coverage.
-_LOCUS_KEYS = (
+# The complete, published locus vocabulary: semantic dimensions only. Execution
+# provenance (request/action/capability/collection IDs) belongs in evidence references;
+# putting it in the fingerprint would make a retry of the same experiment look new.
+# skills/hunt/SKILL.md lists the same keys on its "Locus keys:" line (a test enforces it).
+COVERAGE_LOCUS_KEYS: tuple[str, ...] = (
     "method",
     "route",
+    "path",
     "url",
-    "parameter",
-    "object_kind",
-    "resource_kind",
+    "origin",
+    "scheme",
+    "port",
     "transport",
     "protocol",
-    "port",
+    "service",
     "service_name",
+    "operation",
     "operation_id",
-    "scheme",
-    "sink",
+    "object",
+    "object_id",
+    "object_kind",
+    "resource_kind",
+    "parameter",
+    "input",
     "input_path",
+    "sink",
     "application_state",
     "variant",
 )
+_LOCUS_KEY_SET = frozenset(COVERAGE_LOCUS_KEYS)
 
 
 class CoverageLedgerError(ValueError):
     """A coverage event is structurally invalid or overclaims its evidence."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status_code: int = 422,
+        details: Mapping[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.code = code
+        self.status_code = status_code
+        self.details = dict(details or {})
 
 
-def _text(value: Any, *, maximum: int, required: bool = False) -> str:
+def _text(value: Any, *, field: str, required: bool = False) -> str:
     result = str(value or "").strip()
     if required and not result:
-        raise CoverageLedgerError("coverage_field_required", "Required coverage field is empty")
-    return result[:maximum]
+        raise CoverageLedgerError(
+            "coverage_field_required", f"Required coverage field is empty: {field}",
+        )
+    if len(result) > _TEXT_LIMITS[field]:
+        raise CoverageLedgerError(
+            "coverage_field_too_long", f"{field} exceeds {_TEXT_LIMITS[field]} characters",
+        )
+    return result
 
 
 def _json_value(value: Any) -> Any:
@@ -131,26 +164,52 @@ def _bounded_json_object(value: Any, *, field: str) -> dict[str, Any]:
     return json.loads(encoded)
 
 
+def _locus_error(code: str, message: str, **details: Any) -> CoverageLedgerError:
+    return CoverageLedgerError(
+        code,
+        f"{message}. Accepted locus keys: {', '.join(COVERAGE_LOCUS_KEYS)}",
+        details={**details, "accepted_locus_keys": list(COVERAGE_LOCUS_KEYS)},
+    )
+
+
 def canonical_coverage_locus(value: Any) -> dict[str, Any]:
-    """Return the bounded dimensions that identify one concrete test angle."""
-    source = value if isinstance(value, Mapping) else {}
+    """Return the dimensions that identify one concrete test angle, refusing unknown input."""
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, Mapping):
+        raise _locus_error("coverage_locus_invalid", "locus must be a JSON object")
+    unknown = sorted(str(key)[:80] for key in value if str(key) not in _LOCUS_KEY_SET)
+    if unknown:
+        raise _locus_error(
+            "coverage_locus_key_unsupported",
+            f"Unsupported locus key(s): {', '.join(unknown[:10])}",
+            unsupported_locus_keys=unknown[:20],
+        )
     result: dict[str, Any] = {}
-    for key in _LOCUS_KEYS:
-        item = source.get(key)
-        if item in (None, "", [], {}):
+    for key in COVERAGE_LOCUS_KEYS:
+        item = value.get(key)
+        if item is None or (isinstance(item, str) and not item.strip()):
             continue
-        if key == "port":
-            try:
-                port = int(item)
-            except (TypeError, ValueError):
-                continue
-            if 1 <= port <= 65535:
-                result[key] = port
-            continue
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise _locus_error(
+                "coverage_locus_value_invalid", f"locus.{key} must be a string or integer",
+            )
         text = str(item).strip()
-        if key == "method":
-            text = text.upper()
-        result[key] = text[:1000]
+        if key == "port":
+            port = int(text) if text.isdigit() else 0
+            if not 1 <= port <= 65535:
+                raise _locus_error(
+                    "coverage_locus_value_invalid",
+                    "locus.port must be an integer from 1 to 65535",
+                )
+            result[key] = port
+            continue
+        if len(text) > MAX_LOCUS_VALUE_CHARS:
+            raise _locus_error(
+                "coverage_locus_value_too_long",
+                f"locus.{key} exceeds {MAX_LOCUS_VALUE_CHARS} characters",
+            )
+        result[key] = text.upper() if key == "method" else text
     return result
 
 
@@ -169,8 +228,11 @@ def _action_ids(value: Any, *, field: str) -> list[str]:
             ) from exc
         if parsed not in result:
             result.append(parsed)
-        if len(result) >= MAX_EVIDENCE_ACTIONS:
-            break
+    if len(result) > MAX_EVIDENCE_ACTIONS:
+        raise CoverageLedgerError(
+            "coverage_evidence_too_many",
+            f"{field} may cite at most {MAX_EVIDENCE_ACTIONS} actions",
+        )
     return result
 
 
@@ -182,17 +244,17 @@ def coverage_fingerprint(
     principal_context: Any,
 ) -> str:
     material = {
-        "family": _text(family, maximum=80, required=True).lower(),
+        "family": _text(family, field="family", required=True).lower(),
         "locus": canonical_coverage_locus(locus),
-        "mechanism": _text(mechanism, maximum=1000).lower(),
+        "mechanism": _text(mechanism, field="mechanism").lower(),
         "principal_context": _bounded_json_object(
             principal_context, field="principal_context",
         ),
     }
-    if not material["locus"] and not material["mechanism"]:
-        raise CoverageLedgerError(
+    if not material["locus"]:
+        raise _locus_error(
             "coverage_angle_too_broad",
-            "Coverage must name a concrete locus or mechanism; a family-level claim is too broad",
+            "Coverage must name a concrete locus; a family- or mechanism-only claim is too broad",
         )
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -200,15 +262,15 @@ def coverage_fingerprint(
 
 
 def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
-    status = _text(values.get("status"), maximum=40, required=True).lower()
+    status = str(values.get("status") or "").strip().lower()
     if status not in COVERAGE_ANGLE_STATUSES:
         raise CoverageLedgerError(
-            "coverage_status_invalid", f"Unsupported coverage status: {status}",
+            "coverage_status_invalid", f"Unsupported coverage status: {status[:40]}",
         )
 
-    family = _text(values.get("family"), maximum=80, required=True).lower()
+    family = _text(values.get("family"), field="family", required=True).lower()
     locus = canonical_coverage_locus(values.get("locus"))
-    mechanism = _text(values.get("mechanism"), maximum=1000)
+    mechanism = _text(values.get("mechanism"), field="mechanism")
     principal_context = _bounded_json_object(
         values.get("principal_context") or {}, field="principal_context",
     )
@@ -223,7 +285,7 @@ def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
         values.get("contradictory_evidence_action_ids"),
         field="contradictory_evidence_action_ids",
     )
-    candidate_id = _text(values.get("candidate_id"), maximum=80)
+    candidate_id = str(values.get("candidate_id") or "").strip()
     if candidate_id:
         try:
             candidate_id = str(UUID(candidate_id))
@@ -232,8 +294,8 @@ def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
                 "coverage_candidate_id_invalid", "candidate_id must be a UUID",
             ) from exc
 
-    blocker = _text(values.get("blocker"), maximum=2000)
-    proof_gap = _text(values.get("proof_gap"), maximum=4000)
+    blocker = _text(values.get("blocker"), field="blocker")
+    proof_gap = _text(values.get("proof_gap"), field="proof_gap")
     if status in {"negative", "partial", "candidate"} and not evidence:
         raise CoverageLedgerError(
             "coverage_evidence_required",
@@ -256,7 +318,7 @@ def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
         "locus": locus,
         "mechanism": mechanism,
         "principal_context": principal_context,
-        "hypothesis": _text(values.get("hypothesis"), maximum=8000),
+        "hypothesis": _text(values.get("hypothesis"), field="hypothesis"),
         "status": status,
         "evidence_action_ids": evidence,
         "contradictory_evidence_action_ids": contradictions,
@@ -676,6 +738,7 @@ __all__ = [
     "COVERAGE_ANGLE_STATUSES",
     "COVERAGE_LEDGER_SCHEMA",
     "COVERAGE_LEDGER_SCHEMA_STATEMENTS",
+    "COVERAGE_LOCUS_KEYS",
     "CoverageLedgerError",
     "HUNT_CHECKPOINT_SCHEMA",
     "build_hunt_checkpoint",

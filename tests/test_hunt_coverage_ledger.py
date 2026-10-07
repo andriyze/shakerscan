@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
+import re
 from uuid import UUID, uuid4
 
 import pytest
 
 from api.hunt.coverage_ledger import (
     COVERAGE_ANGLE_STATUSES,
+    COVERAGE_LOCUS_KEYS,
     CoverageLedgerError,
     build_hunt_checkpoint,
     coverage_fingerprint,
@@ -69,9 +72,109 @@ def test_fingerprint_is_stable_for_ordering_but_changes_for_material_angle_dimen
 
 
 def test_family_level_claim_is_too_broad_to_close_coverage():
-    with pytest.raises(CoverageLedgerError, match="concrete locus or mechanism") as exc:
+    with pytest.raises(CoverageLedgerError, match="concrete locus") as exc:
         normalize_coverage_angle(_angle(locus={}, mechanism=""))
     assert exc.value.code == "coverage_angle_too_broad"
+
+
+@pytest.mark.parametrize("locus", [{}, {"route": "  ", "method": ""}, None])
+def test_mechanism_alone_cannot_stand_in_for_an_empty_locus(locus):
+    with pytest.raises(CoverageLedgerError) as exc:
+        normalize_coverage_angle(_angle(locus=locus, mechanism="swap object id"))
+    assert exc.value.code == "coverage_angle_too_broad"
+    assert exc.value.details["accepted_locus_keys"] == list(COVERAGE_LOCUS_KEYS)
+
+
+@pytest.mark.parametrize("key", ["header", "host", "endpoint", "object-id", "Route"])
+def test_unknown_locus_key_is_refused_with_the_accepted_vocabulary(key):
+    with pytest.raises(CoverageLedgerError) as exc:
+        normalize_coverage_angle(_angle(locus={"route": "/api/orders/{id}", key: "x"}))
+    assert exc.value.code == "coverage_locus_key_unsupported"
+    assert exc.value.details["unsupported_locus_keys"] == [key]
+    assert exc.value.details["accepted_locus_keys"] == list(COVERAGE_LOCUS_KEYS)
+    assert "Accepted locus keys: method, route" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "key,first,second",
+    [
+        ("object_id", "4121", "4122"),
+        ("object", "invoice", "order"),
+        ("input", "body.user_id", "query.id"),
+        ("operation", "read", "delete"),
+        ("origin", "https://a.example", "https://a.example:8443"),
+        ("path", "/admin", "/api/users"),
+        ("service", "https/443", "https/8443"),
+        ("port", 443, 8443),
+    ],
+)
+def test_planner_dimensions_keep_materially_different_angles_apart(key, first, second):
+    left = normalize_coverage_angle(_angle(locus={"route": "/r", key: first}))
+    right = normalize_coverage_angle(_angle(locus={"route": "/r", key: second}))
+    assert left["locus"][key] == first
+    assert left["fingerprint"] != right["fingerprint"]
+
+
+@pytest.mark.parametrize(
+    "locus,code",
+    [
+        ({"route": "/r", "port": "https"}, "coverage_locus_value_invalid"),
+        ({"route": "/r", "port": 70000}, "coverage_locus_value_invalid"),
+        ({"route": "/r", "object": {"id": 1}}, "coverage_locus_value_invalid"),
+        ({"route": "/r", "variant": True}, "coverage_locus_value_invalid"),
+        ({"route": "/r", "url": "https://a.example/" + "x" * 1000}, "coverage_locus_value_too_long"),
+        (["route", "/r"], "coverage_locus_invalid"),
+    ],
+)
+def test_locus_values_fail_closed_instead_of_being_dropped_or_cut(locus, code):
+    with pytest.raises(CoverageLedgerError) as exc:
+        normalize_coverage_angle(_angle(locus=locus))
+    assert exc.value.code == code
+
+
+def test_overlong_text_fields_are_refused_not_silently_truncated():
+    with pytest.raises(CoverageLedgerError) as exc:
+        normalize_coverage_angle(_angle(mechanism="m" * 1001))
+    assert exc.value.code == "coverage_field_too_long"
+    with pytest.raises(CoverageLedgerError) as exc:
+        normalize_coverage_angle(_angle(evidence_action_ids=[str(uuid4()) for _ in range(51)]))
+    assert exc.value.code == "coverage_evidence_too_many"
+
+
+def test_published_locus_vocabulary_matches_the_accepted_one_in_both_directions():
+    from api.hunt.run_router import HuntCoverageAngleRequest
+    from api.hunt.start_contract import hunt_start_public_contract
+
+    schema = HuntCoverageAngleRequest.model_json_schema()["properties"]["locus"]
+    assert schema["propertyNames"]["enum"] == list(COVERAGE_LOCUS_KEYS)
+    assert hunt_start_public_contract()["coverage_ledger"]["locus_keys"] == list(COVERAGE_LOCUS_KEYS)
+    skill = (Path(__file__).resolve().parents[1] / "skills/hunt/SKILL.md").read_text()
+    advertised = skill.split("Locus keys:", 1)[1].split(".\n", 1)[0]
+    assert re.findall(r"`([a-z_]+)`", advertised) == list(COVERAGE_LOCUS_KEYS)
+    for key in COVERAGE_LOCUS_KEYS:
+        value = 443 if key == "port" else f"{key}-value"
+        angle = normalize_coverage_angle(_angle(locus={key: value}))
+        assert angle["locus"] == {key: value.upper() if key == "method" else value}
+
+
+@pytest.mark.asyncio
+async def test_coverage_route_returns_the_vocabulary_with_a_422(monkeypatch):
+    from fastapi import HTTPException
+    from api.hunt import run_router
+
+    class Service:
+        async def record_coverage_angle(self, hunt_id, *, values):
+            return normalize_coverage_angle(values)
+
+    monkeypatch.setattr(run_router, "_service_provider", lambda: Service())
+    request = run_router.HuntCoverageAngleRequest(
+        family="authorization", locus={"endpoint": "/api/orders"}, status="planned",
+    )
+    with pytest.raises(HTTPException) as exc:
+        await run_router.record_hunt_coverage_angle(str(uuid4()), request)
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "coverage_locus_key_unsupported"
+    assert exc.value.detail["accepted_locus_keys"] == list(COVERAGE_LOCUS_KEYS)
 
 
 @pytest.mark.parametrize(
