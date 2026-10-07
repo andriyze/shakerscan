@@ -103,7 +103,7 @@ LOCUS_KEYS: dict[str, str] = {
     "method": "HTTP method, upper-cased",
     "route": "route template, e.g. /api/users/{id}",
     "path": "concrete request path, e.g. /.git-credentials",
-    "paths": "set of concrete paths; order-insensitive",
+    "paths": "set of concrete paths; order-insensitive; identity only, never a verification route",
     "url": "absolute URL",
     "origin": "scheme://host[:port] of the service",
     "parameter": "query/body/header parameter name",
@@ -126,6 +126,9 @@ LOCUS_KEYS: dict[str, str] = {
     "ai_boundary_context": "AI boundary context object (JSON, at most 16 KiB)",
 }
 LOCUS_SET_KEYS = frozenset({"paths"})
+# Locus keys that name where a request goes. Each one is either a verification route source or
+# identity only; the Hunt contract publishes which (see hunt.candidate_verification_preflight).
+REQUEST_LOCATION_KEYS = frozenset({"route", "url", "path", "paths"})
 MAX_LOCUS_KEYS = 32
 MAX_LOCUS_BYTES = 16384
 MAX_LOCUS_VALUE_CHARS = 1000

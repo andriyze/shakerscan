@@ -334,3 +334,11 @@ def test_candidate_refusals_decided_by_the_candidate_cost_nothing(candidate, det
     assert not store.actions
     assert not any("INSERT INTO hunt_actions" in sql for sql in store.calls)
 
+
+def test_contract_path_locus_is_admitted_for_verification():
+    store = AdmissionStore()
+    store.candidate = {"status": "new", "family": "data_exposure",
+                       "canonical_locus": {"method": "GET", "path": "/ftp/acquisitions.md"}}
+    asyncio.run(call(store, name="candidate.verify"))
+    assert store.run["budget_used_json"]["verifications"] == 1 and len(store.actions) == 1
+
