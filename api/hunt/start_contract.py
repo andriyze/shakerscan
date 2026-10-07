@@ -213,11 +213,16 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "locus_keys": dict(candidates.LOCUS_KEYS),
             "locus_set_keys": sorted(candidates.LOCUS_SET_KEYS),
             "locus_other_keys": (
-                "Any other lower-case identifier key is preserved verbatim and is part of the "
-                "candidate identity; nothing in the locus is silently dropped."
+                "Any other identifier key (lower-cased, '-' read as '_') is preserved and is "
+                "part of the candidate identity. Nothing in the locus is truncated or dropped: "
+                "a value over max_locus_value_chars, a list over max_locus_list_items distinct "
+                "items, a port outside 1-65535, or a locus over max_locus_keys or "
+                "max_locus_bytes is refused."
             ),
             "max_locus_keys": candidates.MAX_LOCUS_KEYS,
             "max_locus_bytes": candidates.MAX_LOCUS_BYTES,
+            "max_locus_value_chars": candidates.MAX_LOCUS_VALUE_CHARS,
+            "max_locus_list_items": candidates.MAX_LOCUS_LIST_ITEMS,
             "identity": "target + family + locus",
             "dedup": (
                 "A sighting with the same identity and the same title or claim merges its "

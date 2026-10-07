@@ -1126,19 +1126,28 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
             if int(used.get("candidates") or 0) >= int(budget.get("max_candidates") or 0):
                 raise HTTPException(status_code=409, detail="Hunt candidate budget exhausted")
             request = draft["candidate_request"]
-            candidate = investigation_candidates.normalize_candidate(
-                plane="device" if run["device_target_id"] else "web",
-                target_id=str(run["target_id"]) if run["target_id"] else None,
-                device_target_id=str(run["device_target_id"]) if run["device_target_id"] else None,
-                hunt_run_id=str(run["id"]),
-                family=request["family"],
-                locus=request["locus"],
-                title=request["title"],
-                claim=request["claim"],
-                severity=request["severity"],
-                evidence_refs=request["evidence_refs"],
-                source_kind="hunt_boundary_discovery",
-            )
+            try:
+                candidate = investigation_candidates.normalize_candidate(
+                    plane="device" if run["device_target_id"] else "web",
+                    target_id=str(run["target_id"]) if run["target_id"] else None,
+                    device_target_id=(
+                        str(run["device_target_id"]) if run["device_target_id"] else None
+                    ),
+                    hunt_run_id=str(run["id"]),
+                    family=request["family"],
+                    locus=request["locus"],
+                    title=request["title"],
+                    claim=request["claim"],
+                    severity=request["severity"],
+                    evidence_refs=request["evidence_refs"],
+                    source_kind="hunt_boundary_discovery",
+                )
+            except ValueError as exc:
+                # A draft whose locus cannot be kept whole (an over-long URL) is refused, not
+                # truncated into another candidate's identity.
+                raise HTTPException(status_code=422, detail={
+                    "error": "candidate_locus_invalid", "message": str(exc),
+                }) from exc
             try:
                 result = await investigation_candidates.upsert_candidate(
                     conn,
