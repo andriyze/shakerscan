@@ -324,6 +324,7 @@ try:
         SENSITIVE_KEY_FRAGMENTS,
         is_sensitive_key,
         mask_secret,
+        redact_scan_options,
         redact_sensitive,
         redact_text,
     )
@@ -335,6 +336,7 @@ except ModuleNotFoundError as exc:
         SENSITIVE_KEY_FRAGMENTS,
         is_sensitive_key,
         mask_secret,
+        redact_scan_options,
         redact_sensitive,
         redact_text,
     )
@@ -1506,7 +1508,7 @@ def _sanitize_scan_options(value: Any) -> Any:
     options = _decode_json_value(value)
     if not isinstance(options, dict):
         return options
-    return redact_sensitive(options)
+    return redact_scan_options(options)
 
 
 _SCAN_LIST_OPTION_KEYS = {
