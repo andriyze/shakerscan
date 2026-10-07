@@ -127,14 +127,18 @@ def test_every_smoke_shard_builds_the_complete_stack_from_source():
     """The cache only warms layers; each shard still runs the complete ./scanner.sh build."""
     shard_job = _workflow("e2e-pr.yml")["jobs"]["smoke-shard"]
     names = [step.get("name") for step in shard_job["steps"]]
+    launch = _step(shard_job, "Start the ShakerScan image build once the cached runtime is restored")
     bake = _step(shard_job, "Restore unchanged image layers from the build cache")
     build = _step(shard_job, "Build ShakerScan images")
     start = _step(shard_job, "Start ShakerScan stack")
-    assert names.index(bake["name"]) < names.index(build["name"]) < names.index(start["name"])
+    order = [names.index(step["name"]) for step in (launch, bake, build, start)]
+    assert order == sorted(order)
     assert bake["uses"].startswith("docker/bake-action@") and len(bake["uses"].split("@")[1]) == 40
     assert bake["with"]["source"] == "."
-    assert "./scanner.sh build" in build["run"]
-    for step in (bake, build, start):
+    assert "./scanner.sh build >" in launch["run"]
+    assert 'echo "$?" > "$RUNNER_TEMP/scanner-build.status"' in launch["run"]
+    assert 'exit "$status"' in build["run"]
+    for step in (launch, bake, build, start):
         assert step["if"] == "steps.shard.outputs.stack == 'true'"
     # Release and candidate images never read the PR smoke cache.
     for name in ("release-candidate.yml", "release.yml", "_build-images.yml", "build-on-main.yml"):
@@ -234,3 +238,13 @@ def test_browser_shard_ui_contracts_still_gate_the_shard(tmp_path):
                             env={**os.environ, "RUNNER_TEMP": str(tmp_path)}, timeout=10)
     assert result.returncode == 3
     assert b"unit test failed" in result.stdout
+
+
+def test_the_image_build_step_fails_with_the_background_build_status(tmp_path):
+    report = _step(_workflow("e2e-pr.yml")["jobs"]["smoke-shard"], "Build ShakerScan images")
+    (tmp_path / "scanner-build.log").write_text("build failed in model_intake_overlay\n")
+    (tmp_path / "scanner-build.status").write_text("1\n")
+    result = subprocess.run(["bash", "-e", "-c", report["run"]], capture_output=True,
+                            env={**os.environ, "RUNNER_TEMP": str(tmp_path)}, timeout=10)
+    assert result.returncode == 1
+    assert b"build failed in model_intake_overlay" in result.stdout
