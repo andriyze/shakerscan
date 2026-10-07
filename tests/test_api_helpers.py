@@ -19490,6 +19490,80 @@ def test_verified_workflow_promotes_bound_novel_hypothesis():
     assert any("status='promoted'" in query for query, _ in updates)
 
 
+def _promote_bola_with_title(title, *, existing=None):
+    """Promote a BOLA proof whose replay used /objects/51; return the stored title and URL."""
+    target_id = uuid.uuid4()
+    hypothesis_id = uuid.uuid4()
+    finding_id = existing or uuid.uuid4()
+    proof = api_module._trusted_workflow_family_proof(
+        _bola_object_execution(51),
+        _bola_object_execution(52),
+    )
+    stored = {}
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "FROM hypotheses" in query:
+                return {
+                    "id": hypothesis_id, "target_id": target_id, "family": "bola",
+                    "title": title, "description": "Cross-principal object access",
+                    "severity_guess": "high",
+                    "metadata_json": {"dedupe_dimensions": {"route": "/objects/{id}", "method": "GET"}},
+                }
+            if "FROM research_decisions" in query:
+                return None
+            if "FROM findings" in query:
+                return {"id": existing, "status": "active"} if existing else None
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            return []
+
+        async def fetchval(self, query, *args):
+            assert "INSERT INTO findings" in query
+            stored.update(title=args[2], url=args[7])
+            return finding_id
+
+        async def execute(self, query, *args):
+            if query.lstrip().startswith("UPDATE findings"):
+                assert "title=$5" in query
+                stored.update(title=args[4], url=args[2])
+            return "UPDATE 1"
+
+    promoted = asyncio.run(api_module._promote_trusted_workflow_finding(
+        Conn(),
+        target_uuid=target_id,
+        target_url="https://example.test",
+        hypothesis_id=str(hypothesis_id),
+        workflow_id=str(uuid.uuid4()),
+        proof=proof,
+        first=_bola_object_execution(51),
+        replay=_bola_object_execution(52),
+        evidence_instance_id=None,
+        tool_receipt_id=None,
+    ))
+    assert promoted["finding_id"] == str(finding_id)
+    return stored
+
+
+def test_a_promoted_finding_title_names_the_object_its_evidence_proves():
+    # The hypothesis was written about object 7; the proof's own replay created and proved 51.
+    stored = _promote_bola_with_title("User B reads user A's object at /objects/7")
+    assert stored["url"] == "https://example.test/objects/51"
+    assert stored["title"] == "User B reads user A's object at /objects/51"
+    # A full URL in the title is rewritten the same way.
+    stored = _promote_bola_with_title("Cross-user read of https://example.test/objects/7.")
+    assert stored["title"] == "Cross-user read of /objects/51."
+    # A title that names no location gets the proven operation.
+    stored = _promote_bola_with_title("Cross-principal object read")
+    assert stored["title"] == "Cross-principal object read (GET /objects/51)"
+    # A refreshed finding takes the title of the object its new evidence proves.
+    stored = _promote_bola_with_title("Object 7 readable at /objects/7", existing=uuid.uuid4())
+    assert stored == {
+        "title": "Object 7 readable at /objects/51", "url": "https://example.test/objects/51",
+    }
+
+
 def test_autonomous_workflow_finding_uses_canonical_retest_inputs_and_source_filter():
     finding = {
         "url": "https://example.test/objects/51",
