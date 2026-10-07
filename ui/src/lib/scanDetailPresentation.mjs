@@ -255,6 +255,10 @@ function structuredLogWarning(raw, source) {
 // for a code this table does not know.
 const COVERAGE_REASON_LABELS = {
   timed_out: 'A planned step ran out of its time allowance before it finished',
+  http_request_budget_exhausted: 'A planned step used up its HTTP request allowance before it finished',
+  state_changing_budget_exhausted: 'A planned step used up its state-changing request allowance before it finished',
+  process_killed: 'A tool was killed by the system (for example, out of memory) before it finished; what it wrote before that is kept',
+  discovery_truncated: 'Surface discovery was cut short by its budget, so part of the application was never examined',
   cancelled: 'The run was cancelled before all planned work finished',
   budget_exhausted: 'The run exhausted its budget before all planned work finished',
   insufficient_plan_budget: 'Planned steps were skipped because the admitted budget did not reach them',

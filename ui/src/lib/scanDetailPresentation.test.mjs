@@ -532,3 +532,27 @@ test('a scan with no injection candidates says why, and an unpublished hint file
   const unexplained = scanResultPresentation({ result: { findings: [], result: {} } }, { band: 'limited', label: 'x' })
   assert.equal(unexplained.injectionCandidateGap, '')
 })
+
+test('budget, kill and truncated-discovery coverage reasons read as operator labels', () => {
+  const result = scanResultPresentation({
+    result: {
+      findings: [],
+      result: {},
+      coverage: {
+        reasons: [
+          'http_request_budget_exhausted',
+          'state_changing_budget_exhausted',
+          'process_killed',
+          'discovery_truncated',
+        ],
+        family_coverage: [],
+      },
+    },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.deepEqual(result.coverageGapReasons, [
+    'A planned step used up its HTTP request allowance before it finished',
+    'A planned step used up its state-changing request allowance before it finished',
+    'A tool was killed by the system (for example, out of memory) before it finished; what it wrote before that is kept',
+    'Surface discovery was cut short by its budget, so part of the application was never examined',
+  ])
+})
