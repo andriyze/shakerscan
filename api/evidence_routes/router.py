@@ -278,12 +278,13 @@ async def evidence_export_manifest(
             ORDER BY created_at DESC
             LIMIT $1
             """,
-            limit,
+            limit + 1,
             finding_uuid,
             scan_uuid,
             retention_class,
         )
-    manifest = _evidence_export_manifest(rows)
+    manifest = _evidence_export_manifest(rows[:limit])
+    manifest["truncated"] = len(rows) > limit
     manifest["filters"] = {
         "finding_id": str(finding_uuid) if finding_uuid else None,
         "scan_id": str(scan_uuid) if scan_uuid else None,
@@ -322,7 +323,7 @@ async def evidence_export_bundle(
             ORDER BY created_at DESC
             LIMIT $1
             """,
-            limit,
+            limit + 1,
             finding_uuid,
             scan_uuid,
             retention_class,
@@ -333,7 +334,8 @@ async def evidence_export_bundle(
         "retention_class": retention_class,
         "limit": limit,
     }
-    manifest = _evidence_export_manifest(rows)
+    manifest = _evidence_export_manifest(rows[:limit])
+    manifest["truncated"] = len(rows) > limit
     manifest["filters"] = filters
     bundle = _evidence_export_bundle_descriptor(manifest, filters=filters)
     if record_event:
@@ -528,6 +530,8 @@ def _evidence_export_bundle_descriptor(
         "bundle_hash": bundle_hash,
         "manifest_hash": manifest.get("manifest_hash"),
         "object_count": manifest.get("object_count", len(objects)),
+        # The limit cut the selection short; the bundle is not the complete evidence set.
+        "truncated": bool(manifest.get("truncated")),
         "content_included": False,
         "filters": filters or {},
         "retention_counts": manifest.get("retention_counts") or {},
