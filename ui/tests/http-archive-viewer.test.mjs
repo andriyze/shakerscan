@@ -56,3 +56,14 @@ test('archive header never calls a partial archive the traffic recorded during t
   assert.match(source, /unarchived_external_tool_capabilities/)
   assert.match(source, /send their traffic through an opaque tunnel/)
 })
+
+test('raw HAR is disabled with the deployment reason and a refused export is shown', () => {
+  // The server declares whether verbatim HAR is exported here; the option follows it.
+  assert.match(source, /archive\?\.raw_har\?\.available === false/)
+  assert.match(source, /disabled=\{downloading !== null \|\| rawHarUnavailable\}/)
+  assert.match(source, /disabled=\{rawHarUnavailable\}/)
+  assert.match(source, /Raw HAR unavailable: \{rawHarReason\}/)
+  // A refusal is kept on screen, not only toasted.
+  assert.match(source, /setExportError\(message\)/)
+  assert.match(source, /role="alert"[^>]*>\{exportError\}/)
+})
