@@ -36,6 +36,7 @@ import {
   PageHeader,
   Select,
   TableSkeleton,
+  tableStyles,
   useToast,
   buttonClasses,
 } from '@/components/ui'
@@ -120,10 +121,10 @@ function DeepLinkFilterChip({ label, onClear }: { label: string; onClear: () => 
       type="button"
       onClick={onClear}
       aria-label={`Remove filter: ${label}`}
-      className="inline-flex items-center gap-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+      className="inline-flex items-center gap-1.5 rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1 text-xs text-gray-300 hover:border-gray-600 hover:bg-gray-800 hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
     >
       <span className="max-w-64 truncate">{label}</span>
-      <span aria-hidden="true">×</span>
+      <span aria-hidden="true" className="text-gray-500">×</span>
     </button>
   )
 }
@@ -442,7 +443,7 @@ function FindingsContent() {
         >
           Previous
         </Button>
-        <span className="px-1 text-sm text-gray-400 tabular-nums">
+        <span className="px-1 text-xs text-gray-400 tabular-nums">
           Page {page} of {totalPages}
         </span>
         <Button
@@ -492,9 +493,9 @@ function FindingsContent() {
         title="Findings"
         description={
           <>
-            Vulnerability findings across all scans
-            {scanIdFilter && <span className="text-blue-400"> (filtered by scan)</span>}
-            {targetIdFilter && <span className="text-blue-400"> (filtered by target)</span>}
+            Vulnerability findings across all scans.
+            {scanIdFilter && <span className="text-gray-300"> Filtered by scan.</span>}
+            {targetIdFilter && <span className="text-gray-300"> Filtered by target.</span>}
           </>
         }
         actions={
@@ -669,7 +670,7 @@ function FindingsContent() {
             {selectableFindings.length > 0 && (
               <Button
                 ref={selectButtonRef}
-                variant={selecting ? 'primary' : 'ghost'}
+                variant={selecting ? 'secondary' : 'ghost'}
                 size="sm"
                 aria-pressed={selecting}
                 onClick={toggleSelecting}
@@ -717,7 +718,7 @@ function FindingsContent() {
           />
         )
       ) : (
-        <Card className="overflow-hidden">
+        <div className={tableStyles.container}>
           {selecting && (
             <div className="flex items-center gap-3 border-b border-gray-800 px-4 py-2.5">
               <label className="flex items-center gap-2 text-sm text-gray-300">
@@ -760,13 +761,13 @@ function FindingsContent() {
                 />
               ))}
           </div>
-        </Card>
+        </div>
       )}
 
       {/* Bottom Pagination */}
       {total > pageSize && (
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <span className="text-sm text-gray-500 tabular-nums">
+          <span className="text-xs text-gray-400 tabular-nums">
             {`Showing ${rangeStart}–${rangeEnd} of ${total.toLocaleString()}`}
           </span>
           <PaginationControls />

@@ -6,7 +6,6 @@ import {
   RETEST_VERDICT_BADGE_STYLES,
   RETEST_VERDICT_LABELS,
   RISK_TIER_BADGE_STYLES,
-  SCAN_STATUS_BADGE_STYLES,
   SEVERITY_BADGE_STYLES,
   SOURCE_TYPE_BADGE_STYLES,
   TIMELINE_STATUS_BADGE_STYLES,
@@ -19,7 +18,51 @@ import {
   gradeTextColorClass,
 } from '@/lib/constants'
 
-const BADGE_BASE = 'inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded-sm'
+const BADGE_BASE = 'inline-flex items-center gap-1.5 px-1.5 py-0.5 text-xs font-medium leading-4 rounded-sm whitespace-nowrap'
+
+export type StatusTone = 'success' | 'danger' | 'warning' | 'info' | 'neutral'
+
+const DOT_TONES: Record<StatusTone, string> = {
+  success: 'bg-emerald-400',
+  danger: 'bg-red-400',
+  warning: 'bg-amber-400',
+  info: 'bg-blue-400',
+  neutral: 'bg-gray-500',
+}
+
+/**
+ * Lifecycle state as a colored dot and a plain label (● Completed). Status is metadata, so it
+ * stays quieter than severity and proof, which keep their filled badges.
+ */
+export function StatusDot({
+  tone,
+  pulse = false,
+  className = '',
+  title,
+  children,
+}: {
+  tone: StatusTone
+  pulse?: boolean
+  className?: string
+  title?: string
+  children: React.ReactNode
+}) {
+  return (
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium text-gray-300 ${className}`} title={title}>
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT_TONES[tone]} ${pulse ? 'animate-pulse' : ''}`} aria-hidden="true" />
+      <span className="first-letter:uppercase">{children}</span>
+    </span>
+  )
+}
+
+const SCAN_STATUS_TONES: Record<ScanStatus, StatusTone> = {
+  pending: 'neutral',
+  queued: 'neutral',
+  running: 'info',
+  completed: 'success',
+  failed: 'danger',
+  cancelled: 'warning',
+}
 
 export function Badge({
   className = '',
@@ -40,15 +83,11 @@ export function SeverityBadge({ severity }: { severity: string }) {
 }
 
 export function ScanStatusBadge({ status }: { status: string }) {
-  const style =
-    SCAN_STATUS_BADGE_STYLES[status as ScanStatus] ?? SCAN_STATUS_BADGE_STYLES.pending
+  const tone = SCAN_STATUS_TONES[status as ScanStatus] ?? 'neutral'
   return (
-    <Badge className={style}>
-      {status === 'running' && (
-        <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" aria-hidden="true" />
-      )}
-      {status}
-    </Badge>
+    <StatusDot tone={tone} pulse={status === 'running'}>
+      {status.replace(/_/g, ' ')}
+    </StatusDot>
   )
 }
 

@@ -8,7 +8,8 @@ import { configureScanHref } from '../src/lib/targetInventoryModel.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const row = readFileSync(path.join(root, 'src/components/targets/inventory/TargetRow.tsx'), 'utf8')
-const menu = readFileSync(path.join(root, 'src/components/targets/inventory/RowMenu.tsx'), 'utf8')
+// The row menu is the shared overflow menu primitive.
+const menu = readFileSync(path.join(root, 'src/components/ui/ActionMenu.tsx'), 'utf8')
 const groups = readFileSync(path.join(root, 'src/components/targets/inventory/TargetGroups.tsx'), 'utf8')
 const newScan = readFileSync(path.join(root, 'src/app/scan/new/page.tsx'), 'utf8')
 

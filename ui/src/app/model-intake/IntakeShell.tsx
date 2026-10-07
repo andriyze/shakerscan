@@ -1,7 +1,8 @@
 'use client'
 
 import { useState } from 'react'
-import { CheckCircle2, Circle, Copy, LockKeyhole, PackageCheck, ShieldAlert, Server } from 'lucide-react'
+import { CheckCircle2, Circle, Copy, LockKeyhole, ShieldAlert, Server } from 'lucide-react'
+import { buttonClasses } from '@/components/ui'
 import {
   downloadModelIntakeLicenseArtifact,
   downloadModelIntakeSbom,
@@ -29,8 +30,8 @@ export function isTerminalScanStatus(status: ModelIntakeScanSummary['status']): 
 }
 
 function chipClass(tone: 'ok' | 'warn' | 'idle'): string {
-  if (tone === 'ok') return 'bg-green-950/50 text-green-300'
-  if (tone === 'warn') return 'bg-yellow-950/50 text-yellow-200'
+  if (tone === 'ok') return 'bg-green-500/15 text-green-300'
+  if (tone === 'warn') return 'bg-yellow-500/15 text-yellow-200'
   return 'bg-gray-800 text-gray-400'
 }
 
@@ -57,7 +58,7 @@ function Chip({
   // A chip that reports a problem should also be the way to reach the fix.
   if (!onClick) return <span className={base}>{content}</span>
   return (
-    <button type="button" onClick={onClick} title={title} className={`${base} hover:brightness-125 focus:outline-hidden focus:ring-1 focus:ring-cyan-500`}>
+    <button type="button" onClick={onClick} title={title} className={`${base} hover:brightness-125 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500`}>
       {content}
     </button>
   )
@@ -111,7 +112,6 @@ export function IntakeContextBar({
   return (
     <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-900 p-3">
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-        <PackageCheck className="h-4 w-4 shrink-0 text-cyan-300" />
         <span className="min-w-0 max-w-full break-all font-mono text-sm text-white">
           {source || <span className="font-sans text-gray-500">No model selected yet</span>}
         </span>
@@ -160,13 +160,13 @@ export function IntakePhaseTabs({
             aria-current={active ? 'step' : undefined}
             onClick={() => onPhaseChange(item.id)}
             className={`flex min-w-0 items-start gap-2 rounded-lg border p-3 text-left transition ${
-              active ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+              active ? 'border-blue-500/70 bg-blue-500/[0.07]' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
             }`}
           >
             {done ? (
               <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-green-300" />
             ) : (
-              <Circle className={`mt-0.5 h-4 w-4 shrink-0 ${active ? 'text-cyan-300' : 'text-gray-600'}`} />
+              <Circle className={`mt-0.5 h-4 w-4 shrink-0 ${active ? 'text-blue-400' : 'text-gray-600'}`} />
             )}
             <span className="min-w-0">
               <span className="block text-sm font-medium text-white">
@@ -227,11 +227,8 @@ export function RunnerInstallCard({
     <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 text-white">
-            <Server className="h-4 w-4 text-cyan-300" />
-            <h3 className="text-sm font-semibold">microVM runner (Firecracker)</h3>
-          </div>
-          <p className="mt-1 max-w-3xl text-xs text-gray-500">
+          <h3 className="text-sm font-semibold text-gray-100">microVM runner (Firecracker)</h3>
+          <p className="mt-0.5 max-w-3xl text-xs text-gray-400">
             Runs the exact model in a disposable no-egress microVM. Not installed by default: it
             needs root, changes the host, and downloads a multi-gigabyte guest image.
           </p>
@@ -276,19 +273,19 @@ export function RunnerInstallCard({
                 times the model size while it runs; jobs are rejected if that would cross the safety reserve.
               </p>
             </div>
-            <span className={`rounded-sm px-2 py-1 text-xs font-semibold ${storage.active_job ? 'bg-cyan-950/50 text-cyan-200' : 'bg-gray-800 text-gray-300'}`}>
+            <span className={`rounded-sm px-2 py-1 text-xs font-semibold ${storage.active_job ? 'bg-blue-500/15 text-blue-300' : 'bg-gray-800 text-gray-300'}`}>
               {storage.active_job ? 'job active' : 'idle'}
             </span>
           </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-sm border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Free now</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.filesystem.free_bytes)}</div></div>
-            <div className="rounded-sm border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Safety reserve</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.filesystem.reserve_bytes)}</div></div>
-            <div className="rounded-sm border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Runner scratch</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.usage?.scratch_bytes)}</div></div>
-            <div className="rounded-sm border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Converted models retained</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.usage?.converted_models_bytes)}</div></div>
+          <div className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-gray-800 bg-gray-800 lg:grid-cols-4">
+            <div className="bg-gray-950 px-3 py-2"><div className="text-xs font-medium text-gray-400">Free now</div><div className="mt-0.5 text-sm font-semibold tabular-nums text-white">{formatBytes(storage.filesystem.free_bytes)}</div></div>
+            <div className="bg-gray-950 px-3 py-2"><div className="text-xs font-medium text-gray-400">Safety reserve</div><div className="mt-0.5 text-sm font-semibold tabular-nums text-white">{formatBytes(storage.filesystem.reserve_bytes)}</div></div>
+            <div className="bg-gray-950 px-3 py-2"><div className="text-xs font-medium text-gray-400">Runner scratch</div><div className="mt-0.5 text-sm font-semibold tabular-nums text-white">{formatBytes(storage.usage?.scratch_bytes)}</div></div>
+            <div className="bg-gray-950 px-3 py-2"><div className="text-xs font-medium text-gray-400">Converted models retained</div><div className="mt-0.5 text-sm font-semibold tabular-nums text-white">{formatBytes(storage.usage?.converted_models_bytes)}</div></div>
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button type="button" disabled={cleanupBusy} onClick={() => onCleanup(true)} className="rounded-sm border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50">Preview cleanup</button>
-            <button type="button" disabled={cleanupBusy || storage.active_job} onClick={() => onCleanup(false)} className="rounded-sm bg-cyan-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-700 disabled:opacity-50">Clean inactive scratch</button>
+            <button type="button" disabled={cleanupBusy} onClick={() => onCleanup(true)} className={buttonClasses('secondary', 'sm')}>Preview cleanup</button>
+            <button type="button" disabled={cleanupBusy || storage.active_job} onClick={() => onCleanup(false)} className={buttonClasses('secondary', 'sm')}>Clean inactive scratch</button>
             <span className="text-[11px] text-gray-500">
               {formatBytes(storage.reclaimable?.bytes)} safely reclaimable now · automatic cleanup {storage.automatic_cleanup?.enabled ? 'on' : 'off'}
             </span>
@@ -308,9 +305,7 @@ export function RunnerInstallCard({
             <button
               type="button"
               onClick={() => setOpen((value) => !value)}
-              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white ${
-                installed ? 'border border-gray-700 bg-gray-800 hover:bg-gray-700' : 'bg-cyan-700 hover:bg-cyan-600'
-              }`}
+              className={buttonClasses(installed ? 'secondary' : 'primary', 'md')}
             >
               <Server className="h-4 w-4" />{
                 open
@@ -336,7 +331,7 @@ export function RunnerInstallCard({
                         type="button"
                         onClick={() => setSigner(choice.value)}
                         className={`min-w-0 rounded border p-2 text-left ${
-                          signer === choice.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                          signer === choice.value ? 'border-blue-500/70 bg-blue-500/[0.07]' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
                         }`}
                       >
                         <div className="text-xs font-medium text-white">
@@ -352,7 +347,7 @@ export function RunnerInstallCard({
                       <input
                         value={kmsKeyId}
                         onChange={(event) => setKmsKeyId(event.target.value)}
-                        className="w-full rounded-sm border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-cyan-500 focus:outline-hidden"
+                        className="w-full rounded-sm border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-hidden focus:ring-2 focus:ring-blue-500/40"
                         placeholder="arn:aws:kms:region:account:key/…"
                       />
                       <span className="text-[11px] text-gray-500">
@@ -363,7 +358,7 @@ export function RunnerInstallCard({
                 </div>
                 <div className="text-xs font-medium text-gray-300">Run this one command</div>
                 <div className="flex min-w-0 items-center gap-2 rounded-sm border border-gray-800 bg-black/40 p-2">
-                  <code className="min-w-0 flex-1 break-all font-mono text-[11px] text-cyan-200">{command}</code>
+                  <code className="min-w-0 flex-1 break-all font-mono text-[11px] text-gray-200">{command}</code>
                   <button type="button" onClick={copyCommand} disabled={!commandReady} className="shrink-0 rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40">
                     <Copy className="h-3 w-3" /> {copied ? 'Copied' : 'Copy'}
                   </button>
@@ -488,7 +483,7 @@ export function PreflightScanTracker({
                   disabled={!attachable}
                   title={!attachable && scan.status === 'completed' ? 'A complete artifact download is required for admission' : undefined}
                   onClick={() => onUseInAdmission(scan.id)}
-                  className="inline-flex items-center gap-1.5 rounded-sm border border-cyan-700 bg-cyan-950/40 px-2 py-1 text-xs text-cyan-100 hover:bg-cyan-900/40 disabled:cursor-not-allowed disabled:border-gray-700 disabled:bg-transparent disabled:text-gray-600"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs font-medium text-blue-200 hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:border-gray-700 disabled:bg-transparent disabled:text-gray-600"
                 >
                   <LockKeyhole className="h-3 w-3" /> Use in admission
                 </button>

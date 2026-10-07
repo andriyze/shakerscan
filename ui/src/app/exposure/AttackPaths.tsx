@@ -5,8 +5,7 @@ import Link from '@/components/WorkspaceLink'
 import { ChevronRight, ExternalLink, GitBranch, Radar, Target, X } from 'lucide-react'
 import type { ExposureAttackPath } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
-import { EmptyState, ErrorState } from '@/components/ui'
-import styles from './exposure.module.css'
+import { EmptyState, ErrorState, buttonClasses } from '@/components/ui'
 
 const SEVERITY_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 }
 
@@ -47,7 +46,7 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
   const remediation = remediationItems(path.remediation)
 
   return (
-    <div className={`${styles.module} ${styles.corners}`}>
+    <div className="rounded-lg border border-gray-800 bg-gray-900">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -63,9 +62,9 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
             <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] uppercase ${severityClass(path.severity)}`}>
               {path.severity || 'unrated'}
             </span>
-            <span className={`${styles.displayTitle} truncate text-sm text-white`}>{path.name}</span>
+            <span className="truncate text-sm font-semibold text-gray-100">{path.name}</span>
             <span
-              className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${
+              className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[11px] font-medium leading-4 ${
                 complete ? 'bg-red-500/15 text-red-300' : 'bg-amber-500/15 text-amber-300'
               }`}
             >
@@ -88,11 +87,11 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
       </button>
 
       {open && (
-        <div className="border-t border-gray-800/60 px-4 pb-4 pt-3">
+        <div className="border-t border-gray-800 px-4 pb-4 pt-3">
           {path.description && <p className="mb-3 text-xs text-gray-400">{path.description}</p>}
           {!complete && (path.missing_required || []).length > 0 && (
             <div className="mb-3 rounded-sm border border-amber-500/20 bg-amber-500/5 p-2.5">
-              <div className="text-[10px] uppercase tracking-wide text-amber-300">Missing to complete</div>
+              <div className="text-xs font-medium text-amber-300">Missing to complete</div>
               <div className="mt-1 flex flex-wrap gap-1.5">
                 {(path.missing_required || []).map((item, i) => (
                   <span key={`${i}-${item}`} className="rounded-sm bg-gray-900 px-1.5 py-0.5 font-mono text-[10px] text-gray-300">
@@ -108,7 +107,7 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
               return (
                 <li key={i} className="relative flex gap-3">
                   <div className="flex flex-col items-center">
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-teal-400/40 bg-teal-400/10 text-[10px] text-teal-200">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-700 bg-gray-800 text-[11px] tabular-nums text-gray-300">
                       {step.step_number ?? i + 1}
                     </span>
                     {i < path.steps.length - 1 && <span className="mt-0.5 w-px flex-1 bg-gray-700" aria-hidden="true" />}
@@ -144,7 +143,7 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
           </ol>
           {remediation.length > 0 && (
             <div className="mt-3 rounded-sm border border-emerald-500/20 bg-emerald-500/5 p-2.5">
-              <div className="text-[10px] uppercase tracking-wide text-emerald-400">Remediation</div>
+              <div className="text-xs font-medium text-emerald-400">Remediation</div>
               <ul className="mt-1 space-y-1 text-xs text-gray-300">
                 {remediation.map((item, i) => (
                   <li key={`${i}-${item}`}>{item}</li>
@@ -155,14 +154,14 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
           <div className="mt-3 flex flex-wrap gap-2">
             <Link
               href={path.scan_href}
-              className="inline-flex items-center gap-1 rounded-sm border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+              className={buttonClasses('secondary', 'sm')}
             >
               View scan <ExternalLink className="h-3 w-3" aria-hidden="true" />
             </Link>
             {path.findings_href && (
               <Link
                 href={path.findings_href}
-                className="inline-flex items-center gap-1 rounded-sm border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+                className={buttonClasses('secondary', 'sm')}
               >
                 Scan findings <ExternalLink className="h-3 w-3" aria-hidden="true" />
               </Link>
@@ -171,7 +170,7 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
               <button
                 type="button"
                 onClick={() => onExploreAsset(path.asset_node_id as string)}
-                className="inline-flex items-center gap-1 rounded-sm border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+                className={buttonClasses('secondary', 'sm')}
               >
                 <Radar className="h-3 w-3" aria-hidden="true" /> Explore asset
               </button>
@@ -229,7 +228,7 @@ export function AttackPaths({
     return (
       <div className="space-y-3">
         {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className={`${styles.module} h-20 animate-pulse`} />
+          <div key={i} className="h-20 animate-pulse rounded-lg border border-gray-800 bg-gray-900" />
         ))}
       </div>
     )
@@ -249,7 +248,7 @@ export function AttackPaths({
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2 text-sm text-gray-400">
-        <GitBranch className="h-4 w-4 text-teal-300/60" aria-hidden="true" />
+        <GitBranch className="h-4 w-4 text-gray-500" aria-hidden="true" />
         <span>
           <span className="font-semibold text-white">{paths.length}</span> exploit paths ·{' '}
           <span className="text-red-300">{complete} complete</span> · {groups.length}{' '}
@@ -277,7 +276,7 @@ export function AttackPaths({
                 aria-pressed={active}
                 onClick={() => setTypeFilter(active ? null : g.type)}
                 className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                  active ? 'border-teal-400/50 bg-teal-500/15 text-teal-100' : 'border-gray-800 bg-gray-950 text-gray-300 hover:border-gray-700'
+                  active ? 'border-blue-500/60 bg-gray-800 text-white' : 'border-gray-700 text-gray-300 hover:bg-gray-800 hover:text-white'
                 }`}
               >
                 <span
@@ -295,10 +294,10 @@ export function AttackPaths({
                   aria-hidden="true"
                 />
                 <span className="max-w-[16rem] truncate">{g.label}</span>
-                <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">
+                <span className="tabular-nums text-gray-500">
                   {g.count}
                 </span>
-                {g.complete > 0 && <span className="text-[10px] text-red-300">{g.complete} complete</span>}
+                {g.complete > 0 && <span className="text-[11px] text-red-300">{g.complete} complete</span>}
               </button>
             )
           })}

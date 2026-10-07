@@ -7,8 +7,8 @@ import { getScans, cancelScan, getCampaigns, getDomains, getGradeColor, formatDa
 import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SCAN_STATUSES } from '@/lib/constants'
-import { Plus, Search } from 'lucide-react'
-import { buttonClasses, Card, ConfirmDialog, ErrorState, Input, LastUpdated, PageHeader, ScanStatusBadge, Select, TableSkeleton, useToast } from '@/components/ui'
+import { Plus, X } from 'lucide-react'
+import { Button, buttonClasses, Card, ConfirmDialog, ErrorState, LastUpdated, PageHeader, ROW_ACTION_REVEAL, ScanStatusBadge, SearchInput, Select, tableStyles, TableSkeleton, Toolbar, useToast } from '@/components/ui'
 import { episodesStarted, findingCount, RunStatusBadge, runState } from '@/components/hunt'
 import { boundedTargetDisplay } from '@/lib/targetChoices'
 
@@ -27,20 +27,20 @@ const AUTH_OPTION_KEYS = [
 ]
 
 // A grade alone cannot say whether a clean result came from a thorough scan or one that
-// barely ran. The chip sits next to the letter, not in its own column, so the two are read
-// together.
+// barely ran. The examination strength sits next to the letter, not in its own column, so the
+// two are read together.
 function AssuranceChip({ scan }: { scan: Scan }) {
   const assurance = scanAssurance(scan)
   if (!assurance) {
     return (
-      <span className="rounded-sm bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-200">
+      <span className="text-xs text-amber-200">
         Examination strength unavailable
       </span>
     )
   }
   return (
     <span
-      className={`rounded-sm bg-gray-900 px-1.5 py-0.5 text-xs ${assuranceClass(assurance.band)}`}
+      className={`text-xs ${assuranceClass(assurance.band)}`}
       title={`Examination strength ${assurance.score}/100 - ${assurance.label}`}
     >
       {assurance.label} · {assurance.score}/100
@@ -50,31 +50,40 @@ function AssuranceChip({ scan }: { scan: Scan }) {
 
 function ObservedPosture({ scan, compact = false }: { scan: Scan; compact?: boolean }) {
   if (scan.status !== 'completed') {
-    return <span className="text-gray-500">Not available</span>
+    return <span className="text-sm text-gray-500">Not available</span>
   }
   if (scan.risk_assessment_state === 'not_examined' || scan.application_observed === false) {
-    return <span className="text-amber-200">Application not examined</span>
+    return <span className="text-sm text-amber-200">Application not examined</span>
   }
   if (!scan.grade) {
-    return <span className="text-gray-500">No observed posture</span>
+    return <span className="text-sm text-gray-500">No observed posture</span>
   }
   const assurance = scanAssurance(scan)
   const weak = assurance && ['none', 'weak', 'limited'].includes(String(assurance.band || 'none'))
   return (
     <div className="min-w-0">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Observed posture</div>
-      <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
-        <span
-          className={`${compact ? 'text-base' : 'text-lg'} font-bold ${weak ? 'text-gray-200' : getGradeColor(scan.grade)}`}
-          title={scan.grade.includes('*') ? 'The asterisk marks assurance limitations; this is not a clean bill of health.' : 'Risk observed by this run; this is not an overall safety score.'}
-        >
-          {scan.grade}
+      {/* The table's column header names the value; the stacked mobile card names it here. */}
+      {compact && <div className="text-xs text-gray-500">Observed posture</div>}
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="inline-flex items-baseline gap-1 whitespace-nowrap">
+          <span
+            className={`text-base font-semibold ${weak ? 'text-gray-200' : getGradeColor(scan.grade)}`}
+            title={scan.grade.includes('*') ? 'The asterisk marks assurance limitations; this is not a clean bill of health.' : 'Risk observed by this run; this is not an overall safety score.'}
+          >
+            {scan.grade}
+          </span>
+          <span className="text-xs tabular-nums text-gray-500">{scan.score}/100</span>
         </span>
-        <span className="text-sm text-gray-500">{scan.score}/100</span>
         <AssuranceChip scan={scan} />
       </div>
     </div>
   )
+}
+
+// Every row is a Scan, so the table names only the budget profile ("Thorough"); other run
+// kinds (AI Gate, legacy types) keep their full label.
+function scanProfileLabel(label: string): string {
+  return label.startsWith('Scan · ') ? label.slice('Scan · '.length) : label
 }
 
 function hasConfiguredValue(value: unknown): boolean {
@@ -358,32 +367,47 @@ function ScansContent() {
   const PaginationControls = () => (
     totalPages > 1 ? (
       <div className="flex items-center gap-2">
-        <button
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => setFilter('page', page > 1 ? page - 1 : undefined)}
           disabled={page <= 1}
-          className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           Previous
-        </button>
-        <span className="px-3 py-1.5 text-sm text-gray-400">
+        </Button>
+        <span className="px-1 text-xs tabular-nums text-gray-400">
           Page {page} of {totalPages}
         </span>
-        <button
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => setFilter('page', page + 1)}
           disabled={page >= totalPages}
-          className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           Next
-        </button>
+        </Button>
       </div>
     ) : null
   )
 
+  const showingLabel = (
+    <span className="text-xs tabular-nums text-gray-400">
+      {total <= PAGE_SIZE
+        ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
+        : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
+      }
+      {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
+    </span>
+  )
+  const filterChipClass =
+    'inline-flex items-center gap-1.5 rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1 text-xs text-gray-300 ' +
+    'hover:border-gray-600 hover:bg-gray-800 hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
+
   return (
-    <div className="space-y-6">
+    <div>
       <PageHeader
         title="Scans"
-        description="Deterministic DAST runs and their coverage"
+        description="Deterministic DAST runs and their coverage."
         actions={
           <>
             <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
@@ -395,66 +419,38 @@ function ScansContent() {
         }
       />
 
-      {/* Filters */}
-      <div className="flex gap-4 flex-wrap">
-        {/* Status Filter */}
-        <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-400">Status:</label>
+      <Toolbar>
+        <SearchInput
+          wrapperClassName="min-w-[220px] flex-1 sm:max-w-sm"
+          placeholder="Search by target URL…"
+          value={searchInput}
+          onValueChange={setSearchInput}
+          aria-label="Search scans by target URL"
+        />
+        <Select
+          fullWidth={false}
+          value={statusFilter}
+          onChange={(e) => setFilter('status', e.target.value || undefined)}
+          aria-label="Filter by scan status"
+        >
+          <option value="">All statuses</option>
+          {SCAN_STATUSES.map((status) => (
+            <option key={status} value={status}>{status.charAt(0).toUpperCase() + status.slice(1)}</option>
+          ))}
+        </Select>
+        {domains.length > 0 && (
           <Select
             fullWidth={false}
-            value={statusFilter}
-            onChange={(e) => setFilter('status', e.target.value || undefined)}
-            aria-label="Filter by scan status"
+            value={domainFilter}
+            onChange={(e) => setFilter('domain', e.target.value || undefined)}
+            aria-label="Filter by domain"
           >
-            <option value="">All statuses</option>
-            {SCAN_STATUSES.map((status) => (
-              <option key={status} value={status}>{status}</option>
+            <option value="">All domains</option>
+            {domains.map((domain) => (
+              <option key={domain} value={domain}>{domain}</option>
             ))}
           </Select>
-        </div>
-
-        {/* Domain Filter */}
-        {domains.length > 0 && (
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-gray-400">Domain:</label>
-            <Select
-              fullWidth={false}
-              value={domainFilter}
-              onChange={(e) => setFilter('domain', e.target.value || undefined)}
-              aria-label="Filter by domain"
-            >
-              <option value="">All domains</option>
-              {domains.map((domain) => (
-                <option key={domain} value={domain}>{domain}</option>
-              ))}
-            </Select>
-          </div>
         )}
-
-        {/* Search */}
-        <div className="relative flex-1 min-w-[200px]">
-          <Input
-            type="text"
-            placeholder="Search by target URL..."
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            aria-label="Search scans by target URL"
-            className="pr-10"
-          />
-          <Search className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-500" aria-hidden="true" />
-        </div>
-
-        {/* Show Continuous-ASM batch/recon scans (hidden by default) */}
-        <label className="flex items-center gap-2 self-center text-sm text-gray-400 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={includeInternal}
-            onChange={(e) => setFilter('include_internal', e.target.checked ? 'true' : undefined)}
-            aria-label="Show ASM and internal scans"
-            className="h-4 w-4 rounded-sm border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
-          />
-          Show ASM/internal scans
-        </label>
 
         {/* Target chip (deep-linked from a target's scan history) */}
         {targetIdFilter && (
@@ -463,10 +459,10 @@ function ScansContent() {
             onClick={() => setFilter('target_id', undefined)}
             aria-label="Remove filter: one target"
             data-testid="scans-target-filter"
-            className="inline-flex items-center gap-1.5 self-center rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+            className={filterChipClass}
           >
             {scans.find((scan) => scan.target_id === targetIdFilter)?.target_url || 'One target'}
-            <span aria-hidden="true">×</span>
+            <X className="h-3.5 w-3.5 text-gray-500" aria-hidden="true" />
           </button>
         )}
 
@@ -476,44 +472,50 @@ function ScansContent() {
             type="button"
             onClick={() => setFilter('within', undefined)}
             aria-label={`Remove filter: last ${withinFilter} days`}
-            className="inline-flex items-center gap-1.5 self-center rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+            className={filterChipClass}
           >
             Last {withinFilter}d
-            <span aria-hidden="true">×</span>
+            <X className="h-3.5 w-3.5 text-gray-500" aria-hidden="true" />
           </button>
         )}
-      </div>
+
+        {/* Show Continuous-ASM batch/recon scans (hidden by default) */}
+        <label className="ml-auto flex cursor-pointer items-center gap-2 whitespace-nowrap text-xs text-gray-400">
+          <input
+            type="checkbox"
+            checked={includeInternal}
+            onChange={(e) => setFilter('include_internal', e.target.checked ? 'true' : undefined)}
+            aria-label="Show ASM and internal scans"
+            className="h-3.5 w-3.5 accent-blue-500"
+          />
+          Show ASM/internal scans
+        </label>
+      </Toolbar>
 
       {/* Top Pagination */}
       {total > 0 && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">
-            {total <= PAGE_SIZE
-              ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
-              : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
-            }
-            {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
-          </span>
+        <div className="mb-3 flex min-h-8 items-center justify-between gap-3">
+          {showingLabel}
           <PaginationControls />
         </div>
       )}
 
       {/* Load Error */}
       {loadError && (
-        <ErrorState onRetry={() => fetchScans()} />
+        <div className="mb-4"><ErrorState onRetry={() => fetchScans()} /></div>
       )}
 
       {/* Scans Table */}
       {!(loadError && scans.length === 0) && (
-      <Card>
+      <div className={tableStyles.container}>
         {loading ? (
           <TableSkeleton rows={8} cols={6} />
         ) : scans.length === 0 && visibleHunts.length === 0 ? (
           <div className="p-8 text-center">
-            <p className="text-gray-500">
+            <p className="text-sm font-medium text-gray-300">
               {searchQuery || domainFilter || statusFilter ? 'No scans found matching your filters.' : 'No scans yet.'}
             </p>
-            <p className="mt-1 text-sm text-gray-600">
+            <p className="mt-1 text-sm text-gray-500">
               {searchQuery || domainFilter || statusFilter ? 'Try clearing your filters.' : 'Start a new scan to get started.'}
             </p>
           </div>
@@ -522,7 +524,7 @@ function ScansContent() {
           {/* Mobile / tablet card layout (below lg): the desktop table scrolls
               the important columns off-screen on a phone, so render each scan as
               a stacked card with everything visible in the first viewport. */}
-          <div className="lg:hidden space-y-3 p-3">
+          <div className="divide-y divide-gray-800 lg:hidden">
             {visibleHunts.map((campaign) => {
               const progress = episodesStarted(campaign)
               const found = findingCount(campaign)
@@ -531,11 +533,11 @@ function ScansContent() {
                 ? '-'
                 : formatDuration(Math.max(0, Math.floor((durationTickMs - createdAtMs) / 1000)))
               return (
-                <div key={`hunt-${campaign.id}`} className="rounded-lg border border-blue-500/30 bg-blue-500/4 p-4">
+                <div key={`hunt-${campaign.id}`} className="p-4">
                   <div className="flex items-start justify-between gap-3">
                     <Link
                       href={`/deep-hunt/runs/${campaign.id}`}
-                      className="min-w-0 flex-1 truncate text-sm font-medium text-blue-300 hover:text-blue-200"
+                      className="min-w-0 flex-1 truncate text-sm font-medium text-gray-100 hover:text-blue-300"
                       title={huntTargetLabel(campaign)}
                     >
                       {huntTargetLabel(campaign)}
@@ -549,7 +551,7 @@ function ScansContent() {
                     </span>
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
-                    <span className="text-blue-300">Verifier · legacy</span>
+                    <span className="text-gray-400">Verifier · legacy</span>
                     {progress.max > 0 ? (
                       <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-gray-400">
                         Episode {progress.started}/{progress.max}
@@ -563,7 +565,7 @@ function ScansContent() {
                   <div className="mt-3">
                     <Link
                       href={`/deep-hunt/runs/${campaign.id}`}
-                      className="inline-flex rounded-sm bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                      className={buttonClasses('secondary', 'sm')}
                     >
                       View hunt
                     </Link>
@@ -588,7 +590,7 @@ function ScansContent() {
                     : aiTargetType || (authenticated ? 'Authenticated' : null)
               const canCancel = scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued'
               return (
-                <div key={scan.id} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+                <div key={scan.id} className="p-4">
                   <div className="flex items-start justify-between gap-3">
                     <Link
                       href={buildUrl(`/scans/${scan.id}`, {
@@ -600,7 +602,7 @@ function ScansContent() {
                         return_page: page > 1 ? page : undefined,
                         return_include_internal: includeInternal ? 'true' : undefined
                       })}
-                      className="min-w-0 flex-1 truncate text-sm font-medium text-blue-400 hover:text-blue-300"
+                      className="min-w-0 flex-1 truncate text-sm font-medium text-gray-100 hover:text-blue-300"
                       title={scanTargetLabel(scan)}
                     >
                       {scanTargetLabel(scan)}
@@ -612,12 +614,12 @@ function ScansContent() {
                     {(scan.findings_count || 0) > 0 ? (
                       <Link
                         href={`/findings?scan_id=${scan.id}&freshness=all`}
-                        className="text-blue-400 hover:text-blue-300"
+                        className="tabular-nums text-gray-100 hover:text-blue-300"
                       >
                         {scan.findings_count} finding{scan.findings_count === 1 ? '' : 's'}
                       </Link>
                     ) : (
-                      <span className="text-gray-400">0 findings</span>
+                      <span className="text-gray-500">0 findings</span>
                     )}
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
@@ -633,17 +635,19 @@ function ScansContent() {
                   {(canCancel || isAIScan) && (
                     <div className="mt-3 flex items-center gap-2">
                       {canCancel ? (
-                        <button
+                        <Button
+                          variant="secondary"
+                          size="sm"
                           onClick={() => setConfirmCancelId(scan.id)}
                           disabled={cancelling.has(scan.id)}
-                          className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded-sm text-xs font-medium transition-colors disabled:opacity-50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-red-500"
+                          className="text-red-300 hover:text-red-200"
                         >
                           {cancelling.has(scan.id) ? 'Cancelling...' : 'Cancel'}
-                        </button>
+                        </Button>
                       ) : isAIScan ? (
                         <Link
                           href="/ai-gate"
-                          className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-sm text-xs font-medium transition-colors"
+                          className={buttonClasses('secondary', 'sm')}
                         >
                           AI Gate
                         </Link>
@@ -656,22 +660,22 @@ function ScansContent() {
           </div>
 
           {/* Desktop table layout (lg and up) */}
-          <div className="hidden lg:block overflow-x-auto">
-          <table className="w-full min-w-[760px] 2xl:min-w-full">
-            <thead className="bg-gray-800/50">
+          <div className={`hidden lg:block ${tableStyles.scroll}`}>
+          <table className={`${tableStyles.table} min-w-[760px] 2xl:min-w-full`}>
+            <thead className={tableStyles.head}>
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Target</th>
-                <th className="hidden xl:table-cell px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Type</th>
-                <th className="hidden 2xl:table-cell px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Auth</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Observed posture</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Findings</th>
-                <th className="hidden xl:table-cell px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Duration</th>
-                <th className="hidden 2xl:table-cell px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Date</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Actions</th>
+                <th scope="col" className={tableStyles.headerCell}>Target</th>
+                <th scope="col" className={`hidden xl:table-cell ${tableStyles.headerCell}`}>Type</th>
+                <th scope="col" className={`hidden 2xl:table-cell text-center ${tableStyles.headerCell}`}>Auth</th>
+                <th scope="col" className={tableStyles.headerCell}>Status</th>
+                <th scope="col" className={tableStyles.headerCell}>Observed posture</th>
+                <th scope="col" className={`text-right ${tableStyles.headerCell}`}>Findings</th>
+                <th scope="col" className={`hidden xl:table-cell text-right ${tableStyles.headerCell}`}>Duration</th>
+                <th scope="col" className={`hidden 2xl:table-cell ${tableStyles.headerCell}`}>Date</th>
+                <th scope="col" className={tableStyles.headerCell}><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-800">
+            <tbody>
               {visibleHunts.map((campaign) => {
                 const progress = episodesStarted(campaign)
                 const found = findingCount(campaign)
@@ -680,34 +684,34 @@ function ScansContent() {
                   ? '-'
                   : formatDuration(Math.max(0, Math.floor((durationTickMs - createdAtMs) / 1000)))
                 return (
-                  <tr key={`hunt-${campaign.id}`} className="bg-blue-500/[0.035] transition-colors hover:bg-blue-500/[0.07]">
-                    <td className="max-w-[20rem] px-4 py-3">
+                  <tr key={`hunt-${campaign.id}`} className={tableStyles.row}>
+                    <td className={`max-w-[20rem] ${tableStyles.cell}`}>
                       <Link
                         href={`/deep-hunt/runs/${campaign.id}`}
-                        className="block truncate text-sm text-blue-300 hover:text-blue-200"
+                        className="block truncate font-medium text-gray-100 hover:text-blue-300"
                         title={huntTargetLabel(campaign)}
                       >
                         {huntTargetLabel(campaign)}
                       </Link>
                     </td>
-                    <td className="hidden px-4 py-3 xl:table-cell">
-                      <span className="text-sm text-blue-300">Verifier · legacy</span>
+                    <td className={`hidden xl:table-cell ${tableStyles.cell}`}>
+                      <span className="whitespace-nowrap text-gray-300">Verifier · legacy</span>
                       {progress.max > 0 ? <div className="mt-0.5 text-xs text-gray-500">Episode {progress.started}/{progress.max}</div> : null}
                     </td>
-                    <td className="hidden px-4 py-3 text-center text-gray-600 2xl:table-cell">—</td>
-                    <td className="px-4 py-3"><RunStatusBadge state={runState(campaign)} /></td>
-                    <td className="px-4 py-3 text-gray-600">—</td>
-                    <td className="px-4 py-3">
+                    <td className={`hidden 2xl:table-cell text-center text-gray-600 ${tableStyles.cell}`}>—</td>
+                    <td className={tableStyles.cell}><RunStatusBadge state={runState(campaign)} /></td>
+                    <td className={`text-gray-600 ${tableStyles.cell}`}>—</td>
+                    <td className={`text-right tabular-nums ${tableStyles.cell}`}>
                       {found > 0 && campaign.target_id ? (
-                        <Link href={`/findings?target_id=${campaign.target_id}&status=active&freshness=all`} className="text-sm text-emerald-300 hover:text-emerald-200">{found}</Link>
-                      ) : <span className="text-sm text-gray-400">{found}</span>}
+                        <Link href={`/findings?target_id=${campaign.target_id}&status=active&freshness=all`} className="font-medium text-gray-100 hover:text-blue-300">{found}</Link>
+                      ) : <span className="text-gray-500">{found}</span>}
                     </td>
-                    <td className="hidden px-4 py-3 text-sm text-gray-400 xl:table-cell">{duration}</td>
-                    <td className="hidden px-4 py-3 text-sm text-gray-500 2xl:table-cell">{formatDate(campaign.created_at)}</td>
-                    <td className="px-4 py-3">
+                    <td className={`hidden xl:table-cell whitespace-nowrap text-right tabular-nums text-gray-400 ${tableStyles.cell}`}>{duration}</td>
+                    <td className={`hidden 2xl:table-cell whitespace-nowrap text-gray-500 ${tableStyles.cell}`}>{formatDate(campaign.created_at)}</td>
+                    <td className={`text-right ${tableStyles.cell}`}>
                       <Link
                         href={`/deep-hunt/runs/${campaign.id}`}
-                        className="inline-flex rounded-sm bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                        className={buttonClasses('secondary', 'sm')}
                       >
                         View
                       </Link>
@@ -724,8 +728,8 @@ function ScansContent() {
                 const asmBatch = scan.scan_role === 'asm_batch'
                 const asmRecon = scan.scan_role === 'asm_recon'
                 return (
-                <tr key={scan.id} className="hover:bg-gray-800/50 transition-colors">
-                  <td className="px-4 py-3 max-w-[20rem]">
+                <tr key={scan.id} className={tableStyles.row}>
+                  <td className={`max-w-[20rem] ${tableStyles.cell}`}>
                     <Link
                       href={buildUrl(`/scans/${scan.id}`, {
                         return_status: statusFilter,
@@ -736,15 +740,15 @@ function ScansContent() {
                         return_page: page > 1 ? page : undefined,
                         return_include_internal: includeInternal ? 'true' : undefined
                       })}
-                      className="block truncate text-sm text-blue-400 hover:text-blue-300"
+                      className="block truncate font-medium text-gray-100 hover:text-blue-300"
                       title={scanTargetLabel(scan)}
                     >
                       {scanTargetLabel(scan)}
                     </Link>
                   </td>
-                  <td className="hidden xl:table-cell px-4 py-3">
+                  <td className={`hidden xl:table-cell ${tableStyles.cell}`}>
                     <div className="min-w-0">
-                      <span className="text-sm text-gray-300">{scanTypeLabel}</span>
+                      <span className="whitespace-nowrap text-gray-300" title={scanTypeLabel}>{scanProfileLabel(scanTypeLabel)}</span>
                       {(asmBatch || asmRecon || parallelParent || aiTargetType || authenticated) && (
                         <div className="mt-0.5 truncate text-xs text-gray-500">
                           {asmBatch ? 'ASM batch' : asmRecon ? 'ASM recon' : parallelParent ? 'Parallel' : aiTargetType || 'Authenticated'}
@@ -752,10 +756,10 @@ function ScansContent() {
                       )}
                     </div>
                   </td>
-                  <td className="hidden 2xl:table-cell px-4 py-3 text-center">
+                  <td className={`hidden 2xl:table-cell text-center ${tableStyles.cell}`}>
                     {authenticated ? (
                       <span
-                        className="inline-flex items-center justify-center text-green-400"
+                        className="inline-flex items-center justify-center text-emerald-400"
                         title="Authenticated scan"
                         aria-label="Authenticated scan"
                       >
@@ -775,57 +779,57 @@ function ScansContent() {
                       </span>
                     )}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className={tableStyles.cell}>
                     <ScanStatusBadge status={scan.status} />
                   </td>
-                  <td className="px-4 py-3">
+                  <td className={tableStyles.cell}>
                     <ObservedPosture scan={scan} />
                   </td>
-                  <td className="px-4 py-3">
+                  <td className={`text-right tabular-nums ${tableStyles.cell}`}>
                     {(scan.findings_count || 0) > 0 ? (
                       <Link
                         href={`/findings?scan_id=${scan.id}&freshness=all`}
-                        className="text-sm text-blue-400 hover:text-blue-300"
+                        className="font-medium text-gray-100 hover:text-blue-300"
                       >
                         {scan.findings_count}
                       </Link>
                     ) : (
-                      <span className="text-sm text-gray-400">0</span>
+                      <span className="text-gray-500">0</span>
                     )}
                   </td>
-                  <td className="hidden xl:table-cell px-4 py-3">
-                    <span className="text-sm text-gray-400">
-                      {getDurationLabel(scan)}
-                    </span>
+                  <td className={`hidden xl:table-cell whitespace-nowrap text-right tabular-nums text-gray-400 ${tableStyles.cell}`}>
+                    {getDurationLabel(scan)}
                   </td>
-                  <td className="hidden 2xl:table-cell px-4 py-3">
-                    <span className="text-sm text-gray-500">{formatDate(scan.created_at)}</span>
+                  <td className={`hidden 2xl:table-cell whitespace-nowrap text-gray-500 ${tableStyles.cell}`}>
+                    {formatDate(scan.created_at)}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className={`text-right ${tableStyles.cell}`}>
                     {(scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued') ? (
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => setConfirmCancelId(scan.id)}
                         disabled={cancelling.has(scan.id)}
-                        className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded-sm text-xs font-medium transition-colors disabled:opacity-50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-red-500"
+                        className="text-red-300 hover:text-red-200"
                       >
                         {cancelling.has(scan.id) ? 'Cancelling...' : 'Cancel'}
-                      </button>
+                      </Button>
                     ) : isAIScan ? (
                       <Link
                         href="/ai-gate"
-                        className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-sm text-xs font-medium transition-colors"
+                        className={buttonClasses('ghost', 'sm')}
                       >
                         AI Gate
                       </Link>
                     ) : (
-                      <div>
-                        <button
-                          onClick={() => handleScan(scan.target_url)}
-                          className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-sm text-xs font-medium transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
-                        >
-                          Scan again
-                        </button>
-                      </div>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => handleScan(scan.target_url)}
+                        className={`whitespace-nowrap ${ROW_ACTION_REVEAL}`}
+                      >
+                        Scan again
+                      </Button>
                     )}
                   </td>
                 </tr>
@@ -835,19 +839,13 @@ function ScansContent() {
           </div>
           </>
         )}
-      </Card>
+      </div>
       )}
 
       {/* Bottom Pagination */}
-      {total > 0 && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">
-            {total <= PAGE_SIZE
-              ? `Showing ${total} scan${total !== 1 ? 's' : ''}`
-              : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
-            }
-            {visibleHunts.length > 0 ? ` · ${visibleHunts.length} active hunt${visibleHunts.length === 1 ? '' : 's'}` : ''}
-          </span>
+      {total > PAGE_SIZE && (
+        <div className="mt-3 flex min-h-8 items-center justify-between gap-3">
+          {showingLabel}
           <PaginationControls />
         </div>
       )}

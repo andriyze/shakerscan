@@ -1,7 +1,10 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Button, Card, ErrorState, LastUpdated, PageHeader } from '@/components/ui'
+import {
+  Button, ErrorState, LastUpdated, PageHeader, StatusDot, Table, TableCell, TableContainer, TableHead, TableHeaderCell,
+  TableRow, type StatusTone,
+} from '@/components/ui'
 import { getWorkers, type WorkerStats } from '@/lib/api'
 import { poolBadge, poolDetail } from '@/lib/workerPools.mjs'
 
@@ -12,6 +15,10 @@ const POOLS: { key: keyof NonNullable<WorkerStats['pools']>; label: string; deta
   { key: 'device', label: 'Network scanning', detail: 'Dedicated capacity for network and device examination' },
   { key: 'model_intake', label: 'Model Intake', detail: 'Dedicated artifact inspection toolchain' },
 ]
+
+const BADGE_TONES: Record<string, StatusTone> = {
+  ready: 'success', starting: 'info', disabled: 'neutral', 'not started': 'neutral', 'not ready': 'warning',
+}
 
 export default function WorkersPage() {
   const [workers, setWorkers] = useState<WorkerStats | null>(null)
@@ -52,49 +59,52 @@ export default function WorkersPage() {
 
       {error && <ErrorState message={error} onRetry={() => void load()} />}
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {POOLS.map(({ key, label, detail, optIn }) => {
-          const pool = workers?.pools?.[key]
-          const badge = pool ? poolBadge(pool, optIn) : null
-          return (
-            <Card key={key} className="p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="font-medium text-white">{label}</h2>
-                  <p className="mt-1 text-xs text-gray-500">{detail}</p>
-                </div>
-                <span className={`rounded-sm px-2 py-1 text-xs font-medium ${badge ? badge.className : 'bg-gray-800 text-gray-400'}`}>
-                  {loading && !pool ? 'loading' : badge?.text || 'unknown'}
-                </span>
-              </div>
-              <dl className="mt-5 grid grid-cols-4 gap-2 text-center">
-                {([
-                  ['Total', pool?.count],
-                  ['Current', pool?.current],
-                  ['Stale', pool?.stale],
-                  ['Pending', pool?.pending],
-                ] as const).map(([name, value]) => (
-                  <div key={name}>
-                    <dt className="text-[10px] uppercase tracking-wide text-gray-600">{name}</dt>
-                    <dd className="mt-1 font-mono text-lg text-gray-200">{value ?? '—'}</dd>
-                  </div>
-                ))}
-              </dl>
-              <p className="mt-4 border-t border-gray-800 pt-3 text-xs text-gray-500">
-                {pool ? poolDetail(pool) : 'Waiting for the pool summary.'}
-              </p>
-            </Card>
-          )
-        })}
-      </div>
+      <TableContainer>
+        <Table aria-label="Worker pools">
+          <TableHead>
+            <tr>
+              <TableHeaderCell>Pool</TableHeaderCell>
+              <TableHeaderCell>Status</TableHeaderCell>
+              <TableHeaderCell className="text-right">Total</TableHeaderCell>
+              <TableHeaderCell className="text-right">Current</TableHeaderCell>
+              <TableHeaderCell className="text-right">Stale</TableHeaderCell>
+              <TableHeaderCell className="text-right">Pending</TableHeaderCell>
+              <TableHeaderCell>Detail</TableHeaderCell>
+            </tr>
+          </TableHead>
+          <tbody>
+            {POOLS.map(({ key, label, detail, optIn }) => {
+              const pool = workers?.pools?.[key]
+              const badge = pool ? poolBadge(pool, optIn) : null
+              const count = (value?: number) => value ?? <span className="text-gray-600" aria-label="Unknown">—</span>
+              return (
+                <TableRow key={key}>
+                  <TableCell>
+                    <h2 className="font-medium text-gray-100">{label}</h2>
+                    <p className="text-xs text-gray-500">{detail}</p>
+                  </TableCell>
+                  <TableCell className="whitespace-nowrap">
+                    <StatusDot tone={badge ? BADGE_TONES[badge.text] || 'warning' : 'neutral'} className={badge ? '' : 'text-gray-400'}>
+                      {loading && !pool ? 'loading' : badge?.text || 'unknown'}
+                    </StatusDot>
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">{count(pool?.count)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{count(pool?.current)}</TableCell>
+                  <TableCell className={`text-right tabular-nums ${pool?.stale ? 'text-amber-300' : ''}`}>{count(pool?.stale)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{count(pool?.pending)}</TableCell>
+                  <TableCell className="text-xs text-gray-400">{pool ? poolDetail(pool) : 'Waiting for the pool summary.'}</TableCell>
+                </TableRow>
+              )
+            })}
+          </tbody>
+        </Table>
+      </TableContainer>
 
-      <Card className="p-4 text-sm text-gray-400">
-        <p>
-          The Web DAST pool remains the source of the legacy worker count and build-fingerprint fields.
-          Specialized pools use fresh heartbeats and capability checks, so a running container is not
-          counted as current until it reports the expected release identity and required tools.
-        </p>
-      </Card>
+      <p className="max-w-4xl text-xs text-gray-500">
+        The Web DAST pool remains the source of the legacy worker count and build-fingerprint fields.
+        Specialized pools use fresh heartbeats and capability checks, so a running container is not
+        counted as current until it reports the expected release identity and required tools.
+      </p>
 
       <LastUpdated updatedAt={updatedAt} onRefresh={() => void load(true)} refreshing={refreshing} />
     </div>

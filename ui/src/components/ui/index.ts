@@ -23,7 +23,9 @@ export {
   ScanStatusBadge,
   SeverityBadge,
   SourceTypeBadge,
+  StatusDot,
   TimelineStatusBadge,
+  type StatusTone,
   gradeTextColor,
 } from './Badge'
 export { EmptyState, type EmptyStateAction } from './EmptyState'
@@ -33,3 +35,7 @@ export { ConfirmDialog, type ConfirmDialogProps } from './ConfirmDialog'
 export { useModalA11y } from './useModalA11y'
 export { LastUpdated } from './LastUpdated'
 export { ToastProvider, useToast, type ToastApi, type ToastLink } from './Toast'
+export { ActionMenu, MenuItem, MenuSeparator } from './ActionMenu'
+export { Stat, StatGroup, type StatTone } from './Stat'
+export { ROW_ACTION_REVEAL, Table, TableCell, TableContainer, TableHead, TableHeaderCell, TableRow, tableStyles } from './Table'
+export { SearchInput, Toolbar, type SearchInputProps } from './Toolbar'

@@ -36,8 +36,10 @@ import { formatRelativeTime } from '@/lib/format'
 import { findingObservation, hostOf, pathOf, verificationSource } from '@/lib/findingObservation'
 import {
   Button,
+  buttonClasses,
   ConfirmDialog,
   ErrorState,
+  fieldClasses,
   ProofStateBadge,
   RetestVerdictBadge,
   SeverityBadge,
@@ -666,11 +668,11 @@ function FindingDetailContent() {
   }
 
   const retestControls = !deviceFinding && (
-    <div className="flex items-center gap-1 rounded-lg border border-gray-800 bg-gray-950/60 p-1">
+    <div className="flex items-center">
       <select
         value={selectedRetestMode}
         onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
-        className="rounded-md border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-200 focus:border-blue-500 focus:outline-hidden"
+        className={`${fieldClasses()} rounded-r-none py-1 text-xs`}
         title="Retest mode"
         aria-label="Retest mode"
       >
@@ -683,7 +685,7 @@ function FindingDetailContent() {
         onClick={handleRetest}
         disabled={retestLoading || hasPendingRetest || !retestSupported}
         title={!retestSupported ? retestUnsupportedMessage : hasPendingRetest ? 'A proof replay is already queued or running.' : 'Replay this finding with one bounded verifier'}
-        className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+        className={`${buttonClasses('primary', 'sm')} -ml-px rounded-l-none`}
       >
         {retestLoading ? 'Queueing...' : hasPendingRetest ? 'Verifying…' : 'Retest'}
       </button>
@@ -692,13 +694,13 @@ function FindingDetailContent() {
 
   return (
     <div className="space-y-5">
-      <header className="space-y-4">
+      <header className="space-y-3">
         <Link
           href={backUrl}
           aria-label="Back to findings"
-          className="inline-flex items-center gap-1 rounded-sm text-sm text-gray-400 hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="-ml-0.5 inline-flex items-center gap-0.5 rounded-sm text-xs font-medium text-gray-400 transition-colors hover:text-gray-100 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
-          <svg aria-hidden="true" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg aria-hidden="true" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
           Findings
@@ -711,7 +713,7 @@ function FindingDetailContent() {
               <ProofStateBadge proofState={finding.proof_state} />
               <SourceTypeBadge type={getFindingSourceType(finding)} />
             </div>
-            <h1 className="mt-2 text-2xl font-semibold leading-tight text-white wrap-break-word">{finding.title}</h1>
+            <h1 className="mt-2 text-xl font-semibold leading-tight tracking-tight text-white wrap-break-word">{finding.title}</h1>
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-400">
               {hostLabel && (
                 finding.target_id
@@ -752,7 +754,7 @@ function FindingDetailContent() {
                 onChange={(e) => handleStatusChange(e.target.value)}
                 disabled={statusUpdating}
                 title="Canonical lifecycle — the finding's status. Retests and AI assessments never change it."
-                className="rounded-lg border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-100 focus:border-blue-500 focus:outline-hidden disabled:opacity-50"
+                className={`${fieldClasses()} py-1 text-sm`}
               >
                 {FINDING_STATUSES.map((status) => (
                   <option key={status} value={status}>{STATUS_LABELS[status] || status.replaceAll('_', ' ')}</option>
@@ -774,7 +776,7 @@ function FindingDetailContent() {
                         ? 'Inspect this finding, run at most one bounded proof replay, and conclude from its result.'
                         : autonomousUnsupportedReason(finding)
                 }
-                className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"
+                className={buttonClasses('secondary', 'sm')}
               >
                 <BrainCircuit className="h-3.5 w-3.5" aria-hidden="true" />
                 Verify finding
@@ -784,16 +786,16 @@ function FindingDetailContent() {
         </div>
 
         {!deviceFinding && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-gray-800 bg-gray-900/60 px-3 py-2 text-sm">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border border-gray-800 bg-gray-900 px-3 py-2 text-sm">
             <span className="inline-flex items-center gap-2">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Finding proof</span>
+              <span className="text-xs font-medium text-gray-400">Finding proof</span>
               <span className={`rounded px-2 py-0.5 text-xs font-medium ${canonicalProofVerified ? 'bg-emerald-500/15 text-emerald-300' : 'bg-amber-500/15 text-amber-300'}`}>
                 {canonicalProofState}
               </span>
             </span>
             {(latestRetestVerdict || hasPendingRetest) && (
               <span className="inline-flex items-center gap-2">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">{verificationLabel}</span>
+                <span className="text-xs font-medium text-gray-400">{verificationLabel}</span>
                 <RetestVerdictBadge verdict={latestRetestVerdict} pending={hasPendingRetest} />
                 {latestRetestCompletedAt && !hasPendingRetest && (
                   <span className="text-xs text-gray-500" title={formatDate(latestRetestCompletedAt)}>{formatRelativeTime(latestRetestCompletedAt)}</span>

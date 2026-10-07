@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
-import { Compass, Plus } from 'lucide-react'
+import { Plus } from 'lucide-react'
 import {
   authorizeTarget,
   getDeviceAgentSession,
@@ -29,7 +29,7 @@ import {
   HUNT_BUDGET_PROFILES,
   type HuntZeroableBudgetDimension,
 } from '@/lib/huntContract.generated'
-import { Button, Card, Combobox, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
+import { Button, Card, Combobox, EmptyState, Field, PageHeader, Select, Textarea, useToast } from '@/components/ui'
 import { credentialOptions, targetOptions } from '@/lib/pickerOptions'
 import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
@@ -364,20 +364,15 @@ function HuntContent() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6">
+    // The history list uses the page width like every other list; a single run keeps a reading width.
+    <div className={`space-y-6 ${hunt || searchParams.get('run') ? 'mx-auto max-w-6xl' : ''}`}>
       {!hunt && !searchParams.get('run') && (
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="rounded-lg bg-violet-500/10 p-2 text-violet-300"><Compass className="h-6 w-6" /></div>
-            <div>
-              <h1 className="text-2xl font-semibold text-white">Hunts</h1>
-              <p className="mt-1 max-w-2xl text-sm text-gray-400">
-                Evidence-driven sessions your coding agent drives for web, API, network and device targets. The agent proposes each permitted capability call; the runtime executes and proves it.
-              </p>
-            </div>
-          </div>
-          {!launcherOpen && <Button onClick={() => setLauncherOpen(true)}><Plus className="h-4 w-4" aria-hidden="true" />New Hunt</Button>}
-        </div>
+        <PageHeader
+          className="mb-0"
+          title="Hunts"
+          description="Evidence-driven sessions your coding agent drives for web, API, network and device targets. The agent proposes each permitted capability call; the runtime executes and proves it."
+          actions={!launcherOpen && <Button onClick={() => setLauncherOpen(true)}><Plus className="h-4 w-4" aria-hidden="true" />New Hunt</Button>}
+        />
       )}
 
       {legacyRunLoading ? (
@@ -388,9 +383,9 @@ function HuntContent() {
         <p role="status" className="text-sm text-gray-400">Loading Hunt…</p>
       ) : !hunt ? (
         <>
-          {launcherOpen && <Card className="space-y-5 p-5">
+          {launcherOpen && <Card className="max-w-4xl space-y-5 p-5">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="font-medium text-white">New Hunt</h2>
+            <h2 className="text-sm font-semibold text-gray-100">New Hunt</h2>
             <Button size="sm" variant="ghost" onClick={() => setLauncherOpen(false)}>Close</Button>
           </div>
           {loading ? <p className="text-sm text-gray-400">Loading targets…</p> : choices.length === 0 ? (

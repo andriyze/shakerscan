@@ -5,7 +5,7 @@ import { WorkspaceFeature } from '@/components/WorkspaceBoundary'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { workerCapacityLabel, workerCountLabel } from '@/lib/labels'
 import Link from '@/components/WorkspaceLink'
-import { AlertTriangle, ArrowRight, CheckCircle2, CircleHelp, ListTodo, Minus, Plus, RadioTower, ScanLine, Server, ShieldAlert, Target, Trash2, Workflow } from 'lucide-react'
+import { AlertTriangle, ArrowRight, CircleHelp, Info, Minus, Plus, RadioTower, Server, Trash2 } from 'lucide-react'
 import {
   clearQueue, formatDate, getDashboard, getExposureAssets, getGradeColor, getGungnirStatus,
   getMissionTimeline, getQueueStats, getTargetsGrouped, getWorkers, scaleWorkers, startGungnir,
@@ -14,13 +14,20 @@ import {
   type WorkerStats, type ExposureAsset, type ExposureAssetMetrics, type TargetCohort,
 } from '@/lib/api'
 import {
-  Badge,
+  ActionMenu,
+  buttonClasses,
   Card,
   ConfirmDialog,
   ErrorState,
   LastUpdated,
+  MenuItem,
+  PageHeader,
   ScanStatusBadge,
+  Select,
+  SeverityBadge,
   Skeleton,
+  Stat,
+  StatGroup,
   useToast,
 } from '@/components/ui'
 import { ChangesStrip } from '@/app/exposure/ChangesStrip'
@@ -34,6 +41,9 @@ const GUNGNIR_REFRESH_MS = 30000
 const OVERVIEW_REFRESH_MS = 60000
 
 const FOCUS_RING = 'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
+// Small counters in the system status line (worker states, work units).
+const CHIP = 'rounded-sm px-1.5 py-0.5 text-[11px] font-medium leading-4'
+const SCALE_BUTTON = `flex h-6 w-6 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`
 type CohortView = 'operational' | 'production' | 'staging' | 'non_operational' | 'all'
 
 export default function Dashboard() {
@@ -299,16 +309,19 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Dashboard</h1>
-          <p className="text-gray-400 mt-1">What changed, what is proven, and what needs attention</p>
-        </div>
-        <div className="flex w-full flex-wrap items-center gap-2 xl:w-auto xl:justify-end">
-          <div className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5" aria-label="Scan and work queue">
-            <ListTodo className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
+      <PageHeader
+        title="Dashboard"
+        description="What changed, what is proven, and what needs attention."
+        actions={<LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />}
+      />
+
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+        <CohortScopeBar value={cohortView} onChange={setCohortView} counts={cohortCounts} />
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-400">
+          <div role="group" aria-label="Scan and work queue" className="flex items-center gap-3">
             {queueError ? (
-              <span className="flex items-center gap-1.5 text-xs text-red-300" title={queueError}>
+              <span className="flex items-center gap-1.5 text-red-300" title={queueError}>
                 <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> Queue unavailable
               </span>
             ) : (
@@ -316,24 +329,24 @@ export default function Dashboard() {
                 <Link
                   href="/scans?status=pending"
                   title={`${queuePending} pending scans`}
-                  className={`flex items-center gap-1.5 rounded-sm text-xs text-gray-300 hover:text-white ${FOCUS_RING}`}
+                  className={`flex items-center gap-1.5 rounded-sm hover:text-gray-100 ${FOCUS_RING}`}
                 >
-                  <span className={`h-2 w-2 rounded-full bg-amber-400 ${queuePending !== '--' && queuePending > 0 ? 'animate-pulse' : ''}`} />
-                  <span className="font-medium tabular-nums">{queuePending}</span>
-                  <span className="text-gray-500">scans pending</span>
+                  <span className={`h-1.5 w-1.5 rounded-full ${queuePending !== '--' && queuePending > 0 ? 'bg-amber-400' : 'bg-gray-600'}`} aria-hidden="true" />
+                  <span className="font-medium tabular-nums text-gray-100">{queuePending}</span>
+                  <span>scans pending</span>
                 </Link>
                 <Link
                   href="/scans?status=running"
                   title={`${queueRunning} running scans`}
-                  className={`flex items-center gap-1.5 rounded-sm text-xs text-gray-300 hover:text-white ${FOCUS_RING}`}
+                  className={`flex items-center gap-1.5 rounded-sm hover:text-gray-100 ${FOCUS_RING}`}
                 >
-                  <span className={`h-2 w-2 rounded-full bg-blue-500 ${queueRunning !== '--' && queueRunning > 0 ? 'animate-pulse' : ''}`} />
-                  <span className="font-medium tabular-nums">{queueRunning}</span>
-                  <span className="text-gray-500">scan{queueRunning === 1 ? '' : 's'} running</span>
+                  <span className={`h-1.5 w-1.5 rounded-full ${queueRunning !== '--' && queueRunning > 0 ? 'animate-pulse bg-blue-400' : 'bg-gray-600'}`} aria-hidden="true" />
+                  <span className="font-medium tabular-nums text-gray-100">{queueRunning}</span>
+                  <span>scan{queueRunning === 1 ? '' : 's'} running</span>
                 </Link>
                 {(workPending !== queuePending || workRunning !== queueRunning) && (
                   <span
-                    className="hidden rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300 lg:inline"
+                    className={`hidden lg:inline ${CHIP} bg-gray-800 text-gray-300`}
                     title={`${workPending} queued and ${workRunning} running worker jobs, including parallel shards`}
                   >
                     {workRunning} work unit{workRunning === 1 ? '' : 's'} running
@@ -341,21 +354,20 @@ export default function Dashboard() {
                 )}
               </>
             )}
-            <WorkspaceFeature name="worker_admin"><button
-              type="button"
-              onClick={() => { setClearRetests(false); setShowClearQueue(true) }}
-              aria-label="Emergency clear pending jobs"
-              title="Emergency clear pending jobs"
-              className={`ml-1 flex h-7 items-center justify-center gap-1 rounded-sm border border-red-950/70 px-2 text-red-400/80 transition-colors hover:bg-red-500/10 hover:text-red-300 ${FOCUS_RING}`}
-            >
-              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-              <span className="text-[10px]">Emergency clear</span>
-            </button></WorkspaceFeature>
+            <WorkspaceFeature name="worker_admin"><ActionMenu label="Queue actions">
+              <MenuItem
+                icon={<Trash2 />}
+                tone="danger"
+                description="Remove every pending scan job; running scans continue"
+                onSelect={() => { setClearRetests(false); setShowClearQueue(true) }}
+              >Emergency clear</MenuItem>
+            </ActionMenu></WorkspaceFeature>
           </div>
 
-          <WorkspaceFeature name="worker_status"><div
+          <WorkspaceFeature name="worker_status"><span className="hidden h-4 w-px bg-gray-800 sm:block" aria-hidden="true" />
+          <div
             id="workers"
-            className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5"
+            className="flex flex-wrap items-center gap-2"
             title={workersError || workerCapacityLabel({
               fleetEnabled,
               totalAvailable,
@@ -363,63 +375,64 @@ export default function Dashboard() {
               remoteAvailable,
             })}
           >
-            <Server className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
-            <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">
-              {workersKnown ? totalAvailable : 'Unknown'}
+            <Server className="h-3.5 w-3.5 shrink-0 text-gray-500" aria-hidden="true" />
+            <span>
+              <span className="font-medium tabular-nums text-gray-100">{workersKnown ? totalAvailable : 'Unknown'}</span>{' '}
+              {fleetEnabled ? 'ready across fleet' : 'ready to scan'}
             </span>
-            <span className="text-xs text-gray-500">{fleetEnabled ? 'ready across fleet' : 'ready to scan'}</span>
             {fleetEnabled && (
-              <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={workerCountLabel(workerCount ?? 0)}>
+              <span className={`${CHIP} bg-gray-800 text-gray-300`} title={workerCountLabel(workerCount ?? 0)}>
                 {localAvailable} local
               </span>
             )}
             {staleCount > 0 && (
-              <span className="rounded-sm bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Workers running an outdated build">
+              <span className={`${CHIP} bg-amber-500/10 text-amber-300`} title="Workers running an outdated build">
                 {staleCount} stale
               </span>
             )}
             {pendingWorkerCount > 0 && (
-              <span className="rounded-sm bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Running worker processes that have not reported a current build identity yet">
+              <span className={`${CHIP} bg-amber-500/10 text-amber-300`} title="Running worker processes that have not reported a current build identity yet">
                 {pendingWorkerCount} starting
               </span>
             )}
             {unavailableWorkerCount > 0 && (
-              <span className="rounded-sm bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-300" title="Worker containers that are stopped, restarting, or otherwise unavailable">
+              <span className={`${CHIP} bg-red-500/10 text-red-300`} title="Worker containers that are stopped, restarting, or otherwise unavailable">
                 {unavailableWorkerCount} unavailable
               </span>
             )}
             {!fleetEnabled && workersKnown && (
-              <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount} running worker processes; configured safety maximum ${maxWorkers}`}>
+              <span className="tabular-nums text-gray-500" title={`${workerCount} running worker processes; configured safety maximum ${maxWorkers}`}>
                 {workerCount} running · max {maxWorkers}
               </span>
             )}
-            <WorkspaceFeature name="worker_admin"><span className="h-5 w-px bg-gray-800" aria-hidden="true" />
-            <button
-              type="button"
-              onClick={() => handleScale(Math.max(1, (workerCount || 1) - 1))}
-              disabled={scaling || !workersKnown || (workerCount || 0) <= 1}
-              aria-label={fleetEnabled ? 'Decrease local worker count' : 'Decrease worker count'}
-              title={fleetEnabled ? 'Decrease local worker count' : 'Decrease worker count'}
-              className={`flex h-7 w-7 items-center justify-center rounded-sm text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
-            >
-              <Minus className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              onClick={() => handleScale(Math.min(maxWorkers, (workerCount || 1) + 1))}
-              disabled={scaling || !workersKnown || (workerCount || 0) >= maxWorkers}
-              aria-label={fleetEnabled ? 'Increase local worker count' : 'Increase worker count'}
-              title={(workerCount || 0) >= maxWorkers
-                ? `Worker safety limit reached (${maxWorkers})`
-                : fleetEnabled ? 'Increase local worker count' : 'Increase worker count'}
-              className={`flex h-7 w-7 items-center justify-center rounded-sm text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
-            >
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
+            <WorkspaceFeature name="worker_admin"><span className="inline-flex items-center">
+              <button
+                type="button"
+                onClick={() => handleScale(Math.max(1, (workerCount || 1) - 1))}
+                disabled={scaling || !workersKnown || (workerCount || 0) <= 1}
+                aria-label={fleetEnabled ? 'Decrease local worker count' : 'Decrease worker count'}
+                title={fleetEnabled ? 'Decrease local worker count' : 'Decrease worker count'}
+                className={SCALE_BUTTON}
+              >
+                <Minus className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                onClick={() => handleScale(Math.min(maxWorkers, (workerCount || 1) + 1))}
+                disabled={scaling || !workersKnown || (workerCount || 0) >= maxWorkers}
+                aria-label={fleetEnabled ? 'Increase local worker count' : 'Increase worker count'}
+                title={(workerCount || 0) >= maxWorkers
+                  ? `Worker safety limit reached (${maxWorkers})`
+                  : fleetEnabled ? 'Increase local worker count' : 'Increase worker count'}
+                className={SCALE_BUTTON}
+              >
+                <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            </span>
             </WorkspaceFeature>{fleetEnabled && (
               <Link
                 href="/fleet"
-                className="rounded-sm bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-medium text-blue-300 hover:bg-blue-500/20"
+                className={`${CHIP} bg-gray-800 text-blue-300 hover:text-blue-200 ${FOCUS_RING}`}
                 title={`${executionCapacity?.remote_nodes_available ?? 0} remote nodes available`}
               >
                 {remoteAvailable} remote
@@ -427,7 +440,8 @@ export default function Dashboard() {
             )}
           </div>
 
-          </WorkspaceFeature><WorkspaceFeature name="ct_monitor"><button
+          </WorkspaceFeature><WorkspaceFeature name="ct_monitor"><span className="hidden h-4 w-px bg-gray-800 sm:block" aria-hidden="true" />
+          <button
             type="button"
             onClick={handleGungnirToggle}
             disabled={gungnirActionLoading}
@@ -435,20 +449,14 @@ export default function Dashboard() {
             title={gungnir?.running
               ? `Stop CT monitor · ${gungnir.domains_monitored} domains · ${gungnir.session_found} found this session`
               : 'Start Certificate Transparency monitor'}
-            className={`flex h-10 items-center gap-2 rounded-lg border px-3 text-xs font-medium transition-colors disabled:opacity-50 ${FOCUS_RING} ${
-              gungnir?.running
-                ? 'border-emerald-800/60 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/15'
-                : 'border-gray-800 bg-gray-900 text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-            }`}
+            className={`-mx-1.5 inline-flex h-7 items-center gap-1.5 rounded-md px-1.5 font-medium transition-colors hover:bg-gray-800 hover:text-gray-100 disabled:opacity-50 ${FOCUS_RING}`}
           >
-            <RadioTower className={`h-4 w-4 ${gungnir?.running ? 'text-emerald-400' : 'text-gray-500'}`} aria-hidden="true" />
-            <span>CT</span>
-            <span className={`h-2 w-2 rounded-full ${gungnir?.running ? 'animate-pulse bg-emerald-400' : 'bg-gray-600'}`} aria-hidden="true" />
-            <span className="text-gray-500">{gungnirActionLoading ? '…' : gungnir?.running ? 'on' : 'off'}</span>
+            <RadioTower className="h-3.5 w-3.5 text-gray-500" aria-hidden="true" />
+            <span>CT monitor</span>
+            <span className={`h-1.5 w-1.5 rounded-full ${gungnir?.running ? 'bg-emerald-400' : 'bg-gray-600'}`} aria-hidden="true" />
+            <span className={gungnir?.running ? 'text-emerald-300' : 'text-gray-500'}>{gungnirActionLoading ? '…' : gungnir?.running ? 'on' : 'off'}</span>
           </button>
-
           </WorkspaceFeature>
-          <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
         </div>
       </div>
 
@@ -475,17 +483,18 @@ export default function Dashboard() {
         <ErrorState message={dashboardError} onRetry={() => fetchDashboard(true)} />
       )}
 
-      <CohortScopeBar value={cohortView} onChange={setCohortView} counts={cohortCounts} />
-
       <WorkspaceFeature name="exposure"><SecurityPosture exposure={scopedExposure} loading={overviewLoading} /></WorkspaceFeature>
 
       <WorkspaceFeature name="timeline">{cohortView === 'all' ? (
         <ChangesStrip storageKey="dashboard" />
       ) : (
-        <Card className="p-4 text-sm text-gray-400">
-          <span className="font-medium text-gray-200">Recent changes are shown per cohort.</span>{' '}
-          Changes recorded before a target was assigned a cohort only appear under All cohorts.
-        </Card>
+        <p className="flex items-start gap-2 text-xs text-gray-500">
+          <Info className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span>
+            <span className="font-medium text-gray-400">Recent changes are shown per cohort.</span>{' '}
+            Changes recorded before a target was assigned a cohort only appear under All cohorts.
+          </span>
+        </p>
       )}
 
       </WorkspaceFeature>
@@ -606,24 +615,57 @@ function buildCohortActions(exposure: ExposureAssetsResponse | null): DashboardA
   return items
 }
 
+const COHORT_SCOPE_HINT = 'Operational includes production, staging, and clearly labeled unclassified assets. Lab data is never silently mixed into it.'
+
 function CohortScopeBar({ value, onChange, counts }: { value: CohortView; onChange: (value: CohortView) => void; counts: Record<string, number> }) {
   const nonOperational = ['lab', 'demo', 'calibration', 'internal'].reduce((sum, key) => sum + (counts[key] || 0), 0)
   const unclassified = counts.unclassified || 0
   return (
-    <Card className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between">
-      <div>
-        <h2 className="text-sm font-medium text-white">Executive cohort scope</h2>
-        <p className="mt-1 text-xs text-gray-400">Operational includes production, staging, and clearly labeled unclassified assets. Lab data is never silently mixed into it.</p>
-        <p className="mt-1 text-xs text-gray-500">{nonOperational} non-operational · {unclassified} unclassified</p>
-      </div>
-      <select value={value} onChange={(event) => onChange(event.target.value as CohortView)} aria-label="Dashboard cohort scope" className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <label htmlFor="dashboard-cohort" className="text-xs font-medium text-gray-400">Cohort</label>
+      <Select
+        id="dashboard-cohort"
+        fullWidth={false}
+        value={value}
+        onChange={(event) => onChange(event.target.value as CohortView)}
+        aria-label="Dashboard cohort scope"
+        aria-describedby="dashboard-cohort-hint"
+      >
         <option value="operational">Operational + unclassified</option>
         <option value="production">Production only</option>
         <option value="staging">Staging only</option>
         <option value="non_operational">Lab / demo / calibration / internal</option>
         <option value="all">All cohorts</option>
-      </select>
-    </Card>
+      </Select>
+      <span className="flex items-center gap-1.5 text-xs text-gray-500">
+        <span className="tabular-nums">{nonOperational} non-operational · {unclassified} unclassified</span>
+        <span title={COHORT_SCOPE_HINT} className="inline-flex text-gray-600 hover:text-gray-400">
+          <CircleHelp className="h-3.5 w-3.5" aria-hidden="true" />
+        </span>
+        <span id="dashboard-cohort-hint" className="sr-only">{COHORT_SCOPE_HINT}</span>
+      </span>
+    </div>
+  )
+}
+
+/** The shared header for dashboard panels: title, one-line description, one text link. */
+function PanelHeader({ title, description, action }: { title: string; description?: string; action?: React.ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-b border-gray-800 px-4 py-3">
+      <div className="min-w-0">
+        <h2 className="text-sm font-semibold text-gray-100">{title}</h2>
+        {description && <p className="mt-0.5 text-xs text-gray-400">{description}</p>}
+      </div>
+      {action}
+    </div>
+  )
+}
+
+function PanelLink({ href, children, className = '' }: { href: string; children: React.ReactNode; className?: string }) {
+  return (
+    <Link href={href} className={`inline-flex shrink-0 items-center gap-1 rounded-sm text-xs font-medium text-blue-400 hover:text-blue-300 ${FOCUS_RING} ${className}`}>
+      {children} <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+    </Link>
   )
 }
 
@@ -638,98 +680,47 @@ function ActionCenter({
   const visibleItems = actionableItems.slice(0, 3)
 
   return (
-    <Card className="p-4">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="font-medium text-white">Top actions</h2>
-          <p className="mt-1 text-sm text-gray-400">The three highest-impact things to address next</p>
-        </div>
-        <Link href="/exposure" className={`inline-flex items-center gap-1 text-xs text-blue-300 hover:text-blue-200 ${FOCUS_RING}`}>
-          View all priorities <ArrowRight className="h-3.5 w-3.5" />
-        </Link>
-      </div>
-
+    <Card className="overflow-hidden">
+      <PanelHeader
+        title="Top actions"
+        description="The three highest-impact things to address next"
+        action={<PanelLink href="/exposure">View all priorities</PanelLink>}
+      />
       {loading ? (
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-          <Skeleton className="h-20" />
-          <Skeleton className="h-20" />
-          <Skeleton className="h-20" />
+        <div className="grid divide-y divide-gray-800 lg:grid-cols-3 lg:divide-x lg:divide-y-0">
+          {Array.from({ length: 3 }).map((_, index) => <div key={index} className="p-4"><Skeleton className="h-16" /></div>)}
         </div>
       ) : visibleItems.length ? (
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+        <div className="grid divide-y divide-gray-800 lg:grid-cols-3 lg:divide-x lg:divide-y-0">
           {visibleItems.map((item) => <ActionCenterRow key={item.id} item={item} />)}
         </div>
       ) : (
-        <div className="rounded-md border border-gray-800 bg-gray-950 px-4 py-3 text-sm text-gray-400">
-          No high-priority operational actions right now.
-        </div>
+        <p className="px-4 py-6 text-sm text-gray-500">No high-priority operational actions right now.</p>
       )}
     </Card>
   )
 }
 
 function ActionCenterRow({ item }: { item: DashboardActionItem }) {
-  const tone = actionPriorityTone(item.priority)
   const action = (item.actions?.length
     ? item.actions
     : item.href
       ? [{ label: item.action_label || 'Open', href: item.href, variant: 'primary' }]
       : [])[0]
   return (
-    <div className="flex min-h-40 flex-col rounded-lg border border-gray-800 bg-gray-950/70 p-4">
-      <div className="flex min-w-0 flex-1 items-start gap-3">
-        <div className={`mt-0.5 rounded-md p-1.5 ${tone.icon}`}>
-          <AlertTriangle className="h-4 w-4" aria-hidden="true" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge className={tone.badge}>{item.priority}</Badge>
-            <span className="text-xs text-gray-500">{item.category}</span>
-            {typeof item.count === 'number' && item.count > 1 && (
-              <span className="text-xs text-gray-500">{item.count} affected</span>
-            )}
-          </div>
-          <h3 className="mt-1 text-sm font-medium text-white">{item.title}</h3>
-          <p className="mt-1 line-clamp-2 text-sm leading-5 text-gray-400">{item.detail}</p>
-        </div>
+    <div className="flex flex-col p-4">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+        <SeverityBadge severity={item.priority} />
+        <span>{item.category}</span>
+        {typeof item.count === 'number' && item.count > 1 && (
+          <span className="tabular-nums">· {item.count.toLocaleString()} affected</span>
+        )}
       </div>
-      {action ? (
-        <Link href={action.href} className={`mt-4 inline-flex items-center gap-1 self-start text-xs font-medium text-blue-300 hover:text-blue-200 ${FOCUS_RING}`}>
-          {action.label} <ArrowRight className="h-3.5 w-3.5" />
-        </Link>
-      ) : null}
+      <h3 className="mt-2 text-sm font-medium text-gray-100">{item.title}</h3>
+      <p className="mt-1 line-clamp-2 flex-1 text-sm leading-5 text-gray-400">{item.detail}</p>
+      {action ? <PanelLink href={action.href} className="mt-3 self-start">{action.label}</PanelLink> : null}
     </div>
   )
-}
-
-function actionPriorityTone(priority: DashboardActionItem['priority']) {
-  switch (priority) {
-    case 'critical':
-      return {
-        badge: 'bg-red-500/20 text-red-300',
-        icon: 'bg-red-500/10 text-red-300',
-      }
-    case 'high':
-      return {
-        badge: 'bg-orange-500/20 text-orange-300',
-        icon: 'bg-orange-500/10 text-orange-300',
-      }
-    case 'medium':
-      return {
-        badge: 'bg-yellow-500/20 text-yellow-300',
-        icon: 'bg-yellow-500/10 text-yellow-300',
-      }
-    case 'low':
-      return {
-        badge: 'bg-gray-500/20 text-gray-300',
-        icon: 'bg-gray-500/10 text-gray-300',
-      }
-    default:
-      return {
-        badge: 'bg-blue-500/20 text-blue-300',
-        icon: 'bg-blue-500/10 text-blue-300',
-      }
-  }
 }
 
 function SecurityPosture({ exposure, loading }: { exposure: ExposureAssetsResponse | null; loading: boolean }) {
@@ -750,67 +741,46 @@ function SecurityPosture({ exposure, loading }: { exposure: ExposureAssetsRespon
         : { href: '/targets', label: 'Add a target' }
 
   return (
-    <Card className="overflow-hidden">
-      <div className="flex flex-col gap-3 border-b border-gray-800 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="font-medium text-white">Security posture</h2>
-          <p className="mt-1 text-sm text-gray-400">Verified risk, uncertain signals, and assets that need attention</p>
-        </div>
-        <Link href={primary.href} className={`inline-flex items-center gap-1 self-start rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-blue-500/20 ${FOCUS_RING}`}>
-          {primary.label} <ArrowRight className="h-4 w-4" />
-        </Link>
-      </div>
-      {loading && !metrics ? (
-        <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-24" />)}
-        </div>
-      ) : (
-        <>
-          <div className="grid divide-y divide-gray-800 sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-4">
-            <PostureStat href="/exposure?posture=verified" icon={<CheckCircle2 className="h-4 w-4" />} label="Proven active risk" value={verified} hint={`${metrics?.verified_assets || 0} affected assets`} tone="emerald" />
-            <PostureStat href="/exposure?posture=needs_verification" icon={<CircleHelp className="h-4 w-4" />} label="Needs verification" value={needsVerification} hint={`${metrics?.unverified_high_assets || 0} high-impact assets`} tone="amber" />
-            <PostureStat href="/exposure?posture=p1" icon={<ShieldAlert className="h-4 w-4" />} label="P1 assets" value={p1} hint="highest action priority" tone="red" />
-            <PostureStat href="/exposure" icon={<Target className="h-4 w-4" />} label="Freshly assessed" value={fresh} hint={`of ${assetCount} known assets`} tone="blue" />
+    <section aria-labelledby="dashboard-posture-heading">
+      {/* One bordered strip: header, the four headline numbers and the evidence bar, split by hairlines. */}
+      <StatGroup columns={4}>
+        <div className="col-span-full flex flex-col gap-3 bg-gray-900 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <h2 id="dashboard-posture-heading" className="text-sm font-semibold text-gray-100">Security posture</h2>
+            <p className="mt-0.5 text-xs text-gray-400">Verified risk, uncertain signals, and assets that need attention</p>
           </div>
-          <div className="border-t border-gray-800 px-4 py-3">
-            <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <span className="text-gray-500">Evidence confidence across active findings</span>
-              <span className="text-gray-400">{verified} proven · {needsVerification} awaiting verification</span>
+          <Link href={primary.href} className={`${buttonClasses('secondary', 'sm')} self-start sm:self-auto`}>
+            {primary.label} <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
+        </div>
+        {loading && !metrics ? (
+          Array.from({ length: 4 }).map((_, index) => (
+            <div key={index} className="bg-gray-900 px-4 py-3">
+              <Skeleton className="h-3 w-24" />
+              <Skeleton className="mt-2 h-7 w-16" />
+              <Skeleton className="mt-2 h-3 w-28" />
             </div>
-            <div className="flex h-2 overflow-hidden rounded-full bg-gray-800" aria-label={`${verified} proven active findings and ${needsVerification} findings needing verification`}>
-              <div className="bg-emerald-500" style={{ width: `${verifiedWidth}%` }} />
-              <div className="flex-1 bg-amber-500/70" />
+          ))
+        ) : (
+          <>
+            <Stat href="/exposure?posture=verified" label="Proven active risk" value={verified.toLocaleString()} caption={`${metrics?.verified_assets || 0} affected assets`} tone={verified > 0 ? 'danger' : 'default'} />
+            <Stat href="/exposure?posture=needs_verification" label="Needs verification" value={needsVerification.toLocaleString()} caption={`${metrics?.unverified_high_assets || 0} high-impact assets`} tone={needsVerification > 0 ? 'warning' : 'default'} />
+            <Stat href="/exposure?posture=p1" label="P1 assets" value={p1.toLocaleString()} caption="highest action priority" />
+            <Stat href="/exposure" label="Freshly assessed" value={fresh.toLocaleString()} caption={`of ${assetCount} known assets`} />
+            <div className="col-span-full bg-gray-900 px-4 py-3">
+              <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="text-gray-400">Evidence confidence across active findings</span>
+                <span className="tabular-nums text-gray-500">{verified} proven · {needsVerification} awaiting verification</span>
+              </div>
+              <div className="flex h-1.5 overflow-hidden rounded-full bg-gray-800" aria-label={`${verified} proven active findings and ${needsVerification} findings needing verification`}>
+                <div className="bg-emerald-500" style={{ width: `${verifiedWidth}%` }} />
+                <div className="flex-1 bg-amber-500/60" />
+              </div>
             </div>
-          </div>
-        </>
-      )}
-    </Card>
-  )
-}
-
-function PostureStat({ href, icon, label, value, hint, tone }: {
-  href: string
-  icon: React.ReactNode
-  label: string
-  value: number
-  hint: string
-  tone: 'emerald' | 'amber' | 'red' | 'blue'
-}) {
-  const tones = {
-    emerald: 'bg-emerald-500/10 text-emerald-300',
-    amber: 'bg-amber-500/10 text-amber-300',
-    red: 'bg-red-500/10 text-red-300',
-    blue: 'bg-blue-500/10 text-blue-300',
-  }
-  return (
-    <Link href={href} className={`flex items-center gap-3 p-4 hover:bg-gray-800/30 ${FOCUS_RING} focus-visible:ring-inset`}>
-      <span className={`rounded-lg p-2 ${tones[tone]}`}>{icon}</span>
-      <span className="min-w-0">
-        <span className="block text-xs text-gray-500">{label}</span>
-        <span className="block text-2xl font-semibold tabular-nums text-white">{value.toLocaleString()}</span>
-        <span className="block truncate text-xs text-gray-600">{hint}</span>
-      </span>
-    </Link>
+          </>
+        )}
+      </StatGroup>
+    </section>
   )
 }
 
@@ -876,23 +846,18 @@ function CoverageOverview({ exposure, coverage, loading }: {
     { label: 'Never scanned', value: metrics?.unscanned_assets || 0, color: 'bg-gray-500' },
   ]
   return (
-    <Card className="p-4">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="font-medium text-white">Coverage and freshness</h2>
-          <p className="mt-1 text-sm text-gray-400">How much has been tested, and which results are aging out</p>
-        </div>
-        <Link href="/asm" className={`inline-flex items-center gap-1 text-xs text-blue-300 hover:text-blue-200 ${FOCUS_RING}`}>
-          Open Coverage <ArrowRight className="h-3.5 w-3.5" />
-        </Link>
-      </div>
-      {loading && !metrics ? <Skeleton className="h-40" /> : (
-        <div className="grid gap-6 lg:grid-cols-2">
-          <section>
-            <div className="mb-3 flex items-center gap-2">
-              <Target className="h-4 w-4 text-gray-500" />
+    <Card className="overflow-hidden">
+      <PanelHeader
+        title="Coverage and freshness"
+        description="How much has been tested, and which results are aging out"
+        action={<PanelLink href="/asm">Open Coverage</PanelLink>}
+      />
+      {loading && !metrics ? <div className="p-4"><Skeleton className="h-40" /></div> : (
+        <div className="grid divide-y divide-gray-800 lg:grid-cols-2 lg:divide-x lg:divide-y-0">
+          <section className="p-4">
+            <div className="mb-3 flex items-baseline gap-2">
               <h3 className="text-sm font-medium text-gray-200">Asset freshness</h3>
-              <span className="ml-auto text-xs text-gray-600">{totalAssets} assets</span>
+              <span className="ml-auto text-xs tabular-nums text-gray-500">{totalAssets} assets</span>
             </div>
             <div className="grid gap-2.5">
               {freshness.map((item) => (
@@ -900,22 +865,21 @@ function CoverageOverview({ exposure, coverage, loading }: {
               ))}
             </div>
           </section>
-          <section className="border-t border-gray-800 pt-5 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
-            <div className="mb-3 flex items-center gap-2">
-              <Workflow className="h-4 w-4 text-gray-500" />
+          <section className="p-4">
+            <div className="mb-3 flex items-baseline gap-2">
               <h3 className="text-sm font-medium text-gray-200">Continuous endpoint coverage</h3>
               <span className="ml-auto text-xs tabular-nums text-gray-500">{Math.round(coverage.coverage * 100)}%</span>
             </div>
             <ProgressRow label="Tested endpoints" value={coverage.tested} total={coverage.denominator} color="bg-blue-500" />
-            <p className="mt-2 text-xs text-gray-600">{coverage.tested.toLocaleString()} tested · {coverage.remaining.toLocaleString()} remaining across {coverage.targets.length} inventoried targets</p>
-            <div className="mt-3 grid gap-1.5">
+            <p className="mt-2 text-xs text-gray-500">{coverage.tested.toLocaleString()} tested · {coverage.remaining.toLocaleString()} remaining across {coverage.targets.length} inventoried targets</p>
+            <div className="-mx-2 mt-3 grid gap-0.5">
               {coverage.targets.slice(0, 3).map((target) => (
-                <Link key={target.id} href={`/asm?target_id=${target.id}`} className={`flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-gray-800/50 ${FOCUS_RING}`}>
+                <Link key={target.id} href={`/asm?target_id=${target.id}`} className={`flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-gray-800/60 ${FOCUS_RING}`}>
                   <span className="min-w-0 flex-1 truncate text-xs text-gray-300">{shortHost(target.url)}</span>
-                  <span className="text-xs tabular-nums text-gray-600">{target.remaining.toLocaleString()} remaining</span>
+                  <span className="text-xs tabular-nums text-gray-500">{target.remaining.toLocaleString()} remaining</span>
                 </Link>
               ))}
-              {!coverage.targets.length ? <p className="text-xs text-gray-600">No persistent endpoint inventories yet.</p> : null}
+              {!coverage.targets.length ? <p className="px-2 text-xs text-gray-500">No persistent endpoint inventories yet.</p> : null}
             </div>
           </section>
         </div>
@@ -929,8 +893,8 @@ function ProgressRow({ label, value, total, color }: { label: string; value: num
   return (
     <div>
       <div className="mb-1 flex items-center justify-between text-xs">
-        <span className="text-gray-500">{label}</span>
-        <span className="tabular-nums text-gray-400">{value.toLocaleString()}</span>
+        <span className="text-gray-400">{label}</span>
+        <span className="tabular-nums text-gray-300">{value.toLocaleString()}</span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-gray-800">
         <div className={`h-full rounded-full ${color}`} style={{ width: `${percent}%` }} />
@@ -942,25 +906,18 @@ function ProgressRow({ label, value, total, color }: { label: string; value: num
 function LatestResults({ scans, loading }: { scans: Scan[]; loading: boolean }) {
   return (
     <Card className="overflow-hidden">
-      <div className="flex items-center justify-between border-b border-gray-800 p-4">
-        <div>
-          <h2 className="font-medium text-white">Latest target results</h2>
-          <p className="mt-1 text-sm text-gray-400">One current result per target</p>
-        </div>
-        <Link href="/scans" className={`text-xs text-blue-300 hover:text-blue-200 ${FOCUS_RING}`}>All scans</Link>
-      </div>
+      <PanelHeader title="Latest target results" description="One current result per target" action={<PanelLink href="/scans">All scans</PanelLink>} />
       <div className="divide-y divide-gray-800">
-        {loading ? Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="m-4 h-10" />)
+        {loading ? Array.from({ length: 4 }).map((_, index) => <div key={index} className="px-4 py-3"><Skeleton className="h-9" /></div>)
           : scans.length ? scans.slice(0, 5).map((scan) => {
             const assurance = scanAssurance(scan)
             return (
-            <Link key={scan.id} href={`/scans/${scan.id}`} className={`flex items-center gap-3 p-4 hover:bg-gray-800/40 ${FOCUS_RING} focus-visible:ring-inset`}>
-              <span className="rounded-lg bg-blue-500/10 p-2 text-blue-300"><ScanLine className="h-4 w-4" /></span>
+            <Link key={scan.id} href={`/scans/${scan.id}`} className={`flex items-center gap-4 px-4 py-3 transition-colors hover:bg-gray-800/40 ${FOCUS_RING} focus-visible:ring-inset`}>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium text-gray-200">{shortHost(scan.target_url)}</span>
-                <span className="block text-xs text-gray-500">{friendlyScanType(scan)} · {formatDate(scan.completed_at || scan.created_at)}</span>
+                <span className="block truncate text-sm font-medium text-gray-100">{shortHost(scan.target_url)}</span>
+                <span className="block truncate text-xs text-gray-500">{friendlyScanType(scan)} · {formatDate(scan.completed_at || scan.created_at)}</span>
               </span>
-              {typeof scan.findings_count === 'number' ? <span className="hidden text-xs tabular-nums text-gray-500 sm:block">{scan.findings_count} findings</span> : null}
+              {typeof scan.findings_count === 'number' ? <span className="hidden text-xs tabular-nums text-gray-400 sm:block">{scan.findings_count} finding{scan.findings_count === 1 ? '' : 's'}</span> : null}
               {scan.grade ? (
                 <span className="hidden text-right sm:block">
                   <span className={`block text-xs font-medium ${getGradeColor(scan.grade)}`} title="Risk observed by this run; not an overall safety score">Observed posture {scan.grade}</span>
@@ -969,10 +926,10 @@ function LatestResults({ scans, loading }: { scans: Scan[]; loading: boolean }) 
                   </span>
                 </span>
               ) : null}
-              <ScanStatusBadge status={scan.status} />
+              <span className="w-24 shrink-0 text-right"><ScanStatusBadge status={scan.status} /></span>
             </Link>
             )
-          }) : <p className="p-5 text-sm text-gray-500">No scan results yet. Add a target and run the first scan.</p>}
+          }) : <p className="px-4 py-6 text-sm text-gray-500">No scan results yet. Add a target and run the first scan.</p>}
       </div>
     </Card>
   )
@@ -981,31 +938,29 @@ function LatestResults({ scans, loading }: { scans: Scan[]; loading: boolean }) 
 function RecentActivity({ events, loading }: { events: TimelineEvent[]; loading: boolean }) {
   return (
     <Card className="overflow-hidden">
-      <div className="flex items-center justify-between border-b border-gray-800 p-4">
-        <div>
-          <h2 className="font-medium text-white">Recent activity</h2>
-          <p className="mt-1 text-sm text-gray-400">Meaningful results across scans, verification, and investigations</p>
-        </div>
-        <Link href="/timeline" className={`text-xs text-blue-300 hover:text-blue-200 ${FOCUS_RING}`}>Full timeline</Link>
-      </div>
+      <PanelHeader
+        title="Recent activity"
+        description="Meaningful results across scans, verification, and investigations"
+        action={<PanelLink href="/timeline">Full timeline</PanelLink>}
+      />
       <div className="divide-y divide-gray-800">
-        {loading ? Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="m-4 h-10" />)
+        {loading ? Array.from({ length: 4 }).map((_, index) => <div key={index} className="px-4 py-3"><Skeleton className="h-9" /></div>)
           : events.length ? events.map((event) => {
             const href = activityHref(event)
             const body = (
               <>
-                <span className={`mt-0.5 h-2 w-2 flex-none rounded-full ${activityTone(event.status)}`} />
+                <span className={`mt-1.5 h-1.5 w-1.5 flex-none rounded-full ${activityTone(event.status)}`} aria-hidden="true" />
                 <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-medium text-gray-200">{boundedDisplayText(activityTitle(event), 96)}</span>
+                  <span className="block text-sm font-medium text-gray-100">{boundedDisplayText(activityTitle(event), 96)}</span>
                   <span className="block truncate text-xs text-gray-500">{boundedDisplayText(event.operator_message || event.target_url || event.kind.replace(/_/g, ' '), 160)}</span>
                 </span>
-                <span className="flex-none text-xs text-gray-600">{event.created_at ? formatDate(event.created_at) : ''}</span>
+                <span className="flex-none text-xs tabular-nums text-gray-500">{event.created_at ? formatDate(event.created_at) : ''}</span>
               </>
             )
             return href ? (
-              <Link key={event.event_id} href={href} className={`flex items-start gap-3 p-4 hover:bg-gray-800/40 ${FOCUS_RING} focus-visible:ring-inset`}>{body}</Link>
-            ) : <div key={event.event_id} className="flex items-start gap-3 p-4">{body}</div>
-          }) : <p className="p-5 text-sm text-gray-500">No meaningful activity has been recorded yet.</p>}
+              <Link key={event.event_id} href={href} className={`flex items-start gap-3 px-4 py-3 transition-colors hover:bg-gray-800/40 ${FOCUS_RING} focus-visible:ring-inset`}>{body}</Link>
+            ) : <div key={event.event_id} className="flex items-start gap-3 px-4 py-3">{body}</div>
+          }) : <p className="px-4 py-6 text-sm text-gray-500">No meaningful activity has been recorded yet.</p>}
       </div>
     </Card>
   )

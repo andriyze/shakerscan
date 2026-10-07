@@ -85,15 +85,6 @@ export const FINDING_STATUS_LABELS: Record<FindingStatus, string> = {
   accepted_risk: 'Accepted risk',
 }
 
-export const SCAN_STATUS_BADGE_STYLES: Record<ScanStatus, string> = {
-  pending: 'bg-gray-500/20 text-gray-400',
-  queued: 'bg-gray-500/20 text-gray-400',
-  running: 'bg-blue-500/20 text-blue-400',
-  completed: 'bg-green-500/20 text-green-400',
-  failed: 'bg-red-500/20 text-red-400',
-  cancelled: 'bg-orange-500/20 text-orange-400',
-}
-
 export const FINDING_STATUS_BADGE_STYLES: Record<FindingStatus, string> = {
   active: 'bg-yellow-500/20 text-yellow-400',
   resolved: 'bg-green-500/20 text-green-400',

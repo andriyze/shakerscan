@@ -338,7 +338,6 @@ export default function FleetPage() {
         <PageHeader
           title="Fleet"
           description="Checking whether multi-node Fleet is available on this installation."
-          icon={<ServerCog className="h-7 w-7" />}
         />
         <Card className="h-36 animate-pulse bg-gray-900/70" aria-label="Checking Fleet availability" />
       </div>
@@ -350,7 +349,6 @@ export default function FleetPage() {
         <PageHeader
           title="Fleet"
           description="Coordinate Linux worker nodes from one ShakerScan control plane."
-          icon={<ServerCog className="h-7 w-7" />}
         />
         <ErrorState message={error} onRetry={() => void loadFleet()} />
       </div>
@@ -363,7 +361,6 @@ export default function FleetPage() {
         <PageHeader
           title="Fleet"
           description="Coordinate Linux worker nodes from one ShakerScan control plane."
-          icon={<ServerCog className="h-7 w-7" />}
         />
         <Card className="p-6">
           <div className="flex items-start gap-4">
@@ -412,7 +409,6 @@ export default function FleetPage() {
         <PageHeader
           title="Fleet"
           description="Operate every joined ShakerScan worker node from one control plane."
-          icon={<ServerCog className="h-7 w-7" />}
           actions={
             <Button variant="secondary" size="sm" onClick={() => void loadFleet(true)} loading={refreshing}>
               <RefreshCw className="h-4 w-4" aria-hidden="true" />
@@ -436,7 +432,6 @@ export default function FleetPage() {
       <PageHeader
         title="Fleet"
         description="Operate every joined ShakerScan worker node from one control plane. Desired-state changes are applied by each node agent."
-        icon={<ServerCog className="h-7 w-7" />}
         actions={
           <Button variant="secondary" size="sm" onClick={() => void loadFleet(true)} loading={refreshing}>
             <RefreshCw className="h-4 w-4" aria-hidden="true" />

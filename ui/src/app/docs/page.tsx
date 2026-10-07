@@ -131,14 +131,13 @@ export default async function DocsPage() {
     <WorkspaceDocs><div className="mx-auto max-w-5xl">
       <PageHeader
         title="Documentation"
-        icon={<BookOpen className="h-5 w-5" />}
         description="Installation, first steps, workflow selection, safety boundaries, and operator reference."
         actions={
           <a
             href={`${SHAKERSCAN_DOCUMENTATION_BLOB_URL}/README.md`}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-300 transition-colors hover:border-gray-600 hover:bg-gray-800 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-gray-700 bg-gray-900 px-3.5 py-1.5 text-sm font-medium text-gray-200 shadow-xs transition-colors hover:border-gray-600 hover:bg-gray-800 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             View on GitHub <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
           </a>

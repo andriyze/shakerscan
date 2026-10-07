@@ -1,5 +1,5 @@
 import Link from '@/components/WorkspaceLink'
-import { Card, EmptyState } from '@/components/ui'
+import { buttonClasses, Card, EmptyState, tableStyles } from '@/components/ui'
 import { partitionSharedServices, sharedServiceHuntHref } from '@/lib/sharedServicePorts.mjs'
 
 export interface SharedServiceKnowledge {
@@ -18,16 +18,16 @@ export function SharedServicePorts({knowledge,targetId}: {knowledge?:SharedServi
   if (!knowledge) return null
   const {confirmed, unconfirmed, notObservedCount} = partitionSharedServices(knowledge.services)
   return <section className="mb-6">
-    <h2 className="mb-3 text-lg font-semibold text-white">Ports discovered across Scans and Hunts</h2>
+    <h2 className="mb-2 text-base font-semibold text-white">Ports discovered across Scans and Hunts</h2>
     {confirmed.length === 0 ? <EmptyState message={knowledge.services.length === 0 ? 'No retained service evidence' : 'No confirmed open ports'} hint="Port discovery in Hunt and network scans enrich this same target. Missing evidence does not establish closed ports." /> : <Card className="overflow-x-auto p-0"><table className="w-full text-left text-sm">
-      <thead className="text-xs uppercase text-gray-500"><tr><th className="px-4 py-3">Port / address</th><th className="px-4 py-3">Service</th><th className="px-4 py-3">Evidence</th><th className="px-4 py-3">Investigate</th></tr></thead>
-      <tbody className="divide-y divide-gray-800">{confirmed.map(service => {
+      <thead className={tableStyles.head}><tr><th className={tableStyles.headerCell}>Port / address</th><th className={tableStyles.headerCell}>Service</th><th className={tableStyles.headerCell}>Evidence</th><th className={tableStyles.headerCell}><span className="sr-only">Investigate</span></th></tr></thead>
+      <tbody>{confirmed.map(service => {
         const huntHref = sharedServiceHuntHref(service, targetId)
-        return <tr key={service.id}>
+        return <tr key={service.id} className={tableStyles.row}>
           <td className="px-4 py-3 font-mono text-gray-300">{service.port}/{service.transport}<div className="text-xs text-gray-500">{service.address || 'Address unattributed'}</div></td>
           <td className="px-4 py-3 text-gray-300">{service.service || 'Not identified'}<div className="text-xs text-gray-500">{service.application_origin || ''}</div></td>
           <td className="px-4 py-3 text-xs text-gray-400"><EvidenceRefs service={service} /></td>
-          <td className="px-4 py-3">{huntHref ? <Link className="text-blue-300" href={huntHref}>Start Hunt</Link> : <span className="text-xs text-amber-300">Historical address</span>}</td>
+          <td className="px-4 py-3 text-right">{huntHref ? <Link className={`${buttonClasses('ghost', 'sm')} whitespace-nowrap`} href={huntHref}>Start Hunt</Link> : <span className="text-xs text-amber-300">Historical address</span>}</td>
         </tr>
       })}</tbody>
     </table></Card>}

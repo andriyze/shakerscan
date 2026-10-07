@@ -4,7 +4,7 @@ import Link from '@/components/WorkspaceLink'
 import { RetireDeviceButton } from '@/components/RetireDeviceButton'
 import { NetworkScanReadiness, type NetworkReadiness } from '@/components/NetworkScanReadiness'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Plus, Router, ShieldCheck } from 'lucide-react'
+import { ExternalLink, Plus, ShieldCheck } from 'lucide-react'
 import {
   createDevice,
   getDevicePolicies,
@@ -14,7 +14,11 @@ import {
   type DevicePolicy,
   type DeviceTarget,
 } from '@/lib/api'
-import { Button, Card, CardSkeleton, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
+import {
+  ActionMenu, Button, EmptyState, ErrorState, Field, Input, MenuItem, MenuSeparator, Modal, PageHeader, ROW_ACTION_REVEAL,
+  SearchInput, Select, StatusDot, Table, TableCell, TableContainer, TableHead, TableHeaderCell, TableRow, TableSkeleton,
+  Toolbar, buttonClasses, gradeTextColor, useToast, type StatusTone,
+} from '@/components/ui'
 import { deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 
 const DEVICE_CLASSES = [
@@ -23,6 +27,12 @@ const DEVICE_CLASSES = [
   ['conference', 'Conference equipment'], ['building', 'Building system'], ['industrial', 'Industrial device'],
 ] as const
 const PAGE_SIZE = 50
+
+function reachabilityTone(status?: string | null): StatusTone {
+  if (status === 'online') return 'success'
+  if (status === 'unreachable') return 'danger'
+  return status ? 'warning' : 'neutral'
+}
 
 function parsePortHints(value: string): number[] {
   if (!value.trim()) return []
@@ -147,41 +157,81 @@ export default function DevicesPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div>
       <PageHeader
         title="Connected Devices"
         description="Discover services on TVs, cameras, routers, and other network targets. Ports and results are shared with the target inventory and Hunt."
-        icon={<Router className="h-6 w-6" />}
         actions={<>
-          <Link href="/devices/policies" className="inline-flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700"><ShieldCheck className="h-4 w-4" /> Service policies</Link>
-          <Button onClick={() => setAddOpen(true)} disabled={!enabled}><Plus className="h-4 w-4" /> Add device</Button>
+          <Link href="/devices/policies" className={buttonClasses('secondary', 'md')}><ShieldCheck className="h-4 w-4" aria-hidden="true" /> Service policies</Link>
+          <Button onClick={() => setAddOpen(true)} disabled={!enabled}><Plus className="h-4 w-4" aria-hidden="true" /> Add device</Button>
         </>}
       />
 
       <NetworkScanReadiness readiness={readinessState} />
 
-      <div className="mb-4 max-w-md"><Input value={search} onChange={(event) => { setPage(0); setSearch(event.target.value) }} placeholder="Search name, address, or manufacturer" aria-label="Search connected devices" /></div>
+      <Toolbar>
+        <SearchInput value={search} onValueChange={(value) => { setPage(0); setSearch(value) }} placeholder="Search name, address, or manufacturer"
+          aria-label="Search connected devices" wrapperClassName="w-full sm:w-80" />
+        {!loading && !failed && <span className="text-sm tabular-nums text-gray-400">{total.toLocaleString()} device{total === 1 ? '' : 's'}</span>}
+      </Toolbar>
 
-      {loading ? <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3"><CardSkeleton /><CardSkeleton /><CardSkeleton /></div>
+      {loading ? <TableContainer><TableSkeleton rows={5} cols={6} /></TableContainer>
         : failed ? <ErrorState message="Could not load connected devices" onRetry={load} />
         : devices.length === 0 ? <EmptyState message="No connected devices yet" hint="Add a hostname or IP address to your target inventory." action={{ label: 'Add device', onClick: () => setAddOpen(true) }} />
-        : <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{devices.map((device) => {
-          const posture = deviceTargetScorePresentation(device)
-          return <Card key={device.id} className="p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0"><Link href={`/devices/${device.id}`} className="font-semibold text-white hover:text-blue-300">{device.name}</Link><p className="mt-1 truncate font-mono text-xs text-gray-400">{device.primary_locator}</p></div>
-              {posture.grade ? <span title={posture.note || undefined} className={`rounded-md px-2 py-1 text-sm font-bold ${posture.status === 'provisional' ? 'bg-amber-500/15 text-amber-200' : 'bg-gray-800 text-gray-200'}`}>{posture.status === 'provisional' ? `Provisional ${posture.grade}` : posture.grade}</span> : <span title={posture.note || undefined} className="rounded-md bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-200">No reliable score</span>}
-            </div>
-            <div className="mt-3"><span className={`rounded-full px-2 py-1 text-xs ${device.last_reachability?.status === 'online' ? 'bg-emerald-500/15 text-emerald-300' : device.last_reachability?.status === 'unreachable' ? 'bg-red-500/15 text-red-300' : 'bg-amber-500/15 text-amber-300'}`}>{device.last_reachability ? `Reachability: ${device.last_reachability.status}` : 'Reachability: not checked'}</span></div>
-            <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
-              <div className="rounded-sm bg-gray-950 p-2"><div className="text-lg font-semibold text-white">{device.services_count || 0}</div><div className="text-gray-500">services</div></div>
-              <div className="rounded-sm bg-gray-950 p-2"><div className="text-lg font-semibold text-white">{device.active_findings_count || 0}</div><div className="text-gray-500">findings</div></div>
-              <div className="rounded-sm bg-gray-950 p-2"><div className="truncate text-sm font-semibold text-white">{device.device_class}</div><div className="text-gray-500">class</div></div>
-            </div>
-            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><RetireDeviceButton deviceId={device.id} name={device.name} onRetired={() => { if (devices.length === 1 && page > 0) setPage(page - 1); else void load() }} /><Button size="sm" disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', confirm_authorized: false }) }}>Scan</Button></div>
-          </Card>
-        })}</div>}
-      {!loading && !failed && total > PAGE_SIZE && <div className="mt-5 flex items-center justify-between text-sm text-gray-400"><span>Showing {page * PAGE_SIZE + 1}–{Math.min(total, (page + 1) * PAGE_SIZE)} of {total}</span><div className="flex gap-2"><Button size="sm" variant="secondary" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Previous</Button><Button size="sm" variant="secondary" disabled={(page + 1) * PAGE_SIZE >= total} onClick={() => setPage((value) => value + 1)}>Next</Button></div></div>}
+        : <TableContainer>
+          <Table aria-label="Connected devices">
+            <TableHead>
+              <tr>
+                <TableHeaderCell>Device</TableHeaderCell>
+                <TableHeaderCell>Class</TableHeaderCell>
+                <TableHeaderCell>Reachability</TableHeaderCell>
+                <TableHeaderCell className="text-right">Services</TableHeaderCell>
+                <TableHeaderCell className="text-right">Findings</TableHeaderCell>
+                <TableHeaderCell>Observed score</TableHeaderCell>
+                <TableHeaderCell>Policy</TableHeaderCell>
+                <TableHeaderCell className="text-right"><span className="sr-only">Actions</span></TableHeaderCell>
+              </tr>
+            </TableHead>
+            <tbody>
+              {devices.map((device) => {
+                const posture = deviceTargetScorePresentation(device)
+                const reachability = device.last_reachability?.status
+                return <TableRow key={device.id}>
+                  <TableCell>
+                    <Link href={`/devices/${device.id}`} className="block max-w-[18rem] truncate font-medium text-gray-100 hover:text-blue-300">{device.name}</Link>
+                    <span className="block max-w-[18rem] truncate font-mono text-xs text-gray-500">{device.primary_locator}</span>
+                  </TableCell>
+                  <TableCell className="whitespace-nowrap capitalize">{device.device_class}</TableCell>
+                  <TableCell>
+                    <StatusDot tone={reachabilityTone(reachability)} className={reachability ? '' : 'text-gray-400'}>{reachability || 'not checked'}</StatusDot>
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">{device.services_count || 0}</TableCell>
+                  <TableCell className="text-right tabular-nums">{device.active_findings_count || 0}</TableCell>
+                  <TableCell className="whitespace-nowrap">
+                    {posture.grade
+                      ? <span title={posture.note || undefined} className="inline-flex items-baseline gap-1.5">
+                          <span className={`font-semibold ${gradeTextColor(posture.grade)}`}>{posture.grade}</span>
+                          {posture.status === 'provisional' && <span className="text-xs text-gray-500">Provisional</span>}
+                        </span>
+                      : <span title={posture.note || undefined} className="text-xs text-gray-500">No reliable score</span>}
+                  </TableCell>
+                  <TableCell><span className="block max-w-[12rem] truncate text-xs text-gray-400">{device.policy_name || 'Default policy'}</span></TableCell>
+                  <TableCell className="whitespace-nowrap">
+                    <span className="flex items-center justify-end gap-1">
+                      <Button size="sm" variant="secondary" className={ROW_ACTION_REVEAL} disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', confirm_authorized: false }) }}>Scan</Button>
+                      <ActionMenu label={`More actions for ${device.name}`}>
+                        <MenuItem icon={<ExternalLink />} href={`/devices/${device.id}`}>Open details</MenuItem>
+                        <MenuSeparator />
+                        <RetireDeviceButton menuItem deviceId={device.id} name={device.name} onRetired={() => { if (devices.length === 1 && page > 0) setPage(page - 1); else void load() }} />
+                      </ActionMenu>
+                    </span>
+                  </TableCell>
+                </TableRow>
+              })}
+            </tbody>
+          </Table>
+        </TableContainer>}
+      {!loading && !failed && total > PAGE_SIZE && <div className="mt-3 flex items-center justify-between text-sm text-gray-400"><span className="tabular-nums">Showing {page * PAGE_SIZE + 1}–{Math.min(total, (page + 1) * PAGE_SIZE)} of {total}</span><div className="flex gap-2"><Button size="sm" variant="secondary" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Previous</Button><Button size="sm" variant="secondary" disabled={(page + 1) * PAGE_SIZE >= total} onClick={() => setPage((value) => value + 1)}>Next</Button></div></div>}
 
       <Modal open={addOpen} title="Add connected device" onClose={() => setAddOpen(false)} footer={<><Button variant="secondary" onClick={() => setAddOpen(false)}>Cancel</Button><Button loading={saving} onClick={addDevice}>Add device</Button></>}>
         <div className="space-y-4">

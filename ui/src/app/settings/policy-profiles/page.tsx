@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Edit3, Plus, RefreshCw, Save, ShieldCheck, Trash2, X } from 'lucide-react'
+import { Edit3, Plus, RefreshCw, Save, Trash2, X } from 'lucide-react'
 import {
   createPolicyProfile,
   deletePolicyProfile,
@@ -246,7 +246,6 @@ export default function PolicyProfilesPage() {
       <PageHeader
         title="Policy Profiles"
         description="Deployment gate policies used by AI Gate, Model Intake, and CI/CD decisions."
-        icon={<ShieldCheck className="h-6 w-6" />}
         actions={
           <Button variant="secondary" onClick={loadProfiles} disabled={loading}>
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />

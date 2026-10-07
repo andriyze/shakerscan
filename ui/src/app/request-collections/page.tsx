@@ -5,7 +5,7 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { UploadAttempt } from '@/lib/uploadAttempt'
-import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { getAllTargetAssets, getTargetAsset, type TargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'
 import { targetOptions } from '@/lib/pickerOptions'
 import { CollectionLibrary } from '@/components/collections/CollectionLibrary'
@@ -27,6 +27,7 @@ import {
   type SharedRequestCollection,
 } from '@/lib/requestCollectionApi'
 import {
+  ActionMenu,
   Button,
   Card,
   ConfirmDialog,
@@ -34,10 +35,12 @@ import {
   ErrorState,
   Field,
   Input,
+  MenuItem,
   Modal,
   PageHeader,
   Select,
   Textarea,
+  Toolbar,
   useToast,
   Combobox,
 } from '@/components/ui'
@@ -440,12 +443,24 @@ function RequestCollectionsContent() {
   if (loading) return <div className="p-6 text-sm text-gray-400">Loading collection targets…</div>
   if (error && !assets.length) return <ErrorState message={error} />
 
+  const scopeControls = <>
+    <Select fullWidth={false} aria-label="Target kind" value={targetKind} className="w-48"
+      onChange={(event) => setTargetKind(event.target.value as RequestCollectionTargetKind)}>
+      <option value="web">Web application</option>
+      <option value="api">API</option>
+      <option value="network">Asset / network</option>
+      {featureEnabled('devices') && <option value="device">Connected device</option>}
+    </Select>
+    <Combobox aria-label="Collection owner" className="sm:w-80" value={targetId} onChange={setTargetId} options={ownerOptions} noneLabel="All collections"
+      placeholder={choices.length ? 'All collections' : 'No active targets'} searchPlaceholder="Search targets by name, host or environment…" />
+  </>
+  const errorNotice = error && <p className="mb-4 rounded-lg border border-amber-800 bg-amber-950/20 p-3 text-sm text-amber-200">{error}</p>
+
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-6">
+    <div>
       <PageHeader
         title="Request Collections"
         description="Upload once for an asset, bind the same collection to its exact application origins, and attach immutable selection IDs to Scan or Hunt. Documents and environment values stay encrypted."
-        icon={<Braces className="h-6 w-6" />}
         actions={<>
           <Button variant="secondary" onClick={() => void loadCollections()} disabled={!targetId}>
             <RefreshCw className="h-4 w-4" /> Refresh
@@ -456,202 +471,215 @@ function RequestCollectionsContent() {
         </>}
       />
 
-      <Card className="grid gap-4 p-5 md:grid-cols-[180px_minmax(0,1fr)]">
-        <Field label="Target kind">
-          <Select value={targetKind} onChange={(event) => setTargetKind(event.target.value as RequestCollectionTargetKind)}>
-            <option value="web">Web application</option>
-            <option value="api">API</option>
-            <option value="network">Asset / network</option>
-            {featureEnabled('devices') && <option value="device">Connected device</option>}
-          </Select>
-        </Field>
-        <Field label="Collection owner">
-          <Combobox value={targetId} onChange={setTargetId} options={ownerOptions} noneLabel="All collections"
-            placeholder={choices.length ? 'All collections' : 'No active targets'} searchPlaceholder="Search targets by name, host or environment…" />
-        </Field>
-      </Card>
-
-      {error && <p className="rounded-lg border border-amber-800 bg-amber-950/20 p-3 text-sm text-amber-200">{error}</p>}
-
       {!targetId ? (
-        <CollectionLibrary onManage={(collection) => setFilters({ target_id: collection.target_id || undefined, collection: collection.id })} />
-      ) : !collections.length ? (
-        <EmptyState
-          message={targetId ? 'No shared request collections for this target' : 'Choose a collection owner'}
-          hint={targetId
-            ? 'Upload a Postman, HAR, OpenAPI, or Swagger JSON document to begin.'
-            : 'Select the exact asset record that owns this collection. Binding then permits explicit scheme + hostname + port origins on that owner hostname.'}
-          action={targetId ? { label: 'Upload collection', onClick: openUploader } : undefined}
-        />
+        <>
+          {errorNotice}
+          <CollectionLibrary toolbar={scopeControls} onManage={(collection) => setFilters({ target_id: collection.target_id || undefined, collection: collection.id })} />
+        </>
       ) : (
-        <div className="grid gap-5 lg:grid-cols-[280px_minmax(0,1fr)]">
-          <Card className="h-fit space-y-2 p-3">
-            {collections.map((collection) => (
-              <button
-                key={collection.id}
-                type="button"
-                onClick={() => setSelectedId(collection.id)}
-                className={`w-full rounded-lg border p-3 text-left ${
-                  selectedId === collection.id
-                    ? 'border-blue-500 bg-blue-500/10'
-                    : 'border-gray-800 bg-gray-950 hover:border-gray-700'
-                }`}
-              >
-                <span className="block truncate text-sm font-medium text-white">{collection.name}</span>
-                <span className="mt-1 block text-xs text-gray-500">
-                  {collection.format} · {collection.request_count} requests
-                </span>
-              </button>
-            ))}
-          </Card>
-
-          {detail && (
-            <div className="space-y-5">
-              <Card className="p-5">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div>
-                    <h2 className="text-lg font-medium text-white">{detail.collection.name}</h2>
-                    <p className="mt-1 text-xs text-gray-500">
-                      {detail.collection.request_count} requests · {detail.collection.safe_request_count} safe · {detail.collection.potentially_mutating_request_count} potentially state-changing
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="rounded-sm bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300">
-                      encrypted · digest {detail.collection.payload_sha256.slice(0, 12)}
-                    </span>
-                    <Button variant="secondary" size="sm" onClick={() => setDeleting(detail.collection)} disabled={busy}><Trash2 className="h-3.5 w-3.5" /> Deactivate</Button>
-                    <DeleteRecordsButton selection={{ kind: 'request_collection', id: detail.collection.id }} label="Delete permanently"
-                      subject={`collection ${detail.collection.name}`} disabled={busy}
-                      onDeleted={() => { setDetail(null); void loadCollections() }} />
-                  </div>
-                </div>
-              </Card>
-
-              <Card className="space-y-4 p-5">
-                <div>
-                  <h3 className="font-medium text-white">Environments</h3>
-                  <p className="mt-1 text-xs text-gray-500">Stored separately and decrypted only by the assigned worker.</p>
-                </div>
-                {detail.environments.map((environment) => (
-                  <div key={environment.id} className="rounded-sm border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300">
-                    {environment.name} · {environment.variable_count} variables · digest {environment.payload_sha256.slice(0, 12)}
-                  </div>
-                ))}
-                <div className="grid gap-3 md:grid-cols-[220px_minmax(0,1fr)_auto] md:items-end">
-                  <Field label="Environment name"><Input value={newEnvironmentName} onChange={(event) => setNewEnvironmentName(event.target.value)} /></Field>
-                  <Field label="Environment JSON"><Textarea rows={3} value={newEnvironmentText} onChange={(event) => setNewEnvironmentText(event.target.value)} /></Field>
-                  <Button onClick={saveEnvironment} loading={busy} disabled={!newEnvironmentName.trim() || !newEnvironmentText.trim()}>Save</Button>
-                </div>
-              </Card>
-
-              <Card className="space-y-4 p-5">
-                <div>
-                  <h3 className="font-medium text-white">Exact-origin binding</h3>
-                  <p className="mt-1 text-xs text-gray-500">
-                    The asset owns one document. Choose a host or application service for execution; application bindings retain the exact scheme, hostname, and port.
-                  </p>
-                  {selectedChoice && <p className="mt-1 text-xs text-blue-300">Owner: {selectedChoice.label} · hostname source {selectedChoice.locator}</p>}
-                </div>
-                {matchingBindings.map((binding) => (
-                  <div key={binding.id} className="rounded-sm border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300">
-                    {binding.target_id === targetId ? 'Host' : 'Application service'} · {binding.allowed_origins.join(', ')} · {binding.environment_id ? 'environment attached' : 'no environment'}
-                  </div>
-                ))}
-                <Field label="Execution target / service">
-                  <Select value={executionTargetId} onChange={(event) => {
-                    const next = event.target.value
-                    setExecutionTargetId(next)
-                    const origin = assetOrigins.find((item) => item.id === next)
-                    setBindingOrigins(origin ? new URL(origin.url).origin : '')
-                  }}>
-                    <option value={targetId}>Host asset · {selectedChoice?.label || targetId}</option>
-                    {assetOrigins.map((origin) => <option key={origin.id} value={origin.id}>{origin.url}</option>)}
-                  </Select>
-                </Field>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <Field label="Allowed origins (one per line)">
-                    <Textarea rows={3} value={bindingOrigins} onChange={(event) => setBindingOrigins(event.target.value)} placeholder={defaultOrigin(selectedChoice) || 'https://api.example.com'} />
-                  </Field>
-                  <Field label="Environment">
-                    <Select value={bindingEnvironmentId} onChange={(event) => setBindingEnvironmentId(event.target.value)}>
-                      <option value="">No environment</option>
-                      {detail.environments.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}
-                    </Select>
-                  </Field>
-                </div>
-                <Button onClick={saveBinding} loading={busy} disabled={!bindingOrigins.trim()}>Save binding</Button>
-              </Card>
-
-              <Card className="space-y-4 p-5">
-                <div>
-                  <h3 className="font-medium text-white">Named selections</h3>
-                  <p className="mt-1 text-xs text-gray-500">Selectors are frozen with the collection, environment, binding, and replay policy digests.</p>
-                </div>
-                {detail.selections.map((selection) => (
-                  <div key={selection.id} className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300">
-                    <div>
-                      <span className="font-medium text-white">{selection.name}</span>
-                      <span className="ml-2 text-xs text-gray-500">{selection.selected_request_count} requests · {selection.replay_policy.replaceAll('_', ' ')} · {selection.selection_digest.slice(0, 12)}</span>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button variant="secondary" size="sm" onClick={() => loadSelectionForEdit(selection, false)}><Pencil className="h-3.5 w-3.5" /> Replace</Button>
-                      <Button variant="secondary" size="sm" onClick={() => loadSelectionForEdit(selection, true)}><Copy className="h-3.5 w-3.5" /> Clone</Button>
-                      <Button variant="danger" size="sm" onClick={() => void deactivateSelection(selection.id)} disabled={busy}><Trash2 className="h-3.5 w-3.5" /> Deactivate</Button>
-                    </div>
-                  </div>
-                ))}
-                {!matchingBindings.length ? (
-                  <p className="rounded-sm border border-amber-800 bg-amber-950/20 p-3 text-xs text-amber-200">Save an exact {targetKind} binding before creating a selection.</p>
-                ) : (
-                  <div className="space-y-3 rounded-sm border border-gray-800 bg-gray-950 p-4">
-                    <div className="grid gap-3 md:grid-cols-3">
-                      <Field label="Selection name"><Input value={selectionName} onChange={(event) => setSelectionName(event.target.value)} /></Field>
-                      <Field label="Binding"><Select value={selectionBindingId} onChange={(event) => setSelectionBindingId(event.target.value)}>{matchingBindings.map((binding) => <option key={binding.id} value={binding.id}>{binding.allowed_origins.join(', ')}</option>)}</Select></Field>
-                      <Field label="Replay policy"><Select value={replayPolicy} onChange={(event) => setReplayPolicy(event.target.value as RequestCollectionReplayPolicy)}><option value="discovery_only">Discovery only</option><option value="safe_reads">Safe reads</option><option value="confirmed_active">Confirmed active</option></Select></Field>
-                    </div>
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <Field label="Request IDs"><Textarea rows={2} value={requestIds} onChange={(event) => setRequestIds(event.target.value)} /></Field>
-                      <Field label="Folders"><Textarea rows={2} value={folders} onChange={(event) => setFolders(event.target.value)} /></Field>
-                      <Field label="Methods"><Input value={methods} onChange={(event) => setMethods(event.target.value)} placeholder="GET, HEAD" /></Field>
-                      <Field label="Tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="smoke, authenticated" /></Field>
-                      <Field label="Path regular expression"><Input value={pathRegex} onChange={(event) => setPathRegex(event.target.value)} placeholder="^/api/" /></Field>
-                      <Field label="Maximum requests"><Input type="number" min="1" max="2000" value={maxRequests} onChange={(event) => setMaxRequests(event.target.value)} /></Field>
-                    </div>
-                    <label className={`flex items-start gap-3 text-sm ${replayPolicy === 'confirmed_active' ? 'text-gray-300' : 'text-gray-600'}`}>
-                      <input type="checkbox" checked={safeMethodsOnly} disabled={replayPolicy !== 'confirmed_active'} onChange={(event) => setSafeMethodsOnly(event.target.checked)} />
-                      Safe methods only. Turning this off is only valid for confirmed-active selections; execution still requires active testing, state-changing permission, and a target-bound approval.
-                    </label>
-                    <p className="text-xs text-gray-500">Saving an existing name replaces its selector and digest; changing the name creates a clone. Historical scan bindings remain immutable.</p>
-                    <Button onClick={saveSelection} loading={busy} disabled={!selectionName.trim() || !selectionBindingId}>Save selection</Button>
-                  </div>
-                )}
-              </Card>
-
-              <Card className="overflow-hidden">
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 p-5">
-                  <div>
-                    <h3 className="font-medium text-white">Redacted request inventory</h3>
-                    <p className="mt-1 text-xs text-gray-500">URLs are redacted; headers, bodies, cookies, and environment values are never returned.</p>
-                  </div>
-                  <span className="text-xs text-gray-500">{inventoryOffset + 1}–{Math.min(inventoryOffset + inventory.length, inventoryTotal)} of {inventoryTotal}</span>
-                </div>
-                <div className="divide-y divide-gray-800">
-                  {inventory.map((item) => (
-                    <div key={item.request_id} className="grid gap-2 p-4 text-sm md:grid-cols-[90px_minmax(0,1fr)_180px]">
-                      <span className={item.safe_method ? 'text-emerald-300' : 'text-amber-300'}>{item.method}</span>
-                      <span className="min-w-0 truncate text-gray-300">{item.name || item.normalized_path || item.redacted_url}</span>
-                      <span className="truncate text-xs text-gray-500">{item.tags.join(', ') || item.folder || 'untagged'}</span>
-                    </div>
+        <>
+          <Toolbar>{scopeControls}</Toolbar>
+          {errorNotice}
+          {!collections.length ? (
+            <EmptyState
+              message={targetId ? 'No shared request collections for this target' : 'Choose a collection owner'}
+              hint={targetId
+                ? 'Upload a Postman, HAR, OpenAPI, or Swagger JSON document to begin.'
+                : 'Select the exact asset record that owns this collection. Binding then permits explicit scheme + hostname + port origins on that owner hostname.'}
+              action={targetId ? { label: 'Upload collection', onClick: openUploader } : undefined}
+            />
+          ) : (
+            <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
+              <Card className="h-fit p-1">
+                <ul aria-label="Collections for this owner" className="space-y-0.5">
+                  {collections.map((collection) => (
+                    <li key={collection.id}>
+                      <button
+                        type="button"
+                        aria-current={selectedId === collection.id ? 'true' : undefined}
+                        onClick={() => setSelectedId(collection.id)}
+                        className={`w-full rounded-md px-3 py-2 text-left transition-colors ${
+                          selectedId === collection.id
+                            ? 'bg-gray-800 text-white'
+                            : 'text-gray-300 hover:bg-gray-800/50 hover:text-gray-100'
+                        }`}
+                      >
+                        <span className="block truncate text-sm font-medium">{collection.name}</span>
+                        <span className="mt-0.5 block text-xs text-gray-500">
+                          {collection.format.replaceAll('_', ' ')} · <span className="tabular-nums">{collection.request_count}</span> requests
+                        </span>
+                      </button>
+                    </li>
                   ))}
-                </div>
-                <div className="flex justify-end gap-2 border-t border-gray-800 p-4">
-                  <Button variant="secondary" disabled={inventoryOffset === 0} onClick={() => void loadDetail(Math.max(0, inventoryOffset - 100))}><ChevronLeft className="h-4 w-4" /> Previous</Button>
-                  <Button variant="secondary" disabled={inventoryOffset + inventory.length >= inventoryTotal} onClick={() => void loadDetail(inventoryOffset + 100)}>Next <ChevronRight className="h-4 w-4" /></Button>
-                </div>
+                </ul>
               </Card>
+
+              {detail && (
+                <div className="space-y-4">
+                  <Card className="p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <h2 className="truncate text-base font-semibold text-white">{detail.collection.name}</h2>
+                        <p className="mt-1 text-xs tabular-nums text-gray-400">
+                          {detail.collection.request_count} requests · {detail.collection.safe_request_count} safe · {detail.collection.potentially_mutating_request_count} potentially state-changing
+                        </p>
+                        <p className="mt-1 flex items-center gap-1.5 text-xs text-gray-500">
+                          <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+                          encrypted · digest <span className="font-mono">{detail.collection.payload_sha256.slice(0, 12)}</span>
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Button variant="secondary" size="sm" onClick={() => setDeleting(detail.collection)} disabled={busy}><Trash2 className="h-3.5 w-3.5" /> Deactivate</Button>
+                        <DeleteRecordsButton selection={{ kind: 'request_collection', id: detail.collection.id }} label="Delete permanently"
+                          variant="ghost" className="text-red-300 hover:bg-red-500/10 hover:text-red-200"
+                          subject={`collection ${detail.collection.name}`} disabled={busy}
+                          onDeleted={() => { setDetail(null); void loadCollections() }} />
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4 p-4">
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-100">Environments</h3>
+                      <p className="mt-0.5 text-xs text-gray-400">Stored separately and decrypted only by the assigned worker.</p>
+                    </div>
+                    {detail.environments.length > 0 && (
+                      <ul className="divide-y divide-gray-800 rounded-lg border border-gray-800">
+                        {detail.environments.map((environment) => (
+                          <li key={environment.id} className="flex flex-wrap items-center gap-x-3 px-3 py-2 text-sm text-gray-300">
+                            <span className="font-medium text-gray-100">{environment.name}</span>
+                            <span className="text-xs tabular-nums text-gray-500">{environment.variable_count} variables · digest <span className="font-mono">{environment.payload_sha256.slice(0, 12)}</span></span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="grid gap-3 md:grid-cols-[220px_minmax(0,1fr)_auto] md:items-end">
+                      <Field label="Environment name"><Input value={newEnvironmentName} onChange={(event) => setNewEnvironmentName(event.target.value)} /></Field>
+                      <Field label="Environment JSON"><Textarea rows={3} value={newEnvironmentText} onChange={(event) => setNewEnvironmentText(event.target.value)} /></Field>
+                      <Button variant="secondary" onClick={saveEnvironment} loading={busy} disabled={!newEnvironmentName.trim() || !newEnvironmentText.trim()}>Save</Button>
+                    </div>
+                  </Card>
+
+                  <Card className="space-y-4 p-4">
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-100">Exact-origin binding</h3>
+                      <p className="mt-0.5 text-xs text-gray-400">
+                        The asset owns one document. Choose a host or application service for execution; application bindings retain the exact scheme, hostname, and port.
+                      </p>
+                      {selectedChoice && <p className="mt-1 text-xs text-gray-500">Owner: <span className="text-gray-300">{selectedChoice.label}</span> · hostname source <span className="font-mono">{selectedChoice.locator}</span></p>}
+                    </div>
+                    {matchingBindings.length > 0 && (
+                      <ul className="divide-y divide-gray-800 rounded-lg border border-gray-800">
+                        {matchingBindings.map((binding) => (
+                          <li key={binding.id} className="px-3 py-2 text-xs text-gray-300">
+                            <span className="font-medium text-gray-100">{binding.target_id === targetId ? 'Host' : 'Application service'}</span> · <span className="font-mono">{binding.allowed_origins.join(', ')}</span> · {binding.environment_id ? 'environment attached' : 'no environment'}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <Field label="Execution target / service">
+                      <Select value={executionTargetId} onChange={(event) => {
+                        const next = event.target.value
+                        setExecutionTargetId(next)
+                        const origin = assetOrigins.find((item) => item.id === next)
+                        setBindingOrigins(origin ? new URL(origin.url).origin : '')
+                      }}>
+                        <option value={targetId}>Host asset · {selectedChoice?.label || targetId}</option>
+                        {assetOrigins.map((origin) => <option key={origin.id} value={origin.id}>{origin.url}</option>)}
+                      </Select>
+                    </Field>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <Field label="Allowed origins (one per line)">
+                        <Textarea rows={3} value={bindingOrigins} onChange={(event) => setBindingOrigins(event.target.value)} placeholder={defaultOrigin(selectedChoice) || 'https://api.example.com'} />
+                      </Field>
+                      <Field label="Environment">
+                        <Select value={bindingEnvironmentId} onChange={(event) => setBindingEnvironmentId(event.target.value)}>
+                          <option value="">No environment</option>
+                          {detail.environments.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}
+                        </Select>
+                      </Field>
+                    </div>
+                    <Button variant="secondary" onClick={saveBinding} loading={busy} disabled={!bindingOrigins.trim()}>Save binding</Button>
+                  </Card>
+
+                  <Card className="space-y-4 p-4">
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-100">Named selections</h3>
+                      <p className="mt-0.5 text-xs text-gray-400">Selectors are frozen with the collection, environment, binding, and replay policy digests.</p>
+                    </div>
+                    {detail.selections.length > 0 && (
+                      <ul className="divide-y divide-gray-800 rounded-lg border border-gray-800">
+                        {detail.selections.map((selection) => (
+                          <li key={selection.id} className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 text-sm text-gray-300">
+                            <div className="min-w-0">
+                              <span className="font-medium text-gray-100">{selection.name}</span>
+                              <span className="ml-2 text-xs text-gray-500"><span className="tabular-nums">{selection.selected_request_count}</span> requests · {selection.replay_policy.replaceAll('_', ' ')} · <span className="font-mono">{selection.selection_digest.slice(0, 12)}</span></span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <Button variant="secondary" size="sm" onClick={() => loadSelectionForEdit(selection, false)}><Pencil className="h-3.5 w-3.5" /> Replace</Button>
+                              <ActionMenu label={`More actions for ${selection.name}`}>
+                                <MenuItem icon={<Copy />} onSelect={() => loadSelectionForEdit(selection, true)} description="Load a copy into the form below">Clone</MenuItem>
+                                <MenuItem icon={<Trash2 />} tone="danger" disabled={busy} onSelect={() => void deactivateSelection(selection.id)} description="Historical scan records are retained">Deactivate</MenuItem>
+                              </ActionMenu>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {!matchingBindings.length ? (
+                      <p className="rounded-lg border border-amber-800 bg-amber-950/20 p-3 text-xs text-amber-200">Save an exact {targetKind} binding before creating a selection.</p>
+                    ) : (
+                      <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-4">
+                        <div className="grid gap-3 md:grid-cols-3">
+                          <Field label="Selection name"><Input value={selectionName} onChange={(event) => setSelectionName(event.target.value)} /></Field>
+                          <Field label="Binding"><Select value={selectionBindingId} onChange={(event) => setSelectionBindingId(event.target.value)}>{matchingBindings.map((binding) => <option key={binding.id} value={binding.id}>{binding.allowed_origins.join(', ')}</option>)}</Select></Field>
+                          <Field label="Replay policy"><Select value={replayPolicy} onChange={(event) => setReplayPolicy(event.target.value as RequestCollectionReplayPolicy)}><option value="discovery_only">Discovery only</option><option value="safe_reads">Safe reads</option><option value="confirmed_active">Confirmed active</option></Select></Field>
+                        </div>
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <Field label="Request IDs"><Textarea rows={2} value={requestIds} onChange={(event) => setRequestIds(event.target.value)} /></Field>
+                          <Field label="Folders"><Textarea rows={2} value={folders} onChange={(event) => setFolders(event.target.value)} /></Field>
+                          <Field label="Methods"><Input value={methods} onChange={(event) => setMethods(event.target.value)} placeholder="GET, HEAD" /></Field>
+                          <Field label="Tags"><Input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="smoke, authenticated" /></Field>
+                          <Field label="Path regular expression"><Input value={pathRegex} onChange={(event) => setPathRegex(event.target.value)} placeholder="^/api/" /></Field>
+                          <Field label="Maximum requests"><Input type="number" min="1" max="2000" value={maxRequests} onChange={(event) => setMaxRequests(event.target.value)} /></Field>
+                        </div>
+                        <label className={`flex items-start gap-3 text-sm ${replayPolicy === 'confirmed_active' ? 'text-gray-300' : 'text-gray-600'}`}>
+                          <input type="checkbox" checked={safeMethodsOnly} disabled={replayPolicy !== 'confirmed_active'} onChange={(event) => setSafeMethodsOnly(event.target.checked)} />
+                          Safe methods only. Turning this off is only valid for confirmed-active selections; execution still requires active testing, state-changing permission, and a target-bound approval.
+                        </label>
+                        <p className="text-xs text-gray-500">Saving an existing name replaces its selector and digest; changing the name creates a clone. Historical scan bindings remain immutable.</p>
+                        <Button onClick={saveSelection} loading={busy} disabled={!selectionName.trim() || !selectionBindingId}>Save selection</Button>
+                      </div>
+                    )}
+                  </Card>
+
+                  <Card className="overflow-hidden">
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 px-4 py-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-gray-100">Redacted request inventory</h3>
+                        <p className="mt-0.5 text-xs text-gray-400">URLs are redacted; headers, bodies, cookies, and environment values are never returned.</p>
+                      </div>
+                      <span className="text-xs tabular-nums text-gray-500">{inventoryOffset + 1}–{Math.min(inventoryOffset + inventory.length, inventoryTotal)} of {inventoryTotal}</span>
+                    </div>
+                    <div className="divide-y divide-gray-800">
+                      {inventory.map((item) => (
+                        <div key={item.request_id} className="grid gap-2 px-4 py-2.5 text-sm transition-colors hover:bg-gray-800/40 md:grid-cols-[90px_minmax(0,1fr)_180px]">
+                          <span className={`font-mono text-xs leading-5 ${item.safe_method ? 'text-emerald-300' : 'text-amber-300'}`}>{item.method}</span>
+                          <span className="min-w-0 truncate text-gray-300">{item.name || item.normalized_path || item.redacted_url}</span>
+                          <span className="truncate text-xs leading-5 text-gray-500">{item.tags.join(', ') || item.folder || 'untagged'}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex justify-end gap-2 border-t border-gray-800 px-4 py-3">
+                      <Button variant="secondary" size="sm" disabled={inventoryOffset === 0} onClick={() => void loadDetail(Math.max(0, inventoryOffset - 100))}><ChevronLeft className="h-4 w-4" /> Previous</Button>
+                      <Button variant="secondary" size="sm" disabled={inventoryOffset + inventory.length >= inventoryTotal} onClick={() => void loadDetail(inventoryOffset + 100)}>Next <ChevronRight className="h-4 w-4" /></Button>
+                    </div>
+                  </Card>
+                </div>
+              )}
             </div>
           )}
-        </div>
+        </>
       )}
 
       <ConfirmDialog
@@ -668,7 +696,7 @@ function RequestCollectionsContent() {
       <Modal open={uploaderOpen} onClose={() => setUploaderOpen(false)} title="Upload request collection" size="xl">
         <div className="space-y-4">
           {uploadErrors.form && (
-            <div role="alert" className="rounded-sm border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">
+            <div role="alert" className="rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">
               {uploadErrors.form}
             </div>
           )}
@@ -686,7 +714,7 @@ function RequestCollectionsContent() {
           </div>
           <Field label="Environment JSON (optional)" error={uploadErrors.environment}><Textarea rows={5} value={environmentText} onChange={(event) => { setEnvironmentText(event.target.value); setUploadErrors({}) }} /></Field>
           {<Field label="Application base URL (optional)"><Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://device.local:8443" /></Field>}
-          <p className="rounded-sm border border-emerald-800 bg-emerald-950/20 p-3 text-xs text-emerald-200">After validation, only encrypted documents and a redacted index are stored. This screen never reads secret-bearing content back.</p>
+          <p className="flex items-start gap-2 rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400"><ShieldCheck className="mt-px h-3.5 w-3.5 shrink-0 text-gray-500" aria-hidden="true" />After validation, only encrypted documents and a redacted index are stored. This screen never reads secret-bearing content back.</p>
           <div className="flex justify-end gap-3">
             <Button variant="secondary" onClick={() => setUploaderOpen(false)}>Cancel</Button>
             <Button onClick={uploadCollection} loading={busy} disabled={!documentText.trim()}>Validate and upload</Button>

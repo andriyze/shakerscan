@@ -126,8 +126,8 @@ export default function AuthenticationProfiles({ targetId, credentials }: {
 
   if (!enabled) return error ? <p role="status" className="mb-4 text-sm text-amber-300">{error}</p> : null
   const inputClass = 'mt-1 w-full rounded-sm border border-gray-700 bg-gray-950 p-2 focus:outline-hidden focus:ring-2 focus:ring-blue-400'
-  return <section aria-label="Authentication profiles" className="mb-6 rounded-xl border border-gray-800 p-5">
-    <h2 className="text-lg font-semibold">Authentication profiles · internal preview</h2>
+  return <section aria-label="Authentication profiles" className="mb-4 rounded-lg border border-gray-800 bg-gray-900 p-4">
+    <h2 className="text-sm font-semibold text-gray-100">Authentication profiles · internal preview</h2>
     <p className="my-2 text-sm text-gray-400">Reviewed configuration does not grant target authorization. Scan selection is not supported in this preview. Existing credentials do not prove accepted identity.</p>
     <button type="button" className="my-2 rounded-sm border border-gray-600 px-3 py-2 focus:ring-2 focus:ring-blue-400" onClick={() => start(null)}>New authentication profile</button>
     {error && <p role="alert" className="my-2 text-sm text-amber-300">{error}</p>}

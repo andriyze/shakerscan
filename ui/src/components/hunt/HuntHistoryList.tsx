@@ -1,9 +1,9 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Search } from 'lucide-react'
+import { X } from 'lucide-react'
 
-import { Card, EmptyState, ErrorState, Field, Input, Select, TableSkeleton, buttonClasses } from '@/components/ui'
+import { Button, EmptyState, ErrorState, SearchInput, Select, TableSkeleton, Toolbar, tableStyles } from '@/components/ui'
 import { huntStatusLabel } from '@/lib/labels'
 import { listHuntsV2, type HuntSortField, type HuntV2 } from '@/lib/huntV2'
 import { huntTargetTitle } from '@/lib/huntListModel.mjs'
@@ -108,75 +108,74 @@ export function HuntHistoryList() {
   return (
     <div>
 
-      {targetId && (
-        <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-gray-400">Target</span>
-          <span className="inline-flex items-center gap-2 rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-blue-100" data-testid="hunts-target-filter">
+      <Toolbar>
+        <SearchInput
+          wrapperClassName="min-w-[220px] flex-1 sm:max-w-sm"
+          aria-label="Search hunts by target or objective"
+          placeholder="Search target or objective…"
+          value={searchInput}
+          onValueChange={setSearchInput}
+        />
+        <Select
+          fullWidth={false}
+          aria-label="Filter by status"
+          value={status}
+          onChange={(event) => setFilter('status', event.target.value || undefined)}
+        >
+          <option value="">All statuses</option>
+          {STATUSES.map((value) => (
+            <option key={value} value={value}>{huntStatusLabel(value)}</option>
+          ))}
+        </Select>
+        <Select
+          fullWidth={false}
+          aria-label="Filter by target kind"
+          value={kind}
+          onChange={(event) => setFilter('kind', event.target.value || undefined)}
+        >
+          <option value="">All target kinds</option>
+          {['web', 'api', 'device', 'network'].map((value) => (
+            <option key={value} value={value}>{value}</option>
+          ))}
+        </Select>
+        <Select
+          fullWidth={false}
+          aria-label="Sort hunts"
+          value={`${sort}:${order}`}
+          onChange={(event) => {
+            const [nextSort, nextOrder] = event.target.value.split(':')
+            setFilter('sort', nextSort)
+            setFilter('order', nextOrder)
+          }}
+        >
+          {SORT_OPTIONS.flatMap((option) => ([
+            <option key={`${option.value}:desc`} value={`${option.value}:desc`}>Sort: {option.label} (newest)</option>,
+            <option key={`${option.value}:asc`} value={`${option.value}:asc`}>Sort: {option.label} (oldest)</option>,
+          ]))}
+        </Select>
+        {targetId && (
+          <span
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1 text-xs text-gray-300"
+            data-testid="hunts-target-filter"
+          >
+            <span className="text-gray-500">Target</span>
             {scopedTarget ? huntTargetTitle(scopedTarget) : targetId}
             <button
               type="button"
               onClick={() => setFilter('target_id', undefined)}
-              className="text-blue-300 hover:text-white"
+              className="rounded-sm text-gray-500 hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
               aria-label="Show Hunts for every target"
             >
-              ×
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
           </span>
-        </div>
-      )}
+        )}
+      </Toolbar>
 
-      <Card className="mb-4 p-4">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="Status">
-            <Select value={status} onChange={(event) => setFilter('status', event.target.value || undefined)}>
-              <option value="">All statuses</option>
-              {STATUSES.map((value) => (
-                <option key={value} value={value}>{huntStatusLabel(value)}</option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Target kind">
-            <Select value={kind} onChange={(event) => setFilter('kind', event.target.value || undefined)}>
-              <option value="">All kinds</option>
-              {['web', 'api', 'device', 'network'].map((value) => (
-                <option key={value} value={value}>{value}</option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="Sort by">
-            <Select
-              value={`${sort}:${order}`}
-              onChange={(event) => {
-                const [nextSort, nextOrder] = event.target.value.split(':')
-                setFilter('sort', nextSort)
-                setFilter('order', nextOrder)
-              }}
-            >
-              {SORT_OPTIONS.flatMap((option) => ([
-                <option key={`${option.value}:desc`} value={`${option.value}:desc`}>{option.label} (newest)</option>,
-                <option key={`${option.value}:asc`} value={`${option.value}:asc`}>{option.label} (oldest)</option>,
-              ]))}
-            </Select>
-          </Field>
-          <Field label="Search">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
-              <Input
-                className="pl-9"
-                aria-label="Search hunts by target or objective"
-                placeholder="Target or objective"
-                value={searchInput}
-                onChange={(event) => setSearchInput(event.target.value)}
-              />
-            </div>
-          </Field>
-        </div>
-      </Card>
-
-      {loadError && <ErrorState message={loadError} onRetry={() => load()} />}
+      {loadError && <div className="mb-4"><ErrorState message={loadError} onRetry={() => load()} /></div>}
 
       {!loadError && !loading && (
-        <p className="mb-3 text-sm text-gray-500">
+        <p className="mb-3 text-xs tabular-nums text-gray-400">
           {total === 0
             ? 'No hunts'
             : total <= PAGE_SIZE
@@ -195,33 +194,33 @@ export function HuntHistoryList() {
             : 'Start one from a target to investigate it with an agent session.'}
         />
       ) : (
-        <Card className="overflow-hidden p-0">
-          <div className="hidden grid-cols-[7.5rem_minmax(0,2.2fr)_minmax(0,1fr)_8rem] gap-4 border-b border-gray-800 px-4 py-2 text-[11px] font-medium uppercase tracking-wider text-gray-500 lg:grid">
+        <div className={tableStyles.container}>
+          <div className="hidden grid-cols-[8.5rem_minmax(0,2.2fr)_minmax(0,1fr)_8rem] gap-4 border-b border-gray-800 px-4 py-2.5 text-xs font-medium text-gray-400 lg:grid">
             <span>Status</span><span>Objective &amp; target</span><span>Activity</span><span className="text-right">Started</span>
           </div>
           <HuntRunList runs={hunts} />
-        </Card>
+        </div>
       )}
 
       {total > PAGE_SIZE && (
-        <div className="mt-4 flex items-center justify-between">
-          <button
-            type="button"
-            className={buttonClasses('secondary')}
+        <div className="mt-3 flex items-center justify-between">
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={page <= 1}
             onClick={() => setFilter('page', page - 1)}
           >
             Previous
-          </button>
-          <span className="text-sm text-gray-500">Page {page} of {maxPage}</span>
-          <button
-            type="button"
-            className={buttonClasses('secondary')}
+          </Button>
+          <span className="text-xs tabular-nums text-gray-400">Page {page} of {maxPage}</span>
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={page >= maxPage}
             onClick={() => setFilter('page', page + 1)}
           >
             Next
-          </button>
+          </Button>
         </div>
       )}
     </div>

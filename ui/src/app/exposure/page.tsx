@@ -4,8 +4,6 @@ import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { useRouter } from 'next/navigation'
 import {
-  AlertTriangle,
-  ArrowLeft,
   Bot,
   Boxes,
   Cloud,
@@ -14,11 +12,10 @@ import {
   GitBranch,
   Globe2,
   KeyRound,
+  ChevronLeft,
   Layers,
-  ListTree,
   Loader2,
   Package,
-  Radar,
   RefreshCw,
   Route,
   Search,
@@ -49,22 +46,35 @@ import {
 } from '@/lib/api'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { Button, CardSkeleton, EmptyState, ErrorState, useToast } from '@/components/ui'
+import {
+  Button,
+  Card,
+  CardSkeleton,
+  EmptyState,
+  ErrorState,
+  PageHeader,
+  SearchInput,
+  Select,
+  Stat,
+  StatGroup,
+  useToast,
+} from '@/components/ui'
 import { ExposureGraph as ExposureGraphCanvas, NODE_HEX } from '@/components/ExposureGraph'
 import { TriageTable, PriorityBadge, riskDot, isProductionAIAsset, postureMatches, POSTURE_FILTERS, type PostureFilter, type TriageSort } from './TriageTable'
 import { ChangesStrip } from './ChangesStrip'
 import { AttackPaths } from './AttackPaths'
 import { ServicesView } from './ServicesView'
-import styles from './exposure.module.css'
 
 type Lens = 'triage' | 'services' | 'map' | 'paths'
 
-const LENSES: Array<{ value: Lens; label: string; icon: typeof ListTree }> = [
-  { value: 'triage', label: 'Triage', icon: ListTree },
-  { value: 'services', label: 'Services', icon: Route },
-  { value: 'map', label: 'Map', icon: Radar },
-  { value: 'paths', label: 'Attack paths', icon: GitBranch },
+const LENSES: Array<{ value: Lens; label: string }> = [
+  { value: 'triage', label: 'Triage' },
+  { value: 'services', label: 'Services' },
+  { value: 'map', label: 'Map' },
+  { value: 'paths', label: 'Attack paths' },
 ]
+
+const SUBHEADING = 'text-xs font-medium text-gray-400'
 
 const KIND_ABBR: Record<ExposureAssetKind, string> = { web: 'Web', ai: 'AI', model: 'Model' }
 
@@ -236,34 +246,6 @@ function NodePill({ node, onFocus }: { node: ExposureNode; onFocus?: (node: Expo
   return body
 }
 
-function Panel({ className = '', children }: { className?: string; children: React.ReactNode }) {
-  return <div className={`${styles.module} ${styles.corners} ${className}`}>{children}</div>
-}
-
-function StatPanel({
-  label,
-  value,
-  icon,
-  alert = false,
-}: {
-  label: string
-  value: string | number
-  icon: React.ReactNode
-  alert?: boolean
-}) {
-  return (
-    <Panel className="p-4">
-      <div className="flex items-start justify-between">
-        <div>
-          <div className={styles.statLabel}>{label}</div>
-          <div className={`${styles.statValue} ${alert ? styles.statAlert : ''}`}>{value}</div>
-        </div>
-        <div className="p-1 text-teal-200/40">{icon}</div>
-      </div>
-    </Panel>
-  )
-}
-
 function PostureSummary({
   metrics,
   kind,
@@ -283,12 +265,13 @@ function PostureSummary({
   const priorityItems: Array<{ label: string; value: number; tone: string; posture: PostureFilter }> = [
     { label: 'P1', value: metrics?.p1_count ?? 0, tone: 'text-red-300', posture: 'p1' },
     { label: 'P2', value: metrics?.p2_count ?? 0, tone: 'text-orange-300', posture: 'p2' },
-    { label: 'P3', value: metrics?.p3_count ?? 0, tone: 'text-slate-300', posture: 'p3' },
+    { label: 'P3', value: metrics?.p3_count ?? 0, tone: 'text-gray-200', posture: 'p3' },
   ]
+  // Kinds are categories, not risk: they stay neutral so color keeps meaning severity.
   const kindItems: Array<{ label: string; value: number; tone: string; kind: ExposureAssetKind }> = [
-    { label: 'Web', value: metrics?.web_targets ?? 0, tone: 'text-blue-300', kind: 'web' },
-    { label: 'AI', value: metrics?.ai_surfaces ?? 0, tone: 'text-purple-300', kind: 'ai' },
-    { label: 'Models', value: metrics?.model_artifacts ?? 0, tone: 'text-teal-300', kind: 'model' },
+    { label: 'Web', value: metrics?.web_targets ?? 0, tone: 'text-gray-100', kind: 'web' },
+    { label: 'AI', value: metrics?.ai_surfaces ?? 0, tone: 'text-gray-100', kind: 'ai' },
+    { label: 'Models', value: metrics?.model_artifacts ?? 0, tone: 'text-gray-100', kind: 'model' },
   ]
   // Scan-hygiene + internal exposure: each isolates an actionable, *narrow*
   // slice. "Public" is deliberately omitted — it selects ~two thirds of assets,
@@ -303,10 +286,10 @@ function PostureSummary({
     // asset that also has critical/high risk) — the raw inverse is ~all assets.
     { label: 'Unverified high', value: metrics?.unverified_high_assets ?? 0, tone: 'text-orange-300', posture: 'unverified_high' },
     { label: 'Unowned', value: metrics?.unowned_assets ?? 0, tone: 'text-amber-200', posture: 'unowned' },
-    { label: 'Internal', value: metrics?.internal_assets ?? 0, tone: 'text-slate-300', posture: 'internal' },
+    { label: 'Internal', value: metrics?.internal_assets ?? 0, tone: 'text-gray-200', posture: 'internal' },
     { label: 'Unscanned', value: metrics?.unscanned_assets ?? 0, tone: 'text-red-300', posture: 'unscanned' },
     { label: 'Failed', value: metrics?.failed_scans ?? 0, tone: 'text-red-200', posture: 'failed' },
-    { label: 'Stale', value: metrics?.stale_assets ?? 0, tone: 'text-yellow-300', posture: 'stale' },
+    { label: 'Stale', value: metrics?.stale_assets ?? 0, tone: 'text-amber-300', posture: 'stale' },
     { label: 'Incomplete', value: metrics?.incomplete_scans ?? 0, tone: 'text-amber-300', posture: 'incomplete' },
   ]
   const postureItems = postureItemsAll.filter((item) => item.value > 0)
@@ -318,21 +301,21 @@ function PostureSummary({
       type="button"
       aria-pressed={active}
       onClick={onClick}
-      className={`min-w-0 rounded px-2 py-1 text-left transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
-        active ? 'bg-teal-500/15 ring-1 ring-teal-400/40' : 'hover:bg-gray-800/60'
+      className={`min-w-0 rounded-md px-2 py-1 text-left transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
+        active ? 'bg-gray-800 ring-1 ring-inset ring-blue-500/60' : 'hover:bg-gray-800/60'
       }`}
     >
-      <div className={`text-sm font-semibold ${tone}`}>{value}</div>
-      <div className="text-[10px] uppercase tracking-wide text-gray-600">{label}</div>
+      <div className={`text-sm font-semibold tabular-nums ${tone}`}>{value}</div>
+      <div className="text-xs text-gray-500">{label}</div>
     </button>
   )
 
   return (
-    <Panel className="p-3">
+    <Card className="p-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <div className="mr-1 shrink-0">
-          <div className={`${styles.displayTitle} text-xs uppercase tracking-wide text-gray-400`}>Filter inventory</div>
-          <div className="text-[11px] text-gray-600">{metrics?.needs_action ?? 0} of {metrics?.asset_count ?? 0} need action · click to filter</div>
+          <div className="text-sm font-semibold text-gray-100">Filter inventory</div>
+          <div className="text-xs text-gray-500">{metrics?.needs_action ?? 0} of {metrics?.asset_count ?? 0} need action · click to filter</div>
         </div>
         {priorityItems.map((item) => tile(item.label, item.label, item.value, item.tone, posture === item.posture, () => onPosture(posture === item.posture ? 'all' : item.posture)))}
         <span className="h-8 w-px bg-gray-800" aria-hidden="true" />
@@ -343,13 +326,13 @@ function PostureSummary({
           <button
             type="button"
             onClick={() => { onKind('all'); onPosture('all') }}
-            className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-sm px-2 py-1 text-[11px] text-gray-400 hover:bg-gray-800/60 hover:text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs text-gray-400 hover:bg-gray-800/60 hover:text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <X className="h-3 w-3" aria-hidden="true" /> Clear
           </button>
         )}
       </div>
-    </Panel>
+    </Card>
   )
 }
 
@@ -377,7 +360,7 @@ function AgentFindingsSection({ targetId }: { targetId: string }) {
     <Link
       key={finding.id}
       href={`/findings/${finding.id}`}
-      className="flex items-center gap-2 rounded-lg border border-gray-800 bg-gray-950 px-2.5 py-1.5 hover:bg-gray-800/50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+      className="-mx-2 flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-gray-800/50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
     >
       <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] uppercase ${severityClass(finding.severity)}`}>{finding.severity}</span>
       <span className="min-w-0 truncate text-xs text-gray-200">{finding.title}</span>
@@ -386,29 +369,29 @@ function AgentFindingsSection({ targetId }: { targetId: string }) {
 
   return (
     <div>
-      <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500">
+      <div className={`mb-2 flex items-center gap-2 ${SUBHEADING}`}>
         <span>Hunt findings</span>
         <Link
           href={`/hunt?target=${encodeURIComponent(targetId)}`}
-          className="ml-auto rounded-sm text-[11px] normal-case text-blue-400 hover:text-blue-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="ml-auto rounded-sm text-xs text-blue-400 hover:text-blue-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           Open Hunt →
         </Link>
       </div>
       {verified.length > 0 && (
         <div className="mb-2">
-          <div className="mb-1 flex items-center gap-1.5 text-[11px] text-emerald-300">
+          <div className="mb-1 flex items-center gap-1.5 text-xs text-emerald-300">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" /> Verified ({verified.length})
           </div>
-          <div className="space-y-1">{verified.slice(0, 6).map(row)}</div>
+          <div>{verified.slice(0, 6).map(row)}</div>
         </div>
       )}
       {suspected.length > 0 && (
         <div>
-          <div className="mb-1 flex items-center gap-1.5 text-[11px] text-amber-300">
+          <div className="mb-1 flex items-center gap-1.5 text-xs text-amber-300">
             <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" /> Suspected ({suspected.length})
           </div>
-          <div className="space-y-1">{suspected.slice(0, 6).map(row)}</div>
+          <div>{suspected.slice(0, 6).map(row)}</div>
         </div>
       )}
     </div>
@@ -435,9 +418,9 @@ function NodeDetailPanel({
     : []
 
   return (
-    <Panel>
-      <div className={`flex items-center justify-between gap-2 p-4 ${styles.moduleHeader}`}>
-        <h2 className={`${styles.displayTitle} text-sm text-white`}>Selected node</h2>
+    <Card>
+      <div className="flex items-center justify-between gap-2 border-b border-gray-800 px-4 py-3">
+        <h2 className="text-sm font-semibold text-gray-100">Selected node</h2>
         <button
           type="button"
           onClick={onClear}
@@ -449,7 +432,7 @@ function NodeDetailPanel({
       </div>
       <div className="space-y-4 p-4">
         <div>
-          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-gray-500">
+          <div className={`flex items-center gap-2 ${SUBHEADING}`}>
             <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: NODE_HEX[node.type] || '#9ca3af' }} aria-hidden="true" />
             {NODE_SINGULAR[node.type] || node.type}
           </div>
@@ -459,11 +442,11 @@ function NodeDetailPanel({
             {node.severity && (
               <span className={`rounded-sm px-2 py-0.5 text-[10px] uppercase ${severityClass(node.severity)}`}>{node.severity}</span>
             )}
-            {node.status && <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-[10px] text-gray-300">{node.status}</span>}
+            {node.status && <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-xs text-gray-300">{node.status}</span>}
             {node.href && (
               <Link
                 href={node.href}
-                className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-[11px] text-blue-400 hover:text-blue-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-xs text-blue-400 hover:text-blue-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 Open <ExternalLink className="h-3 w-3" aria-hidden="true" />
               </Link>
@@ -475,7 +458,7 @@ function NodeDetailPanel({
           <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
             {fields.map(([key, label]) => (
               <div key={key} className="min-w-0">
-                <dt className="text-[11px] text-gray-500">{label}</dt>
+                <dt className="text-xs text-gray-500">{label}</dt>
                 <dd className="truncate text-xs text-gray-200">{formatMetaValue(node.meta[key])}</dd>
               </div>
             ))}
@@ -484,13 +467,13 @@ function NodeDetailPanel({
 
         {members.length > 0 && (
           <div>
-            <div className="mb-2 text-xs uppercase tracking-wide text-gray-500">Findings in this group ({members.length})</div>
-            <div className="max-h-64 space-y-1.5 overflow-auto pr-1">
+            <div className={`mb-2 ${SUBHEADING}`}>Findings in this group ({members.length})</div>
+            <div className="max-h-64 overflow-auto pr-1">
               {members.map((m) => (
                 <Link
                   key={m.id}
                   href={m.href || '#'}
-                  className="flex items-center justify-between gap-2 rounded-lg border border-gray-800 bg-gray-950 px-3 py-2 hover:bg-gray-800/50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+                  className="-mx-2 flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-gray-800/50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                 >
                   <span className="truncate text-xs text-gray-200">{m.title}</span>
                   {m.severity && (
@@ -507,16 +490,16 @@ function NodeDetailPanel({
         )}
 
         <div>
-          <div className="mb-2 text-xs uppercase tracking-wide text-gray-500">
+          <div className={`mb-2 ${SUBHEADING}`}>
             Connected ({neighbors.length})
           </div>
           {neighbors.length === 0 ? (
-            <p className="text-xs text-gray-600">No connected nodes at this depth.</p>
+            <p className="text-xs text-gray-500">No connected nodes at this depth.</p>
           ) : (
             <div className="max-h-72 space-y-2 overflow-auto pr-1">
               {neighbors.map(({ node: nb, label }) => (
                 <div key={`${nb.id}-${label}`}>
-                  <div className="mb-0.5 text-[10px] uppercase tracking-wide text-gray-600">{label}</div>
+                  <div className="mb-0.5 text-xs text-gray-500">{label}</div>
                   <NodePill node={nb} onFocus={onFocus} />
                 </div>
               ))}
@@ -524,7 +507,7 @@ function NodeDetailPanel({
           )}
         </div>
       </div>
-    </Panel>
+    </Card>
   )
 }
 
@@ -540,7 +523,7 @@ function Legend() {
           </span>
         ))}
       </div>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-gray-600">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-gray-500">
         <span>Larger = more findings</span>
         <span className="inline-flex items-center gap-1.5">
           <span className="inline-block h-2.5 w-2.5 rounded-full ring-2 ring-red-500" aria-hidden="true" />
@@ -1033,84 +1016,79 @@ function ExposureView() {
     }
   }, [assetMetrics, filterActive, filteredAssets])
 
-  return (
-    <div className={styles.page}>
-      <div className={styles.pageGlow} aria-hidden="true" />
-      <div className={`${styles.content} space-y-6`}>
-      <div className={`flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between ${styles.rise} ${styles.d1}`}>
-        <div>
-          <div className="flex items-center gap-2.5">
-            <span className={styles.liveDot} aria-hidden="true" />
-            <span className={styles.kicker}>Exposure · live</span>
-          </div>
-          <h1 className={`${styles.displayTitle} mt-1.5 text-2xl font-bold text-white`}>Exposure</h1>
-          <p className="mt-1 text-sm text-gray-400">
-            {lens === 'triage' && 'Risk-ranked inventory of every asset — scan, triage, and drill in.'}
-            {lens === 'services' && 'Service evidence, candidate weaknesses, and service-specific investigation activities.'}
-            {lens === 'map' && 'Connected view — click a node to explore its blast radius.'}
-            {lens === 'paths' && 'Correlated exploit paths across your attack surface.'}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" aria-hidden="true" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(event) => { setSearchQuery(event.target.value); setSearchOpen(true) }}
-              onFocus={() => setSearchOpen(true)}
-              onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  applyTriage({ query: searchQuery })
-                  setSearchOpen(false)
-                } else if (event.key === 'Escape') {
-                  setSearchOpen(false)
-                }
-              }}
-              placeholder="Search assets & findings…"
-              aria-label="Search exposure nodes"
-              className={`w-56 py-2 pl-8 pr-3 text-sm text-white placeholder:text-gray-500 ${styles.input}`}
-            />
-            {searchOpen && searchMatches.length > 0 && (
-              <div className={`absolute z-20 mt-1 max-h-72 w-72 overflow-auto py-1 shadow-xl ${styles.input}`}>
-                <div className="border-b border-gray-800 px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500">
-                  Click — open in map · Enter — filter inventory
-                </div>
-                {searchMatches.map((match) => (
-                  <button
-                    key={match.id}
-                    type="button"
-                    onMouseDown={(event) => { event.preventDefault(); focusById(match.id); setSearchQuery(''); setSearchOpen(false) }}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-gray-800 focus:outline-hidden focus-visible:bg-gray-800"
-                  >
-                    <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: NODE_HEX[match.type] || '#9ca3af' }} aria-hidden="true" />
-                    <span className="truncate text-gray-200">{match.label}</span>
-                    <span className="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-gray-500">{NODE_SINGULAR[match.type] || match.type}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          <select
-            value={domain}
-            onChange={(event) => changeScope({ domain: event.target.value || undefined })}
-            aria-label="Filter by domain"
-            className={`px-3 py-2 text-sm text-white ${styles.input}`}
-          >
-            <option value="">All domains</option>
-            {domains.map((item) => (
-              <option key={item} value={item}>{item}</option>
-            ))}
-          </select>
-          <Button onClick={refreshActiveLens} disabled={lensBusy}>
-            <RefreshCw className={`h-4 w-4 ${lensBusy ? 'animate-spin' : ''}`} aria-hidden="true" />
-            Refresh
-          </Button>
-        </div>
-      </div>
+  const lensDescription =
+    lens === 'triage' ? 'Risk-ranked inventory of every asset — scan, triage, and drill in.'
+      : lens === 'services' ? 'Service evidence, candidate weaknesses, and service-specific investigation activities.'
+        : lens === 'map' ? 'Connected view — click a node to explore its blast radius.'
+          : 'Correlated exploit paths across your attack surface.'
 
-      <div className={`flex flex-wrap items-center gap-1 ${styles.rise} ${styles.d1}`} role="tablist" aria-label="Exposure lens">
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        title="Exposure"
+        description={lensDescription}
+        actions={
+          <>
+            <div className="relative">
+              <SearchInput
+                value={searchQuery}
+                onValueChange={(value) => { setSearchQuery(value); setSearchOpen(true) }}
+                onFocus={() => setSearchOpen(true)}
+                onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    applyTriage({ query: searchQuery })
+                    setSearchOpen(false)
+                  } else if (event.key === 'Escape') {
+                    setSearchOpen(false)
+                  }
+                }}
+                placeholder="Search assets & findings…"
+                aria-label="Search exposure nodes"
+                wrapperClassName="w-full sm:w-60"
+              />
+              {searchOpen && searchMatches.length > 0 && (
+                <div className="absolute right-0 z-20 mt-1 max-h-72 w-72 max-w-[calc(100vw-2rem)] overflow-auto rounded-lg border border-gray-700 bg-gray-900 py-1 shadow-xl shadow-black/40">
+                  <div className="border-b border-gray-800 px-3 py-1.5 text-xs text-gray-500">
+                    Click — open in map · Enter — filter inventory
+                  </div>
+                  {searchMatches.map((match) => (
+                    <button
+                      key={match.id}
+                      type="button"
+                      onMouseDown={(event) => { event.preventDefault(); focusById(match.id); setSearchQuery(''); setSearchOpen(false) }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-gray-800 focus:outline-hidden focus-visible:bg-gray-800"
+                    >
+                      <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: NODE_HEX[match.type] || '#9ca3af' }} aria-hidden="true" />
+                      <span className="truncate text-gray-200">{match.label}</span>
+                      <span className="ml-auto shrink-0 text-xs text-gray-500">{NODE_SINGULAR[match.type] || match.type}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <Select
+              fullWidth={false}
+              value={domain}
+              onChange={(event) => changeScope({ domain: event.target.value || undefined })}
+              aria-label="Filter by domain"
+              className="max-w-56"
+            >
+              <option value="">All domains</option>
+              {domains.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </Select>
+            <Button variant="secondary" onClick={refreshActiveLens} disabled={lensBusy}>
+              <RefreshCw className={`h-4 w-4 ${lensBusy ? 'animate-spin' : ''}`} aria-hidden="true" />
+              Refresh
+            </Button>
+          </>
+        }
+      />
+
+      {/* Underlined lens tabs, matching the scan report's section tabs. */}
+      <div className="-mx-1 flex gap-1 overflow-x-auto border-b border-gray-800 px-1" role="tablist" aria-label="Exposure lens">
         {LENSES.map((l) => (
           <button
             key={l.value}
@@ -1120,54 +1098,53 @@ function ExposureView() {
             aria-selected={lens === l.value}
             aria-controls={`lens-panel-${l.value}`}
             onClick={() => setLens(l.value)}
-            className={`inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
-              lens === l.value ? 'bg-teal-500/15 text-teal-200' : 'text-gray-400 hover:bg-gray-800/60 hover:text-white'
+            className={`-mb-px inline-flex shrink-0 items-center gap-2 rounded-t-sm border-b-2 px-3 py-2.5 text-sm font-medium transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
+              lens === l.value ? 'border-blue-500 text-white' : 'border-transparent text-gray-400 hover:border-gray-600 hover:text-gray-200'
             }`}
           >
-            <l.icon className="h-4 w-4" aria-hidden="true" />
             {l.label}
             {l.value === 'triage' && newCount > 0 && (
-              <span className="rounded-full bg-teal-400/20 px-1.5 py-0.5 text-[10px] font-semibold text-teal-200">{newCount} new</span>
+              <span className="rounded-full bg-gray-800 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-gray-300">{newCount} new</span>
             )}
           </button>
         ))}
       </div>
 
       {lens !== 'services' && (<>
-      <div className={`grid gap-4 md:grid-cols-2 xl:grid-cols-4 ${styles.rise} ${styles.d2}`}>
-        <StatPanel label={filterActive ? 'Matching assets' : 'Assets'} value={displayedMetrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
-        <StatPanel
-          label="P1 Priorities"
+      <StatGroup columns={4} ariaLabel="Exposure summary">
+        <Stat label={filterActive ? 'Matching assets' : 'Assets'} value={displayedMetrics?.asset_count ?? '--'} />
+        <Stat
+          label="P1 priorities"
           value={displayedMetrics?.p1_count ?? '--'}
-          icon={<Radar className="h-5 w-5" />}
-          alert={Boolean(displayedMetrics && (displayedMetrics.p1_count || 0) > 0)}
+          tone={displayedMetrics && (displayedMetrics.p1_count || 0) > 0 ? 'danger' : 'default'}
         />
-        <StatPanel
+        <Stat
           label="Active critical findings"
           value={displayedMetrics?.active_critical ?? '--'}
-          icon={<AlertTriangle className="h-5 w-5" />}
-          alert={Boolean(displayedMetrics && displayedMetrics.active_critical > 0)}
+          tone={displayedMetrics && displayedMetrics.active_critical > 0 ? 'danger' : 'default'}
         />
-        <StatPanel label="Active high findings" value={displayedMetrics?.active_high ?? '--'} icon={<ShieldAlert className="h-5 w-5" />} />
-      </div>
+        <Stat
+          label="Active high findings"
+          value={displayedMetrics?.active_high ?? '--'}
+          tone={displayedMetrics && displayedMetrics.active_high > 0 ? 'warning' : 'default'}
+        />
+      </StatGroup>
 
-      <div className={`${styles.rise} ${styles.d2}`}>
-        <PostureSummary
-          metrics={displayedMetrics}
-          kind={triageKind}
-          posture={triagePosture}
-          onKind={(k) => applyTriage({ kind: k })}
-          onPosture={(p) => applyTriage({ posture: p })}
-        />
-      </div>
+      <PostureSummary
+        metrics={displayedMetrics}
+        kind={triageKind}
+        posture={triagePosture}
+        onKind={(k) => applyTriage({ kind: k })}
+        onPosture={(p) => applyTriage({ posture: p })}
+      />
 
       </>)}
 
       {lens === 'triage' && (
-        <div role="tabpanel" id="lens-panel-triage" aria-labelledby="lens-tab-triage" className={`${styles.rise} ${styles.d3} space-y-3`}>
+        <div role="tabpanel" id="lens-panel-triage" aria-labelledby="lens-tab-triage" className="space-y-3">
           <ChangesStrip rootDomain={domain || undefined} />
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[10px] uppercase tracking-wide text-gray-600">Views</span>
+            <span className="text-xs font-medium text-gray-500">Views</span>
             {PRESET_VIEWS.map((preset, index) => {
               const active = triageKind === preset.kind && triagePosture === preset.posture && triageSort === preset.sort
               const count = presetCounts[index] ?? 0
@@ -1184,18 +1161,16 @@ function ExposureView() {
                       ? applyTriage({ kind: 'all', posture: 'all', sort: 'priority' })
                       : applyTriage({ kind: preset.kind, posture: preset.posture, sort: preset.sort })
                   }
-                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     active
-                      ? 'border-teal-400/40 bg-teal-500/15 text-teal-200'
+                      ? 'border-blue-500/60 bg-gray-800 text-white'
                       : empty
-                        ? 'border-gray-800/60 text-gray-600'
-                        : 'border-gray-800 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+                        ? 'border-gray-800 text-gray-600'
+                        : 'border-gray-700 text-gray-300 hover:bg-gray-800 hover:text-white'
                   }`}
                 >
                   {preset.label}
-                  <span className={`rounded-full px-1.5 text-[10px] ${active ? 'bg-teal-400/20 text-teal-100' : 'bg-gray-800 text-gray-500'}`}>
-                    {count}
-                  </span>
+                  <span className="tabular-nums text-gray-500">{count}</span>
                 </button>
               )
             })}
@@ -1235,7 +1210,7 @@ function ExposureView() {
       )}
 
       {lens === 'paths' && (
-        <div role="tabpanel" id="lens-panel-paths" aria-labelledby="lens-tab-paths" className={`${styles.rise} ${styles.d3}`}>
+        <div role="tabpanel" id="lens-panel-paths" aria-labelledby="lens-tab-paths">
           <AttackPaths
             paths={paths}
             loading={pathsLoading}
@@ -1250,10 +1225,10 @@ function ExposureView() {
       <div role="tabpanel" id="lens-panel-map" aria-labelledby="lens-tab-map" className="space-y-4">
       {error && <ErrorState message={error} onRetry={() => void loadGraph()} />}
       <div className="grid gap-6 xl:grid-cols-[1.4fr_0.6fr]">
-        <Panel className={`overflow-hidden ${styles.rise} ${styles.d4}`}>
-          <div className={`flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between ${styles.moduleHeader}`}>
+        <Card className="overflow-hidden">
+          <div className="flex flex-col gap-3 border-b border-gray-800 p-4 md:flex-row md:items-center md:justify-between">
             <div>
-              <h2 className={`${styles.displayTitle} text-sm text-white`}>{focusId ? 'Focused neighborhood' : 'Risk overview'}</h2>
+              <h2 className="text-sm font-semibold text-gray-100">{focusId ? 'Focused neighborhood' : 'Risk overview'}</h2>
               <p className="mt-1 text-sm text-gray-500">
                 {focusId
                   ? `${renderedNodes} connected nodes${summary?.truncated ? ' · riskiest shown' : ''}`
@@ -1262,44 +1237,40 @@ function ExposureView() {
             </div>
             <div className="flex flex-wrap items-center gap-3">
               {focusId && (
-                <button
-                  type="button"
-                  onClick={handleClear}
-                  className="inline-flex items-center gap-1 rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
-                >
-                  <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                <Button variant="secondary" size="sm" onClick={handleClear}>
+                  <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
                   Back to overview
-                </button>
+                </Button>
               )}
               {focusId && (
-                <select
+                <Select
+                  fullWidth={false}
                   value={depth}
                   onChange={(event) => setFilter('depth', event.target.value === '1' ? undefined : event.target.value)}
                   aria-label="Neighborhood depth"
-                  className={`px-3 py-2 text-sm text-white ${styles.input}`}
                 >
                   <option value={1}>Depth 1</option>
                   <option value={2}>Depth 2</option>
                   <option value={3}>Depth 3</option>
-                </select>
+                </Select>
               )}
               {focusId && (
-                <label className={`flex items-center gap-2 px-3 py-2 text-xs text-gray-300 ${styles.input}`}>
+                <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-300">
                   <input
                     type="checkbox"
                     checked={showEndpoints}
                     onChange={(event) => setFilter('endpoints', event.target.checked ? '1' : undefined)}
-                    className="rounded-sm border-gray-700 bg-gray-800"
+                    className="h-3.5 w-3.5 accent-blue-500"
                   />
                   All endpoints
                 </label>
               )}
-              <label className={`flex items-center gap-2 px-3 py-2 text-xs text-gray-300 ${styles.input}`}>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-300">
                 <input
                   type="checkbox"
                   checked={includeResolved}
                   onChange={(event) => changeScope({ resolved: event.target.checked ? '1' : undefined })}
-                  className="rounded-sm border-gray-700 bg-gray-800"
+                  className="h-3.5 w-3.5 accent-blue-500"
                 />
                 Include resolved
               </label>
@@ -1320,9 +1291,7 @@ function ExposureView() {
             </div>
           ) : (
             <div>
-              <div className={`relative h-[420px] w-full sm:h-[560px] ${styles.graphBackdrop}`}>
-                <div className={styles.radarRings} aria-hidden="true" />
-                <div className={styles.sweep} aria-hidden="true" />
+              <div className="relative h-[420px] w-full overflow-hidden bg-gray-950 sm:h-[560px]">
                 <ExposureGraphCanvas
                   nodes={graphView?.nodes || []}
                   edges={graphView?.edges || []}
@@ -1331,7 +1300,6 @@ function ExposureView() {
                   onNodeClick={handleFocus}
                   height={560}
                 />
-                <div className={styles.grain} aria-hidden="true" />
                 {refetching && (
                   <div className="pointer-events-none absolute right-3 top-3 inline-flex items-center gap-2 rounded-full border border-gray-700 bg-gray-900/90 px-3 py-1 text-xs text-gray-300">
                     <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
@@ -1342,7 +1310,7 @@ function ExposureView() {
                   <button
                     type="button"
                     onClick={() => setFilter('highlight', undefined)}
-                    className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full border border-blue-500/40 bg-blue-500/10 px-3 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+                    className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md border border-gray-700 bg-gray-900/95 px-2.5 py-1 text-xs text-gray-200 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                   >
                     Highlighting {NODE_LABELS[highlightType] || highlightType}
                     <X className="h-3 w-3" aria-hidden="true" />
@@ -1354,19 +1322,19 @@ function ExposureView() {
               </div>
             </div>
           )}
-        </Panel>
+        </Card>
 
         <div className="space-y-6">
           {selectedNode ? (
             <NodeDetailPanel node={selectedNode} neighbors={neighbors} onFocus={handleFocus} onClear={handleClear} />
           ) : (
             <>
-              <Panel className={`${styles.rise} ${styles.d5}`}>
-                <div className={`p-4 ${styles.moduleHeader}`}>
-                  <h2 className={`${styles.displayTitle} text-sm text-white`}>Priority targets</h2>
-                  <p className="mt-1 text-xs text-gray-500">Same action ranking as triage — click to explore</p>
+              <Card>
+                <div className="border-b border-gray-800 px-4 py-3">
+                  <h2 className="text-sm font-semibold text-gray-100">Priority targets</h2>
+                  <p className="mt-0.5 text-xs text-gray-400">Same action ranking as triage — click to explore</p>
                 </div>
-                <div className="divide-y divide-gray-800/60">
+                <div className="divide-y divide-gray-800">
                   {priorityAssets.length === 0 ? (
                     <div className="p-4 text-sm text-gray-500">No assets need action right now.</div>
                   ) : (
@@ -1375,33 +1343,33 @@ function ExposureView() {
                         key={asset.node_id}
                         type="button"
                         onClick={() => focusById(asset.node_id)}
-                        className="flex w-full gap-3 p-4 text-left hover:bg-gray-800/40 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+                        className="flex w-full gap-3 px-4 py-3 text-left hover:bg-gray-800/40 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
                       >
-                        <span className={`${styles.rank} pt-1`}>{String(index + 1).padStart(2, '0')}</span>
+                        <span className="pt-0.5 text-xs tabular-nums text-gray-500">{index + 1}</span>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <span className={`h-2 w-2 shrink-0 rounded-full ${riskDot(asset)}`} aria-hidden="true" />
                             <span className="truncate text-sm text-gray-100">{asset.label}</span>
                             <PriorityBadge priority={asset.action_priority} />
                           </div>
-                          <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-gray-500">
-                            <span className="uppercase tracking-wide text-gray-600">{KIND_ABBR[asset.kind]}</span>
+                          <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-gray-500">
+                            <span>{KIND_ABBR[asset.kind]}</span>
                             {asset.active_critical > 0 && <span className="text-red-400">{asset.active_critical}C</span>}
                             {asset.active_high > 0 && <span className="text-orange-400">{asset.active_high}H</span>}
                             {asset.grade && <span>Grade {asset.grade}</span>}
-                            {asset.kind === 'ai' && asset.blast_radius_tier && <span className="text-purple-300">{asset.blast_radius_tier} blast</span>}
+                            {asset.kind === 'ai' && asset.blast_radius_tier && <span className="text-gray-400">{asset.blast_radius_tier} blast</span>}
                           </div>
                         </div>
                       </button>
                     ))
                   )}
                 </div>
-              </Panel>
+              </Card>
 
-              <Panel>
-                <div className={`p-4 ${styles.moduleHeader}`}>
-                  <h2 className={`${styles.displayTitle} text-sm text-white`}>Inventory</h2>
-                  <p className="mt-1 text-xs text-gray-500">Click a type to highlight it in the graph</p>
+              <Card>
+                <div className="border-b border-gray-800 px-4 py-3">
+                  <h2 className="text-sm font-semibold text-gray-100">Inventory</h2>
+                  <p className="mt-0.5 text-xs text-gray-400">Click a type to highlight it in the graph</p>
                 </div>
                 <div className="grid grid-cols-2 gap-3 p-4">
                   {Object.entries(NODE_LABELS)
@@ -1415,26 +1383,25 @@ function ExposureView() {
                           aria-pressed={active}
                           onClick={() => setFilter('highlight', active ? undefined : type)}
                           className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                            active ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
+                            active ? 'border-blue-500/60 bg-gray-800' : 'border-gray-800 hover:border-gray-700 hover:bg-gray-800/40'
                           }`}
                         >
-                          <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                          <div className="flex items-center gap-1.5 text-xs text-gray-400">
                             <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: NODE_HEX[type] || '#9ca3af' }} aria-hidden="true" />
                             {label}
                           </div>
-                          <div className="mt-1 text-lg font-semibold text-white">{nodeTypeCounts[type] || 0}</div>
+                          <div className="mt-1 text-lg font-semibold tabular-nums text-white">{nodeTypeCounts[type] || 0}</div>
                         </button>
                       )
                     })}
                 </div>
-              </Panel>
+              </Card>
             </>
           )}
         </div>
       </div>
       </div>
       )}
-      </div>
     </div>
   )
 }

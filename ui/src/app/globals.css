@@ -13,7 +13,43 @@
   `text-[11px]` label inside a `text-sm` block keeps a 20px line in v3 and shrinks to ~14px
   in v4. The UI has ~260 such arbitrary-size labels, so keep v3's absolute values.
 */
+/*
+  Design tokens. The UI is written against Tailwind's gray/blue scales, so retuning those scales
+  here restyles every page at once. See ui/DESIGN.md for how pages use them.
+
+  - Gray is a low-chroma graphite instead of Tailwind's navy-tinted gray: surfaces read as neutral
+    product chrome, so severity and status colors carry the meaning.
+  - Blue is the calmer v3 scale; v4's blue-500/600 read as neon on a dark background.
+  - Radii are tightened: lg is the default control/card radius (6px), xl/2xl collapse to 8px so
+    containers stop drifting between three corner sizes.
+*/
 @theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --color-gray-50: #f7f8f9;
+  --color-gray-100: #eceef1;
+  --color-gray-200: #dcdfe4;
+  --color-gray-300: #c2c7cf;
+  --color-gray-400: #9299a4;
+  --color-gray-500: #6b7280;
+  --color-gray-600: #4b515b;
+  --color-gray-700: #353a42;
+  --color-gray-800: #24272d;
+  --color-gray-900: #16181c;
+  --color-gray-950: #0d0e11;
+
+  --color-blue-300: #93c5fd;
+  --color-blue-400: #60a5fa;
+  --color-blue-500: #3b82f6;
+  --color-blue-600: #2563eb;
+  --color-blue-700: #1d4ed8;
+
+  --radius-lg: 0.375rem;
+  --radius-xl: 0.5rem;
+  --radius-2xl: 0.5rem;
+  --radius-3xl: 0.75rem;
+
   --text-xs--line-height: 1rem;
   --text-sm--line-height: 1.25rem;
   --text-base--line-height: 1.5rem;
@@ -68,14 +104,18 @@
 */
 @layer base {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: var(--color-gray-950);
+    --foreground: var(--color-gray-100);
+    color-scheme: dark;
   }
 
   body {
     background: var(--background);
     color: var(--foreground);
-    font-family: system-ui, -apple-system, sans-serif;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
 }
 
@@ -83,21 +123,22 @@
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #1f2937;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #4b5563;
-  border-radius: 4px;
+  background: var(--color-gray-700);
+  border: 2px solid var(--color-gray-950);
+  border-radius: 6px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #6b7280;
+  background: var(--color-gray-600);
 }
 
 /* Triage dock entrance (findings list); applied under motion-safe: only. */
