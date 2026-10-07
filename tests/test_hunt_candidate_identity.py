@@ -26,6 +26,7 @@ from api import investigation_candidates as candidates
 from api.hunt import candidate_evidence
 from api.hunt import interaction_router as router
 from api.hunt.start_contract import hunt_start_public_contract
+from tests.hunt_candidate_pg_schema import candidate_schema_sql
 
 TARGET = str(uuid.uuid4())
 HUNT = str(uuid.uuid4())
@@ -233,7 +234,8 @@ def _run(**extra):
 def test_evidence_refs_must_resolve_to_this_hunts_records():
     action, receipt, other = (str(uuid.uuid4()) for _ in range(3))
     conn = EvidenceConnection([
-        {"id": action, "kind": "action"}, {"id": receipt, "kind": "receipt"},
+        {"id": action, "kind": "action", "status": "completed"},
+        {"id": receipt, "kind": "receipt", "status": "partial"},
     ])
     refs = [f"action:{action}", f"RECEIPT:{receipt}", action]
     assert asyncio.run(candidate_evidence.resolve_candidate_evidence(
@@ -249,6 +251,74 @@ def test_evidence_refs_must_resolve_to_this_hunts_records():
                 conn, run=_run(), references=bad,
             ))
         assert exc.value.references == bad
+
+
+@pytest.mark.parametrize("status", ["failed", "blocked", "running", "reserved", "cancelled"])
+def test_evidence_refs_must_name_a_completed_or_partial_action(status):
+    unsettled, receipt, settled, transaction = (str(uuid.uuid4()) for _ in range(4))
+    conn = EvidenceConnection([
+        {"id": unsettled, "kind": "action", "status": status},
+        {"id": receipt, "kind": "receipt", "status": status},
+        {"id": settled, "kind": "action", "status": "completed"},
+        {"id": transaction, "kind": "transaction", "status": None},
+    ])
+    for reference in (f"action:{unsettled}", unsettled, f"receipt:{receipt}"):
+        with pytest.raises(candidate_evidence.CandidateEvidenceError) as exc:
+            asyncio.run(candidate_evidence.resolve_candidate_evidence(
+                conn, run=_run(), references=[f"action:{settled}", reference],
+            ))
+        assert exc.value.code == candidate_evidence.UNSETTLED
+        assert exc.value.unsettled == [reference] and exc.value.references == []
+    # A missing reference outranks an unsettled one, and both are reported.
+    missing = str(uuid.uuid4())
+    with pytest.raises(candidate_evidence.CandidateEvidenceError) as exc:
+        asyncio.run(candidate_evidence.resolve_candidate_evidence(
+            conn, run=_run(), references=[unsettled, missing],
+        ))
+    assert exc.value.code == candidate_evidence.UNRESOLVED
+    assert exc.value.references == [missing] and exc.value.unsettled == [unsettled]
+    # Captured traffic is evidence whatever became of its action.
+    assert asyncio.run(candidate_evidence.resolve_candidate_evidence(
+        conn, run=_run(), references=[f"transaction:{transaction}"],
+    )) == [f"transaction:{transaction}"]
+
+
+@pytest.mark.asyncio
+async def test_candidate_route_refuses_an_admission_refused_action_as_evidence(monkeypatch):
+    refused = str(uuid.uuid4())
+
+    class Store:
+        @asynccontextmanager
+        async def acquire(self):
+            yield self
+
+        @asynccontextmanager
+        async def transaction(self, **_kwargs):
+            yield self
+
+        async def fetch(self, _sql, *args):
+            return [{"id": refused, "kind": "action", "status": "failed"}] if refused in args[0] else []
+
+        async def execute(self, query, *args):
+            raise AssertionError("an unsettled candidate must not be stored")
+
+    run = {**_run(), "status": "active", "objective": "o",
+           "budget_used_json": {"candidates": 0}, "budget_json": {"max_candidates": 5}}
+
+    async def lookup(_conn, _hunt_id, for_update=False):
+        return run
+
+    monkeypatch.setattr(router, "_pool", lambda: Store())
+    monkeypatch.setattr(router, "_hunt_run_or_404", lookup)
+    request = router.HuntCandidateRequest(
+        family="data_exposure", locus={"path": "/x"}, title="t", claim="c",
+        evidence_refs=[f"action:{refused}"],
+    )
+    with pytest.raises(router.HTTPException) as exc:
+        await router.create_hunt_candidate(HUNT, request)
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "candidate_evidence_unsettled"
+    assert exc.value.detail["unsettled_evidence_refs"] == [f"action:{refused}"]
 
 
 def test_device_evidence_refs_resolve_against_this_hunts_device_runtime():
@@ -320,22 +390,7 @@ def test_contract_documents_the_locus_schema_and_evidence_forms():
 
 
 DSN = os.environ.get("HUNT_TEST_POSTGRES_DSN")
-PG_DDL = """
-CREATE TABLE investigation_candidates(
- id uuid PRIMARY KEY DEFAULT gen_random_uuid(),plane text,target_id uuid,device_target_id uuid,
- research_episode_id uuid,agent_hunt_run_id uuid,device_agent_run_id uuid,hunt_run_id uuid,
- family text,canonical_locus jsonb,title text,claim text,claimed_severity text,evidence_refs jsonb,
- verifier_contract_id text,source_kind text,fingerprint text UNIQUE,status text,created_by text,
- last_seen_at timestamptz DEFAULT NOW(),created_at timestamptz DEFAULT NOW(),updated_at timestamptz DEFAULT NOW());
-CREATE TABLE investigation_candidate_observations(
- id bigserial PRIMARY KEY,candidate_id uuid,research_episode_id uuid,agent_hunt_run_id uuid,
- device_agent_run_id uuid,hunt_run_id uuid,source_kind text,title text,claim text,claimed_severity text,
- evidence_refs jsonb,verifier_contract_id text,observation_context jsonb,created_by text,
- created_at timestamptz DEFAULT NOW());
-CREATE TABLE hunt_actions(id uuid PRIMARY KEY,hunt_run_id uuid,receipt_id uuid);
-CREATE TABLE http_transactions(id uuid PRIMARY KEY,hunt_run_id uuid);
-CREATE TABLE findings(id uuid PRIMARY KEY,hunt_run_id uuid,target_id uuid,device_target_id uuid);
-"""
+PG_DDL = candidate_schema_sql()
 
 
 @asynccontextmanager
@@ -375,8 +430,8 @@ def test_postgres_upsert_and_evidence_resolution():
 
             other_hunt = uuid.uuid4()
             action, receipt, foreign = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-            await conn.execute("INSERT INTO hunt_actions VALUES($1,$2,$3)", action, uuid.UUID(HUNT), receipt)
-            await conn.execute("INSERT INTO hunt_actions VALUES($1,$2,NULL)", foreign, other_hunt)
+            await _insert_action(conn, action, uuid.UUID(HUNT), "completed", receipt)
+            await _insert_action(conn, foreign, other_hunt, "completed")
             run = _run()
             assert await candidate_evidence.resolve_candidate_evidence(
                 conn, run=run, references=[f"action:{action}", f"receipt:{receipt}"],
@@ -386,4 +441,47 @@ def test_postgres_upsert_and_evidence_resolution():
                     conn, run=run, references=[f"action:{foreign}", str(uuid.uuid4())],
                 )
             assert len(exc.value.references) == 2
+    asyncio.run(scenario())
+
+
+async def _insert_action(conn, action_id, hunt_id, status, receipt_id=None):
+    await conn.execute(
+        """INSERT INTO hunt_actions (id, hunt_run_id, capability_name, status, receipt_id)
+           VALUES ($1,$2,'http.request',$3,$4)""",
+        action_id, hunt_id, status, receipt_id,
+    )
+
+
+@pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not configured")
+def test_postgres_evidence_must_cite_a_settled_action():
+    async def scenario():
+        async with _postgres() as conn:
+            hunt = uuid.UUID(HUNT)
+            ids = {status: (uuid.uuid4(), uuid.uuid4()) for status in (
+                "completed", "partial", "failed", "blocked", "running",
+            )}
+            for status, (action, receipt) in ids.items():
+                await _insert_action(conn, action, hunt, status, receipt)
+            transaction = uuid.uuid4()
+            await conn.execute(
+                """INSERT INTO http_transactions (id, plane, hunt_run_id, method, url)
+                   VALUES ($1,'hunt',$2,'GET','https://app.test/')""",
+                transaction, hunt,
+            )
+            settled = [
+                f"action:{ids['completed'][0]}", f"receipt:{ids['partial'][1]}",
+                str(ids["partial"][0]), f"transaction:{transaction}",
+            ]
+            assert await candidate_evidence.resolve_candidate_evidence(
+                conn, run=_run(), references=settled,
+            ) == settled
+            for status in ("failed", "blocked", "running"):
+                action, receipt = ids[status]
+                for reference in (f"action:{action}", f"receipt:{receipt}", str(action)):
+                    with pytest.raises(candidate_evidence.CandidateEvidenceError) as exc:
+                        await candidate_evidence.resolve_candidate_evidence(
+                            conn, run=_run(), references=[settled[0], reference],
+                        )
+                    assert exc.value.code == "candidate_evidence_unsettled"
+                    assert exc.value.unsettled == [reference] and exc.value.references == []
     asyncio.run(scenario())
