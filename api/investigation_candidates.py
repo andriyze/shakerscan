@@ -19,6 +19,8 @@ STATUSES = frozenset({
 TERMINAL_STATUSES = frozenset({"verified", "refuted", "expired"})
 IN_FLIGHT_STATUSES = frozenset({"verification_queued", "verifying"})
 SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
+# Candidates keep a bounded evidence list; producers report anything beyond it.
+MAX_CANDIDATE_EVIDENCE_REFS = 100
 
 DEVICE_VERIFIER_CONTRACTS: dict[str, str] = {
     "device_service_exposure": "device.service_exposure",
@@ -168,7 +170,7 @@ def normalize_candidate(
         str(item).strip()[:120]
         for item in (evidence_refs or [])
         if str(item).strip()
-    ))[:100]
+    ))[:MAX_CANDIDATE_EVIDENCE_REFS]
     normalized_locus = canonical_locus(locus)
     normalized_family = canonical_family(family)
     if normalized_plane == "device":
