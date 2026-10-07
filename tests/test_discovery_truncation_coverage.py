@@ -161,7 +161,7 @@ def test_distinct_crawl_routes_stay_bounded_and_the_bound_is_marked():
 
 def test_a_passive_scan_runs_its_template_pack_over_the_discovered_surface():
     from api.scan.admission_actions import _compile_scan_admission_action_authority
-    from api.scan.action_plan import batch_profile_shape
+    from api.scan.action_plan import batch_profile_shape, passive_batch_request_hold
     from api.scan.contracts import resolve_scan_contract
     from api.scan.continuation_rounds import compile_next_continuation
     from api.scan.work_manifests import build_canonical_scan_nuclei_template_manifest
@@ -197,7 +197,9 @@ def test_a_passive_scan_runs_its_template_pack_over_the_discovered_surface():
     size, shape = batch_profile_shape("balanced", "templates.passive_batch")
     assert passive, "the pack must reach the discovered routes"
     assert passive[0].capability_args["slice"] == {"start": 0, "count": size}
-    assert passive[0].requested_budget["http_requests"] == shape["http_requests"]
+    # The pack per route plus the retry headroom a wall-killed route needs.
+    assert shape["http_requests"] == 7 * size
+    assert passive[0].requested_budget["http_requests"] == passive_batch_request_hold(size)
     assert sum(action.capability_args["slice"]["count"] for action in passive) > 1
     assert not any(
         action.capability_name in {"xss.verify_batch", "sqli.verify_batch", "templates.active_batch"}
