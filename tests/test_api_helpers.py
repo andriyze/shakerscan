@@ -9122,6 +9122,50 @@ def test_evidence_export_bundle_zip_response_is_downloadable(monkeypatch):
         assert "evidence-export-bundle.json" in zf.namelist()
 
 
+def test_evidence_export_manifest_says_when_the_limit_cut_it_short(monkeypatch, tmp_path):
+    # Soak N23: the manifest listed exactly 200 objects with no sign that more existed.
+    monkeypatch.setattr(api_module, "RESULTS_DIR", tmp_path)
+    seen = []
+
+    def rows(count):
+        return [{
+            "id": f"00000000-0000-4000-8000-{index:012d}", "scan_id": None, "finding_id": None,
+            "object_type": "finding_evidence", "content_sha256": None, "size_bytes": 0,
+            "storage_uri": "inline:evidence_objects", "redaction_profile": "redact_sensitive_v1",
+            "retention_class": "standard", "content": None,
+        } for index in range(count)]
+
+    class _Pool:
+        def __init__(self, count):
+            self.count = count
+
+        def acquire(self):
+            pool = self
+
+            class _Conn:
+                async def fetch(self, query, *args):
+                    seen.append(args[0])
+                    return rows(min(pool.count, args[0]))
+
+            class _Acquire:
+                async def __aenter__(self):
+                    return _Conn()
+
+                async def __aexit__(self, *exc):
+                    return False
+
+            return _Acquire()
+
+    monkeypatch.setattr(api_module, "db_pool", _Pool(5))
+    cut = asyncio.run(api_module.evidence_export_manifest(limit=3))
+    assert seen[-1] == 4
+    assert cut["object_count"] == 3 and cut["truncated"] is True
+    whole = asyncio.run(api_module.evidence_export_manifest(limit=5))
+    assert whole["object_count"] == 5 and whole["truncated"] is False
+    bundle = asyncio.run(api_module.evidence_export_bundle(limit=3, record_event=False))
+    assert bundle["object_count"] == 3 and bundle["truncated"] is True
+
+
 def test_evidence_retention_candidates_skip_legal_hold_and_use_policy_days():
     now = datetime(2026, 7, 6, tzinfo=timezone.utc)
     old = datetime(2025, 1, 1, tzinfo=timezone.utc)
