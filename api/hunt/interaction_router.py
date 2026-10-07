@@ -1158,6 +1158,8 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
                         "objective": run["objective"],
                         "discovery_draft_id": draft_id,
                         "boundary_source_binding": draft["source_binding"],
+                        "evidence_refs_total": draft["evidence_refs_total"],
+                        "provenance_omitted": draft["provenance_omitted"],
                         "authoritative": False,
                     },
                 )
@@ -1174,6 +1176,9 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
         "draft_id": draft_id,
         "candidate": result,
         "source_binding": draft["source_binding"],
+        "evidence_refs_total": draft["evidence_refs_total"],
+        "evidence_refs_truncated": draft["evidence_refs_truncated"],
+        "provenance_omitted": draft["provenance_omitted"],
         "authoritative": False,
         "verified": False,
         "verification_performed": False,

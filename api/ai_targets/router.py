@@ -42,6 +42,7 @@ try:
     from ai_demo_scenarios import get_ai_test_scenarios
     from ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract, boundary_source_matches_endpoint
     from ai_gate.boundary.regression import build_boundary_regression_artifact, evaluate_boundary_regression_artifact
+    from hunt.boundary_source import BoundarySourceError, admit_boundary_source_binding
     from ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
         build_headers as ai_build_headers,
@@ -76,6 +77,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_demo_scenarios import get_ai_test_scenarios
     from ..ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract, boundary_source_matches_endpoint
     from ..ai_gate.boundary.regression import build_boundary_regression_artifact, evaluate_boundary_regression_artifact
+    from ..hunt.boundary_source import BoundarySourceError, admit_boundary_source_binding
     from ..ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
         build_headers as ai_build_headers,
@@ -427,7 +429,14 @@ async def verify_ai_boundary_proposal(target_id: str, request: AIBoundaryVerifyR
         if not row:
             raise HTTPException(status_code=404, detail="AI target not found")
         target = row_to_dict(row)
-        source_binding = request.proposal.get("source_binding")
+        # A Hunt binding is admitted only after it matches the Hunt record, and a
+        # discovery-derived proposal cannot drop it to skip the checks below.
+        try:
+            source_binding = await admit_boundary_source_binding(
+                conn, proposal=request.proposal, contract=materialized["boundary_contract"],
+            )
+        except BoundarySourceError as exc:
+            raise HTTPException(status_code=409, detail=exc.code) from exc
         if source_binding is not None and not boundary_source_matches_endpoint(
             source_binding, target.get("endpoint_url"),
         ):
@@ -509,7 +518,18 @@ async def verify_ai_boundary_proposal(target_id: str, request: AIBoundaryVerifyR
         target_override=target,
         resolved_credential_profile_ref=credential_profile_ref,
         resolved_principal_refs=principal_refs,
+        boundary_source_binding=source_binding,
     )
+
+
+async def _boundary_regression_endpoint(conn, target_uuid: uuid.UUID, proposal: Any) -> str | None:
+    """Load the AI endpoint only when a Hunt binding must be checked against it."""
+    if not isinstance(proposal, dict) or proposal.get("source_binding") is None:
+        return None
+    row = await conn.fetchrow("SELECT endpoint_url FROM ai_targets WHERE id=$1", target_uuid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="AI target not found")
+    return row["endpoint_url"]
 
 
 async def _boundary_regression_scan(conn, target_uuid: uuid.UUID, scan_id: str) -> dict[str, Any]:
@@ -532,9 +552,10 @@ async def export_ai_boundary_regression(target_id: str, request: AIBoundaryRegre
         async with _pool().acquire() as conn:
             async with conn.transaction(isolation="repeatable_read", readonly=True):
                 source = await _boundary_regression_scan(conn, target_uuid, request.source_scan_id)
+                endpoint_url = await _boundary_regression_endpoint(conn, target_uuid, request.proposal)
                 return build_boundary_regression_artifact(
                     proposal=request.proposal, boundary_base=request.boundary_base,
-                    target_id=str(target_uuid), source_scan=source,
+                    target_id=str(target_uuid), source_scan=source, endpoint_url=endpoint_url,
                 )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -555,10 +576,13 @@ async def evaluate_ai_boundary_regression(target_id: str, request: AIBoundaryReg
                 verify_request = artifact.get("verify_request")
                 if not isinstance(verify_request, dict):
                     raise ValueError("boundary_regression_artifact_request_invalid")
+                endpoint_url = await _boundary_regression_endpoint(
+                    conn, target_uuid, verify_request.get("proposal"),
+                )
                 expected = build_boundary_regression_artifact(
                     proposal=verify_request.get("proposal"),
                     boundary_base=verify_request.get("boundary_base"),
-                    target_id=str(target_uuid), source_scan=source,
+                    target_id=str(target_uuid), source_scan=source, endpoint_url=endpoint_url,
                 )
                 if expected["artifact_sha256"] != artifact.get("artifact_sha256"):
                     raise ValueError("boundary_regression_artifact_source_mismatch")
@@ -2530,6 +2554,7 @@ async def _queue_ai_target_scan(
     target_override: dict[str, Any] | None = None,
     resolved_credential_profile_ref: dict[str, Any] | None = None,
     resolved_principal_refs: list[dict[str, Any]] | None = None,
+    boundary_source_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if request.probe_pack not in AI_PROBE_PACKS:
         raise HTTPException(status_code=400, detail=f"probe_pack must be one of: {', '.join(sorted(AI_PROBE_PACKS))}")
@@ -2619,6 +2644,11 @@ async def _queue_ai_target_scan(
         )
         if credentials_selected:
             worker_options["credential_action_name"] = "ai_gate.scan"
+        if boundary_source_binding is not None:
+            # Persisted with the run (scans.options) so it stays traceable to its
+            # Hunt; the worker refuses a contract binding that differs from it.
+            storage_options["ai_boundary_source_binding"] = boundary_source_binding
+            worker_options["ai_boundary_source_binding"] = boundary_source_binding
         if approval_context:
             worker_options.update(approval_context)
             storage_options.update(approval_context)

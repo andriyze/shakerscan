@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .run_service import HuntRunService
 from .budget_amendments import HuntBudgetAmendmentRequest
-from .coverage_ledger import CoverageLedgerError
+from .coverage_ledger import COVERAGE_LOCUS_KEYS, CoverageLedgerError
 from .skills import HuntSkillError, skill_library
 from .start_contract import (
     HUNT_START_SCHEMA,
@@ -105,7 +105,19 @@ class HuntCoverageAngleRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     family: str = Field(min_length=1, max_length=80)
-    locus: dict[str, Any] = Field(default_factory=dict)
+    locus: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Concrete dimensions of this angle (string or integer values). Accepted keys: "
+            + ", ".join(COVERAGE_LOCUS_KEYS)
+            + ". Unknown keys and an empty locus are refused."
+        ),
+        json_schema_extra={
+            "propertyNames": {"enum": list(COVERAGE_LOCUS_KEYS)},
+            "additionalProperties": {"type": ["string", "integer"]},
+            "minProperties": 1,
+        },
+    )
     mechanism: str = Field(default="", max_length=1000)
     principal_context: dict[str, Any] = Field(default_factory=dict)
     hypothesis: str = Field(default="", max_length=8000)
@@ -431,6 +443,13 @@ async def get_hunt(hunt_id: str):
     return await _service().get(hunt_id)
 
 
+def _coverage_http_error(exc: CoverageLedgerError) -> HTTPException:
+    return HTTPException(
+        status_code=exc.status_code,
+        detail={**exc.details, "error": exc.code, "message": str(exc)},
+    )
+
+
 @router.post("/hunts/{hunt_id}/coverage-angles", tags=["Hunt"])
 async def record_hunt_coverage_angle(
     hunt_id: str, request: HuntCoverageAngleRequest,
@@ -441,10 +460,7 @@ async def record_hunt_coverage_angle(
             hunt_id, values=request.model_dump(mode="python"),
         )
     except CoverageLedgerError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"error": exc.code, "message": str(exc)},
-        ) from exc
+        raise _coverage_http_error(exc) from exc
 
 
 @router.get("/hunts/{hunt_id}/coverage-angles", tags=["Hunt"])
@@ -460,10 +476,7 @@ async def get_hunt_coverage_angles(
             hunt_id, status=status, family=family, limit=limit,
         )
     except CoverageLedgerError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"error": exc.code, "message": str(exc)},
-        ) from exc
+        raise _coverage_http_error(exc) from exc
 
 
 @router.get("/hunts/{hunt_id}/checkpoint", tags=["Hunt"])

@@ -52,6 +52,11 @@ class AIStore:
             return None
         if "FROM ai_targets" in query:
             return self.target if str(args[0]) == AI_TARGET else None
+        if "FROM investigation_candidate_observations" in query:
+            # The verify route asks whether discovery prepared this candidate; this
+            # journey's candidate was hand-built, so there is no binding to require.
+            assert CANDIDATE in args[0]
+            return None
         raise AssertionError(query)
 
     async def fetch(self, query, *_args):

@@ -142,15 +142,31 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
 - Track materially distinct tests with the coverage ledger. Before a focused probe, append
   `planned` or `testing` to `POST /hunts/{hunt_id}/coverage-angles` using the concrete
   family plus route/operation/object/input, mechanism, principal context, and application state
-  that make the angle distinct. After execution append the final `negative`, `partial`,
-  `blocked`, or `candidate` state with the actual same-Hunt action IDs. The server rejects
-  clean/negative claims backed only by partial or blocked work. One negative angle never closes a
-  materially different method, identity, mechanism, input path, or state.
+  that make the angle distinct. `locus` accepts only the keys below, with string or integer
+  values. The server refuses any other key and an empty locus; `GET /hunts/contract` publishes
+  the same list as `coverage_ledger.locus_keys`.
+  Locus keys: `method`, `route`, `path`, `url`, `origin`, `scheme`, `port`, `transport`,
+  `protocol`, `service`, `service_name`, `operation`, `operation_id`, `object`, `object_id`,
+  `object_kind`, `resource_kind`, `parameter`, `input`, `input_path`, `sink`,
+  `application_state`, `variant`.
+  After execution append the final `negative`, `partial`, `blocked`, or `candidate` state with
+  the same-Hunt action IDs that settled it. `negative` must cite only completed actions that sent
+  target traffic; `partial`, and `blocked` when it cites actions, need at least one such action.
+  A queue handoff (an action whose result is only `queued`) is never evidence; record `testing`
+  until its result arrives. A policy refusal is recorded as `blocked` with the blocker text alone.
+  An event that cites no new evidence must keep the angle's existing `candidate_id`. One negative
+  angle never closes a materially different method, identity, mechanism, input path, or state.
+  An unfinished `budget_exhausted` Hunt still accepts evidence-bound events, so settle the angles
+  the last actions examined before finishing; finished and cancelled Hunts are read-only.
+  Coverage text and values are stored through the shared secret redactor, so keep secrets out of
+  them anyway. A Hunt holds at most 5,000 coverage events; record one event per state change.
 - Use `GET /hunts/{hunt_id}/checkpoint` after context compaction, planner handoff, or resume.
   It is a bounded server-derived view of current coverage, candidates, action outcomes, budgets,
-  and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. Coverage
-  and checkpoint state are advisory investigation memory; neither can grant authority or verify a
-  finding.
+  and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. When
+  `continuation_truncated` (or `angles_truncated`) is true the queue is not complete; narrow it
+  with `GET /hunts/{hunt_id}/coverage-angles?status=...&family=...`, which reports `truncated` too.
+  Coverage and checkpoint state are advisory investigation memory; neither can grant authority
+  or verify a finding.
 - Browser capabilities return `browser_surface` observations containing safe CSS selectors,
   visible control structure, a redacted SPA route, and a `state_id`, not page text or secrets.
   `browser.interact` accepts either one `selector` or up to eight `steps` (`click` or non-secret
@@ -228,10 +244,16 @@ When multi-principal Hunt evidence shows same-service identity/resource structur
 agent endpoint, call `POST /hunts/{hunt_id}/boundary-discovery` before hand-building the candidate.
 Discovery reads only bounded same-Hunt stored structure and sends no target traffic. For a relevant
 draft, call `POST /hunts/{hunt_id}/boundary-discovery/{draft_id}/prepare`; the server recomputes it
-and creates only an unverified candidate. Fill missing principal facts and the expected rule from
-operator-owned configuration/evidence, then compile `POST /hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal`
-and send the ready proposal through AI Boundary verification. Discovery drafts and action leads are
-not authority or proof and never authorize a state-changing follow-up on their own.
+and creates only an unverified candidate. Report `evidence_refs_truncated` or `provenance_omitted`
+on the result as a coverage gap. Fill missing principal facts and the expected rule from
+operator-owned configuration/evidence, keeping the discovered owner/attacker resource IDs, then
+compile `POST /hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal` and hand the ready
+proposal, with its `source_binding` unchanged, to the operator. AI Boundary verification runs on
+operator-only `/ai/targets/...` routes; a Hunt planner, including one using a planner lease, does
+not call them and must not describe the candidate as verified until that step reports. Verification
+refuses a discovery proposal whose binding is missing, altered or superseded; re-prepare and
+recompile instead. Discovery drafts and action leads are not authority or proof and
+never authorize a state-changing follow-up on their own.
 
 Correct a candidate with `PATCH /hunts/{hunt_id}/candidates/{candidate_id}` when its title, claim,
 severity, evidence references, or verifier contract needs revision. Delete a mistaken, duplicate,

@@ -17,7 +17,9 @@ from .budget_amendments import (
 )
 
 from .coverage_ledger import (
+    COVERAGE_WRITABLE_RUN_STATUSES,
     build_hunt_checkpoint,
+    coverage_history as _coverage_history,
     list_coverage_angles as _list_coverage_angles,
     record_coverage_angle as _record_coverage_angle,
 )
@@ -737,18 +739,37 @@ class HuntRunService:
     async def record_coverage_angle(
         self, hunt_id: str, *, values: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Append one exact, evidence-bound investigation coverage event."""
+        """Append one exact, evidence-bound investigation coverage event.
+
+        Coverage stays writable while the Hunt is unfinished, including a resumable
+        budget_exhausted run (evidence-bound events only). Finishing or cancelling a Hunt
+        sets completed_at under this same row lock, so a concurrent write either lands
+        before it or sees the finished row and is refused.
+        """
         hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
         async with self._pool().acquire() as connection:
             async with connection.transaction():
-                row = await hunt_run_or_404(connection, hunt_id, for_update=True)
-                if str(row["status"]) not in ACTIVE_HUNT_STATUSES:
+                row = dict(await hunt_run_or_404(connection, hunt_id, for_update=True))
+                status = str(row.get("status") or "")
+                if (
+                    row.get("completed_at") is not None
+                    or status not in COVERAGE_WRITABLE_RUN_STATUSES
+                ):
+                    state = (
+                        f"{status} and finished" if status == "budget_exhausted" else status
+                    )
                     raise HTTPException(
                         status_code=409,
-                        detail=f"Hunt is {row['status']}; coverage is immutable after execution stops",
+                        detail=(
+                            f"Hunt is {state}; coverage can be appended only while a Hunt "
+                            "is unfinished (active, awaiting_planner, or budget_exhausted "
+                            "before finish). Finished and cancelled Hunts keep their "
+                            "coverage history read-only."
+                        ),
                     )
                 return await _record_coverage_angle(
                     connection, hunt_run_id=str(hunt_uuid), values=values,
+                    run_status=status,
                 )
 
     async def coverage_angles(
@@ -1131,7 +1152,9 @@ class HuntRunService:
                 connection, scan_id=None, hunt_run_id=hunt_id,
                 limit=MAX_EXPORT_ROWS, offset=0,
             )
-            coverage_ledger = await _list_coverage_angles(
+            # The full event history, superseded events included, with an explicit
+            # bound; the per-Hunt event cap keeps it below MAX_EXPORT_ROWS.
+            coverage_ledger = await _coverage_history(
                 connection, hunt_run_id=str(hunt_uuid), limit=MAX_EXPORT_ROWS,
             )
         run = redact_sensitive(
@@ -1148,7 +1171,7 @@ class HuntRunService:
                 "includes": [
                     "objective", "bound_skills", "policy", "budgets",
                     "planner_capability_inputs", "action_outcomes", "receipt_references",
-                    "coverage_angles", "persisted_notes", "final_debrief",
+                    "coverage_events", "persisted_notes", "final_debrief",
                     "http_transactions", "budget_amendments",
                 ],
                 "excludes": ["hidden_model_chain_of_thought", "context_pack"],

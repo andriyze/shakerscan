@@ -69,13 +69,36 @@ Hunt under lock, recomputes that draft from Hunt-owned captures, enforces the
 normal candidate budget, and then writes the existing unverified candidate. A
 client cannot substitute its own candidate payload for a discovered draft.
 
-The draft carries a validated source binding: Hunt ID, asset ID, exact origin and
-the observed agent paths. The compiled Boundary proposal preserves that binding.
-Before queueing verification the selected AI target must match the exact source
-origin/path, and both declared Boundary roles must exist as active principals on
-that AI target. These checks improve provenance and operator feedback; they do
-not grant target authority or credential access. The selected AI target still
-passes its normal authorization, credential, budget and worker admission.
+The draft carries a source binding: Hunt ID, asset ID, exact origin and the
+observed agent paths. Preparation stores it on the candidate observation for that
+Hunt; re-preparing the same draft supersedes the earlier binding, and later
+metadata edits never shadow it. Each draft reports `evidence_refs_total`,
+`evidence_refs_truncated` and `provenance_omitted` when the bounded candidate
+evidence list (100 references, one capture per prefilled fact first) or the
+identity/agent field provenance (4 and 2 captures) could not hold everything.
+
+The handoff attaches the stored binding to the compiled Boundary proposal and
+refuses principal declarations whose resource IDs differ from the discovered
+pair. The proposal is client-held JSON, so the verify route admits a binding only
+after checking it against the Hunt record: the Hunt exists and is for the bound
+asset, the proposal cites exactly one Hunt candidate, the binding equals the one
+preparation last stored for that candidate in that Hunt, and the contract tests
+the discovered resource pair and path template. A proposal that cites a
+discovery-prepared candidate (or, citing no candidate, a discovery capture)
+without its binding is refused rather than verified unbound. The selected AI
+target must then match the exact source origin/path, and both declared Boundary
+roles must exist as exactly one active principal each on that AI target.
+
+The admitted binding becomes part of the executable contract, so the contract
+digest the worker records covers it, and it is stored in the run's scan options.
+The worker refuses a contract that carries a binding the verify route did not
+admit. Regression export copies a binding only when it equals the one the source
+run recorded and the AI target endpoint still matches it; evaluation requires the
+later run to have recorded the same binding. A proposal without Hunt discovery
+provenance, including one compiled from a hand-built Hunt candidate, verifies
+unchanged. None of these checks grant target authority or
+credential access: the selected AI target still passes its normal authorization,
+credential, budget and worker admission.
 
 Repeated observations of the same principal/resource are merged only when their
 structural bindings agree. Conflicts are counted as explicit coverage gaps rather
@@ -254,8 +277,12 @@ The implementation must prove that:
 8. secure and vulnerable loopback fixtures produce different proof outcomes;
 9. allowed control workflows remain represented for regression;
 10. repeated conflicting resource observations are rejected rather than selected by order;
-11. a discovered proposal cannot be queued against a different AI endpoint or missing principal role;
-12. discovered candidate preparation is recomputed server-side from the selected Hunt.
+11. a discovered proposal cannot be queued against a different AI endpoint, a missing or ambiguous principal role,
+    a Hunt/asset/binding the Hunt record does not hold, or a resource pair discovery did not observe,
+    and cannot be stripped of its binding to avoid those checks;
+12. discovered candidate preparation is recomputed server-side from the selected Hunt;
+13. a verified run and its regression artifact carry the admitted binding, covered by the contract digest,
+    and export refuses a binding the source run did not record.
 
 ## Follow-on order
 

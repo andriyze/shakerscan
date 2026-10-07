@@ -1,10 +1,24 @@
 """Evidence-backed Hunt coverage angles and compact continuation checkpoints.
 
 The external planner may describe what it intends to test, but ShakerScan owns the
-ledger and only accepts settled coverage claims when they cite terminal actions from
-the same Hunt.  Coverage is deliberately finer grained than a vulnerability family:
+ledger and only accepts settled coverage claims when they cite same-Hunt actions that
+actually ran (rules in ``coverage_evidence``). Coverage is deliberately finer grained than a vulnerability family:
 method, route/object/sink, mechanism, principal context, and application state can all
 make one angle materially different from another.
+
+The locus vocabulary is closed and published (``COVERAGE_LOCUS_KEYS``). An unknown key
+is refused instead of dropped, because a dropped dimension silently merges two different
+experiments into one fingerprint.
+
+Events are append-only and ordered by ``event_seq``, which is assigned at insert while
+the writer holds the Hunt row lock, so it follows commit order. An angle's current state
+is its highest-sequence event; the record export carries every event, superseded ones
+included. One supersession is refused: an event that cites no new
+same-Hunt evidence cannot drop the candidate an angle is bound to.
+
+Planner-supplied strings are passed through the shared redactor before they are stored
+or fingerprinted, so a secret-shaped value never persists and never distinguishes angles.
+A Hunt holds at most ``MAX_COVERAGE_EVENTS_PER_HUNT`` events.
 
 This is investigation state, not proof.  A coverage event can point at a candidate,
 but neither a planner-written angle nor a checkpoint may create or verify a finding.
@@ -18,7 +32,15 @@ import json
 from typing import Any
 from uuid import UUID
 
+from .coverage_evidence import (
+    TERMINAL_ACTION_STATUSES,
+    CoverageLedgerError,
+    owned_action_evidence,
+    validate_evidence_claim,
+)
+
 COVERAGE_LEDGER_SCHEMA = "hunt-coverage-ledger/v1"
+COVERAGE_HISTORY_SCHEMA = "hunt-coverage-history/v1"
 HUNT_CHECKPOINT_SCHEMA = "hunt-checkpoint/v1"
 
 COVERAGE_ANGLE_STATUSES = frozenset({
@@ -29,61 +51,83 @@ COVERAGE_ANGLE_STATUSES = frozenset({
     "blocked",
     "candidate",
 })
-TERMINAL_ACTION_STATUSES = frozenset({"completed", "partial", "blocked"})
+# Coverage may be appended while a Hunt is unfinished. budget_exhausted is resumable, so
+# it accepts evidence-bound events; a set completed_at marks a finished run.
+COVERAGE_WRITABLE_RUN_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
 MAX_EVIDENCE_ACTIONS = 50
 MAX_CHECKPOINT_ANGLES = 200
+MAX_CHECKPOINT_CONTINUATION = 200
 MAX_CHECKPOINT_CANDIDATES = 100
+# Several events per examined angle fit comfortably; the record export bound is higher.
+MAX_COVERAGE_EVENTS_PER_HUNT = 5_000
 MAX_JSON_BYTES = 16_384
+MAX_LOCUS_VALUE_CHARS = 1_000
+_TEXT_LIMITS = {
+    "family": 80, "mechanism": 1_000, "hypothesis": 8_000, "blocker": 2_000,
+    "proof_gap": 4_000,
+}
 
-_SECRET_KEY_PARTS = (
-    "authorization",
-    "cookie",
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "api_key",
-    "apikey",
-    "private_key",
-    "session_key",
-)
-
-# Semantic dimensions only. Execution provenance (request/action/capability/collection
-# IDs) belongs in evidence references; putting it in the fingerprint would make a retry
-# of the same experiment look like new coverage.
-_LOCUS_KEYS = (
+# The complete, published locus vocabulary: semantic dimensions only. Execution
+# provenance (request/action/capability/collection IDs) belongs in evidence references;
+# putting it in the fingerprint would make a retry of the same experiment look new.
+# skills/hunt/SKILL.md lists the same keys on its "Locus keys:" line (a test enforces it).
+COVERAGE_LOCUS_KEYS: tuple[str, ...] = (
     "method",
     "route",
+    "path",
     "url",
-    "parameter",
-    "object_kind",
-    "resource_kind",
+    "origin",
+    "scheme",
+    "port",
     "transport",
     "protocol",
-    "port",
+    "service",
     "service_name",
+    "operation",
     "operation_id",
-    "scheme",
-    "sink",
+    "object",
+    "object_id",
+    "object_kind",
+    "resource_kind",
+    "parameter",
+    "input",
     "input_path",
+    "sink",
     "application_state",
     "variant",
 )
+_LOCUS_KEY_SET = frozenset(COVERAGE_LOCUS_KEYS)
 
 
-class CoverageLedgerError(ValueError):
-    """A coverage event is structurally invalid or overclaims its evidence."""
+def _key_is_sensitive(key: Any, item: Any) -> bool:
+    """The shared receipt rule for secret-bearing key names; the ledger keeps no copy."""
+    try:
+        from runtime.receipts import key_is_sensitive
+    except ModuleNotFoundError:
+        from api.runtime.receipts import key_is_sensitive
+    return key_is_sensitive(key, item=item)
 
-    def __init__(self, code: str, message: str):
-        super().__init__(message)
-        self.code = code
+
+def _redacted(value: Any) -> Any:
+    """Mask secret-shaped values with the shared redactor before storage."""
+    try:
+        from redaction import redact_sensitive
+    except ModuleNotFoundError:
+        from scanner.redaction import redact_sensitive
+    return redact_sensitive(value, redact_strings=True, scrub_text=True)
 
 
-def _text(value: Any, *, maximum: int, required: bool = False) -> str:
+def _text(value: Any, *, field: str, required: bool = False) -> str:
     result = str(value or "").strip()
     if required and not result:
-        raise CoverageLedgerError("coverage_field_required", "Required coverage field is empty")
-    return result[:maximum]
+        raise CoverageLedgerError(
+            "coverage_field_required", f"Required coverage field is empty: {field}",
+        )
+    if len(result) > _TEXT_LIMITS[field]:
+        raise CoverageLedgerError(
+            "coverage_field_too_long", f"{field} exceeds {_TEXT_LIMITS[field]} characters",
+        )
+    return str(_redacted(result))
 
 
 def _json_value(value: Any) -> Any:
@@ -99,7 +143,7 @@ def _reject_secret_keys(value: Any, path: str = "context") -> None:
     if isinstance(value, Mapping):
         for raw_key, child in value.items():
             key = str(raw_key).strip().lower()
-            if any(part in key for part in _SECRET_KEY_PARTS):
+            if _key_is_sensitive(key, child):
                 raise CoverageLedgerError(
                     "coverage_secret_context_forbidden",
                     f"{path} must contain labels and state only, not secret-bearing fields",
@@ -128,29 +172,56 @@ def _bounded_json_object(value: Any, *, field: str) -> dict[str, Any]:
         raise CoverageLedgerError(
             "coverage_context_too_large", f"{field} exceeds {MAX_JSON_BYTES} bytes",
         )
-    return json.loads(encoded)
+    return _redacted(json.loads(encoded))
+
+
+def _locus_error(code: str, message: str, **details: Any) -> CoverageLedgerError:
+    return CoverageLedgerError(
+        code,
+        f"{message}. Accepted locus keys: {', '.join(COVERAGE_LOCUS_KEYS)}",
+        details={**details, "accepted_locus_keys": list(COVERAGE_LOCUS_KEYS)},
+    )
 
 
 def canonical_coverage_locus(value: Any) -> dict[str, Any]:
-    """Return the bounded dimensions that identify one concrete test angle."""
-    source = value if isinstance(value, Mapping) else {}
+    """Return the dimensions that identify one concrete test angle, refusing unknown input."""
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, Mapping):
+        raise _locus_error("coverage_locus_invalid", "locus must be a JSON object")
+    unknown = sorted(str(key)[:80] for key in value if str(key) not in _LOCUS_KEY_SET)
+    if unknown:
+        raise _locus_error(
+            "coverage_locus_key_unsupported",
+            f"Unsupported locus key(s): {', '.join(unknown[:10])}",
+            unsupported_locus_keys=unknown[:20],
+        )
     result: dict[str, Any] = {}
-    for key in _LOCUS_KEYS:
-        item = source.get(key)
-        if item in (None, "", [], {}):
+    for key in COVERAGE_LOCUS_KEYS:
+        item = value.get(key)
+        if item is None or (isinstance(item, str) and not item.strip()):
             continue
-        if key == "port":
-            try:
-                port = int(item)
-            except (TypeError, ValueError):
-                continue
-            if 1 <= port <= 65535:
-                result[key] = port
-            continue
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise _locus_error(
+                "coverage_locus_value_invalid", f"locus.{key} must be a string or integer",
+            )
         text = str(item).strip()
-        if key == "method":
-            text = text.upper()
-        result[key] = text[:1000]
+        if key == "port":
+            port = int(text) if text.isdigit() else 0
+            if not 1 <= port <= 65535:
+                raise _locus_error(
+                    "coverage_locus_value_invalid",
+                    "locus.port must be an integer from 1 to 65535",
+                )
+            result[key] = port
+            continue
+        if len(text) > MAX_LOCUS_VALUE_CHARS:
+            raise _locus_error(
+                "coverage_locus_value_too_long",
+                f"locus.{key} exceeds {MAX_LOCUS_VALUE_CHARS} characters",
+            )
+        text = str(_redacted(text))
+        result[key] = text.upper() if key == "method" else text
     return result
 
 
@@ -169,8 +240,11 @@ def _action_ids(value: Any, *, field: str) -> list[str]:
             ) from exc
         if parsed not in result:
             result.append(parsed)
-        if len(result) >= MAX_EVIDENCE_ACTIONS:
-            break
+    if len(result) > MAX_EVIDENCE_ACTIONS:
+        raise CoverageLedgerError(
+            "coverage_evidence_too_many",
+            f"{field} may cite at most {MAX_EVIDENCE_ACTIONS} actions",
+        )
     return result
 
 
@@ -182,17 +256,17 @@ def coverage_fingerprint(
     principal_context: Any,
 ) -> str:
     material = {
-        "family": _text(family, maximum=80, required=True).lower(),
+        "family": _text(family, field="family", required=True).lower(),
         "locus": canonical_coverage_locus(locus),
-        "mechanism": _text(mechanism, maximum=1000).lower(),
+        "mechanism": _text(mechanism, field="mechanism").lower(),
         "principal_context": _bounded_json_object(
             principal_context, field="principal_context",
         ),
     }
-    if not material["locus"] and not material["mechanism"]:
-        raise CoverageLedgerError(
+    if not material["locus"]:
+        raise _locus_error(
             "coverage_angle_too_broad",
-            "Coverage must name a concrete locus or mechanism; a family-level claim is too broad",
+            "Coverage must name a concrete locus; a family- or mechanism-only claim is too broad",
         )
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -200,15 +274,15 @@ def coverage_fingerprint(
 
 
 def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
-    status = _text(values.get("status"), maximum=40, required=True).lower()
+    status = str(values.get("status") or "").strip().lower()
     if status not in COVERAGE_ANGLE_STATUSES:
         raise CoverageLedgerError(
-            "coverage_status_invalid", f"Unsupported coverage status: {status}",
+            "coverage_status_invalid", f"Unsupported coverage status: {status[:40]}",
         )
 
-    family = _text(values.get("family"), maximum=80, required=True).lower()
+    family = _text(values.get("family"), field="family", required=True).lower()
     locus = canonical_coverage_locus(values.get("locus"))
-    mechanism = _text(values.get("mechanism"), maximum=1000)
+    mechanism = _text(values.get("mechanism"), field="mechanism")
     principal_context = _bounded_json_object(
         values.get("principal_context") or {}, field="principal_context",
     )
@@ -223,7 +297,7 @@ def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
         values.get("contradictory_evidence_action_ids"),
         field="contradictory_evidence_action_ids",
     )
-    candidate_id = _text(values.get("candidate_id"), maximum=80)
+    candidate_id = str(values.get("candidate_id") or "").strip()
     if candidate_id:
         try:
             candidate_id = str(UUID(candidate_id))
@@ -232,8 +306,8 @@ def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
                 "coverage_candidate_id_invalid", "candidate_id must be a UUID",
             ) from exc
 
-    blocker = _text(values.get("blocker"), maximum=2000)
-    proof_gap = _text(values.get("proof_gap"), maximum=4000)
+    blocker = _text(values.get("blocker"), field="blocker")
+    proof_gap = _text(values.get("proof_gap"), field="proof_gap")
     if status in {"negative", "partial", "candidate"} and not evidence:
         raise CoverageLedgerError(
             "coverage_evidence_required",
@@ -256,7 +330,7 @@ def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
         "locus": locus,
         "mechanism": mechanism,
         "principal_context": principal_context,
-        "hypothesis": _text(values.get("hypothesis"), maximum=8000),
+        "hypothesis": _text(values.get("hypothesis"), field="hypothesis"),
         "status": status,
         "evidence_action_ids": evidence,
         "contradictory_evidence_action_ids": contradictions,
@@ -264,37 +338,6 @@ def normalize_coverage_angle(values: Mapping[str, Any]) -> dict[str, Any]:
         "blocker": blocker or None,
         "proof_gap": proof_gap or None,
     }
-
-
-async def _owned_action_statuses(
-    conn: Any, *, hunt_run_id: str, action_ids: Sequence[str],
-) -> dict[str, str]:
-    if not action_ids:
-        return {}
-    rows = await conn.fetch(
-        """SELECT id, status
-           FROM hunt_actions
-           WHERE hunt_run_id=$1::uuid AND id = ANY($2::uuid[])""",
-        hunt_run_id,
-        [UUID(item) for item in action_ids],
-    )
-    statuses = {str(row["id"]): str(row["status"]) for row in rows}
-    missing = sorted(set(action_ids) - set(statuses))
-    if missing:
-        raise CoverageLedgerError(
-            "coverage_evidence_not_owned",
-            "Coverage evidence must be actions from this exact Hunt",
-        )
-    nonterminal = {
-        action_id: status for action_id, status in statuses.items()
-        if status not in TERMINAL_ACTION_STATUSES
-    }
-    if nonterminal:
-        raise CoverageLedgerError(
-            "coverage_evidence_not_terminal",
-            "Coverage evidence must be a completed, partial, or blocked Hunt action",
-        )
-    return statuses
 
 
 async def _require_owned_candidate(
@@ -317,26 +360,29 @@ async def _require_owned_candidate(
         )
 
 
-def _validate_evidence_claim(
-    angle: Mapping[str, Any], action_statuses: Mapping[str, str],
+async def _require_candidate_binding_preserved(
+    conn: Any, *, hunt_run_id: str, angle: Mapping[str, Any],
 ) -> None:
-    status = str(angle["status"])
-    evidence_ids = list(angle.get("evidence_action_ids") or [])
-    evidence_statuses = [action_statuses.get(item) for item in evidence_ids]
-    if status == "negative" and any(item != "completed" for item in evidence_statuses):
+    """An event without new evidence cannot replace the candidate an angle is bound to."""
+    if angle["evidence_action_ids"]:
+        return
+    previous = await conn.fetchrow(
+        """SELECT candidate_id
+           FROM hunt_coverage_angle_events
+           WHERE hunt_run_id=$1::uuid AND fingerprint=$2
+           ORDER BY event_seq DESC
+           LIMIT 1""",
+        hunt_run_id,
+        angle["fingerprint"],
+    )
+    bound = str(previous["candidate_id"]) if previous and previous["candidate_id"] else None
+    if bound and bound != angle["candidate_id"]:
         raise CoverageLedgerError(
-            "coverage_negative_requires_completed_actions",
-            "Negative coverage may cite only completed actions; partial/blocked work is a gap",
-        )
-    if status == "negative" and angle.get("contradictory_evidence_action_ids"):
-        raise CoverageLedgerError(
-            "coverage_negative_has_contradictory_evidence",
-            "Negative coverage cannot close an angle while contradictory evidence remains",
-        )
-    if status == "candidate" and any(item == "blocked" for item in evidence_statuses):
-        raise CoverageLedgerError(
-            "coverage_candidate_requires_executed_evidence",
-            "Candidate coverage cannot be based only on a blocked action",
+            "coverage_candidate_binding_superseded",
+            "This angle is bound to a Hunt candidate. Keep candidate_id "
+            f"{bound} or cite new same-Hunt evidence actions to change its state",
+            status_code=409,
+            details={"candidate_id": bound},
         )
 
 
@@ -344,6 +390,7 @@ def _public_row(row: Mapping[str, Any]) -> dict[str, Any]:
     item = dict(row)
     result = {
         "id": str(item.get("id") or ""),
+        "sequence": int(item["event_seq"]) if item.get("event_seq") is not None else None,
         "fingerprint": str(item.get("fingerprint") or ""),
         "family": str(item.get("family") or ""),
         "locus": _json_value(item.get("locus_json")) or {},
@@ -378,20 +425,50 @@ def _public_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def record_coverage_angle(
-    conn: Any, *, hunt_run_id: str, values: Mapping[str, Any],
+    conn: Any,
+    *,
+    hunt_run_id: str,
+    values: Mapping[str, Any],
+    run_status: str = "active",
 ) -> dict[str, Any]:
-    """Append one immutable angle event after binding evidence to this Hunt."""
+    """Append one immutable angle event after binding evidence to this Hunt.
+
+    The caller holds the Hunt row lock, so every check below and the sequence assigned
+    at insert are serialized with every other write to this Hunt.
+    """
     angle = normalize_coverage_angle(values)
+    if run_status == "budget_exhausted" and not angle["evidence_action_ids"]:
+        raise CoverageLedgerError(
+            "coverage_budget_exhausted_requires_evidence",
+            "Hunt is budget_exhausted; until it resumes, coverage must cite the same-Hunt "
+            "actions that settle the angle",
+            status_code=409,
+        )
+    recorded = int(await conn.fetchval(
+        "SELECT COUNT(*) FROM hunt_coverage_angle_events WHERE hunt_run_id=$1::uuid",
+        hunt_run_id,
+    ) or 0)
+    if recorded >= MAX_COVERAGE_EVENTS_PER_HUNT:
+        raise CoverageLedgerError(
+            "coverage_event_limit_reached",
+            f"This Hunt already has {MAX_COVERAGE_EVENTS_PER_HUNT} coverage events; record "
+            "the remaining gaps in the final debrief",
+            status_code=409,
+            details={"max_events_per_hunt": MAX_COVERAGE_EVENTS_PER_HUNT},
+        )
     all_refs = list(dict.fromkeys(
         list(angle["evidence_action_ids"])
         + list(angle["contradictory_evidence_action_ids"])
     ))
-    statuses = await _owned_action_statuses(
+    evidence = await owned_action_evidence(
         conn, hunt_run_id=hunt_run_id, action_ids=all_refs,
     )
-    _validate_evidence_claim(angle, statuses)
+    validate_evidence_claim(angle, evidence)
     await _require_owned_candidate(
         conn, hunt_run_id=hunt_run_id, candidate_id=angle["candidate_id"],
+    )
+    await _require_candidate_binding_preserved(
+        conn, hunt_run_id=hunt_run_id, angle=angle,
     )
     row = await conn.fetchrow(
         """INSERT INTO hunt_coverage_angle_events (
@@ -423,6 +500,14 @@ async def record_coverage_angle(
     }
 
 
+_LATEST_ANGLES_CTE = """WITH latest AS (
+               SELECT DISTINCT ON (fingerprint) *
+               FROM hunt_coverage_angle_events
+               WHERE hunt_run_id=$1::uuid
+               ORDER BY fingerprint, event_seq DESC
+           )"""
+
+
 async def list_coverage_angles(
     conn: Any,
     *,
@@ -438,19 +523,14 @@ async def list_coverage_angles(
     normalized_family = str(family or "").strip().lower()[:80] or None
     bounded_limit = max(1, min(int(limit), 500))
     rows = await conn.fetch(
-        """WITH latest AS (
-               SELECT DISTINCT ON (fingerprint) *
-               FROM hunt_coverage_angle_events
-               WHERE hunt_run_id=$1::uuid
-               ORDER BY fingerprint, created_at DESC, id DESC
-           )
+        _LATEST_ANGLES_CTE + """
            SELECT latest.*, c.status AS candidate_status,
                   COUNT(*) OVER() AS total_count
            FROM latest
            LEFT JOIN investigation_candidates c ON c.id=latest.candidate_id
            WHERE ($2::text IS NULL OR latest.status=$2)
              AND ($3::text IS NULL OR latest.family=$3)
-           ORDER BY latest.created_at DESC, latest.id DESC
+           ORDER BY latest.event_seq DESC
            LIMIT $4""",
         hunt_run_id,
         normalized_status,
@@ -466,8 +546,73 @@ async def list_coverage_angles(
         "angles": angles,
         "count": len(angles),
         "total": total,
+        "limit": bounded_limit,
         "truncated": total > len(angles),
     }
+
+
+async def coverage_history(
+    conn: Any, *, hunt_run_id: str, limit: int,
+) -> dict[str, Any]:
+    """Return every event in sequence order, marking the ones a later event superseded."""
+    bounded_limit = max(1, int(limit))
+    rows = await conn.fetch(
+        """SELECT e.*, c.status AS candidate_status,
+                  LEAD(e.id) OVER (
+                      PARTITION BY e.fingerprint ORDER BY e.event_seq
+                  ) AS superseded_by_event_id,
+                  COUNT(*) OVER() AS total_count
+           FROM hunt_coverage_angle_events e
+           LEFT JOIN investigation_candidates c ON c.id=e.candidate_id
+           WHERE e.hunt_run_id=$1::uuid
+           ORDER BY e.event_seq ASC
+           LIMIT $2""",
+        hunt_run_id,
+        bounded_limit,
+    )
+    events = []
+    for row in rows:
+        event = _public_row(row)
+        event.pop("total_count", None)
+        superseded_by = dict(row).get("superseded_by_event_id")
+        event["superseded"] = superseded_by is not None
+        event["superseded_by_event_id"] = str(superseded_by) if superseded_by else None
+        events.append(event)
+    total = int(dict(rows[0]).get("total_count") or 0) if rows else 0
+    return {
+        "schema_version": COVERAGE_HISTORY_SCHEMA,
+        "events": events,
+        "event_count": len(events),
+        "event_total": total,
+        "event_limit": bounded_limit,
+        "events_truncated": total > len(events),
+        "current_state_rule": (
+            "Each fingerprint's current state is its highest-sequence event; earlier "
+            "events stay listed with superseded=true."
+        ),
+        "advisory_only": True,
+    }
+
+
+_CONTINUATION_SQL = _LATEST_ANGLES_CTE + """,
+           open_angles AS (
+               SELECT latest.*, c.status AS candidate_status
+               FROM latest
+               LEFT JOIN investigation_candidates c ON c.id=latest.candidate_id
+               WHERE latest.status <> 'negative'
+                 AND NOT (
+                     latest.status='candidate'
+                     AND COALESCE(c.status, '') IN ('verified','refuted','expired')
+                 )
+           )
+           SELECT open_angles.*, COUNT(*) OVER() AS continuation_total
+           FROM open_angles
+           ORDER BY CASE status
+                        WHEN 'candidate' THEN 0 WHEN 'partial' THEN 1
+                        WHEN 'testing' THEN 2 WHEN 'planned' THEN 3
+                        WHEN 'blocked' THEN 4 ELSE 99 END,
+                    family, fingerprint
+           LIMIT $2"""
 
 
 async def build_hunt_checkpoint(
@@ -477,6 +622,11 @@ async def build_hunt_checkpoint(
     hunt_run_id = str(run["id"])
     coverage = await list_coverage_angles(
         conn, hunt_run_id=hunt_run_id, limit=MAX_CHECKPOINT_ANGLES,
+    )
+    # The queue is selected and counted in SQL over every open angle, not derived from
+    # the newest-first angle window, so older open work cannot fall off unreported.
+    continuation_rows = await conn.fetch(
+        _CONTINUATION_SQL, hunt_run_id, MAX_CHECKPOINT_CONTINUATION,
     )
     candidate_rows = await conn.fetch(
         """SELECT c.id, c.family, c.title, c.status, c.claimed_severity,
@@ -506,7 +656,7 @@ async def build_hunt_checkpoint(
                SELECT DISTINCT ON (fingerprint) fingerprint, status
                FROM hunt_coverage_angle_events
                WHERE hunt_run_id=$1::uuid
-               ORDER BY fingerprint, created_at DESC, id DESC
+               ORDER BY fingerprint, event_seq DESC
            )
            SELECT status, COUNT(*) AS count
            FROM latest
@@ -519,7 +669,7 @@ async def build_hunt_checkpoint(
                SELECT DISTINCT ON (fingerprint) fingerprint, family
                FROM hunt_coverage_angle_events
                WHERE hunt_run_id=$1::uuid
-               ORDER BY fingerprint, created_at DESC, id DESC
+               ORDER BY fingerprint, event_seq DESC
            )
            SELECT family, COUNT(*) AS count
            FROM latest
@@ -577,34 +727,18 @@ async def build_hunt_checkpoint(
     family_counts = {
         str(row["family"]): int(row["count"]) for row in coverage_family_rows
     }
-
-    priority = {"candidate": 0, "partial": 1, "testing": 2, "planned": 3, "blocked": 4}
-    continuation = sorted(
-        (
-            {
-                "fingerprint": item["fingerprint"],
-                "family": item["family"],
-                "locus": item["locus"],
-                "mechanism": item["mechanism"],
-                "status": item["status"],
-                "candidate_id": item["candidate_id"],
-                "candidate_status": item["candidate_status"],
-                "blocker": item["blocker"],
-                "proof_gap": item["proof_gap"],
-                "evidence_action_ids": item["evidence_action_ids"],
-            }
-            for item in latest_angles
-            if item["status"] != "negative"
-            and not (
-                item["status"] == "candidate"
-                and item["candidate_status"] in {"verified", "refuted", "expired"}
+    continuation = []
+    for row in continuation_rows:
+        item = _public_row(row)
+        continuation.append({
+            key: item[key] for key in (
+                "fingerprint", "family", "locus", "mechanism", "status", "candidate_id",
+                "candidate_status", "blocker", "proof_gap", "evidence_action_ids",
             )
-        ),
-        key=lambda item: (
-            priority.get(str(item["status"]), 99),
-            str(item["family"]),
-            str(item["fingerprint"]),
-        ),
+        })
+    continuation_total = (
+        int(dict(continuation_rows[0]).get("continuation_total") or 0)
+        if continuation_rows else 0
     )
 
     return {
@@ -623,6 +757,9 @@ async def build_hunt_checkpoint(
             "latest_angles": latest_angles,
         },
         "continuation_queue": continuation,
+        "continuation_count": len(continuation),
+        "continuation_total": continuation_total,
+        "continuation_truncated": continuation_total > len(continuation),
         "candidates": candidates,
         "candidate_count": candidate_total,
         "candidates_truncated": candidate_total > len(candidates),
@@ -638,6 +775,10 @@ async def build_hunt_checkpoint(
     }
 
 
+# init.sql carries the same definition for fresh databases. These statements are
+# idempotent and also upgrade the table created by the first release of this ledger:
+# they add the ordering sequence (numbering existing rows in their previous order), give
+# the status check its canonical name, and replace the timestamp-ordered indexes.
 COVERAGE_LEDGER_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS hunt_coverage_angle_events (
@@ -656,31 +797,84 @@ COVERAGE_LEDGER_SCHEMA_STATEMENTS = (
         blocker TEXT,
         proof_gap TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        event_seq BIGSERIAL,
         CONSTRAINT hunt_coverage_angle_status_check CHECK (
             status IN ('planned','testing','negative','partial','blocked','candidate')
         )
     )
     """,
     """
-    CREATE INDEX IF NOT EXISTS idx_hunt_coverage_angle_events_run
-    ON hunt_coverage_angle_events(hunt_run_id, created_at DESC, id DESC)
+    DO $coverage$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_attribute
+            WHERE attrelid='hunt_coverage_angle_events'::regclass
+              AND attname='event_seq' AND NOT attisdropped
+        ) THEN
+            ALTER TABLE hunt_coverage_angle_events ADD COLUMN event_seq BIGSERIAL;
+            UPDATE hunt_coverage_angle_events e
+            SET event_seq=ordered.position
+            FROM (
+                SELECT id, row_number() OVER (ORDER BY created_at, id) AS position
+                FROM hunt_coverage_angle_events
+            ) ordered
+            WHERE e.id=ordered.id;
+            PERFORM setval(
+                pg_get_serial_sequence('hunt_coverage_angle_events', 'event_seq'),
+                GREATEST((SELECT COUNT(*) FROM hunt_coverage_angle_events), 1),
+                (SELECT COUNT(*) > 0 FROM hunt_coverage_angle_events)
+            );
+        END IF;
+    END
+    $coverage$
     """,
     """
-    CREATE INDEX IF NOT EXISTS idx_hunt_coverage_angle_events_fingerprint
-    ON hunt_coverage_angle_events(hunt_run_id, fingerprint, created_at DESC, id DESC)
+    DO $coverage$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid='hunt_coverage_angle_events'::regclass
+              AND conname='hunt_coverage_angle_events_status_check'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid='hunt_coverage_angle_events'::regclass
+              AND conname='hunt_coverage_angle_status_check'
+        ) THEN
+            ALTER TABLE hunt_coverage_angle_events
+            RENAME CONSTRAINT hunt_coverage_angle_events_status_check
+            TO hunt_coverage_angle_status_check;
+        END IF;
+    END
+    $coverage$
+    """,
+    "DROP INDEX IF EXISTS idx_hunt_coverage_angle_events_run",
+    "DROP INDEX IF EXISTS idx_hunt_coverage_angle_events_fingerprint",
+    """
+    CREATE INDEX IF NOT EXISTS idx_hunt_coverage_angle_events_run_seq
+    ON hunt_coverage_angle_events(hunt_run_id, event_seq DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_hunt_coverage_angle_events_fingerprint_seq
+    ON hunt_coverage_angle_events(hunt_run_id, fingerprint, event_seq DESC)
     """,
 )
 
 
 __all__ = [
     "COVERAGE_ANGLE_STATUSES",
+    "COVERAGE_HISTORY_SCHEMA",
     "COVERAGE_LEDGER_SCHEMA",
     "COVERAGE_LEDGER_SCHEMA_STATEMENTS",
+    "COVERAGE_LOCUS_KEYS",
+    "COVERAGE_WRITABLE_RUN_STATUSES",
     "CoverageLedgerError",
     "HUNT_CHECKPOINT_SCHEMA",
+    "MAX_COVERAGE_EVENTS_PER_HUNT",
+    "TERMINAL_ACTION_STATUSES",
     "build_hunt_checkpoint",
     "canonical_coverage_locus",
     "coverage_fingerprint",
+    "coverage_history",
     "list_coverage_angles",
     "normalize_coverage_angle",
     "record_coverage_angle",

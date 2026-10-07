@@ -17,13 +17,17 @@ from .boundary_context import BoundaryContextError, _json, _uuid
 try:
     from runtime.http_structure import structure_fields
     from ai_gate.boundary.hypothesis import MAX_BOUNDARY_SOURCE_AGENT_PATHS, normalize_boundary_source_binding
+    from investigation_candidates import MAX_CANDIDATE_EVIDENCE_REFS
 except ModuleNotFoundError:
     from ..runtime.http_structure import structure_fields
     from ..ai_gate.boundary.hypothesis import MAX_BOUNDARY_SOURCE_AGENT_PATHS, normalize_boundary_source_binding
+    from ..investigation_candidates import MAX_CANDIDATE_EVIDENCE_REFS
 
 MAX_CAPTURES = 500
 MAX_DRAFTS = 20
 MAX_SURFACES = 50
+MAX_IDENTITY_SOURCES = 4
+MAX_AGENT_SOURCES = 2
 CAPTURES_QUERY = """
 SELECT t.id, t.hunt_action_id, t.url, t.method, t.status_code,
        t.principal_slot, t.metadata_json, t.error, t.truncated
@@ -188,6 +192,7 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
     drafts = []
     draft_count = 0
     source_bindings_withheld = 0
+    drafts_with_truncated_provenance = 0
     for (origin, template), slots in sorted(groups.items()):
         same_agents = {(a["path"], a["response_path"]) for a in agents if a["origin"] == origin}
         for owner_id, owner in sorted(slots["primary"].items()):
@@ -200,6 +205,9 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
                 owner_sources = owner.get("provenance_records") or [owner["provenance"]]
                 attacker_sources = attacker.get("provenance_records") or [attacker["provenance"]]
                 sources = [*owner_sources, *attacker_sources]
+                provenance_omitted: dict[str, int] = {}
+                identity_sources: list[dict[str, Any]] = []
+                agent_sources: list[dict[str, Any]] = []
                 prefill: dict[str, Any] = {
                     "version": 1, "name": "discovered-read-boundary",
                     "owner": {"resource_id": owner_id}, "attacker": {"resource_id": attacker_id},
@@ -223,14 +231,20 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
                 if by_slot["primary"] == by_slot["secondary"] and len(by_slot["primary"]) == 1:
                     path, subject, tenant = next(iter(by_slot["primary"]))
                     prefill["identity"] = {"path": path, "subject_field": subject, "tenant_field": tenant}
-                    identity_sources = [i["provenance"] for i in same_identities if i["path"] == path][:4]
+                    identity_all = [i["provenance"] for i in same_identities if i["path"] == path]
+                    identity_sources = identity_all[:MAX_IDENTITY_SOURCES]
+                    if len(identity_all) > len(identity_sources):
+                        provenance_omitted["identity"] = len(identity_all) - len(identity_sources)
                     sources.extend(identity_sources)
                     for key in prefill["identity"]:
                         field_sources[f"identity.{key}"] = identity_sources
                 if len(same_agents) == 1:
                     path, response = next(iter(same_agents))
                     prefill["response_path"] = response
-                    agent_sources = [a["provenance"] for a in agents if a["origin"] == origin and a["path"] == path][:2]
+                    agent_all = [a["provenance"] for a in agents if a["origin"] == origin and a["path"] == path]
+                    agent_sources = agent_all[:MAX_AGENT_SOURCES]
+                    if len(agent_all) > len(agent_sources):
+                        provenance_omitted["response_path"] = len(agent_all) - len(agent_sources)
                     sources.extend(agent_sources)
                     field_sources["response_path"] = agent_sources
                 missing = [f"{slot}.{key}" for slot in ("owner", "attacker")
@@ -245,7 +259,16 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
                 # Canonical candidate identity is shared across Hunts; immutable
                 # observations retain each Hunt's own evidence association.
                 digest = hashlib.sha256(json.dumps([origin, template, owner_id, attacker_id], separators=(",", ":")).encode()).hexdigest()
-                refs = list(dict.fromkeys(s["capture_id"] for s in sources))
+                # The candidate keeps a bounded reference list. Lead with one capture
+                # per prefilled fact so a bound never drops a whole principal, then
+                # report what did not fit instead of truncating silently.
+                ordered = [owner_sources[0], attacker_sources[0], *identity_sources, *agent_sources, *sources]
+                all_refs = list(dict.fromkeys(s["capture_id"] for s in ordered))
+                refs = all_refs[:MAX_CANDIDATE_EVIDENCE_REFS]
+                if len(all_refs) > len(refs):
+                    provenance_omitted["evidence_refs"] = len(all_refs) - len(refs)
+                if provenance_omitted:
+                    drafts_with_truncated_provenance += 1
                 agent_paths = sorted({p for p, _ in same_agents})
                 if len(agent_paths) > MAX_BOUNDARY_SOURCE_AGENT_PATHS:
                     missing.append("agent_endpoint_binding_limit")
@@ -265,6 +288,9 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
                     "principal_slots": {"owner": "primary", "attacker": "secondary"},
                     "fixture_prefill": prefill, "field_provenance": field_sources,
                     "provenance": sources, "missing_facts": missing,
+                    "evidence_refs_total": len(all_refs),
+                    "evidence_refs_truncated": len(all_refs) > len(refs),
+                    "provenance_omitted": provenance_omitted,
                     "candidate_request": {
                         "family": "cross_tenant_retrieval", "locus": {
                             "method": "GET", "url": origin + template, "route": template,
@@ -288,6 +314,7 @@ def build_boundary_discovery(*, run: Mapping[str, Any], rows: list[Mapping[str, 
                      "structure_unavailable": unavailable, "captures_skipped": skipped,
                      "conflicting_resource_observations": resource_conflicts,
                      "source_bindings_withheld": source_bindings_withheld,
+                     "drafts_with_truncated_provenance": drafts_with_truncated_provenance,
                      "drafts_truncated": draft_count > MAX_DRAFTS, "agent_surfaces_truncated": len(agents) > MAX_SURFACES,
                      "action_leads_truncated": len(actions) > MAX_SURFACES,
                      "historical_backfill_performed": False},

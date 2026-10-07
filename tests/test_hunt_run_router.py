@@ -497,6 +497,9 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
     assert "context_pack" not in record["hunt"]
     assert record["trace_policy"]["residual_secret_risk"] is True
     assert record["http_archive"]["fidelity"] == "unavailable"
+    assert "coverage_events" in record["trace_policy"]["includes"]
+    assert record["coverage_ledger"]["schema_version"] == "hunt-coverage-history/v1"
+    assert record["coverage_ledger"]["events_truncated"] is False
 
 
 def test_hunt_run_service_lists_without_context_or_capability_expansion():

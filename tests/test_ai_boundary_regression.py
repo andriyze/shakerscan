@@ -40,8 +40,10 @@ def _proposal_and_base(*, with_digest=True):
     return proposal, base
 
 
-def _scan(scan_id=SOURCE, *, state="passed", time="2026-09-25T12:00:00+00:00"):
+def _scan(scan_id=SOURCE, *, state="passed", time="2026-09-25T12:00:00+00:00", binding=None):
     proposal, base = _proposal_and_base()
+    if binding is not None:
+        proposal["source_binding"] = binding
     digest = materialize_boundary_contract(proposal, boundary_base=base)["boundary_contract_sha256"]
     boundary = {
         "schema_version": "ai-boundary/v6", "contract_sha256": digest,
@@ -55,7 +57,8 @@ def _scan(scan_id=SOURCE, *, state="passed", time="2026-09-25T12:00:00+00:00"):
         "id": scan_id, "ai_target_id": TARGET, "status": "completed", "run_kind": "ai_api",
         "created_at": time,
         "options": {"ai_probe_pack": "shaker-ai-boundary", "ai_environment": "staging",
-                    "ai_scan_profile": "standard"},
+                    "ai_scan_profile": "standard",
+                    **({"ai_boundary_source_binding": binding} if binding is not None else {})},
         "result": {"ai_gate": {"boundary": boundary}, "findings": []},
     }
 
@@ -145,26 +148,76 @@ def test_artifact_digest_and_required_control_policy_cannot_be_weakened():
         evaluate_boundary_regression_artifact(artifact, scan=_later())
 
 
-def test_export_preserves_validated_hunt_source_binding_without_making_it_authority():
+BINDING = {
+    "schema_version": "hunt-boundary-source/v1",
+    "hunt_id": str(UUID(int=10)),
+    "target_id": str(UUID(int=11)),
+    "origin": "https://agent.example.test",
+    "agent_paths": ["/chat"],
+}
+ENDPOINT = "https://agent.example.test/chat"
+
+
+def _bound_proposal_and_base(binding=BINDING):
     proposal, base = _proposal_and_base()
-    proposal["source_binding"] = {
-        "schema_version": "hunt-boundary-source/v1",
-        "hunt_id": str(UUID(int=10)),
-        "target_id": str(UUID(int=11)),
-        "origin": "https://agent.example.test",
-        "agent_paths": ["/chat"],
-    }
+    proposal["source_binding"] = dict(binding)
+    return proposal, base
+
+
+def test_export_carries_hunt_binding_only_as_the_source_run_recorded_it():
+    proposal, base = _bound_proposal_and_base()
     artifact = build_boundary_regression_artifact(
-        proposal=proposal, boundary_base=base, target_id=TARGET, source_scan=_scan(),
+        proposal=proposal, boundary_base=base, target_id=TARGET,
+        source_scan=_scan(binding=BINDING), endpoint_url=ENDPOINT,
     )
-    assert artifact["verify_request"]["proposal"]["source_binding"] == proposal["source_binding"]
+    assert artifact["verify_request"]["proposal"]["source_binding"] == BINDING
     assert artifact["execution_enabled"] is False
+    later = _scan(LATER, time="2026-09-26T12:00:00+00:00", binding=BINDING)
+    assert evaluate_boundary_regression_artifact(artifact, scan=later)["status"] == "pass"
     bad = dict(proposal)
-    bad["source_binding"] = {**proposal["source_binding"], "origin": "not-an-origin"}
+    bad["source_binding"] = {**BINDING, "origin": "not-an-origin"}
     with pytest.raises(ContractError, match="invalid_boundary_source_origin"):
         build_boundary_regression_artifact(
-            proposal=bad, boundary_base=base, target_id=TARGET, source_scan=_scan(),
+            proposal=bad, boundary_base=base, target_id=TARGET,
+            source_scan=_scan(binding=BINDING), endpoint_url=ENDPOINT,
         )
+
+
+@pytest.mark.parametrize("proposal_binding, recorded, endpoint, code", [
+    # The source run never had a binding: the export cannot invent Hunt provenance.
+    (BINDING, None, ENDPOINT, "source_binding_mismatch"),
+    # The source run was bound: the export cannot strip it.
+    (None, BINDING, ENDPOINT, "source_binding_mismatch"),
+    # Re-pointing the binding is a different provenance claim.
+    ({**BINDING, "agent_paths": ["/v2/chat"]}, BINDING, ENDPOINT, "source_binding_mismatch"),
+    ({**BINDING, "hunt_id": str(UUID(int=12))}, BINDING, ENDPOINT, "source_binding_mismatch"),
+    # The AI target must still be the endpoint the binding names.
+    (BINDING, BINDING, "https://other.example.test/chat", "source_binding_endpoint_mismatch"),
+    (BINDING, BINDING, None, "source_binding_endpoint_mismatch"),
+])
+def test_export_refuses_binding_the_source_run_or_endpoint_does_not_support(
+    proposal_binding, recorded, endpoint, code,
+):
+    proposal, base = _proposal_and_base()
+    if proposal_binding is not None:
+        proposal["source_binding"] = dict(proposal_binding)
+    with pytest.raises(ContractError, match=code):
+        build_boundary_regression_artifact(
+            proposal=proposal, boundary_base=base, target_id=TARGET,
+            source_scan=_scan(binding=recorded), endpoint_url=endpoint,
+        )
+
+
+def test_evaluate_refuses_later_run_that_did_not_record_the_binding():
+    proposal, base = _bound_proposal_and_base()
+    artifact = build_boundary_regression_artifact(
+        proposal=proposal, boundary_base=base, target_id=TARGET,
+        source_scan=_scan(binding=BINDING), endpoint_url=ENDPOINT,
+    )
+    later = _scan(LATER, time="2026-09-26T12:00:00+00:00", binding=BINDING)
+    del later["options"]["ai_boundary_source_binding"]
+    with pytest.raises(ContractError, match="run_source_binding_mismatch"):
+        evaluate_boundary_regression_artifact(artifact, scan=later)
 
 
 def test_export_rejects_ignored_payload_fields_and_allows_hunt_provenance_without_digest():
@@ -228,3 +281,50 @@ async def test_api_loads_both_scans_by_target_in_read_only_snapshot(monkeypatch)
     with pytest.raises(HTTPException) as exc:
         await target_router.export_ai_boundary_regression(str(UUID(int=9)), export)
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint, status", [(ENDPOINT, None), ("https://other.example.test/chat", 422)])
+async def test_api_checks_a_bound_export_against_the_ai_target_endpoint(monkeypatch, endpoint, status):
+    class DB:
+        endpoint_lookups = 0
+
+        def acquire(self):
+            return self
+
+        def transaction(self, **_kwargs):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def fetchrow(self, query, *args):
+            if "FROM ai_targets" in query:
+                self.endpoint_lookups += 1
+                return {"endpoint_url": endpoint} if args[0] == UUID(TARGET) else None
+            scan_id, target_id = args
+            if target_id == UUID(TARGET) and str(scan_id) == SOURCE:
+                return _scan(binding=BINDING)
+            if target_id == UUID(TARGET) and str(scan_id) == LATER:
+                return _scan(LATER, time="2026-09-26T12:00:00+00:00", binding=BINDING)
+            return None
+
+    db = DB()
+    monkeypatch.setattr(target_router, "_pool", lambda: db)
+    proposal, base = _bound_proposal_and_base()
+    export = target_router.AIBoundaryRegressionExportRequest(
+        proposal=proposal, boundary_base=base, source_scan_id=SOURCE,
+    )
+    if status is not None:
+        with pytest.raises(HTTPException) as exc:
+            await target_router.export_ai_boundary_regression(TARGET, export)
+        assert exc.value.status_code == status
+        assert "source_binding_endpoint_mismatch" in str(exc.value.detail)
+        return
+    artifact = await target_router.export_ai_boundary_regression(TARGET, export)
+    request = target_router.AIBoundaryRegressionEvaluateRequest(artifact=artifact, scan_id=LATER)
+    assert (await target_router.evaluate_ai_boundary_regression(TARGET, request))["status"] == "pass"
+    assert db.endpoint_lookups == 2

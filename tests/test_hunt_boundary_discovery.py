@@ -187,6 +187,42 @@ def test_output_bounds_report_partial_coverage():
     assert result["coverage"]["captures_read"] == MAX_CAPTURES
 
 
+def _over_bound_evidence():
+    from api.investigation_candidates import MAX_CANDIDATE_EVIDENCE_REFS
+    extra = 20
+    evidence = [row(1000 + n, "/records/owner-record", {"id": SECRET})
+                for n in range(MAX_CANDIDATE_EVIDENCE_REFS + extra)]
+    evidence.append(row(5000, "/records/attacker-record", {"id": SECRET}, "secondary"))
+    for n in range(3):
+        evidence.append(row(6000 + n, "/identity", {"subject": SECRET, "tenant": SECRET}))
+        evidence.append(row(6100 + n, "/identity", {"subject": SECRET, "tenant": SECRET}, "secondary"))
+        evidence.append(row(7000 + n, "/chat", {"answer": SECRET}, method="POST"))
+    return evidence, MAX_CANDIDATE_EVIDENCE_REFS, extra
+
+
+def test_bounded_provenance_keeps_every_principal_and_reports_what_was_cut():
+    evidence, bound, extra = _over_bound_evidence()
+    result = build_boundary_discovery(run=RUN, rows=evidence)
+    draft, = result["drafts"]
+    refs = draft["candidate_request"]["evidence_refs"]
+    assert len(refs) == bound
+    # The single secondary capture survives even though primary captures alone
+    # exceed the bound; identity and agent evidence are kept ahead of repeats.
+    assert uid(5000) in refs and uid(1000) in refs
+    assert {uid(6000), uid(7000)} <= set(refs)
+    owner_and_attacker = bound + extra + 1
+    assert draft["evidence_refs_total"] == owner_and_attacker + 4 + 2
+    assert draft["evidence_refs_truncated"] is True
+    assert draft["provenance_omitted"] == {
+        "identity": 2, "response_path": 1, "evidence_refs": owner_and_attacker + 6 - bound,
+    }
+    assert len(draft["field_provenance"]["identity.path"]) == 4
+    assert len(draft["field_provenance"]["response_path"]) == 2
+    assert result["coverage"]["drafts_with_truncated_provenance"] == 1
+    complete, = build_boundary_discovery(run=RUN, rows=rows())["drafts"]
+    assert complete["evidence_refs_truncated"] is False and complete["provenance_omitted"] == {}
+
+
 def test_anonymous_and_authenticated_action_leads_do_not_fail_discovery():
     evidence = rows() + [row(20, "/chat", {}, slot=None, method="POST")]
     result = build_boundary_discovery(run=RUN, rows=evidence)
@@ -376,10 +412,56 @@ async def test_server_owned_prepare_recomputes_draft_and_persists_source_binding
 
     result = await router.prepare_hunt_boundary_discovery(RUN["id"], draft["draft_id"])
     assert result["candidate"]["id"] == uid(77)
+    assert result["evidence_refs_truncated"] is False
+    assert result["evidence_refs_total"] == len(draft["candidate_request"]["evidence_refs"])
+    assert captured["observation_context"]["evidence_refs_total"] == result["evidence_refs_total"]
     assert captured["normalized"]["locus"] == draft["candidate_request"]["locus"]
     assert captured["observation_context"]["boundary_source_binding"] == draft["source_binding"]
     assert captured["observation_context"]["authoritative"] is False
     assert any("UPDATE hunt_runs SET budget_used_json" in query for query, _ in store.executed)
+
+
+@pytest.mark.asyncio
+async def test_server_owned_prepare_reports_evidence_beyond_the_candidate_bound(monkeypatch):
+    evidence, bound, _extra = _over_bound_evidence()
+    draft = build_boundary_discovery(run=RUN, rows=evidence)["drafts"][0]
+
+    class PreparedStore:
+        @asynccontextmanager
+        async def acquire(self):
+            yield self
+
+        @asynccontextmanager
+        async def transaction(self, **_kwargs):
+            yield self
+
+        async def execute(self, *_args):
+            return "UPDATE 1"
+
+    async def lookup(_conn, _hunt_id, for_update=False):
+        return {**RUN, "status": "active", "objective": "test",
+                "budget_used_json": {}, "budget_json": {"max_candidates": 4}}
+
+    async def discovery(_conn, *, run):
+        return {"drafts": [draft]}
+
+    stored = {}
+
+    async def upsert_candidate(_conn, candidate, *, created_by, observation_context):
+        stored.update(candidate=candidate, observation_context=observation_context)
+        return {"id": uid(78), "inserted": True}
+
+    monkeypatch.setattr(router, "_pool", lambda: PreparedStore())
+    monkeypatch.setattr(router, "_hunt_run_or_404", lookup)
+    monkeypatch.setattr(router, "discover_hunt_boundaries", discovery)
+    monkeypatch.setattr(router.investigation_candidates, "upsert_candidate", upsert_candidate)
+    result = await router.prepare_hunt_boundary_discovery(RUN["id"], draft["draft_id"])
+    assert result["evidence_refs_truncated"] is True
+    assert result["evidence_refs_total"] > bound
+    assert result["provenance_omitted"]["evidence_refs"] == result["evidence_refs_total"] - bound
+    # The real candidate normaliser keeps exactly what discovery reported keeping.
+    assert stored["candidate"]["evidence_refs"] == draft["candidate_request"]["evidence_refs"]
+    assert stored["observation_context"]["provenance_omitted"] == result["provenance_omitted"]
 
 
 @pytest.mark.asyncio

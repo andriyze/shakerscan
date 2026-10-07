@@ -159,6 +159,9 @@ def hunt_start_public_contract() -> dict[str, Any]:
     except ModuleNotFoundError:
         from .. import investigation_candidates as candidates
         from ..runtime.capability_registry import CAPABILITY_REGISTRY
+    from .coverage_ledger import (
+        COVERAGE_ANGLE_STATUSES, COVERAGE_LOCUS_KEYS, MAX_COVERAGE_EVENTS_PER_HUNT,
+    )
     return {
         "schema_version": HUNT_START_SCHEMA,
         "budget_schema_version": HUNT_BUDGET_SCHEMA,
@@ -206,6 +209,15 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "operator_requested_only": True,
             "limits_are_totals": True,
             "preserves_usage_and_authority": True,
+        },
+        "coverage_ledger": {
+            "url_template": "/hunts/{hunt_id}/coverage-angles",
+            "checkpoint_url_template": "/hunts/{hunt_id}/checkpoint",
+            "statuses": sorted(COVERAGE_ANGLE_STATUSES),
+            "locus_keys": list(COVERAGE_LOCUS_KEYS),
+            "unknown_locus_keys": "refused",
+            "max_events_per_hunt": MAX_COVERAGE_EVENTS_PER_HUNT,
+            "advisory_only": True,
         },
         "candidates": {
             "url_template": "/hunts/{hunt_id}/candidates",

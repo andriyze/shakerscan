@@ -97,10 +97,39 @@ def test_converted_installation_adds_hunt_coverage_on_restart():
             await conn.execute('DROP TABLE hunt_coverage_angle_events')
             await module.run_schema_migrations(BoundConnectionPool(conn))
             assert await conn.fetchval("SELECT to_regclass('hunt_coverage_angle_events')") is not None
-            assert await conn.fetchval("SELECT to_regclass('idx_hunt_coverage_angle_events_run')") is not None
-            assert await conn.fetchval("SELECT to_regclass('idx_hunt_coverage_angle_events_fingerprint')") is not None
+            assert await conn.fetchval("SELECT to_regclass('idx_hunt_coverage_angle_events_run_seq')") is not None
+            assert await conn.fetchval("SELECT to_regclass('idx_hunt_coverage_angle_events_fingerprint_seq')") is not None
             await module.run_schema_migrations(BoundConnectionPool(conn))
             assert await conn.fetchval('SELECT count(*) FROM hunt_coverage_angle_events') == 0
+    asyncio.run(run())
+
+
+def test_restart_upgrades_the_first_release_coverage_ledger_in_place():
+    async def run():
+        async with startup_database() as conn:
+            module = importlib.import_module('retest_contract')
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            # Recreate the ledger exactly as the first release installed it (no event_seq,
+            # auto-named status check, timestamp indexes) with one retained event.
+            await conn.execute('DROP TABLE hunt_coverage_angle_events')
+            await conn.execute((Path(__file__).resolve().parent / 'fixtures' / 'hunt'
+                                / 'coverage_ledger_first_release.sql').read_text(encoding='utf-8'))
+            target = await conn.fetchval("INSERT INTO targets(url) VALUES('https://ledger.test') RETURNING id")
+            hunt = await conn.fetchval(
+                "INSERT INTO hunt_runs(target_kind,target_id) VALUES('web',$1) RETURNING id", target)
+            await conn.execute(
+                "INSERT INTO hunt_coverage_angle_events(hunt_run_id,fingerprint,family,status) "
+                "VALUES($1,'kept','authorization','planned')", hunt)
+            for _ in range(2):
+                await module.run_schema_migrations(BoundConnectionPool(conn))
+            assert await conn.fetchval(
+                "SELECT event_seq FROM hunt_coverage_angle_events WHERE fingerprint='kept'") == 1
+            names = {row['conname'] for row in await conn.fetch(
+                "SELECT conname FROM pg_constraint WHERE conrelid='hunt_coverage_angle_events'::regclass")}
+            assert 'hunt_coverage_angle_status_check' in names
+            assert 'hunt_coverage_angle_events_status_check' not in names
+            assert await conn.fetchval("SELECT to_regclass('idx_hunt_coverage_angle_events_run')") is None
+            assert await conn.fetchval("SELECT to_regclass('idx_hunt_coverage_angle_events_run_seq')") is not None
     asyncio.run(run())
 
 

@@ -225,3 +225,81 @@ async def test_shared_candidate_uses_only_current_hunt_discovery_source_binding(
     )
     assert result["proposal"]["source_binding"] == local
     assert "foreign.example.test" not in json.dumps(result)
+
+
+def _local_binding(**changes):
+    return {
+        "schema_version": "hunt-boundary-source/v1", "hunt_id": RUN["id"],
+        "target_id": RUN["target_id"], "origin": "https://agent.example.test",
+        "agent_paths": ["/chat"], **changes,
+    }
+
+
+def _insert_observation(db, n, observed_at, context, source_kind="hunt_boundary_discovery"):
+    db.db.execute(
+        """INSERT INTO investigation_candidate_observations
+           (id,candidate_id,hunt_run_id,evidence_refs,observed_at,source_kind,observation_context)
+           VALUES(?,?,?,?,?,?,?)""",
+        (uid(n), CANDIDATE, HUNT, json.dumps([ACTION]), observed_at, source_kind, json.dumps(context)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_re_prepared_draft_supersedes_earlier_binding_instead_of_becoming_ambiguous():
+    db = ready_db(source_binding=_local_binding())
+    db.db.set_authorizer(None)
+    # Re-preparation after the agent-path set changed: the newest server-written
+    # binding wins instead of making the candidate permanently ambiguous.
+    _insert_observation(db, 800, 50, {"boundary_source_binding": _local_binding(agent_paths=["/chat", "/v2/chat"])})
+    _insert_observation(db, 801, 60, {
+        "event": "candidate.updated", "changed_fields": ["title"], "authoritative": False,
+    })
+    db.guard()
+    result = await handoff(db, expected_rule="Manager approval is required for refunds.")
+    assert result["proposal"]["source_binding"]["agent_paths"] == ["/chat", "/v2/chat"]
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_edits_neither_shadow_nor_exhaust_the_binding_lookup():
+    from api.hunt.boundary_context import read_candidate_boundary_source_binding
+    db = ready_db(source_binding=_local_binding())
+    db.db.set_authorizer(None)
+    # PATCH lifecycle observations inherit the candidate's source_kind but carry no
+    # binding. More of them than the old 50-row window must not hide or cap it.
+    for index in range(60):
+        _insert_observation(db, 900 + index, 100 + index, {
+            "event": "candidate.updated", "changed_fields": ["title"], "authoritative": False,
+        })
+    db.guard()
+    assert await read_candidate_boundary_source_binding(db, run=RUN, candidate_id=CANDIDATE) == _local_binding()
+
+
+@pytest.mark.asyncio
+async def test_handoff_refuses_principal_resources_other_than_the_discovered_pair(monkeypatch):
+    db = DB()
+    db.db.execute("UPDATE investigation_candidates SET family=?, canonical_locus=?", (
+        "cross_tenant_retrieval",
+        json.dumps({"route": "/orders/{{resource_id}}", "ai_boundary_context": {
+            "discovery_draft_id": "a" * 64,
+            "owner_resource_id": "order-a", "attacker_resource_id": "order-b",
+        }}),
+    ))
+    db.guard()
+    assert (await handoff(db))["status"] == "ready"
+    swapped = {**PRINCIPALS, "attacker": {**PRINCIPALS["attacker"], "resource_id": "order-z"}}
+    with pytest.raises(ValueError, match="boundary_principal_resource_mismatch"):
+        await compile_candidate_boundary_handoff(
+            db, run=RUN, candidate_id=CANDIDATE, principal_context=swapped, expected_rule=None,
+        )
+
+    async def lookup(_conn, _hunt_id):
+        return RUN
+
+    monkeypatch.setattr(interaction_router, "_pool", lambda: db)
+    monkeypatch.setattr(interaction_router, "_hunt_run_or_404", lookup)
+    with pytest.raises(HTTPException) as exc:
+        await interaction_router.compile_hunt_candidate_boundary_proposal(
+            HUNT, CANDIDATE, interaction_router.HuntBoundaryHandoffRequest(**swapped),
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "boundary_principal_resource_mismatch"
