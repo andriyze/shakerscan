@@ -117,3 +117,123 @@ async def test_coverage_persists_and_checkpoint_uses_latest_owned_evidence(boots
             await pool.close()
         await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
         await conn.close()
+
+
+# The table exactly as the first ledger release (ba329985) created it, before event_seq,
+# with an auto-named status check and timestamp-ordered indexes.
+FIRST_RELEASE_LEDGER_DDL = """
+CREATE TABLE hunt_coverage_angle_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    fingerprint TEXT NOT NULL,
+    family TEXT NOT NULL,
+    locus_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    mechanism TEXT NOT NULL DEFAULT '',
+    principal_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+    hypothesis TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (
+        status IN ('planned','testing','negative','partial','blocked','candidate')
+    ),
+    evidence_action_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    contradictory_evidence_action_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    candidate_id UUID,
+    blocker TEXT,
+    proof_gap TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_hunt_coverage_angle_events_run
+ON hunt_coverage_angle_events(hunt_run_id, created_at DESC, id DESC);
+CREATE INDEX idx_hunt_coverage_angle_events_fingerprint
+ON hunt_coverage_angle_events(hunt_run_id, fingerprint, created_at DESC, id DESC);
+"""
+
+
+async def _ledger_catalog(conn, schema):
+    columns = [tuple(row) for row in await conn.fetch(
+        """SELECT column_name, data_type, is_nullable,
+                  replace(COALESCE(column_default, ''), $1 || '.', '')
+           FROM information_schema.columns
+           WHERE table_schema=$1 AND table_name='hunt_coverage_angle_events'
+           ORDER BY ordinal_position""", schema)]
+    constraints = sorted(tuple(row) for row in await conn.fetch(
+        """SELECT conname, replace(pg_get_constraintdef(oid), $1 || '.', '')
+           FROM pg_constraint
+           WHERE conrelid=($1 || '.hunt_coverage_angle_events')::regclass""", schema))
+    indexes = sorted(tuple(row) for row in await conn.fetch(
+        """SELECT indexname, replace(indexdef, $1 || '.', '')
+           FROM pg_indexes WHERE schemaname=$1 AND tablename='hunt_coverage_angle_events'""",
+        schema))
+    return columns, constraints, indexes
+
+
+@pytest.mark.asyncio
+async def test_converted_ledger_matches_fresh_schema_and_orders_by_sequence():
+    import asyncpg
+    from api.hunt.coverage_ledger import list_coverage_angles
+
+    assert urlsplit(DSN).hostname in {"localhost", "127.0.0.1", "::1", "postgres"}
+    ddl = (Path(__file__).resolve().parents[1] / "db/init.sql").read_text()
+    conn = await asyncpg.connect(DSN)
+    schemas = {name: f"hunt_coverage_{name}_" + uuid4().hex for name in ("fresh", "converted")}
+    try:
+        for name, schema in schemas.items():
+            await conn.execute(f'CREATE SCHEMA "{schema}"; SET search_path TO "{schema}"')
+            await conn.execute("CREATE TABLE targets(id UUID PRIMARY KEY); "
+                               "CREATE TABLE device_targets(id UUID PRIMARY KEY); "
+                               "CREATE TABLE investigation_candidates(id UUID PRIMARY KEY, status TEXT)")
+            for table in ("hunt_runs", "hunt_actions"):
+                await conn.execute(re.search(rf"CREATE TABLE {table} \(.*?\n\);", ddl, re.S)[0])
+            if name == "fresh":
+                block = ddl[ddl.index("CREATE TABLE hunt_coverage_angle_events"):]
+                await conn.execute(block[:block.index("-- ====")])
+            else:
+                await conn.execute(FIRST_RELEASE_LEDGER_DDL)
+        target, hunt = uuid4(), uuid4()
+        await conn.execute(f'SET search_path TO "{schemas["converted"]}"')
+        await conn.execute("INSERT INTO targets VALUES($1)", target)
+        await conn.execute("INSERT INTO hunt_runs(id,target_kind,target_id) VALUES($1,'web',$2)", hunt, target)
+        # Pre-upgrade rows inserted out of time order; the upgrade numbers them by created_at.
+        for minute, fingerprint in ((2, "second"), (1, "first"), (3, "third")):
+            await conn.execute(
+                "INSERT INTO hunt_coverage_angle_events(hunt_run_id,fingerprint,family,status,created_at) "
+                "VALUES($1,$2,'authorization','planned', TIMESTAMPTZ '2026-10-01' + make_interval(mins => $3))",
+                hunt, fingerprint, minute)
+        for _ in range(2):  # restart twice: idempotent on both populations
+            for schema in schemas.values():
+                await conn.execute(f'SET search_path TO "{schema}"')
+                for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
+                    await conn.execute(statement)
+
+        fresh = await _ledger_catalog(conn, schemas["fresh"])
+        converted = await _ledger_catalog(conn, schemas["converted"])
+        assert fresh == converted
+        assert ("hunt_coverage_angle_status_check",) == tuple(name for name, _ in fresh[1] if "check" in name)
+        assert [name for name, _ in fresh[2]] == [
+            "hunt_coverage_angle_events_pkey",
+            "idx_hunt_coverage_angle_events_fingerprint_seq",
+            "idx_hunt_coverage_angle_events_run_seq",
+        ]
+        await conn.execute(f'SET search_path TO "{schemas["converted"]}"')
+        rows = await conn.fetch("SELECT fingerprint, event_seq FROM hunt_coverage_angle_events ORDER BY event_seq")
+        assert [(row["fingerprint"], row["event_seq"]) for row in rows] == [("first", 1), ("second", 2), ("third", 3)]
+        assert await conn.fetchval(
+            "INSERT INTO hunt_coverage_angle_events(hunt_run_id,fingerprint,family,status) "
+            "VALUES($1,'fourth','authorization','planned') RETURNING event_seq", hunt) == 4
+
+        # Two events for one angle in one transaction share NOW(). The later insert must win
+        # even when its random id sorts first, which the timestamp/id order got wrong.
+        await conn.execute(f'SET search_path TO "{schemas["fresh"]}"')
+        await conn.execute("INSERT INTO targets VALUES($1)", target)
+        await conn.execute("INSERT INTO hunt_runs(id,target_kind,target_id) VALUES($1,'web',$2)", hunt, target)
+        async with conn.transaction():
+            for event_id, status in (("ffffffff-ffff-4fff-8fff-ffffffffffff", "planned"),
+                                     ("00000000-0000-4000-8000-000000000000", "testing")):
+                await conn.execute(
+                    "INSERT INTO hunt_coverage_angle_events(id,hunt_run_id,fingerprint,family,status) "
+                    "VALUES($1,$2,'same-angle','authorization',$3)", event_id, hunt, status)
+        current = await list_coverage_angles(conn, hunt_run_id=str(hunt))
+        assert [(angle["status"], angle["sequence"]) for angle in current["angles"]] == [("testing", 2)]
+    finally:
+        for schema in schemas.values():
+            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.close()

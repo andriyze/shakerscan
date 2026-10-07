@@ -1059,6 +1059,9 @@ ON hunt_skill_events(hunt_run_id, created_at, id);
 -- Append-only, evidence-backed coverage ledger.  A family-level result never closes a
 -- materially different method, route, mechanism, principal context, or application state.
 -- These rows organize investigation only; they do not promote candidates or findings.
+-- event_seq orders events: it is assigned at insert while the writer holds the Hunt row
+-- lock, so it follows commit order. The startup migration (api/hunt/coverage_ledger.py)
+-- installs this exact definition on converted databases.
 CREATE TABLE hunt_coverage_angle_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
@@ -1068,20 +1071,22 @@ CREATE TABLE hunt_coverage_angle_events (
     mechanism TEXT NOT NULL DEFAULT '',
     principal_context JSONB NOT NULL DEFAULT '{}'::jsonb,
     hypothesis TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL CHECK (
-        status IN ('planned','testing','negative','partial','blocked','candidate')
-    ),
+    status TEXT NOT NULL,
     evidence_action_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
     contradictory_evidence_action_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
     candidate_id UUID,
     blocker TEXT,
     proof_gap TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    event_seq BIGSERIAL,
+    CONSTRAINT hunt_coverage_angle_status_check CHECK (
+        status IN ('planned','testing','negative','partial','blocked','candidate')
+    )
 );
-CREATE INDEX idx_hunt_coverage_angle_events_run
-ON hunt_coverage_angle_events(hunt_run_id, created_at DESC, id DESC);
-CREATE INDEX idx_hunt_coverage_angle_events_fingerprint
-ON hunt_coverage_angle_events(hunt_run_id, fingerprint, created_at DESC, id DESC);
+CREATE INDEX idx_hunt_coverage_angle_events_run_seq
+ON hunt_coverage_angle_events(hunt_run_id, event_seq DESC);
+CREATE INDEX idx_hunt_coverage_angle_events_fingerprint_seq
+ON hunt_coverage_angle_events(hunt_run_id, fingerprint, event_seq DESC);
 
 -- ============================================================
 -- FINDINGS - Vulnerabilities discovered

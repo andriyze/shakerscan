@@ -10,6 +10,10 @@ The locus vocabulary is closed and published (``COVERAGE_LOCUS_KEYS``). An unkno
 is refused instead of dropped, because a dropped dimension silently merges two different
 experiments into one fingerprint.
 
+Events are append-only and ordered by ``event_seq``, which is assigned at insert while
+the writer holds the Hunt row lock, so it follows commit order. An angle's current state
+is its highest-sequence event.
+
 This is investigation state, not proof.  A coverage event can point at a candidate,
 but neither a planner-written angle nor a checkpoint may create or verify a finding.
 """
@@ -406,6 +410,7 @@ def _public_row(row: Mapping[str, Any]) -> dict[str, Any]:
     item = dict(row)
     result = {
         "id": str(item.get("id") or ""),
+        "sequence": int(item["event_seq"]) if item.get("event_seq") is not None else None,
         "fingerprint": str(item.get("fingerprint") or ""),
         "family": str(item.get("family") or ""),
         "locus": _json_value(item.get("locus_json")) or {},
@@ -504,7 +509,7 @@ async def list_coverage_angles(
                SELECT DISTINCT ON (fingerprint) *
                FROM hunt_coverage_angle_events
                WHERE hunt_run_id=$1::uuid
-               ORDER BY fingerprint, created_at DESC, id DESC
+               ORDER BY fingerprint, event_seq DESC
            )
            SELECT latest.*, c.status AS candidate_status,
                   COUNT(*) OVER() AS total_count
@@ -512,7 +517,7 @@ async def list_coverage_angles(
            LEFT JOIN investigation_candidates c ON c.id=latest.candidate_id
            WHERE ($2::text IS NULL OR latest.status=$2)
              AND ($3::text IS NULL OR latest.family=$3)
-           ORDER BY latest.created_at DESC, latest.id DESC
+           ORDER BY latest.event_seq DESC
            LIMIT $4""",
         hunt_run_id,
         normalized_status,
@@ -568,7 +573,7 @@ async def build_hunt_checkpoint(
                SELECT DISTINCT ON (fingerprint) fingerprint, status
                FROM hunt_coverage_angle_events
                WHERE hunt_run_id=$1::uuid
-               ORDER BY fingerprint, created_at DESC, id DESC
+               ORDER BY fingerprint, event_seq DESC
            )
            SELECT status, COUNT(*) AS count
            FROM latest
@@ -581,7 +586,7 @@ async def build_hunt_checkpoint(
                SELECT DISTINCT ON (fingerprint) fingerprint, family
                FROM hunt_coverage_angle_events
                WHERE hunt_run_id=$1::uuid
-               ORDER BY fingerprint, created_at DESC, id DESC
+               ORDER BY fingerprint, event_seq DESC
            )
            SELECT family, COUNT(*) AS count
            FROM latest
@@ -700,6 +705,10 @@ async def build_hunt_checkpoint(
     }
 
 
+# init.sql carries the same definition for fresh databases. These statements are
+# idempotent and also upgrade the table created by the first release of this ledger:
+# they add the ordering sequence (numbering existing rows in their previous order), give
+# the status check its canonical name, and replace the timestamp-ordered indexes.
 COVERAGE_LEDGER_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS hunt_coverage_angle_events (
@@ -718,18 +727,65 @@ COVERAGE_LEDGER_SCHEMA_STATEMENTS = (
         blocker TEXT,
         proof_gap TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        event_seq BIGSERIAL,
         CONSTRAINT hunt_coverage_angle_status_check CHECK (
             status IN ('planned','testing','negative','partial','blocked','candidate')
         )
     )
     """,
     """
-    CREATE INDEX IF NOT EXISTS idx_hunt_coverage_angle_events_run
-    ON hunt_coverage_angle_events(hunt_run_id, created_at DESC, id DESC)
+    DO $coverage$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_attribute
+            WHERE attrelid='hunt_coverage_angle_events'::regclass
+              AND attname='event_seq' AND NOT attisdropped
+        ) THEN
+            ALTER TABLE hunt_coverage_angle_events ADD COLUMN event_seq BIGSERIAL;
+            UPDATE hunt_coverage_angle_events e
+            SET event_seq=ordered.position
+            FROM (
+                SELECT id, row_number() OVER (ORDER BY created_at, id) AS position
+                FROM hunt_coverage_angle_events
+            ) ordered
+            WHERE e.id=ordered.id;
+            PERFORM setval(
+                pg_get_serial_sequence('hunt_coverage_angle_events', 'event_seq'),
+                GREATEST((SELECT COUNT(*) FROM hunt_coverage_angle_events), 1),
+                (SELECT COUNT(*) > 0 FROM hunt_coverage_angle_events)
+            );
+        END IF;
+    END
+    $coverage$
     """,
     """
-    CREATE INDEX IF NOT EXISTS idx_hunt_coverage_angle_events_fingerprint
-    ON hunt_coverage_angle_events(hunt_run_id, fingerprint, created_at DESC, id DESC)
+    DO $coverage$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid='hunt_coverage_angle_events'::regclass
+              AND conname='hunt_coverage_angle_events_status_check'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid='hunt_coverage_angle_events'::regclass
+              AND conname='hunt_coverage_angle_status_check'
+        ) THEN
+            ALTER TABLE hunt_coverage_angle_events
+            RENAME CONSTRAINT hunt_coverage_angle_events_status_check
+            TO hunt_coverage_angle_status_check;
+        END IF;
+    END
+    $coverage$
+    """,
+    "DROP INDEX IF EXISTS idx_hunt_coverage_angle_events_run",
+    "DROP INDEX IF EXISTS idx_hunt_coverage_angle_events_fingerprint",
+    """
+    CREATE INDEX IF NOT EXISTS idx_hunt_coverage_angle_events_run_seq
+    ON hunt_coverage_angle_events(hunt_run_id, event_seq DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_hunt_coverage_angle_events_fingerprint_seq
+    ON hunt_coverage_angle_events(hunt_run_id, fingerprint, event_seq DESC)
     """,
 )
 
