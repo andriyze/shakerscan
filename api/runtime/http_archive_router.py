@@ -161,7 +161,24 @@ async def _scan_archive_ids(conn, scan_id: str) -> tuple[str, ...]:
     return values or (scan_id,)
 
 
-async def _export(
+def _raw_har_header() -> dict[str, str]:
+    return {"x-shakerscan-raw-har": "available" if raw_har_enabled() else "disabled"}
+
+
+async def _export(**arguments: Any):
+    """Every archive response, a refusal included, says whether verbatim HAR is exported here.
+
+    A refused export (a 403 for verbatim HAR, a 400 for an unknown format) is exactly the
+    response a client reads to learn the deployment's answer, so it carries the header too.
+    """
+    try:
+        return await _export_document(**arguments)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **_raw_har_header()}
+        raise
+
+
+async def _export_document(
     *,
     request: Request,
     scan_id: str | None,
@@ -232,7 +249,7 @@ async def _export(
             "x-shakerscan-archive-sensitive": (
                 "true" if effective_redaction == "raw" else "possibly"
             ),
-            "x-shakerscan-raw-har": "available" if raw_har["available"] else "disabled",
+            **_raw_har_header(),
         },
     )
 
