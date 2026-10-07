@@ -2,10 +2,11 @@
 
 The inventory is shared target knowledge and an informational worklist, never authority. A
 content-discovery hit enters it only when it differs from what the same run measured for paths
-that cannot exist.
+that cannot exist, and the write never decides whether the action that found it settles.
 """
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -110,3 +111,19 @@ async def enrich_crawl_endpoints(conn: Any, *, target: Any, origin: str,
     return await asm_inventory.upsert_endpoints(conn, target.target_id, worklist,
         source="hunt_discovery", auth_state=str(input.get("as_principal") or "anonymous"))
 
+
+async def record_discovered_endpoints(conn: Any, **kwargs: Any) -> int:
+    """Best-effort inventory enrichment inside a savepoint of the caller's settlement.
+
+    The settlement that calls this has already spent the action's traffic. An inventory failure
+    rolls back only the savepoint, so it can never abort settling the action or its budget.
+    """
+    try:
+        async with conn.transaction():
+            return await enrich_crawl_endpoints(conn, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - enrichment is optional; settlement is not
+        print(
+            f"[hunt] endpoint inventory enrichment skipped: {type(exc).__name__}",
+            file=sys.stderr, flush=True,
+        )
+        return 0
