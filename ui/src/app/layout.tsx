@@ -1,4 +1,8 @@
 import type { Metadata } from 'next'
+// Self-hosted faces: the CSP allows fonts from 'self' only.
+import '@fontsource-variable/archivo/wdth.css'
+import '@fontsource/ibm-plex-mono/400.css'
+import '@fontsource/ibm-plex-mono/500.css'
 import './globals.css'
 import Sidebar from '@/components/Sidebar'
 import WorkspaceBoundary from '@/components/WorkspaceBoundary'

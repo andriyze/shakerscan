@@ -196,7 +196,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-3xl">
             <p className="text-xs font-medium text-gray-400">Run conclusion</p>
-            <h2 id="scan-conclusion-heading" className="mt-2 text-2xl font-semibold text-white">
+            <h2 id="scan-conclusion-heading" className="readout mt-2 text-2xl font-semibold text-white">
               {resultPresentation.headline}
             </h2>
             <p className="mt-2 text-sm text-gray-300">{resultPresentation.explanation}</p>
@@ -246,7 +246,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
             <p className="mt-2 text-sm font-medium text-amber-200">Risk score unavailable</p>
           ) : (
             <div className="mt-1 flex items-baseline gap-2">
-              {hasGrade && <span className={`text-3xl font-semibold tracking-tight ${observedRiskColor}`}>{scorePresentation.grade}</span>}
+              {hasGrade && <span className={`readout text-3xl font-semibold ${observedRiskColor}`}>{scorePresentation.grade}</span>}
               {hasScore && <span className="text-sm text-gray-300">{scorePresentation.score}/100</span>}
             </div>
           )}
@@ -270,7 +270,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
           {assurance ? (
             <>
               <div className="mt-1 flex items-baseline gap-2">
-                <span className={`text-3xl font-semibold tracking-tight tabular-nums ${assuranceClass(assurance.band)}`}>{assurance.score}</span>
+                <span className={`readout text-3xl font-semibold ${assuranceClass(assurance.band)}`}>{assurance.score}</span>
                 <span className="text-sm text-gray-300">/100 · {assurance.label}</span>
               </div>
               <p className="mt-1 text-xs leading-5 text-gray-500">

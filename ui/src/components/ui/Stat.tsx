@@ -77,7 +77,7 @@ export function Stat({
   const body = (
     <>
       <span className="block truncate text-xs font-medium text-gray-400">{label}</span>
-      <span className={cn('mt-1 block text-2xl font-semibold leading-8 tracking-tight tabular-nums', VALUE_TONES[tone])}>
+      <span className={cn('readout mt-1 block text-2xl font-semibold leading-8', VALUE_TONES[tone])}>
         {value}
       </span>
       {caption && <span className="mt-0.5 block truncate text-xs text-gray-500">{caption}</span>}

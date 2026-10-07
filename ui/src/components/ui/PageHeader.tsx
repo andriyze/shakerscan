@@ -41,7 +41,7 @@ export function PageHeader({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           {eyebrow && <p className="mb-0.5 text-xs font-medium text-gray-500">{eyebrow}</p>}
-          <h1 className="wrap-break-word text-xl font-semibold tracking-tight text-white">{renderedTitle}</h1>
+          <h1 className="readout wrap-break-word text-xl font-semibold text-white">{renderedTitle}</h1>
           {description && <p className="mt-1 max-w-3xl text-sm text-gray-400">{description}</p>}
           {meta && <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-400">{meta}</div>}
         </div>

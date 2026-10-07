@@ -8,15 +8,27 @@ styling a local copy.
 
 `src/app/globals.css` retunes Tailwind's scales, so use the ordinary class names:
 
-- **Gray is graphite.** `gray-950` page, `gray-900` surfaces, `gray-800` borders and hover fills,
-  `gray-400` secondary text, `gray-500` tertiary text. No navy, no gradients, no glows.
-- **Blue is the only accent.** Primary buttons, links, focus rings and the active-filter rule.
-- **Color means something.** Red/orange/amber/sky are severities; emerald is proven or healthy.
-  Do not use color to decorate icons, tiles or headings.
+- **Gray is ink and graphite.** `gray-950` page, `gray-900` surfaces, `gray-800` hairlines and
+  hover fills, `gray-400` secondary text, `gray-500` tertiary text. The scale leans very slightly
+  toward the accent. No navy, no gradients, no glows.
+- **Blue is ShakerScan cobalt, the only accent.** Primary buttons, links, focus rings, activity
+  (running) and the active-filter rule.
+- **Color means something.** Red/orange/amber/sky are severities (low is sky, never the accent);
+  emerald is proven or healthy. Do not use color to decorate icons, tiles or headings.
 - **Radius:** `rounded-lg` (6px) for controls and cards, `rounded-md` inside them. `rounded-xl`
   and `rounded-2xl` resolve to 8px; prefer `rounded-lg`.
-- **Type:** system sans, `tabular-nums` on every number column. Monospace only for literal
-  values (URLs, hosts, IDs, payloads), never for labels or headings.
+
+## Type: width is the system
+
+One superfamily, self-hosted (the CSP allows fonts from `'self'` only):
+
+- **Body — Archivo, slightly condensed (96%).** Tables and prose stay dense.
+- **Readout — Archivo, semi-expanded (`readout` utility).** Page titles, `Stat` values, verdict
+  numbers and the wordmark, like the display of a test instrument. This is the product's one
+  expressive move: do not apply it to body copy, labels, buttons or table cells.
+- **Evidence — IBM Plex Mono (`font-mono`).** Literal values only: URLs, hosts, ports, IDs,
+  payloads, signatures. Never labels or headings.
+- `tabular-nums` on every number column.
 
 ## Page anatomy
 

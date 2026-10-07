@@ -66,23 +66,24 @@ export function InventoryToolbar({ filters, facets, onChange, searchRef }: {
       <option value="never">{withCount('Never scanned', facets?.activity.never, facets)}</option>
       <option value="scanning">{withCount('Scanning now', facets?.activity.scanning, facets)}</option>
     </Select>
-    <Select fullWidth={false} aria-label="Surface" value={filters.asset_type} onChange={event => onChange({ asset_type: event.target.value })} className={filterClass}>
-      <option value="">Web and network</option>
-      <option value="web">{withCount('Web apps', facets?.asset_type.web, facets)}</option>
-      <option value="network">{withCount('Network & devices', facets?.asset_type.network, facets)}</option>
-    </Select>
     {(filtered > 0 || filters.search) && <button type="button" onClick={() => onChange({ ...FILTER_DEFAULTS, sort: filters.sort })}
       className="rounded-md px-2 py-1.5 text-sm font-medium text-blue-400 hover:bg-blue-500/10 hover:text-blue-300">Clear all{filtered ? ` (${filtered})` : ''}</button>}
   </Toolbar>
 }
 
-/** The line above the table: what is listed, and how it is ordered. */
-export function InventoryListBar({ filters, onChange, summary }: {
-  filters: InventoryFilters; onChange: (next: Partial<InventoryFilters>) => void; summary: React.ReactNode
+/** The line above the table: what is listed, which surfaces, and how it is ordered. */
+export function InventoryListBar({ filters, facets, onChange, summary }: {
+  filters: InventoryFilters; facets: InventoryFacets | null
+  onChange: (next: Partial<InventoryFilters>) => void; summary: React.ReactNode
 }) {
   return <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
     <p className="text-sm text-gray-400" aria-live="polite">{summary}</p>
-    <div className="flex items-center gap-4">
+    <div className="flex flex-wrap items-center gap-3">
+      <Select fullWidth={false} aria-label="Surface" value={filters.asset_type} onChange={event => onChange({ asset_type: event.target.value })} className="h-8 py-1 text-sm">
+        <option value="">Web and network</option>
+        <option value="web">{withCount('Web apps', facets?.asset_type.web, facets)}</option>
+        <option value="network">{withCount('Network & devices', facets?.asset_type.network, facets)}</option>
+      </Select>
       <label className="flex shrink-0 cursor-pointer items-center gap-2 whitespace-nowrap text-sm text-gray-400">
         <input type="checkbox" className="h-3.5 w-3.5 accent-blue-500" checked={filters.archived} onChange={event => onChange({ archived: event.target.checked })} />
         Show archived

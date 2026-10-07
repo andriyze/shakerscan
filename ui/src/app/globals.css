@@ -17,33 +17,43 @@
   Design tokens. The UI is written against Tailwind's gray/blue scales, so retuning those scales
   here restyles every page at once. See ui/DESIGN.md for how pages use them.
 
-  - Gray is a low-chroma graphite instead of Tailwind's navy-tinted gray: surfaces read as neutral
-    product chrome, so severity and status colors carry the meaning.
-  - Blue is the calmer v3 scale; v4's blue-500/600 read as neon on a dark background.
-  - Radii are tightened: lg is the default control/card radius (6px), xl/2xl collapse to 8px so
-    containers stop drifting between three corner sizes.
+  - Gray is ink and graphite with a slight lean toward the accent, so surfaces read as one
+    product chrome and severity/status colors carry the meaning.
+  - Blue is ShakerScan cobalt: the single accent for actions, links, focus and activity. Low
+    severity uses sky so it never reads as the accent.
+  - Type is one superfamily with width as the variable: Archivo runs slightly condensed for
+    dense tables and semi-expanded for readouts (`readout`), with IBM Plex Mono for evidence.
+    Both are self-hosted (CSP allows font-src 'self' only).
+  - Radii are tight: lg is the default control/card radius (6px); xl/2xl collapse to 8px.
 */
 @theme {
-  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --font-sans: 'Archivo Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  --font-display: 'Archivo Variable', ui-sans-serif, system-ui, sans-serif;
 
-  --color-gray-50: #f7f8f9;
-  --color-gray-100: #eceef1;
-  --color-gray-200: #dcdfe4;
-  --color-gray-300: #c2c7cf;
-  --color-gray-400: #9299a4;
-  --color-gray-500: #6b7280;
-  --color-gray-600: #4b515b;
-  --color-gray-700: #353a42;
-  --color-gray-800: #24272d;
-  --color-gray-900: #16181c;
-  --color-gray-950: #0d0e11;
+  --color-gray-50: #f6f7f9;
+  --color-gray-100: #eceef3;
+  --color-gray-200: #dcdfe7;
+  --color-gray-300: #c1c5d1;
+  --color-gray-400: #9399ab;
+  --color-gray-500: #6b7184;
+  --color-gray-600: #4b5062;
+  --color-gray-700: #353946;
+  --color-gray-800: #242734;
+  --color-gray-900: #13151b;
+  --color-gray-950: #0b0c10;
 
-  --color-blue-300: #93c5fd;
-  --color-blue-400: #60a5fa;
-  --color-blue-500: #3b82f6;
-  --color-blue-600: #2563eb;
-  --color-blue-700: #1d4ed8;
+  --color-blue-50: #eef1ff;
+  --color-blue-100: #dfe5ff;
+  --color-blue-200: #c5d0ff;
+  --color-blue-300: #a8b8ff;
+  --color-blue-400: #7a92ff;
+  --color-blue-500: #4d6bff;
+  --color-blue-600: #3554f0;
+  --color-blue-700: #2a43cc;
+  --color-blue-800: #25389f;
+  --color-blue-900: #22307a;
+  --color-blue-950: #151d48;
 
   --radius-lg: 0.375rem;
   --radius-xl: 0.5rem;
@@ -113,10 +123,24 @@
     background: var(--background);
     color: var(--foreground);
     font-family: var(--font-sans);
+    /* Slightly condensed body width keeps dense tables compact; readouts open it back up. */
+    font-stretch: 96%;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
   }
+}
+
+/*
+  Readout: titles and headline numbers set like an instrument's display — semi-expanded,
+  lining tabular figures. The one expressive type move in the product; use it for page titles,
+  Stat values, the wordmark and verdict numbers, nowhere else.
+*/
+@utility readout {
+  font-family: var(--font-display);
+  font-stretch: 118%;
+  letter-spacing: -0.015em;
+  font-variant-numeric: lining-nums tabular-nums;
 }
 
 /* Severity/grade colors live in src/lib/constants.ts as Tailwind class maps. */

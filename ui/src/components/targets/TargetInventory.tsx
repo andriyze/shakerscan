@@ -208,7 +208,7 @@ export function TargetInventory() {
       <InventorySummary facets={facets} filters={filters} onChange={change} />
       <InventoryToolbar filters={filters} facets={facets} onChange={change} searchRef={searchInput} />
       {error && <div className="mb-4" role="alert"><ErrorState message={error} /></div>}
-      <InventoryListBar filters={filters} onChange={change}
+      <InventoryListBar filters={filters} facets={facets} onChange={change}
         summary={loading && !groups.length ? 'Loading targets…' : `${totals.targets.toLocaleString()} target${totals.targets === 1 ? '' : 's'} in ${totals.groups.toLocaleString()} group${totals.groups === 1 ? '' : 's'}`} />
       <div className="@container overflow-hidden rounded-lg border border-gray-800 bg-gray-900" role="table" aria-label="Targets" aria-busy={loading}>
         <ColumnHeader />

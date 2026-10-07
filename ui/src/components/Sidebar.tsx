@@ -228,7 +228,7 @@ function NavContent({
         <Link
           href="/"
           aria-label="ShakerScan dashboard"
-          className="flex items-center gap-2 rounded-sm text-[15px] font-semibold tracking-tight text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="readout flex items-center gap-2 rounded-sm text-[15px] font-semibold text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <BrandMark className="h-5 w-5" />
           ShakerScan
@@ -450,7 +450,7 @@ export default function Sidebar() {
     <>
       {/* Mobile: slim top bar instead of a viewport-eating sidebar. */}
       <div className="sticky top-0 z-40 flex items-center justify-between border-b border-gray-800 bg-gray-950 px-4 py-2.5 md:hidden">
-        <Link href="/" className="flex items-center gap-2 text-[15px] font-semibold tracking-tight text-white">
+        <Link href="/" className="readout flex items-center gap-2 text-[15px] font-semibold text-white">
           <BrandMark className="h-4 w-4" />
           ShakerScan
         </Link>

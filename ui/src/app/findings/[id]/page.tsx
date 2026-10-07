@@ -713,7 +713,7 @@ function FindingDetailContent() {
               <ProofStateBadge proofState={finding.proof_state} />
               <SourceTypeBadge type={getFindingSourceType(finding)} />
             </div>
-            <h1 className="mt-2 text-xl font-semibold leading-tight tracking-tight text-white wrap-break-word">{finding.title}</h1>
+            <h1 className="readout mt-2 text-xl font-semibold leading-tight text-white wrap-break-word">{finding.title}</h1>
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-400">
               {hostLabel && (
                 finding.target_id
