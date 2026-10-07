@@ -91,6 +91,7 @@ export function HuntResults({ hunt }: { hunt: HuntV2 }) {
           {(summary.indeterminate_calls ?? 0) > 0 && <span>{summary.indeterminate_calls} outcome unknown</span>}
           {(summary.partial_calls ?? 0) > 0 && <span>{summary.partial_calls} partial</span>}
           <span>{summary.executed_calls ?? summary.total_capability_calls} executed · {summary.total_capability_calls} attempted</span>
+          {(summary.rejected_calls ?? 0) > 0 && <span>{summary.rejected_calls} refused before running</span>}
           <span>{hunt.outcome_summary?.observation_count} observations</span>
           <span>{hunt.outcome_summary?.finding_count ?? hunt.outcome_summary?.finding_ids.length} findings</span>
           <span>{summary.candidate_ids.length} candidates</span>

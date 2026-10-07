@@ -77,6 +77,41 @@ def test_a_failed_executed_action_keeps_its_error_but_is_not_called_a_refusal():
     assert result["budget_accounting"]["basis"] != "refused_at_admission"
 
 
+def test_an_admission_refusal_is_attempted_but_never_executed():
+    """Live: a budget_exhausted:agent_actions refusal (no receipt, nothing sent) was counted in
+    executed_calls. attempted = executed + rejected + other must hold."""
+    from api.hunt.run_service import hunt_action_outcome_summary
+
+    refused = public_hunt_action(_refused_action({
+        "error": "budget_exhausted:agent_actions", "retryable_with_smaller_action": False,
+        "shortages": {"agent_actions": 1}, "remaining": {"agent_actions": 0},
+    }))
+    executed_failure = public_hunt_action({
+        **_refused_action({"ok": False, "error": "capability_fault:TimeoutError"}),
+        "receipt_id": uuid.uuid4(),
+    })
+    completed = public_hunt_action({
+        "id": uuid.uuid4(), "capability_name": "http.request", "status": "completed",
+        "input_summary": {}, "result_summary": json.dumps({"ok": True}), "receipt_id": uuid.uuid4(),
+    })
+    running = {"status": "running", "result": {}}
+    assert refused["result"]["execution_started"] is False
+    assert executed_failure["result"]["execution_started"] is None
+    summary = hunt_action_outcome_summary([refused, executed_failure, completed, running])
+    assert summary["attempted_calls"] == 4
+    assert summary["executed_calls"] == 2
+    assert summary["rejected_calls"] == 1
+    assert summary["other_calls"] == 1
+    assert summary["unsuccessful_calls"] == 1 and summary["successful_calls"] == 1
+    assert summary["attempted_calls"] == (
+        summary["executed_calls"] + summary["rejected_calls"] + summary["other_calls"]
+    )
+    assert summary["executed_calls"] == (
+        summary["successful_calls"] + summary["unsuccessful_calls"]
+        + summary["indeterminate_calls"] + summary["partial_calls"]
+    )
+
+
 def test_outcome_summary_names_the_candidates_this_hunt_recorded():
     hunt_id = str(uuid.uuid4())
     candidate_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
