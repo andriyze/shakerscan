@@ -80,9 +80,9 @@ _REASON_LABELS = {
     "declared_out_of_scope": "The target's API description declares its routes on another origin (a different host, port or scheme), outside this scan's scope",
     "declared_partly_out_of_scope": "Some routes in the target's API description are declared only on another origin (a different host, port or scheme); the rest were ingested",
     "slow_endpoints": (
-        "Some endpoints answered too slowly to finish the passive templates inside the "
-        "batch's time allowance, even on a retry sized for a slow endpoint; each is named "
-        "in the family coverage"
+        "Some endpoints answered too slowly to finish their checks (the passive templates, "
+        "or an exposure probe) inside the batch's time allowance, even on a retry sized for a "
+        "slow endpoint; each is named in the family coverage"
     ),
     "no_families_selected": (
         "The scan policy selected no check family, so only the baseline probes ran"

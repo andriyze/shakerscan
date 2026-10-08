@@ -1,16 +1,19 @@
 """Coverage names the endpoints a passive batch could not finish, not a generic timeout (N32).
 
 The batch side is tests/test_passive_batch_slow_endpoints_measured.py; this file reads its
-`slow_endpoints` receipt through the finalizer, in the package import layout.
+`slow_endpoints` receipt through the finalizer, in the package import layout, as it does the
+exposure batch's `exposure_probe_timeout` records (N37, batch side in
+tests/test_exposure_probe_latency.py).
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
 
 
 def test_coverage_says_partial_because_of_the_named_slow_endpoints():
-    from dataclasses import replace
 
     from api.runtime.observation_manifests import ObservationManifest
     from api.scan.action_plan import ScanActionPlan
@@ -58,3 +61,55 @@ def test_coverage_says_partial_because_of_the_named_slow_endpoints():
     assert family["slow_endpoints"] == ["https://app.example.test/api/v1/chat"]
     assert "slow_endpoints" in coverage["reasons"]
     assert "timed_out" not in coverage["reasons"]
+
+
+ORIGIN = "https://app.example.test"
+
+
+def test_coverage_names_the_exposure_paths_that_never_answered():
+    from api.runtime.observation_manifests import ObservationManifest
+    from api.scan.action_plan import ScanActionPlan as PackagePlan
+    from api.scan.finalizer import finalize_scan_report
+    from tests.test_scan_orchestrator import SCAN_ID, _action as plan_action, _result as settle
+
+    batch = replace(
+        plan_action("verify.exposure", 0, capability_name="exposure.verify_batch"),
+        capability_args={"slice": {"start": 0, "count": 2}, "manifest_entries": 2},
+        output_schema="exposure-probe-batch/v1", action_digest=None,
+    )
+    final = plan_action("finalize.report", 1, dependencies=(batch.action_id,))
+    plan = PackagePlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(batch, final),
+    )
+    rows = (
+        {"kind": "candidate_attempt", "attempt_id": "1" * 64, "candidate_id": "c1",
+         "family": "sensitive_exposure", "status": "success", "proof_state": "not_proven"},
+        {"kind": "candidate_attempt", "attempt_id": "2" * 64, "candidate_id": "c2",
+         "family": "sensitive_exposure", "status": "timed_out", "proof_state": "unproven"},
+        {"kind": "exposure_probe_timeout", "candidate_id": "c2", "url": f"{ORIGIN}/.env",
+         "first_timeout_seconds": 5.0, "retry_timeout_seconds": 15.0},
+    )
+    result = settle(
+        batch, status=CapabilityResultStatus.PARTIAL,
+        reason=CapabilityResultReason.SLOW_ENDPOINTS,
+    )
+    result = replace(result, observation_manifest_ref=ObservationManifest(
+        manifest_id="00000000-0000-4000-8000-0000000000ab", owner_id=SCAN_ID,
+        action_id=batch.action_id, capability_name=batch.capability_name,
+        output_schema=batch.output_schema, observation_count=len(rows),
+        content_sha256="0" * 64, size_bytes=512, object_key="scans/x.jsonl",
+    ).reference(), result_digest=None)
+    report = finalize_scan_report(
+        plan=plan, target_url=ORIGIN,
+        action_results={batch.action_id: result}, observations={batch.action_id: rows},
+    )
+    coverage = report["coverage"]
+    family = next(
+        row for row in coverage["family_coverage"] if row["family"] == "sensitive_exposure"
+    )
+    assert family["coverage_status"] == "partial"
+    assert family["reason"] == "slow_endpoints"
+    assert family["slow_endpoints"] == [f"{ORIGIN}/.env"]
+    assert coverage["candidate_coverage"]["sensitive_exposure"]["incomplete_candidates"] == 1
+    assert coverage["status"] == "partial"

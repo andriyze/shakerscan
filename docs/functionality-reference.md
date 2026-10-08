@@ -285,7 +285,12 @@ unverified, never what is shown: no excerpt is kept of a configuration document 
 `web.config`, actuator property sources, JSON configuration, SQL dump) or of any body with a value
 under a secret-named key, whatever that value's entropy, and free-text excerpts mask every
 secret-named assignment. Bodies are classified off the
-event loop by linear-time parsers, so a hostile body cannot stall heartbeats or cancellation. Cost on Balanced: the first slice holds one request and one wall second
+event loop by linear-time parsers, so a hostile body cannot stall heartbeats or cancellation. Each
+probe waits at least 5 s, or four times the slowest response the batch has measured, at most 15 s
+and never past the batch's wall; a probe that times out is retried once after the sweep with the
+15 s ceiling, and one that still times out is a coverage gap (`exposure_probe_timeout`, the family
+`partial` with reason `slow_endpoints` naming each path), never an examined "not proven". A batch
+whose wall runs out with probes left is `partial` with `timed_out`. Cost on Balanced: the first slice holds one request and one wall second
 per seed plus the controls and ten listing follow-ups on top of its endpoint share (130 requests /
 124 s for 25 discovered endpoints); content discovery reads the same 17 high-value paths, so its
 wordlist is 125 entries.

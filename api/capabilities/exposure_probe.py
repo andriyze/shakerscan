@@ -126,6 +126,35 @@ def exposure_first_slice_hold(slice_count: int) -> dict[str, int]:
     }
 
 
+# Per-probe timeout (soak N37). Dividing the batch's wall by its request allowance gave every
+# probe about 0.86 s on honey, so /.env -- the first probe, carrying the connection set-up --
+# timed out and was recorded as examined. A probe now waits at least the floor, longer on a host
+# whose measured responses are slow, never past the ceiling, and never past the batch's wall.
+EXPOSURE_PROBE_TIMEOUT_FLOOR_SECONDS = 5.0
+EXPOSURE_PROBE_TIMEOUT_CEILING_SECONDS = 15.0
+# A probe may take this many times the slowest response the batch has measured.
+EXPOSURE_PROBE_LATENCY_MULTIPLE = 4.0
+# Below this much wall left, a probe is not started: it could only time out.
+EXPOSURE_PROBE_MIN_START_SECONDS = 1.0
+
+
+def exposure_probe_timeout(
+    *, measured_ms: tuple[int, ...] | list[int], remaining_wall_seconds: float, retry: bool = False,
+) -> float:
+    """Seconds one exposure probe may wait, from the latency the batch measured.
+
+    The first attempt waits the larger of the floor and ``EXPOSURE_PROBE_LATENCY_MULTIPLE``
+    times the slowest measured response, capped at the ceiling. A retry of a probe that timed
+    out waits the ceiling. Either is cut to the wall the batch has left.
+    """
+    slowest = max((int(item) for item in measured_ms if int(item) > 0), default=0) / 1000.0
+    wanted = (
+        EXPOSURE_PROBE_TIMEOUT_CEILING_SECONDS if retry
+        else max(EXPOSURE_PROBE_TIMEOUT_FLOOR_SECONDS, EXPOSURE_PROBE_LATENCY_MULTIPLE * slowest)
+    )
+    return max(0.0, min(EXPOSURE_PROBE_TIMEOUT_CEILING_SECONDS, wanted, float(remaining_wall_seconds)))
+
+
 def is_never_requested(url: str) -> bool:
     path = urllib.parse.urlsplit(str(url or "")).path.rstrip("/").lower()
     return any(path.endswith(suffix) for suffix in _NEVER_REQUESTED_PATH_SUFFIXES)
@@ -852,6 +881,9 @@ def redacted_exposure_excerpt(body: bytes, signature: ExposureSignature) -> str:
 
 __all__ = [
     "DIRECTORY_FOLLOW_UP_FLOOR",
+    "EXPOSURE_PROBE_MIN_START_SECONDS",
+    "EXPOSURE_PROBE_TIMEOUT_CEILING_SECONDS",
+    "EXPOSURE_PROBE_TIMEOUT_FLOOR_SECONDS",
     "EXPOSURE_PROBE_PARSER_VERSION",
     "EXPOSURE_PROOF_CONTRACTS",
     "SECRET_MATERIAL_CLASSES",
@@ -862,6 +894,7 @@ __all__ = [
     "classify_exposure",
     "directory_listing_links",
     "exposure_first_slice_hold",
+    "exposure_probe_timeout",
     "is_never_requested",
     "is_sensitive_exposure_class",
     "redacted_exposure_excerpt",

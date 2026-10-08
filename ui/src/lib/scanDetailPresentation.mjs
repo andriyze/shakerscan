@@ -278,21 +278,31 @@ const COVERAGE_REASON_LABELS = {
   parser_promoted_or_degraded_output: 'A step returned output that could only be partly read',
   nmap_timeout_reported: 'The port scan ran out of time before it finished',
   malformed_naabu_jsonl: 'The port discovery step returned output that could not be read',
-  slow_endpoints: 'Some endpoints answered too slowly to finish the passive templates in time',
+  slow_endpoints: 'Some endpoints answered too slowly to finish their checks in time',
   no_families_selected: 'The scan policy selected no check family, so only the baseline probes ran',
   selected_family_no_candidates: 'A selected check family had nothing to test on the discovered surface',
+}
+
+// What a family's slow endpoint could not finish: the template pack, or an exposure probe that
+// no retry got an answer for.
+const SLOW_ENDPOINT_WORK = {
+  nuclei_passive: 'the passive templates',
+  nuclei_active: 'the active templates',
+  sensitive_exposure: 'the exposure checks',
 }
 
 // "Partial because N slow endpoints", naming them from the family coverage the finalizer wrote,
 // so a reader sees which endpoints were too slow rather than a generic timeout.
 export function slowEndpointsLabel(coverage) {
-  const rows = Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : []
+  const rows = (Array.isArray(record(coverage).family_coverage) ? record(coverage).family_coverage : [])
+    .filter((row) => Array.isArray(record(row).slow_endpoints) && record(row).slow_endpoints.length)
   const endpoints = [...new Set(rows.flatMap((row) => (
-    Array.isArray(record(row).slow_endpoints) ? record(row).slow_endpoints.map((item) => String(item || '')) : []
+    record(row).slow_endpoints.map((item) => String(item || ''))
   )).filter(Boolean))]
   if (!endpoints.length) return COVERAGE_REASON_LABELS.slow_endpoints
+  const work = [...new Set(rows.map((row) => SLOW_ENDPOINT_WORK[String(record(row).family)] || 'their checks'))]
   const plural = endpoints.length === 1 ? 'endpoint' : 'endpoints'
-  return `Partial because ${endpoints.length} slow ${plural} could not finish the passive templates in time: ${endpoints.join(', ')}`
+  return `Partial because ${endpoints.length} slow ${plural} could not finish ${work.join(' or ')} in time: ${endpoints.join(', ')}`
 }
 
 // Why no application response was observed. The finalizer records the cause as a coverage
