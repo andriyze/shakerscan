@@ -226,6 +226,11 @@ Rules for bounds:
        native helper, so v1 does not offer them.
    - The token alone never approves: it must be a valid connection **and** belong to a person
      with the operator or admin role who passes step-up.
+   - **Who may approve whose request (owner decision 8).** Any person with the operator or admin
+     role who passes step-up may decide a request raised through any operator token of the same
+     instance. The approver is not bound to the token's owner: client tokens belong to service
+     identities, not people, so there is no person to bind to. Every decision records the person
+     who passed step-up (`decided_by`) and how (`decision_via`), never the token.
 3. **Local OSS.** The approval is a plain `y/N` confirmation on the terminal. The trust boundary
    is the host, so any local process that can reach the API could decide. The note and the
    docs say this plainly.
@@ -574,8 +579,8 @@ pre-authorized …") and exits 2. There is no fallback.
     "session": {"ttl_seconds": 1800}}
    ```
    Exactly one of `decisions`, `preauthorization`, `session`, matching `purpose`. The gateway
-   checks the token, that `account` is a person with the operator or admin role (the gateway may
-   also require it to be the token's owner), that `origin` is its public URL, and for decisions
+   checks the token, that `account` is a person with the operator or admin role (any such person,
+   not only the token's owner: owner decision 8), that `origin` is its public URL, and for decisions
    that each request is pending with that `subject_digest` (read from the engine). It answers:
    ```json
    {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "<opaque>",
@@ -709,6 +714,10 @@ Platform authenticators are not reachable from a pip-installed command.
 5. **Capability flags.** No "remember" for capability flags in v1.
 6. **No model justification** on requests in v1.
 7. **A pending request never freezes the Hunt.**
+8. **Any operator may approve (2026-10-08).** Any person with the operator or admin role who passes
+   step-up may approve or deny a request raised through any operator token; the gateway does not
+   require the approver to own the token (tokens belong to service identities). Kept after the
+   OpenCode acceptance raised it (observation O2); the decision is audited with the person's name.
 
 ## Remaining questions
 
