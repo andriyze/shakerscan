@@ -42,6 +42,11 @@ def mapped(ipv4: str) -> str:
     return f"::ffff:{ipv4}"
 
 
+def siit(ipv4: str) -> str:
+    """SIIT IPv4-translated (RFC 7915, ::ffff:0:0:0/96): not IPv4-mapped, so not ``ipv4_mapped``."""
+    return str(ipaddress.IPv6Address((0xFFFF0000 << 32) | _int(ipv4)))
+
+
 def compatible(ipv4: str) -> str:
     return str(ipaddress.IPv6Address(_int(ipv4)))
 
@@ -61,7 +66,7 @@ def teredo_client(ipv4: str) -> str:
 FORMS = {
     "nat64": nat64, "nat64_local_48": lambda v: nat64_local(v, 6), "nat64_local_56": lambda v: nat64_local(v, 7),
     "nat64_local_64": lambda v: nat64_local(v, 8), "nat64_local_96": lambda v: nat64_local(v, 12),
-    "mapped": mapped, "compatible": compatible, "6to4": sixtofour,
+    "mapped": mapped, "siit": siit, "compatible": compatible, "6to4": sixtofour,
     "teredo_server": teredo_server, "teredo_client": teredo_client,
 }
 METADATA = ("169.254.169.254", "168.63.129.16", "100.100.100.200", "169.254.170.2")
@@ -88,6 +93,22 @@ def test_a_metadata_address_in_any_spelling_is_never_a_target(form, address, env
     spelled = FORMS[form](address)
     assert action_scope._ip_scope_block_reason(spelled, environment, allow_private_networks=True), spelled
     assert not public_address(spelled), spelled
+
+
+@pytest.mark.parametrize("form", sorted(FORMS))
+@pytest.mark.parametrize("address", ("224.0.0.1", "239.255.255.250"))
+@pytest.mark.parametrize("environment", ["production", "lab"])
+def test_a_multicast_address_in_any_spelling_is_never_a_target(form, address, environment):
+    spelled = FORMS[form](address)
+    assert action_scope._ip_scope_block_reason(spelled, environment, allow_private_networks=True), spelled
+    assert not public_address(spelled), spelled
+
+
+def test_siit_is_decoded_and_is_not_mapped():
+    spelled = ipaddress.ip_address(siit("168.63.129.16"))
+    assert spelled.ipv4_mapped is None
+    assert action_scope.embedded_ipv4_addresses(spelled) == (ipaddress.IPv4Address("168.63.129.16"),)
+    assert "cloud metadata" in action_scope.destination_refusal_explanation(str(spelled), "production")
 
 
 @pytest.mark.parametrize("form", sorted(FORMS))

@@ -17,6 +17,13 @@ from typing import Any
 
 import deployment_policy
 
+try:
+    from scanner_tools.address_classes import IPAddress, embedded_ipv4_addresses, judged_addresses
+except ModuleNotFoundError:  # package import (api.action_scope)
+    from scanner.scanner_tools.address_classes import (
+        IPAddress, embedded_ipv4_addresses, judged_addresses,
+    )
+
 
 SAFE_LAB_ENVIRONMENTS = {"development", "dev", "preview", "staging", "lab", "test"}
 ALLOWED_SCHEMES = {"http", "https"}
@@ -105,48 +112,6 @@ def _deployment_allows_private_networks(allow_private_networks: bool | None) -> 
     return deployment_policy.private_network_targets_allowed()
 
 
-IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
-_NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
-_NAT64_LOCAL_USE = ipaddress.ip_network("64:ff9b:1::/48")
-# RFC 6052 prefix lengths a local-use NAT64 prefix inside 64:ff9b:1::/48 may use.
-_NAT64_LOCAL_PREFIX_BYTES = (6, 7, 8, 12)
-
-
-def _rfc6052_ipv4(address: ipaddress.IPv6Address, prefix_bytes: int) -> ipaddress.IPv4Address:
-    """The IPv4 address RFC 6052 embeds after a prefix of ``prefix_bytes``; bits 64-71 (the
-    "u" octet) never carry address bits."""
-    packed = [byte for index, byte in enumerate(address.packed) if index != 8]
-    start = prefix_bytes if prefix_bytes <= 8 else prefix_bytes - 1
-    return ipaddress.IPv4Address(bytes(packed[start:start + 4]))
-
-
-def embedded_ipv4_addresses(address: IPAddress) -> tuple[ipaddress.IPv4Address, ...]:
-    """Every IPv4 address an IPv6 address carries and a translator or tunnel would reach.
-
-    IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d), NAT64 (64:ff9b::/96 and the
-    local-use 64:ff9b:1::/48 at each RFC 6052 prefix length), 6to4 (2002::/16) and Teredo (both
-    the server and the de-obfuscated client). ``64:ff9b::a9fe:a9fe`` is 169.254.169.254 to a NAT64
-    gateway, and ``ipaddress.is_global`` calls it global.
-    """
-    if address.version != 6:
-        return ()
-    assert isinstance(address, ipaddress.IPv6Address)
-    found: list[ipaddress.IPv4Address] = []
-    if address.ipv4_mapped is not None:
-        found.append(address.ipv4_mapped)
-    elif int(address) >> 32 == 0 and int(address) > 1:
-        found.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
-    if address in _NAT64_WELL_KNOWN:
-        found.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
-    if address in _NAT64_LOCAL_USE:
-        found.extend(_rfc6052_ipv4(address, size) for size in _NAT64_LOCAL_PREFIX_BYTES)
-    if address.sixtofour is not None:
-        found.append(address.sixtofour)
-    if address.teredo is not None:
-        found.extend(address.teredo)
-    return tuple(dict.fromkeys(found))
-
-
 def _always_refused(address: IPAddress) -> bool:
     """Classes no environment or deployment setting admits."""
     return (
@@ -187,9 +152,7 @@ def _ip_scope_block_reason(
     # classify every embedded IPv4 address so another spelling of a restricted address is not
     # admitted where the plain spelling is refused.
     # A mapped address is only its IPv4 address (the ::ffff:0:0/96 block itself reads private).
-    embedded = embedded_ipv4_addresses(ip_obj)
-    mapped = getattr(ip_obj, "ipv4_mapped", None)
-    candidates: tuple[IPAddress, ...] = embedded if mapped is not None else (ip_obj, *embedded)
+    candidates = judged_addresses(ip_obj)
     # Restricted classes first, so no label can admit them. A lab environment used to return
     # here before this check, which let "Lab" admit link-local, multicast and unspecified
     # addresses -- 169.254.169.254 among them -- contradicting the docstring above. That became
