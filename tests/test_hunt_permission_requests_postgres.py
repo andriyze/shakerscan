@@ -416,6 +416,36 @@ def test_decisions_are_replay_safe_refuse_a_stale_digest_and_never_change_once_m
     assert run(env, env.conn.fetchval("SELECT COUNT(*) FROM hunt_budget_amendments")) == 0
 
 
+def test_after_a_denial_the_same_subject_is_not_asked_again_until_the_cooldown_ends(env):
+    """D46: after a denial the agent raised a fresh request for the same subject 20 s later under
+    a new key (A3: 7344d366 denied, then 360d5f1c). Within the cooldown the refusal now says the
+    person said no and raises nothing; afterwards the subject may be asked again."""
+    hunt = run(env, env.hunt())
+    post = {"method": "POST", "path": "/api/v1/chat"}  # the live A3 action: a state-changing POST
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, "deny-first-0001", values=post))
+    (request,) = run(env, env.requests(hunt))
+    run(env, env.decide(hunt, request, decision="deny"))
+    with pytest.raises(HTTPException) as again:
+        run(env, env.call(hunt, "deny-second-0002", values=post))
+    assert len(run(env, env.requests(hunt))) == 1, "no new request for the person"
+    detail = _detail(again)
+    assert again.value.status_code == 403 and detail["reason_code"] == "permission_denied"
+    assert str(request["id"]) in detail["message"] and "not asked again before" in detail["message"]
+    assert "code" not in detail, "no permission_required: nothing is pending"
+    assert run(env, env.action(hunt, "deny-second-0002"))["status"] == "blocked"
+    # Once the cooldown has passed, the same subject is a question again.
+    from hunt.permission_store import DENIAL_COOLDOWN
+
+    run(env, env.conn.execute(
+        "UPDATE hunt_permission_requests SET decided_at=NOW()-$2::interval WHERE id=$1",
+        request["id"], DENIAL_COOLDOWN + timedelta(seconds=1)))
+    with pytest.raises(HTTPException) as later:
+        run(env, env.call(hunt, "deny-third-0003", values=post))
+    assert _detail(later)["code"] == "permission_required"
+    assert [item["status"] for item in run(env, env.requests(hunt))] == ["denied", "pending"]
+
+
 def test_racing_decisions_lock_the_row_and_exactly_one_applies(env):
     hunt = run(env, env.hunt(budget={"max_capability_calls": 1}, used={"agent_actions": 1}))
     with pytest.raises(HTTPException):

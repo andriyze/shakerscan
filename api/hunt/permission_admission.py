@@ -22,7 +22,9 @@ from fastapi import HTTPException
 
 from .permission_grants import LEDGER_TO_BUDGET, hunt_finished, try_preauthorized_grant
 from .permission_reasons import PERMISSION_REQUIRED, HuntRefusal, refusal_summary
-from .permission_store import expire_due, load_request, public_request, raise_request, record_event
+from .permission_store import (
+    expire_due, load_request, public_request, raise_request, recent_denial, record_event,
+)
 from .permission_subjects import complete_destination_subject, credential_use_refusal
 from .verification_budget import record_budget_shortage, reservation_exhausted
 
@@ -188,6 +190,15 @@ async def settle_refusal(
                 run = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", hunt_uuid))
             refusal = await credential_use_refusal(conn, run, refusal)
             kind = refusal.kind if refusal.subject else None
+            denied = await recent_denial(conn, run["id"], kind, refusal.subject) if kind else None
+            if denied is not None:
+                # D46: the person said no to this exact subject a moment ago; do not ask again.
+                refusal = HuntRefusal("permission_denied", (
+                    f"A person denied this permission for this Hunt (request {denied['id']}). It is "
+                    f"not asked again before {denied['ask_again_after'].isoformat()}; continue other "
+                    "work, or change what the action needs."
+                ), extra=refusal.extra)
+                kind = None
             if kind and str(run["status"]) in PARKABLE_RUN_STATUSES and not hunt_finished(run):
                 request, _created = await raise_request(
                     conn, run=run, kind=kind, reason_code=refusal.reason_code, subject=refusal.subject,
