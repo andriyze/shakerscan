@@ -709,6 +709,7 @@ download "$REPO_RAW_BASE/api/capabilities/auth.py" "$INSTALL_DIR/api/capabilitie
 download "$REPO_RAW_BASE/api/capabilities/authentication_proof.py" "$INSTALL_DIR/api/capabilities/authentication_proof.py"
 download "$REPO_RAW_BASE/api/capabilities/browser_login.py" "$INSTALL_DIR/api/capabilities/browser_login.py"
 download "$REPO_RAW_BASE/api/capabilities/exposure_probe.py" "$INSTALL_DIR/api/capabilities/exposure_probe.py"
+download "$REPO_RAW_BASE/api/capabilities/secret_material.py" "$INSTALL_DIR/api/capabilities/secret_material.py"
 download "$REPO_RAW_BASE/api/capabilities/ssh.py" "$INSTALL_DIR/api/capabilities/ssh.py"
 download "$REPO_RAW_BASE/api/capabilities/network_inputs.py" "$INSTALL_DIR/api/capabilities/network_inputs.py"
 download "$REPO_RAW_BASE/api/hunt/capability_executor.py" "$INSTALL_DIR/api/hunt/capability_executor.py"
