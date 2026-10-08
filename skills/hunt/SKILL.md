@@ -325,7 +325,9 @@ deterministically verified finding.
 A verified finding belongs to the first Hunt that verified it. When your verification proves a
 finding another Hunt already verified, the result says `hunt_attribution.role: additional`: the
 finding stays that Hunt's, your verification is recorded beside it, and both Hunts list the finding
-in `outcome_summary.finding_ids`.
+in `outcome_summary.finding_ids`. If another Hunt is verifying the same finding at that moment, your
+verification waits for it (up to 90 s) and then runs. If it is still busy, the refusal is
+`verification_in_progress` and nothing was sent: verify again later with the next `attempt` (2, then 3).
 
 Before verification, challenge each non-terminal candidate as if you were trying to reject it.
 `GET /hunts/{hunt_id}/checkpoint` exposes a compact `review_queue` for this purpose. Check the

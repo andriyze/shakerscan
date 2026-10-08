@@ -545,8 +545,12 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
     ),
     HuntMCPTool(
         "shakerscan_hunt_verify", "POST", "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
-        "Request registered deterministic verification for one candidate.",
-        {"hunt_id": {"type": "string", "format": "uuid"}, "candidate_id": {"type": "string", "format": "uuid"}},
+        "Request registered deterministic verification for one candidate. A repeat of the same "
+        "attempt replays its recorded answer; after a refusal that says to retry (another "
+        "verification of the finding was still running), call again with the next attempt.",
+        {"hunt_id": {"type": "string", "format": "uuid"}, "candidate_id": {"type": "string", "format": "uuid"},
+         "attempt": {"type": "integer", "minimum": 1, "maximum": 20,
+                     "description": "Which attempt this is (default 1); a new attempt is a fresh verification."}},
         ("hunt_id", "candidate_id"),
         destructive=True, open_world=True,
     ),

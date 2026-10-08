@@ -95,6 +95,8 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     "verification_family_unsupported": ReasonSpec(422),
     "verification_route_unresolved": ReasonSpec(422),
     "verification_method_unsupported": ReasonSpec(422),
+    # Another verifier still held the finding after the bounded wait (D40): retry, nothing ran.
+    "verification_in_progress": ReasonSpec(409),
     # SSH: codes now, requests in a later release (REQUESTABLE_KINDS).
     "ssh_exec_not_allowed": ReasonSpec(403, KIND_SSH_EXEC),
     "ssh_host_key_untrusted": ReasonSpec(403, KIND_SSH_HOST_TRUST),
