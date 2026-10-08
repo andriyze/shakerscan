@@ -400,7 +400,11 @@ def test_hunt_call_retry_without_explicit_key_is_content_stable():
     assert first["response"]["payload"]["input"]["limit"] == 0
 
 
-def test_hunt_call_binds_reference_and_default_retry_key():
+def test_hunt_call_sends_the_engine_request_body_with_a_content_retry_key():
+    """D43: the body is exactly the engine's HuntCapabilityRequest; --experiment-key, which the
+    engine refused with 422, is gone."""
+    from api.hunt.interaction_router import HuntCapabilityRequest
+
     class Client:
         def get(self, path):
             return {"capabilities": [{"name": "collections.inspect"}]}
@@ -408,18 +412,15 @@ def test_hunt_call_binds_reference_and_default_retry_key():
         def post(self, path, payload):
             return payload
 
-    def call(key):
-        return v2_cli._run_hunt(_parse(
-            "hunt", "call", "hunt-1", "collections.inspect", "--experiment-key", key,
-        ), Client())
+    def call(*extra):
+        return v2_cli._run_hunt(_parse("hunt", "call", "hunt-1", "collections.inspect", *extra), Client())
 
-    first = call("a" * 32)
-    assert first["response"]["experiment_key"] == "a" * 32
-    assert first["response"]["input"] == {}
-    assert first["idempotency_key"] == call("a" * 32)["idempotency_key"]
-    assert first["idempotency_key"] != call("b" * 32)["idempotency_key"]
-    with pytest.raises(v2_cli.CliError, match="experiment key"):
-        call("invalid")
+    first = call()
+    assert set(first["response"]) == {"idempotency_key", "input"} and first["response"]["input"] == {}
+    HuntCapabilityRequest.model_validate(first["response"])
+    assert first["idempotency_key"] == call()["idempotency_key"]
+    with pytest.raises(SystemExit):
+        call("--experiment-key", "a" * 32)
 
 
 def test_hunt_cli_exposes_complete_lifecycle_and_uses_canonical_routes(tmp_path):

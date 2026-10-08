@@ -613,15 +613,26 @@ def test_mcp_hunt_capability_replays_with_the_same_caller_key():
     assert second["structuredContent"]["mcp_generated_idempotency_key"] is False
 
 
-def test_mcp_forwards_experiment_reference_outside_capability_input():
+def test_mcp_capability_body_is_exactly_the_engine_request():
+    """D43: the tool advertised experiment_key, which the engine refused with 422."""
+    from api.hunt.interaction_router import HuntCapabilityRequest
+
     client = ManifestHuntClient()
+    tool = next(item for item in client.list_tools() if item["name"] == "shakerscan_hunt_capability")
+    assert "experiment_key" not in tool["inputSchema"]["properties"]
     client.call_tool("shakerscan_hunt_capability", {
         "hunt_id": client.HUNT_ID, "capability_name": "http.request",
-        "experiment_key": "a" * 32,
         "input": {"method": "GET", "path": "/"},
     })
-    assert client.calls[-1][2]["experiment_key"] == "a" * 32
-    assert "experiment_key" not in client.calls[-1][2]["input"]
+    body = client.calls[-1][2]
+    assert set(body) == {"idempotency_key", "input"}
+    HuntCapabilityRequest.model_validate(body)
+    with pytest.raises(mcp.MCPError) as raised:
+        client.call_tool("shakerscan_hunt_capability", {
+            "hunt_id": client.HUNT_ID, "capability_name": "http.request",
+            "experiment_key": "a" * 32, "input": {"method": "GET", "path": "/"},
+        })
+    assert raised.value.code == -32602 and "experiment_key" in raised.value.message
 
 
 def test_lost_capability_response_preserves_generated_retry_identity_without_secret_errors():
@@ -638,7 +649,7 @@ def test_lost_capability_response_preserves_generated_retry_identity_without_sec
     client = LostResponse()
     arguments = {
         "hunt_id": client.HUNT_ID, "capability_name": "http.request",
-        "experiment_key": "a" * 32, "input": {"method": "GET", "path": "/"},
+        "input": {"method": "GET", "path": "/"},
     }
     with pytest.raises(mcp.MCPError) as raised:
         client.call_tool("shakerscan_hunt_capability", arguments)
@@ -646,7 +657,7 @@ def test_lost_capability_response_preserves_generated_retry_identity_without_sec
     assert "upstream-secret" not in error.message
     assert "must-not-leak" not in json.dumps(error.data)
     assert error.data["outcome"] == "unknown"
-    assert error.data["experiment_key"] == "a" * 32
+    assert "experiment_key" not in error.data
     assert error.data["mcp_generated_idempotency_key"] is True
     assert mcp._error_response(1, error)["error"]["data"]["mcp_idempotency_key"] == (
         error.data["mcp_idempotency_key"]
