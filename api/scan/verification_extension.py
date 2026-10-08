@@ -39,6 +39,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .action_plan import CAPABILITY_REGISTRY, _LANE_WALL_SHARE
+from .capability_result import BUDGET_EXHAUSTION_REASONS
 from .sqli_stages import MINIMUM_STAGE_WALL_SECONDS
 
 EXTENDS_ARG = "extends"
@@ -63,11 +64,36 @@ _MAXIMUM_SPENT_FRACTION = 0.5
 _SCALED_DIMENSIONS = ("http_requests", "state_changing_requests", "tool_wall_seconds")
 _ROUND_SUFFIX = re.compile(r"\.r\d{2}$")
 _CARRIED_ARGS_EXCLUDED = frozenset({"continuation_work_key", EXTENDS_ARG, SIGNAL_SOURCES_ARG})
+# A resumable slice that stopped because its own holds could not fund the candidates it was
+# given. Soak scan 0eb39a8a (Thorough, honey) planned four SQLi candidates, three of them
+# request bodies, into one slice holding 720 s and one body attempt's 480 mutations: the first
+# body candidate ran, the other two could never be funded, the slice settled `partial` for
+# `state_changing_budget_exhausted` with 120 s and 1,441 requests unspent, and -- not being
+# wall-killed -- was never extended, while 7,121 of the Scan's 10,800 tool-wall seconds were
+# never allocated. Its measured latency sizes an extension exactly as a wall-killed slice's does.
+_UNFUNDED_STOP_REASONS = frozenset(reason.value for reason in BUDGET_EXHAUSTION_REASONS.values())
 
 
 def _status(result: Any) -> str:
     status = getattr(result, "status", None)
     return str(getattr(status, "value", status) or "")
+
+
+def _reason(result: Any) -> str:
+    reason = getattr(result, "reason_code", None)
+    return str(getattr(reason, "value", reason) or "")
+
+
+def _extendable_stop(capability_name: str, result: Any) -> bool:
+    """A wall-killed slice, or a resumable one its own holds left with unfunded candidates."""
+    status = _status(result)
+    if status == "timed_out":
+        return True
+    return (
+        capability_name in RESUMABLE_CAPABILITIES
+        and status == "partial"
+        and _reason(result) in _UNFUNDED_STOP_REASONS
+    )
 
 
 def extension_action_id(action_id: str) -> str:
@@ -205,7 +231,7 @@ def plan_verification_extensions(
         ):
             continue
         result = parent_results.get(action.action_id)
-        if result is None or _status(result) != "timed_out":
+        if result is None or not _extendable_stop(action.capability_name, result):
             continue
         reserved = dict(getattr(result, "budget_reserved", {}) or {})
         held_wall = int(reserved.get("tool_wall_seconds") or 0)
