@@ -89,3 +89,25 @@ def test_the_agent_kit_calls_the_api_only_through_the_helper():
     hook = (ROOT / ".claude" / "hooks" / "session-start.sh").read_text(encoding="utf-8")
     assert "SHAKERSCAN_MANAGED_INSTANCE" in hook and "shakerscan api GET /health" in hook
     assert "scripts/api_cli.py" in (ROOT / "install" / "index.sh").read_text(encoding="utf-8")
+
+
+def test_a_validation_refusal_names_each_field():
+    """D48: GLM spent four minutes on /coverage-angles because `shakerscan api` printed "HTTP 422:
+    Field required; Extra inputs are not permitted" with no field names. The body here is the
+    engine's own 422 for one of those live attempts."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.hunt import run_router
+
+    app = FastAPI()
+    app.include_router(run_router.router)
+    response = TestClient(app).post(
+        "/hunts/00000000-0000-4000-8000-000000000001/coverage-angles",
+        json={"family": "data_exposure", "state": "candidate", "locus": {"method": "GET", "path": "/id_rsa"}},
+    )
+    assert response.status_code == 422
+    text, code = api_cli.render(422, response.text)
+    assert code == 1
+    assert "status: Field required" in text and "state: Extra inputs are not permitted" in text
+    assert "candidate" not in text.replace("Field required", ""), "the rejected value is not echoed"

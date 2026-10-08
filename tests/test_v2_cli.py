@@ -596,3 +596,14 @@ def test_the_request_timeout_is_an_option_and_reaches_every_request(monkeypatch)
     assert seen["timeout"] == 150.0
     assert v2_cli.main(["--api-url", "http://localhost:8080", "hunt", "list"]) == 0
     assert seen["timeout"] == 60.0
+
+
+def test_a_validation_refusal_names_each_field_and_never_the_rejected_value():
+    """D48: `shakerscan hunt …` printed "Field required; Extra inputs are not permitted"."""
+    body = json.dumps({"detail": [
+        {"type": "missing", "loc": ["body", "status"], "msg": "Field required", "input": {"x": "secret-ish"}},
+        {"type": "extra_forbidden", "loc": ["body", "state"], "msg": "Extra inputs are not permitted",
+         "input": "candidate"},
+    ]}).encode()
+    message, _detail = v2_cli._safe_api_error(body, fallback="HTTP 422")
+    assert message == "status: Field required; state: Extra inputs are not permitted"

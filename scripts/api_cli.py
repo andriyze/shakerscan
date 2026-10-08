@@ -138,8 +138,18 @@ def render(status: int, text: str) -> tuple[str, int]:
     if isinstance(detail, dict):
         detail = detail.get("message") or detail.get("error") or json.dumps(detail)
     if isinstance(detail, list):
-        detail = "; ".join(str(item.get("msg") or item) if isinstance(item, dict) else str(item) for item in detail)
+        detail = "; ".join(validation_error_text(item) for item in detail)
     return f"HTTP {status}: {detail or text.strip() or 'no detail'}", 1
+
+
+def validation_error_text(item: object) -> str:
+    """One validation error as ``field: message`` (D48: "Field required" named no field). The
+    rejected input the error echoes is never printed."""
+    if not isinstance(item, dict):
+        return str(item)
+    where = ".".join(str(part) for part in item.get("loc") or () if part != "body")
+    said = str(item.get("msg") or "invalid value")
+    return f"{where}: {said}" if where else said
 
 
 def main(argv: list[str] | None = None) -> int:
