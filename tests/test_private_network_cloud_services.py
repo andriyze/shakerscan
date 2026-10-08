@@ -9,6 +9,8 @@ CLOUD_SERVICES = (
     "169.254.169.254", "169.254.170.2", "100.100.100.200",
     "168.63.129.16", "fd00:ec2::254", "FD00:EC2::254",
     "::ffff:100.100.100.200", "::ffff:168.63.129.16",
+    # A zone id does not change the destination; the string match used to miss it.
+    "fd00:ec2::254%eth0", "FD00:EC2::254%25", "[fd00:ec2::254%eth0]",
 )
 
 
@@ -26,3 +28,8 @@ def test_private_permission_still_admits_ordinary_intranet_targets(monkeypatch, 
     assert action_scope._ip_scope_block_reason(address, "production") is None
     monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
     assert action_scope._ip_scope_block_reason(address, "production") is not None
+
+
+def test_the_explanation_names_a_zoned_metadata_address_as_metadata():
+    text = action_scope.destination_refusal_explanation("fd00:ec2::254%eth0", "production")
+    assert "cloud metadata" in text

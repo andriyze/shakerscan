@@ -18,26 +18,22 @@ from typing import Any
 import deployment_policy
 
 try:
-    from scanner_tools.address_classes import IPAddress, embedded_ipv4_addresses, judged_addresses
+    from scanner_tools.address_classes import (
+        IPAddress, cloud_service_address, embedded_ipv4_addresses, judged_addresses,
+    )
 except ModuleNotFoundError:  # package import (api.action_scope)
     from scanner.scanner_tools.address_classes import (
-        IPAddress, embedded_ipv4_addresses, judged_addresses,
+        IPAddress, cloud_service_address, embedded_ipv4_addresses, judged_addresses,
     )
 
 
 SAFE_LAB_ENVIRONMENTS = {"development", "dev", "preview", "staging", "lab", "test"}
 ALLOWED_SCHEMES = {"http", "https"}
 CIDR_RE = re.compile(r"(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}(?![\w:])")
-# These special cloud-service destinations are also denied by device_posture.
-# They are not all link-local: private-network permission must not admit them.
 PRIVATE_NETWORK_TARGETS_DOC = (
     "https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md"
     "#15-safety-model"
 )
-_CLOUD_SERVICE_ADDRESSES = frozenset({
-    "169.254.169.254", "169.254.170.2", "100.100.100.200",
-    "168.63.129.16", "fd00:ec2::254",
-})
 
 
 @dataclass(frozen=True)
@@ -115,7 +111,7 @@ def _deployment_allows_private_networks(allow_private_networks: bool | None) -> 
 def _always_refused(address: IPAddress) -> bool:
     """Classes no environment or deployment setting admits."""
     return (
-        str(address) in _CLOUD_SERVICE_ADDRESSES
+        cloud_service_address(address)
         or address.is_link_local
         or address.is_multicast
         or address.is_unspecified
@@ -204,7 +200,7 @@ def destination_refusal_explanation(host: str, environment: str) -> str:
         # Name the address a translator would reach (NAT64, mapped, 6to4, Teredo), when that is
         # the one refused.
         def weight(item: IPAddress) -> int:
-            return (0 if str(item) in _CLOUD_SERVICE_ADDRESSES else 1 if item.is_link_local
+            return (0 if cloud_service_address(item) else 1 if item.is_link_local
                     else 2 if _always_refused(item) else 3 if item.is_loopback or item.is_private
                     or item.is_reserved else 4)
 
@@ -214,7 +210,7 @@ def destination_refusal_explanation(host: str, environment: str) -> str:
             if weight(first) < 4 or getattr(ip_obj, "ipv4_mapped", None) is not None:
                 ip_obj = first
         restricted = (
-            "a cloud metadata or platform-service" if str(ip_obj) in _CLOUD_SERVICE_ADDRESSES
+            "a cloud metadata or platform-service" if cloud_service_address(ip_obj)
             else "a link-local" if ip_obj.is_link_local
             else "a multicast" if ip_obj.is_multicast
             else "an unspecified" if ip_obj.is_unspecified
