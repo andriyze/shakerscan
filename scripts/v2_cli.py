@@ -310,8 +310,12 @@ def _safe_api_error(raw: bytes, *, fallback: str) -> tuple[str, Any]:
         message = detail.strip()[:2_000]
         return message, message
     if isinstance(detail, list):
+        # D48: name the field ("family: Field required"); never the rejected input.
         messages = [
-            str(item.get("msg") or "invalid request")
+            ": ".join(part for part in (
+                ".".join(str(segment) for segment in item.get("loc") or () if segment != "body"),
+                str(item.get("msg") or "invalid request"),
+            ) if part)
             for item in detail
             if isinstance(item, Mapping)
         ]
