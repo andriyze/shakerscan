@@ -37,6 +37,14 @@ test('only operator decisions are pending: proposed SSH plans and an unfinished 
   assert.deepEqual(pendingDecisions({ status: 'budget_exhausted', completed_at: '2026-10-01T00:00:00Z' }), [])
 })
 
+test('pending permission requests are listed read-only with the terminal command that answers them', () => {
+  const request = { id: 'r1', kind: 'budget.raise', title: 'Raise max_http_requests for this Hunt', approve_command: 'shakerscan approve r1' }
+  assert.deepEqual(pendingDecisions({ status: 'active', pending_permission_requests: [request] }), [
+    { kind: 'permission', id: 'r1', title: 'Raise max_http_requests for this Hunt', command: 'shakerscan approve r1' },
+  ])
+  assert.deepEqual(pendingDecisions({ status: 'cancelled', completed_at: '2026-10-01T00:00:00Z', pending_permission_requests: [request] }), [])
+})
+
 test('requests group under the action that sent them', () => {
   const { byAction, unlinked } = requestsByAction([
     { id: 'r1', hunt_action_id: 'a1' }, { id: 'r2', hunt_action_id: 'a1' }, { id: 'r3', hunt_action_id: null }, { id: 'r4', hunt_action_id: 'a2' },
