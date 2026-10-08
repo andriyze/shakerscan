@@ -1771,8 +1771,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 464 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 385 | `api/**/*.py` |
+| Public REST operations | 471 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 392 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1789,7 +1789,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 104 | `db/init.sql` + migrations |
+| Durable tables | 108 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2036,6 +2036,13 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/finish` | `finish_hunt` |
 | `DELETE` | `/hunts/{hunt_id}/http-transactions` | `purge_hunt_transactions` |
 | `GET` | `/hunts/{hunt_id}/http-transactions` | `export_hunt_transactions` |
+| `GET` | `/hunts/{hunt_id}/permission-events` | `list_hunt_permission_events` |
+| `GET` | `/hunts/{hunt_id}/permission-grants` | `list_hunt_permission_grants` |
+| `POST` | `/hunts/{hunt_id}/permission-grants/{grant_id}/revoke` | `revoke_hunt_permission_grant` |
+| `GET` | `/hunts/{hunt_id}/permission-requests` | `list_hunt_permission_requests` |
+| `GET` | `/hunts/{hunt_id}/permission-requests/{request_id}` | `get_hunt_permission_request` |
+| `POST` | `/hunts/{hunt_id}/permission-requests/{request_id}/decision` | `decide_hunt_permission_request` |
+| `GET` | `/hunts/{hunt_id}/preauthorization` | `get_hunt_preauthorization` |
 | `POST` | `/hunts/{hunt_id}/query` | `query_hunt` |
 | `GET` | `/hunts/{hunt_id}/record` | `export_hunt_record` |
 | `POST` | `/hunts/{hunt_id}/resume` | `resume_hunt` |
@@ -3115,6 +3122,10 @@ Scan feature or a second orchestration engine.
 | `hunt_cancellable_jobs` | `api/retest_contract.py` |
 | `hunt_coverage_angle_events` | `db/init.sql` |
 | `hunt_credential_uses` | `db/init.sql` |
+| `hunt_permission_events` | `db/init.sql` |
+| `hunt_permission_grants` | `db/init.sql` |
+| `hunt_permission_requests` | `db/init.sql` |
+| `hunt_preauthorizations` | `db/init.sql` |
 | `hunt_runs` | `db/init.sql` |
 | `hunt_skill_events` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
