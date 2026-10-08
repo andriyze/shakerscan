@@ -47,6 +47,7 @@ contracts and release notes describe what ships.
 - [Agent authorization direction](agent-authorization-workflow-direction.md) — proposed AI Gate/Hunt direction.
 - [Agent boundary discovery](agent-boundary-discovery.md) — evidence-driven topology and hypothesis phase.
 - [Model Intake security roadmap](model-intake-security-review-roadmap.md)
+- [Hunt permission requests](hunt-permission-requests.md) — proposed live grants for refused Hunt actions (design, not implemented).
 
 ## Operations
 
