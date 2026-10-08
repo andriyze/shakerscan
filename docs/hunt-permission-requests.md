@@ -480,6 +480,10 @@ Where the engine (PR E2) differs from, or makes concrete, the design above:
   "another host", names the addresses it resolved to and will be pinned to, and offers no
   remember: remember records the standing authorization of the Hunt's own target, so it applies to
   another service on the Hunt's host only.
+- **Request text for a credential (D47).** A `credential.use` request names the credential
+  (profile name, kind and version) and its home target (name and host), read from those rows when
+  the request is raised and kept beside the subject, not in its digest; the ids follow for the
+  record. Names are shown as bounded one-line values; no secret is read.
 - **A granted destination at dispatch (D39).** A person's live grant and a pre-authorized one are
   the same grant row and the same `policy.granted_destinations` entry, so both run the same way.
   The Hunt's scope receipt names only the Hunt's host, so the worker checks another host on its

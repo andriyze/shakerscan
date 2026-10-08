@@ -753,6 +753,36 @@ def test_a_hunt_only_credential_grant_admits_without_a_binding_and_remember_crea
     assert binding is not None and remembered["grant"]["persisted_ref"].startswith("credential_grant:")
 
 
+def test_a_credential_request_names_the_credential_and_its_home_target_from_their_rows(env):
+    """D47: the person reads the profile's name and kind and the home target's name and host,
+    read from those rows when the request is raised; no secret is read or shown."""
+    from hunt.permission_store import public_request
+
+    run(env, PostgresCredentialProfileStore().ensure_schema(env.conn))
+    hunt = run(env, env.hunt())
+    other = uuid.uuid4()
+    run(env, env.conn.execute(
+        "INSERT INTO targets(id,url,name) VALUES($1,'https://juice.example.test','Juice Shop')", other))
+    profile_id = run(env, _credential_profile(env.conn, home=other))
+
+    async def raise_request():
+        from hunt.permission_reasons import HuntRefusal
+        from hunt.permission_admission import settle_refusal
+        return await settle_refusal(env.pool, hunt_id=hunt["id"], action_id=uuid.uuid4(),
+                                    name="http.request", input_summary={}, input_digest="d" * 64,
+                                    refusal=HuntRefusal("credential_not_attached", "x", subject={
+                                        "slot": "primary", "profile_id": str(profile_id)}))
+
+    with pytest.raises(HTTPException) as parked:
+        run(env, raise_request())
+    (request,) = run(env, env.requests(hunt))
+    shown = public_request(request)
+    assert shown["title"] == "Use credential 'carol' (authorization_header, v1) in this Hunt"
+    assert "belongs to target 'Juice Shop' (juice.example.test)" in shown["explanation"]
+    assert _detail(parked)["permission_request"]["title"] == shown["title"]
+    assert "enc:fernet" not in json.dumps(shown) and "enc:fernet" not in str(request["display_json"])
+
+
 # ---------------------------------------------------------------------------------------------
 # Audit.
 

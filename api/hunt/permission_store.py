@@ -189,6 +189,25 @@ def _host_port(subject: Mapping[str, Any]) -> str:
     return f"{host}:{port}" if port else host
 
 
+def _label(value: Any, limit: int = 80) -> str:
+    """An operator-entered name, shown as a quoted value: printable, one line, bounded."""
+    text = " ".join("".join(char if char.isprintable() else " " for char in str(value or "")).split())
+    text = text.replace("'", "")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _credential_text(subject: Mapping[str, Any], display: Mapping[str, Any]) -> tuple[str, str]:
+    """D47: the credential and its home target by name, kind and host; the ids follow. Only
+    names and kinds the server read from the profile and target rows, never a secret."""
+    version = f"v{subject.get('profile_version')}"
+    name, auth_kind = _label(display.get("profile_name")), _label(display.get("auth_kind"), 40)
+    credential = (f"'{name}' ({', '.join(item for item in (auth_kind, version) if item)})"
+                  if name else f"{subject.get('profile_id')} ({version})")
+    home_name, home_host = _label(display.get("home_target_name")), _label(subject.get("home_host"), 253)
+    home = (f"target '{home_name}'" if home_name else "another target") + (f" ({home_host})" if home_host else "")
+    return credential, home
+
+
 def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) -> dict[str, Any]:
     """Title, explanation, effect and choices, from the subject alone."""
     remember = False
@@ -247,10 +266,12 @@ def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) ->
             )
     elif kind == KIND_CREDENTIAL_USE:
         remember = True
-        title = f"Use credential {subject.get('profile_id')} (v{subject.get('profile_version')}) in this Hunt"
+        credential, home = _credential_text(subject, display)
+        title = f"Use credential {credential} in this Hunt"
         explanation = (
-            f"The {subject.get('slot')} credential belongs to target {subject.get('home_target_id')} "
-            "and is not attached to this Hunt's target."
+            f"The {subject.get('slot')} credential {credential} belongs to {home} and is not "
+            f"attached to this Hunt's target (credential {subject.get('profile_id')}, target "
+            f"{subject.get('home_target_id')})."
         )
         effect = (
             "Lets this Hunt use exactly this credential version in that slot. It never "
