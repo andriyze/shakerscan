@@ -162,7 +162,8 @@ approval time, or proved it when setting pre-authorization.
 | `ssh.host_trust` | unpinned host key with first-contact trust off | Pins the presented fingerprint for this Hunt | `ssh.host_trust:first-contact` | Save to Hunt authority `ssh_host_keys` |
 
 **Hard limits are never requests and no bound covers them:**
-- loopback, private, link-local, metadata and reserved destinations;
+- loopback, private, link-local, metadata and reserved destinations, including an IPv6 spelling
+  that carries one (NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`, IPv4-mapped, 6to4, Teredo);
 - the Enterprise "private network targets: refuse" setting;
 - an inactive target or a changed locator;
 - a Hunt that is not runnable;

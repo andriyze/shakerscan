@@ -199,13 +199,12 @@ def destination_refusal(target: Any, origin: Any, policy: Mapping[str, Any], *, 
 
 
 def _public_address(value: str) -> bool:
-    import ipaddress
-
+    """The scope guard's classifier, as at dispatch (NAT64, mapped, 6to4, Teredo, cloud services)."""
     try:
-        address = ipaddress.ip_address(str(value).strip("[]"))
-    except ValueError:
-        return False
-    return address.is_global and not address.is_multicast
+        from action_scope import public_unicast_address
+    except ModuleNotFoundError:
+        from ..action_scope import public_unicast_address
+    return public_unicast_address(value)
 
 
 async def _default_resolver(url: str, environment: str) -> list[str]:
