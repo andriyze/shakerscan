@@ -47,6 +47,11 @@ SCAN_V2_FAMILY_NAMES = (
     "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
     "sensitive_exposure", "nosqli", "authz_surface",
 )
+# Families that examine the application itself: they discover its surface or test what was
+# discovered. sensitive_exposure alone only reads a fixed list of well-known locations (its
+# discovered-endpoint sweep needs recon to discover anything), so a plan of it alone is not
+# an application assessment (soak N46).
+SCAN_APPLICATION_SURFACE_FAMILIES = frozenset(SCAN_V2_FAMILY_NAMES) - {"sensitive_exposure"}
 SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
     # sensitive_exposure is read-only GET traffic (ADR 0001 passive) and the only family
     # that verifies exposed .env, .git, actuator, OpenAPI-secret, backup and debug

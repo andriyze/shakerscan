@@ -177,7 +177,10 @@ that only redirects to `https://` on the same host, an origin that answers only 
 errors -- withholds its grade and cannot report `complete` coverage: coverage is `partial` (or
 `failed` when the target was unreachable), its reasons include `application_not_observed`, and
 `coverage.not_examined_reason` says why (for example "the target redirects to https://host,
-outside this scan's origin").
+outside this scan's origin"). A plan whose families cannot examine the application -- only
+`sensitive_exposure`, which reads a fixed list of well-known locations -- reports coverage
+`partial` with `application_surface_not_examined` and an unreliable grade; with no application
+finding it is not examined and its grade is withheld.
 
 The server-generated `GET /scan/contracts` manifest is the public vocabulary for the UI and CLI.
 The complete REST shape is frozen in `docs/generated/public-openapi-manifest.json`: every OpenAPI

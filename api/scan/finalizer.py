@@ -12,6 +12,7 @@ from . import scoring
 from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
+from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 from .verification_extension import superseding_results
 from .continuation import (
@@ -2177,6 +2178,21 @@ def finalize_scan_report(
     )
     if no_families_selected and coverage_status == "complete":
         coverage_status = "partial"
+    # A plan whose families cannot examine the application -- sensitive_exposure alone reads a
+    # fixed list of well-known locations and, with no discovery, nothing else -- is not an
+    # application assessment either (soak N46: 5d4387d7 ran 44 seed probes in 19 s and was
+    # graded A 100, coverage complete). Its coverage is partial and its grade unreliable; with
+    # no application finding to grade, the application was not examined and the grade is
+    # withheld, as for a target that never answered.
+    selected_families = {str(item).strip() for item in resolved_families or () if str(item).strip()}
+    surface_not_examined = bool(selected_families) and not (
+        selected_families & SCAN_APPLICATION_SURFACE_FAMILIES
+    )
+    if surface_not_examined:
+        if coverage_status == "complete":
+            coverage_status = "partial"
+        if not application_proof_observed:
+            risk_assessment_state = "not_examined"
     reliability_reasons = sorted({
         (
             result.reason_code.value
@@ -2188,6 +2204,7 @@ def finalize_scan_report(
       | ({"discovery_truncated"} if truncated_discovery else set())
       | ({"placement_unavailable"} if placement_gaps else set())
       | ({"no_families_selected"} if no_families_selected else set())
+      | ({"application_surface_not_examined"} if surface_not_examined else set())
       | ({"selected_family_incomplete"} if selected_family_gaps else set())
       | ({"unproven_critical_high"} if unproven_critical_high else set())
       | ({"application_not_observed"} if risk_assessment_state == "not_examined" else set())
@@ -2196,6 +2213,7 @@ def finalize_scan_report(
     coverage_reasons = sorted(
         set(reasons)
         | ({"no_families_selected"} if no_families_selected else set())
+        | ({"application_surface_not_examined"} if surface_not_examined else set())
         # Stated, not a gap: a selected family whose surface offered nothing to test.
         | ({"selected_family_no_candidates"} if families_without_candidates else set())
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
