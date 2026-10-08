@@ -245,3 +245,36 @@ def test_a_verifier_still_busy_past_the_bound_leaves_a_retryable_refusal(monkeyp
             await drop()
 
     asyncio.run(scenario())
+
+
+def test_a_hunt_cancelled_during_the_wait_starts_no_proof(monkeypatch):
+    """The wait used to poll for up to 90 s without reading the Hunt: a Hunt cancelled meanwhile
+    still started its proof once the other verifier let go of the finding."""
+    async def scenario():
+        pool, drop = await _database()
+        proofs = None
+        try:
+            finding, candidate, [(x, x_action), (y, y_action)] = await _seed(pool, 2)
+            proofs = Proofs(pool, finding)
+            _install(monkeypatch, pool, proofs, wait_seconds=30)
+            first = asyncio.create_task(_verify(x, x_action, candidate))
+            await proofs.first_in_proof.wait()
+            second = asyncio.create_task(_verify(y, y_action, candidate))
+            await _until(lambda: proofs.refused >= 1 or second.done())
+            assert not second.done(), "the second verifier is waiting"
+            async with pool.acquire() as conn:
+                await conn.execute("UPDATE hunt_runs SET status='cancelled' WHERE id=$1", y["id"])
+            proofs.release_first.set()  # the finding is free: only the cancellation stops Y now
+            await first
+            with pytest.raises(VerificationRefused) as refused:
+                await second
+            assert refused.value.status_code == 409 and refused.value.detail == "Hunt is cancelled"
+            assert proofs.ran == [f"hunt_v2:{x['id']}"], "the cancelled Hunt sent no proof traffic"
+            async with pool.acquire() as conn:
+                assert await conn.fetchval(
+                    "SELECT count(*) FROM finding_hunt_verifications WHERE hunt_run_id=$1", y["id"]) == 0
+        finally:
+            await _settle(proofs)
+            await drop()
+
+    asyncio.run(scenario())

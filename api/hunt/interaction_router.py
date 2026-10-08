@@ -68,7 +68,7 @@ from .settlement import (
 )
 from .verification_refusal import VerificationRefused, raise_returned_refusal, refused_before_traffic
 from .dispatch_authority import GrantedDestinationRecheck, granted_destination_recheck
-from .concurrent_verification import verify_after_concurrent_verifier
+from .concurrent_verification import verification_start_by, verify_after_concurrent_verifier
 from .finding_verifications import attribute_verified_finding
 from .credential_uses import HuntCredentialRefusal, admit_action_credentials, record_credential_uses
 from .permission_admission import (
@@ -2338,7 +2338,9 @@ async def _execute_hunt_capability_lifecycle(
                                 status_code=409,
                                 detail="Hunt capability reservation is already active",
                             )
-                        durable_lease_seconds = hunt_capability_lease_seconds(charges)
+                        durable_lease_seconds = hunt_capability_lease_seconds(
+                            charges, concurrent_wait=name == "candidate.verify",
+                        )
                         try:
                             reserved_record, reserved_used = (
                                 stored_reservation.record.reserve_against(
@@ -2625,6 +2627,10 @@ async def _execute_hunt_capability_lifecycle(
                     policy=policy,
                     candidate_uuid=candidate_uuid,
                     action_id=action_id,
+                    start_by=verification_start_by(
+                        durable_reservation.record.lease_expires_at,
+                        durable_reservation.record.requested,
+                    ),
                 )
                 return _candidate_verification_action_result(candidate_uuid, verification)
 
@@ -4382,8 +4388,12 @@ async def _execute_hunt_candidate_verification(
     policy: Mapping[str, Any],
     candidate_uuid: uuid.UUID,
     action_id: uuid.UUID,
+    start_by: float | None = None,
 ) -> dict[str, Any]:
-    """Execute the server-owned verifier after canonical action admission."""
+    """Execute the server-owned verifier after canonical action admission.
+
+    ``start_by`` (event-loop time) is the last moment a proof may start and still end inside the
+    action's reservation lease (D40 wait)."""
     if run["device_target_id"]:
         try:
             native_device_policy = DeviceHuntPolicyState.from_mapping(
@@ -4427,7 +4437,9 @@ async def _execute_hunt_candidate_verification(
         # The verifier resolves this Hunt's attached credential list and records each use
         # against this action; the same verifier outside a Hunt is unchanged.
         # Another Hunt verifying the same finding at this moment holds its lock: wait for it,
-        # within a bound, then verify as a later verifier does (D40).
+        # within a bound, then verify as a later verifier does (D40). A Hunt cancelled during
+        # the wait starts no proof, and no proof starts that the lease cannot cover.
+        watch = HuntCancellationWatch(_pool, run["id"])
         with refused_before_traffic(), hunt_credential_scope(
             HuntCredentialScope.for_action(run, context, action_id)
         ):
@@ -4438,6 +4450,8 @@ async def _execute_hunt_candidate_verification(
                     created_by=f"hunt_v2:{run['id']}",
                     autonomous=False,
                 ),
+                cancelled=lambda: watch.refresh(force=True),
+                start_by=start_by,
             )
         raise_returned_refusal(result)
         verified_finding_id = (
