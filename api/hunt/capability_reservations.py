@@ -54,9 +54,17 @@ def hunt_capability_action_digest(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def hunt_capability_lease_seconds(requested_budget: Mapping[str, int]) -> int:
-    """Give inline execution a bounded lease derived from server-owned wall budget."""
+def hunt_capability_lease_seconds(requested_budget: Mapping[str, int], *, concurrent_wait: bool = False) -> int:
+    """Give inline execution a bounded lease derived from server-owned wall budget.
+
+    ``candidate.verify`` may first wait for another Hunt's proof of the same finding (D40), so its
+    lease also covers that wait; the wait itself never starts a proof the lease cannot cover.
+    """
     wall = max(1, int(dict(requested_budget or {}).get("tool_wall_seconds") or 1))
+    if concurrent_wait:
+        from .concurrent_verification import CONCURRENT_VERIFICATION_WAIT_SECONDS
+
+        wall += int(CONCURRENT_VERIFICATION_WAIT_SECONDS)
     return max(90, min(3_600, wall + 30))
 
 

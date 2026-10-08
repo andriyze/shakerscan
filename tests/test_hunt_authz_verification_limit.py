@@ -193,7 +193,7 @@ def admission(store, **overrides):
         "require_http_request_authority": require_http_request_authority,
         "DurableBudgetReservation": SimpleNamespace(request=lambda **kwargs: Reservation(kwargs["amounts"])),
         "hunt_capability_action_digest": lambda **kwargs: "a" * 64,
-        "hunt_capability_lease_seconds": lambda _: 120,
+        "hunt_capability_lease_seconds": lambda *_args, **_kwargs: 120,
         "_hunt_redacted_capability_input": lambda name, values: (
             redact_http_request_body(values) if name == "http.request" else dict(values)),
         "HuntActionResult": lambda **kwargs: SimpleNamespace(public_dict=lambda: dict(kwargs)),
