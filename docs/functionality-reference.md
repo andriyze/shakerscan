@@ -1638,7 +1638,14 @@ concurrency-limited with per-tool timeouts and a global deadline.
   neither private nor reserved, so a deployment that refuses private-network targets admitted a
   CGNAT or Tailscale address as public. A deployment that scans over Tailscale sets
   `SHAKERSCAN_PRIVATE_NETWORK_TARGETS=allow` (or uses a Lab environment); a Hunt never authorizes
-  such a destination.
+  such a destination. Every check (the web scope guard, Hunt destinations, and device, network
+  and SSH destinations) judges an IPv6 address as each IPv4 address it carries as well: mapped
+  (`::ffff:a.b.c.d`), SIIT (`::ffff:0:a.b.c.d`), IPv4-compatible, NAT64 (`64:ff9b::/96`,
+  `64:ff9b:1::/48`), 6to4 and Teredo. A NAT64 gateway on a network-specific prefix cannot be
+  recognised from the address, so a deployment that runs one lists its RFC 6052 prefixes in
+  `SHAKERSCAN_NAT64_PREFIXES` (comma-separated, for example `2001:db8:64::/96`; prefix lengths
+  32, 40, 48, 56, 64 or 96; empty by default; set on the API and the workers). An invalid entry
+  makes destination checks fail closed with an error naming the setting.
 - **Coverage honesty**: an endpoint is only counted `tested` when scanner telemetry proves it was
   attempted/completed; timeouts/partials never inflate coverage.
 - **Local binding**: laptop mode binds to `127.0.0.1`; remote mode binds to a Tailscale IP. Exposing
@@ -1788,7 +1795,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 402 | Python sources + Compose manifests |
+| Runtime environment keys | 403 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 127 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2927,6 +2934,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MODEL_INTAKE_ADAPTER_SELF_TEST` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_MODEL_INTAKE_RUNTIME_LOCK` | `scanner/scanner_tools/model_intake_scanners.py` |
+| `SHAKERSCAN_NAT64_PREFIXES` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/address_classes.py` |
 | `SHAKERSCAN_NETWORK_WORKER_ENABLED` | `api/devices/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_NODE_ID` | `api/artifact_storage.py`, `api/broker_worker.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py` |
 | `SHAKERSCAN_NODE_LABELS_JSON` | `api/worker.py` |

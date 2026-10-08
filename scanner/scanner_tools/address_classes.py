@@ -9,10 +9,13 @@ not import the API package) and the API share it.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 import ipaddress
+import os
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
+NAT64_PREFIXES_ENV = "SHAKERSCAN_NAT64_PREFIXES"
 # Special cloud-service destinations. They are not all link-local, so private-network permission
 # must not admit them.
 CLOUD_SERVICE_ADDRESSES = frozenset({
@@ -31,6 +34,8 @@ _NAT64_LOCAL_USE = ipaddress.ip_network("64:ff9b:1::/48")
 _IPV4_TRANSLATED = ipaddress.ip_network("::ffff:0:0:0/96")
 # RFC 6052 prefix lengths, in bytes, a local-use NAT64 prefix inside 64:ff9b:1::/48 may use.
 _NAT64_LOCAL_PREFIX_BYTES = (6, 7, 8, 12)
+# RFC 6052 prefix lengths, in bits, any NAT64 prefix may use.
+_RFC6052_PREFIX_BITS = (32, 40, 48, 56, 64, 96)
 
 
 def without_scope(address: IPAddress) -> IPAddress:
@@ -48,12 +53,45 @@ def _rfc6052_ipv4(address: ipaddress.IPv6Address, prefix_bytes: int) -> ipaddres
     return ipaddress.IPv4Address(bytes(packed[start:start + 4]))
 
 
+@lru_cache(maxsize=16)
+def _parse_nat64_prefixes(raw: str) -> tuple[ipaddress.IPv6Network, ...]:
+    networks: list[ipaddress.IPv6Network] = []
+    for item in (part.strip() for part in raw.split(",")):
+        if not item:
+            continue
+        try:
+            network = ipaddress.ip_network(item, strict=True)
+        except ValueError as exc:
+            raise ValueError(f"invalid {NAT64_PREFIXES_ENV} entry: {item}") from exc
+        if not isinstance(network, ipaddress.IPv6Network) or network.prefixlen not in _RFC6052_PREFIX_BITS:
+            raise ValueError(
+                f"invalid {NAT64_PREFIXES_ENV} entry: {item} (an IPv6 prefix of length "
+                "32, 40, 48, 56, 64 or 96)"
+            )
+        networks.append(network)
+    return tuple(networks)
+
+
+def nat64_prefixes(raw: str | None = None) -> tuple[ipaddress.IPv6Network, ...]:
+    """The deployment's network-specific NAT64 prefixes (``SHAKERSCAN_NAT64_PREFIXES``).
+
+    A comma-separated list of RFC 6052 prefixes (for example ``2001:db8:64::/96``), empty by
+    default. A NAT64 gateway on a network-specific prefix cannot be recognised from the address
+    alone, so an operator whose network runs one names it here and every address under it is
+    judged as the IPv4 address it carries. An invalid entry raises ``ValueError``: destination
+    checks then fail closed instead of ignoring a prefix the operator meant to declare.
+    """
+    return _parse_nat64_prefixes(
+        os.environ.get("SHAKERSCAN_NAT64_PREFIXES", "") if raw is None else raw
+    )
+
+
 def embedded_ipv4_addresses(address: IPAddress) -> tuple[ipaddress.IPv4Address, ...]:
     """Every IPv4 address an IPv6 address carries and a translator or tunnel would reach.
 
     IPv4-mapped (::ffff:a.b.c.d), SIIT IPv4-translated (::ffff:0:a.b.c.d) and IPv4-compatible
-    (::a.b.c.d), NAT64 (64:ff9b::/96 and the local-use 64:ff9b:1::/48 at each RFC 6052 prefix
-    length), 6to4 (2002::/16) and Teredo (both the server and the de-obfuscated client).
+    (::a.b.c.d), NAT64 (64:ff9b::/96, the local-use 64:ff9b:1::/48 at each RFC 6052 prefix
+    length and the deployment's ``SHAKERSCAN_NAT64_PREFIXES``), 6to4 (2002::/16) and Teredo (both the server and the de-obfuscated client).
     ``64:ff9b::a9fe:a9fe`` is 169.254.169.254 to a NAT64 gateway, and ``ipaddress.is_global``
     calls it global.
     """
@@ -69,6 +107,9 @@ def embedded_ipv4_addresses(address: IPAddress) -> tuple[ipaddress.IPv4Address, 
         found.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
     if address in _NAT64_LOCAL_USE:
         found.extend(_rfc6052_ipv4(address, size) for size in _NAT64_LOCAL_PREFIX_BYTES)
+    for network in nat64_prefixes():
+        if address in network:
+            found.append(_rfc6052_ipv4(address, network.prefixlen // 8))
     if address.sixtofour is not None:
         found.append(address.sixtofour)
     if address.teredo is not None:
@@ -106,7 +147,7 @@ def private_class(address: IPAddress) -> bool:
 
 
 __all__ = [
-    "CLOUD_SERVICE_ADDRESSES", "IPAddress", "SHARED_ADDRESS_SPACE", "cloud_service_address",
-    "embedded_ipv4_addresses", "judged_addresses", "private_class", "shared_address_space",
-    "without_scope",
+    "CLOUD_SERVICE_ADDRESSES", "IPAddress", "NAT64_PREFIXES_ENV", "SHARED_ADDRESS_SPACE",
+    "cloud_service_address", "embedded_ipv4_addresses", "judged_addresses", "nat64_prefixes",
+    "private_class", "shared_address_space", "without_scope",
 ]
