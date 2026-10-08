@@ -364,8 +364,11 @@ class PublicV2IdempotencyMiddleware:
             rejection = json.loads(response_body)
         except (ValueError, UnicodeError):
             rejection = None
+        # A 409 is a refusal of this attempt too (a Hunt action waiting for a permission, a
+        # budget refusal, a state conflict): leaving its key "processing" turned every retry with
+        # the same key into an endless in-progress answer, even after the permission was granted.
         definitive_rejection = (
-            status in {400, 401, 403, 404, 405, 413, 415, 422, 429}
+            status in {400, 401, 403, 404, 405, 409, 413, 415, 422, 429}
             and isinstance(rejection, dict)
             and not any(rejection.get(field) for field in ("scan_id", "retest_id", "job_id", "id"))
         )
