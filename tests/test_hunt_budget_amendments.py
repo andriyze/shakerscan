@@ -290,6 +290,7 @@ def test_record_export_includes_bounded_budget_history(monkeypatch):
                 "FROM hunt_actions" in sql
                 or "FROM hunt_skill_events" in sql
                 or "FROM hunt_coverage_angle_events" in sql
+                or "FROM hunt_credential_uses" in sql
             ):
                 return []
             return await super().fetch(sql, *args)

@@ -108,6 +108,7 @@ jobs:
             tests/test_hunt_service_sources_postgres.py \
             tests/test_hunt_budget_amendments_postgres.py \
             tests/test_hunt_coverage_ledger_postgres.py \
+            tests/test_hunt_credential_uses_postgres.py \
             tests/test_service_intelligence_postgres.py
           python scripts/check_module_size.py
       - name: Hunt candidates, host holds and endpoint inventory in real PostgreSQL

@@ -362,6 +362,22 @@ def test_explicit_hunt_trace_preserves_decision_without_secrets_or_hidden_though
     assert "response-secret" not in json.dumps(trace)
 
 
+# Fixture row of hunt_credential_uses: a credential shared to the Hunt target from another target.
+_USE_ID, _USE_ACTION, _USE_PROFILE = uuid.UUID(int=901), uuid.UUID(int=902), uuid.UUID(int=903)
+_USE_HOME = uuid.UUID("0b0e6a51-63a2-4d8c-9c55-1f3c3b6c0a01")
+CREDENTIAL_USE_ROW = {
+    "id": _USE_ID, "action_id": _USE_ACTION, "profile_id": _USE_PROFILE, "profile_version": 3,
+    "source": f"shared_from:{_USE_HOME}", "slot": "secondary",
+    "used_at": datetime(2026, 10, 7, tzinfo=timezone.utc),
+}
+EXPECTED_CREDENTIAL_USE = {
+    "schema_version": "hunt-credential-use/v1", "id": str(_USE_ID), "action_id": str(_USE_ACTION),
+    "profile_id": str(_USE_PROFILE), "profile_version": 3, "source": f"shared_from:{_USE_HOME}",
+    "shared_from_target_id": str(_USE_HOME), "slot": "secondary",
+    "used_at": "2026-10-07T00:00:00+00:00", "secret_values_visible": False,
+}
+
+
 def test_hunt_run_service_get_includes_canonical_action_ledger():
     hunt_id = str(uuid.uuid4())
 
@@ -375,6 +391,9 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
                 return []
             if "FROM findings" in query or "FROM investigation_candidates" in query:
                 return []
+            if "FROM hunt_credential_uses" in query:
+                assert args[0] == uuid.UUID(hunt_id)
+                return [CREDENTIAL_USE_ROW]
             assert "FROM hunt_actions WHERE hunt_run_id=$1" in query
             assert args == (uuid.UUID(hunt_id),)
             return [{
@@ -393,6 +412,8 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
 
     assert len(result["actions"]) == 1
     assert result["actions"][0]["capability_name"] == "collections.inspect"
+    # Read-only credential-use ledger: ids, version and source only.
+    assert result["credential_uses"] == [EXPECTED_CREDENTIAL_USE]
     assert result["outcome_summary"] == {
         "schema_version": "hunt-outcome-summary/v3",
         "capability_calls": 0,
@@ -485,10 +506,14 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
                 return []
             if "FROM hunt_coverage_angle_events" in query:
                 return []
+            if "FROM hunt_credential_uses" in query:
+                return [CREDENTIAL_USE_ROW]
             raise AssertionError(query)
 
     service = HuntRunService(lambda: _Pool(Connection()))
     record = asyncio.run(service.export_record(hunt_id))
+    assert "credential_uses" in record["trace_policy"]["includes"]
+    assert record["credential_uses"] == [EXPECTED_CREDENTIAL_USE]
 
     assert record["schema_version"] == "hunt-record/v1"
     assert record["trace_policy"]["kind"] == "explicit_decision_trace"

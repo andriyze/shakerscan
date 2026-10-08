@@ -212,6 +212,11 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                 for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
                     await conn.execute(statement)
                 try:
+                    from hunt.credential_uses import HUNT_CREDENTIAL_USES_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.credential_uses import HUNT_CREDENTIAL_USES_SCHEMA_SQL
+                await conn.execute(HUNT_CREDENTIAL_USES_SCHEMA_SQL)
+                try:
                     from investigation_candidates import CANDIDATE_SCHEMA_STATEMENTS
                 except ModuleNotFoundError:
                     from api.investigation_candidates import CANDIDATE_SCHEMA_STATEMENTS

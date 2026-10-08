@@ -29,7 +29,7 @@ import re
 # Lower these -- never raise them -- as each bounded domain is extracted into
 # api/<domain>/router.py plus services.
 LIMITS: dict[str, int] = {
-    "api/api.py": 20_426,
+    "api/api.py": 20_344,
     "api/worker.py": 23_130,
     "scanner/risk_scoring.py": 140,
     "scanner/score_bands.py": 27,

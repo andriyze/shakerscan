@@ -15,6 +15,7 @@ from api.hunt.run_service import _action_reference_ids
 
 HUNT, TARGET, CANDIDATE, FINDING = (uuid.uuid4() for _ in range(4))
 RUN = {"id": HUNT, "target_id": TARGET, "device_target_id": None}
+ACTION = uuid.uuid4()
 
 
 class _Conn:
@@ -48,6 +49,7 @@ def _verify(monkeypatch, verification, conn):
     monkeypatch.setattr(router, "_pool", lambda: _Pool(conn))
     return asyncio.run(router._execute_hunt_candidate_verification(
         run=RUN, context={}, policy={"approval_receipt_id": "approval"}, candidate_uuid=CANDIDATE,
+        action_id=ACTION,
     ))
 
 

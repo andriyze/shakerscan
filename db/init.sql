@@ -1056,6 +1056,27 @@ CREATE TABLE hunt_skill_events (
 CREATE INDEX idx_hunt_skill_events_run
 ON hunt_skill_events(hunt_run_id, created_at, id);
 
+-- Every credential a Hunt action used: the attached profile, its version, where it came from
+-- (selected at start, the target's own, or shared from another target by grant) and the slot.
+-- Ids only; never a secret. The startup migration (api/targets/asset_migration.py, with the SQL
+-- in api/hunt/credential_uses.py) installs this exact definition on converted databases.
+CREATE TABLE hunt_credential_uses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    action_id UUID NOT NULL REFERENCES hunt_actions(id) ON DELETE CASCADE,
+    profile_id UUID NOT NULL,
+    profile_version INTEGER NOT NULL CHECK (profile_version > 0),
+    source TEXT NOT NULL CHECK (
+        source IN ('selected','target_own')
+        OR source ~ '^shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    ),
+    slot TEXT NOT NULL CHECK (slot ~ '^[a-z0-9:_.-]{1,80}$'),
+    used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT hunt_credential_uses_action_slot_unique UNIQUE (action_id, profile_id, slot)
+);
+CREATE INDEX idx_hunt_credential_uses_run
+    ON hunt_credential_uses(hunt_run_id, used_at, id);
+
 -- Append-only, evidence-backed coverage ledger.  A family-level result never closes a
 -- materially different method, route, mechanism, principal context, or application state.
 -- These rows organize investigation only; they do not promote candidates or findings.

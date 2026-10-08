@@ -104,6 +104,34 @@ def test_converted_installation_adds_hunt_coverage_on_restart():
     asyncio.run(run())
 
 
+def test_converted_installation_adds_the_hunt_credential_use_ledger_on_restart():
+    async def run():
+        async with startup_database() as conn:
+            module = importlib.import_module('retest_contract')
+            # A fresh install already has the ledger from db/init.sql; startup keeps it intact.
+            assert await conn.fetchval("SELECT to_regclass('hunt_credential_uses')") is not None
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            # Reproduce an already-converted installation from before the ledger shipped.
+            # This is an isolated disposable database; no retained operator evidence exists.
+            await conn.execute('DROP TABLE hunt_credential_uses')
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            assert await conn.fetchval("SELECT to_regclass('hunt_credential_uses')") is not None
+            assert await conn.fetchval("SELECT to_regclass('idx_hunt_credential_uses_run')") is not None
+            target = await conn.fetchval("INSERT INTO targets(url) VALUES('https://ledger.test') RETURNING id")
+            hunt = await conn.fetchval(
+                "INSERT INTO hunt_runs(target_kind,target_id) VALUES('web',$1) RETURNING id", target)
+            action = await conn.fetchval(
+                "INSERT INTO hunt_actions(hunt_run_id,capability_name,status) "
+                "VALUES($1,'candidate.verify','running') RETURNING id", hunt)
+            await conn.execute(
+                "INSERT INTO hunt_credential_uses(hunt_run_id,action_id,profile_id,profile_version,source,slot) "
+                "VALUES($1,$2,$3,1,'target_own','primary')", hunt, action, uuid.uuid4())
+            # Restarting again is idempotent and keeps the recorded uses.
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            assert await conn.fetchval('SELECT count(*) FROM hunt_credential_uses') == 1
+    asyncio.run(run())
+
+
 def test_restart_upgrades_the_first_release_coverage_ledger_in_place():
     async def run():
         async with startup_database() as conn:

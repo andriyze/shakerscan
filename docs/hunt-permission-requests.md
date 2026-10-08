@@ -1,7 +1,8 @@
 # Hunt permission requests, granted live
 
-**Status:** design note, revised after owner decisions (2026-10-07). Nothing here is implemented.
-The owner approved the behaviour and the decisions recorded below; any code follows this note.
+**Status:** design note, revised after owner decisions (2026-10-07). PR E1 implements the
+attached credential list and `hunt_credential_uses`; the rest is not implemented yet. The owner
+approved the behaviour and the decisions recorded below; any code follows this note.
 
 ## Problem and decision
 
@@ -81,8 +82,9 @@ credential grants, Hunt authority, approval receipts and `hunt_actions` idempote
 
 **`hunt_credential_uses`** and **`hunt_permission_events`** (append-only audit)
 - Credential uses: one row per action that resolved a credential. It records the action id,
-  slot, profile id and version, and `source`: `selected`, `attached_own`,
-  `attached_shared_from:<target>`, `live_grant:<grant>` or `preauthorized:<preauth>`.
+  slot, profile id and version, and `source`: `selected`, `target_own`,
+  `shared_from:<target>`, `live_grant:<grant>` or `preauthorized:<preauth>` (the last two in
+  E2).
 - Events: `requested`, `decided`, `auto_granted`, `used`, `expired`, `withdrawn`, `revoked`,
   each with actor and source.
 - Neither table holds secrets, collections or evidence; only ids and digests.
