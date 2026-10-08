@@ -61,7 +61,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--subdomain-discovery", action="store_true")
     parser.add_argument(
         "--include-family", action="append", default=[], metavar="NAME[,NAME]",
-        help="Require one or more server-advertised Scan families",
+        help="Add server-advertised Scan families to the preset the policy implies",
     )
     parser.add_argument(
         "--exclude-family", action="append", default=[], metavar="NAME[,NAME]",

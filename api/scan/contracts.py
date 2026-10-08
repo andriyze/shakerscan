@@ -267,6 +267,31 @@ class ResolvedScanContract:
         return self.execution_plan.option_metadata()
 
 
+def scan_family_resolution(contract: ResolvedScanContract) -> dict[str, Any]:
+    """How the submitted families resolved, returned by preview and submission alike.
+
+    ``include_families`` is exact only under the ``custom`` preset. Otherwise it adds to the
+    preset, named or implied by ``active_testing`` (``standard_active``) or its absence
+    (``passive``), and ``families_added_by_preset`` names what the preset contributed beyond
+    the families the caller listed, so a client that meant "only these" sees that it did not
+    say so.
+    """
+    plan = contract.execution_plan
+    requested = list(plan.requested_families)
+    resolved = list(plan.resolved_families)
+    return {
+        "family_preset": plan.family_preset,
+        "requested_families": requested,
+        "resolved_families": resolved,
+        "include_families_mode": (
+            "exact" if plan.family_preset == "custom" else "added_to_preset"
+        ),
+        "families_added_by_preset": [
+            family for family in resolved if family not in set(requested)
+        ] if plan.family_preset != "custom" else [],
+    }
+
+
 def bind_scan_scope_receipt(
     contract: ResolvedScanContract, scope_receipt_id: str | None,
 ) -> ResolvedScanContract:
@@ -388,7 +413,10 @@ def resolve_scan_contract(
     # Allowing active testing without naming a preset is a request for the
     # standard active set. Defaulting it to passive ran nothing active while the
     # page read "Active allowed"; an operator who wants permission without work
-    # says "preset": "passive" explicitly.
+    # says "preset": "passive" explicitly. include_families adds to the preset, named or
+    # implied; only `custom` is exactly include_families. Because that is easy to misread
+    # (soak N45: `active_testing` with `include_families: ["sensitive_exposure"]` also ran
+    # XSS and SQLi), preview and submission state it (scan_family_resolution).
     preset = str(
         policy_data.get("preset") or ("standard_active" if active_testing else "passive")
     ).strip().lower()
