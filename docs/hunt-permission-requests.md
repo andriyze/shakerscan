@@ -309,6 +309,12 @@ cached-refusal replay. Work that already ran is never re-dispatched.
 - **Several pending requests** are independent. They are deduped by subject; one grant
   unblocks every parked action with that subject, and each action retries under its own key.
 - **Cap.** At most 20 requests may be pending per Hunt. Past the cap, the refusal stays plain.
+- **After a denial (D46).** The same subject is not asked again in that Hunt for 15 minutes
+  (`DENIAL_COOLDOWN`), under any idempotency key: the refusal is `permission_denied`, names the
+  denied request and when the subject may be asked again, and raises nothing for the person. A
+  changed subject (another host, dimension, capability or credential) is a new question. The
+  cooldown also holds back a grant from pre-authorization bounds for that subject, because the
+  person's denial is the later decision.
 - **Decision races** are prevented by a row lock and a `pending` precondition.
 - **Budget grants.** A budget grant re-reads the revision and retries once on 409, because the
   person approved a total, not a delta.
@@ -337,8 +343,8 @@ cached-refusal replay. Work that already ran is never re-dispatched.
   - **OSS local:** the trust boundary is the host. This is stated, not hidden.
 - **Grants are narrow.** Every grant covers one subject, there is no "allow all", and a
   credential never authorizes a target.
-- **Approval fatigue** is limited by dedupe, the cap, `--all-pending` with a full list, and
-  pre-authorization.
+- **Approval fatigue** is limited by dedupe, the cap, the cooldown after a denial,
+  `--all-pending` with a full list, and pre-authorization.
 - **Audit.** Every request, decision, automatic grant, credential use and revocation is
   recorded, naming the person and the source.
 

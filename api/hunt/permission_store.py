@@ -37,6 +37,9 @@ from .permission_reasons import (
 PERMISSION_REQUEST_SCHEMA = "hunt-permission-request/v1"
 MAX_PENDING_PER_HUNT = 20
 REQUEST_LIFETIME = timedelta(hours=24)
+# After a person denies a subject, the same subject is not asked again in that Hunt for this long
+# (D46: an agent re-asked under a new key 20 s after a denial). A changed subject is a new question.
+DENIAL_COOLDOWN = timedelta(minutes=15)
 REQUEST_STATUSES = ("pending", "granted", "denied", "expired", "withdrawn")
 DECISION_VIA = ("preauthorization", "terminal_stepup", "approver_session", "ui_session", "local_confirm")
 EVENTS = ("requested", "decided", "auto_granted", "used", "expired", "withdrawn", "revoked", "preauthorized")
@@ -425,6 +428,23 @@ async def expire_due(conn: Any, hunt_id: Any) -> int:
     return len(rows)
 
 
+def subject_digest(kind: str, subject: Mapping[str, Any]) -> str:
+    return canonical_digest({"kind": kind, **dict(subject)})
+
+
+async def recent_denial(conn: Any, hunt_id: Any, kind: str, subject: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The denial of this exact subject in this Hunt within ``DENIAL_COOLDOWN``, or None."""
+    row = await conn.fetchrow(
+        """SELECT id, decided_at, decided_at + $3::interval AS ask_again_after
+           FROM hunt_permission_requests
+           WHERE hunt_run_id=$1 AND subject_digest=$2 AND status='denied'
+             AND decided_at > NOW() - $3::interval
+           ORDER BY decided_at DESC LIMIT 1""",
+        uuid.UUID(str(hunt_id)), subject_digest(kind, subject), DENIAL_COOLDOWN,
+    )
+    return dict(row) if row is not None else None
+
+
 async def raise_request(
     conn: Any,
     *,
@@ -449,7 +469,7 @@ async def raise_request(
         raise ValueError(f"unknown permission kind: {kind}")
     hunt_uuid = uuid.UUID(str(run["id"]))
     await expire_due(conn, hunt_uuid)
-    digest = canonical_digest({"kind": kind, **dict(subject)})
+    digest = subject_digest(kind, subject)
     existing = await conn.fetchrow(
         """SELECT * FROM hunt_permission_requests
            WHERE hunt_run_id=$1 AND subject_digest=$2 AND status='pending'""",
@@ -587,10 +607,10 @@ def covering_preauthorization(rows: list[dict[str, Any]], predicate: Any) -> dic
 
 
 __all__ = [
-    "DECISION_VIA", "EVENTS", "HUNT_ACTION_STATUSES", "HUNT_PERMISSION_SCHEMA_SQL",
+    "DECISION_VIA", "DENIAL_COOLDOWN", "EVENTS", "HUNT_ACTION_STATUSES", "HUNT_PERMISSION_SCHEMA_SQL",
     "MAX_PENDING_PER_HUNT", "PREAUTHORIZATION_PROOFS", "REQUEST_STATUSES", "canonical_digest",
     "covering_preauthorization", "expire_due", "hunt_bounds", "hunt_deadline", "list_events",
     "list_grants", "list_requests", "live_credential_grants", "load_request", "pending_summary",
     "public_grant", "public_preauthorization", "public_request", "raise_request", "record_event",
-    "record_preauthorization", "render", "request_expiry",
+    "recent_denial", "record_preauthorization", "render", "request_expiry", "subject_digest",
 ]
