@@ -1227,7 +1227,11 @@ and archive stats distinguish complete, partial, unavailable, failed, and droppe
 of an archived row is not proof that no request occurred. Scan engine capabilities that send
 in-process (origin selection, baseline, spec ingest, collection replay, exposure, mutation,
 proof and authz-surface batches) are archived under their own capability name; replayed private
-workflow values, authenticated fetches and exposure bodies are withheld from masked views. External
+workflow values, authenticated fetches and exposure bodies are withheld from masked views. In every
+other body a masked view (the JSON and the masked HAR alike) withholds what exposure evidence
+withholds: each value under or beside a secret-named key in JSON (whole or truncated), YAML, HTML
+form fields and `key = value` text, and every provider-format secret
+(`api/runtime/archive_body_masking.py`). External
 scanner processes (httpx, katana, ffuf, nuclei, dalfox, sqlmap) reach the target through an opaque
 pinned tunnel and are not archived; the stats list them apart from engine gaps
 (`unarchived_external_tool_capabilities` vs `unarchived_engine_capabilities`).
