@@ -2377,6 +2377,9 @@ def finalize_scan_report(
             family_coverage.values(), key=lambda row: row["family"],
         ),
         "selected_family_gaps": selected_family_gaps,
+        # Slices a later extension re-planned: their own outcome is replaced by the newest
+        # extension's, so a reader rolling up the action rows must not count them again.
+        "superseded_action_ids": sorted(superseded),
     }
     smart_coverage_block = {
         "auth_states_tested": auth_states_tested,

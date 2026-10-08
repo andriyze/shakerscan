@@ -14,11 +14,22 @@ DEGRADED_STATUSES = frozenset({"partial", "timed_out", "failed", "blocked", "can
 COMPLETE_STATUSES = frozenset({"complete", "completed"})
 
 
-def action_coverage_reasons(rows: Iterable[Mapping[str, Any]]) -> list[str]:
-    """``<capability>_<status>[:<reason_code>]`` for every required action that fell short."""
+def action_coverage_reasons(
+    rows: Iterable[Mapping[str, Any]], *, superseded: Iterable[str] = (),
+) -> list[str]:
+    """``<capability>_<status>[:<reason_code>]`` for every required action that fell short.
+
+    An action a later verification extension superseded is skipped: its slice is accounted by
+    the extension's outcome (the finalizer's ``superseded_action_ids``). A timed-out SQLi slice
+    whose extension reached the verdict otherwise kept ``sqli_verify_batch_timed_out`` and
+    turned a scan with every family complete partial (soak N35).
+    """
+    replaced = {str(item) for item in superseded or ()}
     reasons: list[str] = []
     for row in rows or ():
         if not isinstance(row, Mapping) or not row.get("required"):
+            continue
+        if replaced and str(row.get("action_id") or "") in replaced:
             continue
         status = str(row.get("status") or "").strip().lower()
         if status not in DEGRADED_STATUSES:
@@ -38,7 +49,9 @@ def apply_action_coverage(
 ) -> dict[str, Any]:
     """Downgrade a coverage that claims completeness when a required action did not complete."""
     result = dict(coverage or {})
-    reasons = action_coverage_reasons(rows)
+    reasons = action_coverage_reasons(
+        rows, superseded=result.get("superseded_action_ids") or (),
+    )
     if not reasons:
         return result
     existing = [str(item) for item in (result.get("reasons") or []) if str(item).strip()]
