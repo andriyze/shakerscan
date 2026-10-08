@@ -304,16 +304,18 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         )
         # A conservative control-plane operation may have emitted traffic or
         # mutated verifier state before returning a failure/blocked result.
-        # Once invoked, settle its complete hold rather than claiming the
+        # Once invoked, settle its complete traffic hold rather than claiming the
         # unobservable partial execution consumed nothing -- unless it refused
-        # with an exception it raises only before any traffic.
-        actual = (
-            {}
-            if unstarted
-            else dict(self._requested_budget)
-            if self._conservative_full_budget
-            else self._wall_budget(started, execution_started=succeeded)
-        )
+        # with an exception it raises only before any traffic. Wall time is the one
+        # dimension that is always observable, so it settles to the real elapsed
+        # time; the reservation only gates admission (D26: a verification that ran
+        # for 3 s held its whole 180 s against the Hunt's duration).
+        if unstarted:
+            actual: dict[str, int] = {}
+        elif self._conservative_full_budget:
+            actual = {**self._requested_budget, **self._wall_budget(started, execution_started=True)}
+        else:
+            actual = self._wall_budget(started, execution_started=succeeded)
         status = (
             "blocked"
             if self.blocked_exception is not None

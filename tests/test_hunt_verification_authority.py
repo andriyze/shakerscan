@@ -198,7 +198,8 @@ def test_an_uncertain_verifier_block_still_charges_the_full_hold():
     result = _execute(_verify_adapter(operation))
     assert result.status == "blocked"
     assert result.execution_started is True
-    assert result.actual_budget == REQUESTED
+    # The traffic hold stays charged; wall time settles to what elapsed (D26).
+    assert result.actual_budget == {**REQUESTED, "tool_wall_seconds": 1}
 
 
 def test_settlement_helpers_release_everything_for_an_unstarted_refusal():

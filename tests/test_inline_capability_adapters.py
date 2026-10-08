@@ -605,7 +605,7 @@ def test_device_adapter_fault_conservatively_charges_the_full_hold():
     assert result.errors == ("adapter_fault:RuntimeError",)
 
 
-def test_candidate_verifier_block_conservatively_charges_the_full_hold():
+def test_candidate_verifier_block_conservatively_charges_the_full_traffic_hold():
     specification = CAPABILITY_REGISTRY.require("candidate.verify")
     requested = {
         "agent_actions": 1,
@@ -633,8 +633,31 @@ def test_candidate_verifier_block_conservatively_charges_the_full_hold():
 
     assert result.status == "blocked"
     assert result.execution_started is True
-    assert result.actual_budget == requested
+    # Traffic is unobservable after an uncertain failure, so its hold stays charged; wall time
+    # is observable and settles to the real elapsed time, never the 180 s reservation (D26).
+    assert result.actual_budget == {**requested, "tool_wall_seconds": 1}
     assert result.errors == ("verifier stopped after uncertain wire activity",)
+
+
+def test_a_verification_that_ran_is_charged_its_real_wall_time_not_the_reservation():
+    """D26: H1 976 s = 76 + 5 x 180 s holds for verifiers that ran 1.6-9.3 s."""
+    specification = CAPABILITY_REGISTRY.require("candidate.verify")
+    requested = {"agent_actions": 1, "active_actions": 1, "http_requests": 24, "tool_wall_seconds": 180}
+
+    async def operation():
+        return {"status": "success", "observation": {"kind": "deterministic_verification"}}
+
+    result = _execute(
+        specification,
+        ControlPlaneExecutionAdapter(
+            specification=specification, operation=operation, requested_budget=requested,
+            redacted_execution={}, blocked_exceptions=(RuntimeError,), conservative_full_budget=True,
+        ),
+        requested,
+    )
+    assert result.status == "success"
+    assert result.actual_budget["tool_wall_seconds"] == 1
+    assert result.actual_budget["http_requests"] == 24
 
 
 def test_ports_discover_supports_a_bounded_contiguous_range():
