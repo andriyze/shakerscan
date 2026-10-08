@@ -12,6 +12,7 @@ import datetime as _dt
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -35,10 +36,47 @@ def evidence_inline_max_bytes() -> int:
         return DEFAULT_INLINE_MAX_BYTES
 
 
+def canonical_evidence_numbers(value: Any) -> Any:
+    """Write every integral finite float as the exactly equal integer, recursively.
+
+    Inline evidence is hashed over its serialized text but stored in a JSONB column, and
+    PostgreSQL keeps a JSON number as an exact ``numeric``: it returns ``1e+20`` as
+    ``100000000000000000000``, which Python then decodes as an int. Re-serializing the stored
+    value therefore produced different text for the same number, and intact evidence was
+    reported as a mismatch (audit S004).
+
+    The canonical form identifies a JSON number by its exact value (RFC 8259 gives a number no
+    other identity). A float that is a whole number becomes ``int(value)``, which is exact for
+    every finite float, so no precision is lost. Every other number is unchanged: a fractional
+    float keeps Python's shortest round-trip text, which PostgreSQL stores exactly and which
+    decodes back to the same float, and an int is already exact at any size. -0.0 becomes 0,
+    as PostgreSQL's numeric has no negative zero. NaN and infinities are left for ``json.dumps``
+    exactly as before. Strings, keys and structure are untouched, so any change to a value
+    still changes the digest.
+    """
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) and value.is_integer() else value
+    if isinstance(value, dict):
+        return {key: canonical_evidence_numbers(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [canonical_evidence_numbers(item) for item in value]
+    return value
+
+
+def _legacy_evidence_text(content: Any) -> str:
+    """The serialization evidence stored before the numeric canonicalization was hashed over."""
+    return json.dumps(content, sort_keys=True, default=str)
+
+
 def serialize_evidence_content(content: Any) -> tuple[str | None, str | None, int]:
+    """The exact text evidence is stored as and hashed over, its digest and its size.
+
+    Numbers are canonicalized first (``canonical_evidence_numbers``), so the text a JSONB round
+    trip hands back re-serializes to these same bytes.
+    """
     if content is None:
         return None, None, 0
-    raw = json.dumps(content, sort_keys=True, default=str)
+    raw = _legacy_evidence_text(canonical_evidence_numbers(content))
     raw_bytes = raw.encode("utf-8", "ignore")
     return raw, hashlib.sha256(raw_bytes).hexdigest(), len(raw_bytes)
 
@@ -505,23 +543,35 @@ def public_evidence_object(row: dict[str, Any], *, results_dir: Path) -> dict[st
 def _inline_content_digests(content: Any) -> list[str]:
     """Digests an inline object's stored content may legitimately have.
 
-    The hash is taken over ``serialize_evidence_content`` (sorted keys, ASCII escapes), but the
-    content column is JSONB: PostgreSQL stores the parsed value and returns its own text form
-    (keys ordered by length, raw non-ASCII). Hashing that text reported every new inline object
-    -- every ``nuclei_evidence`` row on the soak -- as ``mismatch``. The stored JSON is
-    re-serialized the way it was hashed; a plain string is also checked as written.
+    The hash is taken over ``serialize_evidence_content`` (sorted keys, ASCII escapes,
+    canonical numbers), but the content column is JSONB: PostgreSQL stores the parsed value and
+    returns its own text form (keys ordered by length, raw non-ASCII, numbers as exact
+    decimals). Hashing that text reported every new inline object -- every ``nuclei_evidence``
+    row on the soak -- as ``mismatch``. The stored JSON is re-serialized the way it was hashed;
+    a plain string is also checked as written.
+
+    Each candidate is a deterministic serialization of the stored value, compared with the
+    digest recorded when the object was written, never with one derived from the content being
+    checked. Rows written before numbers were canonicalized were hashed over the plain
+    serialization, which is still accepted, so they keep exactly their earlier behaviour.
     """
-    if not isinstance(content, str):
-        raw, _sha, _size = serialize_evidence_content(content)
-        return [hashlib.sha256((raw or "").encode("utf-8", "ignore")).hexdigest()]
-    digests = [hashlib.sha256(content.encode("utf-8", "ignore")).hexdigest()]
-    try:
-        decoded = json.loads(content)
-    except ValueError:
-        return digests
-    raw, sha, _size = serialize_evidence_content(decoded)
-    if sha and raw != content:
-        digests.append(sha)
+    decoded = content
+    digests: list[str] = []
+    if isinstance(content, str):
+        digests.append(hashlib.sha256(content.encode("utf-8", "ignore")).hexdigest())
+        try:
+            decoded = json.loads(content)
+        except ValueError:
+            return digests
+    for text in (
+        serialize_evidence_content(decoded)[0],
+        _legacy_evidence_text(decoded),
+    ):
+        if text is None:
+            continue
+        sha = hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()
+        if text != content and sha not in digests:
+            digests.append(sha)
     return digests
 
 
