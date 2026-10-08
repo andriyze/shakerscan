@@ -493,10 +493,8 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
                 "pattern": DEFAULT_CAPABILITY_PATTERN,
             },
             "input": {"type": "object"},
-            "experiment_key": {
-                "type": "string", "pattern": r"^[0-9a-f]{32}$",
-                "description": "Optional proposal identity, not proof or authorization.",
-            },
+            # Exactly the engine's request body (HuntCapabilityRequest: idempotency_key, input).
+            # D43: an advertised experiment_key was refused by the engine with 422.
             "idempotency_key": {
                 "type": "string", "minLength": 8, "maxLength": 200,
                 "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
@@ -1841,11 +1839,7 @@ class ArsenalClient:
                 if not idempotency_key:
                     idempotency_key = f"mcp-{uuid.uuid4().hex}"
                     generated_idempotency_key = idempotency_key
-                payload = {
-                    "idempotency_key": idempotency_key,
-                    "input": capability_input,
-                    **({"experiment_key": payload["experiment_key"]} if "experiment_key" in payload else {}),
-                }
+                payload = {"idempotency_key": idempotency_key, "input": capability_input}
             try:
                 if streaming_ssh:
                     try:
@@ -1882,7 +1876,6 @@ class ArsenalClient:
                     "capability_name": capability_name,
                     "mcp_idempotency_key": payload["idempotency_key"],
                     "mcp_generated_idempotency_key": generated_idempotency_key is not None,
-                    **({"experiment_key": payload["experiment_key"]} if "experiment_key" in payload else {}),
                 }
                 if streaming_ssh:
                     raise self._ssh_failure(exc, identity) from exc
