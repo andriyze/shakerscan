@@ -101,13 +101,13 @@ def test_hunt_starts_with_snapshot_and_crud_changes_only_future_hunts(monkeypatc
             identifier = origin if kind in {'web','api'} else device
             pool = BoundConnectionPool(conn)
             monkeypatch.setattr(app_module, 'db_pool', pool)
-            async def no_credentials(*args, **kwargs): return []
             async def origins(*args, **kwargs): return ['https://skill.test:8443']
             async def collections(*args, **kwargs): return [],[],[]
             async def addresses(*args, **kwargs): return ['192.0.2.10']
             async def knowledge(*args, **kwargs): return {}
             async def approval(*args, **kwargs): return None
-            monkeypatch.setattr(app_module, '_validate_hunt_credential_references', no_credentials)
+            async def no_start_credentials(*args, **kwargs): return [], []
+            monkeypatch.setattr(app_module, 'validate_start_credentials', no_start_credentials)
             monkeypatch.setattr(app_module, '_target_web_origins', origins)
             monkeypatch.setattr(app_module, '_generic_collection_refs', collections)
             monkeypatch.setattr(app_module, '_resolve_agent_target_addresses', addresses)
