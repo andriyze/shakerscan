@@ -19,11 +19,13 @@ import deployment_policy
 
 try:
     from scanner_tools.address_classes import (
-        IPAddress, cloud_service_address, embedded_ipv4_addresses, judged_addresses,
+        IPAddress, cloud_service_address, embedded_ipv4_addresses, judged_addresses, private_class,
+        shared_address_space,
     )
 except ModuleNotFoundError:  # package import (api.action_scope)
     from scanner.scanner_tools.address_classes import (
-        IPAddress, cloud_service_address, embedded_ipv4_addresses, judged_addresses,
+        IPAddress, cloud_service_address, embedded_ipv4_addresses, judged_addresses, private_class,
+        shared_address_space,
     )
 
 
@@ -129,7 +131,7 @@ def _ip_scope_block_reason(
 
     Lab environments admit local targets. A deployment that sets
     SHAKERSCAN_PRIVATE_NETWORK_TARGETS=allow also admits loopback/private targets in other
-    environments. Special cloud-service destinations, link-local, multicast, unspecified
+    environments; shared address space (100.64.0.0/10, CGNAT and Tailscale) is private here. Special cloud-service destinations, link-local, multicast, unspecified
     addresses and the limited broadcast address remain denied regardless of that permission.
     An IPv6 address that carries an IPv4 address (``embedded_ipv4_addresses``) is judged as
     every address it carries as well as itself.
@@ -157,7 +159,8 @@ def _ip_scope_block_reason(
         return "loopback_or_private_range"
     if environment in SAFE_LAB_ENVIRONMENTS:
         return None
-    if any(candidate.is_loopback or candidate.is_private or candidate.is_reserved for candidate in candidates):
+    # Shared address space (100.64.0.0/10: CGNAT, Tailscale) is private-class too.
+    if any(private_class(candidate) for candidate in candidates):
         return None if deployment_allows else "loopback_or_private_range"
     return None
 
@@ -201,8 +204,7 @@ def destination_refusal_explanation(host: str, environment: str) -> str:
         # the one refused.
         def weight(item: IPAddress) -> int:
             return (0 if cloud_service_address(item) else 1 if item.is_link_local
-                    else 2 if _always_refused(item) else 3 if item.is_loopback or item.is_private
-                    or item.is_reserved else 4)
+                    else 2 if _always_refused(item) else 3 if private_class(item) else 4)
 
         embedded = embedded_ipv4_addresses(ip_obj)
         if embedded:
@@ -222,6 +224,8 @@ def destination_refusal_explanation(host: str, environment: str) -> str:
         kind = (
             "a loopback" if ip_obj.is_loopback
             else "a private-network" if ip_obj.is_private
+            else "a shared-address-space (100.64.0.0/10, CGNAT or Tailscale)"
+            if shared_address_space(ip_obj)
             else "a reserved"
         )
     else:

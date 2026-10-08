@@ -21,6 +21,10 @@ CLOUD_SERVICE_ADDRESSES = frozenset({
     )
 })
 
+# RFC 6598 shared address space (carrier-grade NAT). Neither ``is_private`` nor ``is_reserved``,
+# yet never a public destination: Tailscale and other overlay networks number their nodes from it.
+SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
+
 _NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
 _NAT64_LOCAL_USE = ipaddress.ip_network("64:ff9b:1::/48")
 # SIIT (RFC 7915) IPv4-translated addresses, ::ffff:0:a.b.c.d.
@@ -88,7 +92,21 @@ def cloud_service_address(address: IPAddress) -> bool:
     return without_scope(address) in CLOUD_SERVICE_ADDRESSES
 
 
+
+def shared_address_space(address: IPAddress) -> bool:
+    """RFC 6598 shared address space (100.64.0.0/10, CGNAT and Tailscale)."""
+    return address.version == 4 and address in SHARED_ADDRESS_SPACE
+
+
+def private_class(address: IPAddress) -> bool:
+    """Loopback, private, reserved or shared (CGNAT) space: admitted only where a Lab environment
+    or the deployment's private-network setting admits private-network targets."""
+    return (address.is_loopback or address.is_private or address.is_reserved
+            or shared_address_space(address))
+
+
 __all__ = [
-    "CLOUD_SERVICE_ADDRESSES", "IPAddress", "cloud_service_address", "embedded_ipv4_addresses",
-    "judged_addresses", "without_scope",
+    "CLOUD_SERVICE_ADDRESSES", "IPAddress", "SHARED_ADDRESS_SPACE", "cloud_service_address",
+    "embedded_ipv4_addresses", "judged_addresses", "private_class", "shared_address_space",
+    "without_scope",
 ]
