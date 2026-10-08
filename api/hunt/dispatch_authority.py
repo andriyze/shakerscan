@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 import json
+import logging
 from typing import Any
 import urllib.parse
 import uuid
@@ -51,6 +52,7 @@ except ModuleNotFoundError:
 from .permission_reasons import HuntRefusal
 
 DISPATCH_REJECTED = "dispatch_authority_rejected"
+logger = logging.getLogger(__name__)
 
 
 class HuntDispatchRejected(CapabilityInputError):
@@ -197,12 +199,27 @@ async def settle_rejected_dispatch(
     Nothing is changed unless the reservation and the action are still ``reserved`` and match
     the job exactly; the result then says the budget was settled (released), so the API records
     the refusal instead of leaving the lease to the sweeper.
+
+    It runs inside the worker's ``except HuntDispatchRejected`` handler, so it never raises: if
+    the settlement itself fails (the database is unreachable, the row changed shape), the job
+    still gets the contract result, unsettled, and stale recovery releases the lease as before.
     """
     message = str(exc)[:240]
     result: dict[str, Any] = {
         "job_id": job_id, "status": "failed", "error": f"contract:{message}",
         "durable_budget_settled": False,
     }
+    try:
+        return await _settle_rejected_dispatch(pool, job_data, message, result)
+    except Exception as failure:  # noqa: BLE001 - never leave the job without a result
+        logger.warning("Hunt dispatch refusal could not be settled at once (%s); stale recovery releases it",
+                       type(failure).__name__)
+        return result
+
+
+async def _settle_rejected_dispatch(
+    pool: Any, job_data: Mapping[str, Any], message: str, result: dict[str, Any],
+) -> dict[str, Any]:
     try:
         hunt_id = uuid.UUID(str(job_data.get("hunt_id") or ""))
         action_id = uuid.UUID(str(job_data.get("action_id") or ""))
