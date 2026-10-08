@@ -15,6 +15,7 @@ from .run_service import HuntRunService
 from .budget_amendments import HuntBudgetAmendmentRequest
 from .coverage_ledger import COVERAGE_LOCUS_KEYS, CoverageLedgerError
 from .skills import HuntSkillError, skill_library
+from .start_guidance import with_start_guidance
 from .permission_bounds import MAX_BOUNDS
 from .start_contract import (
     HUNT_START_SCHEMA,
@@ -353,7 +354,8 @@ async def start_hunt(request: Request, response: Response):
             },
         ) from exc
     response.headers["x-shakerscan-hunt-contract"] = "v2"
-    return result
+    # Budget warnings and the verifiable families: advisory, never a refusal.
+    return with_start_guidance(result)
 
 
 @router.get("/hunts/contract", tags=["Hunt"])

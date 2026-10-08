@@ -632,6 +632,31 @@ def test_bounds_from_the_mcp_start_tool_become_one_pending_request_for_the_perso
     assert run(env, env.call(hunt, "proposal-0001")) == "admitted"
 
 
+def test_the_start_answer_names_the_pending_proposal_and_its_approve_command(env):
+    """E3: the agent learns at start which `shakerscan approve` to hand the person."""
+    hunt = run(env, env.hunt(budget={"max_capability_calls": 1}, used={"agent_actions": 0}))
+
+    async def started():
+        contract = normalize_hunt_start_payload({
+            "target_id": str(hunt["target_id"]), "target_kind": "web", "policy": {},
+            "proposed_allow": ["budget.raise:2x"],
+        })
+        async with env.pool.acquire() as conn:
+            return await record_start_permissions(conn, hunt, contract, [])
+
+    answer = run(env, started())
+    (pending,) = answer["pending_permission_requests"]
+    assert pending["kind"] == "preauthorization"
+    assert pending["approve_command"] == f"shakerscan approve {pending['id']}"
+
+    async def without_bounds():
+        contract = normalize_hunt_start_payload({"target_id": str(hunt["target_id"]), "target_kind": "web", "policy": {}})
+        async with env.pool.acquire() as conn:
+            return await record_start_permissions(conn, hunt, contract, [])
+
+    assert run(env, without_bounds()) == {}
+
+
 def test_bound_grammar_refuses_wildcards_and_normalizes_idna():
     assert parse_bounds(["target.authorize:Bücher.example:443"]).target_patterns[0].host == "xn--bcher-kva.example"
     for bad in ("target.authorize:*", "target.authorize:*.com", "budget.raise:50x", "capability:everything",

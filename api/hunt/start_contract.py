@@ -171,7 +171,7 @@ def hunt_start_public_contract() -> dict[str, Any]:
         from .. import investigation_candidates as candidates
         from ..runtime.capability_registry import CAPABILITY_REGISTRY
     from .candidate_verification_preflight import (
-        IDENTITY_ONLY_LOCATION_KEYS, ROUTE_LOCUS_KEYS,
+        IDENTITY_ONLY_LOCATION_KEYS, ROUTE_LOCUS_KEYS, public_verification_families,
     )
     from .permission_bounds import CAPABILITY_FLAGS, MAX_BOUNDS
     from .permission_reasons import PERMISSION_KINDS, REASON_CODES
@@ -273,6 +273,8 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "max_locus_list_items": candidates.MAX_LOCUS_LIST_ITEMS,
             "identity": "target + family + the locus_keys of the locus",
             "verification_route_keys": list(ROUTE_LOCUS_KEYS),
+            # D27: which families candidate.verify can prove, before an agent spends a call on one.
+            "verification": public_verification_families(),
             "identity_only_location_keys": list(IDENTITY_ONLY_LOCATION_KEYS),
             "verification_route": (
                 "candidate.verify re-executes one concrete route, taken from the first of the "

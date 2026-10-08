@@ -208,6 +208,33 @@ export const HUNT_START_CONTRACT = {
     "max_locus_list_items": 100,
     "max_locus_value_chars": 1000,
     "url_template": "/hunts/{hunt_id}/candidates",
+    "verification": {
+      "family_aliases": {
+        "authentication_bypass": "auth_bypass",
+        "authz_bypass": "auth_bypass",
+        "bfla": "auth_bypass",
+        "broken_object_level_authorization": "bola",
+        "business_logic": "workflow",
+        "idor": "bola",
+        "information_disclosure": "data_exposure",
+        "sensitive_data_exposure": "data_exposure"
+      },
+      "other_families": "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, injection, CORS...) may be recorded as a candidate with its evidence, but no deterministic verifier proves it: do not call candidate.verify for it; report it as an unverified candidate. Device Hunts verify through their own verifier_contract_id contracts.",
+      "state_changing_families": [
+        "field_constraint",
+        "mass_assignment",
+        "workflow"
+      ],
+      "verifiable_families": [
+        "access_control",
+        "auth_bypass",
+        "bola",
+        "data_exposure",
+        "field_constraint",
+        "mass_assignment",
+        "workflow"
+      ]
+    },
     "verification_route": "candidate.verify re-executes one concrete route, taken from the first of the verification_route_keys present in the locus; identity_only_location_keys distinguish candidates but never resolve a route (otherwise 422 verification_route_unresolved, at no budget cost).",
     "verification_route_keys": [
       "route",

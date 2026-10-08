@@ -43,7 +43,11 @@ except ModuleNotFoundError:
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
 from .candidate_evidence import CandidateEvidenceError, resolve_candidate_evidence
-from .candidate_verification_preflight import CandidateVerificationRefused, web_candidate_preflight
+from .candidate_verification_preflight import (
+    STATE_CHANGING_VERIFY_FAMILIES,
+    CandidateVerificationRefused,
+    web_candidate_preflight,
+)
 from .action_replay import execution_started_from_budget, replay_observations
 from .host_accounting import distinct_host_charge
 from .boundary_handoff import compile_candidate_boundary_handoff
@@ -4463,7 +4467,7 @@ async def _attribute_verified_finding(
     return attribution
 
 
-_AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment", "field_constraint", "workflow"})
+_AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = STATE_CHANGING_VERIFY_FAMILIES
 def _hunt_device_adapter_execution_state(value: Mapping[str, Any]) -> dict[str, Any]:
     """Read a transient adapter state without making it persisted Hunt context.
 

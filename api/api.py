@@ -13362,8 +13362,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             _optional_uuid(validated_approval_id) if validated_approval_id else None,
         )
         await _hunt_skills.record_initial_skill_bindings(conn, hunt_run_id=row["id"], specs=bound.specs, requested_skill_ids=contract.skill_ids)
-        await record_start_permissions(conn, row, contract, preauthorized_credentials)
-    return _hunt_public(row)
+        started_permissions = await record_start_permissions(conn, row, contract, preauthorized_credentials)
+    return {**_hunt_public(row), **started_permissions}
 
 
 _hunt_run_service = HuntRunService(lambda: db_pool, get_redis)
