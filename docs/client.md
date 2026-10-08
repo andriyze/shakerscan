@@ -180,8 +180,11 @@ The link works once and expires after ten minutes; the command carries no secret
 fetches the token through it, writes it to `~/.config/shakerscan/token` (owner-only) and the
 instance address to `~/.config/shakerscan/config.json`, runs `doctor`, and with `--claude`
 registers `shakerscan mcp` in Claude Code (user scope). `shakerscan connect
-https://scanner.example.com` prompts for a token instead (never on the command line). The token
-is sent only over `https://` and is never printed; a token with a plain-http URL refuses to start.
+https://scanner.example.com` prompts for a token instead (never on the command line). Before
+anything is saved the token is checked against the instance: a token it refuses (HTTP 401), or an
+instance that cannot be reached, saves nothing. The token is sent only over `https://` and is
+never printed: `connect http://… --token-stdin` is refused with the https address to use instead,
+and a token with a plain-http URL refuses to start.
 How a deployment issues tokens, assigns roles and enables Hunt is documented at
 [shakerscan.com/docs/enterprise](https://shakerscan.com/docs/enterprise).
 
@@ -248,7 +251,9 @@ for each kit skill, and `--prompt-template .claude/commands`. That keeps trust-g
 settings/extensions out of the launch without a trust prompt while still loading AGENTS.md and
 the explicitly named ShakerScan resources. Pi reaches the instance through `shakerscan api`,
 `scan` and `hunt`. `--no-launch` prepares the workspace and prints a shell-safe command to
-start it. The
+start it; with no supported agent on the PATH it says so instead of naming one. OpenCode
+workspaces also load `skills/hunt/SKILL.md` as instructions (`opencode.json`), so the permission,
+budget and view rules are in every session that drives a Hunt. The
 kit's API calls go through `shakerscan api`, so the same commands work locally and remotely.
 
 `shakerscan api METHOD PATH [JSON]` calls the instance directly (`shakerscan api GET
@@ -290,6 +295,40 @@ The tools, their trust levels, and the fail-closed rules are those of the runtim
 [mcp.md](mcp.md). The agent's own model does the reasoning; the instance's model credentials are
 not involved. The MCP `serverInfo.version` reports `client-X.Y.Z`.
 
+## Approve what a Hunt asks for: `shakerscan approve`
+
+When a Hunt action is refused for something a person can allow (a budget raise, a capability
+flag, another service or host, another target's credential), the action waits as a permission
+request and the agent tells you the command to run. Run it yourself, in your own terminal:
+
+```bash
+shakerscan approve 8f0c…                # shows the server's text, then asks for your proof
+shakerscan approve --all-pending        # every pending request, one proof
+shakerscan deny 8f0c…
+shakerscan approve --watch              # stay open; decide each new request on a keypress
+shakerscan hunt permissions list        # JSON: the pending requests, as the server words them
+shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, withdrawn or still_pending
+```
+
+- **Enterprise (a token).** You name your account and prove it with your TOTP code, typed at the
+  prompt, or a USB/NFC security key (`--method security_key`, with python-fido2 installed:
+  `pipx inject shakerscan fido2`). The proof goes to the gateway's step-up routes, which decide
+  in your name; the token alone never approves. A gateway that does not serve those routes yet
+  gets an exact error and nothing is decided. `--watch` opens a 30-minute approver session after
+  one step-up; its secret is held only in that process's memory (see
+  `docs/hunt-permission-requests.md` for what that does and does not protect against).
+- **Open-source engine (no token).** A `y/N` at the prompt, sent to the engine's decision route.
+  The engine has no accounts: anyone who can reach its API could decide, and the command says so.
+- Neither runs without an interactive terminal, so an agent cannot run it in its own shell. Never
+  type a code into an agent's chat.
+
+Bounds set when you start an agent pre-authorize requests inside them, so they are granted as they
+arise: `shakerscan agent opencode --allow budget.raise:2x --allow capability:state-changing`
+(also `credential.use:<targets>`, `target.authorize:<patterns>`, `capability:active-testing`).
+On Enterprise this asks for your step-up once, before the agent starts. `shakerscan hunt start
+--allow …` does the same for one Hunt. Bounds an agent proposes itself become one pending request
+you approve like any other.
+
 ## Hunt from a script
 
 ```bash
@@ -299,7 +338,8 @@ shakerscan hunt --url https://scanner.example.com --token-file ./token start --h
 
 `shakerscan hunt` forwards everything except its connection options to the runtime's product CLI
 (`scripts/v2_cli.py … hunt`), so the subcommands are the runtime's: `start`, `get`, `list`,
-`query`, `call`, `candidate`, `verify`, `finish`, `cancel`, `resume` and the `skill-*` commands.
+`query`, `call`, `candidate`, `verify`, `finish`, `cancel`, `resume`, `permissions` and the
+`skill-*` commands.
 The connection options (`--url`, `--token-file`, `--timeout`) may come before or after the
 subcommand, and everything after a `--` is forwarded untouched. `--timeout` is the seconds to
 wait for each API answer (default 60). `shakerscan hunt --help`, or `hunt` with nothing after
@@ -309,6 +349,11 @@ engine's `/hunts/{id}/query` accepts, the same as the MCP tool, including `hypot
 follow `next_cursor`.
 
 ## Versioning and release
+
+A client built from a repository checkout (a release, or `pipx install
+"git+https://github.com/andriyze/shakerscan@<commit>#subdirectory=client"`) also records the commit
+it was built from: `shakerscan version` prints `shakerscan client 0.8.0 (source 1a2b3c4d5e6f)`,
+`doctor` shows the same, and the MCP `serverInfo.version` is `client-0.8.0+1a2b3c4d5e6f`.
 
 The client has its own version (`client/src/shakerscan/__init__.py`), tagged `client-vX.Y.Z`,
 independent of the engine release: because tool catalogues come from the live contracts, one

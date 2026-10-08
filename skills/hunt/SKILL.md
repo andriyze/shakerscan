@@ -53,8 +53,25 @@ unrequested permissions. Profile and collection IDs select resources, not new au
 
 The exact `hunt-start/v2` fields come from `GET /hunts/contract`. A normal planner should not
 pre-fill zero-valued ceilings merely to make a request look explicit: doing so can accidentally
-turn a usable Hunt into a no-op. Supply a lower ceiling only when the operator or investigation
-actually wants one.
+turn a usable Hunt into a no-op. Supply a lower ceiling only when the operator actually asks for
+one.
+
+**Budgets: do not starve the Hunt.** Leave `budgets` empty: the profile defaults are sized for
+mapping and then testing. Never lower `max_http_requests` below what discovery needs: one
+`web.crawl` and one `web.content_discover` reserve about 370 requests together, and an agent that
+set 300, then 180, skipped content discovery and missed every exposed `/.env`, `/.git` and backup
+file. The start response's `budget_warnings` names every limit too small for a capability in the
+manifest; when it is not empty, start again with the profile defaults (or ask the operator for a
+budget raise) before you test. Map first, then narrow.
+
+**Keep answers small.** Hunt tools answer in a compact view by default; leave `view` out. Use
+`capability=<name>` on `shakerscan_hunt_get` for one capability's contract, and `limit`/`cursor` on
+queries. `view: full` returns a 70-150 KB record in 32 KB pages and wastes context: do not use it.
+
+**Verification families.** `verification.verifiable_families` in the start response (and in
+`GET /hunts/contract` under `candidates.verification`) lists the only families `candidate.verify`
+can prove. Record any other family (prompt injection, excessive agency, RAG isolation...) as an
+unverified candidate with its evidence, and do not spend a verification call on it.
 
 For authenticated or multi-principal work, pass saved profile IDs only. For imported traffic, pass
 saved request-collection IDs only. Secret values stay in ShakerScan. For network/device work, request
@@ -217,14 +234,24 @@ This executes workflow steps; it does not turn their results into verified vulne
 
 A refusal a person could allow (a budget raise, a capability flag, another service or host, another
 target's credential) parks that one action and answers 409 `permission_required`; through MCP the
-outcome is `awaiting_permission`. Tell the user the server's title and to run
-`shakerscan approve <request id>` in their own terminal; never ask for a code in chat and never try
-to decide the request yourself (there is no tool for it). Keep working on other actions: the Hunt
-and its clock continue. Check with `shakerscan_hunt_permission_wait` (or
-`GET /hunts/{hunt_id}/permission-requests/{request_id}?wait_seconds=25`). On `granted`, call the same
-capability again with the same `idempotency_key` and input: it goes through full admission again.
-On `denied` or `expired`, do not retry that action. Every refusal carries a `reason_code`; act on
-it rather than on the wording.
+outcome is `awaiting_permission` with `permission_request_id` and the server's `title`. Then:
+
+1. **Tell the user exactly what to run**, in one line they can copy, with the server's title:
+   "ShakerScan needs your permission: <title>. In your own terminal run
+   `shakerscan approve <permission_request_id>` (or `shakerscan deny <id>`)." With several requests
+   pending, `shakerscan approve --all-pending` lists and decides them together.
+2. **Never ask for a code** (TOTP, PIN, security key) in chat, never run `shakerscan approve`
+   yourself (it refuses without the person's terminal), and never try to decide: no tool can.
+3. **Keep working** on other actions: only the refused action waits; the Hunt and its clock go on.
+4. **Check with the wait tool** (`shakerscan_hunt_permission_wait`, or
+   `shakerscan hunt permissions wait <id>` without MCP) between other actions.
+5. On `granted`, call the same capability again with the **same `idempotency_key` and input**: it
+   goes through full admission again. On `denied`, `expired` or `withdrawn`, do not retry it.
+
+Bounds you pass as `allow` to the start tool are a proposal: they become one pending request the
+user approves the same way. The user may instead start you with `shakerscan agent --allow <bound>`;
+your Hunts then carry those bounds and requests inside them are granted as they arise. Every
+refusal carries a `reason_code`; act on it rather than on the wording.
 
 ## Operator-requested budget extension
 

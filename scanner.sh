@@ -2340,6 +2340,8 @@ print_help() {
     echo "                       worker aggregates all shakerscan-worker* containers"
     echo "  scan <target>      Submit the deterministic DAST Scan"
     echo "  hunt <cmd>         Start or drive one canonical Hunt"
+    echo "  approve <id>       Allow a Hunt permission request (y/N here); --all-pending, --watch"
+    echo "  deny <id>          Deny a Hunt permission request"
     echo "  credentials <cmd>  Create, rotate, or admission-test encrypted profiles"
     echo "  collections <cmd>  Upload, bind, or select request collections"
     echo "  evidence export    Export content-free evidence manifests or bundles"
@@ -4260,7 +4262,7 @@ done
 
 if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     case "$COMMAND" in
-        scan|hunt|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild)
+        scan|hunt|approve|deny|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild)
             # Forward to the command's own help implementation below.
             ;;
         mcp)
@@ -4347,6 +4349,11 @@ case $COMMAND in
         ;;
     hunt)
         run_v2_product_cli "hunt" "${ARGS[@]}"
+        ;;
+    approve|deny)
+        # The person's decision on a Hunt permission request, at this terminal (y/N): the
+        # engine has no accounts, so the host is the trust boundary.
+        run_v2_product_cli "$COMMAND" "${ARGS[@]}"
         ;;
     api)
         if [ ! -f "$SCRIPT_DIR/scripts/api_cli.py" ]; then

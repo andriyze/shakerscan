@@ -15,6 +15,10 @@ without its adapter.
 
 from __future__ import annotations
 
+import json
+import re
+import subprocess
+import tempfile
 from pathlib import Path
 
 try:
@@ -31,6 +35,8 @@ VENDORED = {
     "mcp_stdio.py": "_mcp_stdio.py",
     "mcp_ssh_stream.py": "_mcp_ssh_stream.py",
     "api_stream.py": "_api_stream.py",
+    "hunt_approve.py": "_hunt_approve.py",
+    "redirect_hint.py": "_redirect_hint.py",
 }
 # The agent kit the launcher runs agents inside (`shakerscan agent …`): materialized into a
 # workspace by the client's `agent` command against the connected instance. `.claude` is
@@ -72,7 +78,42 @@ def plan_force_include(target_name: str, root: Path) -> dict[str, str]:
     )
 
 
+BUILD_INFO = "_build.json"
+
+
+def source_commit(root: Path) -> str | None:
+    """The repository commit a build is made from, or None outside a git checkout.
+
+    D15: a client installed from ``git+…@<commit>#subdirectory=client`` reported only the last
+    released version, so two different builds looked identical. The commit is stamped into the
+    package (``_build.json``) and ``shakerscan version`` prints it."""
+    scripts = repository_scripts(root)
+    if scripts is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(scripts.parent), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", commit) else None
+
+
+def plan_build_info(target_name: str, root: Path, directory: Path) -> dict[str, str]:
+    """Write ``_build.json`` (the source commit) into ``directory``; map it into the package."""
+    commit = source_commit(root)
+    if commit is None:
+        return {}
+    path = Path(directory) / BUILD_INFO
+    path.write_text(json.dumps({"source_commit": commit}) + "\n", encoding="utf-8")
+    prefix = "src/shakerscan/" if target_name == "sdist" else "shakerscan/"
+    return {str(path): prefix + BUILD_INFO}
+
+
 class CustomBuildHook(BuildHookInterface):  # type: ignore[misc]
     def initialize(self, version: str, build_data: dict) -> None:  # noqa: ARG002
         mapping = plan_force_include(self.target_name, Path(self.root))
+        mapping.update(plan_build_info(self.target_name, Path(self.root), Path(tempfile.mkdtemp(prefix="shakerscan-build-"))))
         build_data.setdefault("force_include", {}).update(mapping)
