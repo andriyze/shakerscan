@@ -302,8 +302,9 @@ async def credential_use_refusal(conn: Any, run: Mapping[str, Any], refusal: Hun
     except ValueError:
         return plain
     row = await conn.fetchrow(
-        """SELECT p.id, p.target_id, p.current_version, p.is_active,
-                  (p.expires_at IS NULL OR p.expires_at > NOW()) AS unexpired, t.url AS home_url
+        """SELECT p.id, p.target_id, p.current_version, p.is_active, p.name, p.auth_kind,
+                  (p.expires_at IS NULL OR p.expires_at > NOW()) AS unexpired, t.url AS home_url,
+                  t.name AS home_name
            FROM credential_profiles p LEFT JOIN targets t ON t.id=p.target_id WHERE p.id=$1""",
         profile_uuid,
     )
@@ -324,7 +325,14 @@ async def credential_use_refusal(conn: Any, run: Mapping[str, Any], refusal: Hun
     }
     if await credential_kind_error(conn, run, subject):
         return HuntRefusal("credential_not_attached", refusal.message, extra=refusal.extra)
-    return HuntRefusal("credential_not_attached", refusal.message, extra=refusal.extra, subject=subject)
+    grantable = HuntRefusal("credential_not_attached", refusal.message, extra=refusal.extra, subject=subject)
+    # D47: what the person reads names the credential and its target; names and kinds only,
+    # outside the subject digest (a renamed profile is still the same request).
+    grantable.display = {  # type: ignore[attr-defined]
+        "profile_name": str(row["name"] or "")[:200], "auth_kind": str(row["auth_kind"] or "")[:80],
+        "home_target_name": str(row["home_name"] or "")[:200],
+    }
+    return grantable
 
 
 __all__ = [
