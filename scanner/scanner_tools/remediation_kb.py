@@ -773,6 +773,52 @@ management.endpoints.web.exposure.include=health,info"""
         "verification": "curl -s -o /dev/null -w '%{http_code}' https://example.com/actuator/env   # expect 401, 403 or 404",
         "effort": "hours"
     },
+    "exposed_debug_interface": {
+        "title": "Debug or Diagnostic Page Served Publicly",
+        "severity_base": "medium",
+        "cwe": "CWE-215",
+        "owasp": "A05:2021 - Security Misconfiguration",
+        "description": "A diagnostic page meant for developers (phpinfo(), the Werkzeug debugger console, Go's /debug/pprof) answers anyone who requests it.",
+        "business_impact": "These pages disclose server paths, versions, environment variables and secrets; an interactive debugger console executes code once its PIN is guessed or leaked.",
+        "remediation_steps": [
+            "Remove the diagnostic page or route from the production build",
+            "Run the framework with debug mode off in production",
+            "Rotate any secret the page displayed",
+            "If a profiler must stay reachable, bind it to an internal interface"
+        ],
+        "code_examples": {
+            "php": "// delete phpinfo.php / info.php from the web root",
+            "flask": "app.run(debug=False)  # never enable the Werkzeug debugger in production",
+            "go": """// serve net/http/pprof on a separate, internal-only listener
+go http.ListenAndServe("127.0.0.1:6060", nil)"""
+        },
+        "documentation_links": [
+            "https://cwe.mitre.org/data/definitions/215.html"
+        ],
+        "verification": "curl -s -o /dev/null -w '%{http_code}' https://example.com/phpinfo.php   # expect 403 or 404",
+        "effort": "minutes"
+    },
+    "exposed_directory_metadata": {
+        "title": "Directory Metadata File Served Publicly",
+        "severity_base": "low",
+        "cwe": "CWE-538",
+        "owasp": "A05:2021 - Security Misconfiguration",
+        "description": "A desktop file-index such as macOS .DS_Store was deployed with the site and is served publicly.",
+        "business_impact": "The file lists the names of files and folders in the directory, including ones no page links to, such as backups and configuration files.",
+        "remediation_steps": [
+            "Delete .DS_Store files from the deployed site",
+            "Exclude them from deployments (.gitignore, build ignore rules)",
+            "Deny dotfiles at the web server"
+        ],
+        "code_examples": {
+            "nginx": "location ~ /\\.(?!well-known) { deny all; return 404; }"
+        },
+        "documentation_links": [
+            "https://cwe.mitre.org/data/definitions/538.html"
+        ],
+        "verification": "curl -s -o /dev/null -w '%{http_code}' https://example.com/.DS_Store   # expect 403 or 404",
+        "effort": "minutes"
+    },
     "verbose_errors": {
         "title": "Verbose Error Messages",
         "severity_base": "medium",
@@ -1388,6 +1434,14 @@ EXPOSURE_CLASS_REMEDIATION = {
     "actuator_endpoint": "exposed_actuator",
     "exposed_api_specification": "open_api_exposed",
     "verbose_error_disclosure": "verbose_errors",
+    "actuator_secret_disclosure": "exposed_secret_file",
+    "actuator_heapdump_exposed": "exposed_secret_file",
+    "api_specification_secret": "exposed_secret_file",
+    "configuration_secret_file": "exposed_secret_file",
+    "configuration_file": "exposed_confidential_file",
+    "directory_metadata_file": "exposed_directory_metadata",
+    "phpinfo_disclosure": "exposed_debug_interface",
+    "debug_interface_exposure": "exposed_debug_interface",
 }
 
 

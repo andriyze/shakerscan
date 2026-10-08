@@ -24,6 +24,7 @@ CONTRACT_LITERAL = re.compile(r'"([a-z_]+/v\d+)"')
 # Emitters live in the capability modules; these are the families that produce proof.
 EMITTERS = (
     "capabilities/authz_surface.py",
+    "capabilities/exposure_probe.py",
     "capabilities/nosqli_verify.py",
     "capabilities/request_mutation.py",
     "capabilities/sqli_proof.py",
@@ -72,7 +73,7 @@ def test_the_registry_matches_what_the_capabilities_emit():
         assert path.exists(), relative
         source = path.read_text(encoding="utf-8")
         for line in source.splitlines():
-            if "proof_contract" not in line and "_differential/v" not in line and "_access/v" not in line and "_bypass/v" not in line:
+            if "proof_contract" not in line and "_differential/v" not in line and "_access/v" not in line and "_bypass/v" not in line and "_exposure/v" not in line:
                 continue
             emitted.update(CONTRACT_LITERAL.findall(line))
     unregistered = emitted - CANONICAL_PROOF_CONTRACTS
