@@ -39,7 +39,7 @@ TARGET = TargetBinding(
 HARD = (
     "hunt_not_runnable", "target_not_found", "target_inactive", "target_locator_changed",
     "capability_unregistered", "capability_target_kind_mismatch", "capability_requires_credentials",
-    "scope_destination_blocked", "scope_credential_other_host", "scope_origin_invalid",
+    "scope_destination_blocked", "scope_credential_other_host", "scope_origin_invalid", "scope_scanner_other_host",
     "credential_inactive", "credential_version_changed", "budget_dimension_needs_permission",
 )
 

@@ -361,6 +361,7 @@ export const HUNT_START_CONTRACT = {
     "scope_origin_invalid",
     "scope_other_host",
     "scope_other_service_port",
+    "scope_scanner_other_host",
     "ssh_exec_not_allowed",
     "ssh_host_key_untrusted",
     "state_changing_http_not_allowed",

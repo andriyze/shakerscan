@@ -198,6 +198,28 @@ def destination_refusal(target: Any, origin: Any, policy: Mapping[str, Any], *, 
     )
 
 
+def scanner_destination_refusal(target: Any, origin: Any) -> HuntRefusal | None:
+    """A scanner's origin on another host, or None.
+
+    The scanner worker runs only against the Hunt's registered host
+    (``validate_scanner_execution_target``). A scanner aimed at a destination a person authorized
+    used to be admitted and then fail in the worker after its reservation started, charged in full
+    for no traffic. It is refused here instead, before anything is reserved, and no permission
+    request is raised for it: no grant could make it run.
+    """
+    try:
+        host = (urllib.parse.urlsplit(str(origin or "").strip()).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    if not host or host == str(target.canonical_host or "").lower():
+        return None
+    return HuntRefusal(
+        "scope_scanner_other_host",
+        f"{host} is not the Hunt's target host. Scanners run only against the Hunt's own host; "
+        "reach a destination a person authorized for this Hunt with http.request.",
+    )
+
+
 def _public_address(value: str) -> bool:
     """The scope guard's classifier, as at dispatch (NAT64, mapped, 6to4, Teredo, cloud services)."""
     try:
@@ -338,5 +360,5 @@ __all__ = [
     "approval_required_refusal", "preflight_reason_code",
     "capability_refusal", "complete_destination_subject", "credential_kind_error",
     "credential_use_refusal", "destination_refusal", "http_authority_refusal",
-    "replay_authority_refusal", "resolve_destination_addresses",
+    "replay_authority_refusal", "resolve_destination_addresses", "scanner_destination_refusal",
 ]
