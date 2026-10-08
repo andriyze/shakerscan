@@ -6,8 +6,9 @@ is the replay's own. The finding used to take its title verbatim from the hypoth
 written about whatever object the planner had seen: a finding could read "/objects/7" while its
 evidence proved "/objects/51" (PR #340's "Not changed" note). ``proven_finding_title`` rewrites
 the hypothesis title's mention of the route to the proven concrete path, or names the proven
-operation when the title mentions none, and a refreshed finding takes the new title with its
-new URL.
+operation when the title mentions none. A refreshed finding keeps its own title, re-pointed at
+the object the new proof proved; it never takes the hypothesis title, which the hypothesis row
+shares across Hunts and keeps from whichever Hunt wrote it first (D29).
 
 Moved out of the api.py monolith, which was at its module-size ratchet; api.py keeps its old
 names as aliases and the arsenal still reaches the promotion through its injected callables.
@@ -302,12 +303,19 @@ async def promote_trusted_workflow_finding(
         "research_provenance_history": list(unique_provenance.values()),
     })
     existing = known_match if known_match else await conn.fetchrow(
-        "SELECT id, status FROM findings WHERE target_id=$1 AND fingerprint=$2",
+        "SELECT id, status, title FROM findings WHERE target_id=$1 AND fingerprint=$2",
         target_uuid,
         fingerprint,
     )
     if existing:
         finding_id = existing["id"]
+        # D29: the hypothesis row is shared per (target, family, route) and keeps the title of
+        # whichever Hunt wrote it first, tags and masking included. A refresh therefore keeps the
+        # finding's own title and only re-points it at the object this proof proved.
+        title = proven_finding_title(
+            existing.get("title") or title, family=family, method=proven_method,
+            route=finding_route, concrete_path=concrete_path,
+        )
         status = "resurfaced" if str(existing.get("status") or "") == "resolved" else "duplicate"
         await conn.execute(
             """

@@ -19490,7 +19490,7 @@ def test_verified_workflow_promotes_bound_novel_hypothesis():
     assert any("status='promoted'" in query for query, _ in updates)
 
 
-def _promote_bola_with_title(title, *, existing=None):
+def _promote_bola_with_title(title, *, existing=None, existing_title=None):
     """Promote a BOLA proof whose replay used /objects/51; return the stored title and URL."""
     target_id = uuid.uuid4()
     hypothesis_id = uuid.uuid4()
@@ -19513,7 +19513,7 @@ def _promote_bola_with_title(title, *, existing=None):
             if "FROM research_decisions" in query:
                 return None
             if "FROM findings" in query:
-                return {"id": existing, "status": "active"} if existing else None
+                return {"id": existing, "status": "active", "title": existing_title} if existing else None
             raise AssertionError(query)
 
         async def fetch(self, query, *args):
@@ -19562,6 +19562,25 @@ def test_a_promoted_finding_title_names_the_object_its_evidence_proves():
     assert stored == {
         "title": "Object 7 readable at /objects/51", "url": "https://example.test/objects/51",
     }
+
+
+def test_a_refreshed_finding_keeps_its_own_title_not_another_hunts_hypothesis():
+    """D29: the hypothesis row is shared per route and keeps the first Hunt's title, masking
+    included; a refresh re-points the finding's own title at the proven object instead."""
+    stored = _promote_bola_with_title(
+        "Hunt C lead: object *** readable (hunt5825ce41) at /objects/7", existing=uuid.uuid4(),
+        existing_title="User B reads user A's object (main35) at /objects/9",
+    )
+    assert stored == {
+        "title": "User B reads user A's object (main35) at /objects/51",
+        "url": "https://example.test/objects/51",
+    }
+    # A title that already names the proven operation is stable across refreshes.
+    stored = _promote_bola_with_title(
+        "Hunt C lead (hunt5825ce41)", existing=uuid.uuid4(),
+        existing_title="Cross-principal object read (main35) (GET /objects/51)",
+    )
+    assert stored["title"] == "Cross-principal object read (main35) (GET /objects/51)"
 
 
 def test_autonomous_workflow_finding_uses_canonical_retest_inputs_and_source_filter():
