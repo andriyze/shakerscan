@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 import time
 from typing import Any, Awaitable, Callable
@@ -29,6 +28,14 @@ from http_experiment import (
     _variable_references,
     compare_summaries,
     response_summary,
+)
+
+from capabilities.secret_material import (
+    PLACEHOLDER_SECRET_TOKENS,
+    SELF_EVIDENT_SECRET_PATTERNS,
+    classify_selfevident_secret_values,
+    is_placeholder_secret,
+    shannon_entropy_bits,
 )
 
 
@@ -238,61 +245,14 @@ _CARD_CANDIDATE = re.compile(r"\b(?:\d[ -]?){13,19}\b")
 # own, without the server-owned protected-route receipt that `sensitive_value_present` otherwise
 # requires. That receipt is only ever granted to a route observed under an authenticated scan
 # pass, so an endpoint that requires no authentication at all can never earn one -- and that is
-# exactly where a leaked provider secret lives. Membership is deliberately narrow:
-#   * excluded because a public endpoint may legitimately issue them: jwt, bearer_token
-#   * excluded because the pattern matches documentation samples: ssn, credit_card,
-#     google_api_key (Maps/browser keys are designed to ship publicly, restricted by referrer)
-# Each pattern captures the secret so it can be screened for placeholders and entropy; only the
-# category LABEL is ever returned, never the value.
-_SELF_EVIDENT_SECRET_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
-    ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----")),
-    ("aws_access_key", re.compile(r"\b((?:AKIA|ASIA)[0-9A-Z]{16})\b")),
-    ("slack_token", re.compile(r"\b(xox[baprs]-[0-9A-Za-z-]{10,})")),
-    ("stripe_key", re.compile(r"\b(sk_live_[0-9A-Za-z]{16,})\b")),
-    ("github_token", re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{30,255})\b")),
-    ("npm_token", re.compile(r"\b(npm_[A-Za-z0-9]{30,255})\b")),
-    ("sendgrid_key", re.compile(r"\b(SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b")),
-    ("password_hash", re.compile(
-        r"(\$(?:2[aby]\$\d{2}\$[./A-Za-z0-9]{53}|argon2(?:id|i|d)\$[^\s\"\']{20,}))")),
-    ("credentialed_database_uri", re.compile(
-        r"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s:/?#]+:([^\s@/?#]+)@[^\s]+"
-    )),
-)
-
-# Values that match a secret's shape but carry no secret. Vendor documentation ships these
-# verbatim, so a page echoing one is not an exposure.
-_PLACEHOLDER_SECRET_TOKENS: frozenset[str] = frozenset({
-    "example", "examplekey", "placeholder", "changeme", "password", "passwd", "secret",
-    "yoursecret", "yourpassword", "yourkey", "test", "testing", "dummy", "sample", "redacted",
-    "xxxxxxxx", "notreal", "fake", "insertkeyhere", "todo",
-})
-
-
-def _shannon_entropy_bits(value: str) -> float:
-    """Return Shannon entropy in bits per character for a candidate secret."""
-    if not value:
-        return 0.0
-    counts: dict[str, int] = {}
-    for ch in value:
-        counts[ch] = counts.get(ch, 0) + 1
-    total = float(len(value))
-    return -sum((n / total) * math.log2(n / total) for n in counts.values())
-
-
-def _is_placeholder_secret(value: str) -> bool:
-    """True when a shape-matching value is a documentation placeholder, not real secret material."""
-    stripped = value.strip()
-    if not stripped:
-        return True
-    lowered = stripped.lower()
-    if any(token in lowered for token in _PLACEHOLDER_SECRET_TOKENS):
-        return True
-    # Provider secrets are random; a short or low-entropy tail is a stand-in. The bound is applied
-    # to the random remainder so a long fixed prefix (``sk_live_``) cannot carry a value past it.
-    tail = re.sub(r"^(?:AKIA|ASIA|sk_live_|gh[pousr]_|npm_|SG\.|xox[baprs]-)", "", stripped)
-    if len(tail) < 12:
-        return True
-    return _shannon_entropy_bits(tail) < 3.0
+# exactly where a leaked provider secret lives. The narrow, entropy-screened set and its
+# exclusions (jwt, bearer_token, ssn, credit_card, google_api_key) live in
+# `capabilities.secret_material`, shared with the DAST exposure probe so the two producers
+# cannot disagree about what a leaked secret is. Only the category LABEL is ever returned.
+_SELF_EVIDENT_SECRET_PATTERNS = SELF_EVIDENT_SECRET_PATTERNS
+_PLACEHOLDER_SECRET_TOKENS = PLACEHOLDER_SECRET_TOKENS
+_shannon_entropy_bits = shannon_entropy_bits
+_is_placeholder_secret = is_placeholder_secret
 
 
 def _classify_selfevident_secret_values(text: str) -> list[str]:
@@ -303,17 +263,7 @@ def _classify_selfevident_secret_values(text: str) -> list[str]:
     """
     if not text:
         return []
-    sample = text[:MAX_BODY_BYTES]
-    categories: set[str] = set()
-    for label, pattern in _SELF_EVIDENT_SECRET_PATTERNS:
-        for match in pattern.finditer(sample):
-            # A pattern with no capture group (private_key) is a structural marker, not a value.
-            captured = match.group(1) if match.re.groups else None
-            if captured is None or not _is_placeholder_secret(captured):
-                categories.add(label)
-                break
-    return sorted(categories)
-
+    return classify_selfevident_secret_values(text[:MAX_BODY_BYTES])
 
 
 def _luhn_ok(digits: str) -> bool:
