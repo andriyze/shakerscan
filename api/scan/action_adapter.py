@@ -7,6 +7,7 @@ module; it performs only the target-bound operation authorized by one action.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import functools
 import hashlib
@@ -2509,9 +2510,13 @@ class DatabaseNeutralScanActionDispatcher:
             result = await probe(probe_url, ordinal)
             if result.error_code:
                 errors.append(str(result.error_code))
-            signature = classify_exposure(
-                path=probe_url, status=result.status_code or 0,
-                headers=result.response_headers, body=result.response_body,
+            # Classification parses up to a megabyte of hostile content: it runs off the
+            # event loop so heartbeats and cancellation keep working while it does.
+            signature = await asyncio.to_thread(
+                functools.partial(
+                    classify_exposure, path=probe_url, status=result.status_code or 0,
+                    headers=result.response_headers, body=result.response_body,
+                ),
             )
             if signature is not None:
                 if absent_bodies is None:
@@ -2530,8 +2535,8 @@ class DatabaseNeutralScanActionDispatcher:
                     signature = None
             attempt_observations: list[Mapping[str, Any]] = []
             if signature is not None:
-                attempt_observations.append(_exposure_observation(
-                    probe_url, discovered_via, signature, result,
+                attempt_observations.append(await asyncio.to_thread(
+                    _exposure_observation, probe_url, discovered_via, signature, result,
                 ))
                 # A listing is metadata, not proof that children are confidential.
                 # Existing bounded follow-up still records content observations.
@@ -2539,7 +2544,12 @@ class DatabaseNeutralScanActionDispatcher:
                     signature.exposure_class == "directory_listing"
                     and consumed["http_requests"] < http_ceiling
                 ):
-                    for link in directory_listing_links(result.response_body, limit=10):
+                    links = await asyncio.to_thread(
+                        functools.partial(
+                            directory_listing_links, result.response_body, limit=10,
+                        ),
+                    )
+                    for link in links:
                         if self.cancelled() or consumed["http_requests"] >= http_ceiling:
                             break
                         # Follow-up gets a small fixed share of the batch, not
@@ -2556,13 +2566,16 @@ class DatabaseNeutralScanActionDispatcher:
                             continue
                         ordinal += 1
                         child = await probe(child_url, ordinal)
-                        child_signature = classify_confidential_file(
-                            path=child_url, status=child.status_code or 0,
-                            headers=child.response_headers, body=child.response_body,
+                        child_signature = await asyncio.to_thread(
+                            functools.partial(
+                                classify_confidential_file, path=child_url,
+                                status=child.status_code or 0,
+                                headers=child.response_headers, body=child.response_body,
+                            ),
                         )
                         if child_signature is not None:
-                            attempt_observations.append(_exposure_observation(
-                                child_url, "directory_listing_follow",
+                            attempt_observations.append(await asyncio.to_thread(
+                                _exposure_observation, child_url, "directory_listing_follow",
                                 child_signature, child,
                             ))
             proven = any(item.get("proof_state") == "verified" for item in attempt_observations)
