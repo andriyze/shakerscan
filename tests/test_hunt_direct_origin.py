@@ -114,6 +114,34 @@ def test_never_routable_direct_origins_are_refused_under_every_deployment(addres
 
 
 @pytest.mark.parametrize("address", [
+    # NAT64, SIIT, 6to4 and Teredo spellings of the metadata service: only the IPv4-mapped
+    # spelling used to be decoded here.
+    "64:ff9b::a9fe:a9fe", "::ffff:0:a9fe:a9fe", "2002:a9fe:a9fe::", "64:ff9b::e000:1",
+    "2001:0:4136:e378:8000:63bf:5601:5601",
+    # Cloud platform-service addresses are never an origin either.
+    "168.63.129.16", "::ffff:168.63.129.16", "64:ff9b::a83f:8110", "fd00:ec2::254",
+])
+def test_embedded_and_cloud_service_direct_origins_are_refused_under_every_deployment(address):
+    for policy in ("allow", "refuse"):
+        os.environ["SHAKERSCAN_PRIVATE_NETWORK_TARGETS"] = policy
+        try:
+            with pytest.raises(HuntStartContractError, match="private, local, or non-routable"):
+                _start(direct_origin_addresses=[address], policy=AUTHORIZED)
+        finally:
+            os.environ.pop("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", None)
+
+
+@pytest.mark.parametrize("address", ["64:ff9b::a00:8", "2002:a00:8::", "64:ff9b::6440:1"])
+def test_an_embedded_private_direct_origin_needs_the_private_setting(address):
+    os.environ["SHAKERSCAN_PRIVATE_NETWORK_TARGETS"] = "refuse"
+    try:
+        with pytest.raises(HuntStartContractError, match="private, local, or non-routable"):
+            _start(direct_origin_addresses=[address], policy=AUTHORIZED)
+    finally:
+        os.environ.pop("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", None)
+
+
+@pytest.mark.parametrize("address", [
     "127.0.0.1", "10.0.0.8", "::1", "fc00::8", "::ffff:10.0.0.8",
 ])
 def test_private_direct_origins_follow_the_deployment_target_policy(address):
