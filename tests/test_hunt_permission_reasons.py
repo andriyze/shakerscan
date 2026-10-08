@@ -283,3 +283,26 @@ def test_the_hunt_postgres_workflow_runs_the_permission_tests():
     assert "tests/test_hunt_permission_requests_postgres.py" in workflow
     assert "tests/test_hunt_refusal_retry_postgres.py" in workflow
     assert "tests/test_public_retry_conflict_postgres.py" in workflow
+
+
+@pytest.mark.parametrize("name", ["shell.exec", "made.up"])
+def test_an_unregistered_capability_is_refused_with_its_code_and_no_request(monkeypatch, name):
+    """D45: it reached MCP as 404 "'unknown capability: shell.exec'" (a Python repr) with no
+    reason_code. It is a hard limit: a coded refusal from the closed list, never a request."""
+    from api.hunt import interaction_router as router
+
+    async def executable(*_args):  # labelled double: the Hunt exists and is active
+        return None
+
+    monkeypatch.setattr(router, "_require_executable_hunt_or_recorded_action", executable)
+    with pytest.raises(HuntRefusal) as refused:
+        asyncio.run(router.execute_hunt_capability(
+            "00000000-0000-4000-8000-000000000001", name,
+            router.HuntCapabilityRequest(idempotency_key="unknown-capability-0001", input={}),
+        ))
+    detail = refused.value.detail
+    assert refused.value.status_code == 404
+    assert detail["reason_code"] == "capability_unregistered" and detail["error"] == "capability_unregistered"
+    assert detail["message"].startswith(f"{name} is not a registered Hunt capability")
+    assert "'unknown capability" not in detail["message"], "no Python repr"
+    assert refused.value.kind is None and refused.value.recorded is False

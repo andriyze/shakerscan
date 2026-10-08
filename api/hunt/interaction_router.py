@@ -408,7 +408,13 @@ async def execute_hunt_capability(
             ),
         )
     except HuntActionNotFound as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # D45: a hard limit with its code from the closed list, never a request.
+        shown = "".join(char for char in name[:128] if char.isprintable())
+        raise HuntRefusal(
+            "capability_unregistered",
+            f"{shown} is not a registered Hunt capability; use a name from this Hunt's "
+            "capability manifest.",
+        ) from exc
     except HuntActionInputError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
