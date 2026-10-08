@@ -351,6 +351,7 @@ export const HUNT_START_CONTRACT = {
     "idempotency_key_reused",
     "permission_denied",
     "permission_expired",
+    "permission_unused",
     "permission_withdrawn",
     "preauthorization_bound_invalid",
     "preauthorization_proposed",
