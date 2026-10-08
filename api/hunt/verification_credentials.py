@@ -80,11 +80,11 @@ from .credential_uses import (
     CREDENTIAL_TARGET_MISMATCH,
     CREDENTIAL_VERSION_CHANGED,
     CREDENTIALS_NOT_DISTINCT,
-    SOURCE_SELECTED,
     SOURCE_TARGET_OWN,
     CredentialUse,
     HuntCredentialRefusal,
     attached_source,
+    selected_source,
     record_credential_uses,
 )
 
@@ -261,7 +261,9 @@ async def _select(
             principal = next(
                 (row for row in own_principals if str(row["profile_id"]) == profile_id), None,
             )
-            selection = _Selection(slot, profile, SOURCE_SELECTED, principal)
+            selection = _Selection(slot, profile, selected_source(
+                home_target_id=profile.target_id, hunt_target_id=scope.target_id,
+            ), principal)
         else:
             own = [row for row in own_principals if slot in _principal_slots(row)]
             if len(own) > 1:

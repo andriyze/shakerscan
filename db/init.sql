@@ -1057,7 +1057,8 @@ CREATE INDEX idx_hunt_skill_events_run
 ON hunt_skill_events(hunt_run_id, created_at, id);
 
 -- Every credential a Hunt action used: the attached profile, its version, where it came from
--- (selected at start, the target's own, or shared from another target by grant) and the slot.
+-- (selected at start, selected at start but shared from another target, the target's own, or
+-- shared from another target by grant) and the slot.
 -- Ids only; never a secret. The startup migration (api/targets/asset_migration.py, with the SQL
 -- in api/hunt/credential_uses.py) installs this exact definition on converted databases.
 CREATE TABLE hunt_credential_uses (
@@ -1066,9 +1067,9 @@ CREATE TABLE hunt_credential_uses (
     action_id UUID NOT NULL REFERENCES hunt_actions(id) ON DELETE CASCADE,
     profile_id UUID NOT NULL,
     profile_version INTEGER NOT NULL CHECK (profile_version > 0),
-    source TEXT NOT NULL CHECK (
+    source TEXT NOT NULL CONSTRAINT hunt_credential_uses_source_check CHECK (
         source IN ('selected','target_own')
-        OR source ~ '^shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        OR source ~ '^(selected_)?shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     ),
     slot TEXT NOT NULL CHECK (slot ~ '^[a-z0-9:_.-]{1,80}$'),
     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

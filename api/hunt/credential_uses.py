@@ -7,7 +7,8 @@ point that list; they never widen it. Nothing unattached is decrypted or used. A
 never authorizes a destination; the Hunt's authorized set is checked first, as before.
 
 Every use is appended to ``hunt_credential_uses``: the action, the profile id and version,
-where the credential came from (``selected``, ``target_own`` or ``shared_from:<target>``) and
+where the credential came from (``selected``, ``selected_shared_from:<target>`` for a selected
+credential shared from another target, ``target_own`` or ``shared_from:<target>``) and
 the slot it filled. The table holds ids only, never a secret, collection or evidence.
 
 A credential that is not attached is refused with a reason code from
@@ -54,9 +55,9 @@ CREATE TABLE IF NOT EXISTS hunt_credential_uses (
     action_id UUID NOT NULL REFERENCES hunt_actions(id) ON DELETE CASCADE,
     profile_id UUID NOT NULL,
     profile_version INTEGER NOT NULL CHECK (profile_version > 0),
-    source TEXT NOT NULL CHECK (
+    source TEXT NOT NULL CONSTRAINT hunt_credential_uses_source_check CHECK (
         source IN ('selected','target_own')
-        OR source ~ '^shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        OR source ~ '^(selected_)?shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     ),
     slot TEXT NOT NULL CHECK (slot ~ '^[a-z0-9:_.-]{1,80}$'),
     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -64,12 +65,29 @@ CREATE TABLE IF NOT EXISTS hunt_credential_uses (
 );
 CREATE INDEX IF NOT EXISTS idx_hunt_credential_uses_run
     ON hunt_credential_uses(hunt_run_id, used_at, id);
+DO $credential_uses$
+BEGIN
+    -- D38: a ledger created before selected_shared_from:<target> existed accepts it too.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='hunt_credential_uses'::regclass
+          AND conname='hunt_credential_uses_source_check'
+          AND pg_get_constraintdef(oid) LIKE '%(selected_)?shared_from%'
+    ) THEN
+        ALTER TABLE hunt_credential_uses DROP CONSTRAINT IF EXISTS hunt_credential_uses_source_check;
+        ALTER TABLE hunt_credential_uses ADD CONSTRAINT hunt_credential_uses_source_check CHECK (
+            source IN ('selected','target_own')
+            OR source ~ '^(selected_)?shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        );
+    END IF;
+END
+$credential_uses$;
 """
 
 SOURCE_SELECTED = "selected"
 SOURCE_TARGET_OWN = "target_own"
 _SHARED_SOURCE_RE = re.compile(
-    r"^shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    r"^(?:selected_)?shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 _SLOT_RE = re.compile(r"^[a-z0-9:_.-]{1,80}$")
 
@@ -168,6 +186,17 @@ def attached_source(*, home_target_id: Any, hunt_target_id: Any) -> str:
     return SOURCE_TARGET_OWN if home == str(uuid.UUID(str(hunt_target_id))) else f"shared_from:{home}"
 
 
+def selected_source(*, home_target_id: Any, hunt_target_id: Any) -> str:
+    """``selected``, or ``selected_shared_from:<home>`` when the selected credential is another
+    target's, shared by a grant: a grant audit must see where it came from (D38)."""
+    if not home_target_id or not hunt_target_id:
+        return SOURCE_SELECTED
+    home = str(uuid.UUID(str(home_target_id)))
+    if home == str(uuid.UUID(str(hunt_target_id))):
+        return SOURCE_SELECTED
+    return f"selected_shared_from:{home}"
+
+
 def hunt_consuming_target_id(run: Mapping[str, Any]) -> str | None:
     value = run.get("device_target_id") or run.get("target_id")
     return str(value) if value else None
@@ -203,7 +232,10 @@ async def read_credential_uses(conn: Any, hunt_id: Any, *, limit: int = 2000) ->
 def public_credential_use(row: Any) -> dict[str, Any]:
     item = dict(row)
     source = str(item.get("source") or "")
-    shared_from = source.split(":", 1)[1] if source.startswith("shared_from:") else None
+    shared_from = (
+        source.split(":", 1)[1]
+        if source.startswith(("shared_from:", "selected_shared_from:")) else None
+    )
     used_at = item.get("used_at")
     return {
         "schema_version": HUNT_CREDENTIAL_USE_SCHEMA,
@@ -212,6 +244,7 @@ def public_credential_use(row: Any) -> dict[str, Any]:
         "profile_id": str(item["profile_id"]),
         "profile_version": int(item["profile_version"]),
         "source": source,
+        "selected": source == SOURCE_SELECTED or source.startswith("selected_shared_from:"),
         "shared_from_target_id": shared_from,
         "slot": str(item.get("slot") or ""),
         "used_at": used_at.isoformat() if hasattr(used_at, "isoformat") else used_at,
@@ -282,7 +315,7 @@ async def admit_action_credentials(
     consuming = hunt_consuming_target_id(run)
     ids = sorted({str(reference["profile_id"]) for _, reference in references})
     rows = await conn.fetch(
-        """SELECT p.id, p.current_version
+        """SELECT p.id, p.current_version, p.target_id AS home_target_id
            FROM credential_profiles p
            JOIN credential_profile_bindings b
              ON b.profile_id=p.id AND b.binding_kind='target'
@@ -292,6 +325,7 @@ async def admit_action_credentials(
         [uuid.UUID(value) for value in ids], str(consuming or ""),
     )
     attached = {str(row["id"]): int(row["current_version"]) for row in rows}
+    homes = {str(row["id"]): row.get("home_target_id") for row in rows}
     uses: list[CredentialUse] = []
     for slot, reference in references:
         profile_id = str(reference["profile_id"])
@@ -310,7 +344,9 @@ async def admit_action_credentials(
                 "current version.",
                 slot=slot, profile_id=profile_id,
             )
-        uses.append(CredentialUse(profile_id, version, SOURCE_SELECTED, slot))
+        uses.append(CredentialUse(profile_id, version, selected_source(
+            home_target_id=homes.get(profile_id), hunt_target_id=consuming,
+        ), slot))
     return uses
 
 
@@ -339,6 +375,7 @@ __all__ = [
     "action_credential_references",
     "admit_action_credentials",
     "attached_source",
+    "selected_source",
     "public_credential_use",
     "read_credential_uses",
     "record_credential_uses",
