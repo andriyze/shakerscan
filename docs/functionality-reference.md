@@ -276,7 +276,11 @@ host name, address, class name, file path, boolean or number is configuration, n
 that cannot exist; a match byte-identical to the host's answer for an absent path is dropped
 (`indistinguishable_from_absent`). `/actuator/heapdump` is never requested -- its exposure is proved
 from the anonymous actuator index. Evidence keeps field names, provider categories and scrypt value
-fingerprints of at most 20 distinct secrets per body, never a value. Bodies are classified off the
+fingerprints of at most 20 distinct secrets per body, never a value. Proof decides verified versus
+unverified, never what is shown: no excerpt is kept of a configuration document (dotenv/properties,
+`web.config`, actuator property sources, JSON configuration, SQL dump) or of any body with a value
+under a secret-named key, whatever that value's entropy, and free-text excerpts mask every
+secret-named assignment. Bodies are classified off the
 event loop by linear-time parsers, so a hostile body cannot stall heartbeats or cancellation. Cost on Balanced: the first slice holds one request and one wall second
 per seed plus the controls and ten listing follow-ups on top of its endpoint share (130 requests /
 124 s for 25 discovered endpoints); content discovery reads the same 17 high-value paths, so its

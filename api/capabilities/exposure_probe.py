@@ -24,15 +24,18 @@ import json
 import re
 import urllib.parse
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .secret_material import (
     SecretEvidence,
     fingerprinted_secret_evidence,
+    redact_text_assignments,
+    redactable_assignments,
     secret_evidence,
     selfevident_secret_evidence,
     structured_secret_assignments,
+    text_assignment_values,
 )
 
 try:
@@ -281,6 +284,10 @@ class ExposureSignature:
     # Proven secrets in the body. Each carries its key, category and fingerprint; the
     # raw value is kept only in memory (repr-hidden) for scrubbing excerpts.
     secrets: tuple[SecretEvidence, ...] = ()
+    # Every secret-NAMED key of a recognised document, proven or not, and its raw value
+    # (memory only, repr-hidden). Proof decides the class; these decide what is never shown.
+    withheld_keys: tuple[str, ...] = ()
+    withheld_values: tuple[str, ...] = field(default=(), repr=False, compare=False)
 
     @property
     def proves_sensitive_exposure(self) -> bool:
@@ -295,6 +302,16 @@ class ExposureSignature:
     def secret_evidence(self) -> list[dict[str, object]]:
         """Key names, categories and fingerprints only -- never a value."""
         return [item.public() for item in self.secrets]
+
+    @property
+    def withholds_content(self) -> bool:
+        """No excerpt of this body is stored: it is secret material, a configuration document,
+        or it carries a proven secret or a value under a secret-named key."""
+        return bool(
+            self.exposure_class in SECRET_MATERIAL_CLASSES
+            or self.matched_pattern in _CONFIG_DOCUMENT_PATTERNS
+            or self.secrets or self.withheld_keys or self.withheld_values
+        )
 
 
 def _content_type(headers: Mapping[str, str]) -> str:
@@ -397,12 +414,17 @@ def _escalated(
 def _sig(
     exposure_class: str, matched_pattern: str,
     secrets: tuple[SecretEvidence, ...] = (), *, severity: str | None = None,
+    pairs: list[tuple[str, object]] | None = None,
 ) -> ExposureSignature:
+    """``pairs`` are the document's key/value pairs: every secret-named one is withheld."""
+    keys, values = redactable_assignments(pairs) if pairs else ((), ())
     return ExposureSignature(
         exposure_class=exposure_class,
         severity=_escalated(exposure_class, secrets, severity),
         matched_pattern=matched_pattern,
         secrets=secrets,
+        withheld_keys=keys,
+        withheld_values=values,
     )
 
 
@@ -531,18 +553,19 @@ def _web_config(path: str, text: str) -> ExposureSignature | None:
             ("connectionString.password", match.strip())
             for match in _CONNECTION_PASSWORD_RE.findall(connection)
         )
+    machine_keys = _MACHINE_KEY_RE.findall(text)
     found = list(structured_secret_assignments(pairs, server_side=True))
     found.extend(
-        secret_evidence(name, "config_secret_assignment", value)
-        for name, value in _MACHINE_KEY_RE.findall(text)
+        secret_evidence(name, "config_secret_assignment", value) for name, value in machine_keys
     )
     found.extend(selfevident_secret_evidence(text))
     secrets = _dedupe(found)
+    pairs.extend(machine_keys)
     if secrets:
-        return _sig("configuration_secret_file", "aspnet_web_config", secrets)
+        return _sig("configuration_secret_file", "aspnet_web_config", secrets, pairs=pairs)
     if _BACKUP_SUFFIX_RE.search(_last_segment(path)):
-        return _sig("backup_or_source_artifact", "aspnet_web_config_backup")
-    return _sig("configuration_file", "aspnet_web_config")
+        return _sig("backup_or_source_artifact", "aspnet_web_config_backup", pairs=pairs)
+    return _sig("configuration_file", "aspnet_web_config", pairs=pairs)
 
 
 def _json_signature(path: str, text: str, document: Any) -> ExposureSignature | None:
@@ -550,8 +573,9 @@ def _json_signature(path: str, text: str, document: Any) -> ExposureSignature | 
     if actuator is not None:
         secrets = _secrets(text, actuator, server_side=True)
         if secrets:
-            return _sig("actuator_secret_disclosure", "actuator_property_sources", secrets)
-        return _sig("actuator_endpoint", "actuator_property_sources")
+            return _sig("actuator_secret_disclosure", "actuator_property_sources", secrets,
+                        pairs=actuator)
+        return _sig("actuator_endpoint", "actuator_property_sources", pairs=actuator)
     if _actuator_index_advertises_heapdump(document):
         return _sig("actuator_heapdump_exposed", "actuator_index_heapdump_link")
     spec_secrets = _openapi_secrets(document)
@@ -572,7 +596,8 @@ def _json_signature(path: str, text: str, document: Any) -> ExposureSignature | 
             )
     secrets = _secrets(text, leaf_pairs, server_side=name in _SERVER_CONFIG_NAMES)
     if secrets:
-        return _sig("configuration_secret_file", "json_configuration_secret", secrets)
+        return _sig("configuration_secret_file", "json_configuration_secret", secrets,
+                    pairs=leaf_pairs)
     return None
 
 
@@ -588,10 +613,12 @@ def _structured_text(path: str, text: str) -> ExposureSignature | None:
         return _json_signature(path, text, document)
     dotenv = _dotenv_pairs(text)
     if dotenv is not None:
-        secrets = _secrets(text, list(dotenv), server_side=True)
+        pairs: list[tuple[str, object]] = list(dotenv)
+        secrets = _secrets(text, pairs, server_side=True)
         if secrets:
-            return _sig("environment_secret_file", "dotenv_secret_assignment", secrets)
-        return _sig("configuration_file", "dotenv_assignments")
+            return _sig("environment_secret_file", "dotenv_secret_assignment", secrets,
+                        pairs=pairs)
+        return _sig("configuration_file", "dotenv_assignments", pairs=pairs)
     web_config = _web_config(path, text)
     if web_config is not None:
         return web_config
@@ -610,7 +637,8 @@ def _structured_html(text: str) -> ExposureSignature | None:
             (key.strip(), value.strip())
             for key, value in _HTML_ROW_RE.findall(text[:_PARSE_MAX_CHARS])
         ][:_MAX_DOCUMENT_PAIRS]
-        return _sig("phpinfo_disclosure", "phpinfo_page", _secrets(text, rows, server_side=True))
+        return _sig("phpinfo_disclosure", "phpinfo_page", _secrets(text, rows, server_side=True),
+                    pairs=rows)
     if _WERKZEUG_CONSOLE_RE.search(text) and _WERKZEUG_MARKER_RE.search(text):
         # An interactive debugger console executes code once its PIN is known.
         return _sig("debug_interface_exposure", "werkzeug_debugger_console", severity="high")
@@ -755,24 +783,51 @@ _SECRET_MATERIAL_CLASSES = SECRET_MATERIAL_CLASSES
 _PROMOTABLE_EXPOSURE_CLASSES = frozenset(EXPOSURE_PROOF_CONTRACTS)
 
 
+# Configuration documents: their body is withheld whether or not a secret in it was proven,
+# because the entropy screen decides proof, never whether a value may be shown.
+_CONFIG_DOCUMENT_PATTERNS = frozenset({
+    "dotenv_secret_assignment", "dotenv_assignments", "aspnet_web_config",
+    "aspnet_web_config_backup", "actuator_property_sources", "json_configuration_secret",
+    "sql_dump",
+})
+# A known value shorter than this is too common to scrub or to test an excerpt for.
+_MIN_SCRUBBED_VALUE_LENGTH = 4
+
+
+def _withheld_notice(signature: ExposureSignature) -> str:
+    notice = (
+        f"[{signature.exposure_class} detected - content withheld; "
+        f"{len(signature.secrets)} secret value(s) fingerprinted"
+    )
+    keys = list(dict.fromkeys(
+        [item.key for item in signature.secrets] + list(signature.withheld_keys)
+    ))
+    if keys:
+        shown = ", ".join(keys[:20]) + (f" (+{len(keys) - 20} more)" if len(keys) > 20 else "")
+        notice += f"; secret-named keys: {shown}"
+    return notice + "]"
+
+
 def redacted_exposure_excerpt(body: bytes, signature: ExposureSignature) -> str:
     """Return a short, secret-redacted evidence excerpt around the match.
 
-    For secret-material classes, and for any body in which a secret was proven, the
-    body itself is the secret, so no content is excerpted at all -- only the fact of
-    disclosure and the fingerprinted key names are recorded. Other excerpts pass
-    through the shared redactor with every value this body is known to hold.
+    The body of a secret-material class, of a configuration document (dotenv/properties,
+    web.config, actuator property sources, JSON configuration, SQL dump), or of anything in
+    which a secret was proven or a secret-named key carries a value is not excerpted at all:
+    only the fact of disclosure, the key names and the fingerprints are recorded. That holds
+    whatever the values' entropy -- ``DB_PASS=Winter2023!`` proves nothing but is never shown.
+    Other excerpts pass through the shared redactor with every value this body is known to
+    hold, then every secret-named assignment is masked; an excerpt that still contains a
+    known value is withheld instead.
     """
     if signature.exposure_class == "listed_file":
         return "[File reachable; sensitivity not established; content withheld]"
-    if signature.exposure_class in _SECRET_MATERIAL_CLASSES or signature.secrets:
-        return (
-            f"[{signature.exposure_class} detected - content withheld; "
-            f"{len(signature.secrets)} secret value(s) fingerprinted]"
-        )
+    if signature.withholds_content:
+        return _withheld_notice(signature)
     if body.startswith((_DS_STORE_MAGIC, *_ARCHIVE_MAGIC)):
         return f"[{signature.exposure_class} detected - binary content withheld]"
-    text = _decode(body)
+    full = _decode(body)
+    text = full
     try:
         compiled = re.compile(signature.matched_pattern)
     except re.error:
@@ -782,11 +837,15 @@ def redacted_exposure_excerpt(body: bytes, signature: ExposureSignature) -> str:
         start = max(0, found.start() - 40)
         text = text[start:found.end() + 160]
     sample = " ".join(text.split())[:400]
-    known = [item.value for item in selfevident_secret_evidence(_decode(body)) if item.value]
+    known = [item.value for item in selfevident_secret_evidence(full) if item.value]
+    known.extend(text_assignment_values(full[:_PARSE_MAX_CHARS]))
+    known = [value for value in known if len(value) >= _MIN_SCRUBBED_VALUE_LENGTH]
     sample = _shared_redact_text(sample, known_values=known)
-    return _SECRET_REDACT_RE.sub(
-        lambda item: f"{item.group(1)}=[REDACTED]", sample,
-    )
+    sample = redact_text_assignments(sample)
+    sample = _SECRET_REDACT_RE.sub(lambda item: f"{item.group(1)}=[REDACTED]", sample)
+    if any(value in sample for value in known):
+        return _withheld_notice(signature)
+    return sample
 
 
 __all__ = [
