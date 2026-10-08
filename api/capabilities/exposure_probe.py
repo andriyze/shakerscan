@@ -305,10 +305,12 @@ class ExposureSignature:
 
     @property
     def withholds_content(self) -> bool:
-        """No excerpt of this body is stored: it is secret material, a configuration document,
-        or it carries a proven secret or a value under a secret-named key."""
+        """No excerpt and no plain digest of this body is stored: it is secret material, a
+        configuration document, a file of unestablished sensitivity, or it carries a proven
+        secret or a value under a secret-named key."""
         return bool(
             self.exposure_class in SECRET_MATERIAL_CLASSES
+            or self.exposure_class == "listed_file"
             or self.matched_pattern in _CONFIG_DOCUMENT_PATTERNS
             or self.secrets or self.withheld_keys or self.withheld_values
         )

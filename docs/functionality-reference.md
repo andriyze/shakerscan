@@ -276,7 +276,11 @@ host name, address, class name, file path, boolean or number is configuration, n
 that cannot exist; a match byte-identical to the host's answer for an absent path is dropped
 (`indistinguishable_from_absent`). `/actuator/heapdump` is never requested -- its exposure is proved
 from the anonymous actuator index. Evidence keeps field names, provider categories and scrypt value
-fingerprints of at most 20 distinct secrets per body, never a value. Proof decides verified versus
+fingerprints of at most 20 distinct secrets per body, never a value. The scrypt salt, and the HMAC
+that replaces `response_body_sha256` (as `response_body_hmac`) for any body whose content is
+withheld, use a key derived from the installation's credential key, so fingerprints match across
+Scans of one installation and cannot be recomputed from a guess elsewhere (`-ephemeral` marks a
+process without a stable key). Proof decides verified versus
 unverified, never what is shown: no excerpt is kept of a configuration document (dotenv/properties,
 `web.config`, actuator property sources, JSON configuration, SQL dump) or of any body with a value
 under a secret-named key, whatever that value's entropy, and free-text excerpts mask every

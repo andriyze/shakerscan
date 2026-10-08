@@ -15,6 +15,8 @@ On by default, backward compatible:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import secrets
 from typing import Any
@@ -154,3 +156,21 @@ def decrypt_secret(value: Any) -> Any:
         return fernet.decrypt(value[len(_PREFIX):].encode()).decode()
     except Exception as exc:
         raise SecretStoreUnavailable("credential ciphertext cannot be decrypted with the active key") from exc
+
+
+_DERIVED_KEY_DOMAIN = b"shakerscan-installation-derived-key/v1\x00"
+
+
+def derived_installation_key(purpose: str) -> bytes | None:
+    """A 32-byte key for ``purpose``, derived from this installation's stable credential key.
+
+    HMAC-SHA256 under the credential key, so it is as stable and as private as that key:
+    the same on every restart of this installation, different on every other one, and never
+    the credential key itself. ``None`` when no stable key can be loaded.
+    """
+    material = _load_key_material()
+    if not material:
+        return None
+    return hmac.new(
+        material.encode("utf-8"), _DERIVED_KEY_DOMAIN + purpose.encode("utf-8"), hashlib.sha256,
+    ).digest()
