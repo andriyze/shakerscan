@@ -693,6 +693,10 @@ def cmd_agent(args: argparse.Namespace) -> int:
     if not agents and not args.no_launch:
         raise ClientError("no supported agent on this PATH; install Codex, Claude Code, OpenCode or Pi, or pass --no-launch")
     agent = agents[0] if agents else None
+    if agent is not None and not args.no_launch and not shutil.which(agent):
+        # D44: before any step-up, so a launch that cannot start mints no pre-authorization.
+        raise ClientError(f"{agent} is not on this PATH; install it, or pass --no-launch to prepare the "
+                          "workspace. Nothing was pre-authorized and no agent was started.")
     allowed = launch_preauthorization(args, url, token_file)
     workspace = Path(args.workspace).expanduser().resolve() if args.workspace else (Path.cwd() if args.here else config_dir() / "agent")
     executable = client_executable()

@@ -625,7 +625,9 @@ Refusals use `{"detail": {"schema_version": "shakerscan-approval-error/v1", "err
 `session_invalid`, `preauthorization_invalid`, `feature_disabled`, `licence_read_only`.
 
 **`--allow` at launch.** `shakerscan agent --allow BOUND…` validates the `<kind>:<value>` shape
-locally (the engine parses the grammar). On Enterprise it runs one `preauthorization` step-up
+locally (the engine parses the grammar) and checks that the agent it will start is on `PATH`
+before anything else (D44: a launch that cannot start asks for no step-up and mints no
+pre-authorization). On Enterprise it then runs one `preauthorization` step-up
 (`use: agent_launch`) before any agent process exists; a gateway without G1 gets the exact error
 and no agent starts. The agent's environment, and its MCP registrations (`.mcp.json` `env`,
 `opencode.json` `environment`, `codex mcp add --env`), then carry `SHAKERSCAN_HUNT_ALLOW` (the
