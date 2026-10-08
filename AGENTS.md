@@ -246,10 +246,10 @@ Severities are `critical`, `high`, `medium`, `low`, and `info`. Triage states ar
 - Finding lists may omit heavy fields. Respect `details_included` and `omitted_detail_fields`.
 - Do not reinterpret inconclusive retests as fixed or verified.
 - Unauthenticated `data_exposure` proofs (Hunt and DAST share `capabilities/secret_material.py`)
-  recognise a narrow, entropy-screened set of self-evident secret formats, or a screened unmasked
-  value under a secret-named key of a recognised config document (dotenv, actuator, web.config).
-  JWTs, bearer tokens, SSNs, cards and Google API keys stay excluded (public issuers, doc samples);
-  widening either is a proof-contract change, never a per-target tuning.
+  recognise narrow, entropy-screened provider secret formats, or a screened value under a key
+  with a secret name segment (`DB_PASSWORD`, not `SECRETS_MANAGER_ENDPOINT`) in a recognised config
+  document; credential-free URLs, hosts, class names, paths and numbers never count. JWTs, bearer
+  tokens, SSNs, cards, Google API keys stay excluded; widening either is a proof-contract change.
 
 Evidence retention cleanup is destructive and interactive-only. It starts with a target-scoped
 dry-run preview, binds an immutable snapshot, uses a one-use dangerous approval for that preview,

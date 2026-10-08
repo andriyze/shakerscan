@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 
 SELF_EVIDENT_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -66,26 +67,52 @@ _INDIRECTION_RE = re.compile(
 # asterisks; such a value is the absence of a leak.
 _MASKED_VALUE_RE = re.compile(r"^\*+$|^\[?(?:redacted|hidden|masked|filtered)\]?$", re.IGNORECASE)
 
-# Key names that hold a secret in server-side configuration. Matched on the normalized
-# snake_case name. ``token`` and ``api_key`` count in server configuration (a dotenv file or an
-# actuator property source is never meant to reach a browser) but not in a client config file,
-# where public, publishable and search-only keys legitimately live (``strict``).
+# Key names that hold a secret in server-side configuration, matched on whole segments of the
+# normalized snake_case name (camelCase, kebab, dot and snake separators all normalize to ``_``).
+# A secret word must be a segment of its own, or end a run-together segment for the words that
+# cannot be anything else (``dbpassword``, ``clientsecret``, ``privatekey``). A name that merely
+# contains the word is not secret: ``SECRETS_MANAGER_ENDPOINT`` names where secrets are kept and
+# ``CREDENTIAL_PROVIDER_CLASS`` names the code that fetches them. ``token`` and ``api_key`` count
+# in server configuration (a dotenv file or an actuator property source is never meant to reach a
+# browser) but not in a client config file, where public, publishable and search-only keys
+# legitimately live (``server_side``).
 _SECRET_KEY_RE = re.compile(
-    r"(?:^|_)(?:password|passwd|pwd|pass|secret|secret_key|private_key|privatekey|credential"
-    r"|credentials|connection_string|connectionstring|signing_key|encryption_key|master_key"
-    r"|client_secret|access_key)(?:_|$)"
-    r"|password|passwd|secret|privatekey|credential"
+    r"(?:^|_)(?:pwd|pass|passphrase|secret_key|private_key|credentials?|connection_string"
+    r"|connectionstring|signing_key|encryption_key|master_key|client_secret|access_key)(?:_|$)"
+    r"|(?:^|_)[a-z0-9]*(?:password|passwd|secret|secretkey|privatekey)(?:_|$)"
 )
 _SERVER_SECRET_KEY_RE = re.compile(
     r"(?:^|_)(?:token|api_key|apikey|auth_token|access_token|refresh_token|admin_token|webhook_key"
-    r"|license_key|session_key)(?:_|$)|token$"
+    r"|license_key|session_key)(?:_|$)|(?:^|_)[a-z0-9]*token$"
 )
-# Key names that look secret but name public, identifying or descriptive values.
+# A last segment that names a public, identifying or descriptive value, or the place or code a
+# secret comes from, rather than the secret: ``SECRET_KEY_FILE``, ``SECRETS_MANAGER_ENDPOINT``.
 _PUBLIC_KEY_RE = re.compile(
     r"(?:^|_)(?:public|publishable|pub|site|sitekey|site_key|anon|id|key_id|client_id|username"
-    r"|user|name|host|port|url|uri|path|file|dir|enabled|enable|timeout|expiry|expires|ttl"
-    r"|length|count|size|type|algorithm|header|policy|rotation|hint|mode|format)$"
+    r"|user|name|host|hostname|port|url|uri|path|file|dir|directory|enabled|enable|timeout|expiry"
+    r"|expires|ttl|length|count|size|type|algorithm|header|policy|rotation|hint|mode|format"
+    r"|endpoint|address|addr|server|region|provider|class|classname|driver|location|version"
+    r"|prefix|method|strategy|required|min|max|label|description|pattern|regex|field|param)$"
 )
+# Value shapes that are configuration, not a secret, whatever their entropy: a URL that carries
+# no credential, a host name, an address, a dotted class name, a file path, a boolean or number.
+_BOOLEAN_WORDS = frozenset({
+    "true", "false", "yes", "no", "on", "off", "null", "none", "nil", "enabled", "disabled",
+})
+_NUMBER_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]{0,30}://")
+_HOSTNAME_RE = re.compile(
+    r"^(?:[a-z0-9][a-z0-9-]{0,62}\.){1,10}[a-z]{2,24}\.?(?::\d{1,5})?$"
+)
+_IP_ADDRESS_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?$|^\[[0-9A-Fa-f:.]{2,45}\](?::\d{1,5})?$")
+_CLASS_NAME_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{0,40}(?:\.[A-Za-z_$][A-Za-z0-9_$]{0,40}){2,12}$")
+_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/][^\x00-\x1f]{0,512}$")
+_UNIX_PATH_RE = re.compile(r"^(?:~|\.{1,2})?/[a-z0-9_.\-~ ]{0,128}(?:/[a-z0-9_.\-~ ]{0,128}){0,32}$")
+_EXTENSION_PATH_RE = re.compile(
+    r"^(?:~|\.{1,2})?/[\w.\-~ ]{0,128}(?:/[\w.\-~ ]{0,128}){0,32}\.[A-Za-z][A-Za-z0-9]{0,7}$"
+)
+# Longer values are never one of the shapes above; skip the checks rather than scan them.
+_SHAPE_MAX_CHARS = 2_048
 
 
 def shannon_entropy_bits(value: str) -> float:
@@ -145,7 +172,7 @@ def classify_selfevident_secret_values(text: str) -> list[str]:
 
 def normalized_key_name(key: str) -> str:
     """``internalAdminToken`` / ``SPRING_DATASOURCE_PASSWORD`` / ``db.password`` -> snake_case."""
-    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key or "").strip())
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key or "").strip()[:200])
     return re.sub(r"[^a-z0-9]+", "_", spaced.lower()).strip("_")
 
 
@@ -163,12 +190,44 @@ def is_secret_key_name(key: str, *, server_side: bool) -> bool:
     return server_side and bool(_SERVER_SECRET_KEY_RE.search(name))
 
 
+def _url_carries_credential(text: str) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError:
+        return True
+    if parts.password:
+        return True
+    return any(
+        is_secret_key_name(name, server_side=True)
+        for name, _value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)[:50]
+    )
+
+
+def is_non_secret_value_shape(text: str) -> bool:
+    """Whether a value is configuration by its shape: a URL without a credential, a host name
+    or address, a dotted class name, a file path, a boolean or a number."""
+    if len(text) > _SHAPE_MAX_CHARS:
+        return False
+    if text.lower() in _BOOLEAN_WORDS or _NUMBER_RE.match(text):
+        return True
+    if _URL_SCHEME_RE.match(text):
+        return not _url_carries_credential(text)
+    return bool(
+        _HOSTNAME_RE.match(text) or _IP_ADDRESS_RE.match(text) or _CLASS_NAME_RE.match(text)
+        or _DRIVE_PATH_RE.match(text) or _UNIX_PATH_RE.match(text)
+        or _EXTENSION_PATH_RE.match(text)
+    )
+
+
 def is_structured_secret_value(value: object) -> bool:
-    """An unmasked, non-indirect value that passes the placeholder and entropy screen."""
+    """An unmasked, non-indirect value that passes the placeholder and entropy screen and is
+    not configuration by its shape (a URL, host, class name, path, boolean or number)."""
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         return False
     text = str(value).strip().strip("\"'")
     if not text or _MASKED_VALUE_RE.match(text) or _INDIRECTION_RE.match(text):
+        return False
+    if is_non_secret_value_shape(text):
         return False
     return not is_placeholder_secret(text)
 
@@ -252,6 +311,7 @@ __all__ = [
     "classify_selfevident_secret_values",
     "is_placeholder_secret",
     "is_secret_key_name",
+    "is_non_secret_value_shape",
     "is_structured_secret_value",
     "normalized_key_name",
     "selfevident_secret_evidence",
