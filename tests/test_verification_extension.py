@@ -114,7 +114,8 @@ def test_a_slice_is_extended_once_and_a_dalfox_extension_never_again():
 def test_a_resumable_sqli_extension_is_continued_at_the_lane_share():
     """146b6c03: the r02 extension held the whole Balanced lane share (900 s), sent 230 of
     1,714 requests and timed out. Its candidates' finished technique stages are checkpointed,
-    so a continuation at the same share resumes rather than repeats it."""
+    so a continuation at the same share resumes rather than repeats it -- when the checkpoint
+    says the interrupted stage ran out of less than the share (audit S002)."""
     ext_reserved = {"http_requests": 1_714, "state_changing_requests": 1_028, "tool_wall_seconds": 900}
     ext_consumed = {"http_requests": 230, "state_changing_requests": 230, "tool_wall_seconds": 900}
     original = _action("verify.sqli.r01", "sqli.verify_batch")
@@ -122,20 +123,28 @@ def test_a_resumable_sqli_extension_is_continued_at_the_lane_share():
         "verify.sqli.r01.ext.r02", "sqli.verify_batch",
         args={"slice": {"start": 0, "count": 1}, EXTENDS_ARG: "verify.sqli.r01"},
     )
-    planned = plan_verification_extensions(
-        parent_plan=_plan(original, extension),
-        parent_results={
-            "verify.sqli.r01": _settled("timed_out"),
-            "verify.sqli.r01.ext.r02": _settled(
-                "timed_out", reserved=ext_reserved, consumed=ext_consumed,
-            ),
-        },
-        profile_limits=BALANCED, residual=ROOMY,
-    )
 
+    def plan(resume_walls):
+        return plan_verification_extensions(
+            parent_plan=_plan(original, extension),
+            parent_results={
+                "verify.sqli.r01": _settled("timed_out"),
+                "verify.sqli.r01.ext.r02": _settled(
+                    "timed_out", reserved=ext_reserved, consumed=ext_consumed,
+                ),
+            },
+            profile_limits=BALANCED, residual=ROOMY, stage_resume_walls=resume_walls,
+        )
+
+    # Boolean finished inside r02 and error-based was killed at 568 s: 588 s makes progress.
+    planned = plan({"verify.sqli.r01.ext.r02": 588})
     assert [item["action_id"] for item in planned] == ["verify.sqli.r01.ext.r02.ext"]
     assert planned[0]["capability_args"][EXTENDS_ARG] == "verify.sqli.r01.ext.r02"
     assert planned[0]["budget"] == ext_reserved
+    # A stage that used the whole 900 s share cannot be re-run inside that share, and without
+    # a checkpoint no stage can be shown to need less: the share is the limit, not a no-op.
+    assert plan({"verify.sqli.r01.ext.r02": 920}) == ()
+    assert plan(None) == ()
 
 
 def test_the_residual_bounds_the_extension_or_drops_it():

@@ -44,7 +44,11 @@ from .continuation import (
     reconciled_continuation_ceiling,
 )
 from .manifest_store import PostgresScanManifestStore
-from .verification_extension import plan_verification_extensions
+from .verification_extension import (
+    plan_verification_extensions,
+    resume_observation_action_ids,
+    stage_resume_walls,
+)
 from .work_manifests import (
     ScanWorkManifest,
     ScanWorkManifestKind,
@@ -253,6 +257,12 @@ def compile_continuation_round(
     if any(result.status.value == "cancelled" for result in parent_results.values()):
         raise ScanContinuationError("cancelled Scan cannot continue")
     root_results = {key: parent_results[key] for key in allocation.parent_action_ids}
+    # The receipts of resumable slices name the least wall their unfinished candidates need;
+    # extensions are sized from those checkpoints. Only root observations define worklists.
+    resume_walls = stage_resume_walls({
+        key: observations.get(key, ())
+        for key in resume_observation_action_ids(parent_plan, parent_results)
+    })
     observations = {key: observations.get(key, ()) for key in allocation.parent_action_ids}
     endpoints, candidates = build_discovery_continuation_manifests(
         allocation=allocation,
@@ -310,6 +320,7 @@ def compile_continuation_round(
             parent_results=parent_results,
             profile_limits=execution_plan.budget.ledger_limits(),
             residual=residual,
+            stage_resume_walls=resume_walls,
         )
         if revision_number >= 2 and not finalize_only else ()
     )
@@ -429,7 +440,10 @@ async def materialize_local_scan_continuation(
     dispatcher = runtime.dispatcher
     observations = {
         action_id: await dispatcher._observations(action_id)
-        for action_id in allocation.parent_action_ids
+        for action_id in dict.fromkeys((
+            *allocation.parent_action_ids,
+            *resume_observation_action_ids(parent_plan, parent_results),
+        ))
     }
     request_manifests = await runtime.load_request_manifests(
         scan_id=dispatcher.scan_id, target_binding_digest=dispatcher.target.digest,

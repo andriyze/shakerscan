@@ -69,6 +69,7 @@ try:
     from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from scan.continuation import ContinuationBudgetCeiling, reconciled_continuation_ceiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from scan.continuation_rounds import compile_next_continuation
+    from scan.verification_extension import resume_observation_action_ids
     from scan.contracts import SCAN_AUTHENTICATION_KEYS, scan_authentication_value_present
     from scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
     from scan.executor import build_native_scan_execution
@@ -119,6 +120,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from ..scan.continuation import ContinuationBudgetCeiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from ..scan.continuation_rounds import compile_next_continuation
+    from ..scan.verification_extension import resume_observation_action_ids
     from ..scan.contracts import SCAN_AUTHENTICATION_KEYS, scan_authentication_value_present
     from ..scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
     from ..scan.executor import build_native_scan_execution
@@ -3071,7 +3073,13 @@ async def _materialize_broker_scan_continuation(
                 detail="broker continuation requires every parent action receipt",
             )
         results[action.action_id] = result
-        if action.action_id not in allocation.parent_action_ids:
+    # Root observations define the worklists; a resumable slice's receipt sizes its extension.
+    observed = set(allocation.parent_action_ids) | set(
+        resume_observation_action_ids(parent_plan, results)
+    )
+    for action in parent_plan.actions:
+        result = results[action.action_id]
+        if action.action_id not in observed:
             continue
         if result.observation_manifest_ref is None:
             observations[action.action_id] = ()
@@ -3083,6 +3091,9 @@ async def _materialize_broker_scan_continuation(
             action_id=action.action_id,
         )
         if rows is None:
+            if action.action_id not in allocation.parent_action_ids:
+                # Only sizes an extension floor; the planner falls back to the conservative one.
+                continue
             raise HTTPException(
                 status_code=409,
                 detail="broker continuation observation manifest is unavailable",
