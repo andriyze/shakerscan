@@ -274,6 +274,25 @@ class HuntQueryRequest(BaseModel):
 CANDIDATE_RECORDING_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
 
 
+def _require_candidate_writable_hunt(run: Mapping[str, Any]) -> None:
+    """Refuse a candidate write once the Hunt is finished (audit Low (a)).
+
+    Finishing a budget_exhausted Hunt keeps its status and sets completed_at, so the status
+    alone does not say the Hunt is finished. The caller holds the Hunt row lock; finish and
+    cancel set completed_at under the same lock, so a write either lands before them or is
+    refused here. Same rule as the coverage ledger.
+    """
+    status = str(run["status"] or "")
+    finished = run.get("completed_at") is not None
+    if finished or status not in CANDIDATE_RECORDING_STATUSES:
+        state = f"{status} and finished" if finished and status == "budget_exhausted" else status
+        raise HTTPException(status_code=409, detail=(
+            f"Hunt is {state}; candidates can be recorded or changed only while a Hunt is "
+            "unfinished (active, awaiting_planner, or budget_exhausted before finish). A "
+            "finished or cancelled Hunt keeps its candidates read-only."
+        ))
+
+
 class HuntCandidateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     family: str = Field(min_length=1, max_length=80)
@@ -1115,8 +1134,7 @@ async def prepare_hunt_boundary_discovery(hunt_id: str, draft_id: str):
     async with _pool().acquire() as conn:
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
-            if run["status"] not in CANDIDATE_RECORDING_STATUSES:
-                raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
+            _require_candidate_writable_hunt(run)
             discovery = await discover_hunt_boundaries(conn, run=dict(run))
             draft = next(
                 (item for item in discovery["drafts"] if item.get("draft_id") == draft_id),
@@ -1244,8 +1262,7 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
     async with _pool().acquire() as conn:
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
-            if run["status"] not in CANDIDATE_RECORDING_STATUSES:
-                raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
+            _require_candidate_writable_hunt(run)
             used = _hunt_json(run["budget_used_json"], {})
             budget = _hunt_json(run["budget_json"], {})
             if int(used.get("candidates") or 0) >= int(budget.get("max_candidates") or 0):
@@ -1314,9 +1331,10 @@ async def update_hunt_candidate(
 ):
     """Correct metadata on a candidate produced by this Hunt.
 
-    Candidate identity, proof state, and verification results remain server-owned. Historical
-    Hunts may correct their own non-terminal candidates because this operation performs no target
-    traffic and appends an immutable lifecycle observation.
+    Candidate identity, proof state, and verification results remain server-owned. An
+    unfinished Hunt may correct its own non-terminal candidates because this operation performs
+    no target traffic and appends an immutable lifecycle observation; a finished Hunt's record,
+    candidates included, is read-only after its debrief.
     """
     hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
     candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
@@ -1324,6 +1342,7 @@ async def update_hunt_candidate(
         async with _pool().acquire() as conn:
             async with conn.transaction():
                 run = await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                _require_candidate_writable_hunt(run)
                 await _require_candidate_evidence(conn, run, request.evidence_refs)
                 result = await investigation_candidates.update_candidate_for_hunt(
                     conn,
@@ -1345,7 +1364,9 @@ async def delete_hunt_candidate(hunt_id: str, candidate_id: str):
     try:
         async with _pool().acquire() as conn:
             async with conn.transaction():
-                await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                _require_candidate_writable_hunt(
+                    await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
+                )
                 result = await investigation_candidates.expire_candidate_for_hunt(
                     conn,
                     hunt_run_id=str(hunt_uuid),

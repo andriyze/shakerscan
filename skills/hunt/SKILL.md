@@ -311,7 +311,8 @@ stop work that uses other remaining dimensions. Preserve observations and name m
 An action rejected with `budget_insufficient_for_action` has not exhausted the run: use its
 reported shortages to select a smaller useful action. Do not retry an unchanged oversized action.
 A `budget_exhausted` Hunt still accepts candidates while its candidate budget has room: record the
-leads the gathered evidence supports before finishing. `hosts_attempted` counts distinct hosts: once
+leads the gathered evidence supports before finishing. Finishing keeps the `budget_exhausted` status
+but closes the record: afterwards every candidate write (record, correct, expire) is refused with 409. `hosts_attempted` counts distinct hosts: once
 a network action on a host has settled, later network actions on that host do not charge it again.
 An action admitted while the first is still running, or after one that failed before reaching the
 host, is charged in full.

@@ -12,6 +12,7 @@ import json
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -275,10 +276,13 @@ def test_worker_network_job_adopts_and_records_the_distinct_host_hold():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status,allowed", [
-    ("budget_exhausted", True), ("active", True), ("completed", False), ("cancelled", False),
+@pytest.mark.parametrize("status,finished,allowed", [
+    ("budget_exhausted", False, True), ("active", False, True),
+    ("completed", True, False), ("cancelled", True, False),
+    # Audit Low (a): finishing a budget_exhausted Hunt keeps its status; the debrief closes it.
+    ("budget_exhausted", True, False),
 ])
-async def test_candidates_are_recordable_after_budget_exhaustion(monkeypatch, status, allowed):
+async def test_candidates_are_recordable_after_budget_exhaustion(monkeypatch, status, finished, allowed):
     action = str(uuid.uuid4())
     hunt = str(uuid.uuid4())
     writes = []
@@ -300,7 +304,8 @@ async def test_candidates_are_recordable_after_budget_exhaustion(monkeypatch, st
 
     run = {"id": hunt, "target_id": str(uuid.uuid4()), "device_target_id": None, "status": status,
            "objective": "o", "context_pack": {}, "budget_used_json": {"candidates": 0},
-           "budget_json": {"max_candidates": 20}}
+           "budget_json": {"max_candidates": 20},
+           "completed_at": datetime.now(timezone.utc) if finished else None}
 
     async def lookup(_conn, _hunt_id, for_update=False):
         return run
@@ -323,3 +328,50 @@ async def test_candidates_are_recordable_after_budget_exhaustion(monkeypatch, st
         with pytest.raises(router.HTTPException) as exc:
             await router.create_hunt_candidate(hunt, request)
         assert exc.value.status_code == 409
+        shown = f"{status} and finished" if status == "budget_exhausted" else status
+        assert exc.value.detail.startswith(f"Hunt is {shown}; candidates can be recorded")
+        # Refused before anything is written or charged to the candidate budget.
+        assert writes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["budget_exhausted", "completed", "cancelled"])
+async def test_a_finished_hunt_refuses_candidate_corrections_expiry_and_drafts(monkeypatch, status):
+    """Audit Low (a): after the final debrief no candidate write lands, whatever the status."""
+    hunt, candidate = str(uuid.uuid4()), str(uuid.uuid4())
+    called = []
+
+    class Store:
+        @asynccontextmanager
+        async def acquire(self):
+            yield self
+
+        @asynccontextmanager
+        async def transaction(self, **_kwargs):
+            yield self
+
+    run = {"id": hunt, "target_id": str(uuid.uuid4()), "device_target_id": None, "status": status,
+           "objective": "o", "context_pack": {}, "budget_used_json": {"candidates": 0},
+           "budget_json": {"max_candidates": 20}, "completed_at": datetime.now(timezone.utc)}
+
+    async def lookup(_conn, _hunt_id, for_update=False):
+        return run
+
+    async def record(*_args, **_kwargs):
+        called.append(_args)
+        return {}
+
+    monkeypatch.setattr(router, "_pool", lambda: Store())
+    monkeypatch.setattr(router, "_hunt_run_or_404", lookup)
+    monkeypatch.setattr(router, "discover_hunt_boundaries", record)
+    monkeypatch.setattr(router.investigation_candidates, "update_candidate_for_hunt", record)
+    monkeypatch.setattr(router.investigation_candidates, "expire_candidate_for_hunt", record)
+    for call in (
+        router.update_hunt_candidate(hunt, candidate, router.HuntCandidateUpdateRequest(title="New")),
+        router.delete_hunt_candidate(hunt, candidate),
+        router.prepare_hunt_boundary_discovery(hunt, "a" * 64),
+    ):
+        with pytest.raises(router.HTTPException) as exc:
+            await call
+        assert exc.value.status_code == 409 and "candidates can be recorded or changed" in exc.value.detail
+    assert called == []
