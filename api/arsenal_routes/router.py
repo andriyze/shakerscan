@@ -8095,7 +8095,9 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             principal_contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, used_slots)
             validate_principal_contexts(principal_contexts, used_slots)
         except WorkflowContractError as exc:
-            detail = {"error": "invalid_workflow", "violation": str(exc)}
+            detail = {"error": "invalid_workflow", "violation": str(exc),
+                      # Only a create-surface probe can have reached the target before this point.
+                      "target_traffic_sent": bool(int((p.get("_server_materialization") or {}).get("request_count") or 0))}
             # A Hunt credential refusal also carries its machine-readable reason code.
             public_detail = getattr(exc, "public_detail", None)
             raise HTTPException(

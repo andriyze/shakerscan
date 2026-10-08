@@ -115,7 +115,9 @@ class HuntCredentialRefusal(Exception):
     ) -> None:
         if code not in CREDENTIAL_REFUSAL_CODES:
             raise ValueError(f"unknown credential refusal code: {code}")
-        super().__init__(f"{code}:{slot}" if slot else code)
+        # Not "code:slot": the shared redactor masks the value after a credential-like key, which
+        # turned the slot name into "***" (D33).
+        super().__init__(f"{code} for slot {slot}" if slot else code)
         self.code = code
         self.message = message
         self.slot = slot

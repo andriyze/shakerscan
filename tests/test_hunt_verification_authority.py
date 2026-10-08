@@ -426,3 +426,102 @@ def test_a_verification_that_ran_keeps_the_conservative_charge(web_hunt, monkeyp
     (action,) = database.actions.values()
     accounting = public_hunt_action(action)["result"]["budget_accounting"]
     assert accounting["charge_basis"] == "conservative_full_reservation"
+
+
+def test_a_credential_refusal_returned_by_the_dispatch_is_charged_nothing(web_hunt, monkeypatch):
+    """D33: auth_bypass resolves its principals at dispatch, not in preflight. The verifier turns
+    that HTTPException into a returned verdict, and the Hunt reported a successful verification
+    charged 1 verification, 24 requests and 180 s, with the slot masked as ``***``."""
+    from api.hunt.verification_credentials import HuntVerificationCredentialRefused
+    from scanner.redaction import redact_sensitive
+
+    database, reservations = web_hunt
+    before = dict(database.run["budget_used_json"])
+    refusal = HuntVerificationCredentialRefused(
+        "credential_missing_for_slot", "Attach a credential for slot user1", slot="user1",
+    )
+
+    async def dispatch_refused_verifier(*args, **kwargs):
+        # Labelled double: the verdict _verify_web_candidate_workflow_unlocked returns when
+        # _arsenal_dispatch_workflow raised its 422 for this refusal before any traffic.
+        return {"verified": False, "verified_finding_id": None, "error": {
+            "error": "invalid_workflow", "violation": str(refusal), "target_traffic_sent": False,
+            **refusal.public_detail(),
+        }}
+
+    with pytest.raises(HTTPException) as exc:
+        _verify(dispatch_refused_verifier, monkeypatch)
+    assert exc.value.status_code == 422
+    assert exc.value.detail["reason_code"] == "credential_missing_for_slot"
+    used = database.run["budget_used_json"]
+    assert {key: used.get(key, 0) for key in before} == before
+    assert used.get("verifications", 0) == 0 and used.get("active_actions", 0) == 0
+    (stored,) = reservations.rows.values()
+    assert not any(stored.record.actual.values())
+    (action,) = database.actions.values()
+    public = public_hunt_action(action)["result"]
+    assert action["status"] == "blocked" and public["execution_started"] is False
+    assert public["budget_accounting"]["charge_basis"] == "not_charged"
+    summary = hunt_action_outcome_summary([public_hunt_action(action)])
+    assert (summary["executed_calls"], summary["rejected_calls"]) == (0, 1)
+    # The slot name survives the shared redactor.
+    assert "user1" in redact_sensitive({"violation": str(refusal)}, redact_strings=True,
+                                       scrub_text=True)["violation"]
+
+
+def test_a_dispatch_refusal_after_a_create_surface_probe_keeps_the_charge(web_hunt, monkeypatch):
+    database, _reservations = web_hunt
+
+    async def probed_then_refused(*args, **kwargs):
+        return {"verified": False, "error": {
+            "error": "hunt_credential_refused", "reason_code": "credential_missing_for_slot",
+            "target_traffic_sent": True,
+        }}
+
+    result = _verify(probed_then_refused, monkeypatch)
+    assert result["result"]["ok"] is True
+    assert database.run["budget_used_json"]["verifications"] == 1
+
+
+@pytest.mark.parametrize("probe_requests,sent", [(0, False), (3, True)])
+def test_the_workflow_dispatch_says_whether_a_credential_refusal_followed_traffic(
+    monkeypatch, probe_requests, sent,
+):
+    """D33: the dispatch's refusal names its reason code and whether a create-surface probe ran."""
+    from api.arsenal_routes import router as arsenal
+    from api.hunt.verification_credentials import HuntVerificationCredentialRefused
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert "FROM targets" in query
+            return {"id": TARGET, "url": ORIGIN, "is_active": True, "discovery_source": "manual"}
+
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self):
+            yield Conn()
+
+    async def materialize(conn, url, target, params, hypothesis, approval):
+        if probe_requests:  # labelled double for a create-surface probe that sent requests
+            params["_server_materialization"] = {"request_count": probe_requests}
+
+    async def resolve(conn, target, slots, **kwargs):
+        raise HuntVerificationCredentialRefused(
+            "credential_missing_for_slot", "Attach a credential for slot user1", slot="user1")
+
+    monkeypatch.setattr(arsenal, "_pool_provider", lambda: Pool())
+    monkeypatch.setitem(arsenal._deps, "_active_workflow_cancellations", lambda: {})
+    monkeypatch.setitem(arsenal._deps, "_server_materialize_create_ma", lambda: materialize)
+    monkeypatch.setitem(arsenal._deps, "_resolve_workflow_principal_contexts", lambda: resolve)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(arsenal._arsenal_dispatch_workflow({
+            "target_id": str(TARGET), "workflow_id": str(uuid.uuid4()), "proof_family": "auth_bypass",
+            "steps": [{"id": f"step{n}", "principal": "user1", "method": "GET", "path": "/admin"}
+                      for n in range(2)],
+        }, "approval"))
+    assert exc.value.status_code == 422
+    detail = exc.value.detail
+    assert detail["error"] == "hunt_credential_refused"
+    assert detail["reason_code"] == "credential_missing_for_slot" and detail["slot"] == "user1"
+    assert detail["violation"] == "credential_missing_for_slot for slot user1"
+    assert detail["target_traffic_sent"] is sent

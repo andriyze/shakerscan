@@ -62,7 +62,7 @@ from .settlement import (
     refund_verification,
     unstarted_refusal_charges,
 )
-from .verification_refusal import VerificationRefused, refused_before_traffic
+from .verification_refusal import VerificationRefused, raise_returned_refusal, refused_before_traffic
 from .finding_verifications import attribute_verified_finding
 from .credential_uses import HuntCredentialRefusal, admit_action_credentials, record_credential_uses
 from .verification_credentials import HuntCredentialScope, hunt_credential_scope
@@ -4301,6 +4301,7 @@ async def _execute_hunt_candidate_verification(
                 created_by=f"hunt_v2:{run['id']}",
                 autonomous=False,
             )
+        raise_returned_refusal(result)
         verified_finding_id = (
             result.get("verified_finding_id") if isinstance(result, Mapping) else None
         )
