@@ -15,7 +15,7 @@ What counts as a leaked secret is not decided here. Secret values are judged by
 the narrow, entropy-screened contract in ``secret_material`` that the Hunt
 ``data_exposure`` verifier also uses; this module only recognises the document
 structure that makes a key name meaningful. Raw values never leave a signature:
-evidence carries key names, categories and keyed fingerprints.
+evidence carries key names, categories and scrypt fingerprints.
 """
 
 from __future__ import annotations

@@ -22,7 +22,7 @@ The contract has two parts.
   structure is what makes the key name meaningful: the same ``password=...`` text in a page of
   prose or an API response proves nothing here.
 
-Raw values never leave this module's callers: they are used to compute a keyed fingerprint and
+Raw values never leave this module's callers: they are used to compute a scrypt fingerprint and
 to scrub excerpts, and only labels, key names and fingerprints are persisted.
 """
 
@@ -196,13 +196,16 @@ _FINGERPRINT_DOMAIN = b"shakerscan-secret-fingerprint/v1\x00"
 
 
 def value_fingerprint(value: str) -> str:
-    """A short domain-separated digest that matches repeat sightings without revealing a value.
+    """A short, deterministic fingerprint that matches repeat sightings without revealing a value.
 
-    Only entropy-screened values reach this, so the truncated digest cannot be inverted by
-    guessing; a non-screened value is never fingerprinted.
+    A leaked secret can be a human-chosen password, so a fast hash would let anyone holding
+    the evidence test guesses offline. scrypt (memory-hard, fixed domain salt so the same value
+    fingerprints the same across Scans) makes each guess cost what a password hash costs.
     """
-    digest = hashlib.sha256(_FINGERPRINT_DOMAIN + str(value).encode("utf-8")).hexdigest()
-    return f"sha256:{digest[:16]}"
+    digest = hashlib.scrypt(
+        str(value).encode("utf-8"), salt=_FINGERPRINT_DOMAIN, n=2**14, r=8, p=1, dklen=12,
+    ).hex()
+    return f"scrypt:{digest}"
 
 
 def secret_evidence(key: str, category: str, value: str | None) -> SecretEvidence:

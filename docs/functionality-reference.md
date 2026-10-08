@@ -273,7 +273,7 @@ so masked (`******`), indirect (`${VAR}`), placeholder and documentation-sample 
 and values under an OpenAPI `example` are documentation. The first match in a batch reads two paths
 that cannot exist; a match byte-identical to the host's answer for an absent path is dropped
 (`indistinguishable_from_absent`). `/actuator/heapdump` is never requested -- its exposure is proved
-from the anonymous actuator index. Evidence keeps field names, provider categories and keyed value
+from the anonymous actuator index. Evidence keeps field names, provider categories and scrypt value
 fingerprints, never a value. Cost on Balanced: the first slice holds one request and one wall second
 per seed plus the controls and ten listing follow-ups on top of its endpoint share (130 requests /
 124 s for 25 discovered endpoints); content discovery reads the same 17 high-value paths, so its
