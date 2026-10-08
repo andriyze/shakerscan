@@ -1,4 +1,4 @@
-"""D40 wait bounds, without a database: the lease and cancellation.
+"""D40 wait bounds, without a database: the poll interval, the lease and cancellation.
 
 The verifier is a labelled double that answers the real 409 "Finding verification is already in
 progress" a set number of times; ``verify_after_concurrent_verifier`` is the production function.
@@ -30,6 +30,19 @@ class Busy:
         if self.calls <= self.busy_calls:
             raise HTTPException(status_code=409, detail=VERIFICATION_IN_PROGRESS)
         return {"verified": True}
+
+
+def test_the_module_poll_interval_is_the_one_in_force(monkeypatch):
+    """POLL_SECONDS was bound as a default argument, so patching the module changed nothing."""
+    monkeypatch.setattr(concurrent_verification, "POLL_SECONDS", 0.02)
+    verify = Busy(busy_calls=10_000)
+
+    async def scenario():
+        with pytest.raises(HTTPException):
+            await verify_after_concurrent_verifier(verify, wait_seconds=0.4)
+
+    asyncio.run(scenario())
+    assert verify.calls >= 8, verify.calls
 
 
 def test_no_retry_starts_that_the_lease_cannot_cover():

@@ -66,7 +66,7 @@ async def verify_after_concurrent_verifier(
     verify: Callable[[], Awaitable[Mapping[str, Any]]],
     *,
     wait_seconds: float | None = None,
-    poll_seconds: float = POLL_SECONDS,
+    poll_seconds: float | None = None,
     cancelled: Callable[[], Awaitable[bool]] | None = None,
     start_by: float | None = None,
 ) -> Mapping[str, Any]:
@@ -77,7 +77,8 @@ async def verify_after_concurrent_verifier(
     inside the action's reservation lease.
     """
     bound = CONCURRENT_VERIFICATION_WAIT_SECONDS if wait_seconds is None else float(wait_seconds)
-    poll = float(poll_seconds)
+    # Read at call time, not bound as a default, so the module setting is the one in force.
+    poll = POLL_SECONDS if poll_seconds is None else float(poll_seconds)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + bound
     if start_by is not None:
