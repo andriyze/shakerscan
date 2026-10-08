@@ -30,7 +30,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-import ipaddress
 import json
 from typing import Any
 import urllib.parse
@@ -77,12 +76,17 @@ def _json(value: Any) -> dict[str, Any]:
 
 
 def public_address(value: Any) -> bool:
-    """A globally routable unicast address: the only kind a granted destination may use."""
+    """A globally routable unicast address: the only kind a granted destination may use.
+
+    The scope guard's classifier (``action_scope.public_unicast_address``), so a NAT64, mapped,
+    6to4 or Teredo spelling of a private or metadata address, and the cloud platform-service
+    addresses ``is_global`` accepts (168.63.129.16), are refused here as they are for targets.
+    """
     try:
-        address = ipaddress.ip_address(str(value).strip("[]"))
-    except ValueError:
-        return False
-    return address.is_global and not address.is_multicast
+        from action_scope import public_unicast_address
+    except ModuleNotFoundError:
+        from ..action_scope import public_unicast_address
+    return public_unicast_address(value)
 
 
 def destination_hard_limit(granted: Mapping[str, Any], environment: str) -> str | None:
