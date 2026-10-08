@@ -245,7 +245,8 @@ def test_a_start_selection_narrows_the_attached_list():
     contexts = _resolve(conn, store, decrypt, {"user1"}, refs=[_ref(SHARED_CAROL, "primary")])
     assert contexts["user1"]["profile_id"] == SHARED_CAROL
     assert store.loaded == [SHARED_CAROL] and decrypt.calls == [f"enc:fernet:{SHARED_CAROL}"]
-    assert [(u["slot"], u["source"]) for u in conn.uses] == [("primary", "selected")]
+    # D38: the selection keeps the credential's origin target.
+    assert [(u["slot"], u["source"]) for u in conn.uses] == [("primary", f"selected_shared_from:{OTHER}")]
 
 
 def test_a_selection_also_overrides_the_registered_principal_for_its_slot():

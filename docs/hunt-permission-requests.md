@@ -82,7 +82,8 @@ credential grants, Hunt authority, approval receipts and `hunt_actions` idempote
 
 **`hunt_credential_uses`** and **`hunt_permission_events`** (append-only audit)
 - Credential uses: one row per action that resolved a credential. It records the action id,
-  slot, profile id and version, and `source`: `selected`, `target_own`,
+  slot, profile id and version, and `source`: `selected`, `selected_shared_from:<target>` (a
+  credential selected at start that another target shared by grant), `target_own`,
   `shared_from:<target>`, `live_grant:<grant>` or `preauthorized:<preauth>` (the last two in
   E2).
 - Events: `requested`, `decided`, `auto_granted`, `used`, `expired`, `withdrawn`, `revoked`,

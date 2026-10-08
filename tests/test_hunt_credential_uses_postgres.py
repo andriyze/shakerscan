@@ -21,6 +21,7 @@ from hunt.credential_uses import (
     HuntCredentialRefusal,
     admit_action_credentials,
     read_credential_uses,
+    record_credential_uses,
 )
 from hunt.verification_credentials import (
     HuntCredentialScope,
@@ -207,7 +208,23 @@ async def test_attached_credentials_resolve_through_real_grants_and_every_use_is
         admitted = await admit_action_credentials(
             conn, run=run, capability="http.request",
             capability_input={"as_principal": "secondary"}, context=context)
-        assert [(u.profile_id, u.source, u.slot) for u in admitted] == [(shared, "selected", "secondary")]
+        # D38: selected at start, and still recorded as another target's credential.
+        assert [(u.profile_id, u.source, u.slot) for u in admitted] == [
+            (shared, f"selected_shared_from:{OTHER}", "secondary")]
+        await record_credential_uses(conn, hunt_id=hunt, action_id=second_action, uses=admitted)
+        (recorded,) = [u for u in await read_credential_uses(conn, hunt)
+                       if u["action_id"] == str(second_action)]
+        assert (recorded["selected"], recorded["shared_from_target_id"]) == (True, str(OTHER))
+        # The verifier records a selected shared credential the same way.
+        selected_shared = HuntCredentialScope(
+            hunt_id=hunt, action_id=second_action, target_kind="web", target_id=TARGET,
+            credential_refs=({"source": "credential_profiles", "principal_slot": "secondary",
+                              "profile_id": shared, "profile_version": 1},))
+        await resolve_hunt_workflow_principal_contexts(
+            conn, selected_shared, TARGET, {"user1", "user2"}, decryptor=spy)
+        assert {(u["slot"], u["source"]) for u in await read_credential_uses(conn, hunt)
+                if u["action_id"] == str(second_action)} == {
+            ("primary", "target_own"), ("secondary", f"selected_shared_from:{OTHER}")}
         await STORE.revoke_grant(conn, profile_id=shared, target_id=TARGET, now=datetime.now(timezone.utc))
         with pytest.raises(HuntCredentialRefusal) as exc:
             await admit_action_credentials(
@@ -222,6 +239,7 @@ async def test_attached_credentials_resolve_through_real_grants_and_every_use_is
 
         # The ledger rejects anything but the closed sources and safe slots.
         for source, slot in (("granted", "primary"), ("shared_from:not-a-target", "primary"),
+                             ("selected_shared_from:not-a-target", "primary"),
                              ("selected", "Primary Slot")):
             with pytest.raises(asyncpg.CheckViolationError):
                 await conn.execute(
@@ -233,4 +251,62 @@ async def test_attached_credentials_resolve_through_real_grants_and_every_use_is
         assert await conn.fetchval("SELECT count(*) FROM hunt_credential_uses") == 0
     finally:
         await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.close()
+
+
+# The ledger exactly as its first release (b849c3b4) created it, before selected_shared_from.
+FIRST_RELEASE_LEDGER = """
+CREATE TABLE hunt_credential_uses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    action_id UUID NOT NULL REFERENCES hunt_actions(id) ON DELETE CASCADE,
+    profile_id UUID NOT NULL,
+    profile_version INTEGER NOT NULL CHECK (profile_version > 0),
+    source TEXT NOT NULL CHECK (
+        source IN ('selected','target_own')
+        OR source ~ '^shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    ),
+    slot TEXT NOT NULL CHECK (slot ~ '^[a-z0-9:_.-]{1,80}$'),
+    used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT hunt_credential_uses_action_slot_unique UNIQUE (action_id, profile_id, slot)
+);
+CREATE INDEX idx_hunt_credential_uses_run ON hunt_credential_uses(hunt_run_id, used_at, id);
+"""
+
+
+@pytest.mark.asyncio
+async def test_restart_lets_a_first_release_ledger_record_a_selected_shared_credential():
+    """D38: the startup migration widens the first release's source check in place."""
+    import asyncpg
+
+    assert urlsplit(DSN).hostname in {"localhost", "127.0.0.1", "::1", "postgres"}
+    conn = await asyncpg.connect(DSN)
+    old, fresh = "hunt_cred_old_" + uuid.uuid4().hex, "hunt_cred_new_" + uuid.uuid4().hex
+    ddl = (ROOT / "db/init.sql").read_text()
+    try:
+        await _schema(conn, fresh, bootstrap=True)
+        await conn.execute(f'CREATE SCHEMA "{old}"; SET search_path TO "{old}"')
+        await conn.execute("CREATE TABLE targets(id UUID PRIMARY KEY); CREATE TABLE device_targets(id UUID PRIMARY KEY)")
+        for table in ("hunt_runs", "hunt_actions"):
+            await conn.execute(_table(ddl, table))
+        await conn.execute(FIRST_RELEASE_LEDGER)
+        hunt, action = uuid.uuid4(), uuid.uuid4()
+        await conn.execute("INSERT INTO targets VALUES($1)", TARGET)
+        await conn.execute("INSERT INTO hunt_runs(id,target_kind,target_id) VALUES($1,'web',$2)", hunt, TARGET)
+        await conn.execute("INSERT INTO hunt_actions(id,hunt_run_id,capability_name,status) "
+                           "VALUES($1,$2,'http.request','running')", action, hunt)
+        insert = ("INSERT INTO hunt_credential_uses(hunt_run_id,action_id,profile_id,profile_version,"
+                  "source,slot) VALUES($1,$2,$3,1,$4,'secondary')")
+        selected_shared = f"selected_shared_from:{OTHER}"
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(insert, hunt, action, uuid.uuid4(), selected_shared)
+        await conn.execute(insert, hunt, action, uuid.uuid4(), "selected")
+        for _ in range(2):  # restart twice: the widening is idempotent and keeps rows
+            await conn.execute(HUNT_CREDENTIAL_USES_SCHEMA_SQL)
+        await conn.execute(insert, hunt, action, uuid.uuid4(), selected_shared)
+        assert await conn.fetchval("SELECT count(*) FROM hunt_credential_uses") == 2
+        assert await _definition(conn, old) == await _definition(conn, fresh)
+    finally:
+        for schema in (old, fresh):
+            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await conn.close()

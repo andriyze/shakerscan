@@ -373,7 +373,7 @@ CREDENTIAL_USE_ROW = {
 EXPECTED_CREDENTIAL_USE = {
     "schema_version": "hunt-credential-use/v1", "id": str(_USE_ID), "action_id": str(_USE_ACTION),
     "profile_id": str(_USE_PROFILE), "profile_version": 3, "source": f"shared_from:{_USE_HOME}",
-    "shared_from_target_id": str(_USE_HOME), "slot": "secondary",
+    "selected": False, "shared_from_target_id": str(_USE_HOME), "slot": "secondary",
     "used_at": "2026-10-07T00:00:00+00:00", "secret_values_visible": False,
 }
 
