@@ -121,6 +121,12 @@ health/traffic freezes and all usage; device daily and child-scan limits remain 
 ceiling can be increased only where the saved policy already permits it; this does not add a
 capability originally excluded from the run.
 
+A budget refusal of one action no longer becomes a `failed` row that replays forever. The action is
+parked under its key (`awaiting_permission`) with a `budget.raise` permission request; a person's
+grant is exactly one amendment of this kind (key `permission:<request id>`, `resume: true`), and the
+same key then re-runs full admission. An amendment made here also lets a parked action through on
+its next retry. See `docs/hunt-permission-requests.md`.
+
 `GET /hunts/{id}/budget-amendments?after_revision=0&limit=50` pages the durable history, which also
 appears in `/record` with explicit truncation. Events retain before/after limits, the usage snapshot,
 redacted reason and status transition. Retry-key hashes are internal. Deleting the owning Hunt or

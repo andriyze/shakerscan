@@ -112,10 +112,13 @@ def test_api_admits_network_hold_before_queue_and_never_double_settles():
     assert handler.index("create_requested") < handler.index(
         "await _enqueue_canonical_network_capability("
     )
-    admission_commit = handler.index("if admission_error is not None:")
-    assert "admission_error = HTTPException(" in handler[:admission_commit]
-    assert "raise admission_error" in handler[admission_commit:]
-    assert "budget_reservation_state" in handler[:admission_commit]
+    # A budget shortage is refused before anything is reserved: the admission transaction
+    # rolls back and the refusal is recorded (or the action parked for a budget.raise) in its
+    # own transaction, never as a failed row that replays the refusal.
+    admission_commit = handler.index('lifecycle.advance("admitted")')
+    assert "raise budget_refusal(" in handler[:admission_commit]
+    assert "settle_refusal(" in handler[:admission_commit]
+    assert 'admission_action_status = "failed"' not in handler
     assert '"active", "awaiting_planner", "budget_exhausted"' in handler
     worker_branch_start = handler.index("elif worker_durable_budget:")
     legacy_branch_start = handler.index("\n            else:", worker_branch_start)

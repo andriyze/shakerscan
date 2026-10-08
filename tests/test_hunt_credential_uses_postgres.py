@@ -23,6 +23,7 @@ from hunt.credential_uses import (
     read_credential_uses,
     record_credential_uses,
 )
+from hunt.permission_store import HUNT_PERMISSION_SCHEMA_SQL
 from hunt.verification_credentials import (
     HuntCredentialScope,
     HuntVerificationCredentialRefused,
@@ -59,6 +60,8 @@ async def _schema(conn, schema: str, *, bootstrap: bool) -> None:
         await conn.execute(re.search(r"CREATE INDEX idx_hunt_credential_uses_run\n.*?;", ddl, re.S)[0])
     for _ in range(2):  # the startup migration, repeated: idempotent on both paths
         await conn.execute(HUNT_CREDENTIAL_USES_SCHEMA_SQL)
+    # Admission also reads this Hunt's credential.use grants (none in these fixtures).
+    await conn.execute(HUNT_PERMISSION_SCHEMA_SQL)
 
 
 async def _definition(conn, schema: str) -> dict:

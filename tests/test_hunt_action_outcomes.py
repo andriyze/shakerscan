@@ -162,7 +162,8 @@ def test_capability_call_on_a_finished_hunt_reports_state_before_schema(monkeypa
     with pytest.raises(router.HTTPException) as exc:
         asyncio.run(router.execute_hunt_capability(str(uuid.uuid4()), "web.content_discover", request))
     assert exc.value.status_code == 409
-    assert exc.value.detail == f"Hunt is {status}"
+    assert exc.value.detail["message"] == f"Hunt is {status}"
+    assert exc.value.detail["reason_code"] == "hunt_not_runnable"
 
 
 def test_active_hunt_still_reports_schema_errors(monkeypatch):

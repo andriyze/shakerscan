@@ -25,6 +25,11 @@ def _blocked_error(exc: BaseException) -> str:
     detail = getattr(exc, "detail", None)
     if isinstance(detail, str) and detail.strip():
         return detail.strip()[:500]
+    if isinstance(detail, Mapping):
+        # A coded refusal keeps its code, never a Python repr of the whole detail (D34).
+        code = detail.get("reason_code") or detail.get("error")
+        if isinstance(code, str) and code.strip():
+            return code.strip()[:500]
     message = str(exc).strip()
     return message[:500] if message else f"blocked:{type(exc).__name__}"
 

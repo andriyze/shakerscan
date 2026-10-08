@@ -216,6 +216,9 @@ class _FakeConnection:
     def __init__(self, hunt_row):
         self._hunt_row = hunt_row
 
+    def transaction(self):
+        return _FakeAcquire(self)
+
     async def fetchrow(self, query, *args):
         return self._hunt_row
 

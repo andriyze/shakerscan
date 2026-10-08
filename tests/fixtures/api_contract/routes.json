@@ -1682,6 +1682,55 @@
     "name": "export_hunt_transactions"
   },
   {
+    "path": "/hunts/{hunt_id}/permission-events",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_hunt_permission_events"
+  },
+  {
+    "path": "/hunts/{hunt_id}/permission-grants",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_hunt_permission_grants"
+  },
+  {
+    "path": "/hunts/{hunt_id}/permission-grants/{grant_id}/revoke",
+    "methods": [
+      "POST"
+    ],
+    "name": "revoke_hunt_permission_grant"
+  },
+  {
+    "path": "/hunts/{hunt_id}/permission-requests",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_hunt_permission_requests"
+  },
+  {
+    "path": "/hunts/{hunt_id}/permission-requests/{request_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_permission_request"
+  },
+  {
+    "path": "/hunts/{hunt_id}/permission-requests/{request_id}/decision",
+    "methods": [
+      "POST"
+    ],
+    "name": "decide_hunt_permission_request"
+  },
+  {
+    "path": "/hunts/{hunt_id}/preauthorization",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_preauthorization"
+  },
+  {
     "path": "/hunts/{hunt_id}/query",
     "methods": [
       "POST"

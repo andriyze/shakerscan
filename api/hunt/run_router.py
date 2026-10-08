@@ -15,6 +15,7 @@ from .run_service import HuntRunService
 from .budget_amendments import HuntBudgetAmendmentRequest
 from .coverage_ledger import COVERAGE_LOCUS_KEYS, CoverageLedgerError
 from .skills import HuntSkillError, skill_library
+from .permission_bounds import MAX_BOUNDS
 from .start_contract import (
     HUNT_START_SCHEMA,
     MAX_CAPABILITIES,
@@ -42,6 +43,15 @@ class HuntStartV2PolicyRequest(BaseModel):
     authorization_confirmed: bool = False
     approval_receipt_id: str | None = Field(default=None, max_length=256)
     scope_receipt_id: str | None = Field(default=None, max_length=256)
+
+
+class HuntAllowAssertion(BaseModel):
+    """Who set ``allow``: the Enterprise gateway sets it after the person's step-up and strips any
+    value a client sent (PR G1). On local OSS the operator is the trust boundary (``local``)."""
+
+    model_config = ConfigDict(extra="forbid")
+    person: str = Field(min_length=1, max_length=200)
+    proof: Literal["stepup", "launch_stepup", "local"]
 
 
 class HuntStartV2Request(BaseModel):
@@ -74,6 +84,11 @@ class HuntStartV2Request(BaseModel):
     )
     approval_receipt_id: str | None = Field(default=None, max_length=256)
     scope_receipt_id: str | None = Field(default=None, max_length=256)
+    # Pre-authorization bounds (``--allow``). ``allow`` is a person's, recorded as theirs;
+    # ``proposed_allow`` (the MCP start tool) becomes one pending request for a person.
+    allow: list[str] | None = Field(default=None, max_length=MAX_BOUNDS)
+    proposed_allow: list[str] | None = Field(default=None, max_length=MAX_BOUNDS)
+    allow_asserted_by: HuntAllowAssertion | None = None
 
 
 class HuntStartV2Response(BaseModel):
@@ -332,7 +347,10 @@ async def start_hunt(request: Request, response: Response):
     except HuntStartContractError as exc:
         raise HTTPException(
             status_code=422,
-            detail={"message": str(exc), "schema_version": HUNT_START_SCHEMA},
+            detail={
+                "message": str(exc), "schema_version": HUNT_START_SCHEMA,
+                **({"error": exc.code, "reason_code": exc.code} if exc.code else {}),
+            },
         ) from exc
     response.headers["x-shakerscan-hunt-contract"] = "v2"
     return result
@@ -585,3 +603,9 @@ __all__ = [
 from .authorization_router import router as _authorization_router
 
 router.include_router(_authorization_router)
+
+# Permission requests: reads, long-poll, a person's decision and revocation. No create route.
+from .permission_router import configure_permission_router, router as _permission_router  # noqa: E402
+
+configure_permission_router(lambda: _service()._pool())
+router.include_router(_permission_router)

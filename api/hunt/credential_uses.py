@@ -8,8 +8,9 @@ never authorizes a destination; the Hunt's authorized set is checked first, as b
 
 Every use is appended to ``hunt_credential_uses``: the action, the profile id and version,
 where the credential came from (``selected``, ``selected_shared_from:<target>`` for a selected
-credential shared from another target, ``target_own`` or ``shared_from:<target>``) and
-the slot it filled. The table holds ids only, never a secret, collection or evidence.
+credential shared from another target, ``target_own``, ``shared_from:<target>``, or
+``live_grant:<grant>`` / ``preauthorized:<pre-authorization>`` for another target's credential a
+person allowed for this Hunt only) and the slot it filled. The table holds ids only, never a secret, collection or evidence.
 
 A credential that is not attached is refused with a reason code from
 ``CREDENTIAL_REFUSAL_CODES``. Live grants and pre-authorization (design note
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+import json
 import re
 from typing import Any
 import uuid
@@ -58,6 +60,7 @@ CREATE TABLE IF NOT EXISTS hunt_credential_uses (
     source TEXT NOT NULL CONSTRAINT hunt_credential_uses_source_check CHECK (
         source IN ('selected','target_own')
         OR source ~ '^(selected_)?shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        OR source ~ '^(live_grant|preauthorized):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     ),
     slot TEXT NOT NULL CHECK (slot ~ '^[a-z0-9:_.-]{1,80}$'),
     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -67,17 +70,19 @@ CREATE INDEX IF NOT EXISTS idx_hunt_credential_uses_run
     ON hunt_credential_uses(hunt_run_id, used_at, id);
 DO $credential_uses$
 BEGIN
-    -- D38: a ledger created before selected_shared_from:<target> existed accepts it too.
+    -- D38 and E2: a ledger created before selected_shared_from:<target>, live_grant:<grant> and
+    -- preauthorized:<pre-authorization> existed accepts them too.
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid='hunt_credential_uses'::regclass
           AND conname='hunt_credential_uses_source_check'
-          AND pg_get_constraintdef(oid) LIKE '%(selected_)?shared_from%'
+          AND pg_get_constraintdef(oid) LIKE '%live_grant%'
     ) THEN
         ALTER TABLE hunt_credential_uses DROP CONSTRAINT IF EXISTS hunt_credential_uses_source_check;
         ALTER TABLE hunt_credential_uses ADD CONSTRAINT hunt_credential_uses_source_check CHECK (
             source IN ('selected','target_own')
             OR source ~ '^(selected_)?shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            OR source ~ '^(live_grant|preauthorized):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
         );
     END IF;
 END
@@ -87,7 +92,8 @@ $credential_uses$;
 SOURCE_SELECTED = "selected"
 SOURCE_TARGET_OWN = "target_own"
 _SHARED_SOURCE_RE = re.compile(
-    r"^(?:selected_)?shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    r"^(?:(?:selected_)?shared_from|live_grant|preauthorized):"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 _SLOT_RE = re.compile(r"^[a-z0-9:_.-]{1,80}$")
 
@@ -263,6 +269,52 @@ def _ssh_reference(context: Mapping[str, Any], capability: str) -> dict[str, Any
     return refs[0] if len(refs) == 1 else None
 
 
+def _refuse_unusable_principal_slot(
+    capability: str, capability_input: Mapping[str, Any], context: Mapping[str, Any],
+) -> None:
+    """Refuse at admission, with a code, a principal slot the executor could not fill (D36b).
+
+    The executor's own rule needs exactly one selected profile for the slot that allows the
+    capability. Two selected for one slot used to pass admission, be charged, and fail in the
+    executor with free text; the verifier calls the same state ``credential_ambiguous_for_slot``.
+    """
+    try:
+        from runtime.credential_refs import normalize_hunt_principal_slot
+    except ModuleNotFoundError:
+        from ..runtime.credential_refs import normalize_hunt_principal_slot
+    try:
+        slot = normalize_hunt_principal_slot(capability_input.get("as_principal"))
+    except CredentialReferenceError:
+        return
+    if slot == "anonymous":
+        return
+    refs = [
+        item for item in context.get("credential_refs") or ()
+        if isinstance(item, Mapping) and item.get("source") == "credential_profiles"
+        and item.get("principal_slot") == slot
+    ]
+    usable = [item for item in refs if capability in (item.get("allowed_capabilities") or ())]
+    if len(usable) > 1:
+        raise HuntCredentialRefusal(
+            CREDENTIAL_AMBIGUOUS_FOR_SLOT,
+            f"Several credentials were selected for the {slot} principal; start a Hunt that "
+            "selects one.",
+            slot=slot,
+        )
+    if refs and not usable:
+        raise HuntCredentialRefusal(
+            CREDENTIAL_CAPABILITY_NOT_GRANTED,
+            f"The credential selected for the {slot} principal does not allow {capability}.",
+            slot=slot, profile_id=str(refs[0].get("profile_id") or "") or None,
+        )
+    if not refs:
+        raise HuntCredentialRefusal(
+            CREDENTIAL_MISSING_FOR_SLOT,
+            f"No credential was selected for the {slot} principal when this Hunt started.",
+            slot=slot,
+        )
+
+
 def action_credential_references(
     capability: str, capability_input: Mapping[str, Any], context: Mapping[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
@@ -271,6 +323,8 @@ def action_credential_references(
     Only references selected at Hunt start can reach an action, so every one is ``selected``.
     An input the executor would refuse yields nothing here; the executor still refuses it.
     """
+    if capability in {"http.request", "collections.replay_safe", "collections.replay_active"}:
+        _refuse_unusable_principal_slot(capability, capability_input, context)
     try:
         if capability in {"http.request", "collections.replay_safe", "collections.replay_active"}:
             reference = select_hunt_principal_reference(
@@ -325,11 +379,19 @@ async def admit_action_credentials(
         [uuid.UUID(value) for value in ids], str(consuming or ""),
     )
     attached = {str(row["id"]): int(row["current_version"]) for row in rows}
+    granted: dict[str, dict[str, Any]] = {}
+    if run.get("id") and set(ids) - set(attached):
+        # Another target's credential a person allowed for this Hunt only (no binding exists).
+        granted = await live_credential_grants(conn, run["id"])
     homes = {str(row["id"]): row.get("home_target_id") for row in rows}
     uses: list[CredentialUse] = []
     for slot, reference in references:
         profile_id = str(reference["profile_id"])
         version = int(reference.get("profile_version") or 0)
+        grant = granted.get(profile_id)
+        if profile_id not in attached and grant is not None and grant["version"] == version:
+            uses.append(CredentialUse(profile_id, version, str(grant["source"]), slot))
+            continue
         if profile_id not in attached:
             raise HuntCredentialRefusal(
                 CREDENTIAL_NOT_ATTACHED,
@@ -348,6 +410,29 @@ async def admit_action_credentials(
             home_target_id=homes.get(profile_id), hunt_target_id=consuming,
         ), slot))
     return uses
+
+
+async def live_credential_grants(conn: Any, hunt_id: Any) -> dict[str, dict[str, Any]]:
+    """Profile id -> {version, grant_id, source} for this Hunt's live credential.use grants."""
+    rows = await conn.fetch(
+        """SELECT id, subject_json, preauthorization_id FROM hunt_permission_grants
+           WHERE hunt_run_id=$1 AND kind='credential.use' AND revoked_at IS NULL""",
+        uuid.UUID(str(hunt_id)),
+    )
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        subject = row["subject_json"]
+        if isinstance(subject, str):
+            subject = json.loads(subject)
+        source = (
+            f"preauthorized:{row['preauthorization_id']}" if row["preauthorization_id"]
+            else f"live_grant:{row['id']}"
+        )
+        result[str(subject.get("profile_id"))] = {
+            "version": int(subject.get("profile_version") or 0), "grant_id": str(row["id"]),
+            "source": source, "slot": subject.get("slot"),
+        }
+    return result
 
 
 def unattached_reference_refusal(
@@ -375,6 +460,7 @@ __all__ = [
     "action_credential_references",
     "admit_action_credentials",
     "attached_source",
+    "live_credential_grants",
     "selected_source",
     "public_credential_use",
     "read_credential_uses",

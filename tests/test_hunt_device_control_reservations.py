@@ -22,9 +22,11 @@ def test_device_control_actions_use_atomic_durable_settlement():
     assert handler.index("create_requested(") < handler.index(
         "_execute_device_capability_operation("
     )
-    assert handler.index("persist_terminal(") < handler.index(
-        "UPDATE hunt_actions"
-    )
+    # A shortage refuses before the action exists; settlement persists the terminal
+    # reservation before the action row is finalized.
+    assert handler.index("raise budget_refusal(") < handler.index("UPDATE hunt_actions")
+    settled = handler.index("persist_terminal(")
+    assert settled < handler.index("UPDATE hunt_actions", settled)
 
 
 def test_device_control_context_merge_is_limited_to_read_only_evidence():

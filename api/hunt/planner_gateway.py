@@ -29,9 +29,12 @@ _DRAFT = r'[0-9a-f]{64}'
 # All capability names still resolve through the one server-owned registry.
 # Every route is under the leased /hunts/{id} prefix, so each one acts on that Hunt only.
 # Operator-only steps (budget amendments, shell-plan confirmation, /ai/targets boundary
-# verification) are deliberately absent.
+# verification, permission-request decisions and grant revocation) are deliberately absent:
+# the planner may read and wait on its permission requests, never decide them.
 _ROUTES = {
     'GET': (r'', r'/record', r'/budget-amendments', r'/checkpoint', r'/coverage-angles',
+            r'/permission-requests', rf'/permission-requests/{_UUID}', r'/permission-grants',
+            r'/preauthorization', r'/permission-events',
             rf'/candidates/{_UUID}/boundary-context',
             rf'/authorization-investigations/{_UUID}',
             rf'/authorization-investigations/{_UUID}/reproduction', rf'/ssh/actions/{_UUID}/output'),

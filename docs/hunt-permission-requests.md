@@ -1,8 +1,12 @@
 # Hunt permission requests, granted live
 
-**Status:** design note, revised after owner decisions (2026-10-07). PR E1 implements the
-attached credential list and `hunt_credential_uses`; the rest is not implemented yet. The owner
-approved the behaviour and the decisions recorded below; any code follows this note.
+**Status:** design note, revised after owner decisions (2026-10-07); E2 implemented 2026-10-08.
+PR E1 implemented the attached credential list and `hunt_credential_uses`. PR E2 implements the
+engine side: closed reason codes, permission requests, grants, pre-authorization, the
+`awaiting_permission` action status, the read/decision/revoke routes, the MCP outcome and wait tool
+(see "E2 implementation notes" for where it differs). The terminal approve flow (E3) and the
+gateway step-up (G1) are not implemented yet. The owner approved the behaviour and the decisions
+recorded below; any code follows this note.
 
 ## Problem and decision
 
@@ -439,6 +443,54 @@ Fix (PR E1). Hunt verification keeps using the attached credentials, so no capab
   5. A denial settles the action `blocked`.
   6. The Hunt is cancelled while a request is pending.
   7. The UI Allow path is checked once, as optional.
+
+## E2 implementation notes
+
+Where the engine (PR E2) differs from, or makes concrete, the design above:
+
+- **Reason codes.** `api/hunt/permission_reasons.py` holds the closed list (`REASON_CODES`,
+  published as `permission_reason_codes` in `GET /hunts/contract`). A refusal is a `HuntRefusal`
+  whose `detail` is JSON (`error`, `reason_code`, `message`; budget refusals keep the legacy
+  `error` string `budget_exhausted:<dim>`). Every recorded refusal leaves a `blocked` action with
+  `refusal_stage: admission` and its code (D25/D35); a refusal that a person can allow parks the
+  action as `awaiting_permission` instead.
+- **Retry of a parked action.** Granted: full admission under the same action id. Pending on an
+  active Hunt: admission also runs again, so an action whose refusal no longer applies (a person
+  amended the budget directly) goes through; if it still applies it is parked again under the same
+  request (409 `permission_required`). Pending on a stopped (`budget_exhausted`) Hunt: 409
+  `permission_required` with no change. Denied, expired or withdrawn: `blocked` with
+  `permission_<status>`, replayed as such.
+- **Kinds raised in E2.** `budget.raise`; `capability.enable` (the grant binds the target's standing
+  authorization when the Hunt has none, and is refused with `target_authorization_required`
+  otherwise; the bound grammar also takes `capability:active-testing`); `target.authorize` for
+  another service port on the Hunt's host and for another host, anonymously only (the host is
+  resolved and scope-checked before the request is raised, and every address must be public:
+  loopback, private, link-local, metadata and reserved addresses are hard limits even where the
+  deployment admits private targets; remember applies to the Hunt's own host only);
+  `credential.use` for another target's active credential (a Hunt-only grant is honoured by
+  admission, the verifier and `load_for_worker` through the Hunt's live grant, with no binding;
+  remember creates the normal credential grant); and `preauthorization` for bounds proposed through
+  the MCP start tool. `ssh.exec` and `ssh.host_trust` have their codes but no requests yet: the
+  SSH worker re-reads the profile's command grant and meets the host key only at connection time.
+  DNS-out-of-scope and discovered-host refusals are not yet wired to `target.authorize`.
+- **Deadline.** A request expires after 24 h or at `created_at + max_duration_seconds` of the Hunt,
+  whichever is first. Past that deadline no request is raised and the refusal stays plain.
+- **Start bounds.** `POST /hunts` takes `allow` (a person's bounds) and `proposed_allow` (the MCP
+  start tool sends the agent's `allow` argument here). `allow_asserted_by: {person, proof}` names
+  who set `allow` (`stepup`, `launch_stepup` or `local`); the gateway sets it after step-up and must
+  strip a client-supplied value (G1). Without it the bounds are recorded as `local-operator` /
+  `local`. A start that selects another target's credential is admitted only when `allow` covers its
+  home target and the kind rules pass; the Hunt-only grant is recorded at start.
+- **Routes.** Besides the routes above: `GET /hunts/{id}/permission-events` (the audit). The
+  planner ingress delegates the reads only. On OSS the decision and revoke routes are protected by
+  the engine's existing API authentication alone: the trust boundary is the host.
+- **Revocation.** A `target.authorize` or `capability.enable` grant is reverted in the Hunt's
+  policy; a `credential.use` grant stops working at once; a budget raise (an amendment) and
+  pre-authorization bounds are not revocable. Revoking never undoes a remembered record.
+- **MCP.** The `awaiting_permission` outcome and `shakerscan_hunt_permission_wait` ship in E2;
+  a capability outside the manifest is sent to the engine, which answers with its code (D31).
+- **UI.** The Hunt page lists pending requests read-only with the `shakerscan approve` command;
+  Allow and Deny on the page are left to E3/G1.
 
 ## PR split
 

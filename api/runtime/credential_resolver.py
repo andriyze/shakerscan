@@ -487,6 +487,8 @@ class WorkerCredentialResolver:
                 target_kind=target.target_kind,
                 target_id=target.target_id,
                 capability=capability,
+                # A Hunt may use another target's credential a person allowed for it alone.
+                hunt_run_id=authority.owner_id if authority.owner_kind == "hunt" else None,
             )
         except CredentialStoreError as exc:
             raise CredentialResolutionError(str(exc)) from exc

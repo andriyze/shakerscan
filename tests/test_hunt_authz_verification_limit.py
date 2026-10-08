@@ -77,7 +77,7 @@ class AdmissionStore:
             "id": HUNT, "target_id": TARGET, "device_target_id": None,
             "target_kind": "web", "status": "active",
             "context_pack": {"target": {"url": "https://fixture.example.test"}},
-            "policy_json": {"scope_receipt_id": "scope"},
+            "policy_json": {"scope_receipt_id": "scope", "approval_receipt_id": "approval"},
             "budget_used_json": {"verifications": used},
             "budget_json": {"max_verifications": maximum, "max_capability_calls": 100,
                             "max_active_actions": 100, "max_http_requests": 1000,
@@ -159,8 +159,9 @@ def admission(store, **overrides):
     module = ast.parse(source.read_text(), filename=str(source))
     function = next(n for n in module.body if isinstance(n, ast.AsyncFunctionDef)
                     and n.name == "_execute_hunt_capability_lifecycle")
-    # The first top-level transaction finishes admission, before any dispatch.
-    stop = next(i for i, node in enumerate(function.body) if isinstance(node, ast.AsyncWith))
+    # The admission loop (its transaction, and the refusal settlement after it) finishes
+    # admission, before any dispatch.
+    stop = next(i for i, node in enumerate(function.body) if isinstance(node, (ast.AsyncWith, ast.For)))
     function.body = function.body[:stop + 1] + ast.parse("return {'action_id': str(action_id)}").body
     ledger = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_hunt_ledger_limits")
     selected = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
@@ -205,6 +206,22 @@ def admission(store, **overrides):
         "HuntCredentialRefusal": HuntCredentialRefusal,
         "record_credential_uses": record_credential_uses,
     }
+    from api.hunt import interaction_router as real_router
+
+    async def settle_refusal(*_args, refusal, **_kwargs):
+        # Labelled double: the refusal's own record/park transaction is covered by
+        # tests/test_hunt_permission_requests_postgres.py; here the answer is what matters.
+        raise refusal
+
+    for helper in (
+        "HuntRefusal", "from_credential_refusal", "capability_refusal", "http_authority_refusal",
+        "replay_authority_refusal", "destination_refusal", "approval_required_refusal",
+        "preflight_reason_code", "budget_refusal", "verification_budget_refusal",
+        "MAX_ADMISSION_ATTEMPTS", "record_grant_use", "_resume_parked_action", "granted_destination",
+        "Any", "parked_outcome", "close_parked_action", "permission_required",
+    ):
+        context.setdefault(helper, getattr(real_router, helper))
+    context.setdefault("settle_refusal", settle_refusal)
     context.update(overrides)
     exec(compile(selected, str(source), "exec"), context)
     return context[function.name]

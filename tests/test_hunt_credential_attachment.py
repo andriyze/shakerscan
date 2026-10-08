@@ -216,13 +216,15 @@ def test_hunt_start_refuses_an_unattached_credential_reference_with_the_reason_c
         async def list_profiles(self, conn, **kwargs):
             return attached
 
-    monkeypatch.setattr(api_module, "_generic_credential_store", Store())
-    contract = type("Contract", (), {"target_kind": "web", "credential_refs": {
+    from api.hunt.start_permissions import validate_start_credentials
+
+    # No start bounds (allow) cover the unattached credential, so it is refused by code.
+    contract = type("Contract", (), {"target_kind": "web", "allow": (), "credential_refs": {
         "primary_credential_profile_id": SHARED_CAROL,
         "secondary_credential_profile_id": UNATTACHED_EVE,
     }})()
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(api_module._validate_hunt_credential_references(None, contract, TARGET))
+        asyncio.run(validate_start_credentials(None, contract, TARGET, Store()))
     assert exc.value.status_code == 422
     assert exc.value.detail["reason_code"] == "credential_not_attached"
     assert exc.value.detail["slot"] == "secondary"
@@ -392,6 +394,8 @@ class AttachmentConn:
         self.attached = dict(attached)
 
     async def fetch(self, query, *args):
+        if "FROM hunt_permission_grants" in query:
+            return []  # no Hunt-only credential grant in this fixture
         assert "JOIN credential_profile_bindings b" in query and args[1] == str(TARGET)
         return [{"id": value, "current_version": self.attached[str(value)]}
                 for value in args[0] if str(value) in self.attached]

@@ -1009,7 +1009,9 @@ CREATE TABLE hunt_actions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
     capability_name TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('running','completed','blocked','failed','partial')),
+    status TEXT NOT NULL CONSTRAINT hunt_actions_status_check CHECK (status IN (
+        'reserved','running','completed','blocked','cancelled','failed','partial','awaiting_permission'
+    )),
     input_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
     result_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
     private_http_result TEXT CHECK (private_http_result IS NULL OR private_http_result LIKE 'enc:fernet:%'),
@@ -1070,6 +1072,7 @@ CREATE TABLE hunt_credential_uses (
     source TEXT NOT NULL CONSTRAINT hunt_credential_uses_source_check CHECK (
         source IN ('selected','target_own')
         OR source ~ '^(selected_)?shared_from:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        OR source ~ '^(live_grant|preauthorized):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     ),
     slot TEXT NOT NULL CHECK (slot ~ '^[a-z0-9:_.-]{1,80}$'),
     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1077,6 +1080,98 @@ CREATE TABLE hunt_credential_uses (
 );
 CREATE INDEX idx_hunt_credential_uses_run
     ON hunt_credential_uses(hunt_run_id, used_at, id);
+
+-- Hunt permission requests (docs/hunt-permission-requests.md): requests raised only by server
+-- refusals, the grants that answer them, start pre-authorizations, and the append-only audit.
+-- The startup migration (api/hunt/permission_store.py) installs these exact definitions.
+CREATE TABLE IF NOT EXISTS hunt_preauthorizations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    bounds_json JSONB NOT NULL,
+    bounds_digest TEXT NOT NULL CHECK (bounds_digest ~ '^[0-9a-f]{64}$'),
+    created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 1 AND 200),
+    proof TEXT NOT NULL CHECK (proof IN ('stepup','launch_stepup','local','request_approval')),
+    source_request_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_hunt_preauthorizations_run
+    ON hunt_preauthorizations(hunt_run_id, created_at);
+CREATE TABLE IF NOT EXISTS hunt_permission_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization')),
+    reason_code TEXT NOT NULL CHECK (reason_code ~ '^[a-z][a-z_]{2,63}$'),
+    subject_json JSONB NOT NULL,
+    subject_digest TEXT NOT NULL CHECK (subject_digest ~ '^[0-9a-f]{64}$'),
+    display_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    action_id UUID,
+    capability_name TEXT,
+    input_digest TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','granted','denied','expired','withdrawn')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    decided_at TIMESTAMPTZ,
+    decided_by TEXT,
+    decision_via TEXT CHECK (decision_via IS NULL OR decision_via IN ('preauthorization','terminal_stepup','approver_session','ui_session','local_confirm')),
+    decision_scope TEXT CHECK (decision_scope IS NULL OR decision_scope IN ('hunt','target')),
+    decision_choice_json JSONB,
+    decision_key_sha256 TEXT,
+    grant_id UUID,
+    CHECK (expires_at > created_at),
+    CHECK ((status = 'pending') = (decided_at IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_hunt_permission_requests_pending_subject
+    ON hunt_permission_requests(hunt_run_id, subject_digest) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_hunt_permission_requests_run
+    ON hunt_permission_requests(hunt_run_id, created_at, id);
+CREATE TABLE IF NOT EXISTS hunt_permission_grants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    request_id UUID NOT NULL REFERENCES hunt_permission_requests(id) ON DELETE CASCADE,
+    preauthorization_id UUID REFERENCES hunt_preauthorizations(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization')),
+    subject_json JSONB NOT NULL,
+    subject_digest TEXT NOT NULL CHECK (subject_digest ~ '^[0-9a-f]{64}$'),
+    scope TEXT NOT NULL CHECK (scope IN ('hunt','target')),
+    effect_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    persisted_ref TEXT,
+    created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 1 AND 200),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at TIMESTAMPTZ,
+    revoked_by TEXT,
+    CONSTRAINT hunt_permission_grants_request_unique UNIQUE (request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_hunt_permission_grants_live
+    ON hunt_permission_grants(hunt_run_id, kind) WHERE revoked_at IS NULL;
+CREATE TABLE IF NOT EXISTS hunt_permission_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    request_id UUID,
+    grant_id UUID,
+    action_id UUID,
+    event TEXT NOT NULL CHECK (event IN ('requested','decided','auto_granted','used','expired','withdrawn','revoked','preauthorized')),
+    actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 200),
+    source TEXT NOT NULL CHECK (length(source) BETWEEN 1 AND 80),
+    detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- clock_timestamp(): several events of one transaction keep their order.
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS idx_hunt_permission_events_run
+    ON hunt_permission_events(hunt_run_id, created_at, id);
+CREATE OR REPLACE FUNCTION hunt_permission_events_append_only() RETURNS trigger AS $events$
+BEGIN
+    -- Deleting the Hunt cascades here from a referential trigger (depth > 1); nothing else may
+    -- change or remove an audit row.
+    IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'hunt_permission_events is append-only';
+END
+$events$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS hunt_permission_events_append_only ON hunt_permission_events;
+CREATE TRIGGER hunt_permission_events_append_only
+    BEFORE UPDATE OR DELETE ON hunt_permission_events
+    FOR EACH ROW EXECUTE FUNCTION hunt_permission_events_append_only();
 
 -- Append-only, evidence-backed coverage ledger.  A family-level result never closes a
 -- materially different method, route, mechanism, principal context, or application state.
