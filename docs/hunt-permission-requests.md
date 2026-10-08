@@ -316,8 +316,11 @@ cached-refusal replay. Work that already ran is never re-dispatched.
 - **Cap.** At most 20 requests may be pending per Hunt. Past the cap, the refusal stays plain.
 - **After a denial (D46).** The same subject is not asked again in that Hunt for 15 minutes
   (`DENIAL_COOLDOWN`), under any idempotency key: the refusal is `permission_denied`, names the
-  denied request and when the subject may be asked again, and raises nothing for the person. A
-  changed subject (another host, dimension, capability or credential) is a new question. The
+  denied request and when the subject may be asked again, and raises nothing for the person. The
+  cooldown keys on the question, not on every field of the subject: a destination is its scheme,
+  host and port, whatever addresses the host resolves to on the next lookup (a CDN or round-robin
+  host does not make a fresh question), and a credential is its profile, whichever slot the agent
+  names. Another host, port, scheme, dimension, capability or credential is a new question. The
   cooldown also holds back a grant from pre-authorization bounds for that subject, because the
   person's denial is the later decision.
 - **Decision races** are prevented by a row lock and a `pending` precondition.
