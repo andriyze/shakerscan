@@ -21,11 +21,13 @@ try:
     import deployment_policy
     from scanner_tools.device_posture import (
         DEVICE_LAB_ENVIRONMENTS, PRIVATE_DESTINATION_REASON, device_private_destination_refusal,
+        canonical_device_address, validate_device_destination,
     )
 except ModuleNotFoundError:  # package import in host-side tests
     from .. import deployment_policy
     from scanner.scanner_tools.device_posture import (
         DEVICE_LAB_ENVIRONMENTS, PRIVATE_DESTINATION_REASON, device_private_destination_refusal,
+        canonical_device_address, validate_device_destination,
     )
 
 Resolver = Callable[[str], Awaitable[list[str]]]
@@ -84,6 +86,55 @@ async def admit_device_destination(
         "message": f"Connected device address is not an allowed destination class: {refusal}",
         "reason": PRIVATE_DESTINATION_REASON,
         "setting": deployment_policy.PRIVATE_NETWORK_TARGETS_ENV,
+        "environment": judged,
+    })
+
+
+async def pin_device_connect_address(
+    connect_address: str,
+    environment: Any,
+    *,
+    policy: str | None = None,
+    resolve: Resolver | None = None,
+) -> str:
+    """The one address a device request sent from the API process may connect to.
+
+    A Device Hunt's ``device_http_request`` and the control-authorization replay connect from
+    the API, to an address stored by an earlier posture scan or to the device's own locator
+    (an operator-named port), which may be a hostname. That connection is checked exactly as
+    the device worker checks the address it pins (``validate_device_destination``: the shared
+    address classifier, the metadata deny list and the private-network policy under the
+    device's environment), and a hostname is resolved once here and the request pinned to an
+    admitted address. Raises a 422 naming the refusal.
+    """
+    effective = policy or deployment_policy.private_network_targets_policy()
+    judged = device_policy_environment(environment)
+    text = str(connect_address or "").strip().strip("[]")
+    try:
+        candidates = [canonical_device_address(text)]
+    except ValueError:
+        try:
+            resolved = await (resolve or _resolve)(text)
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={
+                "message": f"Device address could not be resolved: {type(exc).__name__}",
+                "reason": "device_address_unresolved",
+            }) from exc
+        candidates = []
+        for item in resolved:
+            try:
+                candidates.append(canonical_device_address(item))
+            except ValueError:
+                continue
+    refusal = "it resolves to no IP address"
+    for candidate in dict.fromkeys(candidates):
+        try:
+            return validate_device_destination(candidate, environment=judged, policy=effective)
+        except ValueError as exc:
+            refusal = str(exc)
+    raise HTTPException(status_code=422, detail={
+        "message": f"Device address is not an allowed destination: {refusal}",
+        "reason": PRIVATE_DESTINATION_REASON,
         "environment": judged,
     })
 
