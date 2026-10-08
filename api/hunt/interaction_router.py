@@ -1679,12 +1679,16 @@ async def _execute_hunt_capability_lifecycle(
         f"api:{str(os.environ.get('HOSTNAME') or 'local')[:64]}:{os.getpid()}"
     )
     durable_lease_seconds = 120
-    admission_input_summary = {
-        "schema_version": "hunt-capability-input-summary/v1",
-        "input": _hunt_redacted_capability_input(name, request.input),
-        "input_digest": capability_input_digest,
-        "idempotency_key_sha256": idempotency_key_digest,
-    }
+
+    def admission_input_summary() -> dict[str, Any]:
+        # Built only for an action that is recorded (a replay never needs it).
+        return {
+            "schema_version": "hunt-capability-input-summary/v1",
+            "input": _hunt_redacted_capability_input(name, request.input),
+            "input_digest": capability_input_digest,
+            "idempotency_key_sha256": idempotency_key_digest,
+        }
+
     # Grants a pre-authorization applied on an earlier attempt, or the one a parked action
     # waited for; their use is recorded with the admission that uses them.
     granted_requests: list[dict[str, Any]] = []
@@ -2392,7 +2396,7 @@ async def _execute_hunt_capability_lifecycle(
             # that refused rolled back, so nothing was reserved or charged.
             granted_requests.append(await settle_refusal(
                 _pool(), hunt_id=hunt_id, action_id=action_id, name=name,
-                input_summary=admission_input_summary, input_digest=capability_input_digest,
+                input_summary=admission_input_summary(), input_digest=capability_input_digest,
                 refusal=refusal,
             ))
             continue
