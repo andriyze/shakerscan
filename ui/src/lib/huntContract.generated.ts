@@ -224,6 +224,8 @@ export const HUNT_START_CONTRACT = {
       "application_state",
       "variant"
     ],
+    "max_bytes_per_hunt": 8388608,
+    "max_event_bytes": 32768,
     "max_events_per_hunt": 5000,
     "statuses": [
       "blocked",

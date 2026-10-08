@@ -18,7 +18,13 @@ same-Hunt evidence cannot drop the candidate an angle is bound to.
 
 Planner-supplied strings are passed through the shared redactor before they are stored
 or fingerprinted, so a secret-shaped value never persists and never distinguishes angles.
-A Hunt holds at most ``MAX_COVERAGE_EVENTS_PER_HUNT`` events.
+A Hunt holds at most ``MAX_COVERAGE_EVENTS_PER_HUNT`` events and ``MAX_COVERAGE_BYTES_PER_HUNT``
+bytes, and one event at most ``MAX_COVERAGE_EVENT_BYTES``. The per-field limits count characters,
+so without a byte bound one event could hold about 165 KB of multi-byte text and a Hunt about
+0.8 GB that the record export and checkpoint would load. Bytes are counted as stored: the UTF-8
+text fields plus the JSON fields as PostgreSQL renders them (``coverage_event_bytes`` and
+``COVERAGE_EVENT_BYTES_SQL`` measure the same thing). Reads cap the bytes they return as well,
+so rows stored before the bound cannot make a page unbounded either.
 
 This is investigation state, not proof.  A coverage event can point at a candidate,
 but neither a planner-written angle nor a checkpoint may create or verify a finding.
@@ -60,6 +66,11 @@ MAX_CHECKPOINT_CONTINUATION = 200
 MAX_CHECKPOINT_CANDIDATES = 100
 # Several events per examined angle fit comfortably; the record export bound is higher.
 MAX_COVERAGE_EVENTS_PER_HUNT = 5_000
+# Byte bounds (audit Low (c)). 5,000 small events fit well inside the per-Hunt total.
+MAX_COVERAGE_EVENT_BYTES = 32_768
+MAX_COVERAGE_BYTES_PER_HUNT = 8 * 1024 * 1024
+# What one coverage page or checkpoint section returns at most; ``truncated`` reports the rest.
+MAX_COVERAGE_PAGE_BYTES = 4 * 1024 * 1024
 MAX_JSON_BYTES = 16_384
 MAX_LOCUS_VALUE_CHARS = 1_000
 _TEXT_LIMITS = {
@@ -223,6 +234,37 @@ def canonical_coverage_locus(value: Any) -> dict[str, Any]:
         text = str(_redacted(text))
         result[key] = text.upper() if key == "method" else text
     return result
+
+
+_STORED_TEXT_FIELDS = ("family", "mechanism", "hypothesis", "blocker", "proof_gap")
+# Stored JSON fields and their empty value.
+_STORED_JSON_FIELDS = (
+    ("locus", {}), ("principal_context", {}),
+    ("evidence_action_ids", []), ("contradictory_evidence_action_ids", []),
+)
+
+
+def coverage_event_bytes(angle: Mapping[str, Any]) -> int:
+    """The bytes one normalized event occupies as stored (see COVERAGE_EVENT_BYTES_SQL)."""
+    total = 0
+    for field in _STORED_TEXT_FIELDS:
+        total += len(str(angle.get(field) or "").encode("utf-8"))
+    for field, empty in _STORED_JSON_FIELDS:
+        # PostgreSQL renders jsonb with ", " and ": " separators and keeps non-ASCII text.
+        rendered = json.dumps(angle.get(field) or empty, ensure_ascii=False, separators=(", ", ": "))
+        total += len(rendered.encode("utf-8"))
+    return total
+
+
+# The same measure over stored rows; ``{p}`` is the row alias prefix ("" or "e.").
+_COVERAGE_EVENT_BYTES_TEMPLATE = (
+    "(octet_length({p}family) + octet_length({p}mechanism) + octet_length({p}hypothesis)"
+    " + COALESCE(octet_length({p}blocker), 0) + COALESCE(octet_length({p}proof_gap), 0)"
+    " + octet_length({p}locus_json::text) + octet_length({p}principal_context::text)"
+    " + octet_length({p}evidence_action_ids::text)"
+    " + octet_length({p}contradictory_evidence_action_ids::text))"
+)
+COVERAGE_EVENT_BYTES_SQL = _COVERAGE_EVENT_BYTES_TEMPLATE.format(p="")
 
 
 def _action_ids(value: Any, *, field: str) -> list[str]:
@@ -444,10 +486,35 @@ async def record_coverage_angle(
             "actions that settle the angle",
             status_code=409,
         )
-    recorded = int(await conn.fetchval(
-        "SELECT COUNT(*) FROM hunt_coverage_angle_events WHERE hunt_run_id=$1::uuid",
+    event_bytes = coverage_event_bytes(angle)
+    if event_bytes > MAX_COVERAGE_EVENT_BYTES:
+        raise CoverageLedgerError(
+            "coverage_event_too_large",
+            f"This coverage event is {event_bytes:,} bytes; one event may hold at most "
+            f"{MAX_COVERAGE_EVENT_BYTES:,} bytes of UTF-8 text and locus values together. "
+            "Shorten the hypothesis, mechanism or proof gap and keep long material in "
+            "evidence actions",
+            details={"event_bytes": event_bytes, "max_event_bytes": MAX_COVERAGE_EVENT_BYTES},
+        )
+    stored = await conn.fetchrow(
+        f"""SELECT COUNT(*) AS events, COALESCE(SUM({COVERAGE_EVENT_BYTES_SQL}), 0) AS bytes
+           FROM hunt_coverage_angle_events WHERE hunt_run_id=$1::uuid""",
         hunt_run_id,
-    ) or 0)
+    )
+    recorded = int(stored["events"] or 0)
+    recorded_bytes = int(stored["bytes"] or 0)
+    if recorded_bytes + event_bytes > MAX_COVERAGE_BYTES_PER_HUNT:
+        raise CoverageLedgerError(
+            "coverage_byte_limit_reached",
+            f"This Hunt's coverage ledger holds {recorded_bytes:,} bytes; this "
+            f"{event_bytes:,}-byte event would pass the {MAX_COVERAGE_BYTES_PER_HUNT:,}-byte "
+            "limit per Hunt. Record shorter events, or the remaining gaps in the final debrief",
+            status_code=409,
+            details={
+                "recorded_bytes": recorded_bytes, "event_bytes": event_bytes,
+                "max_bytes_per_hunt": MAX_COVERAGE_BYTES_PER_HUNT,
+            },
+        )
     if recorded >= MAX_COVERAGE_EVENTS_PER_HUNT:
         raise CoverageLedgerError(
             "coverage_event_limit_reached",
@@ -523,19 +590,27 @@ async def list_coverage_angles(
     normalized_family = str(family or "").strip().lower()[:80] or None
     bounded_limit = max(1, min(int(limit), 500))
     rows = await conn.fetch(
-        _LATEST_ANGLES_CTE + """
-           SELECT latest.*, c.status AS candidate_status,
-                  COUNT(*) OVER() AS total_count
-           FROM latest
-           LEFT JOIN investigation_candidates c ON c.id=latest.candidate_id
-           WHERE ($2::text IS NULL OR latest.status=$2)
-             AND ($3::text IS NULL OR latest.family=$3)
-           ORDER BY latest.event_seq DESC
+        _LATEST_ANGLES_CTE + f""",
+           page AS (
+               SELECT latest.*, c.status AS candidate_status,
+                      COUNT(*) OVER() AS total_count,
+                      SUM({_COVERAGE_EVENT_BYTES_TEMPLATE.format(p="latest.")}) OVER (
+                          ORDER BY latest.event_seq DESC ROWS UNBOUNDED PRECEDING
+                      ) AS running_bytes
+               FROM latest
+               LEFT JOIN investigation_candidates c ON c.id=latest.candidate_id
+               WHERE ($2::text IS NULL OR latest.status=$2)
+                 AND ($3::text IS NULL OR latest.family=$3)
+           )
+           SELECT * FROM page
+           WHERE running_bytes <= $5
+           ORDER BY event_seq DESC
            LIMIT $4""",
         hunt_run_id,
         normalized_status,
         normalized_family,
         bounded_limit,
+        MAX_COVERAGE_PAGE_BYTES,
     )
     angles = [_public_row(row) for row in rows]
     total = int(angles[0].pop("total_count", 0)) if angles else 0
@@ -556,19 +631,28 @@ async def coverage_history(
 ) -> dict[str, Any]:
     """Return every event in sequence order, marking the ones a later event superseded."""
     bounded_limit = max(1, int(limit))
+    # The export holds every event of a Hunt inside the per-Hunt byte bound; rows stored before
+    # that bound existed are still cut at the same number of bytes and reported as truncated.
     rows = await conn.fetch(
-        """SELECT e.*, c.status AS candidate_status,
-                  LEAD(e.id) OVER (
-                      PARTITION BY e.fingerprint ORDER BY e.event_seq
-                  ) AS superseded_by_event_id,
-                  COUNT(*) OVER() AS total_count
-           FROM hunt_coverage_angle_events e
-           LEFT JOIN investigation_candidates c ON c.id=e.candidate_id
-           WHERE e.hunt_run_id=$1::uuid
-           ORDER BY e.event_seq ASC
+        f"""SELECT * FROM (
+               SELECT e.*, c.status AS candidate_status,
+                      LEAD(e.id) OVER (
+                          PARTITION BY e.fingerprint ORDER BY e.event_seq
+                      ) AS superseded_by_event_id,
+                      COUNT(*) OVER() AS total_count,
+                      SUM({_COVERAGE_EVENT_BYTES_TEMPLATE.format(p="e.")}) OVER (
+                          ORDER BY e.event_seq ROWS UNBOUNDED PRECEDING
+                      ) AS running_bytes
+               FROM hunt_coverage_angle_events e
+               LEFT JOIN investigation_candidates c ON c.id=e.candidate_id
+               WHERE e.hunt_run_id=$1::uuid
+           ) history
+           WHERE running_bytes <= $3
+           ORDER BY event_seq ASC
            LIMIT $2""",
         hunt_run_id,
         bounded_limit,
+        MAX_COVERAGE_BYTES_PER_HUNT,
     )
     events = []
     for row in rows:
@@ -585,6 +669,7 @@ async def coverage_history(
         "event_count": len(events),
         "event_total": total,
         "event_limit": bounded_limit,
+        "event_byte_limit": MAX_COVERAGE_BYTES_PER_HUNT,
         "events_truncated": total > len(events),
         "current_state_rule": (
             "Each fingerprint's current state is its highest-sequence event; earlier "
@@ -604,9 +689,21 @@ _CONTINUATION_SQL = _LATEST_ANGLES_CTE + """,
                      latest.status='candidate'
                      AND COALESCE(c.status, '') IN ('verified','refuted','expired')
                  )
+           ),
+           ranked AS (
+               SELECT open_angles.*, COUNT(*) OVER() AS continuation_total,
+                      SUM(""" + _COVERAGE_EVENT_BYTES_TEMPLATE.format(p="open_angles.") + """) OVER (
+                          ORDER BY CASE open_angles.status
+                                       WHEN 'candidate' THEN 0 WHEN 'partial' THEN 1
+                                       WHEN 'testing' THEN 2 WHEN 'planned' THEN 3
+                                       WHEN 'blocked' THEN 4 ELSE 99 END,
+                                   open_angles.family, open_angles.fingerprint
+                          ROWS UNBOUNDED PRECEDING
+                      ) AS running_bytes
+               FROM open_angles
            )
-           SELECT open_angles.*, COUNT(*) OVER() AS continuation_total
-           FROM open_angles
+           SELECT * FROM ranked
+           WHERE running_bytes <= $3
            ORDER BY CASE status
                         WHEN 'candidate' THEN 0 WHEN 'partial' THEN 1
                         WHEN 'testing' THEN 2 WHEN 'planned' THEN 3
@@ -626,7 +723,7 @@ async def build_hunt_checkpoint(
     # The queue is selected and counted in SQL over every open angle, not derived from
     # the newest-first angle window, so older open work cannot fall off unreported.
     continuation_rows = await conn.fetch(
-        _CONTINUATION_SQL, hunt_run_id, MAX_CHECKPOINT_CONTINUATION,
+        _CONTINUATION_SQL, hunt_run_id, MAX_CHECKPOINT_CONTINUATION, MAX_COVERAGE_PAGE_BYTES,
     )
     candidate_rows = await conn.fetch(
         """SELECT c.id, c.family, c.title, c.status, c.claimed_severity,
@@ -869,10 +966,15 @@ __all__ = [
     "COVERAGE_WRITABLE_RUN_STATUSES",
     "CoverageLedgerError",
     "HUNT_CHECKPOINT_SCHEMA",
+    "COVERAGE_EVENT_BYTES_SQL",
+    "MAX_COVERAGE_BYTES_PER_HUNT",
     "MAX_COVERAGE_EVENTS_PER_HUNT",
+    "MAX_COVERAGE_EVENT_BYTES",
+    "MAX_COVERAGE_PAGE_BYTES",
     "TERMINAL_ACTION_STATUSES",
     "build_hunt_checkpoint",
     "canonical_coverage_locus",
+    "coverage_event_bytes",
     "coverage_fingerprint",
     "coverage_history",
     "list_coverage_angles",
