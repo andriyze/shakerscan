@@ -24,11 +24,12 @@ import json
 import re
 import urllib.parse
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from .secret_material import (
     SecretEvidence,
+    fingerprinted_secret_evidence,
     secret_evidence,
     selfevident_secret_evidence,
     structured_secret_assignments,
@@ -182,15 +183,22 @@ _AWS_SECRET_RE = re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*(\S{20,})")
 # A git config is proved by its own grammar: the [core] section header on a line of
 # its own, followed by one of the keys git itself writes there. HEAD is the whole
 # body: a symbolic ref or a bare object id.
-_GIT_CORE_HEADER_RE = re.compile(r"(?m)^\s*\[core\]\s*$")
+#
+# Every pattern here runs over a hostile body of up to a megabyte, so none may backtrack
+# super-linearly: a line anchor is followed by ``[ \t]*`` (``\s*`` would also eat newlines and
+# rescan every following blank line from every line start), repetitions that can fail are
+# bounded, and multi-part grammars are matched in linear steps rather than one lazy pattern.
+_GIT_CORE_HEADER_RE = re.compile(r"(?m)^[ \t]*\[core\][ \t]*\r?$")
 _GIT_CORE_KEY_RE = re.compile(
-    r"(?m)^\s*(?:repositoryformatversion|filemode|bare|logallrefupdates)\s*=\s*\S+"
+    r"(?m)^[ \t]*(?:repositoryformatversion|filemode|bare|logallrefupdates)[ \t]*=[ \t]*\S"
 )
 _GIT_HEAD_RE = re.compile(r"^\s*(?:ref:\s*refs/[A-Za-z0-9._/-]+|[0-9a-f]{40}|[0-9a-f]{64})\s*$")
 _DOTENV_LINE_RE = re.compile(
-    r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.\-]*)\s*=\s*(.*?)\s*$"
+    r"[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_.\-]{0,199})[ \t]*=(.*)"
 )
-_METRICS_RE = re.compile(r"(?m)^# HELP \S+.*(?:\n|.)*?^# TYPE \S+")
+# A Prometheus exposition: a ``# HELP`` line and, after it, a ``# TYPE`` line.
+_METRICS_HELP_RE = re.compile(r"(?m)^# HELP \S")
+_METRICS_TYPE_RE = re.compile(r"(?m)^# TYPE \S")
 # Server-generated listing titles differ by stack: Apache and nginx autoindex
 # say "Index of /", Python's http.server says "Directory listing for /", and
 # the Node/Express serve-index middleware says "listing directory /". Matching
@@ -206,9 +214,9 @@ _LISTING_RE = re.compile(
 _ACTUATOR_MEDIA_TYPE = "application/vnd.spring-boot.actuator."
 _ERROR_RE = re.compile(
     r"Traceback \(most recent call last\)"
-    r"|^\s*at [\w.$]+\([\w.$]+:\d+\)"
-    r"|org\.springframework\.[\w.]+Exception"
-    r"|Fatal error:\s|Warning:\s.*on line \d+"
+    r"|^[ \t]*at [\w.$]{1,300}\([\w.$]{1,300}:\d+\)"
+    r"|org\.springframework\.[\w.]{1,300}Exception"
+    r"|Fatal error:\s|Warning:[ \t][^\n]{0,300}?on line \d+"
     r"|System\.\w+Exception:",
     re.MULTILINE,
 )
@@ -222,7 +230,8 @@ _HREF_RE = re.compile(r'(?i)href\s*=\s*["\']([^"\'#?]+)["\']')
 _PHPINFO_TITLE_RE = re.compile(r"(?i)<title>\s*(?:PHP [\d.]+[^<]{0,40}-\s*)?phpinfo\(\)\s*</title>")
 _PHPINFO_VERSION_RE = re.compile(r"PHP Version\s*\d+\.\d+")
 _HTML_ROW_RE = re.compile(
-    r"(?is)<tr[^>]*>\s*<td[^>]*>\s*([^<]{1,200}?)\s*</td>\s*<td[^>]*>\s*([^<]{0,500}?)\s*</td>"
+    r"(?is)<tr[^<>]{0,256}>[ \t\r\n]{0,64}<td[^<>]{0,256}>([^<]{1,200})</td>[ \t\r\n]{0,64}"
+    r"<td[^<>]{0,256}>([^<]{0,500})</td>"
 )
 _WERKZEUG_CONSOLE_RE = re.compile(r"(?i)<title>[^<]*//\s*Werkzeug Debugger</title>")
 _WERKZEUG_MARKER_RE = re.compile(r"__debugger__|\bEVALEX\b|CONSOLE_MODE")
@@ -231,17 +240,18 @@ _WEB_CONFIG_ROOT_RE = re.compile(r"<configuration[\s>]")
 _WEB_CONFIG_SECTION_RE = re.compile(
     r"<(?:system\.web|system\.webServer|appSettings|connectionStrings)[\s>/]"
 )
-_XML_ADD_RE = re.compile(
-    r'(?is)<add\s[^>]*?\bkey\s*=\s*"([^"]{1,200})"[^>]*?\bvalue\s*=\s*"([^"]{0,1000})"'
-)
+# An ``<add .../>`` element is read as one bounded tag, then its attributes are tokenized:
+# the tag cannot run past the next ``<``, so the scan is linear in the body.
+_XML_ADD_TAG_RE = re.compile(r"(?i)<add\s([^<>]{0,4096})>")
+_XML_ATTRIBUTE_RE = re.compile(r'([A-Za-z_:][\w:.\-]{0,63})[ \t\r\n]*=[ \t\r\n]*"([^"]{0,2000})"')
 _CONNECTION_STRING_RE = re.compile(r'(?is)\bconnectionString\s*=\s*"([^"]{1,2000})"')
 _CONNECTION_PASSWORD_RE = re.compile(r"(?i)(?:^|;)\s*(?:password|pwd)\s*=\s*([^;]+)")
 _MACHINE_KEY_RE = re.compile(r'(?i)\b(validationKey|decryptionKey)\s*=\s*"([0-9A-F]{32,})"')
 _SQL_DUMP_HEADER_RE = re.compile(
     r"(?m)^--\s*(?:MySQL dump|MariaDB dump|PostgreSQL database dump|Dumping data for table)"
 )
-_SQL_CREATE_RE = re.compile(r"(?im)^\s*CREATE TABLE\b")
-_SQL_INSERT_RE = re.compile(r"(?im)^\s*INSERT INTO\b")
+_SQL_CREATE_RE = re.compile(r"(?im)^[ \t]*CREATE TABLE\b")
+_SQL_INSERT_RE = re.compile(r"(?im)^[ \t]*INSERT INTO\b")
 _BACKUP_SUFFIX_RE = re.compile(r"(?i)(?:\.bak|\.old|\.orig|\.save|\.backup|~)$")
 _BACKUP_ARCHIVE_NAME_RE = re.compile(
     r"(?i)^(?:backup|backups|dump|database|db|site|www|htdocs|web|public_html|src|source)"
@@ -254,6 +264,11 @@ _DS_STORE_MAGIC = b"\x00\x00\x00\x01Bud1"
 _SERVER_CONFIG_NAMES = frozenset({"appsettings.json", "secrets.json", "credentials.json"})
 _CLIENT_CONFIG_NAMES = frozenset({"config.json", "settings.json"})
 _EXAMPLE_KEYS = frozenset({"example", "examples", "x-example", "x-examples"})
+# Key/value grammars (dotenv, XML attributes, phpinfo rows) are parsed over at most this many
+# characters of a body; a configuration file is a few kilobytes. Leaf pairs taken from one
+# JSON document are bounded the same way.
+_PARSE_MAX_CHARS = 262_144
+_MAX_DOCUMENT_PAIRS = 20_000
 
 
 @dataclass(frozen=True)
@@ -298,31 +313,27 @@ def _last_segment(path: str) -> str:
 
 
 def _dedupe(items: list[SecretEvidence]) -> tuple[SecretEvidence, ...]:
-    """One entry per value: the configuration key that holds it, the provider category if known."""
-    kept: dict[str, SecretEvidence] = {}
-    for item in items:
-        prior = kept.get(item.fingerprint)
-        if prior is None:
-            kept[item.fingerprint] = item
-        elif prior.category == "config_secret_assignment" and item.category != prior.category:
-            kept[item.fingerprint] = replace(prior, category=item.category)
-    return tuple(list(kept.values())[:50])
+    """One entry per value, cut before any value is fingerprinted."""
+    return fingerprinted_secret_evidence(items)
 
 
-def _flatten(value: Any, prefix: str = "", depth: int = 0) -> list[tuple[str, object]]:
-    """Leaf ``(dotted.key, value)`` pairs of a JSON document, bounded in depth and size."""
-    if depth > 8:
-        return []
+def _flatten(value: Any, prefix: str = "") -> list[tuple[str, object]]:
+    """Leaf ``(dotted.key, value)`` pairs of a JSON document, bounded in depth and total size."""
     pairs: list[tuple[str, object]] = []
-    if isinstance(value, Mapping):
-        for key, item in list(value.items())[:2_000]:
-            name = f"{prefix}.{key}" if prefix else str(key)
-            pairs.extend(_flatten(item, name, depth + 1))
-    elif isinstance(value, list):
-        for index, item in enumerate(value[:2_000]):
-            pairs.extend(_flatten(item, f"{prefix}[{index}]", depth + 1))
-    elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
-        pairs.append((prefix, value))
+
+    def walk(item: Any, name: str, depth: int) -> None:
+        if depth > 8 or len(pairs) >= _MAX_DOCUMENT_PAIRS:
+            return
+        if isinstance(item, Mapping):
+            for key, child in list(item.items())[:2_000]:
+                walk(child, f"{name}.{key}" if name else str(key), depth + 1)
+        elif isinstance(item, list):
+            for index, child in enumerate(item[:2_000]):
+                walk(child, f"{name}[{index}]", depth + 1)
+        elif isinstance(item, (str, int, float)) and not isinstance(item, bool):
+            pairs.append((name, item))
+
+    walk(value, prefix, 0)
     return pairs
 
 
@@ -347,16 +358,16 @@ def _dotenv_pairs(text: str) -> list[tuple[str, str]] | None:
     assignments, and assignments make up at least four in five meaningful lines.
     """
     lines = [
-        line for line in text.splitlines()
+        line for line in text[:_PARSE_MAX_CHARS].splitlines()
         if line.strip() and not line.lstrip().startswith(("#", "!"))
     ]
     if len(lines) < 2:
         return None
     pairs: list[tuple[str, str]] = []
     for line in lines:
-        match = _DOTENV_LINE_RE.match(line)
+        match = _DOTENV_LINE_RE.fullmatch(line)
         if match:
-            pairs.append((match.group(1), match.group(2)))
+            pairs.append((match.group(1), match.group(2).strip()))
     if len(pairs) < 2 or len(pairs) * 5 < len(lines) * 4:
         return None
     return pairs
@@ -414,7 +425,9 @@ def _actuator_pairs(document: Any) -> list[tuple[str, object]] | None:
                 value = item.get("value") if isinstance(item, Mapping) else item
                 if _scalar(value):
                     pairs.append((str(key), value))
-        return pairs
+            if len(pairs) >= _MAX_DOCUMENT_PAIRS:
+                break
+        return pairs[:_MAX_DOCUMENT_PAIRS]
     contexts = document.get("contexts")
     if isinstance(contexts, Mapping):  # Boot 2/3 configprops
         bean_maps = [
@@ -428,6 +441,8 @@ def _actuator_pairs(document: Any) -> list[tuple[str, object]] | None:
             for bean in list(beans.values())[:2_000]:
                 if isinstance(bean, Mapping) and isinstance(bean.get("properties"), Mapping):
                     pairs.extend(_flatten(bean["properties"], str(bean.get("prefix") or "")))
+                if len(pairs) >= _MAX_DOCUMENT_PAIRS:
+                    return pairs[:_MAX_DOCUMENT_PAIRS]
         return pairs
     if isinstance(document.get("profiles"), list) and any(
         isinstance(value, Mapping) for value in document.values()
@@ -439,7 +454,7 @@ def _actuator_pairs(document: Any) -> list[tuple[str, object]] | None:
                     (str(key), value) for key, value in list(source.items())[:2_000]
                     if _scalar(value)
                 )
-        return pairs
+        return pairs[:_MAX_DOCUMENT_PAIRS]
     return None
 
 
@@ -491,10 +506,26 @@ def _openapi_secrets(document: Any) -> tuple[SecretEvidence, ...] | None:
     return _dedupe(found)
 
 
+def _xml_add_pairs(text: str) -> list[tuple[str, object]]:
+    """``(key, value)`` of each ``<add key=".." value=".."/>`` element, in linear time."""
+    pairs: list[tuple[str, object]] = []
+    for tag in _XML_ADD_TAG_RE.finditer(text):
+        attributes = {
+            name.lower(): value for name, value in _XML_ATTRIBUTE_RE.findall(tag.group(1))
+        }
+        key = attributes.get("key")
+        if key and "value" in attributes:
+            pairs.append((key[:200], attributes["value"]))
+        if len(pairs) >= _MAX_DOCUMENT_PAIRS:
+            break
+    return pairs
+
+
 def _web_config(path: str, text: str) -> ExposureSignature | None:
     if not (_WEB_CONFIG_ROOT_RE.search(text) and _WEB_CONFIG_SECTION_RE.search(text)):
         return None
-    pairs: list[tuple[str, object]] = list(_XML_ADD_RE.findall(text))
+    text = text[:_PARSE_MAX_CHARS]
+    pairs = _xml_add_pairs(text)
     for connection in _CONNECTION_STRING_RE.findall(text):
         pairs.extend(
             ("connectionString.password", match.strip())
@@ -575,7 +606,10 @@ def _structured_text(path: str, text: str) -> ExposureSignature | None:
 def _structured_html(text: str) -> ExposureSignature | None:
     """Proofs for server-generated diagnostic pages, which are HTML by nature."""
     if _PHPINFO_TITLE_RE.search(text) and _PHPINFO_VERSION_RE.search(text):
-        rows: list[tuple[str, object]] = list(_HTML_ROW_RE.findall(text))
+        rows: list[tuple[str, object]] = [
+            (key.strip(), value.strip())
+            for key, value in _HTML_ROW_RE.findall(text[:_PARSE_MAX_CHARS])
+        ][:_MAX_DOCUMENT_PAIRS]
         return _sig("phpinfo_disclosure", "phpinfo_page", _secrets(text, rows, server_side=True))
     if _WERKZEUG_CONSOLE_RE.search(text) and _WERKZEUG_MARKER_RE.search(text):
         # An interactive debugger console executes code once its PIN is known.
@@ -597,6 +631,11 @@ def _cloud_credentials(text: str) -> tuple[SecretEvidence, ...]:
         )
     )
     return _dedupe(found)
+
+
+def _is_metrics_exposition(text: str) -> bool:
+    help_line = _METRICS_HELP_RE.search(text)
+    return help_line is not None and _METRICS_TYPE_RE.search(text, help_line.end()) is not None
 
 
 def classify_exposure(
@@ -636,8 +675,8 @@ def classify_exposure(
         cloud = _cloud_credentials(text)
         if cloud:
             return _sig("cloud_credential_material", "aws_credential", cloud)
-    if _METRICS_RE.search(text) and not is_html:
-        return _sig("metrics_endpoint", _METRICS_RE.pattern)
+    if not is_html and _is_metrics_exposition(text):
+        return _sig("metrics_endpoint", _METRICS_HELP_RE.pattern)
     if content_type.startswith(_ACTUATOR_MEDIA_TYPE) and "+json" in content_type:
         return _sig("actuator_endpoint", "actuator_vendor_media_type")
     if _LISTING_RE.search(text):

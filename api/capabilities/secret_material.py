@@ -32,7 +32,7 @@ import hashlib
 import math
 import re
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 SELF_EVIDENT_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----")),
@@ -234,7 +234,12 @@ def is_structured_secret_value(value: object) -> bool:
 
 @dataclass(frozen=True)
 class SecretEvidence:
-    """One proven secret: its key and category are evidence; the value only fingerprints it."""
+    """One proven secret: its key and category are evidence; the value only fingerprints it.
+
+    ``fingerprint`` stays empty until :func:`fingerprinted_secret_evidence` has cut and
+    deduplicated the candidates: hashing is the expensive step, so it runs on at most
+    ``MAX_FINGERPRINTED_SECRETS`` distinct values per body, never on every candidate.
+    """
 
     key: str
     category: str
@@ -252,6 +257,12 @@ class SecretEvidence:
 
 
 _FINGERPRINT_DOMAIN = b"shakerscan-secret-fingerprint/v1\x00"
+_STRUCTURAL_MARKER = "structural_marker"
+# Evidence names at most this many distinct secrets per body; only these are fingerprinted.
+MAX_FINGERPRINTED_SECRETS = 20
+# Candidate assignments examined per document before the cut. Each is a cheap name and
+# entropy check, but a hostile body can carry hundreds of thousands of them.
+_MAX_ASSIGNMENT_CANDIDATES = 200
 
 
 def value_fingerprint(value: str) -> str:
@@ -268,22 +279,57 @@ def value_fingerprint(value: str) -> str:
 
 
 def secret_evidence(key: str, category: str, value: str | None) -> SecretEvidence:
-    shown_key = re.sub(r"[^A-Za-z0-9_.:\-\[\]]", "", str(key or ""))[:120] or category
+    """An unfingerprinted candidate; :func:`fingerprinted_secret_evidence` finishes it."""
+    shown_key = re.sub(r"[^A-Za-z0-9_.:\-\[\]]", "", str(key or "")[:400])[:120] or category
     raw = "" if value is None else str(value)
     return SecretEvidence(
         key=shown_key, category=category,
-        fingerprint=value_fingerprint(raw) if raw else "structural_marker",
+        fingerprint="" if raw else _STRUCTURAL_MARKER,
         value_length=len(raw), value=raw,
+    )
+
+
+def fingerprinted_secret_evidence(
+    items: list[SecretEvidence], *, limit: int = MAX_FINGERPRINTED_SECRETS,
+) -> tuple[SecretEvidence, ...]:
+    """Deduplicate by value, cut to ``limit``, and only then fingerprint what is kept.
+
+    One entry per value: the configuration key that holds it, the provider category if a
+    provider format recognises it. Provider-format secrets and structural markers are kept
+    before plain configuration assignments, so the cut never drops the category that decides
+    severity (a private key or a cloud key). A structural marker (a PEM header) has no value
+    and is kept once per category.
+    """
+    kept: dict[tuple[str, str], SecretEvidence] = {}
+    # Stable sort: provider categories first, each group in document order.
+    for item in sorted(items, key=lambda entry: entry.category == "config_secret_assignment"):
+        identity = ("value", item.value) if item.value else ("marker", item.category)
+        prior = kept.get(identity)
+        if prior is None:
+            if len(kept) < limit:
+                kept[identity] = item
+        elif (prior.category != "config_secret_assignment"
+              and item.category == "config_secret_assignment"):
+            # The provider names the category; the configuration key names where it was held.
+            kept[identity] = replace(prior, key=item.key)
+    return tuple(
+        replace(item, fingerprint=value_fingerprint(item.value)) if item.value else item
+        for item in kept.values()
     )
 
 
 def structured_secret_assignments(
     pairs: list[tuple[str, object]], *, server_side: bool,
 ) -> list[SecretEvidence]:
-    """Secret assignments among the ``(key, value)`` pairs of a recognised config document."""
+    """Secret assignments among the ``(key, value)`` pairs of a recognised config document.
+
+    Unfingerprinted candidates, at most ``_MAX_ASSIGNMENT_CANDIDATES`` distinct values.
+    """
     found: list[SecretEvidence] = []
     seen: set[str] = set()
     for key, value in pairs:
+        if len(found) >= _MAX_ASSIGNMENT_CANDIDATES:
+            break
         if not is_secret_key_name(key, server_side=server_side):
             continue
         if not is_structured_secret_value(value):
@@ -297,7 +343,7 @@ def structured_secret_assignments(
 
 
 def selfevident_secret_evidence(text: str, *, key: str = "") -> list[SecretEvidence]:
-    """Self-evident provider secrets in one string, as fingerprinted evidence."""
+    """Self-evident provider secrets in one string, as unfingerprinted candidates."""
     return [
         secret_evidence(key or label, label, value)
         for label, value in selfevident_secret_matches(text)
@@ -305,13 +351,15 @@ def selfevident_secret_evidence(text: str, *, key: str = "") -> list[SecretEvide
 
 
 __all__ = [
+    "MAX_FINGERPRINTED_SECRETS",
     "PLACEHOLDER_SECRET_TOKENS",
     "SELF_EVIDENT_SECRET_PATTERNS",
     "SecretEvidence",
     "classify_selfevident_secret_values",
+    "fingerprinted_secret_evidence",
     "is_placeholder_secret",
-    "is_secret_key_name",
     "is_non_secret_value_shape",
+    "is_secret_key_name",
     "is_structured_secret_value",
     "normalized_key_name",
     "selfevident_secret_evidence",
