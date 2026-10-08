@@ -476,6 +476,10 @@ Where the engine (PR E2) differs from, or makes concrete, the design above:
   the MCP start tool. `ssh.exec` and `ssh.host_trust` have their codes but no requests yet: the
   SSH worker re-reads the profile's command grant and meets the host key only at connection time.
   DNS-out-of-scope and discovered-host refusals are not yet wired to `target.authorize`.
+- **Request text for another host (D41).** A `target.authorize` request for another host says
+  "another host", names the addresses it resolved to and will be pinned to, and offers no
+  remember: remember records the standing authorization of the Hunt's own target, so it applies to
+  another service on the Hunt's host only.
 - **A granted destination at dispatch (D39).** A person's live grant and a pre-authorized one are
   the same grant row and the same `policy.granted_destinations` entry, so both run the same way.
   The Hunt's scope receipt names only the Hunt's host, so the worker checks another host on its

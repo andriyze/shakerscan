@@ -218,17 +218,33 @@ def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) ->
             "default. The target's standing authorization is required."
         )
     elif kind == KIND_TARGET_AUTHORIZE:
-        remember = True
+        # Remember records the standing authorization of the Hunt's own target, so it applies to
+        # another service on the Hunt's host only; another host is a separate target.
+        remember = bool(subject.get("same_host"))
         title = f"Authorize {_host_port(subject)} for this Hunt"
-        explanation = (
-            f"The action targets {subject.get('scheme')}://{_host_port(subject)}, another "
-            f"service on the Hunt's host {subject.get('host')} that this Hunt may not reach yet. "
-            f"Scope verdict: {subject.get('scope_verdict') or 'not blocked'}."
-        )
-        effect = (
-            f"Adds {subject.get('origin')} to this Hunt's authorized services. Remember records "
-            "the target's standing authorization."
-        )
+        verdict = f"Scope verdict: {subject.get('scope_verdict') or 'not blocked'}."
+        if remember:
+            explanation = (
+                f"The action targets {subject.get('scheme')}://{_host_port(subject)}, another "
+                f"service on the Hunt's host {subject.get('host')} that this Hunt may not reach yet. "
+                + verdict
+            )
+            effect = (
+                f"Adds {subject.get('origin')} to this Hunt's authorized services. Remember records "
+                "the target's standing authorization."
+            )
+        else:
+            addresses = ", ".join(str(item) for item in subject.get("addresses") or ()) or "no address"
+            explanation = (
+                f"The action targets {subject.get('scheme')}://{_host_port(subject)}, another host: "
+                f"{subject.get('host')} is not the Hunt's target, and this Hunt may not reach it yet. "
+                f"It resolves to {addresses}, every one public. " + verdict
+            )
+            effect = (
+                f"Adds {subject.get('origin')} to this Hunt's authorized destinations, for this Hunt "
+                f"only and pinned to {addresses}. No credential is ever sent to it. It cannot be "
+                "remembered: another host is a separate target."
+            )
     elif kind == KIND_CREDENTIAL_USE:
         remember = True
         title = f"Use credential {subject.get('profile_id')} (v{subject.get('profile_version')}) in this Hunt"
