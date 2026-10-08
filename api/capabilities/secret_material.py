@@ -232,6 +232,92 @@ def is_structured_secret_value(value: object) -> bool:
     return not is_placeholder_secret(text)
 
 
+# --- Withholding: wider than proof ------------------------------------------------------------
+# Whether a value is PROVEN secret (above) decides verified vs unverified. Whether a value may be
+# SHOWN is a separate, wider question that entropy never answers: ``DB_PASS=Winter2023!`` fails
+# the entropy screen and proves nothing, but it is still a password and must never be stored in
+# clear. Any key with one of these segments, or a segment ending in one of the suffixes, has its
+# value withheld from every excerpt. Over-matching only hides a harmless value.
+_REDACTABLE_SEGMENTS = frozenset({
+    "password", "passwd", "pwd", "pass", "passphrase", "secret", "secrets", "token", "tokens",
+    "key", "keys", "apikey", "salt", "pepper", "signature", "sig", "cookie", "session", "auth",
+    "authorization", "bearer", "jwt", "otp", "credential", "credentials", "private", "dsn",
+    "connectionstring", "hmac", "nonce", "seed",
+})
+_REDACTABLE_SUFFIX_RE = re.compile(
+    r"(?:password|passwd|passphrase|secret|token|key|credentials?)$"
+)
+_MAX_REDACTED_VALUES = 500
+
+
+def is_redactable_key_name(key: object) -> bool:
+    """Whether the value under ``key`` must be withheld from any excerpt, whatever it holds."""
+    for segment in normalized_key_name(str(key or "")).split("_"):
+        if segment in _REDACTABLE_SEGMENTS or _REDACTABLE_SUFFIX_RE.search(segment):
+            return True
+    return False
+
+
+def redactable_assignments(pairs: list[tuple[str, object]]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(key names, raw values)`` of the pairs whose key is redactable and whose value is set.
+
+    Masked and indirect values are skipped (they carry nothing). The values are for scrubbing
+    and must never be persisted; the key names are evidence.
+    """
+    keys: list[str] = []
+    values: list[str] = []
+    seen: set[str] = set()
+    for key, value in pairs:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        if not is_redactable_key_name(key):
+            continue
+        text = str(value).strip().strip("\"'")
+        if not text or _MASKED_VALUE_RE.match(text) or _INDIRECTION_RE.match(text):
+            continue
+        shown = re.sub(r"[^A-Za-z0-9_.:\-\[\]]", "", str(key)[:400])[:120]
+        if shown and shown not in keys:
+            keys.append(shown)
+        if text not in seen:
+            seen.add(text)
+            values.append(text)
+        if len(values) >= _MAX_REDACTED_VALUES:
+            break
+    return tuple(keys), tuple(values)
+
+
+# ``key = value`` / ``key: value`` / ``"key": "value"`` in free text. The look-behind starts a
+# key only at a word boundary and every repetition is bounded, so the scan is linear.
+_TEXT_ASSIGNMENT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.\-])([A-Za-z_][A-Za-z0-9_.\-]{0,80})([\"']?[ \t]*[:=][ \t]*[\"']?)"
+    r"([^\s,;\"'<>&]{1,200})"
+)
+
+
+def text_assignment_values(text: str) -> tuple[str, ...]:
+    """Raw values of redactable ``key = value`` assignments in free text, for scrubbing only."""
+    values: list[str] = []
+    seen: set[str] = set()
+    for match in _TEXT_ASSIGNMENT_RE.finditer(text):
+        value = match.group(3)
+        if value not in seen and is_redactable_key_name(match.group(1)):
+            seen.add(value)
+            values.append(value)
+            if len(values) >= _MAX_REDACTED_VALUES:
+                break
+    return tuple(values)
+
+
+def redact_text_assignments(text: str, *, mask: str = "[REDACTED]") -> str:
+    """Replace the value of every redactable ``key = value`` assignment in ``text``."""
+    def replace_value(match: re.Match[str]) -> str:
+        if not is_redactable_key_name(match.group(1)):
+            return match.group(0)
+        return f"{match.group(1)}{match.group(2)}{mask}"
+
+    return _TEXT_ASSIGNMENT_RE.sub(replace_value, text)
+
+
 @dataclass(frozen=True)
 class SecretEvidence:
     """One proven secret: its key and category are evidence; the value only fingerprints it.
@@ -359,12 +445,16 @@ __all__ = [
     "fingerprinted_secret_evidence",
     "is_placeholder_secret",
     "is_non_secret_value_shape",
+    "is_redactable_key_name",
     "is_secret_key_name",
     "is_structured_secret_value",
     "normalized_key_name",
+    "redact_text_assignments",
+    "redactable_assignments",
     "selfevident_secret_evidence",
     "selfevident_secret_matches",
     "shannon_entropy_bits",
     "structured_secret_assignments",
+    "text_assignment_values",
     "value_fingerprint",
 ]
