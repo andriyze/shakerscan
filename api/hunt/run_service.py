@@ -17,6 +17,7 @@ from .budget_amendments import (
 )
 
 from .credential_uses import read_credential_uses
+from .finding_verifications import HUNT_FINDINGS_QUERY
 from .coverage_ledger import (
     COVERAGE_WRITABLE_RUN_STATUSES,
     build_hunt_checkpoint,
@@ -733,9 +734,8 @@ class HuntRunService:
                    ORDER BY created_at ASC, id ASC""",
                 hunt_uuid,
             )
-            live_findings = await connection.fetch(
-                "SELECT id, COUNT(*) OVER() AS total_count FROM findings WHERE hunt_run_id=$1 ORDER BY id LIMIT 500", hunt_uuid,
-            )
+            # Owned findings and findings this Hunt verified after another Hunt owned them (D21).
+            live_findings = await connection.fetch(HUNT_FINDINGS_QUERY, hunt_uuid)
             # Candidates are recorded through /candidates, not as capability results, so the
             # action ledger never named them. The immutable observation ledger does.
             live_candidates = await connection.fetch(HUNT_CANDIDATES_QUERY, hunt_uuid)

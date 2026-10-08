@@ -23,6 +23,7 @@ import pytest
 from api.hunt.authz_findings import authz_finding_records
 from api.hunt.capability_reservations import terminalize_hunt_capability
 from api.hunt.deterministic_findings import materialize_verified_hunt_findings
+from api.hunt.finding_verifications import FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL
 from api.runtime.budget_reservations import DurableBudgetReservation
 from api.runtime.models import TargetBinding
 from api.scan.finalizer import canonical_authz_findings
@@ -260,6 +261,7 @@ DDL = """
 CREATE TABLE targets(id uuid PRIMARY KEY, active_findings_count int DEFAULT 0, updated_at timestamptz);
 CREATE TABLE device_targets(LIKE targets INCLUDING ALL);
 CREATE TABLE hunt_runs(id uuid PRIMARY KEY);
+CREATE TABLE hunt_actions(id uuid PRIMARY KEY, hunt_run_id uuid REFERENCES hunt_runs(id));
 CREATE TABLE findings(
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), target_id uuid REFERENCES targets(id),
  device_target_id uuid REFERENCES device_targets(id), hunt_run_id uuid REFERENCES hunt_runs(id),
@@ -293,15 +295,21 @@ def test_real_postgres_proof_is_hunt_attributed_and_atomic(origin, kind):
             await conn.execute(f'CREATE SCHEMA "{schema}"')
             await conn.execute(f'SET search_path TO "{schema}"')
             await conn.execute(DDL)
+            await conn.execute(FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL)
             table = "device_targets" if kind == "device" else "targets"
             column = "device_target_id" if kind == "device" else "target_id"
             await conn.execute(f"INSERT INTO {table}(id) VALUES($1)", TARGET)
-            await conn.execute("INSERT INTO hunt_runs(id) VALUES($1)", HUNT)
+            other_hunt, other_action = uuid.uuid4(), uuid.uuid4()
+            for hunt, action in ((HUNT, ACTION), (other_hunt, other_action)):
+                await conn.execute("INSERT INTO hunt_runs(id) VALUES($1)", hunt)
+                await conn.execute("INSERT INTO hunt_actions(id,hunt_run_id) VALUES($1,$2)", action, hunt)
             result, _, _ = await exercise(origin, [origin + "/authz/vuln/orders"])
             receipt = make_receipt(result, target_kind=kind)
-            async def persist():
-                return await materialize_verified_hunt_findings(conn, HUNT, ACTION, TARGET, origin,
-                    "authz.verify", RECEIPT, {}, [], target_kind=kind, capability_receipt=receipt,
+            async def persist(hunt=HUNT, action=ACTION):
+                return await materialize_verified_hunt_findings(conn, hunt, action, TARGET, origin,
+                    "authz.verify", RECEIPT, {}, [], target_kind=kind,
+                    capability_receipt=receipt if hunt == HUNT else make_receipt(
+                        result, hunt_id=hunt, target_kind=kind),
                     allowed_origins=(origin,))
             with pytest.raises(RuntimeError, match="rollback fixture"):
                 async with conn.transaction():
@@ -322,6 +330,15 @@ def test_real_postgres_proof_is_hunt_attributed_and_atomic(origin, kind):
                 assert await persist() == ids
             assert await conn.fetchval("SELECT count(*) FROM findings") == 1
             assert await conn.fetchval("SELECT count(*) FROM finding_verifications") == 2
+            # D21: another Hunt proving the same finding again is recorded beside the first
+            # verifier, which keeps the finding.
+            async with conn.transaction():
+                assert await persist(other_hunt, other_action) == ids
+            assert await conn.fetchval("SELECT hunt_run_id FROM findings") == HUNT
+            roles = await conn.fetch(
+                "SELECT hunt_run_id, action_id, role FROM finding_hunt_verifications ORDER BY role DESC")
+            assert [tuple(row) for row in roles] == [
+                (HUNT, ACTION, "owner"), (other_hunt, other_action, "additional")]
             assert result["budget_consumed"]["http_requests"] == 4
         finally:
             await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')

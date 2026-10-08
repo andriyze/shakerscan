@@ -845,6 +845,48 @@ def test_a_hunt_is_deleted_with_its_traffic_sessions_candidates_and_only_its_own
     run(scenario)
 
 
+def test_deleting_a_hunt_keeps_a_finding_another_hunt_verified():
+    """D21: a Hunt's deletion never takes a finding another Hunt verified or owns."""
+    async def scenario(pool):
+        t, *_ = await seeded(pool)
+        async with pool.acquire() as c:
+            first, second = [await c.fetchval("""INSERT INTO hunt_runs(target_kind,target_id,status)
+                VALUES('web',$1,'completed') RETURNING id""", t) for _ in range(2)]
+            actions = {hunt: await c.fetchval("""INSERT INTO hunt_actions(hunt_run_id,capability_name,status)
+                VALUES($1,'candidate.verify','completed') RETURNING id""", hunt) for hunt in (first, second)}
+            shared, owned_by_second = [await c.fetchval("""INSERT INTO findings(target_id,hunt_run_id,fingerprint,title,
+                severity,last_verified_at) VALUES($1,$2,$3,'Verified issue','high',NOW()) RETURNING id""",
+                t, owner, uuid4().hex) for owner in (first, second)]
+            only_first = await c.fetchval("""INSERT INTO findings(target_id,hunt_run_id,fingerprint,title,severity,
+                last_verified_at) VALUES($1,$2,'first-only','Verified issue','high',NOW()) RETURNING id""", t, first)
+            rows = [(shared, first, 'owner'), (shared, second, 'additional'),
+                    (owned_by_second, second, 'owner'), (owned_by_second, first, 'additional'),
+                    (only_first, first, 'owner')]
+            for finding, hunt, role in rows:
+                await c.execute("""INSERT INTO finding_hunt_verifications(finding_id,hunt_run_id,action_id,role)
+                    VALUES($1,$2,$3,$4)""", finding, hunt, actions[hunt], role)
+        preview = await service.preview(pool, {'kind': 'hunt', 'id': str(first)})
+        assert not preview['blockers'], preview['blockers']
+        # Only the finding no other Hunt verified is the first Hunt's to delete.
+        assert preview['records']['delete']['findings']['count'] == 1
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        async with pool.acquire() as c:
+            assert await _count(c, 'findings', 'id', only_first) == 0
+            # The shared finding stays and passes to the Hunt that also verified it.
+            assert await c.fetchval('SELECT hunt_run_id FROM findings WHERE id=$1', shared) == second
+            assert await c.fetchval('SELECT hunt_run_id FROM findings WHERE id=$1', owned_by_second) == second
+            assert await c.fetchval('SELECT count(*) FROM finding_hunt_verifications WHERE hunt_run_id=$1', first) == 0
+            assert await c.fetchval('SELECT count(*) FROM finding_hunt_verifications WHERE hunt_run_id=$1', second) == 2
+        # Deleting the remaining verifier deletes what is now only its own.
+        preview = await service.preview(pool, {'kind': 'hunt', 'id': str(second)})
+        assert preview['records']['delete']['findings']['count'] == 2
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        async with pool.acquire() as c:
+            assert await _count(c, 'findings', 'id', shared) == 0
+            assert await _count(c, 'findings', 'id', owned_by_second) == 0
+    run(scenario)
+
+
 def test_an_ai_target_is_deleted_with_its_credentials_their_store_copies_scans_and_findings():
     async def scenario(pool):
         async with pool.acquire() as c:

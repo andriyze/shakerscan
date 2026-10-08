@@ -274,6 +274,11 @@ that exact Hunt and must cite same-Hunt evidence actions. None accepts proof, ve
 response, or target fields. Never use these controls to rewrite or delete a scanner-owned or
 deterministically verified finding.
 
+A verified finding belongs to the first Hunt that verified it. When your verification proves a
+finding another Hunt already verified, the result says `hunt_attribution.role: additional`: the
+finding stays that Hunt's, your verification is recorded beside it, and both Hunts list the finding
+in `outcome_summary.finding_ids`.
+
 Before verification, challenge each non-terminal candidate as if you were trying to reject it.
 `GET /hunts/{hunt_id}/checkpoint` exposes a compact `review_queue` for this purpose. Check the
 attacker prerequisite, plausible alternative explanations, the highest impact actually supported,

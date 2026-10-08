@@ -6,11 +6,18 @@ an old candidate does not inherit another run's verification result.
 
 
 def finding_hunt_predicate(parameter: int) -> str:
-    """Include direct creations and actual deterministic verifications by this run."""
+    """Include direct creations and actual deterministic verifications by this run.
+
+    A finding another Hunt owns is still this run's when this run verified it again
+    (finding_hunt_verifications, D21).
+    """
     if type(parameter) is not int or parameter < 1:
         raise ValueError("parameter must be a positive SQL bind position")
     return f"""(
         f.hunt_run_id = ${parameter} OR EXISTS (
+            SELECT 1 FROM finding_hunt_verifications fhv
+            WHERE fhv.finding_id = f.id AND fhv.hunt_run_id = ${parameter}
+        ) OR EXISTS (
             SELECT 1 FROM finding_verifications hv
             JOIN hunt_runs hr ON hr.id = ${parameter}
             WHERE hv.finding_id = f.id

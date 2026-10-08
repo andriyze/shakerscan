@@ -63,6 +63,7 @@ from .settlement import (
     unstarted_refusal_charges,
 )
 from .verification_refusal import VerificationRefused, refused_before_traffic
+from .finding_verifications import attribute_verified_finding
 from .credential_uses import HuntCredentialRefusal, admit_action_credentials, record_credential_uses
 from .verification_credentials import HuntCredentialScope, hunt_credential_scope
 from .device_policy import DeviceHuntPolicyState
@@ -4283,10 +4284,11 @@ async def _execute_hunt_candidate_verification(
             result.get("verified_finding_id") if isinstance(result, Mapping) else None
         )
         if verified_finding_id:
-            result = {
-                **result,
-                "hunt_attributed": await _attribute_verified_finding(run, verified_finding_id),
-            }
+            attribution = await _attribute_verified_finding(run, verified_finding_id, action_id)
+            result = {**result, "hunt_attributed": attribution is not None}
+            if attribution is not None:
+                # owner: this Hunt owns the finding; additional: another Hunt verified it first.
+                result["hunt_attribution"] = attribution
     return result
 
 
@@ -4309,28 +4311,30 @@ def _candidate_verification_action_result(
     }
 
 
-async def _attribute_verified_finding(run: Mapping[str, Any], finding_id: Any) -> bool:
-    """Attribute a finding this Hunt's deterministic verification materialized to the Hunt.
+async def _attribute_verified_finding(
+    run: Mapping[str, Any], finding_id: Any, action_id: Any,
+) -> dict[str, Any] | None:
+    """Record this Hunt's deterministic verification of a finding (D21).
 
-    The same rule as authz.verify materialization (E2E H-19): the finding row names the Hunt
-    whose proof produced it, so the Hunt's finding list and outcome include it. Attribution grants
-    no edit authority: Hunt finding controls refuse any finding with verification history. A
-    failure here never turns a completed verification into a failed action.
+    The same rule as authz.verify materialization (E2E H-19): a finding names the Hunt whose
+    proof first produced it. A finding another Hunt already owns stays that Hunt's; this
+    verification is appended to finding_hunt_verifications, so both Hunts list the finding.
+    Attribution grants no edit authority: Hunt finding controls refuse any finding with
+    verification history. A failure here never turns a completed verification into a failed
+    action.
     """
     try:
         async with _pool().acquire() as conn:
-            updated = await conn.execute(
-                """UPDATE findings SET hunt_run_id=$1, updated_at=NOW()
-                   WHERE id=$2 AND target_id=$3 AND last_verified_at IS NOT NULL""",
-                run["id"], uuid.UUID(str(finding_id)), run["target_id"],
+            attribution = await attribute_verified_finding(
+                conn, run=run, finding_id=finding_id, action_id=action_id,
             )
     except Exception as exc:  # noqa: BLE001 - attribution is bookkeeping, not proof
         print(
             f"[hunt] verified finding attribution skipped: {type(exc).__name__}",
             file=sys.stderr, flush=True,
         )
-        return False
-    return str(updated).endswith(" 1")
+        return None
+    return attribution
 
 
 _AGENT_MUTATING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment", "field_constraint", "workflow"})

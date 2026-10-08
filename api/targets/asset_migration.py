@@ -217,6 +217,11 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                     from api.hunt.credential_uses import HUNT_CREDENTIAL_USES_SCHEMA_SQL
                 await conn.execute(HUNT_CREDENTIAL_USES_SCHEMA_SQL)
                 try:
+                    from hunt.finding_verifications import FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.finding_verifications import FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL
+                await conn.execute(FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL)
+                try:
                     from investigation_candidates import CANDIDATE_SCHEMA_STATEMENTS
                 except ModuleNotFoundError:
                     from api.investigation_candidates import CANDIDATE_SCHEMA_STATEMENTS

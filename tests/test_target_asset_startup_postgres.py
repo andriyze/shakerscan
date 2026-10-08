@@ -132,6 +132,37 @@ def test_converted_installation_adds_the_hunt_credential_use_ledger_on_restart()
     asyncio.run(run())
 
 
+def test_converted_installation_adds_the_finding_hunt_verification_ledger_on_restart():
+    async def run():
+        async with startup_database() as conn:
+            module = importlib.import_module('retest_contract')
+            # A fresh install already has the relation from db/init.sql; startup keeps it intact.
+            assert await conn.fetchval("SELECT to_regclass('finding_hunt_verifications')") is not None
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            # Reproduce an already-converted installation from before the relation shipped (D21).
+            # This is an isolated disposable database; no retained operator evidence exists.
+            await conn.execute('DROP TABLE finding_hunt_verifications')
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            for index in ('idx_finding_hunt_verifications_run', 'idx_finding_hunt_verifications_finding'):
+                assert await conn.fetchval("SELECT to_regclass($1)", index) is not None
+            target = await conn.fetchval("INSERT INTO targets(url) VALUES('https://verified.test') RETURNING id")
+            hunt = await conn.fetchval(
+                "INSERT INTO hunt_runs(target_kind,target_id) VALUES('web',$1) RETURNING id", target)
+            action = await conn.fetchval(
+                "INSERT INTO hunt_actions(hunt_run_id,capability_name,status) "
+                "VALUES($1,'candidate.verify','completed') RETURNING id", hunt)
+            finding = await conn.fetchval(
+                "INSERT INTO findings(target_id,hunt_run_id,fingerprint,title,severity) "
+                "VALUES($1,$2,'verified','Verified','high') RETURNING id", target, hunt)
+            await conn.execute(
+                "INSERT INTO finding_hunt_verifications(finding_id,hunt_run_id,action_id,role) "
+                "VALUES($1,$2,$3,'owner')", finding, hunt, action)
+            # Restarting again is idempotent and keeps the recorded verifications.
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            assert await conn.fetchval('SELECT count(*) FROM finding_hunt_verifications') == 1
+    asyncio.run(run())
+
+
 def test_restart_upgrades_the_first_release_coverage_ledger_in_place():
     async def run():
         async with startup_database() as conn:

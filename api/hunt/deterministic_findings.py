@@ -13,6 +13,7 @@ from typing import Any, Mapping
 import urllib.parse
 import uuid
 
+from .finding_verifications import record_hunt_verification
 from .service_identity import _origin, service_identity_suffix
 
 try:
@@ -239,7 +240,10 @@ async def materialize_verified_hunt_findings(
                    'still_vulnerable','exploited',1.0,NOW(),1
                ) ON CONFLICT ({target_column}, fingerprint) WHERE {target_column} IS NOT NULL
                DO UPDATE SET
-                   hunt_run_id=EXCLUDED.hunt_run_id, status='active', resolved_at=NULL,
+                   -- The first verifying Hunt keeps the finding (D21); a later Hunt's proof
+                   -- is recorded in finding_hunt_verifications below instead.
+                   hunt_run_id=COALESCE(findings.hunt_run_id, EXCLUDED.hunt_run_id),
+                   status='active', resolved_at=NULL,
                    last_seen_at=NOW(), url=EXCLUDED.url,
                    evidence=EXCLUDED.evidence || CASE
                        WHEN findings.evidence ? 'cvss'
@@ -260,6 +264,9 @@ async def materialize_verified_hunt_findings(
             record["tool"],
             record["title"],
             record["cwe"],
+        )
+        await record_hunt_verification(
+            conn, finding_id=finding_id, hunt_id=hunt_id, action_id=action_id,
         )
         await conn.execute(
             f"""INSERT INTO finding_verifications (
