@@ -162,6 +162,9 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   the last actions examined before finishing; finished and cancelled Hunts are read-only.
   Coverage text and values are stored through the shared secret redactor, so keep secrets out of
   them anyway. A Hunt holds at most 5,000 coverage events; record one event per state change.
+  Bounds are also in bytes (`max_event_bytes`, `max_bytes_per_hunt` in the contract): one event
+  holds at most 32,768 bytes of text and locus values together, and a Hunt 8 MiB, so keep
+  hypotheses short and long material in evidence actions.
 - Use `GET /hunts/{hunt_id}/checkpoint` after context compaction, planner handoff, or resume.
   It is a bounded server-derived view of current coverage, candidates, action outcomes, budgets,
   and unresolved proof gaps. Prefer it to reconstructing state from the chat transcript. When

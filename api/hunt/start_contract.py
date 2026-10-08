@@ -163,7 +163,8 @@ def hunt_start_public_contract() -> dict[str, Any]:
         IDENTITY_ONLY_LOCATION_KEYS, ROUTE_LOCUS_KEYS,
     )
     from .coverage_ledger import (
-        COVERAGE_ANGLE_STATUSES, COVERAGE_LOCUS_KEYS, MAX_COVERAGE_EVENTS_PER_HUNT,
+        COVERAGE_ANGLE_STATUSES, COVERAGE_LOCUS_KEYS, MAX_COVERAGE_BYTES_PER_HUNT,
+        MAX_COVERAGE_EVENT_BYTES, MAX_COVERAGE_EVENTS_PER_HUNT,
     )
     return {
         "schema_version": HUNT_START_SCHEMA,
@@ -220,6 +221,8 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "locus_keys": list(COVERAGE_LOCUS_KEYS),
             "unknown_locus_keys": "refused",
             "max_events_per_hunt": MAX_COVERAGE_EVENTS_PER_HUNT,
+            "max_event_bytes": MAX_COVERAGE_EVENT_BYTES,
+            "max_bytes_per_hunt": MAX_COVERAGE_BYTES_PER_HUNT,
             "advisory_only": True,
         },
         "candidates": {

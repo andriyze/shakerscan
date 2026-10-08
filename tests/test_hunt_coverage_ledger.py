@@ -242,6 +242,7 @@ class _Conn:
         candidate_owned: bool = True,
         latest_candidate_id: str | None = None,
         recorded_events: int = 0,
+        recorded_bytes: int = 0,
     ):
         self.actions = {
             key: value if isinstance(value, tuple) else (
@@ -252,6 +253,7 @@ class _Conn:
         self.candidate_owned = candidate_owned
         self.latest_candidate_id = latest_candidate_id
         self.recorded_events = recorded_events
+        self.recorded_bytes = recorded_bytes
         self.inserted = None
 
     async def fetch(self, query, *args):
@@ -264,12 +266,13 @@ class _Conn:
         ]
 
     async def fetchval(self, query, *args):
-        if "SELECT COUNT(*) FROM hunt_coverage_angle_events" in query:
-            return self.recorded_events
         assert "investigation_candidate_observations" in query
         return 1 if self.candidate_owned else None
 
     async def fetchrow(self, query, *args):
+        if query.lstrip().startswith("SELECT COUNT(*) AS events"):
+            assert "FROM hunt_coverage_angle_events" in query
+            return {"events": self.recorded_events, "bytes": self.recorded_bytes}
         if query.lstrip().startswith("SELECT candidate_id"):
             if self.latest_candidate_id is None:
                 return None
@@ -871,3 +874,41 @@ async def test_per_hunt_event_cap_refuses_further_events():
     assert conn.inserted is None
     conn.recorded_events -= 1
     assert (await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle()))["angle"]
+
+
+@pytest.mark.asyncio
+async def test_an_event_within_every_character_limit_can_still_exceed_the_byte_bound():
+    """Audit Low (c): limits counted characters, so multi-byte text made ~165 KB events."""
+    from api.hunt.coverage_ledger import MAX_COVERAGE_EVENT_BYTES, coverage_event_bytes
+
+    values = _angle(hypothesis="€" * 8_000, mechanism="€" * 1_000, proof_gap="€" * 4_000)
+    assert coverage_event_bytes(normalize_coverage_angle(values)) > MAX_COVERAGE_EVENT_BYTES
+    conn = _Conn({})
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=values)
+    assert exc.value.code == "coverage_event_too_large" and exc.value.status_code == 422
+    assert exc.value.details["max_event_bytes"] == MAX_COVERAGE_EVENT_BYTES
+    assert f"at most {MAX_COVERAGE_EVENT_BYTES:,} bytes" in str(exc.value)
+    assert conn.inserted is None
+    # The same text in single-byte characters fits.
+    ascii_values = _angle(hypothesis="e" * 8_000, mechanism="e" * 1_000, proof_gap="e" * 4_000)
+    assert (await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=ascii_values))["angle"]
+
+
+@pytest.mark.asyncio
+async def test_per_hunt_byte_bound_refuses_further_events():
+    from api.hunt.coverage_ledger import MAX_COVERAGE_BYTES_PER_HUNT, coverage_event_bytes
+
+    values = _angle()
+    size = coverage_event_bytes(normalize_coverage_angle(values))
+    conn = _Conn({}, recorded_bytes=MAX_COVERAGE_BYTES_PER_HUNT - size + 1)
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=values)
+    assert exc.value.code == "coverage_byte_limit_reached" and exc.value.status_code == 409
+    assert exc.value.details == {
+        "recorded_bytes": MAX_COVERAGE_BYTES_PER_HUNT - size + 1, "event_bytes": size,
+        "max_bytes_per_hunt": MAX_COVERAGE_BYTES_PER_HUNT,
+    }
+    assert conn.inserted is None
+    conn.recorded_bytes -= 1  # exactly at the bound is still accepted
+    assert (await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=values))["angle"]

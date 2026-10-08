@@ -265,3 +265,94 @@ async def test_converted_ledger_matches_fresh_schema_and_orders_by_sequence():
         for schema in schemas.values():
             await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_coverage_is_bounded_in_bytes_on_write_export_and_checkpoint():
+    """Audit Low (c): character limits allowed ~165 KB per event and ~0.8 GB per Hunt."""
+    import asyncpg
+    from api.hunt import coverage_ledger as ledger
+    from api.runtime.http_archive_reader import MAX_EXPORT_ROWS
+
+    assert urlsplit(DSN).hostname in {"localhost", "127.0.0.1", "::1", "postgres"}
+    ddl = (Path(__file__).resolve().parents[1] / "db/init.sql").read_text()
+    schema = "hunt_coverage_bytes_" + uuid4().hex
+    conn = await asyncpg.connect(DSN)
+    pool = None
+    try:
+        await conn.execute(f'CREATE SCHEMA "{schema}"; SET search_path TO "{schema}"')
+        await conn.execute("""CREATE TABLE targets(id UUID PRIMARY KEY);
+            CREATE TABLE device_targets(id UUID PRIMARY KEY);
+            CREATE TABLE investigation_candidates (
+                id UUID PRIMARY KEY, family TEXT, title TEXT, status TEXT, claimed_severity TEXT,
+                fingerprint TEXT, canonical_locus JSONB, verifier_contract_id TEXT,
+                last_seen_at TIMESTAMPTZ DEFAULT NOW());
+            CREATE TABLE investigation_candidate_observations(candidate_id UUID, hunt_run_id UUID);""")
+        for table in ("hunt_runs", "hunt_actions"):
+            await conn.execute(re.search(rf"CREATE TABLE {table} \(.*?\n\);", ddl, re.S)[0])
+        for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
+            await conn.execute(statement)
+        target, hunt = uuid4(), uuid4()
+        await conn.execute("INSERT INTO targets VALUES($1)", target)
+        await conn.execute("INSERT INTO hunt_runs(id,target_kind,target_id,objective) "
+                           "VALUES($1,'web',$2,'Byte bounds')", hunt, target)
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2, server_settings={"search_path": schema})
+        service = HuntRunService(lambda: pool)
+
+        # The Python measure and the stored-row measure agree, multi-byte text and nesting included.
+        angle = {"family": "authorization", "status": "planned", "mechanism": "réplica ✓",
+                 "locus": {"method": "GET", "route": "/записи/{id}", "port": 8443},
+                 "principal_context": {"owner": {"role": "管理者", "tags": ["a", "b"]}},
+                 "hypothesis": "€" * 100, "proof_gap": "line\none\ttab"}
+        stored = await service.record_coverage_angle(str(hunt), values=angle)
+        measured = await conn.fetchval(
+            f"SELECT {ledger.COVERAGE_EVENT_BYTES_SQL} FROM hunt_coverage_angle_events WHERE id=$1",
+            stored["angle"]["id"])
+        assert measured == ledger.coverage_event_bytes(ledger.normalize_coverage_angle(angle))
+
+        # Each field is inside its character limit, the event is not inside its byte limit.
+        oversized = {**angle, "locus": {"route": "/large"}, "hypothesis": "€" * 8_000,
+                     "mechanism": "€" * 1_000, "proof_gap": "€" * 4_000}
+        with pytest.raises(CoverageLedgerError) as exc:
+            await service.record_coverage_angle(str(hunt), values=oversized)
+        assert exc.value.code == "coverage_event_too_large"
+        assert exc.value.details["event_bytes"] > ledger.MAX_COVERAGE_EVENT_BYTES
+        assert await conn.fetchval("SELECT count(*) FROM hunt_coverage_angle_events") == 1
+
+        # Rows stored before the bound (here written directly): ~9.6 MB in 80 events.
+        legacy = "€" * 40_000
+        await conn.executemany(
+            "INSERT INTO hunt_coverage_angle_events(hunt_run_id,fingerprint,family,status,hypothesis) "
+            "VALUES($1,$2,'authorization','planned',$3)",
+            [(hunt, f"legacy-{n:03}", legacy) for n in range(80)])
+        total = await conn.fetchval(
+            f"SELECT SUM({ledger.COVERAGE_EVENT_BYTES_SQL}) FROM hunt_coverage_angle_events")
+        assert total > ledger.MAX_COVERAGE_BYTES_PER_HUNT
+        with pytest.raises(CoverageLedgerError) as exc:
+            await service.record_coverage_angle(str(hunt), values={**angle, "locus": {"route": "/next"}})
+        assert exc.value.code == "coverage_byte_limit_reached" and exc.value.status_code == 409
+        assert exc.value.details["max_bytes_per_hunt"] == ledger.MAX_COVERAGE_BYTES_PER_HUNT
+
+        async def returned_bytes(ids):
+            return await conn.fetchval(
+                f"SELECT COALESCE(SUM({ledger.COVERAGE_EVENT_BYTES_SQL}), 0) "
+                "FROM hunt_coverage_angle_events WHERE id = ANY($1::uuid[])", ids)
+
+        # The record export and the checkpoint load a bounded number of bytes and say so.
+        async with pool.acquire() as read:
+            history = await ledger.coverage_history(read, hunt_run_id=str(hunt), limit=MAX_EXPORT_ROWS)
+        assert history["events_truncated"] is True and history["event_total"] == 81
+        assert 0 < history["event_count"] < 81
+        assert await returned_bytes([e["id"] for e in history["events"]]) <= ledger.MAX_COVERAGE_BYTES_PER_HUNT
+        checkpoint = await service.checkpoint(str(hunt))
+        latest = checkpoint["coverage"]["latest_angles"]
+        assert checkpoint["coverage"]["angle_count"] == 81
+        assert checkpoint["coverage"]["angles_truncated"] is True and 0 < len(latest) < 81
+        assert await returned_bytes([a["id"] for a in latest]) <= ledger.MAX_COVERAGE_PAGE_BYTES
+        assert checkpoint["continuation_total"] == 81 and checkpoint["continuation_truncated"] is True
+        assert 0 < checkpoint["continuation_count"] < 81
+    finally:
+        if pool is not None:
+            await pool.close()
+        await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
+        await conn.close()
