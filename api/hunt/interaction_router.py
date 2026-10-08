@@ -78,7 +78,7 @@ from .permission_admission import (
 from .permission_reasons import HuntRefusal, from_credential_refusal
 from .permission_subjects import (
     approval_required_refusal, capability_refusal, destination_refusal, http_authority_refusal,
-    preflight_reason_code, replay_authority_refusal,
+    preflight_reason_code, replay_authority_refusal, scanner_destination_refusal,
 )
 from .verification_credentials import HuntCredentialScope, hunt_credential_scope
 from .device_policy import DeviceHuntPolicyState
@@ -1997,6 +1997,8 @@ async def _execute_hunt_capability_lifecycle(
                         or is_scanner or is_browser
                     ):
                         original, _ = web_hunt_target(run, context, policy)
+                        if is_scanner and (refused := scanner_destination_refusal(original, request.input["origin"])):
+                            raise refused
                         try:
                             selected = resolve_hunt_http_origin(original, request.input["origin"], policy)
                         except ValueError as exc:

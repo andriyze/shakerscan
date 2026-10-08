@@ -512,7 +512,10 @@ Where the engine (PR E2) differs from, or makes concrete, the design above:
   addresses checked when the request was raised. A refusal at dispatch (authority revoked between
   admission and dispatch) releases the action's hold at once and settles it `blocked` with
   `dispatch_authority_rejected`; it no longer waits about two minutes for stale recovery, during
-  which finishing the Hunt was refused.
+  which finishing the Hunt was refused. Scanners run only against the Hunt's own host: a scanner
+  aimed at another host, granted or not, is refused at admission with `scope_scanner_other_host`,
+  before anything is reserved and without a request (reach a granted destination with
+  `http.request`).
 - **Deadline.** A request expires after 24 h or at `created_at + max_duration_seconds` of the Hunt,
   whichever is first. Past that deadline no request is raised and the refusal stays plain.
 - **Start bounds.** `POST /hunts` takes `allow` (a person's bounds) and `proposed_allow` (the MCP

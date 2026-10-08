@@ -480,6 +480,36 @@ def test_the_dispatch_recheck_matches_the_grant_on_scheme_host_and_port_and_its_
     stack.loop.run_until_complete(scenario())
 
 
+def test_a_scanner_aimed_at_an_authorized_destination_is_refused_before_anything_is_reserved(stack):
+    """A scanner runs only against the Hunt's own host (the worker's
+    validate_scanner_execution_target). On a granted destination it used to be admitted, reserved
+    and charged in full, and then fail in the worker with no traffic sent."""
+    from fastapi import HTTPException
+
+    async def scenario():
+        hunt, _standing = await _hunt(stack.pool, preauthorize=True)
+        enqueued: list = []
+        stack.router.enqueue_job = lambda _redis, _queue, payload: enqueued.append(payload)
+        request = stack.router.HuntCapabilityRequest(
+            idempotency_key="d39-scanner-01", input={"origin": DESTINATION},
+        )
+        with pytest.raises(HTTPException) as refused:
+            await stack.router.execute_hunt_capability(str(hunt["id"]), "web.probe", request)
+        assert refused.value.status_code == 422, refused.value.detail
+        assert refused.value.detail["reason_code"] == "scope_scanner_other_host"
+        assert enqueued == [] and stack.wire == []
+        action_id = uuid.uuid5(uuid.UUID(str(hunt["id"])), "hunt-capability:d39-scanner-01")
+        async with stack.pool.acquire() as conn:
+            assert await conn.fetchval(
+                "SELECT count(*) FROM budget_reservations WHERE owner_kind='hunt' AND owner_id=$1",
+                str(hunt["id"])) == 0, "nothing was reserved"
+            assert await conn.fetchval(
+                "SELECT count(*) FROM hunt_permission_requests WHERE hunt_run_id=$1", hunt["id"]) == 0
+            assert await conn.fetchval("SELECT status FROM hunt_actions WHERE id=$1", action_id) == "blocked"
+
+    stack.loop.run_until_complete(scenario())
+
+
 def test_a_granted_destination_is_held_to_the_hard_limits_at_dispatch():
     """Unit: the dispatch re-check of a granted destination's pinned addresses and scope."""
     from hunt.dispatch_authority import destination_hard_limit
