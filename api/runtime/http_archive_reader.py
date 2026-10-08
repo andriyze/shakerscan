@@ -27,6 +27,7 @@ try:
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import redact_sensitive
 
+from .archive_body_masking import withhold_body_secrets
 from .http_archive import ARCHIVE_SCHEMA, har_document, har_entry
 
 try:
@@ -597,6 +598,10 @@ def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
     for key in ("request_headers", "request_body", "response_headers", "response_body"):
         item[key] = _decoded(item.get(key))
     if redaction != "raw":
+        # Bodies first: a value beside a secret-named parameter or nested below a secret-named
+        # key is not under a sensitive dictionary key, and a stored body is text (N39).
+        for key in ("request_body", "response_body"):
+            item[key] = withhold_body_secrets(item.get(key))
         item = redact_sensitive(item, redact_strings=True, scrub_text=True)
         # State-changing Hunt bodies can contain low-entropy pairing PINs or newly
         # issued credentials. Key-name redaction and an unsalted body digest are
@@ -702,6 +707,8 @@ def export_document(
         "URL credentials may contain secrets. Treat this export as sensitive."
         if redaction == "raw"
         else "Known credential keys, headers, URL parameters, and common token shapes are masked; "
+        "in bodies, every value under or beside a secret-named key (JSON, YAML, form fields, "
+        "assignments) and every provider-format secret is withheld, as in exposure evidence; "
         "state-changing Hunt request bodies and their digests are omitted because they may contain "
         "low-entropy pairing secrets. Other arbitrary target-controlled bodies may still contain secrets."
     )
