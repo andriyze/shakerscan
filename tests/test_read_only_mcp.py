@@ -668,11 +668,6 @@ def test_lost_capability_response_preserves_generated_retry_identity_without_sec
             "not active",
         ),
         (
-            ManifestHuntClient(capabilities=[]),
-            {"capability_name": "http.request", "input": {"method": "GET", "path": "/"}},
-            "not allowed",
-        ),
-        (
             ManifestHuntClient(),
             {"capability_name": "http.request", "input": {"method": "POST", "path": "/"}},
             "one of",
@@ -685,6 +680,9 @@ def test_lost_capability_response_preserves_generated_retry_identity_without_sec
     ],
 )
 def test_mcp_hunt_capability_fails_closed_before_execution(client, arguments, message):
+    # A capability outside the manifest is no longer refused here: the engine refuses it with a
+    # reason code and, where a person can allow it, a permission request (D31,
+    # tests/test_mcp_hunt_permissions.py). Schema checks against the manifest stay local.
     with pytest.raises(mcp.MCPError) as exc:
         client.call_tool("shakerscan_hunt_capability", {
             "hunt_id": client.HUNT_ID,

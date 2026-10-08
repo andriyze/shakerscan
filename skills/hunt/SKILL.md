@@ -213,6 +213,19 @@ For writes, use `collections.replay_active` with an already bound `confirmed_act
 and saved state-changing authority. A safe-only saved selector is never silently widened.
 This executes workflow steps; it does not turn their results into verified vulnerabilities.
 
+## Permission requests
+
+A refusal a person could allow (a budget raise, a capability flag, another service or host, another
+target's credential) parks that one action and answers 409 `permission_required`; through MCP the
+outcome is `awaiting_permission`. Tell the user the server's title and to run
+`shakerscan approve <request id>` in their own terminal; never ask for a code in chat and never try
+to decide the request yourself (there is no tool for it). Keep working on other actions: the Hunt
+and its clock continue. Check with `shakerscan_hunt_permission_wait` (or
+`GET /hunts/{hunt_id}/permission-requests/{request_id}?wait_seconds=25`). On `granted`, call the same
+capability again with the same `idempotency_key` and input: it goes through full admission again.
+On `denied` or `expired`, do not retry that action. Every refusal carries a `reason_code`; act on
+it rather than on the wording.
+
 ## Operator-requested budget extension
 
 When the operator asks for more budget, use `POST /hunts/{hunt_id}/budget-amendments` with the

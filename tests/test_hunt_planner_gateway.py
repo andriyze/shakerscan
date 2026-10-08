@@ -233,7 +233,8 @@ def test_every_hunt_route_the_skill_tells_the_planner_to_call_is_delegated():
     assert ('POST', '/hunts/{hunt_id}/coverage-angles') in named
     assert not re.search(r'\b(?:GET|POST|PUT|PATCH|DELETE) /ai/targets', skill)
     samples = {'{hunt_id}': HUNT, '{candidate_id}': str(uuid4()), '{draft_id}': DRAFT,
-               '{skill_id}': 'web-authz', '{capability_name}': 'http.request', '{plan_id}': str(uuid4())}
+               '{skill_id}': 'web-authz', '{capability_name}': 'http.request', '{plan_id}': str(uuid4()),
+               '{request_id}': str(uuid4())}
     for method, template in sorted(named - OPERATOR_ONLY_SKILL_ROUTES):
         path = template
         for placeholder, value in samples.items():
