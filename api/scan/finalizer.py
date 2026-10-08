@@ -154,6 +154,50 @@ _FAMILY_BY_CAPABILITY = {
     "authz.verify": "bola",
 }
 
+# The candidate manifests a family's verifier slices index. A family fed only by these whose
+# manifests hold no entry had nothing to test, so planning no action for it was correct.
+_CANDIDATE_MANIFEST_KINDS_BY_FAMILY: Mapping[str, frozenset[str]] = {
+    "xss": frozenset({"candidate", "request_candidate"}),
+    "sqli": frozenset({"candidate", "request_candidate"}),
+    "nosqli": frozenset({"candidate"}),
+}
+
+
+def _unplanned_family_row(
+    family: str, manifests: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Coverage for a selected family the plan gave no action at all.
+
+    Soak c4f1cf2e selected xss and sqli, discovery built an empty candidate manifest, the
+    continuation (correctly) planned no verifier -- and both families then vanished from
+    ``family_coverage`` while the Scan read ``complete`` with no reason. The row states what
+    happened: no candidates (counted from the manifests), or work that was never planned.
+    """
+    kinds = _CANDIDATE_MANIFEST_KINDS_BY_FAMILY.get(family, frozenset())
+    candidate_manifests = [
+        item for item in manifests
+        if str(item.get("kind") or "") in kinds and item.get("status") != "cancelled"
+    ]
+    entries = sum(max(0, int(item.get("entry_count") or 0)) for item in candidate_manifests)
+    no_candidates = bool(candidate_manifests) and entries == 0
+    return {
+        "family": family, "selected": True, "required": False,
+        "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
+        "unattempted_candidates": 0,
+        "manifest_candidates": entries,
+        # Entries a manifest held that no action ever scheduled.
+        "unscheduled_candidates": entries,
+        "verified_findings": 0, "suspected_findings": 0,
+        "budget_reserved": {}, "budget_consumed": {},
+        "proof_escalation": {
+            "actions": 0, "attempted_candidates": 0, "status": "not_planned", "reason": None,
+        },
+        # Nothing to test is a settled outcome; a selected family that did no work without
+        # showing it had nothing to do is a gap.
+        "coverage_status": "complete" if no_candidates else "partial",
+        "reason": "no_candidates" if no_candidates else "not_planned",
+    }
+
 
 class ScanFinalizationError(ValueError):
     """Terminal receipts are incomplete or inconsistent with the Scan plan."""
@@ -1965,6 +2009,26 @@ def finalize_scan_report(
         else:
             row["coverage_status"] = "complete"
             row["reason"] = "no_candidates" if no_candidates else None
+    # Every selected check family is reported, including one the plan gave no action: an
+    # absent family read as nothing to report, and the Scan as complete. `recon` is
+    # discovery, not a check family with a verifier, so it has no row.
+    known_manifests = [
+        dict(item) for item in (*work_manifest_references, *revision.work_manifest_references)
+        if isinstance(item, Mapping)
+    ]
+    unplanned_families = sorted(
+        {str(item).strip() for item in resolved_families or ()}
+        & set(_FAMILY_BY_CAPABILITY.values())
+        - set(family_coverage)
+    )
+    for family in unplanned_families:
+        row = family_coverage[family] = _unplanned_family_row(family, known_manifests)
+        if row["coverage_status"] != "complete":
+            selected_family_gaps.append(family)
+    families_without_candidates = sorted(
+        family for family, row in family_coverage.items()
+        if row.get("reason") == "no_candidates"
+    )
     selected_family_gaps.sort()
 
     coverage_actions = [
@@ -2128,6 +2192,8 @@ def finalize_scan_report(
     coverage_reasons = sorted(
         set(reasons)
         | ({"no_families_selected"} if no_families_selected else set())
+        # Stated, not a gap: a selected family whose surface offered nothing to test.
+        | ({"selected_family_no_candidates"} if families_without_candidates else set())
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
         | ({"discovery_truncated"} if truncated_discovery else set())
         | ({"placement_unavailable"} if placement_gaps else set())

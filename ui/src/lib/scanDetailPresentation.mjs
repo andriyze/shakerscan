@@ -280,6 +280,7 @@ const COVERAGE_REASON_LABELS = {
   malformed_naabu_jsonl: 'The port discovery step returned output that could not be read',
   slow_endpoints: 'Some endpoints answered too slowly to finish the passive templates in time',
   no_families_selected: 'The scan policy selected no check family, so only the baseline probes ran',
+  selected_family_no_candidates: 'A selected check family had nothing to test on the discovered surface',
 }
 
 // "Partial because N slow endpoints", naming them from the family coverage the finalizer wrote,

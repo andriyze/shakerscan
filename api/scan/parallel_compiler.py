@@ -1878,6 +1878,15 @@ def merge_parallel_action_executions(
                 "unattempted_candidates", "verified_findings", "suspected_findings",
             ):
                 aggregate[key] += max(0, int(raw.get(key) or 0))
+            if int(raw.get("batch_actions") or 0) == 0 and raw.get("reason") in {
+                "not_planned", "no_candidates",
+            }:
+                # A shard whose plan gave this family no action: its lane or scope left the
+                # family's work to another shard, or its manifests held none. That alone says
+                # nothing about the family; the merged counters decide (see reconciliation).
+                tally = aggregate.setdefault("_unplanned_children", Counter())
+                tally[str(raw.get("reason"))] += 1
+                continue
             if str(raw.get("coverage_status") or "complete").lower() != "complete":
                 aggregate["coverage_status"] = "partial"
                 aggregate["reason"] = aggregate["reason"] or raw.get("reason") or "child_family_incomplete"
@@ -1969,11 +1978,19 @@ def _reconciled_family_coverage(aggregate: Mapping[str, Any]) -> dict[str, Any]:
     family the merged run did attempt is incomplete, not unattempted.
     """
     row = dict(aggregate)
+    unplanned = row.pop("_unplanned_children", None) or {}
     if (
         str(row.get("reason") or "") == "zero_attempts"
         and int(row.get("attempted_candidates") or 0) > 0
     ):
         row["reason"] = "child_family_incomplete"
+    if unplanned and int(row.get("batch_actions") or 0) == 0 and row.get("reason") is None:
+        # No shard ran the family. It had nothing to test only if a shard showed that.
+        if unplanned.get("no_candidates"):
+            row["reason"] = "no_candidates"
+        else:
+            row["coverage_status"] = "partial"
+            row["reason"] = "not_planned"
     return row
 
 
