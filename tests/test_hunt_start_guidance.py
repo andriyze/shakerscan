@@ -95,3 +95,29 @@ def test_the_start_route_returns_the_guidance(monkeypatch):
     body = response.json()
     assert {item["code"] for item in body["budget_warnings"]} >= {"budget_below_mapping_minimum"}
     assert body["verification"]["verifiable_families"] == sorted(VERIFIABLE_FAMILIES)
+
+
+def _every_capability(kind="web"):
+    return [spec.planner_contract() for spec in CAPABILITY_REGISTRY.list()
+            if spec.planner_visible and spec.hunt_executor is not None and kind in spec.target_kinds]
+
+
+def test_a_start_at_the_profile_defaults_warns_about_nothing_whatever_the_manifest():
+    """D49: every start warned that collections.replay_active reserves 2000 state-changing requests
+    (balanced allows 20) and fast's browser crawl, sqli.verify and templates.scan exceed fast's
+    maxima: limits no allowed start setting can meet. Those calls ask for a budget raise instead."""
+    for profile in HUNT_BUDGET_PROFILES:
+        started = {**_started({}, profile=profile), "capabilities": _every_capability()}
+        assert start_budget_warnings(started) == [], profile
+
+
+def test_a_lowered_limit_names_the_start_maximum_when_a_restart_cannot_fix_it():
+    started = {**_started({"max_state_changing_requests": 5}), "capabilities": _every_capability()}
+    warnings = {item["capability"]: item for item in start_budget_warnings(started)
+                if item["limit"] == "max_state_changing_requests"}
+    replay = warnings["collections.replay_active"]
+    assert replay["restart_fixes_it"] is False and replay["start_maximum"] == 20
+    assert "Start again without lowering it" not in replay["message"]
+    assert "start maximum, 20, is below that" in replay["message"]
+    fits = [item for item in warnings.values() if item["restart_fixes_it"]]
+    assert all("Start again without lowering it" in item["message"] for item in fits)

@@ -105,8 +105,9 @@ entry. None of these arguments is sent to the server. `shakerscan_hunt_query` as
 no `limit` is given, and a page larger than 32 KB is cut to fit, with `next_cursor` cleared and
 `mcp_view` naming the smaller `limit` to read it with.
 
-The start answer carries `budget_warnings` (every limit too small for a capability in the
-manifest, and a web Hunt's `max_http_requests` below one crawl plus one content discovery) and
+The start answer carries `budget_warnings` (every limit lowered below what a capability in the
+manifest reserves, and a web Hunt's lowered `max_http_requests` below one crawl plus one content
+discovery; a limit at its profile default is the most a start allows and is not warned about) and
 `verification` (the families `candidate.verify` can prove); a start that proposed bounds adds
 `mcp_permission_requests`, the `shakerscan approve` command to give the user. The candidate tool's
 schema lists the published locus keys, the evidence-reference forms and the verifiable families
