@@ -114,17 +114,29 @@ def test_a_proven_stage_ends_the_candidate():
     assert any(item.get("kind") == "sqli_finding" for item in outcome.observations)
 
 
-def test_the_soak_slice_finishes_union_and_is_stopped_inside_boolean():
+def test_the_soak_slice_settles_union_and_stops_before_a_boolean_stage_it_cannot_finish():
     # 146b6c03's slice: one body candidate, 480 requests / 420 s at ~3.7 s per response.
     budget = {"http_requests": 480, "state_changing_requests": 480, "tool_wall_seconds": 420}
     outcome, calls, checkpoints = _run(budget)
 
-    assert [technique for technique, _, _ in calls] == ["U", "B"]
+    # UNION settles in ~196 s. Boolean needs 87 requests at the response time UNION just
+    # measured -- more than the 224 s left -- so it is not started only to be killed part-way
+    # and re-sent from its first payload: the wall it would have burnt returns to the slice.
+    assert [technique for technique, _, _ in calls] == ["U"]
     assert outcome.status == "partial" and outcome.timed_out is True
-    finished = [item for item in checkpoints if item["status"] == "success"]
-    assert [item["attempt_id"] for item in finished] == [stage_attempt_id(CANDIDATE, "U")]
-    # The wall-killed stage is checkpointed too, so the next attempt knows its wall.
-    assert checkpoints[-1]["timed_out"] is True
+    assert outcome.stages[-1] == {"technique": "B", "outcome": "wall_exhausted"}
+    assert [item["attempt_id"] for item in checkpoints] == [stage_attempt_id(CANDIDATE, "U")]
+    assert outcome.actual_budget["tool_wall_seconds"] < 420
+
+
+def test_a_stage_that_fits_the_wall_left_still_runs_and_a_first_stage_always_runs():
+    # Enough wall left for boolean after UNION: it runs.
+    _, calls, _ = _run({"http_requests": 1_000, "tool_wall_seconds": 600})
+    assert [technique for technique, _, _ in calls][:2] == ["U", "B"]
+    # The first stage of an attempt runs whatever the wall: it is the latency measurement an
+    # extension is sized by, and the candidate's only chance in this attempt.
+    _, calls, _ = _run({"http_requests": 1_000, "tool_wall_seconds": 60})
+    assert [technique for technique, _, _ in calls] == ["U"]
 
 
 def test_an_extension_continues_at_the_first_unfinished_stage():
@@ -133,7 +145,7 @@ def test_an_extension_continues_at_the_first_unfinished_stage():
     prior = prior_stages(
         [("verify.sqli.r01.ext.r02", ()), ("verify.sqli.r01", slice_checkpoints)], CANDIDATE,
     )
-    assert set(prior.finished) == {"U"} and "B" in prior.wall_killed
+    assert set(prior.finished) == {"U"} and prior.wall_killed == {}
 
     extension = {"http_requests": 1_714, "state_changing_requests": 1_028, "tool_wall_seconds": 900}
     outcome, calls, _ = _run(extension, prior=prior)
