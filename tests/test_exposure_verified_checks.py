@@ -476,7 +476,7 @@ def test_the_finding_names_its_contract_and_carries_only_fingerprints():
     assert all(set(item) == {"field", "category", "value_fingerprint", "value_length"}
                for item in evidence["exposure_fingerprints"])
     real = [item for item in evidence["exposure_fingerprints"] if item["field"] != "x"]
-    assert all(str(item["value_fingerprint"]).startswith("scrypt:") and item["value_length"] > 0
+    assert all(str(item["value_fingerprint"]).startswith("scrypt-") and item["value_length"] > 0
                for item in real)
     assert all(item["value_fingerprint"] is None for item in evidence["exposure_fingerprints"]
                if item["field"] == "x")
@@ -518,7 +518,7 @@ def test_value_fingerprints_are_deterministic_and_memory_hard():
     assert value_fingerprint(PASSWORD) == value_fingerprint(PASSWORD)
     assert value_fingerprint(PASSWORD) != value_fingerprint(PASSWORD + "x")
     # ... and a KDF, not a fast hash, because a leaked value may be a chosen password.
-    assert value_fingerprint(PASSWORD).startswith("scrypt:")
+    assert value_fingerprint(PASSWORD).startswith("scrypt-")
     assert PASSWORD not in value_fingerprint(PASSWORD)
 
 

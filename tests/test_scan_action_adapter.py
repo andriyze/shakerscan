@@ -1240,7 +1240,14 @@ def test_exposure_probe_batch_probes_seeds_follows_listings_and_checkpoints(monk
     # receipt redaction layer, so accept either the bool or its redacted marker).
     assert all(item["secret_values_visible"] in (False, "***") for item in proofs)
     assert all("PRIVATE KEY" not in (item.get("redacted_excerpt") or "") for item in proofs)
-    assert all(len(item["response_body_sha256"]) == 64 for item in proofs)
+    # A body that may hold secrets is identified by an installation-keyed digest only;
+    # a plain SHA-256 of a small leaked file would be an offline guessing oracle.
+    for item in proofs:
+        if item["exposure_class"] in {"private_key_material", "listed_file"}:
+            assert item["response_body_sha256"] is None
+            assert str(item["response_body_hmac"]).startswith("hmac-sha256-")
+        else:
+            assert len(item["response_body_sha256"]) == 64
 
     # Every probe is checkpointed; a resumed run repeats no request.
     assert backend.attempts[action.action_id]

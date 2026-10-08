@@ -853,7 +853,8 @@ def _findings_for_action(
             and item.get("finding_verdict") == "verified"
             and is_sensitive_exposure_class(str(item.get("exposure_class") or ""))
             and item.get("response_status") == 200
-            and str(item.get("response_body_sha256") or "")
+            # A body that may hold secrets carries an installation-keyed digest instead.
+            and str(item.get("response_body_sha256") or item.get("response_body_hmac") or "")
         ):
             severity = str(item.get("severity") or "medium")
             if severity not in {"critical", "high", "medium", "low"}:
@@ -881,6 +882,7 @@ def _findings_for_action(
                     "response_status": item.get("response_status"),
                     "content_type": item.get("content_type"),
                     "response_body_sha256": item.get("response_body_sha256"),
+                    "response_body_hmac": item.get("response_body_hmac"),
                     "matched_signature": item.get("matched_signature"),
                     "redacted_excerpt": item.get("redacted_excerpt"),
                     # The class names the contract; a stored observation cannot pick its own.

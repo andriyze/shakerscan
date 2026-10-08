@@ -29,8 +29,10 @@ to scrub excerpts, and only labels, key names and fingerprints are persisted.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import math
 import re
+import secrets
 import urllib.parse
 from dataclasses import dataclass, field, replace
 
@@ -351,17 +353,60 @@ MAX_FINGERPRINTED_SECRETS = 20
 _MAX_ASSIGNMENT_CANDIDATES = 200
 
 
+_INSTALLATION_KEYS: dict[str, tuple[str, bytes]] = {}
+
+
+def _installation_key(purpose: str) -> tuple[str, bytes]:
+    """``(scheme, key)``: this installation's private key for ``purpose``.
+
+    Derived from the stable credential key, so fingerprints match across Scans and restarts of
+    one installation and nowhere else. Without a stable key the process uses a random key and
+    says so in the scheme (``ephemeral``): its fingerprints are private but match only within
+    the process, never a constant anyone could recompute.
+    """
+    cached = _INSTALLATION_KEYS.get(purpose)
+    if cached is not None:
+        return cached
+    try:
+        from secret_store import derived_installation_key
+    except ModuleNotFoundError:  # package layout in host-side tests
+        from api.secret_store import derived_installation_key
+    key = derived_installation_key(purpose)
+    resolved = ("keyed", key) if key else ("ephemeral", secrets.token_bytes(32))
+    _INSTALLATION_KEYS[purpose] = resolved
+    return resolved
+
+
+def _reset_installation_keys() -> None:
+    """Forget the resolved keys (tests switch installations)."""
+    _INSTALLATION_KEYS.clear()
+
+
 def value_fingerprint(value: str) -> str:
     """A short, deterministic fingerprint that matches repeat sightings without revealing a value.
 
     A leaked secret can be a human-chosen password, so a fast hash would let anyone holding
-    the evidence test guesses offline. scrypt (memory-hard, fixed domain salt so the same value
-    fingerprints the same across Scans) makes each guess cost what a password hash costs.
+    the evidence test guesses offline, and so would a KDF under a published salt. The salt is
+    this installation's private derived key, and scrypt (memory-hard) still makes each guess
+    cost what a password hash costs if that key is ever exposed with the evidence. The same
+    value fingerprints the same across Scans of one installation.
     """
+    scheme, key = _installation_key("secret-value-fingerprint")
     digest = hashlib.scrypt(
-        str(value).encode("utf-8"), salt=_FINGERPRINT_DOMAIN, n=2**14, r=8, p=1, dklen=12,
+        str(value).encode("utf-8"), salt=_FINGERPRINT_DOMAIN + key, n=2**14, r=8, p=1, dklen=12,
     ).hex()
-    return f"scrypt:{digest}"
+    return f"scrypt-{scheme}:{digest}"
+
+
+def keyed_body_digest(body: bytes) -> str:
+    """An installation-keyed digest of a response body that holds secret material.
+
+    A plain SHA-256 of a small leaked file is an offline oracle: guess the file, hash it,
+    compare. Keyed, the digest still identifies the same body within this installation.
+    """
+    scheme, key = _installation_key("exposure-body-digest")
+    digest = hmac.new(key, bytes(body), hashlib.sha256).hexdigest()
+    return f"hmac-sha256-{scheme}:{digest}"
 
 
 def secret_evidence(key: str, category: str, value: str | None) -> SecretEvidence:
@@ -448,6 +493,7 @@ __all__ = [
     "is_redactable_key_name",
     "is_secret_key_name",
     "is_structured_secret_value",
+    "keyed_body_digest",
     "normalized_key_name",
     "redact_text_assignments",
     "redactable_assignments",

@@ -62,6 +62,7 @@ try:
         directory_listing_links,
         redacted_exposure_excerpt,
     )
+    from capabilities.secret_material import keyed_body_digest
     from capabilities.scanner import ScannerExecutionAdapter
     from capabilities.tls import inspect_tls_binding
     from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
@@ -130,6 +131,7 @@ except (ImportError, ModuleNotFoundError):
         directory_listing_links,
         redacted_exposure_excerpt,
     )
+    from ..capabilities.secret_material import keyed_body_digest
     from ..capabilities.scanner import ScannerExecutionAdapter
     from ..capabilities.tls import inspect_tls_binding
     from ..hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
@@ -596,7 +598,13 @@ def _exposure_observation(
         "discovered_via": discovered_via,
         "response_status": result.status_code,
         "content_type": content_type,
-        "response_body_sha256": hashlib.sha256(result.response_body).hexdigest(),
+        # A body that may hold secret material keeps only an installation-keyed digest: a
+        # plain SHA-256 of a small leaked file lets anyone holding the evidence confirm a
+        # guess of the whole file offline.
+        **({"response_body_sha256": None,
+            "response_body_hmac": keyed_body_digest(result.response_body)}
+           if signature.withholds_content else
+           {"response_body_sha256": hashlib.sha256(result.response_body).hexdigest()}),
         "matched_signature": signature.matched_pattern,
         "redacted_excerpt": redacted_exposure_excerpt(result.response_body, signature),
         # Key names, provider categories and scrypt fingerprints of the proven secrets:
