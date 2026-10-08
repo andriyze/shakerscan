@@ -13512,7 +13512,7 @@ async def process_scan_job(job_data: dict):
             # claiming complete coverage (a killed crawler did exactly that).
             try:
                 action_rows = await conn.fetch(
-                    "SELECT capability_name, status, required, reason_code "
+                    "SELECT action_id, capability_name, status, required, reason_code "
                     "FROM scan_capability_actions WHERE scan_id=$1",
                     uuid.UUID(scan_id),
                 )
