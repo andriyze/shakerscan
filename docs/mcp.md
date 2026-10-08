@@ -119,6 +119,20 @@ dispatched (`execution_started: true`, or the action's in-flight state), a later
 replay answered 409 because the Hunt finished meanwhile, say -- reports `outcome: "unknown"` with
 `indeterminate: true`, the `action_id` and the key, because the action may have run.
 
+Every refusal a person could resolve carries a stable `reason_code` from the engine's closed list
+(`permission_reason_codes` in `GET /hunts/contract`); the adapter keeps it, with any `slot` and
+`profile_id`, in `error.data`. A capability outside the Hunt's manifest is sent to the engine,
+which says what is missing (for example `capability_requires_active_testing`) instead of an
+opaque local refusal. When a person could allow the refused action, the engine parks it under its
+idempotency key and the adapter reports `outcome: "awaiting_permission"` with the
+`permission_request_id`, the server-rendered title and this recovery text: tell the user to run
+`shakerscan approve <id>` in their own terminal, continue other work, check with
+`shakerscan_hunt_permission_wait` (`granted`, `denied`, `expired`, `withdrawn` or `still_pending`,
+long-polled within the call bound), and on `granted` call the same tool again with the same key and
+input. No MCP tool can approve, deny or revoke a permission. Bounds passed to the start tool's
+`allow` are sent as `proposed_allow` and become one pending request the person approves; the agent
+cannot pre-authorize itself. See `docs/hunt-permission-requests.md`.
+
 The capability request may run as long as the server's wall time for it
 (`budget_cost.tool_wall_seconds` in the Hunt manifest) plus a margin, never only the adapter's
 20-second request timeout. MCP clients usually end a request after 60 seconds, so the adapter never outlives it: a

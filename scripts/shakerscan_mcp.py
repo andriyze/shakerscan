@@ -157,6 +157,35 @@ def _refusal_reason(body: str) -> str | None:
     return None
 
 
+def _error_detail(exc: BaseException) -> dict[str, Any]:
+    """The structured ``detail`` of an error body, or {} (D34: keep the reason code)."""
+    body = exc.data if isinstance(exc, MCPError) and isinstance(exc.data, str) else None
+    try:
+        document = json.loads(body) if body else None
+    except (TypeError, ValueError):
+        return {}
+    detail = document.get("detail") if isinstance(document, dict) else None
+    return dict(detail) if isinstance(detail, dict) else {}
+
+
+def _reason_fields(detail: Mapping[str, Any]) -> dict[str, Any]:
+    """The machine-readable fields of a coded refusal the agent may act on."""
+    return {
+        key: _bounded_text(detail[key], 200) for key in ("reason_code", "slot", "profile_id")
+        if isinstance(detail.get(key), str) and detail.get(key)
+    }
+
+
+def _permission_wait_text(request_id: str, title: str) -> str:
+    return (
+        f"Waiting for the user to allow: {title}. Tell the user to run `shakerscan approve "
+        f"{request_id}` in their own terminal. Continue other work meanwhile. Check with "
+        "shakerscan_hunt_permission_wait (it returns granted, denied, expired or still_pending). "
+        "On granted, call the same tool again with the same idempotency key. On denied or expired, "
+        "do not retry this action."
+    )
+
+
 def _bounded_text(value: Any, limit: int) -> str | None:
     if value is None:
         return None
@@ -536,6 +565,15 @@ HUNT_TOOLS += (
     HuntMCPTool("shakerscan_hunt_ssh_cancel","POST","/hunts/{hunt_id}/ssh/actions/{action_id}/cancel",
         "Cancel this Hunt's SSH action. Remote termination may remain uncertain.",
         {"hunt_id":_ssh_id,"action_id":_ssh_id},("hunt_id","action_id"),idempotent=True),
+    # Waits on a permission request; it never decides one. No MCP tool can approve or deny.
+    HuntMCPTool("shakerscan_hunt_permission_wait","GET","/hunts/{hunt_id}/permission-requests/{request_id}",
+        "Wait for the user's decision on a permission request (from outcome=awaiting_permission). "
+        "Returns status granted, denied, expired, withdrawn or still_pending. On granted, call the "
+        "refused capability again with the same idempotency_key and input. This tool cannot approve.",
+        {"hunt_id":_ssh_id,"request_id":_ssh_id,
+         "wait_seconds":{"type":"integer","minimum":0,"maximum":int(DEFAULT_CALL_SECONDS),
+                         "description":"How long to wait for a decision in this call (default 40)."}},
+        ("hunt_id","request_id"),read_only=True,idempotent=True),
 )
 HUNT_TOOL_BY_NAME = {tool.name: tool for tool in HUNT_TOOLS}
 
@@ -817,6 +855,19 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
         "idempotency_key": dict(START_IDEMPOTENCY_KEY_PROPERTY),
         "view": VIEW_PROPERTY,
     }
+    allow_contract = contract.get("allow_bounds") if isinstance(contract.get("allow_bounds"), dict) else None
+    if allow_contract:
+        properties["allow"] = {
+            "type": "array", "maxItems": _positive_int(limits.get("allow"), 32), "uniqueItems": True,
+            "items": {"type": "string", "minLength": 3, "maxLength": 512},
+            "description": (
+                "Optional pre-authorization bounds you propose, e.g. budget.raise:2x, "
+                "capability:state-changing, target.authorize:api.example.com:8443. They become ONE "
+                "pending permission request the user approves in their own terminal (shakerscan "
+                "approve <id>); you cannot pre-authorize yourself. Grammar: "
+                + "; ".join(str(item) for item in allow_contract.get("grammar") or ())
+            ),
+        }
     return HuntMCPTool(
         "shakerscan_hunt_start", "POST", "/hunts",
         "Start one target-bound Hunt using the live Hunt V2 authority contract.",
@@ -980,10 +1031,23 @@ def _capability_failure(exc: BaseException, identity: Mapping[str, Any]) -> MCPE
                 "unchanged input. Do not submit a new key."
             ),
         }, http_status=status)
+    detail = _error_detail(exc)
+    permission = detail.get("permission_request") if isinstance(detail.get("permission_request"), Mapping) else None
+    if _definite_refusal(exc) and detail.get("code") == "permission_required" and permission:
+        request_id = str(permission.get("id") or "")
+        title = str(_bounded_text(permission.get("title"), 300) or "a permission")
+        text = _permission_wait_text(request_id, title)
+        return MCPError(exc.code, f"Hunt capability {capability} is awaiting permission. {text}", {
+            "outcome": "awaiting_permission", "http_status": status,
+            "permission_request_id": request_id, "permission_kind": permission.get("kind"),
+            "title": title, "expires_at": permission.get("expires_at"),
+            "action_id": detail.get("action_id"), **_reason_fields(detail), **identity,
+            "recovery": text,
+        }, http_status=status)
     if _definite_refusal(exc):
         return MCPError(exc.code, f"Hunt capability {capability} was refused: {exc.message}", {
-            "outcome": "refused", "http_status": status, "detail": reason, **identity,
-            "recovery": REFUSED_RECOVERY,
+            "outcome": "refused", "http_status": status, "detail": reason, **_reason_fields(detail),
+            **identity, "recovery": REFUSED_RECOVERY,
         }, http_status=status)
     if _retryable_answer(exc):
         retry_after = exc.retry_after if isinstance(exc, MCPError) else None
@@ -1148,6 +1212,34 @@ class ArsenalClient:
             if isinstance(first, dict) and not _in_flight(first):
                 return first
             return self._settle_capability(path, payload, first, deadline=deadline)
+
+    def _wait_permission(self, path: str, wait_seconds: Any) -> dict[str, Any]:
+        """Long-poll one permission request within this call's bound; never decides it."""
+        budget = float(wait_seconds) if isinstance(wait_seconds, int) and not isinstance(wait_seconds, bool) else 40.0
+        deadline = time.monotonic() + max(0.0, min(budget, self.call_seconds - 2.0))
+        with _heartbeat(_KEEPALIVE.get(), "permission request"):
+            while True:
+                remaining = int(max(0.0, deadline - time.monotonic()))
+                step = min(25, remaining)
+                override = _REQUEST_TIMEOUT.set(max(self.timeout_seconds, step + 10.0))
+                try:
+                    request = self.request_json("GET", f"{path}?wait_seconds={step}")
+                finally:
+                    _REQUEST_TIMEOUT.reset(override)
+                status = str(request.get("status") or "")
+                if status != "pending" or time.monotonic() >= deadline - 1:
+                    break
+        outcome = status if status in {"granted", "denied", "expired", "withdrawn"} else "still_pending"
+        next_step = {
+            "granted": "Call the refused capability again with the same idempotency_key and unchanged input.",
+            "still_pending": _permission_wait_text(str(request.get("id") or ""), str(request.get("title") or "")),
+        }.get(outcome, "Do not retry this action; the permission was not granted.")
+        return {"outcome": outcome, "permission_request": {
+            key: request.get(key) for key in (
+                "id", "kind", "reason_code", "status", "title", "explanation", "effect", "expires_at",
+                "decided_at", "decision_scope", "action_id",
+            )
+        }, "next": next_step}
 
     def _settle_capability(
         self, path: str, payload: dict[str, Any], first: Any, *, deadline: float | None = None,
@@ -1447,6 +1539,9 @@ class ArsenalClient:
                 payload.setdefault("capabilities", [])
                 payload.setdefault("request_collection_ids", [])
                 payload.setdefault("skill_ids", [])
+                # The agent's bounds are a proposal for the person, never the person's own.
+                if "allow" in payload:
+                    payload["proposed_allow"] = payload.pop("allow")
             elif name == "shakerscan_hunt_skill_suggestions":
                 payload.setdefault("signals", [])
             elif name == "shakerscan_hunt_skill_bind":
@@ -1457,7 +1552,8 @@ class ArsenalClient:
                 payload.setdefault("evidence_refs", [])
                 payload.setdefault("reason", "")
             path = hunt_tool.path_template
-            for key in ("hunt_id", "capability_name", "candidate_id", "skill_id", "action_id"):
+            wait_seconds = payload.pop("wait_seconds", None) if name == "shakerscan_hunt_permission_wait" else None
+            for key in ("hunt_id", "capability_name", "candidate_id", "skill_id", "action_id", "request_id"):
                 marker = "{" + key + "}"
                 if marker in path:
                     path = path.replace(marker, urllib.parse.quote(str(payload.pop(key)), safe=""))
@@ -1491,13 +1587,16 @@ class ArsenalClient:
                     item for item in manifest
                     if isinstance(item, dict) and str(item.get("name") or "") == capability_name
                 ), None)
-                if capability is None:
-                    raise MCPError(-32006, "Capability is not allowed by this Hunt manifest")
-                input_schema = capability.get("input_schema")
-                if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
-                    raise MCPError(-32005, "Hunt capability manifest has an invalid input schema")
                 capability_input = payload.get("input") or {}
-                self._validate_argument("input", capability_input, input_schema)
+                if capability is None:
+                    # D31: the server says why a capability is withheld (a reason code, and a
+                    # permission request when a person can allow it); this adapter cannot.
+                    capability = {"name": capability_name}
+                else:
+                    input_schema = capability.get("input_schema")
+                    if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
+                        raise MCPError(-32005, "Hunt capability manifest has an invalid input schema")
+                    self._validate_argument("input", capability_input, input_schema)
                 idempotency_key = str(payload.get("idempotency_key") or "").strip()
                 if not idempotency_key:
                     idempotency_key = f"mcp-{uuid.uuid4().hex}"
@@ -1515,6 +1614,8 @@ class ArsenalClient:
                         from scripts.mcp_ssh_stream import ssh_events
                     path = "/hunts/"+urllib.parse.quote(hunt_id,safe="")+"/ssh/exec"
                     result = ssh_events(self,path,payload,_SSH_PROGRESS.get())
+                elif name == "shakerscan_hunt_permission_wait":
+                    result = self._wait_permission(path, wait_seconds)
                 elif name == "shakerscan_hunt_capability":
                     result = self._run_capability(
                         path, payload, _capability_wall_seconds(capability, capability_input), capability_name,
