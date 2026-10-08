@@ -14,7 +14,9 @@ that can be resumed is a technique: ``--technique X`` is a complete, independent
 pass, and its verdict ("not injectable by X") is final. Each stage runs as its own bounded
 sqlmap invocation and is checkpointed when it finishes; a later attempt on the same
 candidate -- after a crash, or in a verification extension -- continues at the first stage
-without a verdict and only ever repeats the one stage the wall interrupted.
+without a verdict and only ever repeats the one stage the wall interrupted. A resume inside
+the same action charges the stages that action already ran and holds only what is left for
+the rest; a stage carried from an earlier action was charged on that action's receipt.
 
 Stages run cheapest first, by the requests each needs for a negative verdict (measured in the
 scanner image at level 2 / risk 2: UNION 53, boolean-based blind 87, error-based 144,
@@ -87,6 +89,8 @@ class PriorStages:
     finished: dict[str, tuple[str, Mapping[str, Any]]] = field(default_factory=dict)
     wall_killed: dict[str, int] = field(default_factory=dict)
     latency_seconds: float | None = None
+    # What every stage checkpoint of the candidate consumed, per action that recorded it.
+    spent: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 def prior_stages(
@@ -130,6 +134,9 @@ def prior_stages(
             technique = wanted.get(str(item.get("attempt_id") or ""))
             if technique is None:
                 continue
+            spent = prior.spent.setdefault(source, {})
+            for name, amount in consumed.items():
+                spent[str(name)] = spent.get(str(name), 0) + max(0, int(amount or 0))
             if measured is not None:
                 source_latency = measured
             if (
@@ -188,6 +195,14 @@ async def run_staged_sqli_attempt(
     """
     remaining = {name: max(0, int(amount)) for name, amount in budget.items()}
     consumed: dict[str, int] = {name: 0 for name in budget}
+    # Resumed inside the same action (audit L001): the stages it already ran were sent under
+    # this action's reservation, but never settled on a receipt. They are charged now, and the
+    # stages still to run hold only what the candidate's budget has left. Stages carried from
+    # an earlier action were settled on that action's receipt and are not charged again.
+    for name, amount in prior.spent.get(own_action_id, {}).items():
+        consumed[name] = consumed.get(name, 0) + amount
+        if name in remaining:
+            remaining[name] = max(0, remaining[name] - amount)
     observations: list[Mapping[str, Any]] = []
     errors: list[str] = []
     stages: list[Mapping[str, Any]] = []
@@ -203,7 +218,7 @@ async def run_staged_sqli_attempt(
             source, item = finished
             if source == own_action_id:
                 # Resumed inside the same action: its records were never settled on a
-                # receipt, so they are this action's evidence.
+                # receipt, so they are this action's evidence (and its cost, charged above).
                 observations.extend(
                     dict(record) for record in item.get("observations") or ()
                     if isinstance(record, Mapping)
