@@ -118,7 +118,8 @@ async def _database():
     return pool, drop
 
 
-async def _hunt(pool, *, preauthorize: bool = False):
+async def _hunt(pool, *, preauthorize: bool = False, bounds=("target.authorize:dest.example.net",),
+                budget_overrides=None, used_overrides=None):
     """A passive web Hunt whose approval and scope receipts are the target's standing ones,
     as a ``capability.enable`` grant binds them (the live Hunts 36833868 and 4e48d91b)."""
     from hunt.permission_bounds import parse_bounds
@@ -129,7 +130,7 @@ async def _hunt(pool, *, preauthorize: bool = False):
     async with pool.acquire() as conn:
         target = await conn.fetchval("INSERT INTO targets(url) VALUES($1) RETURNING id", TARGET_URL)
         standing = await authorize_target(conn, target, approved_by="alice@example.test")
-        budget = dict(vars(HUNT_BUDGET_PROFILES["fast"]))
+        budget = {**dict(vars(HUNT_BUDGET_PROFILES["fast"])), **dict(budget_overrides or {})}
         allowed = ["http.request", "web.probe"]
         policy = {
             "schema_version": "hunt-policy/v2", "target_kind": "web", "active_testing": False,
@@ -151,13 +152,14 @@ async def _hunt(pool, *, preauthorize: bool = False):
                                      budget_json,budget_used_json,context_pack,created_by,approval_receipt_id)
                VALUES('web',$1,'D39 live grant','active','fast',$2::jsonb,$3::jsonb,$4::jsonb,$5::jsonb,
                       'fixture',$6) RETURNING *""",
-            target, json.dumps(policy), json.dumps(budget), json.dumps({key: 0 for key in LEDGER}),
+            target, json.dumps(policy), json.dumps(budget),
+            json.dumps({**{key: 0 for key in LEDGER}, **dict(used_overrides or {})}),
             json.dumps(context), uuid.UUID(str(standing["approval_receipt_id"])),
         )
         if preauthorize:
             async with conn.transaction():
                 await record_preauthorization(
-                    conn, hunt_id=row["id"], bounds=parse_bounds(["target.authorize:dest.example.net"]),
+                    conn, hunt_id=row["id"], bounds=parse_bounds(list(bounds)),
                     created_by="alice@example.test", proof="launch_stepup",
                 )
     return dict(row), standing
@@ -506,6 +508,49 @@ def test_a_scanner_aimed_at_an_authorized_destination_is_refused_before_anything
             assert await conn.fetchval(
                 "SELECT count(*) FROM hunt_permission_requests WHERE hunt_run_id=$1", hunt["id"]) == 0
             assert await conn.fetchval("SELECT status FROM hunt_actions WHERE id=$1", action_id) == "blocked"
+
+    stack.loop.run_until_complete(scenario())
+
+
+def test_pre_authorized_destination_capability_and_budget_admit_within_the_attempt_budget(stack, monkeypatch):
+    """Every pre-authorized grant costs one admission pass, and the granted destination's DNS
+    recheck cost one more. A call needing a destination, a capability and a budget raise, all
+    inside the start bounds, used five passes of MAX_ADMISSION_ATTEMPTS = 4 and was answered
+    "Hunt admission did not settle". The recheck is not an admission attempt."""
+    async def scenario():
+        hunt, standing = await _hunt(
+            stack.pool, preauthorize=True,
+            bounds=("target.authorize:dest.example.net", "capability:state-changing", "budget.raise:2x"),
+            budget_overrides={"max_state_changing_requests": 5},
+        )
+
+        async def approval(*_args, **_kwargs):  # labelled double: the per-call active approval
+            return {"scope_receipt_id": str(standing["scope_receipt_id"])}
+
+        monkeypatch.setitem(stack.router._deps, "_validate_approval_receipt_for_action", lambda: approval)
+        async with stack.pool.acquire() as conn:  # the call budget is spent: a raise is needed
+            budget = json.loads(await conn.fetchval("SELECT budget_json FROM hunt_runs WHERE id=$1", hunt["id"]))
+            await conn.execute(
+                """UPDATE hunt_runs SET budget_used_json = budget_used_json || jsonb_build_object('agent_actions', $2::int)
+                   WHERE id=$1""", hunt["id"], int(budget["max_capability_calls"]))
+        from fastapi import HTTPException
+
+        request = stack.router.HuntCapabilityRequest(
+            idempotency_key="d39-attempts-01",
+            input={"method": "POST", "path": "/robots.txt", "origin": DESTINATION},
+        )
+        try:
+            result = await stack.router.execute_hunt_capability(str(hunt["id"]), "http.request", request)
+        except HTTPException as exc:
+            result = exc
+        finally:
+            if stack.workers:
+                await asyncio.gather(*stack.workers)
+        assert not isinstance(result, Exception), getattr(result, "detail", result)
+        async with stack.pool.acquire() as conn:
+            kinds = sorted(row["kind"] for row in await conn.fetch(
+                "SELECT kind FROM hunt_permission_requests WHERE hunt_run_id=$1 AND status='granted'", hunt["id"]))
+        assert kinds == ["budget.raise", "capability.enable", "target.authorize"], kinds
 
     stack.loop.run_until_complete(scenario())
 

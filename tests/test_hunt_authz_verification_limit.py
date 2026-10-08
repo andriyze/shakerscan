@@ -161,7 +161,7 @@ def admission(store, **overrides):
                     and n.name == "_execute_hunt_capability_lifecycle")
     # The admission loop (its transaction, and the refusal settlement after it) finishes
     # admission, before any dispatch.
-    stop = next(i for i, node in enumerate(function.body) if isinstance(node, (ast.AsyncWith, ast.For)))
+    stop = next(i for i, node in enumerate(function.body) if isinstance(node, (ast.AsyncWith, ast.For, ast.While)))
     function.body = function.body[:stop + 1] + ast.parse("return {'action_id': str(action_id)}").body
     ledger = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_hunt_ledger_limits")
     selected = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
