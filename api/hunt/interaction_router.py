@@ -1708,7 +1708,12 @@ async def _execute_hunt_capability_lifecycle(
     # A destination a person authorized is resolved again on its retry (D39): None until then,
     # then the refusal text or "" when it still resolves only to public addresses.
     granted_destination_refusal: str | None = None
-    for _attempt in range(MAX_ADMISSION_ATTEMPTS):
+    # Each pre-authorized grant costs one pass. The granted destination's DNS recheck happens at
+    # most once and is not an admission attempt, so it does not spend one (destination,
+    # capability and budget grants together used to exhaust the attempts).
+    attempts = 0
+    while attempts < MAX_ADMISSION_ATTEMPTS:
+        attempts += 1
         admission_action_status = "running"
         admission_result_summary = {}
         durable_reservation = None
@@ -2420,6 +2425,7 @@ async def _execute_hunt_capability_lifecycle(
                 granted_destination_refusal = await granted_destination_recheck(
                     _pool(), hunt_id, refusal.recheck_origin,
                 ) or ""
+                attempts -= 1
                 continue
             if action_id is None or (not refusal.recorded and refusal.kind is None):
                 raise
