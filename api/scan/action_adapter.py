@@ -2394,7 +2394,19 @@ class DatabaseNeutralScanActionDispatcher:
         )
 
     def _exposure_origin(self) -> tuple[str, str] | None:
-        """Return the (origin, scheme) for canonical-host seed probing."""
+        """Return the (origin, scheme) for canonical-host seed probing.
+
+        A target entered without a scheme is frozen with both origins, http first; its probes
+        run against the origin ``scan.origin_select`` measured (HTTPS when it answers), like
+        every other action, never simply the first frozen one (soak N38).
+        """
+        if self.target.inferred_origins:
+            if not self._origin_selected:
+                return None
+            parsed = urllib.parse.urlsplit(str(self.target_url))
+            if not parsed.scheme or not parsed.netloc:
+                return None
+            return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}", parsed.scheme.lower()
         for origin in self.target.allowed_origins:
             parsed = urllib.parse.urlsplit(str(origin))
             host = (parsed.hostname or "").lower().rstrip(".")
