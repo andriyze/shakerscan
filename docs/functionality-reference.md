@@ -1616,7 +1616,8 @@ concurrency-limited with per-tool timeouts and a global deadline.
   exploit mode. Rate tokens are reserved before active work is queued.
 - **Destination classes**: cloud metadata/platform-service addresses (169.254.169.254 and
   equivalents), link-local, multicast, unspecified and broadcast addresses are never scanned, under
-  any setting or environment. Loopback, private (RFC1918, unique-local) and reserved addresses are
+  any setting or environment. Loopback, private (RFC1918, unique-local), reserved and shared
+  (RFC 6598 100.64.0.0/10: carrier-grade NAT and Tailscale node addresses) addresses are
   admitted in Lab environments, and elsewhere only when the deployment admits private-network
   targets with `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` (set on the API and the workers). It is a
   switch, not a range list: `allow`, `allowed`, `true`, `1`, `yes` or `on` admit; unset admits (the
@@ -1632,7 +1633,12 @@ concurrency-limited with per-tool timeouts and a global deadline.
   deployment's setting and its own. On this plane link-local (APIPA) devices stay admitted, and
   cloud metadata addresses are governed by `SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS` and
   `SHAKERSCAN_DEVICE_DENY_CIDRS`. Registering a device is not checked, so a refused target
-  network scan can leave its device profile behind.
+  network scan can leave its device profile behind. Shared address space (100.64.0.0/10) is
+  private-class on both planes since 2.8.0, a deliberate tightening: before, `ipaddress` called it
+  neither private nor reserved, so a deployment that refuses private-network targets admitted a
+  CGNAT or Tailscale address as public. A deployment that scans over Tailscale sets
+  `SHAKERSCAN_PRIVATE_NETWORK_TARGETS=allow` (or uses a Lab environment); a Hunt never authorizes
+  such a destination.
 - **Coverage honesty**: an endpoint is only counted `tested` when scanner telemetry proves it was
   attempted/completed; timeouts/partials never inflate coverage.
 - **Local binding**: laptop mode binds to `127.0.0.1`; remote mode binds to a Tailscale IP. Exposing

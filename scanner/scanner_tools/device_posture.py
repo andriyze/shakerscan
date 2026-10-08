@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover - minimal host test environment
     from xml.etree import ElementTree as ET
 
 try:
+    from .address_classes import private_class, shared_address_space
     from .common import run
     from .device_evidence import build_device_evidence_graph
     from .device_application import discover_device_application_surface, enrich_ssdp_descriptions
@@ -50,6 +51,7 @@ try:
     from .device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
     from .ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
 except ImportError:  # pragma: no cover - flat scanner runtime
+    from address_classes import private_class, shared_address_space
     from common import run
     from device_evidence import build_device_evidence_graph
     from device_application import discover_device_application_surface, enrich_ssdp_descriptions
@@ -268,7 +270,7 @@ def device_private_destination_refusal(address: str, environment: Any, policy: A
     """Why ``address`` is refused under the deployment's private-network policy, or None.
 
     This is the policy-dependent part of the web scope guard (api/action_scope.py): loopback,
-    private and reserved addresses are refused outside a Lab environment unless the deployment
+    private, reserved and shared (100.64.0.0/10, CGNAT) addresses are refused outside a Lab environment unless the deployment
     allows private-network targets. It deliberately does not apply that guard's always-refused
     classes: link-local (APIPA) devices are legitimate LAN devices on this plane, and the cloud
     metadata destinations are governed by ``DEFAULT_DENIED_DEVICE_DESTINATIONS`` and
@@ -292,9 +294,13 @@ def device_private_destination_refusal(address: str, environment: Any, policy: A
         return None
     if parsed.is_link_local or _device_metadata_destination(parsed):
         return None
-    if not (parsed.is_loopback or parsed.is_private or parsed.is_reserved):
+    if not private_class(parsed):
         return None
-    kind = "a loopback" if parsed.is_loopback else "a private-network" if parsed.is_private else "a reserved"
+    kind = (
+        "a loopback" if parsed.is_loopback else "a private-network" if parsed.is_private
+        else "a shared-address-space (100.64.0.0/10, CGNAT or Tailscale)"
+        if shared_address_space(parsed) else "a reserved"
+    )
     return (
         f"{parsed} is {kind} address; this deployment does not allow private-network targets "
         f"outside a Lab environment. The device is evaluated under the '{judged}' environment. "
