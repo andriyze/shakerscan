@@ -8,6 +8,12 @@ start response names, in ``budget_warnings``, every capability in the manifest t
 limits leave unable to run even once, and the cost of mapping a web target once (one crawl and one
 content discovery), so the planner can restart with a workable budget or ask the person.
 
+Only limits a start can change are named (D49): a limit left at its profile default is the most a
+start allows, so a reservation above it is not warned about at start (every start used to repeat
+``collections.replay_active`` 2000 > ``max_state_changing_requests`` 20); calling that capability
+raises a ``budget.raise`` request the person can allow. A lowered limit is named; when even the
+profile's start maximum is below the reservation, the warning says so instead of "start again".
+
 Verification. ``verification`` names the candidate families ``candidate.verify`` can prove on
 this target kind (D27), so no attempt is spent on a family no verifier accepts.
 """
@@ -63,21 +69,34 @@ def start_budget_warnings(result: Mapping[str, Any]) -> list[dict[str, Any]]:
             if not limit_name or limit <= 0 or amount <= limit:
                 continue
             default = int(getattr(profile, limit_name, 0) or 0) if profile else 0
+            if limit >= default:
+                # D49: not lowered. The profile's start maximum is below this reservation, so no
+                # allowed start setting meets it; a call asks the person for a budget raise.
+                continue
+            fits = amount <= default
             warnings.append({
                 "code": "budget_below_capability_reservation",
                 "limit": limit_name, "value": limit, "capability": capability, "reserves": amount,
-                "profile_default": default or None,
+                "profile_default": default or None, "start_maximum": default or None,
+                "restart_fixes_it": fits,
                 "message": (
                     f"{limit_name} is {limit}, below the {amount} {ledger} that {capability} "
                     f"reserves for one call, so {capability} can never run in this Hunt"
-                    + (f" (the {profile_name} profile default is {default})" if default else "")
-                    + ". Start again without lowering it, or ask the person for a budget raise."
+                    + (
+                        f" (the {profile_name} profile default is {default}). Start again without "
+                        "lowering it, or ask the person for a budget raise."
+                        if fits else
+                        f". Even the {profile_name} start maximum, {default}, is below that, so "
+                        "starting again cannot fix it; only a budget raise the person approves "
+                        "during the Hunt can, and calling it asks for one."
+                    )
                 ),
             })
     mapping = [costs[name].get("http_requests", 0) for name in MAPPING_CAPABILITIES if name in costs]
     needed = sum(mapping)
     limit_name, limit = limits.get("http_requests", ("max_http_requests", 0))
-    if len(mapping) == len(MAPPING_CAPABILITIES) and 0 < limit < needed:
+    lowered = profile is not None and limit < int(getattr(profile, limit_name, 0) or 0)
+    if len(mapping) == len(MAPPING_CAPABILITIES) and 0 < limit < needed and lowered:
         default = int(getattr(profile, limit_name, 0) or 0) if profile else 0
         warnings.append({
             "code": "budget_below_mapping_minimum",

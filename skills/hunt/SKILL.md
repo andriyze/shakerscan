@@ -60,9 +60,11 @@ one.
 mapping and then testing. Never lower `max_http_requests` below what discovery needs: one
 `web.crawl` and one `web.content_discover` reserve about 370 requests together, and an agent that
 set 300, then 180, skipped content discovery and missed every exposed `/.env`, `/.git` and backup
-file. The start response's `budget_warnings` names every limit too small for a capability in the
-manifest; when it is not empty, start again with the profile defaults (or ask the operator for a
-budget raise) before you test. Map first, then narrow.
+file. The start response's `budget_warnings` names every limit you lowered below what a capability in
+the manifest reserves; when it is not empty, start again with the profile defaults (or ask the
+operator for a budget raise) before you test. A warning with `restart_fixes_it: false` is above even
+the profile's start maximum: only a budget raise the person approves can let that capability run.
+Map first, then narrow.
 
 **Keep answers small.** Hunt tools answer in a compact view by default; leave `view` out. Use
 `capability=<name>` on `shakerscan_hunt_get` for one capability's contract, and `limit`/`cursor` on
