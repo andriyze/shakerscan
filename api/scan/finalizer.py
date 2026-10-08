@@ -1866,11 +1866,13 @@ def finalize_scan_report(
         else:
             row["batch_actions"] += 1
             # Endpoints a template batch could not finish inside its wall even on a retry
-            # sized for a slow endpoint (soak N32), named so coverage says which ones.
+            # sized for a slow endpoint (soak N32), and exposure probes no retry got an answer
+            # for (soak N37), named so coverage says which ones.
             row["_slow_endpoints"].extend(
                 str(item.get("url") or item.get("candidate_id") or "")
                 for item in observations.get(action.action_id, ())
-                if isinstance(item, Mapping) and item.get("kind") == "template_slow_endpoint"
+                if isinstance(item, Mapping)
+                and item.get("kind") in {"template_slow_endpoint", "exposure_probe_timeout"}
             )
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)

@@ -565,6 +565,28 @@ test('budget, kill and truncated-discovery coverage reasons read as operator lab
   ])
 })
 
+test('an exposure probe no retry answered is named as a slow endpoint of the exposure checks', () => {
+  const result = scanResultPresentation({
+    result: {
+      findings: [],
+      result: {},
+      coverage: {
+        reasons: ['slow_endpoints'],
+        family_coverage: [{
+          family: 'sensitive_exposure',
+          coverage_status: 'partial',
+          reason: 'slow_endpoints',
+          slow_endpoint_count: 1,
+          slow_endpoints: ['https://honey.example/.env'],
+        }],
+      },
+    },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.deepEqual(result.coverageGapReasons, [
+    'Partial because 1 slow endpoint could not finish the exposure checks in time: https://honey.example/.env',
+  ])
+})
+
 test('slow endpoints are counted and named, and an empty family selection is explained', () => {
   const result = scanResultPresentation({
     result: {

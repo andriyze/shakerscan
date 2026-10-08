@@ -14,6 +14,7 @@ import hashlib
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
 import json
 import statistics
+import time
 import urllib.parse
 
 try:
@@ -52,6 +53,8 @@ try:
     from capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from capabilities.exposure_probe import (
         DIRECTORY_FOLLOW_UP_FLOOR,
+        EXPOSURE_PROBE_MIN_START_SECONDS,
+        exposure_probe_timeout,
         SENSITIVE_SEED_PATHS,
         SOFT_404_CONTROL_COUNT,
         EXPOSURE_PROBE_PARSER_VERSION,
@@ -121,6 +124,8 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from ..capabilities.exposure_probe import (
         DIRECTORY_FOLLOW_UP_FLOOR,
+        EXPOSURE_PROBE_MIN_START_SECONDS,
+        exposure_probe_timeout,
         SENSITIVE_SEED_PATHS,
         SOFT_404_CONTROL_COUNT,
         EXPOSURE_PROBE_PARSER_VERSION,
@@ -2481,7 +2486,22 @@ class DatabaseNeutralScanActionDispatcher:
         absent_bodies: set[str] | None = None
         indistinguishable = 0
 
-        async def probe(url: str, ordinal: int) -> Any:
+        # Every probe waits a realistic time sized from the latency this batch measured, never
+        # past the batch's own wall (soak N37: wall / allowance gave /.env 0.86 s).
+        wall_deadline = time.monotonic() + wall_ceiling
+        measured_ms: list[int] = []
+        stopped_by_wall = False
+
+        def remaining_wall() -> float:
+            return wall_deadline - time.monotonic()
+
+        def timed_out(result: Any) -> bool:
+            return result.status_code is None and (
+                bool(getattr(result, "timed_out", False))
+                or str(result.error_code or "").lower() == "timeout"
+            )
+
+        async def probe(url: str, ordinal: int, *, retry: bool = False) -> Any:
             nonlocal consumed
             request = ReplayRequest(
                 request_id=f"exposure:{ordinal}", ordinal=ordinal,
@@ -2489,33 +2509,33 @@ class DatabaseNeutralScanActionDispatcher:
                 headers=(), body=b"", body_mode="none",
                 auth_type="none", has_sensitive_material=False,
             )
-            remaining = max(1, http_ceiling - consumed["http_requests"])
             result = await transport.send(
                 request, target=self.target,
-                timeout_seconds=max(0.5, min(15.0, wall_ceiling / remaining)),
+                timeout_seconds=exposure_probe_timeout(
+                    measured_ms=measured_ms, remaining_wall_seconds=remaining_wall(),
+                    retry=retry,
+                ),
                 follow_redirects=False,
             )
             consumed["http_requests"] = min(
                 http_ceiling, consumed["http_requests"] + 1,
             )
+            if result.status_code is not None and int(result.elapsed_ms or 0) > 0:
+                measured_ms.append(int(result.elapsed_ms))
             await heartbeat()
             return result
 
-        ordinal = start * 1000
-        for probe_url, discovered_via in probes:
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:exposure:{probe_url}".encode()
-            ).hexdigest()
-            prior = completed.get(attempt_id)
-            if prior is not None:
-                resumed += 1
-                attempted += 1
-                observations.extend(prior.get("observations") or ())
-                continue
-            if self.cancelled() or consumed["http_requests"] >= http_ceiling:
-                break
-            ordinal += 1
-            result = await probe(probe_url, ordinal)
+        def can_start() -> bool:
+            nonlocal stopped_by_wall
+            if remaining_wall() < EXPOSURE_PROBE_MIN_START_SECONDS:
+                stopped_by_wall = True
+                return False
+            return True
+
+        async def settle(
+            probe_url: str, discovered_via: str, attempt_id: str, result: Any,
+        ) -> None:
+            nonlocal ordinal, absent_bodies, indistinguishable, follow_up_spent, attempted
             if result.error_code:
                 errors.append(str(result.error_code))
             # Classification parses up to a megabyte of hostile content: it runs off the
@@ -2532,7 +2552,10 @@ class DatabaseNeutralScanActionDispatcher:
                     for control in negative_control_entries(
                         SOFT_404_CONTROL_COUNT, seed=action.action_id,
                     ):
-                        if self.cancelled() or consumed["http_requests"] >= http_ceiling:
+                        if (
+                            self.cancelled() or consumed["http_requests"] >= http_ceiling
+                            or not can_start()
+                        ):
                             break
                         ordinal += 1
                         answer = await probe(f"{base_origin}/{control}", ordinal)
@@ -2558,7 +2581,10 @@ class DatabaseNeutralScanActionDispatcher:
                         ),
                     )
                     for link in links:
-                        if self.cancelled() or consumed["http_requests"] >= http_ceiling:
+                        if (
+                            self.cancelled() or consumed["http_requests"] >= http_ceiling
+                            or not can_start()
+                        ):
                             break
                         # Follow-up gets a small fixed share of the batch, not
                         # whatever the primary sweep has not spent yet. Letting
@@ -2605,21 +2631,91 @@ class DatabaseNeutralScanActionDispatcher:
                 await checkpoint_attempt(action.action_id, attempt)
             attempted += 1
             observations.extend(bundled)
+
+        # A probe that timed out is never recorded as examined: it is retried once, after the
+        # sweep, with the ceiling (or what the wall has left).
+        deferred: list[tuple[str, str, str, float]] = []
+        ordinal = start * 1000
+        for probe_url, discovered_via in probes:
+            attempt_id = hashlib.sha256(
+                f"{manifest_digest}:exposure:{probe_url}".encode()
+            ).hexdigest()
+            prior = completed.get(attempt_id)
+            if prior is not None:
+                resumed += 1
+                attempted += 1
+                observations.extend(prior.get("observations") or ())
+                continue
+            if (
+                self.cancelled() or consumed["http_requests"] >= http_ceiling
+                or not can_start()
+            ):
+                break
+            ordinal += 1
+            waited = exposure_probe_timeout(
+                measured_ms=measured_ms, remaining_wall_seconds=remaining_wall(),
+            )
+            result = await probe(probe_url, ordinal)
+            if timed_out(result):
+                deferred.append((probe_url, discovered_via, attempt_id, waited))
+                continue
+            await settle(probe_url, discovered_via, attempt_id, result)
+        slow_probes: list[Mapping[str, Any]] = []
+        for probe_url, discovered_via, attempt_id, waited in deferred:
+            retry_wait = 0.0
+            if (
+                not self.cancelled() and consumed["http_requests"] < http_ceiling
+                and can_start()
+            ):
+                ordinal += 1
+                retry_wait = exposure_probe_timeout(
+                    measured_ms=measured_ms, remaining_wall_seconds=remaining_wall(),
+                    retry=True,
+                )
+                result = await probe(probe_url, ordinal, retry=True)
+                if not timed_out(result):
+                    await settle(probe_url, discovered_via, attempt_id, result)
+                    continue
+            # Still unanswered: a coverage gap named by its path, never "not proven". It is not
+            # checkpointed, so a resumed batch probes it again.
+            attempted += 1
+            observations.append({
+                "kind": "candidate_attempt", "attempt_id": attempt_id,
+                "candidate_id": attempt_id[:32], "family": "sensitive_exposure",
+                "status": "timed_out", "proof_state": "unproven",
+                "budget_consumed": {"http_requests": 2 if retry_wait else 1},
+            })
+            slow_probes.append({
+                "kind": "exposure_probe_timeout", "candidate_id": attempt_id[:32],
+                "url": redact_url(probe_url), "discovered_via": discovered_via,
+                "first_timeout_seconds": round(waited, 2),
+                "retry_timeout_seconds": round(retry_wait, 2) if retry_wait else None,
+            })
+        observations.extend(slow_probes)
         unattempted = max(0, len(probes) - attempted)
         consumed["tool_wall_seconds"] = min(
             wall_ceiling, max(1, len(probes)),
         ) if "tool_wall_seconds" in consumed else consumed.get("tool_wall_seconds", 0)
+        partial = bool(unattempted or slow_probes)
+        batch_errors = list(errors[:20])
+        if unattempted and stopped_by_wall:
+            # The batch's own wall ran out with probes left: a real timeout.
+            batch_errors.insert(0, CapabilityResultReason.TIMED_OUT.value)
+        elif slow_probes and not unattempted:
+            # Every probe ran; the only gap is the named probes no retry could get an answer for.
+            batch_errors.insert(0, CapabilityResultReason.SLOW_ENDPOINTS.value)
         return self._receipt(
-            action, status="partial" if unattempted else "success",
+            action, status="partial" if partial else "success",
             parser_version=EXPOSURE_PROBE_PARSER_VERSION,
             started_at=started_at, observations=tuple(observations),
-            errors=tuple(errors[:20]), consumed=consumed,
-            partial=bool(unattempted), timed_out=False,
+            errors=tuple(batch_errors[:21]), consumed=consumed,
+            partial=partial, timed_out=bool(unattempted and stopped_by_wall),
             redacted_execution={
                 "action_id": action.action_id, "manifest_digest": manifest_digest,
                 "slice": {"start": start, "count": count},
                 "probe_count": len(probes), "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
+                "retried_count": len(deferred), "timed_out_count": len(slow_probes),
                 "indistinguishable_from_absent": indistinguishable,
                 "soft_404_controls_requested": absent_bodies is not None,
                 "checkpoint_mode": "after_each_candidate",
