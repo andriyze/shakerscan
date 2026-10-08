@@ -176,7 +176,7 @@ def _verify_adapter(operation):
         specification=CAPABILITY_REGISTRY.require("candidate.verify"),
         operation=operation, requested_budget=REQUESTED, redacted_execution={},
         blocked_exceptions=(HTTPException,), conservative_full_budget=True,
-        unstarted_exceptions=(VerificationRefused,),
+        unstarted_exceptions=(VerificationRefused,), measured_wall=True,
     )
 
 
@@ -424,6 +424,8 @@ def test_a_verification_that_ran_keeps_the_conservative_charge(web_hunt, monkeyp
     assert used["verifications"] == 1
     assert used["active_actions"] == 1
     assert used["http_requests"] == 224 + 24
+    # D26: the 180 s reservation gated admission; the charge is the wall time that elapsed.
+    assert used["tool_wall_seconds"] == 64 + 1
     (action,) = database.actions.values()
     accounting = public_hunt_action(action)["result"]["budget_accounting"]
     assert accounting["charge_basis"] == "conservative_full_reservation"
