@@ -368,10 +368,11 @@ coverage.
   PostgreSQL, MSSQL, Oracle) — it fingerprints the database, then chooses DBMS-specific payloads,
   techniques, and optional data-extraction chaining. Supports out-of-band (blind) detection via
   `oob_callback_url`. A canonical Scan's `sqli.verify_batch` verifies each candidate one sqlmap
-  technique at a time (boolean, error, UNION, time-based), checkpoints every finished technique,
-  and paces later techniques by the response time it measured. A slice its wall interrupted is
-  continued by a verification extension in the next round, which resumes at the first unfinished
-  technique (and can itself be continued) instead of re-sending what was already settled.
+  technique at a time, cheapest first (UNION, boolean, error, then time-based only when the others
+  were inconclusive), checkpoints every finished technique, and paces later techniques by the
+  response time it measured. A slice its wall interrupted is continued by a verification extension
+  in the next round, which resumes at the first unfinished technique (and can itself be continued)
+  instead of re-sending what was already settled.
 - **Other injection** (`injection_extra_checks.py`): SSI/ESI, prototype pollution, CSV/formula
   injection, RFI, LDAP/XPath, XXE/XML injection.
 - **SSRF / command injection / LFI / RCE**: high-risk active families, gated behind non-safe exploit

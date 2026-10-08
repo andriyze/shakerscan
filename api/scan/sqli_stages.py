@@ -16,10 +16,13 @@ sqlmap invocation and is checkpointed when it finishes; a later attempt on the s
 candidate -- after a crash, or in a verification extension -- continues at the first stage
 without a verdict and only ever repeats the one stage the wall interrupted.
 
-Stages run most-likely-to-prove first: boolean-based blind (the most common detection on JSON
-APIs and the cheapest), error-based (the strongest proof when the DBMS reflects errors),
-UNION (cheap), and time-based blind last (the most requests, each costing the full response
-time on a slow target). A stage that proves an injection ends the candidate. Every stage is
+Stages run cheapest first, by the requests each needs for a negative verdict (measured in the
+scanner image at level 2 / risk 2: UNION 53, boolean-based blind 87, error-based 144,
+time-based blind 189). On a slow target every request costs the full response time, so a wall
+that cannot reach the candidate's verdict still settles as many techniques as it can, and each
+settled technique is a checkpoint a later extension never re-sends. A stage that proves an
+injection ends the candidate, so time-based blind -- the most expensive and the slowest to
+prove -- runs only when UNION, boolean and error-based were all inconclusive. Every stage is
 paced and bounded exactly like the attempt it is part of; a stage holds whatever the
 candidate's sub-budget has left, so no ceiling grows. A stage the wall interrupted is not a
 verdict and the candidate stays unproven-incomplete; a stage that already ran out of wall
@@ -35,7 +38,11 @@ from typing import Any
 
 from .external_process import paced_request_delay
 
-SQLI_TECHNIQUE_STAGES: tuple[str, ...] = ("B", "E", "U", "T")
+# Requests a negative verdict costs per technique (soak host, 2026-10-07): the stage order.
+SQLI_TECHNIQUE_NEGATIVE_COST: dict[str, int] = {"U": 53, "B": 87, "E": 144, "T": 189}
+SQLI_TECHNIQUE_STAGES: tuple[str, ...] = tuple(
+    sorted(SQLI_TECHNIQUE_NEGATIVE_COST, key=SQLI_TECHNIQUE_NEGATIVE_COST.__getitem__)
+)
 STAGE_RECORD_KIND = "sqli_technique_stage"
 _SUCCESS = frozenset({"success", "succeeded", "completed"})
 # A stage holding less wall than this cannot get past sqlmap's connection and heuristic

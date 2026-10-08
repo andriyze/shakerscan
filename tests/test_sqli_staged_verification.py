@@ -88,39 +88,41 @@ def _run(budget, *, prior=None, finding_at=None, seconds_per_request=3.7):
     return outcome, calls, checkpoints
 
 
-def test_stages_run_most_likely_to_prove_first_and_each_is_checkpointed():
+def test_stages_run_cheapest_first_and_each_is_checkpointed():
     budget = {"http_requests": 1_000, "state_changing_requests": 1_000, "tool_wall_seconds": 3_000}
     outcome, calls, checkpoints = _run(budget)
 
-    assert SQLI_TECHNIQUE_STAGES == ("B", "E", "U", "T")
-    assert [technique for technique, _, _ in calls] == ["B", "E", "U", "T"]
+    # Cheapest negative verdict first (U 53, B 87, E 144, T 189); time-based last.
+    assert SQLI_TECHNIQUE_STAGES == ("U", "B", "E", "T")
+    assert [technique for technique, _, _ in calls] == ["U", "B", "E", "T"]
     assert outcome.status == "success" and outcome.timed_out is False
     assert [item["attempt_id"] for item in checkpoints] == [
-        stage_attempt_id(CANDIDATE, technique) for technique in "BEUT"
+        stage_attempt_id(CANDIDATE, technique) for technique in "UBET"
     ]
     assert outcome.actual_budget["http_requests"] == sum(NEGATIVE_VERDICT.values())
     # Each stage holds what the candidate has left; no ceiling grows.
-    assert calls[1][1]["http_requests"] == 1_000 - NEGATIVE_VERDICT["B"]
+    assert calls[1][1]["http_requests"] == 1_000 - NEGATIVE_VERDICT["U"]
 
 
 def test_a_proven_stage_ends_the_candidate():
     budget = {"http_requests": 1_000, "tool_wall_seconds": 3_000}
     outcome, calls, _ = _run(budget, finding_at="B")
 
-    assert [technique for technique, _, _ in calls] == ["B"]
+    # Boolean proved it: error-based and time-based never run.
+    assert [technique for technique, _, _ in calls] == ["U", "B"]
     assert outcome.status == "success"
     assert any(item.get("kind") == "sqli_finding" for item in outcome.observations)
 
 
-def test_the_soak_slice_finishes_boolean_and_is_stopped_inside_error_based():
+def test_the_soak_slice_finishes_union_and_is_stopped_inside_boolean():
     # 146b6c03's slice: one body candidate, 480 requests / 420 s at ~3.7 s per response.
     budget = {"http_requests": 480, "state_changing_requests": 480, "tool_wall_seconds": 420}
     outcome, calls, checkpoints = _run(budget)
 
-    assert [technique for technique, _, _ in calls] == ["B", "E"]
+    assert [technique for technique, _, _ in calls] == ["U", "B"]
     assert outcome.status == "partial" and outcome.timed_out is True
     finished = [item for item in checkpoints if item["status"] == "success"]
-    assert [item["attempt_id"] for item in finished] == [stage_attempt_id(CANDIDATE, "B")]
+    assert [item["attempt_id"] for item in finished] == [stage_attempt_id(CANDIDATE, "U")]
     # The wall-killed stage is checkpointed too, so the next attempt knows its wall.
     assert checkpoints[-1]["timed_out"] is True
 
@@ -131,18 +133,18 @@ def test_an_extension_continues_at_the_first_unfinished_stage():
     prior = prior_stages(
         [("verify.sqli.r01.ext.r02", ()), ("verify.sqli.r01", slice_checkpoints)], CANDIDATE,
     )
-    assert set(prior.finished) == {"B"} and "E" in prior.wall_killed
+    assert set(prior.finished) == {"U"} and "B" in prior.wall_killed
 
     extension = {"http_requests": 1_714, "state_changing_requests": 1_028, "tool_wall_seconds": 900}
     outcome, calls, _ = _run(extension, prior=prior)
 
-    assert [technique for technique, _, _ in calls][0] == "E", "boolean is never re-sent"
+    assert [technique for technique, _, _ in calls][0] == "B", "UNION is never re-sent"
     carried = [
         item for item in outcome.observations
         if item.get("kind") == STAGE_RECORD_KIND and item.get("carried_from")
     ]
     assert [(item["technique"], item["carried_from"]) for item in carried] == [
-        ("B", "verify.sqli.r01"),
+        ("U", "verify.sqli.r01"),
     ]
     # The measured response time paces the next stage instead of a fresh full delay.
     assert calls[0][2] > 2.5
@@ -150,10 +152,10 @@ def test_an_extension_continues_at_the_first_unfinished_stage():
 
 def test_a_stage_is_not_rerun_on_a_hold_no_larger_than_the_one_it_ran_out_of():
     killed = {
-        "attempt_id": stage_attempt_id(CANDIDATE, "B"), "candidate_id": "cand-1",
+        "attempt_id": stage_attempt_id(CANDIDATE, "U"), "candidate_id": "cand-1",
         "status": "partial", "timed_out": True,
         "budget_consumed": {"http_requests": 80, "tool_wall_seconds": 400},
-        "observations": ({"kind": STAGE_RECORD_KIND, "technique": "B", "delay_ms": 1_000},),
+        "observations": ({"kind": STAGE_RECORD_KIND, "technique": "U", "delay_ms": 1_000},),
     }
     prior = prior_stages([("verify.sqli.r01", (killed,))], CANDIDATE)
     outcome, calls, _ = _run({"http_requests": 500, "tool_wall_seconds": 300}, prior=prior)
@@ -164,9 +166,9 @@ def test_a_stage_is_not_rerun_on_a_hold_no_larger_than_the_one_it_ran_out_of():
 
 
 def test_a_spent_request_hold_stops_the_candidate_at_the_request_ceiling():
-    outcome, calls, _ = _run({"http_requests": 87, "tool_wall_seconds": 3_000})
+    outcome, calls, _ = _run({"http_requests": 53, "tool_wall_seconds": 3_000})
 
-    assert [technique for technique, _, _ in calls] == ["B"]
+    assert [technique for technique, _, _ in calls] == ["U"]
     assert outcome.status == "partial"
     assert "connection_limit_exceeded" in outcome.errors
 
@@ -318,7 +320,7 @@ def test_a_chained_extension_carries_candidates_settled_two_rounds_back(monkeypa
         by_round[action.action_id] = receipt
     fast_runs = [call for call in calls if call[0] == "/fast"]
     slow_runs = [call for call in calls if call[0] == "/slow"]
-    assert fast_runs == [("/fast", technique) for technique in "BEUT"], "verified once, carried after"
+    assert fast_runs == [("/fast", technique) for technique in "UBET"], "verified once, carried after"
     # The slow candidate's finished stages are never re-sent; only its time stage is resumed.
     assert [technique for _, technique in slow_runs].count("B") == 1
     assert [technique for _, technique in slow_runs].count("E") == 1
