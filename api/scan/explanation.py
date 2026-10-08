@@ -94,6 +94,10 @@ _REASON_LABELS = {
     "missing_terminal_result": "A required capability has no terminal result",
     "parallel_child_incomplete": "At least one parallel shard completed with partial coverage",
     "no_injection_candidates": "Selected injection families had no candidate to test",
+    "selected_family_no_candidates": (
+        "A selected check family had no candidate to test on the discovered surface; its "
+        "family coverage says which"
+    ),
     "discovery_truncated": (
         "Surface discovery was cut short by its budget, so part of the application was "
         "never examined"
