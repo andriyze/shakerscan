@@ -512,7 +512,7 @@ def _exposure_observation(
         "response_body_sha256": hashlib.sha256(result.response_body).hexdigest(),
         "matched_signature": signature.matched_pattern,
         "redacted_excerpt": redacted_exposure_excerpt(result.response_body, signature),
-        # Key names, provider categories and keyed fingerprints of the proven secrets:
+        # Key names, provider categories and scrypt fingerprints of the proven secrets:
         # enough to match a repeat sighting or a rotation, never the value itself.
         "exposure_fingerprints": signature.secret_evidence(),
         "proof_producer": "shakerscan",

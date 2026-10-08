@@ -476,7 +476,7 @@ def test_the_finding_names_its_contract_and_carries_only_fingerprints():
     assert all(set(item) == {"field", "category", "value_fingerprint", "value_length"}
                for item in evidence["exposure_fingerprints"])
     real = [item for item in evidence["exposure_fingerprints"] if item["field"] != "x"]
-    assert all(str(item["value_fingerprint"]).startswith("sha256:") and item["value_length"] > 0
+    assert all(str(item["value_fingerprint"]).startswith("scrypt:") and item["value_length"] > 0
                for item in real)
     assert all(item["value_fingerprint"] is None for item in evidence["exposure_fingerprints"]
                if item["field"] == "x")
@@ -509,6 +509,17 @@ def test_no_raw_secret_reaches_findings_evidence_exports_or_logs(path, body, con
     for surface, text in surfaces.items():
         for canary in CANARIES:
             assert canary not in text, (surface, path)
+
+
+def test_value_fingerprints_are_deterministic_and_memory_hard():
+    from api.capabilities.secret_material import value_fingerprint
+
+    # Stable across Scans so a repeat sighting or a rotation is recognisable ...
+    assert value_fingerprint(PASSWORD) == value_fingerprint(PASSWORD)
+    assert value_fingerprint(PASSWORD) != value_fingerprint(PASSWORD + "x")
+    # ... and a KDF, not a fast hash, because a leaked value may be a chosen password.
+    assert value_fingerprint(PASSWORD).startswith("scrypt:")
+    assert PASSWORD not in value_fingerprint(PASSWORD)
 
 
 def test_first_slice_reserves_the_seed_sweep_beyond_its_endpoint_share():
