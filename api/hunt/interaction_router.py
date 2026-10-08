@@ -67,6 +67,7 @@ from .settlement import (
     unstarted_refusal_charges,
 )
 from .verification_refusal import VerificationRefused, raise_returned_refusal, refused_before_traffic
+from .dispatch_authority import GrantedDestinationRecheck, granted_destination_recheck
 from .finding_verifications import attribute_verified_finding
 from .credential_uses import HuntCredentialRefusal, admit_action_credentials, record_credential_uses
 from .permission_admission import (
@@ -1697,6 +1698,9 @@ async def _execute_hunt_capability_lifecycle(
     # waited for; their use is recorded with the admission that uses them.
     granted_requests: list[dict[str, Any]] = []
     revalidated = False
+    # A destination a person authorized is resolved again on its retry (D39): None until then,
+    # then the refusal text or "" when it still resolves only to public addresses.
+    granted_destination_refusal: str | None = None
     for _attempt in range(MAX_ADMISSION_ATTEMPTS):
         admission_action_status = "running"
         admission_result_summary = {}
@@ -1993,6 +1997,12 @@ async def _execute_hunt_capability_lifecycle(
                                 original, request.input["origin"], policy, principal_slot=principal_slot,
                             ) from exc
                         granted_origin = granted_destination(policy, request.input["origin"])
+                        if granted_origin is not None and not granted_origin.get("same_host"):
+                            if granted_destination_refusal is None:
+                                # DNS never runs under the Hunt lock: resolve, then admit again.
+                                raise GrantedDestinationRecheck(request.input["origin"])
+                            if granted_destination_refusal:
+                                raise HuntRefusal("scope_destination_blocked", granted_destination_refusal)
                         if (granted_origin is not None and not granted_origin.get("same_host")
                                 and principal_slot != "anonymous"):
                             raise destination_refusal(
@@ -2369,7 +2379,8 @@ async def _execute_hunt_capability_lifecycle(
                         else:
                             used.update(reserved_used)
                             await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, status='active', updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
-                    for granted_request in granted_requests:
+                    # Once per request: an admission attempt that rolled back may have met it already.
+                    for granted_request in {str(item["id"]): item for item in granted_requests}.values():
                         await record_grant_use(
                             conn, hunt_id=run["id"], action_id=action_id, request=granted_request,
                         )
@@ -2394,6 +2405,11 @@ async def _execute_hunt_capability_lifecycle(
                             conn, hunt_id=run["id"], action_id=action_id, uses=credential_uses,
                         )
         except HuntRefusal as refusal:
+            if getattr(refusal, "recheck_origin", None) is not None:
+                granted_destination_refusal = await granted_destination_recheck(
+                    _pool(), hunt_id, refusal.recheck_origin,
+                ) or ""
+                continue
             if action_id is None or (not refusal.recorded and refusal.kind is None):
                 raise
             # A refusal is recorded (or its action parked) in its own transaction: the one
@@ -2921,6 +2937,8 @@ async def _execute_hunt_capability_lifecycle(
             )
         elif result.get("status") == "cancelled":
             status = "cancelled"
+        elif result.get("refusal_stage") == "dispatch":
+            status = "blocked"  # the worker refused it before any traffic and released it (D39)
         elif result.get("partial") or result.get("status") == "partial":
             status = "partial"
         else:

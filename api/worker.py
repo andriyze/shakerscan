@@ -19911,6 +19911,7 @@ def _worker_terminal_network_result(
 
 
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
+from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_target, dispatch_scope_binding, settle_rejected_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
 from hunt.host_accounting import bound_distinct_hosts, record_attempted_hosts
 
@@ -19941,15 +19942,16 @@ async def _revalidate_hunt_action_authority(
         )
         frozen_locator = registered_hunt_locator(run, target_url)
     if not current or not current["is_active"]:
-        raise CapabilityInputError("Hunt target is no longer active")
+        raise HuntDispatchRejected("Hunt target is no longer active")
     if str(current["locator"] or "").strip() != frozen_locator:
-        raise CapabilityInputError("Hunt target locator changed after admission")
+        raise HuntDispatchRejected("Hunt target locator changed after admission")
     authority_decision = await revalidate_scan_action_authority(
         conn,
         action=SimpleNamespace(
             capability_name=capability_name, capability_input=dict(capability_input or {}),
         ),
-        target_binding=target,
+        # A destination a person authorized for this Hunt is checked on its grant (D39).
+        target_binding=await dispatch_scope_binding(conn, run=run, target=target, target_url=target_url),
         scope_receipt_id=target.scope_receipt_id,
         approval_receipt_id=policy.approval_receipt_id,
     )
@@ -19959,10 +19961,7 @@ async def _revalidate_hunt_action_authority(
         record_operational_event(get_redis(), "approval_revocation")
     if authority_decision is ActionAuthorityDecision.REJECTED_SCOPE:
         record_operational_event(get_redis(), "target_transport_block")
-    raise CapabilityInputError(
-        "Hunt action authority rejected at dispatch: "
-        f"{authority_decision.value}"
-    )
+    raise HuntDispatchRejected(f"Hunt action authority rejected at dispatch: {authority_decision.value}")
 
 
 def _worker_hunt_profile_context(
@@ -20328,7 +20327,7 @@ async def process_canonical_scanner_capability_job(
                 )
                 authorized_addresses = [
                     str(item)
-                    for item in context.get("authorized_target_addresses") or []
+                    for item in target.allowed_addresses
                     if str(item)
                 ][:16]
                 if not authorized_addresses:
@@ -20725,6 +20724,8 @@ async def process_canonical_scanner_capability_job(
         }
     except asyncio.CancelledError:
         raise
+    except HuntDispatchRejected as exc:  # refused before traffic: release the hold now (D39)
+        result = await settle_rejected_dispatch(db_pool, job_data, exc, job_id=job_id)
     except (
         agent_tools.AgentToolError,
         ReservationConflict,
@@ -21217,6 +21218,8 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
         }
     except asyncio.CancelledError:
         raise
+    except HuntDispatchRejected as exc:  # refused before traffic: release the hold now (D39)
+        result = await settle_rejected_dispatch(db_pool, job_data, exc, job_id=job_id)
     except (
         BrowserCapabilityInputError,
         ReservationConflict,
@@ -21688,6 +21691,8 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
         }
     except asyncio.CancelledError:
         raise
+    except HuntDispatchRejected as exc:  # refused before traffic: release the hold now (D39)
+        result = await settle_rejected_dispatch(db_pool, job_data, exc, job_id=job_id)
     except (
         CapabilityInputError,
         ReservationConflict,
@@ -21846,9 +21851,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 target, target_url = _worker_hunt_web_target(
                     run, context, hunt_policy,
                 )
-                if capability_input.get("origin") is not None:
-                    from capabilities.http import resolve_hunt_http_origin
-                    target = resolve_hunt_http_origin(target, capability_input["origin"], hunt_policy)
+                target = dispatch_http_target(target, capability_input.get("origin"), hunt_policy)
                 policy = ScanPolicy(
                     active_testing=bool(hunt_policy.get("active_testing")),
                     allow_state_changing_http=bool(hunt_policy.get("allow_state_changing_http")),
@@ -22624,6 +22627,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
         }
     except asyncio.CancelledError:
         raise
+    except HuntDispatchRejected as exc:  # refused before traffic: release the hold now (D39)
+        result = await settle_rejected_dispatch(db_pool, job_data, exc, job_id=job_id)
     except (
         AuthSessionStoreError,
         CapabilityInputError,

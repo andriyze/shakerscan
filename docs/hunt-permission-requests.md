@@ -476,6 +476,18 @@ Where the engine (PR E2) differs from, or makes concrete, the design above:
   the MCP start tool. `ssh.exec` and `ssh.host_trust` have their codes but no requests yet: the
   SSH worker re-reads the profile's command grant and meets the host key only at connection time.
   DNS-out-of-scope and discovered-host refusals are not yet wired to `target.authorize`.
+- **A granted destination at dispatch (D39).** A person's live grant and a pre-authorized one are
+  the same grant row and the same `policy.granted_destinations` entry, so both run the same way.
+  The Hunt's scope receipt names only the Hunt's host, so the worker checks another host on its
+  grant instead: the grant is still live (in the policy, its row not revoked), every pinned address
+  is public and the host's own scope is not blocked; the Hunt's approval and scope receipts are then
+  revalidated for the Hunt's host as for any action, so a revoked authorization still refuses it.
+  The same-key retry resolves the host again before admission takes the Hunt lock, and every address
+  must still be public (`scope_destination_blocked` otherwise); the connection stays pinned to the
+  addresses checked when the request was raised. A refusal at dispatch (authority revoked between
+  admission and dispatch) releases the action's hold at once and settles it `blocked` with
+  `dispatch_authority_rejected`; it no longer waits about two minutes for stale recovery, during
+  which finishing the Hunt was refused.
 - **Deadline.** A request expires after 24 h or at `created_at + max_duration_seconds` of the Hunt,
   whichever is first. Past that deadline no request is raised and the refusal stays plain.
 - **Start bounds.** `POST /hunts` takes `allow` (a person's bounds) and `proposed_allow` (the MCP

@@ -41,6 +41,10 @@ from runtime.request_collection_store import (
 from runtime.request_replay_executor import ReplayExecutionError, replay_reservation_budget
 from runtime.reservation_store import StoredBudgetReservation, ReservationConflict, ReservationStoreError
 from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
+# The worker functions exec here resolve these by name, as api/worker.py imports them.
+from hunt.dispatch_authority import (  # noqa: F401
+    HuntDispatchRejected, dispatch_http_target, dispatch_scope_binding, settle_rejected_dispatch,
+)
 from scanner_tools.request_collections import RequestSelector, select_requests
 from scanner_tools.request_replay import ReplayAuthorization, RequestReplayError, build_selected_replay_plan
 from tests.test_hunt_authz_verification_limit import AdmissionStore, Lifecycle, admission, HUNT, TARGET
