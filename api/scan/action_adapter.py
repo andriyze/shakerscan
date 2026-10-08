@@ -186,7 +186,7 @@ from .sqli_concurrency import (
     RequestRateGate,
     slice_rate_ceiling,
 )
-from .sqli_stages import prior_stages, run_staged_sqli_attempt
+from .sqli_stages import prior_resume_wall_seconds, prior_stages, run_staged_sqli_attempt
 from .verification_extension import EXTENDS_ARG, extension_lineage
 from .batch_carry import (
     admission_template_source, carried_records, finished_attempts, proof_signal_sources,
@@ -3406,6 +3406,15 @@ class DatabaseNeutralScanActionDispatcher:
                     "response_hashes": response_hashes,
                     "budget_consumed": dict(result.actual_budget),
                     **({"retry_round": retry_round} if retry_round else {}),
+                    # An unfinished SQLi candidate names the least wall its next attempt needs:
+                    # its unfinished stage's checkpoint, never less than the attempt floor. The
+                    # extension planner sizes the next round from this (audit S002).
+                    **({"resume_wall_seconds": max(
+                        int(result.resume_wall_seconds),
+                        int(batch_attempt_floor(
+                            action.capability_name, body_candidate=bool(body_request),
+                        ).get("tool_wall_seconds", 0)),
+                    )} if getattr(result, "resume_wall_seconds", None) else {}),
                 },
                 *attempt_observations,
             )
@@ -3733,6 +3742,42 @@ class DatabaseNeutralScanActionDispatcher:
                             sub_budget["state_changing_requests"] = int(
                                 sub_budget["http_requests"]
                             )
+                    candidate_prior = (
+                        prior_stages(staged_sources, attempt_id) if tool == "sqlmap" else None
+                    )
+                    stage_need = (
+                        prior_resume_wall_seconds(candidate_prior)
+                        if candidate_prior is not None else None
+                    )
+                    if stage_need is not None and sub_budget.get("tool_wall_seconds"):
+                        # A resumed candidate re-runs its unfinished stage only on a hold
+                        # strictly larger than any it ran out of (audit S002). Fund that from
+                        # what the slice has left; if the slice cannot, defer the candidate
+                        # before any traffic instead of dispatching a guaranteed no-op. What
+                        # this action already spent on the candidate counts against the hold.
+                        stage_need = max(stage_need, int(floor.get("tool_wall_seconds", 0)))
+                        own_spent = int(candidate_prior.spent.get(action.action_id, {}).get(
+                            "tool_wall_seconds", 0,
+                        ))
+                        available = int(remaining_budget.get("tool_wall_seconds", 0))
+                        if available < stage_need + own_spent:
+                            if candidates.running:
+                                position -= 1
+                                await candidates.wait()
+                                continue
+                            observations.append({
+                                "kind": "candidate_deferred",
+                                "candidate_id": candidate_id,
+                                "family": family,
+                                "reason": "stage_wall_unfunded",
+                                "resume_wall_seconds": stage_need,
+                                "available_wall_seconds": max(0, available - own_spent),
+                            })
+                            exhausted.add("tool_wall_seconds")
+                            continue
+                        sub_budget["tool_wall_seconds"] = max(
+                            int(sub_budget["tool_wall_seconds"]), stage_need + own_spent,
+                        )
                     if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
                         if candidates.running:
                             position -= 1
@@ -3853,7 +3898,7 @@ class DatabaseNeutralScanActionDispatcher:
                             candidate_attempt_id=attempt_id,
                             candidate_id=candidate_id,
                             budget=sub_budget,
-                            prior=prior_stages(staged_sources, attempt_id),
+                            prior=candidate_prior,
                             own_action_id=action.action_id,
                             run_stage=run_stage,
                             checkpoint=checkpoint_stage,

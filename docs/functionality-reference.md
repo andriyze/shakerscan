@@ -391,9 +391,13 @@ coverage.
   were inconclusive), checkpoints every finished technique, and paces later techniques by the
   response time it measured. A slice its wall interrupted is continued by a verification extension
   in the next round, which resumes at the first unfinished technique (and can itself be continued)
-  instead of re-sending what was already settled. Candidates of one slice run concurrently, up to
-  the Scan's `max_workers` (at most 4) and only as many as the slice's request rate covers at the
-  measured response time; one request gate in the pinned transport spaces every connection of the
+  instead of re-sending what was already settled. An extension is admitted only with more wall
+  than its candidate's interrupted technique already ran out of, read from that technique's
+  checkpoint; when the lane cannot fund two such floors it funds one and the other waits for a
+  later round, and a candidate its slice cannot fund that far is deferred before any traffic
+  (`candidate_deferred`) instead of being re-run into the same wall. Candidates of one slice run
+  concurrently, up to the Scan's `max_workers` (at most 4) and only as many as the slice's request
+  rate covers at the measured response time; one request gate in the pinned transport spaces every connection of the
   slice so its aggregate rate never exceeds the rate one of its candidates was already paced at
   when they ran one at a time. A SQLi slice whose own holds could not fund all of its candidates
   (`state_changing_budget_exhausted` / `http_request_budget_exhausted`) is extended like a

@@ -99,6 +99,23 @@ def test_the_round_compiler_continues_a_sqli_extension_in_the_next_round():
     )
     starve(extension)
     _settle_round_fixture(fixture)
+    # Without its checkpoint the link that spent its whole hold is not re-extended inside the
+    # same share: nothing shows its interrupted stage needs less (audit S002).
+    held = extension.requested_budget["tool_wall_seconds"]
+    unread = compile_next_continuation(**fixture, revision_number=3)
+    assert not any(
+        action.action_id == "verify.sqli.r01.ext.r02.ext.r03"
+        for action in unread.plan.actions[len(second.plan.actions):]
+    )
+    # The extension's receipt names its unfinished candidate's checkpoint: a stage that ran
+    # out of 100 s less than the hold. The compiler reads it and continues the chain.
+    fixture["observations"] = {
+        **fixture["observations"],
+        extension.action_id: ({
+            "kind": "candidate_attempt", "attempt_id": "1" * 64, "candidate_id": "c1",
+            "family": "sqli", "status": "partial", "resume_wall_seconds": held - 80,
+        },),
+    }
 
     third = compile_next_continuation(**fixture, revision_number=3)
 

@@ -160,6 +160,33 @@ def prior_stages(
     return prior
 
 
+def resume_wall_seconds(
+    finished: Iterable[str], wall_killed: Mapping[str, int], *, proven: bool = False,
+) -> int | None:
+    """The least wall a further attempt needs to make progress, or None if nothing is left.
+
+    That is its first stage without a verdict, re-run on a hold strictly larger than any it
+    already ran out of (the stage guard refuses one no larger): the largest wall that stage
+    was killed at, plus one stage's minimum. A stage never killed needs that minimum.
+    Extensions are sized from this checkpoint, not from the predecessor's hold (audit S002).
+    """
+    if proven:
+        return None
+    settled = set(finished)
+    for technique in SQLI_TECHNIQUE_STAGES:
+        if technique not in settled:
+            return int(wall_killed.get(technique, 0)) + MINIMUM_STAGE_WALL_SECONDS
+    return None
+
+
+def prior_resume_wall_seconds(prior: PriorStages) -> int | None:
+    """``resume_wall_seconds`` for a candidate that has not run in this attempt yet."""
+    return resume_wall_seconds(
+        prior.finished, prior.wall_killed,
+        proven=any(_proved(item.get("observations")) for _source, item in prior.finished.values()),
+    )
+
+
 @dataclass(frozen=True)
 class StagedAttempt:
     """One candidate's staged verification, in the shape the batch loop reads a result in."""
@@ -170,6 +197,8 @@ class StagedAttempt:
     actual_budget: Mapping[str, int]
     timed_out: bool
     stages: tuple[Mapping[str, Any], ...]
+    # The least wall the candidate's next attempt needs to make progress; None when finished.
+    resume_wall_seconds: int | None = None
 
 
 RunStage = Callable[[str, Mapping[str, int], float], Awaitable[Any]]
@@ -212,6 +241,8 @@ async def run_staged_sqli_attempt(
     timed_out = False
     was_cancelled = False
     ran_here = False
+    settled = set(prior.finished)
+    wall_killed = dict(prior.wall_killed)
     for technique in SQLI_TECHNIQUE_STAGES:
         finished = prior.finished.get(technique)
         if finished is not None:
@@ -322,6 +353,10 @@ async def run_staged_sqli_attempt(
         observations.extend(stage_observations)
         errors.extend(stage_errors)
         stages.append({"technique": technique, "outcome": status, "timed_out": stage_killed})
+        if status in _SUCCESS and not stage_killed:
+            settled.add(technique)
+        elif stage_killed:
+            wall_killed[technique] = max(wall_killed.get(technique, 0), took)
         timed_out = timed_out or stage_killed
         if status == "cancelled":
             complete, was_cancelled = False, True
@@ -345,4 +380,7 @@ async def run_staged_sqli_attempt(
         actual_budget=consumed,
         timed_out=timed_out and outcome != "success",
         stages=tuple(stages),
+        resume_wall_seconds=(
+            None if outcome == "success" else resume_wall_seconds(settled, wall_killed)
+        ),
     )

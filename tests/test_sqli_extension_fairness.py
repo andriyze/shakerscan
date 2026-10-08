@@ -115,6 +115,8 @@ def test_a_candidate_already_extended_waits_for_the_ones_that_were_not():
         _action("verify.sqli.r02"),
         _action("verify.sqli.r01.ext.r02", extends="verify.sqli.r01"),
     )
+    # The chained link's checkpoint: its interrupted stage ran out of 430 s of its 450 s.
+    resume_walls = {"verify.sqli.r01.ext.r02": 450}
     planned = plan_verification_extensions(
         parent_plan=SimpleNamespace(actions=actions),
         parent_results={
@@ -125,6 +127,7 @@ def test_a_candidate_already_extended_waits_for_the_ones_that_were_not():
         profile_limits=BALANCED,
         # Enough for both floors (440 + 450): both progress, the share split between them.
         residual=_residual(3_000, 0, 2_000),
+        stage_resume_walls=resume_walls,
     )
     assert [item["action_id"] for item in planned] == [
         "verify.sqli.r02.ext", "verify.sqli.r01.ext.r02.ext",
@@ -141,6 +144,7 @@ def test_a_candidate_already_extended_waits_for_the_ones_that_were_not():
         },
         profile_limits=BALANCED,
         residual=_residual(3_000, 0, 3_000),
+        stage_resume_walls=resume_walls,
     )
     # 599 s funds one floor: the candidate never extended goes first.
     assert [item["action_id"] for item in tight] == ["verify.sqli.r02.ext"]
@@ -245,3 +249,36 @@ def test_the_round_compiler_extends_every_starved_sqli_slice():
     ceiling = reconciled_continuation_ceiling(fixture["allocation"], fixture["parent_results"])
     for name, limit in ceiling.items():
         assert sum(action.requested_budget.get(name, 0) for action in appended) <= limit
+
+
+def test_a_checkpoint_floor_never_shrinks_the_slice_holds():
+    """A body link whose stage needs less wall than it held still gets every hold it had:
+    its mutation hold below the body attempt floor would be unfundable (audit S002 review)."""
+    body = {"http_requests": 1_441, "state_changing_requests": 480, "tool_wall_seconds": 720}
+    actions = (_action("verify.sqli.r01"), _action("verify.sqli.r01.ext.r02", extends="verify.sqli.r01"))
+    planned = plan_verification_extensions(
+        parent_plan=SimpleNamespace(actions=actions),
+        parent_results={
+            "verify.sqli.r01": _timed_out(116),
+            "verify.sqli.r01.ext.r02": _timed_out(100, reserved=body, state_changing=100),
+        },
+        profile_limits=BALANCED,
+        residual=_residual(0, 0, BALANCED["tool_wall_seconds"] - 520),
+        stage_resume_walls={"verify.sqli.r01.ext.r02": 420},
+    )
+    # 519 s cannot fund a link at least as large as the 720 s one: nothing is planned rather
+    # than a link that could fund no candidate.
+    assert planned == ()
+    roomy = plan_verification_extensions(
+        parent_plan=SimpleNamespace(actions=actions),
+        parent_results={
+            "verify.sqli.r01": _timed_out(116),
+            "verify.sqli.r01.ext.r02": _timed_out(100, reserved=body, state_changing=100),
+        },
+        profile_limits=BALANCED,
+        residual=_residual(0, 0, 0),
+        stage_resume_walls={"verify.sqli.r01.ext.r02": 420},
+    )
+    assert [item["action_id"] for item in roomy] == ["verify.sqli.r01.ext.r02.ext"]
+    for name, amount in body.items():
+        assert roomy[0]["budget"][name] >= amount

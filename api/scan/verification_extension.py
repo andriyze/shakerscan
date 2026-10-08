@@ -130,21 +130,80 @@ def extension_scale(
     return scale if scale >= minimum else None
 
 
-def _floor_scale(capability_name: str, chained: bool, held_wall: int) -> float:
+def _floor_scale(
+    capability_name: str, held_wall: int, resume_wall: int | None = None,
+) -> float:
     """The smallest scale at which an extension still makes progress on its slice.
 
     A Dalfox extension restarts from scratch, so it must buy meaningfully more time than the
-    slice had. A SQLi extension resumes at the first unfinished technique stage, and its
-    interrupted stage is re-run only on a hold larger than the one it ran out of: a first
-    extension needs the slice's wall plus one stage's minimum, and a chained link -- whose
-    interrupted stage started part-way through its predecessor's hold -- its predecessor's
-    wall again.
+    slice had. A SQLi extension resumes at the first unfinished technique stage, and the stage
+    guard re-runs an interrupted stage only on a hold strictly larger than the one it ran out
+    of. Its floor is therefore read from the slice's own checkpoints when they are known
+    (``resume_wall``: the least wall any of its unfinished candidates needs, see
+    ``stage_resume_walls``). Without them it is the slice's whole wall plus one stage's minimum,
+    because no stage can have run longer than the hold it ran in.
+
+    A chained link used to get just its predecessor's wall, on the assumption that the
+    interrupted stage started part-way through that hold. When the earlier stages were carried,
+    the stage had the whole hold, so an equal wall was refused (``would_repeat_timeout``), the
+    link settled partial instead of timed out, and the chain ended on a no-op (audit S002).
     """
     if capability_name not in RESUMABLE_CAPABILITIES:
         return _MINIMUM_SCALE
-    if chained:
-        return 1.0
+    if resume_wall is not None and resume_wall > 0:
+        # Never below the slice's own holds: the request and mutation holds scale with the
+        # wall, and a candidate needs at least its attempt floor in every dimension, so a
+        # smaller extension would be unfundable in those and send nothing.
+        return max(1.0, resume_wall / held_wall)
     return (held_wall + MINIMUM_STAGE_WALL_SECONDS) / held_wall
+
+
+# The records an unfinished SQLi candidate names its next attempt's least useful wall on.
+_RESUME_RECORD_KINDS = frozenset({"candidate_attempt", "candidate_deferred"})
+
+
+def stage_resume_walls(observations: Mapping[str, Any]) -> dict[str, int]:
+    """The least wall that makes progress on each resumable slice, from its own receipt.
+
+    Every unfinished SQLi candidate's record names ``resume_wall_seconds``: its first
+    unfinished technique stage's checkpoint plus one stage's minimum, never below the attempt
+    floor. The slice makes progress on any hold that funds one of them, so its floor is the
+    smallest. A slice whose receipt names none falls back to the conservative floor.
+    """
+    walls: dict[str, int] = {}
+    for action_id, rows in (observations or {}).items():
+        needs = [
+            int(row["resume_wall_seconds"])
+            for row in rows or ()
+            if isinstance(row, Mapping)
+            and row.get("kind") in _RESUME_RECORD_KINDS
+            and not row.get("carried_from")
+            and isinstance(row.get("resume_wall_seconds"), int)
+            and not isinstance(row.get("resume_wall_seconds"), bool)
+            and int(row["resume_wall_seconds"]) > 0
+        ]
+        if needs:
+            walls[str(action_id)] = min(needs)
+    return walls
+
+
+def resume_observation_action_ids(
+    parent_plan: Any, parent_results: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """The resumable slices whose receipts the next round reads its extension floors from."""
+    actions = tuple(getattr(parent_plan, "actions", ()) or ())
+    extended = {
+        str(action.capability_args.get(EXTENDS_ARG))
+        for action in actions if action.capability_args.get(EXTENDS_ARG)
+    }
+    return tuple(
+        action.action_id
+        for action in actions
+        if action.capability_name in RESUMABLE_CAPABILITIES
+        and action.action_id not in extended
+        and action.action_id in parent_results
+        and _extendable_stop(action.capability_name, parent_results[action.action_id])
+    )
 
 
 def _fair_walls(
@@ -190,14 +249,40 @@ def _fair_walls(
     }
 
 
+def _lineage_measurement(
+    action: Any, by_id: Mapping[str, Any], parent_results: Mapping[str, Any],
+) -> dict[str, int] | None:
+    """The consumption of the nearest link in ``action``'s chain that sent traffic."""
+    seen: set[str] = set()
+    current = str(action.capability_args.get(EXTENDS_ARG) or "")
+    while current and current not in seen:
+        seen.add(current)
+        consumed = dict(getattr(parent_results.get(current), "budget_consumed", {}) or {})
+        if int(consumed.get("http_requests") or 0) > 0 and int(
+            consumed.get("tool_wall_seconds") or 0
+        ) > 0:
+            return consumed
+        ancestor = by_id.get(current)
+        current = (
+            str(ancestor.capability_args.get(EXTENDS_ARG) or "") if ancestor is not None else ""
+        )
+    return None
+
+
 def plan_verification_extensions(
     *,
     parent_plan: Any,
     parent_results: Mapping[str, Any],
     profile_limits: Mapping[str, int],
     residual: Mapping[str, int],
+    stage_resume_walls: Mapping[str, int] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """One optional extension per timed-out, latency-starved verifier slice not yet extended.
+
+    ``stage_resume_walls`` maps a resumable slice to the least wall its unfinished candidates'
+    checkpoints say makes progress (``stage_resume_walls()`` over its receipt); an extension is
+    never admitted below it, so two extensions that would each be refused are not admitted in
+    place of one that can finish. A slice whose floor cannot fit waits for a later round.
 
     Every such slice is eligible, not only the first one a lane meets. One lane holds at
     most its share of the profile wall across all of its extensions in a round (exactly as
@@ -235,12 +320,26 @@ def plan_verification_extensions(
             continue
         reserved = dict(getattr(result, "budget_reserved", {}) or {})
         held_wall = int(reserved.get("tool_wall_seconds") or 0)
-        floor = _floor_scale(action.capability_name, chained, held_wall) if held_wall > 0 else 0
+        floor = (
+            _floor_scale(
+                action.capability_name, held_wall,
+                (stage_resume_walls or {}).get(action.action_id),
+            )
+            if held_wall > 0 else 0
+        )
+        consumed = dict(getattr(result, "budget_consumed", {}) or {})
+        if (
+            chained and action.action_id in (stage_resume_walls or {})
+            and int(consumed.get("http_requests") or 0) <= 0
+        ):
+            # A link that deferred every candidate before any traffic measured nothing; its
+            # chain's nearest measured link holds the target's latency.
+            consumed = _lineage_measurement(action, by_id, parent_results) or consumed
         # The largest extension this slice can use: its latency-sized need inside the lane
         # share and the whole remaining residual.
         scale = extension_scale(
             reserved=reserved,
-            consumed=dict(getattr(result, "budget_consumed", {}) or {}),
+            consumed=consumed,
             wall_ceiling=wall_ceiling,
             residual=remaining,
             minimum=floor,
