@@ -25,6 +25,8 @@ VERIFIABLE_FAMILIES: frozenset[str] = frozenset({
     "bola", "auth_bypass", "data_exposure", "mass_assignment", "access_control",
     "field_constraint", "workflow",
 })
+# Families whose verification sends state-changing requests: they need state-changing authority.
+STATE_CHANGING_VERIFY_FAMILIES: frozenset[str] = frozenset({"mass_assignment", "field_constraint", "workflow"})
 # Locus keys a verification route is resolved from, in precedence order. ``path`` is what the
 # candidate contract tells planners to use for a concrete request path (a file exposure).
 ROUTE_LOCUS_KEYS: tuple[str, ...] = ("route", "url", "path")
@@ -56,6 +58,29 @@ def _mapping(value: Any) -> dict[str, Any]:
 
 def unsupported_family_detail(family: str) -> str:
     return f"verification bridge supports {sorted(VERIFIABLE_FAMILIES)}, not '{family or 'unknown'}'"
+
+
+def public_verification_families() -> dict[str, Any]:
+    """Which candidate families a web/API/network Hunt can verify, told to planners up front.
+
+    D27: half of the agents' verification attempts named a family the bridge refuses
+    (``rag_cross_tenant_isolation``, ``excessive_agency``...), each costing a round trip. The
+    start response, ``GET /hunts/contract`` and the MCP candidate tool all carry this.
+    """
+    return {
+        "verifiable_families": sorted(VERIFIABLE_FAMILIES),
+        "family_aliases": {
+            alias: family for alias, family in sorted(family_proof.FAMILY_ALIASES.items())
+            if family in VERIFIABLE_FAMILIES
+        },
+        "state_changing_families": sorted(STATE_CHANGING_VERIFY_FAMILIES),
+        "other_families": (
+            "Any other family (AI/LLM prompt injection, excessive agency, RAG isolation, injection, "
+            "CORS...) may be recorded as a candidate with its evidence, but no deterministic "
+            "verifier proves it: do not call candidate.verify for it; report it as an unverified "
+            "candidate. Device Hunts verify through their own verifier_contract_id contracts."
+        ),
+    }
 
 
 def verification_route(locus: Mapping[str, Any], context: Mapping[str, Any]) -> str | None:

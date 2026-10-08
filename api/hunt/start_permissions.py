@@ -22,7 +22,7 @@ from fastapi import HTTPException
 from .credential_uses import CREDENTIAL_NOT_ATTACHED, HuntCredentialRefusal, unattached_reference_refusal
 from .permission_bounds import parse_bounds
 from .permission_reasons import KIND_CREDENTIAL_USE, KIND_PREAUTHORIZATION
-from .permission_store import raise_request, record_preauthorization
+from .permission_store import pending_summary, raise_request, record_preauthorization
 from .permission_subjects import credential_kind_error
 from .start_contract import HuntStartContract
 
@@ -108,10 +108,14 @@ async def validate_start_credentials(
 
 async def record_start_permissions(
     conn: Any, run: Mapping[str, Any], contract: HuntStartContract, preauthorized: Sequence[Any],
-) -> None:
-    """Record start bounds, the agent's proposal, and pre-authorized credential grants."""
+) -> dict[str, Any]:
+    """Record start bounds, the agent's proposal, and pre-authorized credential grants.
+
+    Returns what the start response adds: the requests still pending for a person (the agent's
+    proposed bounds), so the planner can tell the person which ``shakerscan approve`` to run.
+    """
     if not (contract.allow or contract.proposed_allow or preauthorized):
-        return
+        return {}
     from .permission_grants import try_preauthorized_grant
 
     person, proof = _owner(contract)
@@ -141,6 +145,7 @@ async def record_start_permissions(
                 subject={"allow": list(contract.proposed_allow), "bounds_digest": bounds.digest()},
                 actor="agent", source="proposed_allow",
             )
+    return {"pending_permission_requests": await pending_summary(conn, run["id"])}
 
 
 __all__ = ["record_start_permissions", "validate_start_credentials"]
