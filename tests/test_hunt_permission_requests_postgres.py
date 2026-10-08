@@ -540,6 +540,33 @@ def test_a_parked_action_never_retried_is_labelled_by_its_requests_outcome_when_
     assert statuses == {None: "granted", "xss.verify": "denied", "http.request": "expired", "web.probe": "withdrawn"}
 
 
+def test_a_request_outcome_without_an_ending_never_nulls_the_parked_actions_summary(env, monkeypatch):
+    """D42 SQL: ``result_summary || (SELECT ...)`` is NULL when no ending matches the request's
+    outcome, and the NOT NULL column then failed the whole finishing transaction. An outcome the
+    endings do not name (here: the granted one, removed) leaves the summary as it was."""
+    from hunt import permission_grants
+
+    monkeypatch.setattr(permission_grants, "PARKED_ENDINGS", {
+        status: ending for status, ending in permission_grants.PARKED_ENDINGS.items() if status != "granted"})
+    hunt = run(env, env.hunt(budget={"max_capability_calls": 1}, used={"agent_actions": 1}))
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, "end-unnamed-0001"))  # budget.raise, granted and never retried
+    (request,) = run(env, env.requests(hunt))
+    run(env, env.decide(hunt, request))
+    before = json.loads(run(env, env.action(hunt, "end-unnamed-0001"))["result_summary"])
+
+    async def finish():
+        async with env.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("UPDATE hunt_runs SET status='completed', completed_at=NOW() WHERE id=$1", hunt["id"])
+                await settle_for_ended_hunt(conn, hunt["id"], actor="hunt", source="hunt_finished")
+
+    run(env, finish())
+    action = run(env, env.action(hunt, "end-unnamed-0001"))
+    assert action["status"] == "blocked"
+    assert json.loads(action["result_summary"]) == before
+
+
 # ---------------------------------------------------------------------------------------------
 # Kinds and hard limits.
 

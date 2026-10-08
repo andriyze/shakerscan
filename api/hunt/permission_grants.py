@@ -555,14 +555,15 @@ async def settle_for_ended_hunt(conn: Any, hunt_id: Any, *, actor: str, source: 
                SELECT * FROM jsonb_to_recordset($2::jsonb) AS e(status text, code text, message text)
            )
            UPDATE hunt_actions a
-           SET status='blocked', completed_at=NOW(), result_summary=a.result_summary || (
+           SET status='blocked', completed_at=NOW(),
+               result_summary=COALESCE(a.result_summary, '{}'::jsonb) || COALESCE((
                SELECT jsonb_build_object('error', e.code, 'reason_code', e.code, 'message', e.message)
                FROM ending e
                WHERE e.status = COALESCE((
                    SELECT r.status FROM hunt_permission_requests r
                    WHERE r.hunt_run_id=a.hunt_run_id
                      AND r.id::text = a.result_summary->>'permission_request_id'
-               ), 'withdrawn'))
+               ), 'withdrawn')), '{}'::jsonb)
            WHERE a.hunt_run_id=$1 AND a.status='awaiting_permission'""",
         hunt_uuid, json.dumps([
             {"status": status, "code": code, "message": message}
