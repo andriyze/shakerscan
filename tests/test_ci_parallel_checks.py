@@ -136,7 +136,9 @@ def test_every_smoke_shard_builds_the_complete_stack_from_source():
     assert bake["uses"].startswith("docker/bake-action@") and len(bake["uses"].split("@")[1]) == 40
     assert bake["with"]["source"] == "."
     assert "./scanner.sh build >" in launch["run"]
-    assert 'echo "$?" > "$RUNNER_TEMP/scanner-build.status"' in launch["run"]
+    # The status is captured with || so the step's inherited -e cannot skip publishing it;
+    # tests/test_ci_background_status.py executes the launcher and the waiter.
+    assert '|| rc=$?' in launch["run"] and '"$RUNNER_TEMP/scanner-build.status"' in launch["run"]
     assert 'exit "$status"' in build["run"]
     for step in (launch, bake, build, start):
         assert step["if"] == "steps.shard.outputs.stack == 'true'"
@@ -253,7 +255,7 @@ def test_browser_toolchain_install_still_gates_the_shard(tmp_path):
     names = [step.get("name") for step in shard_job["steps"]]
     start = _step(shard_job, "Install the browser test toolchain while the images build")
     report = _step(shard_job, "Report the browser test toolchain install")
-    assert "set -e" in start["run"] and "playwright install chromium" in start["run"]
+    assert "bash -e -o pipefail -c" in start["run"] and "playwright install chromium" in start["run"]
     assert names.index(start["name"]) < names.index("Build ShakerScan images")
     assert names.index(report["name"]) < names.index("Run real-stack browser acceptance")
     assert start["if"] == report["if"] == _step(shard_job, "Run real-stack browser acceptance")["if"]

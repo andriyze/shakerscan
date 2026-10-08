@@ -119,13 +119,18 @@ jobs:
           # Real-stack browser acceptance needs only the UI dependencies and Chromium, not the
           # stack, so they install during the image build. "Report the browser test toolchain
           # install" waits for them and fails the shard if either command failed.
+          # The step shell runs with -e, which the background supervisor inherits: a failing
+          # child would end it before it wrote the status, and the report step would wait
+          # forever. The install is an explicit fail-fast child; the supervisor always
+          # records its exit status, published atomically so the reader never sees it empty.
           (
-            (
-              set -e
+            rc=0
+            bash -e -o pipefail -c '
               npm --prefix ui ci
               npx --prefix ui playwright install chromium
-            ) > "$RUNNER_TEMP/browser-toolchain.log" 2>&1
-            echo "$?" > "$RUNNER_TEMP/browser-toolchain.status"
+            ' > "$RUNNER_TEMP/browser-toolchain.log" 2>&1 || rc=$?
+            printf '%s\n' "$rc" > "$RUNNER_TEMP/browser-toolchain.status.tmp"
+            mv "$RUNNER_TEMP/browser-toolchain.status.tmp" "$RUNNER_TEMP/browser-toolchain.status"
           ) &
 
       - name: Use the containerd image store so the local build can reuse cached layers
@@ -174,11 +179,15 @@ jobs:
           # same complete build as before. It starts as soon as the bake below has restored
           # the scanner runtime, while the bake still restores the Model Intake toolchain and
           # UI layers; BuildKit shares identical in-flight steps between the two builds.
-          # "Build ShakerScan images" waits for it and fails the shard if it failed.
+          # "Build ShakerScan images" waits for it and fails the shard if it failed. The
+          # supervisor inherits the step's -e, so the build's status is captured with || rather
+          # than read from $? after it: a failed build must still publish its status.
           (
             until docker image inspect shakerscan-worker:local >/dev/null 2>&1; do sleep 3; done
-            ./scanner.sh build > "$RUNNER_TEMP/scanner-build.log" 2>&1
-            echo "$?" > "$RUNNER_TEMP/scanner-build.status"
+            rc=0
+            ./scanner.sh build > "$RUNNER_TEMP/scanner-build.log" 2>&1 || rc=$?
+            printf '%s\n' "$rc" > "$RUNNER_TEMP/scanner-build.status.tmp"
+            mv "$RUNNER_TEMP/scanner-build.status.tmp" "$RUNNER_TEMP/scanner-build.status"
           ) &
 
       - name: Restore unchanged image layers from the build cache
@@ -209,11 +218,13 @@ jobs:
           touch "$log"
           tail -n +1 -f "$log" &
           tail_pid=$!
-          deadline=$(( $(date +%s) + 35 * 60 ))
+          # The bound can be lowered (never raised past the job timeout) by the workflow tests.
+          wait_seconds="${SHAKERSCAN_SCANNER_BUILD_WAIT_SECONDS:-2100}"
+          deadline=$(( $(date +%s) + wait_seconds ))
           until [ -f "$RUNNER_TEMP/scanner-build.status" ]; do
             if [ "$(date +%s)" -ge "$deadline" ]; then
               kill "$tail_pid" 2>/dev/null || true
-              echo "::error::./scanner.sh build did not finish within 35 minutes; last 200 lines:"
+              echo "::error::./scanner.sh build did not finish within ${wait_seconds} seconds; last 200 lines:"
               tail -n 200 "$log"
               exit 1
             fi
@@ -410,8 +421,25 @@ jobs:
         shell: bash
         run: |
           # Wait for the install started before the image build and fail exactly as it failed.
-          until [ -f "$RUNNER_TEMP/browser-toolchain.status" ]; do sleep 2; done
-          cat "$RUNNER_TEMP/browser-toolchain.log"
+          # Stream its log while waiting and stop at a bound, so a hung install fails with its
+          # last output instead of holding the shard until the job timeout.
+          log="$RUNNER_TEMP/browser-toolchain.log"
+          touch "$log"
+          tail -n +1 -f "$log" &
+          tail_pid=$!
+          wait_seconds="${SHAKERSCAN_BROWSER_TOOLCHAIN_WAIT_SECONDS:-1200}"
+          deadline=$(( $(date +%s) + wait_seconds ))
+          until [ -f "$RUNNER_TEMP/browser-toolchain.status" ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              kill "$tail_pid" 2>/dev/null || true
+              echo "::error::the browser test toolchain install did not finish within ${wait_seconds} seconds; last 200 lines:"
+              tail -n 200 "$log"
+              exit 1
+            fi
+            sleep 2
+          done
+          sleep 1
+          kill "$tail_pid" 2>/dev/null || true
           status="$(cat "$RUNNER_TEMP/browser-toolchain.status")"
           echo "browser test toolchain install exit status: $status"
           exit "$status"

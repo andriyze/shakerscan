@@ -45,7 +45,9 @@ def test_smoke_build_streams_its_log_and_fails_before_the_job_limit():
     # The log is streamed while the background build runs, not printed only at the end.
     assert 'tail -n +1 -f "$log" &' in run
     # A bound below the job timeout fails with the build's last output.
-    assert "35 * 60" in run and "did not finish within 35 minutes" in run
+    # 35 minutes unless a test injects a smaller bound (tests/test_ci_background_status.py).
+    assert "${SHAKERSCAN_SCANNER_BUILD_WAIT_SECONDS:-2100}" in run
+    assert "did not finish within ${wait_seconds} seconds" in run
     assert 'tail -n 200 "$log"' in run and "exit 1" in run
     # The build's own exit status still decides the step.
     assert 'exit "$status"' in run
