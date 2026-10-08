@@ -33,6 +33,10 @@ try:
     from runtime.browser_login_contract import browser_login_action_arguments
 except ModuleNotFoundError:
     from ..runtime.browser_login_contract import browser_login_action_arguments
+try:
+    from capabilities.exposure_probe import exposure_first_slice_hold
+except ModuleNotFoundError:
+    from ..capabilities.exposure_probe import exposure_first_slice_hold
 from .capability_execution import SCAN_BASE_ORIGIN_CAPABILITIES, scan_discovery_reservation
 from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .execution import ScanExecutionPlan
@@ -1088,7 +1092,8 @@ class ScanActionPlanCompiler:
         sqli = active and enabled("sqli")
         active_nuclei = active and enabled("nuclei_active")
         bola = active and enabled("bola")
-        sensitive_exposure = active and enabled("sensitive_exposure")
+        # Read-only (ADR 0001 passive): runs whenever selected, active authority or not.
+        sensitive_exposure = enabled("sensitive_exposure")
         nosqli = active and enabled("nosqli")
         authz_surface = active and enabled("authz_surface")
         template_actions_expected = (
@@ -1451,6 +1456,14 @@ class ScanActionPlanCompiler:
                         int(budget.get("http_requests", 0)),
                         passive_batch_request_hold(slice_count),
                     )
+                if (
+                    blueprint.capability_name == "exposure.verify_batch"
+                    and isinstance(raw_slice, Mapping)
+                    and int(raw_slice.get("start") or 0) == 0
+                ):
+                    # The first slice also reads the whole seed list; hold it explicitly.
+                    for name, amount in exposure_first_slice_hold(slice_count).items():
+                        budget[name] = max(int(budget.get(name, 0)), amount)
                 if (
                     policy.allow_state_changing_http
                     and blueprint.capability_name == "xss.browser_prove_batch"
@@ -1943,7 +1956,10 @@ class ScanActionPlanCompiler:
                 {"endpoint_manifest_ref": endpoint_ref or None},
                 manifest_ref=endpoint_ref,
                 dependencies=active_dependencies,
-                required="sensitive_exposure" in explicitly_requested,
+                # Required only when the operator named the family. From a preset it is
+                # best-effort: a parallel shard or tight ledger that cannot fund the seed
+                # sweep skips it with a reason code instead of rejecting the whole plan.
+                required="sensitive_exposure" in set(execution_plan.requested_families or ()),
                 minimum_batches=1,
                 reserve_dependency_slots=int(authz_will_run),
             )

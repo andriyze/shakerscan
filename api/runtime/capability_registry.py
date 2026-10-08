@@ -1048,10 +1048,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "exposure.verify_batch",
-            "Probe endpoints and well-known sensitive locations for deterministic "
-            "content disclosure over one bounded slice.",
-            "internal", "active", _HTTP_TARGETS, "exposure.probe_batch", "1",
-            "active_testing",
+            "Read endpoints and well-known sensitive locations with GET only and prove "
+            "content disclosure by file-type signature over one bounded slice.",
+            # Read-only (ADR 0001 passive): fixed GETs, redirects off, no input varied.
+            "internal", "read_only", _HTTP_TARGETS, "exposure.probe_batch", "1",
+            None,
             {"http_requests": 300, "tool_wall_seconds": 180},
             {
                 "network_reachability": True,

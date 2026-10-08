@@ -2721,7 +2721,10 @@ def test_active_scope_fanout_uses_preallocated_continuation_authority(monkeypatc
         # "xss.verify" here made a legitimate continuation look like it had
         # escaped its allocation.
         required_capabilities=(scan_family_required_capability("xss"),),
-        allowed_capabilities=scan_family_capabilities("xss"),
+        # The passive preset's read-only exposure checks are allowed work, as admission derives.
+        allowed_capabilities=(
+            *scan_family_capabilities("xss"), *scan_family_capabilities("sensitive_exposure"),
+        ),
     )
     conn = _FakePlanConn(
         parent_id, target_id, uuid.uuid4(), parent_plan, allocation,
@@ -2752,7 +2755,7 @@ def test_active_scope_fanout_uses_preallocated_continuation_authority(monkeypatc
         allocation.allocation_digest
     )
     assert record["allowed_continuation_capabilities"] == sorted(
-        scan_family_capabilities("xss")
+        (*scan_family_capabilities("xss"), *scan_family_capabilities("sensitive_exposure"))
     )
     assert any(
         "verify.xss" in child["expected_action_ids"]
@@ -2817,7 +2820,8 @@ def test_canonical_shard_builder_emits_secret_free_v2_queue_authority():
 
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        policy={"exclude_families": ["nuclei_passive", "nuclei_active"]},
+        # No target work at all: the passive exposure checks are excluded too.
+        policy={"exclude_families": ["nuclei_passive", "nuclei_active", "sensitive_exposure"]},
     )
     parent = CanonicalScanJob.create(
         job_id="parent-job",
@@ -6083,6 +6087,8 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
             "preset": "passive",
             "allow_state_changing_http": True,
             "include_families": ["bola"],
+            # Keep the focus on bola alone; the passive exposure checks are their own lane.
+            "exclude_families": ["nuclei_passive", "nuclei_active", "sensitive_exposure"],
         },
         strategy="coverage_family",
         custom_endpoints=endpoints,

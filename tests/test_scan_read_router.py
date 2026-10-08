@@ -50,11 +50,11 @@ def test_family_preview_resolves_standard_active_without_ai_or_implicit_families
     ))
 
     assert preview["resolved_families"] == [
-        "recon", "nuclei_passive", "xss", "sqli",
+        "recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure",
     ]
     assert preview["requested_families"] == []
     # Quotas are what balanced executes at the measured per-attempt cost, not a breadth promise.
-    assert preview["minimum_family_quotas"] == {"xss": 4, "sqli": 4}
+    assert preview["minimum_family_quotas"] == {"xss": 4, "sqli": 4, "sensitive_exposure": 10}
     assert preview["execution_topology"] == "single_worker"
     assert preview["ai_used"] is False
 

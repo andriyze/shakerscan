@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-23
+- Amended: 2026-10-07 (read-only exposure checks are passive)
 - Scope: deterministic Scan V2
 
 ## Decision
@@ -15,7 +16,15 @@ Passive means target-bound read-only traffic, not zero traffic. It may use only
 GET, HEAD, or OPTIONS through a fixed adapter with runtime destination checks.
 It may fingerprint HTTP, inspect DNS/TLS, crawl without form fill, request an
 immutable content-discovery wordlist, execute the reviewed passive Nuclei ID
-allowlist, and replay explicitly selected safe-read collection requests.
+allowlist, run the reviewed exposure checks (`exposure.verify_batch`: GETs of a
+fixed seed list and of endpoints discovery already reached, redirects off, no
+input varied), and replay explicitly selected safe-read collection requests.
+
+Requesting a fixed sensitive path such as `/.env` is the same traffic as a
+wordlist entry; what makes it a verified finding is the file-type proof applied
+to the response, not a different kind of request. A request that makes the
+target do expensive work rather than read a resource (a JVM heap dump) is never
+sent by a passive check, even when discovery reports the route.
 
 Passive execution must disable redirects where the adapter cannot prove every
 hop stays in scope, retries that would exceed its reservation, form submission,

@@ -166,10 +166,13 @@ def test_structural_disclosure_excerpt_redacts_inline_secret_values():
 
 def test_sensitive_exposure_is_a_registered_canonical_family():
     assert "sensitive_exposure" in SCAN_V2_FAMILY_NAMES
-    assert get_check_family("sensitive_exposure").is_active is True
+    # Read-only GETs of fixed paths and discovered endpoints: passive under ADR 0001.
+    assert get_check_family("sensitive_exposure").is_active is False
+    assert get_check_family("sensitive_exposure").phase == "passive"
     assert get_check_family("exposure").name == "sensitive_exposure"  # alias
     spec = CAPABILITY_REGISTRY.require("exposure.verify_batch")
-    assert spec.required_approval == "active_testing"
+    assert spec.required_approval is None
+    assert spec.risk_tier == "read_only"
     assert "sensitive_exposure_proof" in spec.evidence_contract
     for profile in ("fast", "balanced", "thorough", "deep"):
         assert SCAN_MINIMUM_FAMILY_QUOTAS[profile]["sensitive_exposure"] >= 5
