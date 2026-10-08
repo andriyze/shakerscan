@@ -546,6 +546,7 @@ try:
         scan_family_capabilities,
         scan_family_required_capability,
     )
+    from scan.contracts import scan_family_resolution
     from scan.collection_replay import (
         EXECUTABLE_REPLAY_POLICIES,
         ScanCollectionReplayContractError,
@@ -675,6 +676,7 @@ except ModuleNotFoundError:
         scan_family_capabilities,
         scan_family_required_capability,
     )
+    from api.scan.contracts import scan_family_resolution
     from api.scan.collection_replay import (
         EXECUTABLE_REPLAY_POLICIES,
         ScanCollectionReplayContractError,
@@ -11591,7 +11593,7 @@ async def _submit_scan(
         'queue_schema': canonical_job.schema_version if canonical_queue else 'legacy-transport',
         'policy': options_payload.get('scan_policy'),
         'budget': options_payload.get('resolved_scan_budget'),
-        'budget_profile': scan_contract.budget_profile,
+        'budget_profile': scan_contract.budget_profile, **scan_family_resolution(scan_contract),
     }
     if parallel_enabled:
         response['parallel'] = True

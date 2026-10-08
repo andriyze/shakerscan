@@ -15,6 +15,7 @@ from .contracts import (
     SCAN_MINIMUM_FAMILY_QUOTAS,
     public_scan_contract,
     resolve_scan_contract,
+    scan_family_resolution,
 )
 from .explanation import (
     action_list_response,
@@ -269,6 +270,8 @@ async def preview_scan_contract(request: ScanFamilyPreviewRequest):
         prerequisites.extend(["web.probe", "web.crawl"])
     return {
         "preset": contract.execution_plan.family_preset,
+        # How include_families resolved: exact under `custom`, otherwise added to the preset.
+        **scan_family_resolution(contract),
         "requested_families": list(contract.execution_plan.requested_families),
         "resolved_families": resolved,
         "derived_prerequisites": list(dict.fromkeys(prerequisites)),
