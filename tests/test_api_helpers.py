@@ -18355,7 +18355,10 @@ def test_device_control_verifier_restores_query_state_before_promotion(monkeypat
 
         def transaction(self): return _Transaction()
 
-        async def fetchval(self, _query, *_args):
+        async def fetchval(self, query, *_args):
+            if "SELECT environment FROM device_targets" in query:
+                # The replay pins its connect address under the device's environment.
+                return "production"
             self.fetchval_calls += 1
             return uuid.uuid4()
 

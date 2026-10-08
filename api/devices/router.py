@@ -99,6 +99,7 @@ from .collection_environments import bind_environments
 from .network_authorization import network_authorization_snapshot
 from .destination_policy import (
     admit_device_destination, device_destination_policy_record, device_policy_environment,
+    pin_device_connect_address,
 )
 
 router = APIRouter()
@@ -2773,6 +2774,7 @@ async def _execute_device_capability_operation(
             )
         if origin is None:
             origin = origins[0]
+        origin = await _pin_device_origin(device_target_id, origin)
         try:
             device_agent.reserve_device_http_attempt(
                 state, now_monotonic=time.monotonic(),
@@ -3040,6 +3042,19 @@ async def _device_operator_named_web_origin(
         "host_header": "",
         "operator_named": True,
     }
+
+
+async def _pin_device_origin(device_target_id: uuid.UUID, origin: dict[str, Any]) -> dict[str, Any]:
+    """``origin`` with its connect address checked and pinned under the device's current
+    environment and the deployment's policy (``pin_device_connect_address``), as the device
+    worker checks the address it pins. A stored posture address may predate a policy change,
+    and an operator-named port connects to the device's locator, which may be a hostname."""
+    async with _pool().acquire() as conn:
+        environment = await conn.fetchval(
+            "SELECT environment FROM device_targets WHERE id=$1", device_target_id,
+        )
+    pinned = await pin_device_connect_address(str(origin["connect_address"]), environment)
+    return {**origin, "connect_address": pinned}
 
 
 def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
@@ -3608,6 +3623,13 @@ async def _verify_device_control_authorization_candidate(
                 if not (parsed_request.scheme and parsed_request.hostname)
                 else "request_origin_not_confirmed_open"
             ],
+        )
+    try:
+        origin = await _pin_device_origin(device_target_id, origin)
+    except HTTPException:
+        return await _device_control_authorization_blocked(
+            candidate_id=candidate_id, device_target_id=device_target_id, run_id=run_id,
+            gaps=["request_origin_destination_refused"],
         )
     path = urllib.parse.urlunsplit(("", "", parsed_request.path or "/", parsed_request.query, ""))
     method = str(imported.get("method") or "").upper()

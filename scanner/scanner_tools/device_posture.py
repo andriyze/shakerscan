@@ -36,7 +36,10 @@ except ImportError:  # pragma: no cover - minimal host test environment
     from xml.etree import ElementTree as ET
 
 try:
-    from .address_classes import private_class, shared_address_space
+    from .address_classes import (
+        embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
+        without_scope,
+    )
     from .common import run
     from .device_evidence import build_device_evidence_graph
     from .device_application import discover_device_application_surface, enrich_ssdp_descriptions
@@ -51,7 +54,10 @@ try:
     from .device_safety import DeviceSafetyGovernor, check_device_health, validate_safety_request
     from .ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
 except ImportError:  # pragma: no cover - flat scanner runtime
-    from address_classes import private_class, shared_address_space
+    from address_classes import (
+        embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
+        without_scope,
+    )
     from common import run
     from device_evidence import build_device_evidence_graph
     from device_application import discover_device_application_surface, enrich_ssdp_descriptions
@@ -162,7 +168,7 @@ def normalize_device_locator(value: Any) -> str:
     if raw.startswith("[") and raw.endswith("]"):
         raw = raw[1:-1]
     try:
-        return str(ipaddress.ip_address(raw))
+        return canonical_device_address(raw)
     except ValueError:
         candidate = raw.rstrip(".").lower()
         if not _HOST_RE.fullmatch(candidate):
@@ -182,6 +188,19 @@ def normalize_device_locator(value: Any) -> str:
         return candidate
 
 
+def canonical_device_address(value: Any) -> str:
+    """One spelling per destination: an IPv4-mapped address (``::ffff:a.b.c.d``) is the IPv4
+    address a dual-stack socket connects to. Raises ``ValueError`` for anything but an IP literal.
+
+    Other IPv6 forms that carry an IPv4 address (NAT64, SIIT, 6to4, Teredo) are distinct
+    destinations and keep their spelling; ``validate_device_destination`` judges them as the
+    IPv4 address they carry as well.
+    """
+    parsed = ipaddress.ip_address(str(value).strip())
+    mapped = getattr(parsed, "ipv4_mapped", None)
+    return str(mapped) if mapped is not None else str(parsed)
+
+
 async def resolve_device_address(
     locator: str,
     *,
@@ -196,7 +215,7 @@ async def resolve_device_address(
     and ``validate_device_destination`` refuses it by name.
     """
     try:
-        return str(ipaddress.ip_address(locator))
+        return canonical_device_address(locator)
     except ValueError:
         pass
     loop = asyncio.get_running_loop()
@@ -210,7 +229,7 @@ async def resolve_device_address(
     addresses = []
     for info in infos:
         try:
-            address = str(ipaddress.ip_address(str(info[4][0]).split("%", 1)[0]))
+            address = canonical_device_address(str(info[4][0]).split("%", 1)[0])
         except (ValueError, IndexError, TypeError):
             continue
         if address not in addresses:
@@ -260,8 +279,9 @@ def effective_private_network_policy(admitted_policy: Any = None) -> str:
 
 
 def _device_metadata_destination(parsed: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    plain = without_scope(parsed)
     return any(
-        parsed.version == network.version and parsed in network
+        plain.version == network.version and plain in network
         for network in (ipaddress.ip_network(raw) for raw in DEFAULT_DENIED_DEVICE_DESTINATIONS)
     )
 
@@ -270,19 +290,20 @@ def device_private_destination_refusal(address: str, environment: Any, policy: A
     """Why ``address`` is refused under the deployment's private-network policy, or None.
 
     This is the policy-dependent part of the web scope guard (api/action_scope.py): loopback,
-    private, reserved and shared (100.64.0.0/10, CGNAT) addresses are refused outside a Lab environment unless the deployment
-    allows private-network targets. It deliberately does not apply that guard's always-refused
+    private, reserved and shared (100.64.0.0/10, CGNAT) addresses are refused outside a Lab
+    environment unless the deployment allows private-network targets. An IPv6 address that
+    carries an IPv4 address (mapped, SIIT, NAT64, 6to4, Teredo: ``embedded_ipv4_addresses``) is
+    judged as that address too. It deliberately does not apply that guard's always-refused
     classes: link-local (APIPA) devices are legitimate LAN devices on this plane, and the cloud
     metadata destinations are governed by ``DEFAULT_DENIED_DEVICE_DESTINATIONS`` and
-    ``SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS``. ``policy`` None reads this process's setting.
+    ``SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS`` (``validate_device_destination`` refuses a
+    link-local address carried inside a translator or tunnel form). ``policy`` None reads this
+    process's setting.
     """
     try:
         parsed = ipaddress.ip_address(str(address or "").split("%", 1)[0].strip("[]"))
     except ValueError:
         return None
-    mapped = getattr(parsed, "ipv4_mapped", None)
-    if mapped is not None:
-        parsed = mapped
     judged = str(environment or "").strip().lower()
     if not judged or judged == "unknown":
         judged = "production"
@@ -292,17 +313,21 @@ def device_private_destination_refusal(address: str, environment: Any, policy: A
     )
     if judged in DEVICE_LAB_ENVIRONMENTS or effective == "allow":
         return None
-    if parsed.is_link_local or _device_metadata_destination(parsed):
-        return None
-    if not private_class(parsed):
+    refused = next((
+        candidate for candidate in judged_addresses(parsed)
+        if not candidate.is_link_local and not _device_metadata_destination(candidate)
+        and private_class(candidate)
+    ), None)
+    if refused is None:
         return None
     kind = (
-        "a loopback" if parsed.is_loopback else "a private-network" if parsed.is_private
+        "a loopback" if refused.is_loopback else "a private-network" if refused.is_private
         else "a shared-address-space (100.64.0.0/10, CGNAT or Tailscale)"
-        if shared_address_space(parsed) else "a reserved"
+        if shared_address_space(refused) else "a reserved"
     )
+    spelled = str(refused) if refused == parsed else f"{parsed} (which carries {refused})"
     return (
-        f"{parsed} is {kind} address; this deployment does not allow private-network targets "
+        f"{spelled} is {kind} address; this deployment does not allow private-network targets "
         f"outside a Lab environment. The device is evaluated under the '{judged}' environment. "
         f"Set the device's environment to Lab, or set {PRIVATE_NETWORK_TARGETS_ENV}=allow for "
         "the deployment."
@@ -320,21 +345,37 @@ def validate_device_destination(
 ) -> str:
     """Reject infrastructure control-plane destinations, not authorized public devices.
 
-    Private, loopback and reserved destinations are also refused when the deployment refuses
-    private-network targets (``SHAKERSCAN_PRIVATE_NETWORK_TARGETS=refuse``) and the device is not
-    in a Lab environment. ``policy`` is the policy recorded when the job was admitted; the
-    stricter of it and this worker's own setting applies.
+    Private, loopback, reserved and shared (CGNAT) destinations are also refused when the
+    deployment refuses private-network targets (``SHAKERSCAN_PRIVATE_NETWORK_TARGETS=refuse``)
+    and the device is not in a Lab environment. ``policy`` is the policy recorded when the job
+    was admitted; the stricter of it and this worker's own setting applies.
+
+    Every test applies to each address an IPv6 spelling carries (``embedded_ipv4_addresses``,
+    shared with the web scope guard): ``::ffff:169.254.169.254``, ``::ffff:0:a9fe:a9fe``,
+    ``64:ff9b::a9fe:a9fe`` and ``2002:a9fe:a9fe::`` are the metadata service to a dual-stack
+    socket, a SIIT or NAT64 translator or a 6to4 relay. The link-local allowance of this plane
+    covers a link-local address itself, never one carried inside a translator or tunnel form.
+    Returns the canonical address (``canonical_device_address``).
     """
     parsed = ipaddress.ip_address(address)
-    if parsed.is_unspecified or parsed.is_multicast:
+    candidates = judged_addresses(parsed)
+    if any(candidate.is_unspecified or candidate.is_multicast for candidate in candidates):
         raise ValueError("device destination is not a unicast host address")
     refusal = device_private_destination_refusal(
         str(parsed), environment, effective_private_network_policy(policy),
     )
     if refusal:
         raise ValueError(f"device destination refused ({PRIVATE_DESTINATION_REASON}): {refusal}")
+    canonical = canonical_device_address(address)
     if os.environ.get("SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS", "").strip().lower() in {"1", "true", "yes"}:
-        return str(parsed)
+        return canonical
+    if getattr(without_scope(parsed), "ipv4_mapped", None) is None and any(
+        carried.is_link_local for carried in embedded_ipv4_addresses(without_scope(parsed))
+    ):
+        raise ValueError(
+            "device destination is denied because it carries a link-local IPv4 address inside a "
+            "translator or tunnel form (NAT64, SIIT, 6to4 or Teredo)"
+        )
     configured = [
         item.strip()
         for item in os.environ.get("SHAKERSCAN_DEVICE_DENY_CIDRS", "").split(",")
@@ -346,9 +387,23 @@ def validate_device_destination(
             networks.append(ipaddress.ip_network(raw, strict=False))
         except ValueError as exc:
             raise ValueError(f"invalid SHAKERSCAN_DEVICE_DENY_CIDRS entry: {raw}") from exc
-    if any(parsed.version == network.version and parsed in network for network in networks):
+    if any(
+        candidate.version == network.version and candidate in network
+        for candidate in candidates for network in networks
+    ):
         raise ValueError("device destination is denied because it is an infrastructure metadata or configured control-plane address")
-    return str(parsed)
+    return canonical
+
+
+def device_destination_admitted(address: str, *, environment: Any, policy: Any = None) -> bool:
+    """True when ``validate_device_destination`` admits ``address``: the filter a multi-address
+    answer is narrowed with, so a name whose lowest address is a refused one pins an admitted
+    address instead."""
+    try:
+        validate_device_destination(address, environment=environment, policy=policy)
+    except ValueError:
+        return False
+    return True
 
 
 def manufacturer_priority_ports(manufacturer: str, model: str) -> tuple[int, ...]:
@@ -1640,9 +1695,9 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
     try:
         resolved_address = await resolve_device_address(
             locator,
-            admit=lambda address: device_private_destination_refusal(
-                address, destination_environment, destination_policy,
-            ) is None,
+            admit=lambda address: device_destination_admitted(
+                address, environment=destination_environment, policy=destination_policy,
+            ),
         )
     except ValueError as exc:
         reachability = unresolved_reachability(locator, exc)
@@ -1659,7 +1714,7 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
             policy_name=policy_name,
             policy_rules_count=len(rules),
         )
-    validate_device_destination(
+    resolved_address = validate_device_destination(
         resolved_address, environment=destination_environment, policy=destination_policy,
     )
 
