@@ -188,10 +188,12 @@ def _request_json(
             body = response.read()
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
-            raise ScanCliError(
-                f"the API answered HTTP {exc.code} with a redirect; an authenticated "
-                "request is never followed to another location"
-            ) from exc
+            try:
+                from redirect_hint import redirect_explanation
+            except ModuleNotFoundError:
+                from scripts.redirect_hint import redirect_explanation
+            location = exc.headers.get("Location") if exc.headers is not None else None
+            raise ScanCliError(redirect_explanation(exc.code, location, url)) from exc
         body = exc.read()
         try:
             error = json.loads(body)

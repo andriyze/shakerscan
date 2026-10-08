@@ -100,11 +100,27 @@ def test_lifecycle_tools_answer_compactly_by_default(tool, arguments):
     assert all("view" not in (payload or {}) for _, _, payload in client.sent)
 
 
-def test_full_view_returns_the_record_unchanged():
-    client = Instance()
+def test_full_view_returns_a_record_that_fits_one_answer_unchanged():
+    small = {key: value for key, value in _record().items() if key not in {"capabilities", "actions", "context_pack"}}
+
+    class Small(Instance):
+        def request_json(self, method, path, payload=None):
+            self.sent.append((method, path, payload))
+            return dict(small)
+
+    client = Small()
     result = client.call_tool("shakerscan_hunt_get", {"hunt_id": HUNT, "view": "full"})
-    assert result["structuredContent"] == _record()
+    assert result["structuredContent"] == small
     assert client.sent == [("GET", f"/hunts/{HUNT}", None)]
+
+
+def test_full_view_of_a_record_larger_than_one_answer_is_paged():
+    """D11: OpenCode truncated 50-100 KB full records; see test_mcp_hunt_terminal_experience."""
+    client = Instance()
+    assert len(json.dumps(_record())) > mcp.FULL_VIEW_PAGE_BYTES
+    result = client.call_tool("shakerscan_hunt_get", {"hunt_id": HUNT, "view": "full"})
+    assert len(result["content"][0]["text"]) <= mcp.FULL_VIEW_PAGE_BYTES
+    assert result["structuredContent"]["mcp_view"]["pages"] > 1
 
 
 def test_hunt_get_returns_one_capability_contract_on_request():

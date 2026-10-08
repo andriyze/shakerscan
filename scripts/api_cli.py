@@ -113,12 +113,14 @@ def call(request: urllib.request.Request, *, opener=None, timeout: float = 60.0)
             return response.status, response.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
-            raise ApiCliError(
-                f"the instance answered HTTP {exc.code} with a redirect to "
-                f"{exc.headers.get('Location') or 'an unnamed location'}; an authenticated "
-                "request is never followed to another location. Point --api-url at the "
-                "instance's own origin."
-            ) from exc
+            # D17: name where the instance is and the client option that points there (the
+            # internal --api-url is not a flag anyone types).
+            try:
+                from redirect_hint import redirect_explanation
+            except ModuleNotFoundError:
+                from scripts.redirect_hint import redirect_explanation
+            location = exc.headers.get("Location") if exc.headers is not None else None
+            raise ApiCliError(redirect_explanation(exc.code, location, request.full_url)) from exc
         return exc.code, exc.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ApiCliError(f"cannot reach {request.full_url}: {getattr(exc, 'reason', exc)}") from exc
