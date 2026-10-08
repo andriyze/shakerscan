@@ -7,7 +7,7 @@ import re
 import contextlib
 import ipaddress
 import struct
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 from runtime.target_bound_socket import FrozenTargetSocketFactory
 
@@ -147,6 +147,7 @@ class PinnedSocksProxy:
         self, *, hostname: str, pinned_address: str | None = None,
         pinned_addresses: Iterable[str] | None = None, port: int,
         max_connections: int | None = None,
+        admit: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.hostname = str(hostname or "").strip().lower().rstrip(".")
         self.port = int(port)
@@ -184,6 +185,11 @@ class PinnedSocksProxy:
         self.bytes_to_target = 0
         self.bytes_from_target = 0
         self.limit_exceeded = asyncio.Event()
+        # A shared request gate (scan.sqli_concurrency.RequestRateGate): every connection to the
+        # target waits for its start time, so the processes sharing one gate stay within its
+        # aggregate rate. Tools that open one connection per request are paced per request.
+        self._admit = admit
+        self.admitted_connections = 0
 
     @property
     def proxy_url(self) -> str:
@@ -262,6 +268,9 @@ class PinnedSocksProxy:
             if destination not in allowed_hosts or requested_port != self.port:
                 await self._reply(writer, 2)
                 return
+            if self._admit is not None:
+                await self._admit()
+                self.admitted_connections += 1
             candidate_addresses = (
                 (destination,)
                 if destination in self.pinned_addresses

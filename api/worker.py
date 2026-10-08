@@ -18694,6 +18694,7 @@ async def _execute_agent_scanner_process(
                 pinned_addresses=job_data.get("authorized_addresses") or (),
                 port=target_port,
                 max_connections=connection_ceiling,
+                admit=job_data.get("_request_gate") if callable(job_data.get("_request_gate")) else None,
             ).start()
         runtime_paths: dict[str, Any] = {}
         browser_storage = (
@@ -19033,6 +19034,11 @@ async def _execute_agent_scanner_process(
         "execution_uncertain": execution_uncertain,
         "network_binding": _agent_scanner_network_binding(name),
     }
+
+
+# Its pinned transport awaits a batch's shared request gate before each target connection,
+# so a SQLi slice may run candidates concurrently through it (scan.sqli_concurrency).
+_execute_agent_scanner_process.enforces_request_gate = True  # type: ignore[attr-defined]
 
 
 async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:

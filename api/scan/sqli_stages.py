@@ -176,8 +176,13 @@ async def run_staged_sqli_attempt(
     run_stage: RunStage,
     checkpoint: Checkpoint,
     cancelled: Callable[[], bool],
+    measured: Callable[[float], None] | None = None,
 ) -> StagedAttempt:
-    """Verify one candidate stage by stage from what earlier checkpoints left unsettled."""
+    """Verify one candidate stage by stage from what earlier checkpoints left unsettled.
+
+    ``measured`` receives each response time a finished stage measured, so a batch running
+    candidates concurrently can size its slots from the target's latency (``sqli_concurrency``).
+    """
     remaining = {name: max(0, int(amount)) for name, amount in budget.items()}
     consumed: dict[str, int] = {name: 0 for name in budget}
     observations: list[Mapping[str, Any]] = []
@@ -257,6 +262,8 @@ async def run_staged_sqli_attempt(
         took = int(spent.get("tool_wall_seconds", 0))
         if sent > 0 and took > 0:
             latency = max(0.0, took / sent - delay)
+            if measured is not None:
+                measured(latency)
         record = {
             "kind": STAGE_RECORD_KIND, "technique": technique, "status": status,
             "timed_out": stage_killed, "budget_consumed": dict(spent),
