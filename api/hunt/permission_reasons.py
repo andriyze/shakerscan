@@ -75,6 +75,9 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     "scope_credential_other_host": ReasonSpec(422),
     "scope_origin_invalid": ReasonSpec(422),
     "scope_destination_blocked": ReasonSpec(403),
+    # The worker refused an admitted action before any traffic (its authority changed in between);
+    # the hold is released at once (D39).
+    "dispatch_authority_rejected": ReasonSpec(403),
     # Approval.
     "approval_receipt_required": ReasonSpec(403),
     "approval_scope_changed": ReasonSpec(403),

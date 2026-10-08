@@ -24,6 +24,7 @@ on:
       - 'api/targets/asset_migration.py'
       - 'api/public_api_contract.py'
       - 'api/runtime/credential_store.py'
+      - 'api/worker.py'
       - 'db/init.sql'
       - 'ui/**'
       - '.github/workflows/hunt-record-integrity.yml'
@@ -49,6 +50,7 @@ on:
       - 'api/targets/asset_migration.py'
       - 'api/public_api_contract.py'
       - 'api/runtime/credential_store.py'
+      - 'api/worker.py'
       - 'db/init.sql'
       - 'ui/**'
       - '.github/workflows/hunt-record-integrity.yml'
@@ -114,6 +116,7 @@ jobs:
             tests/test_hunt_coverage_ledger_postgres.py \
             tests/test_hunt_credential_uses_postgres.py \
             tests/test_hunt_permission_requests_postgres.py \
+            tests/test_hunt_live_grant_dispatch_postgres.py \
             tests/test_hunt_refusal_retry_postgres.py \
             tests/test_public_retry_conflict_postgres.py \
             tests/test_hunt_finding_attribution_postgres.py \

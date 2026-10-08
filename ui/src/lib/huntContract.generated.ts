@@ -346,6 +346,7 @@ export const HUNT_START_CONTRACT = {
     "credential_version_changed",
     "credentials_not_distinct",
     "direct_origin_address_required",
+    "dispatch_authority_rejected",
     "hunt_not_runnable",
     "idempotency_key_reused",
     "permission_denied",
