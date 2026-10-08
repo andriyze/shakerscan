@@ -120,6 +120,7 @@ jobs:
             tests/test_hunt_refusal_retry_postgres.py \
             tests/test_public_retry_conflict_postgres.py \
             tests/test_hunt_finding_attribution_postgres.py \
+            tests/test_hunt_concurrent_verification_postgres.py \
             tests/test_service_intelligence_postgres.py
           python scripts/check_module_size.py
       - name: Hunt candidates, host holds and endpoint inventory in real PostgreSQL

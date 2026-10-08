@@ -68,6 +68,7 @@ from .settlement import (
 )
 from .verification_refusal import VerificationRefused, raise_returned_refusal, refused_before_traffic
 from .dispatch_authority import GrantedDestinationRecheck, granted_destination_recheck
+from .concurrent_verification import verify_after_concurrent_verifier
 from .finding_verifications import attribute_verified_finding
 from .credential_uses import HuntCredentialRefusal, admit_action_credentials, record_credential_uses
 from .permission_admission import (
@@ -4419,14 +4420,18 @@ async def _execute_hunt_candidate_verification(
         # not depend on AI_OPS_ROUTER_EXECUTE_ENABLED. Every other verifier gate still applies.
         # The verifier resolves this Hunt's attached credential list and records each use
         # against this action; the same verifier outside a Hunt is unchanged.
+        # Another Hunt verifying the same finding at this moment holds its lock: wait for it,
+        # within a bound, then verify as a later verifier does (D40).
         with refused_before_traffic(), hunt_credential_scope(
             HuntCredentialScope.for_action(run, context, action_id)
         ):
-            result = await _verify_suspected_finding_workflow(
-                candidate_uuid,
-                str(policy["approval_receipt_id"]),
-                created_by=f"hunt_v2:{run['id']}",
-                autonomous=False,
+            result = await verify_after_concurrent_verifier(
+                lambda: _verify_suspected_finding_workflow(
+                    candidate_uuid,
+                    str(policy["approval_receipt_id"]),
+                    created_by=f"hunt_v2:{run['id']}",
+                    autonomous=False,
+                ),
             )
         raise_returned_refusal(result)
         verified_finding_id = (

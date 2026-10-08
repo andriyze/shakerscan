@@ -367,6 +367,7 @@ export const HUNT_START_CONTRACT = {
     "target_locator_changed",
     "target_not_found",
     "verification_family_unsupported",
+    "verification_in_progress",
     "verification_method_unsupported",
     "verification_route_unresolved"
   ],

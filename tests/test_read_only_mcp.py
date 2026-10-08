@@ -785,3 +785,21 @@ def test_mcp_main_sends_a_service_token_to_a_remote_https_gateway_only(monkeypat
     monkeypatch.delenv("SHAKERSCAN_MCP_ALLOW_REMOTE_API")
     monkeypatch.setenv("SHAKERSCAN_API_URL", "http://127.0.0.1:8080")
     assert mcp.main() == 0 and captured["client"].api_token is None
+
+
+def test_mcp_verify_sends_the_attempt_a_retry_needs():
+    """D40: a verification refused because another one was still running names attempt=2; the
+    tool can send it (a new attempt is a fresh action, not a replay of the refusal)."""
+    class VerifyClient(FakeClient):
+        def request_json(self, method, path, payload=None):
+            if path.endswith("/verify"):
+                self.calls.append((method, path, payload))
+                return {"verification": {"verified": True}}
+            return super().request_json(method, path, payload)
+
+    client = VerifyClient()
+    hunt, candidate = "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"
+    client.call_tool("shakerscan_hunt_verify", {"hunt_id": hunt, "candidate_id": candidate, "attempt": 2})
+    assert client.calls[-1] == ("POST", f"/hunts/{hunt}/candidates/{candidate}/verify", {"attempt": 2})
+    client.call_tool("shakerscan_hunt_verify", {"hunt_id": hunt, "candidate_id": candidate})
+    assert client.calls[-1][2] in (None, {})
