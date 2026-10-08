@@ -704,6 +704,22 @@ def _private_networks_allowed() -> bool:
         return False
 
 
+def _judged_addresses(address: Any) -> tuple[Any, ...]:
+    try:
+        from scanner_tools.address_classes import judged_addresses
+    except ModuleNotFoundError:
+        from scanner.scanner_tools.address_classes import judged_addresses
+    return judged_addresses(address)
+
+
+def _cloud_service_address(address: Any) -> bool:
+    try:
+        from scanner_tools.address_classes import cloud_service_address, judged_addresses
+    except ModuleNotFoundError:
+        from scanner.scanner_tools.address_classes import cloud_service_address, judged_addresses
+    return any(cloud_service_address(item) for item in judged_addresses(address))
+
+
 def _ip_addresses(value: Any, field: str) -> tuple[str, ...]:
     """Operator-confirmed literal addresses. Hostnames are refused on purpose.
 
@@ -742,9 +758,12 @@ def _ip_addresses(value: Any, field: str) -> tuple[str, ...]:
             raise HuntStartContractError(
                 f"{field} must contain literal IP addresses"
             ) from exc
-        comparable = getattr(parsed, "ipv4_mapped", None) or parsed
-        if any(
-            comparable.version == network.version and comparable in network
+        # The shared classifier's decoding (``address_classes.judged_addresses``): NAT64, SIIT,
+        # 6to4 and Teredo spellings are judged as the IPv4 address they reach, not only the
+        # IPv4-mapped one, and a cloud metadata or platform-service address is never an origin.
+        if _cloud_service_address(parsed) or any(
+            candidate.version == network.version and candidate in network
+            for candidate in _judged_addresses(parsed)
             for network in forbidden_networks
         ):
             raise HuntStartContractError(
