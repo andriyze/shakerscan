@@ -518,9 +518,28 @@ async def revoke_grant(conn: Any, hunt_id: Any, grant_id: Any, *, revoked_by: st
     return {"replayed": False, "grant": public_grant(updated)}
 
 
+# How a parked action the agent never retried settles when its Hunt ends, by the outcome of the
+# request it waited for (D42: a denied or expired request used to read "withdrawn").
+PARKED_ENDINGS: Mapping[str, tuple[str, str]] = {
+    "denied": ("permission_denied", "The person denied the permission this action waited for; it did not run."),
+    "expired": ("permission_expired",
+                "The permission request expired before anyone decided it; the action did not run."),
+    "granted": ("permission_unused", "The permission was granted, but the action was not called again "
+                "before the Hunt ended; it did not run."),
+    "withdrawn": ("permission_withdrawn", "The Hunt ended before this permission was granted."),
+}
+
+
 async def settle_for_ended_hunt(conn: Any, hunt_id: Any, *, actor: str, source: str) -> None:
-    """Withdraw pending requests and settle parked actions blocked, in the finishing transaction."""
+    """Withdraw pending requests and settle parked actions blocked, in the finishing transaction.
+
+    A request past its expiry ends ``expired``, not withdrawn, and each parked action is labelled
+    by the outcome of its own request.
+    """
+    from .permission_store import expire_due
+
     hunt_uuid = uuid.UUID(str(hunt_id))
+    await expire_due(conn, hunt_uuid)
     rows = await conn.fetch(
         """UPDATE hunt_permission_requests SET status='withdrawn', decided_at=NOW()
            WHERE hunt_run_id=$1 AND status='pending' RETURNING id""",
@@ -529,18 +548,29 @@ async def settle_for_ended_hunt(conn: Any, hunt_id: Any, *, actor: str, source: 
     for row in rows:
         await record_event(conn, hunt_id=hunt_uuid, request_id=row["id"], event="withdrawn",
                            actor=actor, source=source)
+    # Every pending request was just withdrawn, so a parked action's request is granted,
+    # denied, expired or withdrawn; an action whose request is gone reads as withdrawn.
     await conn.execute(
-        """UPDATE hunt_actions
-           SET status='blocked', completed_at=NOW(),
-               result_summary=result_summary || jsonb_build_object(
-                   'error','permission_withdrawn','reason_code','permission_withdrawn',
-                   'message','The Hunt ended before this permission was granted.')
-           WHERE hunt_run_id=$1 AND status='awaiting_permission'""",
-        hunt_uuid,
+        """WITH ending AS (
+               SELECT * FROM jsonb_to_recordset($2::jsonb) AS e(status text, code text, message text)
+           )
+           UPDATE hunt_actions a
+           SET status='blocked', completed_at=NOW(), result_summary=a.result_summary || (
+               SELECT jsonb_build_object('error', e.code, 'reason_code', e.code, 'message', e.message)
+               FROM ending e
+               WHERE e.status = COALESCE((
+                   SELECT r.status FROM hunt_permission_requests r
+                   WHERE r.hunt_run_id=a.hunt_run_id
+                     AND r.id::text = a.result_summary->>'permission_request_id'
+               ), 'withdrawn'))
+           WHERE a.hunt_run_id=$1 AND a.status='awaiting_permission'""",
+        hunt_uuid, json.dumps([
+            {"status": status, "code": code, "message": message}
+            for status, (code, message) in PARKED_ENDINGS.items()
+        ]),
     )
 
-
 __all__ = [
-    "GrantRefused", "LEDGER_TO_BUDGET", "apply_grant", "decide", "hunt_finished", "revoke_grant",
+    "GrantRefused", "LEDGER_TO_BUDGET", "PARKED_ENDINGS", "apply_grant", "decide", "hunt_finished", "revoke_grant",
     "settle_for_ended_hunt", "standing_authorization", "try_preauthorized_grant", "withdraw_request",
 ]

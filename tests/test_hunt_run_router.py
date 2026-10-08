@@ -616,7 +616,11 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
             self.cleared_http_captures = True
 
         async def fetch(self, query, *args):
-            assert "UPDATE hunt_permission_requests SET status='withdrawn'" in query
+            # The permission settlement of a finished Hunt: due requests expire (D42), then
+            # pending ones are withdrawn.
+            assert any(marker in query for marker in (
+                "SET status='expired'", "UPDATE hunt_permission_requests SET status='withdrawn'",
+            )), query
             return []
 
     connection = Connection()
@@ -723,7 +727,11 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
             self.cleared_http_captures = True
 
         async def fetch(self, query, *args):
-            assert "UPDATE hunt_permission_requests SET status='withdrawn'" in query
+            # The permission settlement of a finished Hunt: due requests expire (D42), then
+            # pending ones are withdrawn.
+            assert any(marker in query for marker in (
+                "SET status='expired'", "UPDATE hunt_permission_requests SET status='withdrawn'",
+            )), query
             return []
 
     connection = Connection()

@@ -111,6 +111,8 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     "permission_denied": ReasonSpec(403),
     "permission_expired": ReasonSpec(403),
     "permission_withdrawn": ReasonSpec(409),
+    # Granted, but the agent never called the action again before the Hunt ended (D42).
+    "permission_unused": ReasonSpec(409),
 }
 
 PERMISSION_REQUIRED = "permission_required"

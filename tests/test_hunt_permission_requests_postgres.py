@@ -458,6 +458,58 @@ def test_a_hunt_that_ends_withdraws_its_requests_and_a_later_approval_grants_not
     assert run(env, env.conn.fetchval("SELECT COUNT(*) FROM hunt_permission_grants")) == 0
 
 
+def test_a_parked_action_never_retried_is_labelled_by_its_requests_outcome_when_the_hunt_ends(env):
+    """D42: every parked action settled ``permission_withdrawn`` at the end, even when its request
+    was denied or had expired (live: cda6999c, 65e6b4b6, 99f3fbe6 denied; 360d5f1c expired)."""
+    from hunt.permission_admission import settle_refusal
+    from hunt.permission_reasons import HuntRefusal
+
+    hunt = run(env, env.hunt(budget={"max_capability_calls": 1}, used={"agent_actions": 1}))
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, "end-granted-0001"))  # budget.raise, granted and never retried
+    (budget_request,) = run(env, env.requests(hunt))
+    run(env, env.decide(hunt, budget_request))
+    parked = {}
+    for label, capability, flag in (("denied", "xss.verify", "active-testing"),
+                                    ("expired", "http.request", "state-changing"),
+                                    ("pending", "web.probe", "tcp-discovery")):
+        action_id = uuid.uuid4()
+        with pytest.raises(HTTPException):
+            run(env, settle_refusal(env.pool, hunt_id=hunt["id"], action_id=action_id, name=capability,
+                                    input_summary={}, input_digest="d" * 64, refusal=HuntRefusal(
+                                        "capability_requires_active_testing", "x",
+                                        subject={"capability": capability, "flag": flag})))
+        parked[label] = action_id
+    requests = {json.loads(item["subject_json"]).get("capability"): item for item in run(env, env.requests(hunt))}
+    run(env, env.decide(hunt, requests["xss.verify"], decision="deny", key="decision-deny-0001"))
+    run(env, env.conn.execute(
+        """UPDATE hunt_permission_requests SET created_at=NOW()-interval '2 days',
+                  expires_at=NOW()-interval '1 second' WHERE id=$1""", requests["http.request"]["id"]))
+
+    async def finish():
+        async with env.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("UPDATE hunt_runs SET status='completed', completed_at=NOW() WHERE id=$1", hunt["id"])
+                await settle_for_ended_hunt(conn, hunt["id"], actor="hunt", source="hunt_finished")
+
+    run(env, finish())
+
+    async def summary(action_id):
+        row = await env.conn.fetchrow("SELECT status, result_summary FROM hunt_actions WHERE id=$1", action_id)
+        assert row["status"] == "blocked"
+        return json.loads(row["result_summary"])
+
+    assert run(env, summary(parked["denied"]))["reason_code"] == "permission_denied"
+    assert "denied" in run(env, summary(parked["denied"]))["message"]
+    assert run(env, summary(parked["expired"]))["reason_code"] == "permission_expired"
+    granted = run(env, env.action(hunt, "end-granted-0001"))
+    assert granted["status"] == "blocked"
+    assert json.loads(granted["result_summary"])["reason_code"] == "permission_unused"
+    assert run(env, summary(parked["pending"]))["reason_code"] == "permission_withdrawn"
+    statuses = {json.loads(item["subject_json"]).get("capability"): item["status"] for item in run(env, env.requests(hunt))}
+    assert statuses == {None: "granted", "xss.verify": "denied", "http.request": "expired", "web.probe": "withdrawn"}
+
+
 # ---------------------------------------------------------------------------------------------
 # Kinds and hard limits.
 

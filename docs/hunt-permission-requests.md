@@ -318,7 +318,9 @@ cached-refusal replay. Work that already ran is never re-dispatched.
   later approval returns "this Hunt has ended; nothing was granted", and "remember" is not
   applied either.
 - **Parked action whose request the agent never retried.** It stays parked until the Hunt ends,
-  then settles `blocked`.
+  then settles `blocked` with the outcome of its own request (D42): `permission_denied`,
+  `permission_expired`, `permission_unused` (granted, never called again) or
+  `permission_withdrawn` (still pending when the Hunt ended).
 
 ## Security analysis
 
