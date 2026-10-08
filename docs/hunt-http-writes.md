@@ -52,8 +52,8 @@ When the operator receives a PIN, save it through the existing encrypted credent
 UI/API (`POST /credential-profiles`) for this exact target. Use an HTTP credential kind
 such as `api_key_header`, enable `http.request`, and retain the returned profile ID/version.
 The profile creation input is sensitive; use the normal secret-entry path, not an inline
-Hunt body or shell-history command. Existing standing authorization covers the selected
-target credential. A newly supplied PIN does not require restarting this Hunt.
+Hunt body or shell-history command. Existing standing authorization covers the credentials
+attached to this target. A newly supplied PIN does not require restarting this Hunt.
 
 The next `http.request` input may be:
 
