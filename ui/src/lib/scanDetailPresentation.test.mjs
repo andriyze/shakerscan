@@ -255,7 +255,7 @@ test('the testing tile names what active permission bought, or warns that it bou
     options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure'] } },
     result: { findings: [], result: {} },
   }, { band: 'limited', label: 'Limited coverage' })
-  assert.equal(ran.testingSummary, 'Active · XSS, SQLi, exposure')
+  assert.equal(ran.testingSummary, 'Active · XSS, SQLi')
   assert.equal(ran.testingWarning, null)
 
   const permittedOnly = scanResultPresentation({
@@ -270,6 +270,14 @@ test('the testing tile names what active permission bought, or warns that it bou
     result: { findings: [], result: {} },
   }, { band: 'limited', label: 'Limited coverage' })
   assert.equal(passive.testingSummary, 'Passive only')
+
+  // Read-only exposure checks run in the passive preset; they are not active work, so a run
+  // that allowed active testing but selected only passive families still warns.
+  const exposureOnly = scanResultPresentation({
+    options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['recon', 'nuclei_passive', 'sensitive_exposure'] } },
+    result: { findings: [], result: {} },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.equal(exposureOnly.testingSummary, 'Active allowed · none selected')
 })
 
 

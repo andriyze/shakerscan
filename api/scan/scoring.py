@@ -67,9 +67,10 @@ ASSURANCE_COMPONENTS: tuple[tuple[str, int], ...] = (
 # Families whose batches send active verification traffic at a candidate. A candidate one of
 # them attempted is active verification that ran, whether or not anything was then eligible
 # for proof escalation: crediting escalation alone told an operator "active verification never
-# ran" on a Scan whose XSS verifier had attempted its only candidate.
+# ran" on a Scan whose XSS verifier had attempted its only candidate. sensitive_exposure is
+# read-only (it runs in passive Scans too), so its reads earn no active-verification credit.
 ACTIVE_VERIFIER_FAMILIES = frozenset({
-    "xss", "sqli", "nosqli", "authz_surface", "bola", "sensitive_exposure",
+    "xss", "sqli", "nosqli", "authz_surface", "bola",
 })
 
 

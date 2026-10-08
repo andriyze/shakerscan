@@ -48,10 +48,12 @@ SCAN_V2_FAMILY_NAMES = (
     "sensitive_exposure", "nosqli", "authz_surface",
 )
 SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
-    "passive": ("recon", "nuclei_passive"),
-    # sensitive_exposure stays opt-in: it carries its own Lab/deep prerequisite,
-    # and a default that fails submission is no default.
-    "standard_active": ("recon", "nuclei_passive", "xss", "sqli"),
+    # sensitive_exposure is read-only GET traffic (ADR 0001 passive) and the only family
+    # that verifies exposed .env, .git, actuator, OpenAPI-secret, backup and debug
+    # files. Kept opt-in behind a Lab/deep gate it never ran: every soak Scan of the
+    # honeypot verified none of the four exposures a Hunt proved in seconds.
+    "passive": ("recon", "nuclei_passive", "sensitive_exposure"),
+    "standard_active": ("recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure"),
     "custom": (),
 }
 # The minimum candidates a profile's ROOT plan executes per family when the target
@@ -201,7 +203,7 @@ def public_scan_contract() -> dict[str, Any]:
             "risk_level": specification.risk_level,
             "requires_active_testing": bool(specification.is_active),
             "requires_credentials": specification.requires_credentials,
-            "default_enabled": name in {"recon", "nuclei_passive"},
+            "default_enabled": name in SCAN_FAMILY_PRESETS["passive"],
             "capabilities": list(_SCAN_V2_FAMILY_CAPABILITIES[name]),
         })
     limits = []
@@ -232,10 +234,11 @@ def public_scan_contract() -> dict[str, Any]:
         "passive_coverage": {
             "description": (
                 "Every passive Scan runs the target baseline, surface discovery, "
-                "and the reviewed read-only template pack unless a family is excluded."
+                "the reviewed read-only template pack and the read-only verified "
+                "exposure checks unless a family is excluded."
             ),
             "baseline_capabilities": list(_SCAN_V2_BASELINE_CAPABILITIES),
-            "default_families": ["recon", "nuclei_passive"],
+            "default_families": list(SCAN_FAMILY_PRESETS["passive"]),
         },
         "credentials": {
             "supported_auth_kinds": sorted(

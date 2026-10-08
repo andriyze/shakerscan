@@ -42,8 +42,10 @@ def _sqli_round_fixture():
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=min(20_000, contract.budget.max_http_requests),
         required_capabilities=("templates.passive_batch", "sqli.verify_batch"),
+        # Mirrors admission: the passive preset's read-only exposure checks are allowed work.
         allowed_capabilities=(
             "templates.passive_batch", "sqli.verify_batch", "sqli.prove_batch",
+            "exposure.verify_batch",
         ),
     )
     template = build_canonical_scan_nuclei_template_manifest(

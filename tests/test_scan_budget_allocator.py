@@ -119,10 +119,11 @@ def test_shard_allocator_leaves_unassigned_residual_outside_pure_finalizer():
     execution = ScanExecutionPlan(
         # This fixture exercises residual accounting for a pure-finalizer
         # endpoint shard. Keep Nuclei out of scope explicitly so the compiler
-        # does not (correctly) require the canonical immutable template pack.
+        # does not (correctly) require the canonical immutable template pack,
+        # and the passive exposure checks so the shard plans no work at all.
         policy=ScanPolicy(
             active_testing=False,
-            exclude_families=("nuclei_passive",),
+            exclude_families=("nuclei_passive", "sensitive_exposure"),
         ),
         budget_profile="fast",
         budget=budget,

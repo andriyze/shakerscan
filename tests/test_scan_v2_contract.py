@@ -25,8 +25,11 @@ def test_canonical_scan_defaults_to_balanced_passive_v2():
     assert contract.execution_plan.generation == "v2"
     assert contract.execution_plan.family_preset == "passive"
     assert contract.execution_plan.requested_families == ()
-    assert contract.execution_plan.resolved_families == ("recon", "nuclei_passive")
-    assert contract.policy.include_families == ("recon", "nuclei_passive")
+    # Read-only exposure checks are passive traffic (ADR 0001) and part of the default.
+    assert contract.execution_plan.resolved_families == (
+        "recon", "nuclei_passive", "sensitive_exposure",
+    )
+    assert contract.policy.include_families == ("recon", "nuclei_passive", "sensitive_exposure")
     assert not hasattr(contract, "execution_scan_type")
     assert not hasattr(contract, "legacy_scan_type")
     assert not hasattr(contract, "deprecations")
@@ -76,7 +79,9 @@ def test_active_permission_changes_policy_not_scan_identity():
     assert passive.policy.active_testing is False
     assert active.policy.active_testing is True
     # Permission alone does not change the family set the operator chose.
-    assert active.execution_plan.resolved_families == ("recon", "nuclei_passive")
+    assert active.execution_plan.resolved_families == (
+        "recon", "nuclei_passive", "sensitive_exposure",
+    )
     assert passive.execution_plan.digest != active.execution_plan.digest
     # Without a chosen preset, permission selects the standard active set, and
     # the run is still the one Scan engine.
@@ -170,15 +175,15 @@ def test_family_policy_uses_only_canonical_registry_names():
     # The standard active set is implied by the permission; the explicit
     # families join it rather than replace it.
     assert contract.execution_plan.resolved_families == (
-        "recon", "nuclei_passive", "xss", "sqli",
+        "recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure",
     )
     assert contract.policy.include_families == (
-        "recon", "nuclei_passive", "xss", "sqli",
+        "recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure",
     )
     assert contract.policy.exclude_families == ("nuclei_active",)
     assert resolve_scan_contract(
         policy={"include_families": ["all"]},
-    ).policy.include_families == ("recon", "nuclei_passive")
+    ).policy.include_families == ("recon", "nuclei_passive", "sensitive_exposure")
     with pytest.raises(ValueError, match="unknown family"):
         resolve_scan_contract(policy={"include_families": ["legacy_magic"]})
     with pytest.raises(ValueError, match="cannot contain all"):
@@ -196,7 +201,7 @@ def test_standard_active_and_custom_presets_resolve_once():
     })
     assert standard.execution_plan.requested_families == ()
     assert standard.execution_plan.resolved_families == (
-        "recon", "nuclei_passive", "xss", "sqli",
+        "recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure",
     )
     assert standard.policy.include_families == standard.execution_plan.resolved_families
     # Allowing active testing without naming a preset is a request for the
@@ -206,7 +211,9 @@ def test_standard_active_and_custom_presets_resolve_once():
     assert implied.execution_plan.resolved_families == standard.execution_plan.resolved_families
     assert resolve_scan_contract(policy={"active_testing": False}).execution_plan.family_preset == "passive"
     explicit = resolve_scan_contract(policy={"active_testing": True, "preset": "passive"})
-    assert explicit.execution_plan.resolved_families == ("recon", "nuclei_passive")
+    assert explicit.execution_plan.resolved_families == (
+        "recon", "nuclei_passive", "sensitive_exposure",
+    )
 
     custom = resolve_scan_contract(policy={
         "preset": "custom",
@@ -231,9 +238,11 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
         "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
         "sensitive_exposure", "nosqli", "authz_surface",
     ]
-    assert contract["passive_coverage"]["default_families"] == ["recon", "nuclei_passive"]
+    assert contract["passive_coverage"]["default_families"] == [
+        "recon", "nuclei_passive", "sensitive_exposure",
+    ]
     assert contract["family_presets"]["standard_active"] == [
-        "recon", "nuclei_passive", "xss", "sqli",
+        "recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure",
     ]
     assert "legacy_capability" not in contract["credentials"]
     assert "http.request" in contract["credentials"]["semantic_capabilities"]
@@ -291,7 +300,8 @@ def test_active_family_admission_is_derived_from_the_check_registry():
     from check_registry import get_check_family
     from scan.contracts import SCAN_V2_FAMILY_NAMES
 
-    checked_active = 0
+    checked_active: set[str] = set()
+    checked_passive: set[str] = set()
     for family in SCAN_V2_FAMILY_NAMES:
         spec = get_check_family(family)
         assert spec is not None, f"{family} is not in the check registry"
@@ -301,13 +311,18 @@ def test_active_family_admission_is_derived_from_the_check_registry():
             "include_families": [family],
         }
         if spec.is_active:
-            checked_active += 1
+            checked_active.add(family)
             with pytest.raises(ValueError, match="active_testing is required"):
                 resolve_scan_contract(budget_profile="balanced", policy=policy)
         else:
+            checked_passive.add(family)
             resolved = resolve_scan_contract(budget_profile="balanced", policy=policy)
             assert family in resolved.policy.include_families
-    assert checked_active >= 7, "expected every active Scan family to be covered"
+    # Exact, so a reclassification is a reviewed decision rather than a silent drift.
+    # sensitive_exposure is read-only GET traffic: ADR 0001 places it with the
+    # immutable content-discovery wordlist and the reviewed passive templates.
+    assert checked_active == {"nuclei_active", "xss", "sqli", "bola", "nosqli", "authz_surface"}
+    assert checked_passive == {"recon", "nuclei_passive", "sensitive_exposure"}
 
 
 def test_unknown_scan_family_cannot_widen_passive_admission():

@@ -286,13 +286,13 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "capabilities": [
         "exposure.verify_batch"
       ],
-      "default_enabled": false,
-      "description": "Deterministic probing for exposed secrets, VCS/env files, metrics, listings, and backups.",
+      "default_enabled": true,
+      "description": "Read-only verified exposure checks: secrets in env, actuator, OpenAPI and config files, VCS metadata, backups, debug pages, metrics, and listings.",
       "label": "Sensitive Exposure",
       "name": "sensitive_exposure",
-      "requires_active_testing": true,
+      "requires_active_testing": false,
       "requires_credentials": false,
-      "risk_level": "high"
+      "risk_level": "medium"
     },
     {
       "capabilities": [
@@ -323,13 +323,15 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     "custom": [],
     "passive": [
       "recon",
-      "nuclei_passive"
+      "nuclei_passive",
+      "sensitive_exposure"
     ],
     "standard_active": [
       "recon",
       "nuclei_passive",
       "xss",
-      "sqli"
+      "sqli",
+      "sensitive_exposure"
     ]
   },
   "generation": "v2",
@@ -343,9 +345,10 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
     ],
     "default_families": [
       "recon",
-      "nuclei_passive"
+      "nuclei_passive",
+      "sensitive_exposure"
     ],
-    "description": "Every passive Scan runs the target baseline, surface discovery, and the reviewed read-only template pack unless a family is excluded."
+    "description": "Every passive Scan runs the target baseline, surface discovery, the reviewed read-only template pack and the read-only verified exposure checks unless a family is excluded."
   },
   "request_collections": {
     "active_policy": "confirmed_active",

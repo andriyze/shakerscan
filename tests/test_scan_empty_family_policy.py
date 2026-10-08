@@ -17,11 +17,11 @@ from api.scan.contracts import resolve_scan_contract
 
 
 @pytest.mark.parametrize("policy", [
-    {"include_families": [], "exclude_families": ["recon", "nuclei_passive"]},
-    {"preset": "passive", "exclude_families": ["nuclei_passive", "recon"]},
+    {"include_families": [], "exclude_families": ["recon", "nuclei_passive", "sensitive_exposure"]},
+    {"preset": "passive", "exclude_families": ["nuclei_passive", "recon", "sensitive_exposure"]},
     {
         "active_testing": True,
-        "exclude_families": ["recon", "nuclei_passive", "xss", "sqli"],
+        "exclude_families": ["recon", "nuclei_passive", "xss", "sqli", "sensitive_exposure"],
     },
 ])
 def test_a_policy_that_excludes_every_family_is_refused(policy):
@@ -33,20 +33,28 @@ def test_excluding_some_families_is_still_admitted():
     contract = resolve_scan_contract(
         budget_profile="balanced", policy={"exclude_families": ["nuclei_passive"]},
     )
-    assert contract.execution_plan.resolved_families == ("recon",)
+    assert contract.execution_plan.resolved_families == ("recon", "sensitive_exposure")
+    # The soak probe's exclusions no longer empty the passive preset: its read-only
+    # exposure checks still run, so the Scan examines something and is admitted.
+    soak = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={"include_families": [], "exclude_families": ["recon", "nuclei_passive"]},
+    )
+    assert soak.execution_plan.resolved_families == ("sensitive_exposure",)
 
 
 def test_the_preview_refuses_it_with_a_precise_422():
     with pytest.raises(read_router.HTTPException) as refused:
         asyncio.run(read_router.preview_scan_contract(
             read_router.ScanFamilyPreviewRequest(
-                preset="passive", exclude_families=["recon", "nuclei_passive"],
+                preset="passive",
+                exclude_families=["recon", "nuclei_passive", "sensitive_exposure"],
             )
         ))
     assert refused.value.status_code == 422
     assert refused.value.detail == (
         "exclude_families removes every family of the passive preset "
-        "(nuclei_passive, recon); select at least one family"
+        "(nuclei_passive, recon, sensitive_exposure); select at least one family"
     )
 
 

@@ -281,11 +281,16 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
     ),
     CheckFamilySpec(
         name="sensitive_exposure",
-        phase="active",
+        # Passive under ADR 0001: every request is a GET of a fixed reviewed path or of an
+        # endpoint discovery already reached, with redirects off and no input varied --
+        # the same traffic class as the immutable content-discovery wordlist and the
+        # reviewed passive templates, which already read /.git/config and web.config.
+        # It therefore runs in the passive preset without active-testing authority.
+        phase="passive",
         family="disclosure",
         label="Sensitive Exposure",
-        is_active=True,
-        risk_level="high",
+        is_active=False,
+        risk_level="medium",
         telemetry_schema="active_endpoint_attempt_v1",
         proof_contract=("request_url", "response_status", "response_body_hash", "exposure_class"),
         severity_rules={
@@ -308,7 +313,10 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         ),
         scanner_focus_order=40,
         runnable=False,
-        description="Deterministic probing for exposed secrets, VCS/env files, metrics, listings, and backups.",
+        description=(
+            "Read-only verified exposure checks: secrets in env, actuator, OpenAPI and config files, "
+            "VCS metadata, backups, debug pages, metrics, and listings."
+        ),
     ),
     CheckFamilySpec(
         name="nosqli",

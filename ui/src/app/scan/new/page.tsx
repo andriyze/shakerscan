@@ -175,8 +175,8 @@ export default function NewScanPage() {
   const excludeFamilies: string[] = []
   const resolvedFamilies = contractPreview?.resolved_families ?? (
     familyPreset === 'standard_active'
-      ? ['recon', 'nuclei_passive', 'xss', 'sqli']
-      : familyPreset === 'passive' ? ['recon', 'nuclei_passive'] : customFamilies
+      ? ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure']
+      : familyPreset === 'passive' ? ['recon', 'nuclei_passive', 'sensitive_exposure'] : customFamilies
   )
 
   useEffect(() => {
@@ -670,7 +670,7 @@ export default function NewScanPage() {
               </div>
               <div className="mt-3 grid gap-2 md:grid-cols-3">
                 {([
-                  ['passive', 'Passive', 'Recon and reviewed passive templates'],
+                  ['passive', 'Passive', 'Recon, reviewed passive templates and verified exposure checks'],
                   ['standard_active', 'Standard active', 'Passive coverage plus XSS and SQLi'],
                   ['custom', 'Custom', 'Choose an exact family set'],
                 ] as const).map(([value, label, description]) => (

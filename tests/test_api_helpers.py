@@ -22063,9 +22063,11 @@ def test_passive_scan_admission_continues_its_template_pack_over_discovery():
     active = {
         "xss.verify_batch", "sqli.verify_batch", "templates.active_batch",
         "xss.request_verify_batch", "sqli.request_verify_batch", "authz.verify",
-        "exposure.verify_batch", "nosqli.verify_batch", "authz_surface.verify_batch",
+        "nosqli.verify_batch", "authz_surface.verify_batch",
     }
     assert not active & set(continuation.allowed_capabilities)
+    # The read-only exposure checks are passive work (ADR 0001) and continue too.
+    assert "exposure.verify_batch" in continuation.allowed_capabilities
     assert continuation.budget_ceiling["state_changing_requests"] == 0
 
 

@@ -319,10 +319,12 @@ export function notExaminedExplanation(report) {
   return 'The responses observed on the bound origin did not expose application content.'
 }
 
-const ACTIVE_FAMILIES = new Set(['xss', 'sqli', 'nuclei_active', 'bola', 'sensitive_exposure', 'nosqli', 'authz_surface'])
+// sensitive_exposure is read-only GET traffic and runs in passive Scans, so it is not
+// something active permission bought.
+const ACTIVE_FAMILIES = new Set(['xss', 'sqli', 'nuclei_active', 'bola', 'nosqli', 'authz_surface'])
 const ACTIVE_FAMILY_LABELS = {
   xss: 'XSS', sqli: 'SQLi', nuclei_active: 'active templates', bola: 'BOLA',
-  sensitive_exposure: 'exposure', nosqli: 'NoSQLi', authz_surface: 'authz',
+  nosqli: 'NoSQLi', authz_surface: 'authz',
 }
 
 // The one thing to do next, derived from what limited this run. A page that lists every gap

@@ -373,11 +373,21 @@ def test_explicitly_named_families_satisfy_the_lab_deep_gate():
     selected at all. Naming an active-only family explicitly already requires
     ``active_testing`` at contract resolution, so it stands in for the boolean.
     """
-    lab_gated = ["sensitive_exposure", "nosqli"]
+    lab_gated = ["nosqli"]
     assert r.scan_family_precondition_errors(lab_gated, {}, exploit_depth=False)
     assert r.scan_family_precondition_errors(
         lab_gated, {}, exploit_depth=False, deep_intent_families=lab_gated,
     ) == []
+
+
+def test_read_only_exposure_checks_carry_no_lab_gate():
+    """sensitive_exposure sends only GETs of fixed paths and discovered endpoints.
+
+    ADR 0001 classes that as passive traffic, so it runs in the passive preset. A Lab/deep
+    gate on it is what kept it out of every preset: soak Scans of the honeypot verified
+    none of the .env, .git, actuator and OpenAPI exposures a Hunt proved in seconds.
+    """
+    assert r.scan_family_precondition_errors(["sensitive_exposure"], {}, exploit_depth=False) == []
 
 
 def test_deep_intent_covers_only_the_families_actually_named():

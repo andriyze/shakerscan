@@ -61,7 +61,7 @@ def test_active_testing_alone_resolves_to_the_standard_active_preset():
         },
         approval_receipt_id="a" * 32,
     )
-    assert contract.policy.include_families == ("recon", "xss", "sqli")
+    assert contract.policy.include_families == ("recon", "xss", "sqli", "sensitive_exposure")
     assert contract.execution_plan.family_preset == "standard_active"
 
 

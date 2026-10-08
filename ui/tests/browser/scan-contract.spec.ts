@@ -63,7 +63,9 @@ test.beforeEach(async ({ page }) => {
       body: JSON.stringify({
         preset: request.preset,
         requested_families: request.include_families || [],
-        resolved_families: active ? ['recon', 'nuclei_passive', 'xss', 'sqli'] : ['recon', 'nuclei_passive'],
+        resolved_families: active
+          ? ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure']
+          : ['recon', 'nuclei_passive', 'sensitive_exposure'],
         derived_prerequisites: [],
         active_permissions: {
           active_testing: active,

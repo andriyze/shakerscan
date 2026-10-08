@@ -261,13 +261,32 @@ before redaction, because redaction is not injective) is dropped and counted as
 retained as uncertain and reported as `unverified_redirect_observations:N`; a run that carried no
 control claims nothing.
 
+**Verified exposure checks** (`sensitive_exposure`, `exposure.verify_batch`, passive under ADR 0001):
+GETs of a reviewed seed list (`api/capabilities/exposure_probe.py`: `.env` variants, `.git/config` and
+`HEAD`, actuator `env`/`configprops`/index, OpenAPI documents, `config.json`, `appsettings.json`,
+`web.config(.bak)`, `.DS_Store`, SQL dumps and backup archives, `phpinfo.php`, the Werkzeug console and
+`/debug/pprof/`) and of every discovered endpoint, redirects off. Each file type is proved by its own
+grammar (a git `[core]` section, a dotenv/properties body, actuator `propertySources`, an OpenAPI
+document, ASP.NET `<configuration>`, a dump header or file magic); a secret is proved only by the
+narrow, entropy-screened contract shared with the Hunt verifier (`capabilities/secret_material.py`),
+so masked (`******`), indirect (`${VAR}`), placeholder and documentation-sample values never count,
+and values under an OpenAPI `example` are documentation. The first match in a batch reads two paths
+that cannot exist; a match byte-identical to the host's answer for an absent path is dropped
+(`indistinguishable_from_absent`). `/actuator/heapdump` is never requested -- its exposure is proved
+from the anonymous actuator index. Evidence keeps field names, provider categories and keyed value
+fingerprints, never a value. Cost on Balanced: the first slice holds one request and one wall second
+per seed plus the controls and ten listing follow-ups on top of its endpoint share (130 requests /
+124 s for 25 discovered endpoints); content discovery reads the same 17 high-value paths, so its
+wordlist is 125 entries.
+
 **Family presets and the active default.** The canonical Scan families are `recon`, `nuclei_passive`,
 `nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli` and `authz_surface`
 (`api/scan/contracts.py`), and only these run. A name outside the check registry is rejected; a
 registry family outside the nine is not run as a Scan family (read `resolved_families` on the
 result), and a `custom` selection with none of the nine is refused. `policy.preset`
-selects the family set: `passive` (recon, reviewed passive templates), `standard_active` (passive plus
-XSS and SQLi) or `custom` (exactly `include_families`, from the nine above). A submission that allows active testing and
+selects the family set: `passive` (recon, reviewed passive templates, verified exposure checks),
+`standard_active` (passive plus XSS and SQLi) or `custom` (exactly `include_families`, from the nine
+above). A submission that allows active testing and
 names no preset resolves to `standard_active`; one that does not allow it resolves to `passive`.
 Permission and work are reported separately: the scan page's Testing tile names the active
 families that ran, or warns that active testing was allowed but no active family was selected.
@@ -2217,7 +2236,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `nuclei_passive` | template | nuclei | False | low | True | `none` | `nuclei_template` | Reviewed read-only Nuclei templates included in passive Scan presets. |
 | `rce` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Command/code execution checks. Planned and permission-gated. |
 | `recon` | recon | passive | False | low | True | `legacy_discovery` | `discovery` | Crawl, API/HAR/OpenAPI discovery, and passive surface refresh. |
-| `sensitive_exposure` | active | disclosure | True | high | False | `exposure_probe_batch` | `active_endpoint_attempt_v1` | Deterministic probing for exposed secrets, VCS/env files, metrics, listings, and backups. |
+| `sensitive_exposure` | passive | disclosure | False | medium | False | `exposure_probe_batch` | `active_endpoint_attempt_v1` | Read-only verified exposure checks: secrets in env, actuator, OpenAPI and config files, VCS metadata, backups, debug pages, metrics, and listings. |
 | `sqli` | active | injection | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | SQL injection probes and proof/extraction depth. |
 | `ssrf` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | Server-side request forgery checks. Planned and permission-gated. |
 | `xss` | active | client | True | medium | True | `legacy_active_loop` | `active_endpoint_attempt_v1` | Reflected, stored, and DOM XSS probes. |
