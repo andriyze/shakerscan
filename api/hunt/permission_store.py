@@ -37,8 +37,10 @@ from .permission_reasons import (
 PERMISSION_REQUEST_SCHEMA = "hunt-permission-request/v1"
 MAX_PENDING_PER_HUNT = 20
 REQUEST_LIFETIME = timedelta(hours=24)
-# After a person denies a subject, the same subject is not asked again in that Hunt for this long
-# (D46: an agent re-asked under a new key 20 s after a denial). A changed subject is a new question.
+# After a person denies a subject, the same question is not asked again in that Hunt for this long
+# (D46: an agent re-asked under a new key 20 s after a denial). The question is the subject's stable
+# identity (``cooldown_identity``), not its digest: a destination's resolved addresses or a credential
+# slot the agent chose do not make it a new question.
 DENIAL_COOLDOWN = timedelta(minutes=15)
 REQUEST_STATUSES = ("pending", "granted", "denied", "expired", "withdrawn")
 DECISION_VIA = ("preauthorization", "terminal_stepup", "approver_session", "ui_session", "local_confirm")
@@ -432,17 +434,44 @@ def subject_digest(kind: str, subject: Mapping[str, Any]) -> str:
     return canonical_digest({"kind": kind, **dict(subject)})
 
 
+def cooldown_identity(kind: str, subject: Mapping[str, Any]) -> dict[str, Any]:
+    """What a person said no to, for the denial cooldown (D46).
+
+    The full subject digest still dedupes pending requests and binds every decision. The cooldown
+    keys on what stays the same question: a destination is its scheme, host and port, whatever
+    addresses the host resolves to this time (a CDN or round-robin host answers differently from
+    one lookup to the next, and every answer used to make a fresh request after a denial); a
+    credential is its profile, whichever slot the agent asked to use it in. Any other kind keys on
+    its whole subject, which holds only values the server chose.
+    """
+    if kind == KIND_TARGET_AUTHORIZE:
+        port = subject.get("port")
+        return {
+            "kind": kind, "scheme": str(subject.get("scheme") or "").lower(),
+            "host": str(subject.get("host") or "").lower().rstrip("."),
+            "port": int(port) if str(port or "").isdigit() else str(port or ""),
+        }
+    if kind == KIND_CREDENTIAL_USE:
+        return {"kind": kind, "profile_id": str(subject.get("profile_id") or "")}
+    return {"kind": kind, **dict(subject)}
+
+
 async def recent_denial(conn: Any, hunt_id: Any, kind: str, subject: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The denial of this exact subject in this Hunt within ``DENIAL_COOLDOWN``, or None."""
-    row = await conn.fetchrow(
-        """SELECT id, decided_at, decided_at + $3::interval AS ask_again_after
+    """The latest denial of the same question (``cooldown_identity``) in this Hunt within
+    ``DENIAL_COOLDOWN``, or None."""
+    wanted = cooldown_identity(kind, subject)
+    rows = await conn.fetch(
+        """SELECT id, subject_json, decided_at, decided_at + $3::interval AS ask_again_after
            FROM hunt_permission_requests
-           WHERE hunt_run_id=$1 AND subject_digest=$2 AND status='denied'
+           WHERE hunt_run_id=$1 AND kind=$2 AND status='denied'
              AND decided_at > NOW() - $3::interval
-           ORDER BY decided_at DESC LIMIT 1""",
-        uuid.UUID(str(hunt_id)), subject_digest(kind, subject), DENIAL_COOLDOWN,
+           ORDER BY decided_at DESC, id DESC""",
+        uuid.UUID(str(hunt_id)), kind, DENIAL_COOLDOWN,
     )
-    return dict(row) if row is not None else None
+    for row in rows:
+        if cooldown_identity(kind, _json(row["subject_json"], {})) == wanted:
+            return {key: row[key] for key in ("id", "decided_at", "ask_again_after")}
+    return None
 
 
 async def raise_request(
@@ -608,7 +637,7 @@ def covering_preauthorization(rows: list[dict[str, Any]], predicate: Any) -> dic
 
 __all__ = [
     "DECISION_VIA", "DENIAL_COOLDOWN", "EVENTS", "HUNT_ACTION_STATUSES", "HUNT_PERMISSION_SCHEMA_SQL",
-    "MAX_PENDING_PER_HUNT", "PREAUTHORIZATION_PROOFS", "REQUEST_STATUSES", "canonical_digest",
+    "MAX_PENDING_PER_HUNT", "PREAUTHORIZATION_PROOFS", "REQUEST_STATUSES", "canonical_digest", "cooldown_identity",
     "covering_preauthorization", "expire_due", "hunt_bounds", "hunt_deadline", "list_events",
     "list_grants", "list_requests", "live_credential_grants", "load_request", "pending_summary",
     "public_grant", "public_preauthorization", "public_request", "raise_request", "record_event",

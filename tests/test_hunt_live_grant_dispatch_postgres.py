@@ -239,7 +239,7 @@ async def _call(stack, hunt, key):
             await asyncio.gather(*stack.workers)
 
 
-async def _decide(pool, hunt, request_id):
+async def _decide(pool, hunt, request_id, decision="allow"):
     from hunt.permission_grants import decide
 
     async with pool.acquire() as conn:
@@ -247,7 +247,7 @@ async def _decide(pool, hunt, request_id):
             row = await conn.fetchrow("SELECT subject_digest FROM hunt_permission_requests WHERE id=$1",
                                       uuid.UUID(request_id))
             return await decide(conn, hunt["id"], uuid.UUID(request_id), {
-                "decision": "allow", "scope": "hunt", "subject_digest": row["subject_digest"], "choice": {},
+                "decision": decision, "scope": "hunt", "subject_digest": row["subject_digest"], "choice": {},
                 "idempotency_key": "approval:apv_0001:" + request_id, "decided_by": "alice@example.test",
                 "decision_via": "terminal_stepup",
             })
@@ -380,6 +380,61 @@ def test_authority_revoked_after_admission_is_refused_at_dispatch_and_releases_i
                 hunt["id"]) == 0, "nothing is left reserved to block finishing the Hunt"
 
     stack.loop.run_until_complete(scenario())
+
+
+def test_a_denied_destination_is_not_asked_again_when_its_host_resolves_differently(stack):
+    """D46 cooldown under DNS rotation: a CDN or round-robin host answers other addresses on the
+    next lookup. The resolved addresses are part of the request's subject, so the cooldown keyed
+    on the subject digest raised a fresh request after the person said no."""
+    async def scenario():
+        hunt, _standing = await _hunt(stack.pool)
+        refused = await _call(stack, hunt, "d46-rotation-01")
+        request_id = refused.detail["permission_request"]["id"]
+        denied = await _decide(stack.pool, hunt, request_id, decision="deny")
+        assert denied["request"]["status"] == "denied"
+        stack.answers[:] = ["93.184.216.35", "93.184.216.36"]  # the host rotated its A records
+        again = await _call(stack, hunt, "d46-rotation-02")
+        assert getattr(again, "status_code", None) == 403, again
+        assert again.detail["reason_code"] == "permission_denied", again.detail
+        assert request_id in again.detail["message"]
+        async with stack.pool.acquire() as conn:
+            assert await conn.fetchval(
+                "SELECT count(*) FROM hunt_permission_requests WHERE hunt_run_id=$1", hunt["id"]) == 1
+        # Another port on that host is another question.
+        from fastapi import HTTPException
+
+        other = stack.router.HuntCapabilityRequest(
+            idempotency_key="d46-rotation-03",
+            input={"method": "GET", "path": "/robots.txt", "origin": "http://dest.example.net:8080"},
+        )
+        with pytest.raises(HTTPException) as asked:
+            await stack.router.execute_hunt_capability(str(hunt["id"]), "http.request", other)
+        assert asked.value.detail["code"] == "permission_required"
+        assert stack.wire == []
+
+    stack.loop.run_until_complete(scenario())
+
+
+def test_the_denial_cooldown_keys_on_the_question_not_the_resolved_subject():
+    """Unit: what stays the same question for each kind."""
+    from hunt.permission_store import cooldown_identity, subject_digest
+
+    first = {"target_id": "t", "host": "dest.example.net", "port": 80, "scheme": "http",
+             "origin": "http://dest.example.net:80", "same_host": False,
+             "addresses": ["93.184.216.34"], "scope_verdict": "allowed"}
+    rotated = {**first, "addresses": ["93.184.216.35"], "scope_verdict": "allowed_with_warnings"}
+    assert subject_digest("target.authorize", first) != subject_digest("target.authorize", rotated)
+    assert cooldown_identity("target.authorize", first) == cooldown_identity("target.authorize", rotated)
+    for changed in ({"port": 8080}, {"scheme": "https"}, {"host": "other.example.net"}):
+        assert cooldown_identity("target.authorize", first) != cooldown_identity("target.authorize", {**first, **changed})
+    credential = {"profile_id": "p1", "profile_version": 2, "home_target_id": "h", "home_host": "a.test",
+                  "slot": "user_a", "consuming_target_id": "c"}
+    assert cooldown_identity("credential.use", credential) == cooldown_identity(
+        "credential.use", {**credential, "slot": "user_b"})
+    assert cooldown_identity("credential.use", credential) != cooldown_identity(
+        "credential.use", {**credential, "profile_id": "p2"})
+    budget = {"dimension": "max_http_requests", "limit": 500}
+    assert cooldown_identity("budget.raise", budget) != cooldown_identity("budget.raise", {**budget, "limit": 900})
 
 
 def test_a_granted_destination_is_held_to_the_hard_limits_at_dispatch():
