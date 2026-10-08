@@ -437,6 +437,49 @@ def test_the_denial_cooldown_keys_on_the_question_not_the_resolved_subject():
     assert cooldown_identity("budget.raise", budget) != cooldown_identity("budget.raise", {**budget, "limit": 900})
 
 
+def test_the_dispatch_recheck_matches_the_grant_on_scheme_host_and_port_and_its_live_row(stack):
+    """The dispatch recheck matched a grant on host and pinned addresses only, so another scheme
+    or port on a granted host was checked as the granted origin. It now matches the origin the
+    grant names, and a grant whose row is revoked or gone is refused at dispatch."""
+    from capabilities.http import granted_destination, granted_destination_target
+    from hunt.dispatch_authority import HuntDispatchRejected, dispatch_scope_binding
+    from hunt.target_binding import web_hunt_target
+
+    async def scenario():
+        hunt, _standing = await _hunt(stack.pool)
+        refused = await _call(stack, hunt, "d39-match-01")
+        decided = await _decide(stack.pool, hunt, refused.detail["permission_request"]["id"])
+        async with stack.pool.acquire() as conn:
+            run = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", hunt["id"]))
+        policy = json.loads(run["policy_json"]) if isinstance(run["policy_json"], str) else dict(run["policy_json"])
+        context = json.loads(run["context_pack"]) if isinstance(run["context_pack"], str) else dict(run["context_pack"])
+        own, _ = web_hunt_target(run, context, policy)
+        granted = granted_destination(policy, DESTINATION)
+        assert granted is not None
+
+        def binding(origin):
+            return granted_destination_target(own, granted, origin)
+
+        async with stack.pool.acquire() as conn:
+            matched = await dispatch_scope_binding(conn, run=run, target=binding(DESTINATION), target_url=TARGET_URL)
+            assert matched.canonical_host == "app.example.com", "the granted origin is checked on its grant"
+            for other in ("https://dest.example.net", "http://dest.example.net:8080"):
+                unchanged = await dispatch_scope_binding(conn, run=run, target=binding(other), target_url=TARGET_URL)
+                assert unchanged.canonical_host == "dest.example.net", other  # left to the receipt check
+
+            # The row decides liveness: a revoked grant (policy snapshot still lists it) ...
+            await conn.execute("UPDATE hunt_permission_grants SET revoked_at=NOW() WHERE id=$1",
+                               uuid.UUID(decided["grant"]["id"]))
+            with pytest.raises(HuntDispatchRejected, match="no longer live"):
+                await dispatch_scope_binding(conn, run=run, target=binding(DESTINATION), target_url=TARGET_URL)
+            # ... and a grant row that is gone.
+            await conn.execute("DELETE FROM hunt_permission_grants WHERE id=$1", uuid.UUID(decided["grant"]["id"]))
+            with pytest.raises(HuntDispatchRejected, match="no longer live"):
+                await dispatch_scope_binding(conn, run=run, target=binding(DESTINATION), target_url=TARGET_URL)
+
+    stack.loop.run_until_complete(scenario())
+
+
 def test_a_granted_destination_is_held_to_the_hard_limits_at_dispatch():
     """Unit: the dispatch re-check of a granted destination's pinned addresses and scope."""
     from hunt.dispatch_authority import destination_hard_limit

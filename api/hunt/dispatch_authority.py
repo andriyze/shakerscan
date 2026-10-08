@@ -36,13 +36,13 @@ import urllib.parse
 import uuid
 
 try:
-    from capabilities.http import resolve_hunt_http_origin
+    from capabilities.http import granted_destination, resolve_hunt_http_origin
     from capabilities.network import CapabilityInputError
     from runtime.budgets import BUDGET_DIMENSIONS
     from runtime.models import TargetBinding
     from runtime.reservation_store import PostgresBudgetReservationStore
 except ModuleNotFoundError:
-    from ..capabilities.http import resolve_hunt_http_origin
+    from ..capabilities.http import granted_destination, resolve_hunt_http_origin
     from ..capabilities.network import CapabilityInputError
     from ..runtime.budgets import BUDGET_DIMENSIONS
     from ..runtime.models import TargetBinding
@@ -115,10 +115,6 @@ async def granted_destination_recheck(pool: Any, hunt_id: Any, origin: Any) -> s
     """
     if origin is None:
         return None
-    try:
-        from capabilities.http import granted_destination
-    except ModuleNotFoundError:
-        from ..capabilities.http import granted_destination
     from . import permission_subjects
 
     async with pool.acquire() as conn:
@@ -167,12 +163,13 @@ async def dispatch_scope_binding(
     if not registered or host == registered:
         return target
     policy = _json(run.get("policy_json"))
-    granted = next((
-        dict(item) for item in policy.get("granted_destinations") or ()
-        if isinstance(item, Mapping) and not item.get("same_host")
-        and str(item.get("host") or "") == host
-        and tuple(str(address) for address in item.get("addresses") or ()) == tuple(target.allowed_addresses)
-    ), None)
+    # The grant is for one origin (scheme, host and port) and the addresses pinned with it; the
+    # binding a granted origin produces names exactly that origin (``granted_destination_target``).
+    match = granted_destination(policy, target.allowed_origins[0]) if len(target.allowed_origins) == 1 else None
+    granted = dict(match) if (
+        match is not None and not match.get("same_host") and str(match.get("host") or "") == host
+        and tuple(str(address) for address in match.get("addresses") or ()) == tuple(target.allowed_addresses)
+    ) else None
     if granted is None:
         return target
     live = await conn.fetchval(
