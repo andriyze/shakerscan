@@ -78,6 +78,17 @@ export function pendingDecisions(hunt, shellPlans = []) {
   if (hunt?.status === 'budget_exhausted' && !hunt?.completed_at) {
     decisions.push({ kind: 'budget', id: 'budget', reason: String(hunt?.stop_reason || '').replace(/^budget_exhausted:?/, '').replaceAll('_', ' ') })
   }
+  // Permission requests a refused action is waiting on. Read-only here: a person approves them in
+  // a terminal (`shakerscan approve <id>`); the page never needs to.
+  if (!hunt?.completed_at) {
+    for (const request of hunt?.pending_permission_requests || []) {
+      if (!request?.id) continue
+      decisions.push({
+        kind: 'permission', id: String(request.id), title: String(request.title || request.kind || 'Permission request'),
+        command: String(request.approve_command || `shakerscan approve ${request.id}`),
+      })
+    }
+  }
   return decisions
 }
 

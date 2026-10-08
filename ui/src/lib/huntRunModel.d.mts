@@ -8,9 +8,16 @@ export function budgetUsage(
   labels?: Record<string, string>,
   nowMs?: number,
 ): { rows: BudgetUsageRow[]; disabled: string[] }
-export type PendingDecision = { kind: 'ssh_plan'; id: string } | { kind: 'budget'; id: 'budget'; reason: string }
+export type PendingDecision =
+  | { kind: 'ssh_plan'; id: string }
+  | { kind: 'budget'; id: 'budget'; reason: string }
+  | { kind: 'permission'; id: string; title: string; command: string }
+export interface PendingPermissionRequest { id?: string; kind?: string; title?: string; approve_command?: string }
 export function pendingDecisions(
-  hunt: { status?: string; stop_reason?: string | null; completed_at?: string | null } | null | undefined,
+  hunt: {
+    status?: string; stop_reason?: string | null; completed_at?: string | null
+    pending_permission_requests?: PendingPermissionRequest[] | null
+  } | null | undefined,
   shellPlans?: Array<{ plan_id: string; status?: string }>,
 ): PendingDecision[]
 export function requestsByAction<T extends { hunt_action_id?: string | null }>(rows: T[] | null | undefined): { byAction: Map<string, T[]>; unlinked: T[] }

@@ -88,6 +88,7 @@ export function HuntRunView({ hunt, onChange, target }: {
   const decisions = pendingDecisions(hunt, shellPlans)
   const planDecisions = decisions.filter(decision => decision.kind === 'ssh_plan')
   const budgetDecision = decisions.find(decision => decision.kind === 'budget')
+  const permissionDecisions = decisions.filter(decision => decision.kind === 'permission')
   // Once the budget decision has appeared it stays until the operator leaves: extending the budget
   // changes the Hunt's status, and the result of that extension must remain readable.
   const [budgetDecisionShown, setBudgetDecisionShown] = useState(false)
@@ -169,11 +170,22 @@ export function HuntRunView({ hunt, onChange, target }: {
 
     {live && <AgentHandoff hunt={hunt} started={actions.length > 0} />}
 
-    {(planDecisions.length > 0 || showBudget) && <section aria-label="Needs your decision"
+    {(planDecisions.length > 0 || showBudget || permissionDecisions.length > 0) && <section aria-label="Needs your decision"
       className={`space-y-3 rounded-xl border p-4 ${decisions.length > 0 ? 'border-amber-500/40 bg-amber-500/5' : 'border-gray-800 bg-gray-900/60'}`}>
       <h2 className={`flex items-center gap-2 text-sm font-semibold ${decisions.length > 0 ? 'text-amber-100' : 'text-gray-200'}`}>
         <AlertTriangle className="h-4 w-4" aria-hidden="true" />{decisions.length > 0 ? 'Needs your decision' : 'Decision made'}
       </h2>
+      {permissionDecisions.length > 0 && <div className="space-y-2">
+        <p className="text-sm text-amber-100/90">
+          The agent is waiting for your permission. Approve or deny each request in your own terminal; the rest of the Hunt continues meanwhile.
+        </p>
+        <ul className="space-y-1">
+          {permissionDecisions.map(decision => <li key={decision.id} className="flex flex-wrap items-center gap-2 text-sm text-gray-200">
+            <span>{decision.title}</span>
+            <code className="rounded bg-gray-950 px-1.5 py-0.5 text-xs text-amber-200">{decision.command}</code>
+          </li>)}
+        </ul>
+      </div>}
       {planDecisions.map(decision => <ShellPlanCard key={decision.id} plan={shellPlans.find(plan => plan.plan_id === decision.id)!}
         confirming={confirmingPlanId === decision.id} onConfirm={confirmShellPlan} />)}
       {showBudget && <div className="space-y-2">
