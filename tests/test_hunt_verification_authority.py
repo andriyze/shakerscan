@@ -40,6 +40,7 @@ from api import api as api_module
 
 HUNT, TARGET = uuid.UUID(int=11), uuid.UUID(int=12)
 CANDIDATE = uuid.UUID("7d2c5d0e-4b1a-4f6e-9a7c-3e2b1f0a9c11")
+ACTION = uuid.UUID(int=15)
 APPROVAL = str(uuid.UUID(int=14))
 ORIGIN = "https://fixture.example.test"
 
@@ -100,6 +101,7 @@ def test_a_hunt_verification_reaches_the_verifier_with_the_switch_off(router_swi
         asyncio.run(router._execute_hunt_candidate_verification(
             run={"id": HUNT, "device_target_id": None}, context={},
             policy={"approval_receipt_id": APPROVAL}, candidate_uuid=CANDIDATE,
+            action_id=ACTION,
         ))
     assert exc.value.detail != "execution_feature_disabled"
     assert (exc.value.status_code, exc.value.detail) == (404, "Investigation candidate not found")
@@ -128,6 +130,7 @@ def test_the_hunt_asks_for_verification_under_its_own_authority(monkeypatch):
     with pytest.raises(VerificationRefused) as exc:
         asyncio.run(router._execute_hunt_candidate_verification(
             run=run, context={}, policy={"approval_receipt_id": APPROVAL}, candidate_uuid=CANDIDATE,
+            action_id=ACTION,
         ))
     assert calls == [{"created_by": f"hunt_v2:{HUNT}", "autonomous": False}]
     # The caller still gets the verifier's own answer.

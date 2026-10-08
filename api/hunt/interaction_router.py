@@ -63,6 +63,8 @@ from .settlement import (
     unstarted_refusal_charges,
 )
 from .verification_refusal import VerificationRefused, refused_before_traffic
+from .credential_uses import HuntCredentialRefusal, admit_action_credentials, record_credential_uses
+from .verification_credentials import HuntCredentialScope, hunt_credential_scope
 from .device_policy import DeviceHuntPolicyState
 from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
 from .service_binding import collection_uses_service_origin
@@ -1804,6 +1806,15 @@ async def _execute_hunt_capability_lifecycle(
                         )
                 except CredentialReferenceError as exc:
                     raise HTTPException(status_code=403, detail=str(exc)) from exc
+            # Every credential this action will use must still be attached to the Hunt's
+            # target at its selected version; the uses are recorded with the action below.
+            try:
+                credential_uses = await admit_action_credentials(
+                    conn, run=run, capability=name,
+                    capability_input=request.input, context=context,
+                )
+            except HuntCredentialRefusal as exc:
+                raise exc.http_exception() from exc
             if name in {"collections.replay_safe", "collections.replay_active"}:
                 principal = _hunt_managed_principal_reference(
                     _hunt_json(run["context_pack"], {}), principal_slot, capability=name,
@@ -2267,6 +2278,10 @@ async def _execute_hunt_capability_lifecycle(
                 }),
                 json.dumps(admission_result_summary),
             )
+            if admission_action_status != "failed":
+                await record_credential_uses(
+                    conn, hunt_id=run["id"], action_id=action_id, uses=credential_uses,
+                )
 
     lifecycle.advance("admitted")
     assert action_id is not None
@@ -2463,6 +2478,7 @@ async def _execute_hunt_capability_lifecycle(
                     context=context,
                     policy=policy,
                     candidate_uuid=candidate_uuid,
+                    action_id=action_id,
                 )
                 return _candidate_verification_action_result(candidate_uuid, verification)
 
@@ -4209,6 +4225,7 @@ async def _execute_hunt_candidate_verification(
     context: Mapping[str, Any],
     policy: Mapping[str, Any],
     candidate_uuid: uuid.UUID,
+    action_id: uuid.UUID,
 ) -> dict[str, Any]:
     """Execute the server-owned verifier after canonical action admission."""
     if run["device_target_id"]:
@@ -4251,7 +4268,11 @@ async def _execute_hunt_candidate_verification(
         # A Hunt verification is requested by its operator or planner inside the Hunt's own
         # authority, budget and proof contract, so it is not autonomous router execution and does
         # not depend on AI_OPS_ROUTER_EXECUTE_ENABLED. Every other verifier gate still applies.
-        with refused_before_traffic():
+        # The verifier resolves this Hunt's attached credential list and records each use
+        # against this action; the same verifier outside a Hunt is unchanged.
+        with refused_before_traffic(), hunt_credential_scope(
+            HuntCredentialScope.for_action(run, context, action_id)
+        ):
             result = await _verify_suspected_finding_workflow(
                 candidate_uuid,
                 str(policy["approval_receipt_id"]),

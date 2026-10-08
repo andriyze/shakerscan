@@ -31,6 +31,9 @@ from runtime.hunt_http_contract import require_http_request_authority, redact_ht
 from runtime.credential_refs import (
     CredentialReferenceError, select_hunt_immediate_principal_reference,
 )
+from hunt.credential_uses import (
+    HuntCredentialRefusal, admit_action_credentials, record_credential_uses,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +69,10 @@ class AdmissionStore:
         self.lock = asyncio.Lock()
         self.actions = {}
         self.calls = []
+        # Fixture: profile id -> current version of each credential attached to TARGET (an
+        # active profile with an active binding). None attaches every selected reference.
+        self.attached = None
+        self.credential_uses = []
         self.run = {
             "id": HUNT, "target_id": TARGET, "device_target_id": None,
             "target_kind": "web", "status": "active",
@@ -101,8 +108,22 @@ class AdmissionStore:
             return dict(self.candidate)
         raise AssertionError(sql)
 
+    async def fetch(self, sql, *args):
+        self.calls.append(sql)
+        assert "FROM credential_profiles p" in sql and "b.binding_id=$2::text" in sql, sql
+        assert args[1] == str(TARGET)
+        attached = self.attached if self.attached is not None else {
+            ref["profile_id"]: ref["profile_version"]
+            for ref in self.run["context_pack"].get("credential_refs") or []
+        }
+        return [{"id": profile_id, "current_version": attached[str(profile_id)]}
+                for profile_id in args[0] if str(profile_id) in attached]
+
     async def execute(self, sql, *args):
         self.calls.append(sql)
+        if "INSERT INTO hunt_credential_uses" in sql:
+            self.credential_uses.append(args)
+            return "INSERT 0 1"
         if sql.startswith("UPDATE hunt_runs SET budget_used_json"):
             self.run["budget_used_json"] = json.loads(args[1])
         elif "INSERT INTO hunt_actions" in sql:
@@ -180,6 +201,9 @@ def admission(store, **overrides):
         "distinct_host_charge": distinct_host_charge,
         "web_candidate_preflight": web_candidate_preflight,
         "CandidateVerificationRefused": CandidateVerificationRefused,
+        "admit_action_credentials": admit_action_credentials,
+        "HuntCredentialRefusal": HuntCredentialRefusal,
+        "record_credential_uses": record_credential_uses,
     }
     context.update(overrides)
     exec(compile(selected, str(source), "exec"), context)

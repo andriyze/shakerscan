@@ -1762,7 +1762,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 102 | `db/init.sql` + migrations |
+| Durable tables | 103 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -3086,6 +3086,7 @@ Scan feature or a second orchestration engine.
 | `hunt_budget_amendments` | `db/init.sql` |
 | `hunt_cancellable_jobs` | `api/retest_contract.py` |
 | `hunt_coverage_angle_events` | `db/init.sql` |
+| `hunt_credential_uses` | `db/init.sql` |
 | `hunt_runs` | `db/init.sql` |
 | `hunt_skill_events` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |

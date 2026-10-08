@@ -16,6 +16,7 @@ from .budget_amendments import (
     require_resume_headroom,
 )
 
+from .credential_uses import read_credential_uses
 from .coverage_ledger import (
     COVERAGE_WRITABLE_RUN_STATUSES,
     build_hunt_checkpoint,
@@ -738,6 +739,7 @@ class HuntRunService:
             # Candidates are recorded through /candidates, not as capability results, so the
             # action ledger never named them. The immutable observation ledger does.
             live_candidates = await connection.fetch(HUNT_CANDIDATES_QUERY, hunt_uuid)
+            credential_uses = await read_credential_uses(connection, hunt_uuid)
         result = public_hunt_run(row)
         result["actions"] = [public_hunt_action(action) for action in actions]
         result["outcome_summary"] = hunt_action_outcome_summary(result["actions"])
@@ -757,6 +759,8 @@ class HuntRunService:
         result["skill_activity"] = [
             public_hunt_skill_event(event) for event in skill_events
         ]
+        # Read-only: which attached credential each action used, by id and version only.
+        result["credential_uses"] = credential_uses
         return result
 
     async def amend_budget(self, hunt_id: str, request: HuntBudgetAmendmentRequest) -> dict[str, Any]:
@@ -1192,6 +1196,9 @@ class HuntRunService:
             coverage_ledger = await _coverage_history(
                 connection, hunt_run_id=str(hunt_uuid), limit=MAX_EXPORT_ROWS,
             )
+            credential_uses = await read_credential_uses(
+                connection, hunt_uuid, limit=MAX_EXPORT_ROWS,
+            )
         run = redact_sensitive(
             public_hunt_run(row, include_context=False),
             redact_strings=True,
@@ -1207,7 +1214,7 @@ class HuntRunService:
                     "objective", "bound_skills", "policy", "budgets",
                     "planner_capability_inputs", "action_outcomes", "receipt_references",
                     "coverage_events", "persisted_notes", "final_debrief",
-                    "http_transactions", "budget_amendments",
+                    "http_transactions", "budget_amendments", "credential_uses",
                 ],
                 "excludes": ["hidden_model_chain_of_thought", "context_pack"],
                 "detail": (
@@ -1220,6 +1227,7 @@ class HuntRunService:
             },
             "hunt": run,
             "budget_amendments": budget_history,
+            "credential_uses": credential_uses,
             "decision_trace": [public_hunt_action_trace(action) for action in actions],
             "methodology_trace": [
                 public_hunt_skill_event(event) for event in skill_events

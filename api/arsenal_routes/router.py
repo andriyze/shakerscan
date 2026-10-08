@@ -8095,7 +8095,12 @@ async def _arsenal_dispatch_workflow(p: dict[str, Any], approval_receipt_id: str
             principal_contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, used_slots)
             validate_principal_contexts(principal_contexts, used_slots)
         except WorkflowContractError as exc:
-            raise HTTPException(status_code=422, detail={"error": "invalid_workflow", "violation": str(exc)}) from exc
+            detail = {"error": "invalid_workflow", "violation": str(exc)}
+            # A Hunt credential refusal also carries its machine-readable reason code.
+            public_detail = getattr(exc, "public_detail", None)
+            raise HTTPException(
+                status_code=422, detail={**detail, **(public_detail() if callable(public_detail) else {})},
+            ) from exc
         if hypothesis_id:
             hypothesis_uuid = _optional_uuid(hypothesis_id)
             if not hypothesis_uuid:

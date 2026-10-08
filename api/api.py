@@ -858,6 +858,11 @@ try:
         HuntStartContract,
         bind_validated_receipts,
     )
+    from hunt.credential_uses import HuntCredentialRefusal, unattached_reference_refusal
+    from hunt.verification_credentials import (
+        current_hunt_credential_scope,
+        resolve_hunt_workflow_principal_contexts,
+    )
     from hunt.legacy import LegacyHuntIsolationMiddleware
     from hunt.run_router import (
         HuntFinishRequest,
@@ -919,6 +924,11 @@ except ModuleNotFoundError:
         HUNT_BUDGET_SCHEMA,
         HuntStartContract,
         bind_validated_receipts,
+    )
+    from api.hunt.credential_uses import HuntCredentialRefusal, unattached_reference_refusal
+    from api.hunt.verification_credentials import (
+        current_hunt_credential_scope,
+        resolve_hunt_workflow_principal_contexts,
     )
     from api.hunt.legacy import LegacyHuntIsolationMiddleware
     from api.hunt.run_router import (
@@ -1059,6 +1069,10 @@ from http_experiment import (
     response_summary,
     rewrite_method_for_redirect,
     validate_next_hop,
+)
+from workflow_principals import (
+    resolve_target_principal_contexts,
+    workflow_identity_fingerprint as _workflow_identity_fingerprint,
 )
 from workflow_experiment import (
     WorkflowContractError,
@@ -13114,6 +13128,9 @@ async def _validate_hunt_credential_references(
         target_id=target_id,
         include_inactive=True,
     )
+    refusal = unattached_reference_refusal(contract.credential_refs, profiles)
+    if refusal is not None:
+        raise HTTPException(status_code=422, detail=refusal.public_detail())
     try:
         generic, _missing = validate_generic_credential_references(
             contract.credential_refs,
@@ -13739,7 +13756,11 @@ async def _agent_verification_workflow_for(
     proof. ``workflow`` with ``server_materialize=True`` means dispatch WITHOUT steps and let the
     proven create-MA server materializer build them (probe runs under the authorized dispatch)."""
     if family == "bola":
-        contexts = await _resolve_workflow_principal_contexts(conn, target_uuid, {"user1", "user2"})
+        try:
+            contexts = await _resolve_workflow_principal_contexts(
+                conn, target_uuid, {"user1", "user2"}, select_only=True)
+        except HuntCredentialRefusal as exc:  # a Hunt names the credential to attach
+            raise exc.http_exception() from exc
         targets = agent_tools.derive_bola_verification_targets(
             path,
             (contexts.get("user1") or {}).get("captured_refs"),
@@ -13758,7 +13779,7 @@ async def _agent_verification_workflow_for(
     if family == "data_exposure":
         try:
             baseline = bool(conn is not None and (await _resolve_workflow_principal_contexts(
-                conn, target_uuid, {"user1"})).get("user1"))
+                conn, target_uuid, {"user1"}, select_only=True)).get("user1"))
         except WorkflowContractError:
             baseline = False  # no usable credential: the proof-inert baseline is simply omitted
         return (_materialize_dataexposure_verification_workflow(
@@ -16475,119 +16496,21 @@ async def _promote_authz_replay_finding(
 
 
 
-def _workflow_identity_fingerprint(principal_metadata: Any, profile_metadata: Any, secret: str, auth_kind: str) -> str | None:
-    sources = [_decode_json_value(principal_metadata) or {}, _decode_json_value(profile_metadata) or {}]
-    identity: str | None = None
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        for key in ("principal_identity", "account_id", "subject_id", "user_id", "email"):
-            value = str(source.get(key) or "").strip().lower()
-            if value:
-                identity = f"{key}:{value}"
-                break
-        if identity:
-            break
-    if not identity and auth_kind == "authorization_header":
-        token = secret.split(None, 1)[1] if secret.lower().startswith("bearer ") and " " in secret else secret
-        parts = token.split(".")
-        if len(parts) == 3:
-            try:
-                payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
-            except (ValueError, TypeError, json.JSONDecodeError):
-                payload = {}
-            if isinstance(payload, dict):
-                for key in ("account_id", "user_id", "email", "sub"):
-                    value = str(payload.get(key) or "").strip().lower()
-                    if value and not (key == "sub" and value in {"user", "customer", "generic"}):
-                        identity = f"{key}:{value}"
-                        break
-    return hashlib.sha256(identity.encode()).hexdigest() if identity else None
-
-
-def _workflow_cookie_map(secret: str) -> dict[str, str]:
-    cookies: dict[str, str] = {}
-    for item in secret.split(";"):
-        name, separator, value = item.strip().partition("=")
-        if separator and name:
-            cookies[name] = value
-    return cookies
-
-
 async def _resolve_workflow_principal_contexts(
     conn: Any,
     target_uuid: uuid.UUID,
     used_slots: set[str],
+    *,
+    select_only: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    rows = await conn.fetch(
-        """
-        SELECT p.id AS principal_id, p.label, p.role, p.tenant_id, p.auth_state,
-               p.metadata_json AS principal_metadata, cp.id AS profile_id,
-               cp.auth_kind, cp.secret_value, cp.metadata_json AS profile_metadata
-        FROM target_principals p
-        JOIN target_credential_profiles cp
-          ON cp.target_id = p.target_id
-         AND lower(cp.name) = lower(p.credential_profile)
-        WHERE p.target_id = $1
-          AND p.is_active = true
-          AND cp.is_active = true
-          AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
-        ORDER BY p.updated_at DESC
-        """,
-        target_uuid,
+    """A Hunt verification resolves its attached credential list and records each use;
+    every other caller keeps the target's registered principals."""
+    scope = current_hunt_credential_scope()
+    if scope is None:
+        return await resolve_target_principal_contexts(conn, target_uuid, used_slots)
+    return await resolve_hunt_workflow_principal_contexts(
+        conn, scope, target_uuid, used_slots, select_only=select_only,
     )
-    candidates: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        payload = row_to_dict(row)
-        slots = {str(payload.get("auth_state") or "").strip().lower()}
-        if str(payload.get("role") or "").strip().lower() == "admin":
-            slots.add("admin")
-        tenant = str(payload.get("tenant_id") or "").strip().lower()
-        if tenant:
-            slots.add(f"tenant:{tenant}")
-        for slot in slots:
-            if slot in used_slots:
-                candidates.setdefault(slot, []).append(payload)
-    contexts: dict[str, dict[str, Any]] = {}
-    for slot in sorted(used_slots - {"anonymous"}):
-        matches = candidates.get(slot) or []
-        if not matches:
-            raise WorkflowContractError(f"principal_context_missing:{slot}")
-        if len(matches) > 1:
-            raise WorkflowContractError(f"principal_context_ambiguous:{slot}")
-        row = matches[0]
-        secret = str(decrypt_secret(row.get("secret_value")) or "").strip()
-        if not secret:
-            raise WorkflowContractError(f"principal_profile_secret_unavailable:{slot}")
-        auth_kind = str(row.get("auth_kind") or "").strip()
-        headers = {"Authorization": secret} if auth_kind == "authorization_header" else {}
-        cookies = _workflow_cookie_map(secret) if auth_kind == "cookie" else {}
-        if not headers and not cookies:
-            raise WorkflowContractError(f"principal_profile_auth_kind_invalid:{slot}")
-        principal_metadata = _decode_json_value(row.get("principal_metadata")) or {}
-        captured_refs = (
-            principal_metadata.get("captured_refs")
-            if isinstance(principal_metadata, dict)
-            and isinstance(principal_metadata.get("captured_refs"), dict)
-            else {}
-        )
-        contexts[slot] = {
-            "principal_id": str(row.get("principal_id")),
-            "profile_id": str(row.get("profile_id")),
-            "identity_fingerprint": _workflow_identity_fingerprint(
-                row.get("principal_metadata"), row.get("profile_metadata"), secret, auth_kind
-            ),
-            "role": row.get("role"),
-            "tenant_id": row.get("tenant_id"),
-            "captured_refs": {
-                str(key): str(value)
-                for key, value in captured_refs.items()
-                if not is_sensitive_key(str(key)) and value not in (None, "")
-            },
-            "headers": headers,
-            "cookies": cookies,
-        }
-    return contexts
 
 
 
