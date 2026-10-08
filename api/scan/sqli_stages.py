@@ -22,7 +22,10 @@ time-based blind 189). On a slow target every request costs the full response ti
 that cannot reach the candidate's verdict still settles as many techniques as it can, and each
 settled technique is a checkpoint a later extension never re-sends. A stage that proves an
 injection ends the candidate, so time-based blind -- the most expensive and the slowest to
-prove -- runs only when UNION, boolean and error-based were all inconclusive. Every stage is
+prove -- runs only when UNION, boolean and error-based were all inconclusive. Once an attempt
+has settled a stage, it does not start a stage whose negative verdict cannot fit the wall left at
+the response time just measured: that stage would be killed part-way and re-sent from its first
+payload, so the candidate stops as wall-stopped and the unspent wall returns to its slice. Every stage is
 paced and bounded exactly like the attempt it is part of; a stage holds whatever the
 candidate's sub-budget has left, so no ceiling grows. A stage the wall interrupted is not a
 verdict and the candidate stays unproven-incomplete; a stage that already ran out of wall
@@ -193,6 +196,7 @@ async def run_staged_sqli_attempt(
     proven = False
     timed_out = False
     was_cancelled = False
+    ran_here = False
     for technique in SQLI_TECHNIQUE_STAGES:
         finished = prior.finished.get(technique)
         if finished is not None:
@@ -248,6 +252,20 @@ async def run_staged_sqli_attempt(
             int(stage_budget.get("http_requests", 1)), wall,
             minimum_seconds=_MINIMUM_DELAY_SECONDS, latency_seconds=latency,
         )
+        if ran_here and latency > 0 and (
+            SQLI_TECHNIQUE_NEGATIVE_COST[technique] * (latency + delay) > wall
+        ):
+            # This attempt already settled a stage, and the next one cannot reach its verdict
+            # in the wall left at the response time just measured: starting it would only be
+            # killed part-way and re-sent from its first payload by the next attempt. The
+            # candidate stops here as wall-stopped, so an extension continues at this stage
+            # with a hold that fits it, and the wall it did not spend returns to the slice.
+            complete = False
+            timed_out = True
+            stages.append({"technique": technique, "outcome": "wall_exhausted"})
+            errors.append("timeout")
+            break
+        ran_here = True
         result = await run_stage(technique, stage_budget, latency)
         status = _status(getattr(result, "status", ""))
         spent = {
