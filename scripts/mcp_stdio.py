@@ -27,7 +27,9 @@ def serve(server, stdin, stdout, *, limit, error_type, error_response):
         except Exception:
             # Never expose command text, tokens or upstream response bodies.
             response = error_response(request.get('id'),error_type(-32603,'MCP request failed'))
-        if response is not None:
+        # JSON-RPC 2.0: a notification (no "id" member) is never answered, not even with an
+        # error; answering with id null made clients log a reply to nothing (D9).
+        if response is not None and 'id' in request:
             emit(response)
     # Cancelling must remain responsive when execution workers and their bounded queue are full.
     # The separate lane is bounded too; both still use the same server validation and output lock.
@@ -41,10 +43,20 @@ def serve(server, stdin, stdout, *, limit, error_type, error_response):
                 break
             try:
                 if len(line)>limit or not line.endswith(b'\n'):
+                    # Discard the rest of the oversized line, so its tail is not parsed as a
+                    # second request with its own second error (D9: one line, one error).
+                    tail = line
+                    while tail and not tail.endswith(b'\n'):
+                        tail = stdin.readline(limit+1)
                     raise error_type(-32700,'MCP request exceeded the input cap')
                 request = json.loads(line.decode())
                 if not isinstance(request,dict):
                     raise error_type(-32600,'JSON-RPC request must be an object')
+                if 'id' in request and (request['id'] is None or isinstance(request['id'], bool)
+                                        or not isinstance(request['id'], (str, int))):
+                    # MCP ids are strings or integers; an object, array, float or null id cannot
+                    # be echoed back as a correlation key, so the request is refused unread.
+                    raise error_type(-32600,'JSON-RPC id must be a string or an integer')
             except (UnicodeDecodeError,json.JSONDecodeError):
                 emit(error_response(None,error_type(-32700,'Invalid JSON')))
                 continue

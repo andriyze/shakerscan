@@ -95,9 +95,24 @@ name, input fields and budget cost, each bound skill with its `withheld_capabili
 out (the context pack and any field over 4 KB that cannot be cut down) and `mcp_view.reduced`
 names each field that was cut down and what it kept; a field over 4 KB such as `outcome_summary`
 keeps its counters and its ID lists are cut to their first 20. The full record is 70-150 KB,
-which agents' tool output truncates. `view: "full"` returns the record unchanged, and `shakerscan_hunt_get` with
-`capability: "<name>"` adds that capability's full manifest entry. Neither argument is sent to
-the server.
+which agents' tool output truncates (OpenCode near 50 KB). `view: "full"` returns a record that
+fits 32 KB unchanged; a larger one is paged into `parts`, each one whole field, list item or object
+key named by its path (`actions[3]`, `context_pack.prior_knowledge[12]`), and
+`shakerscan_hunt_get` takes `page` to read on (`mcp_view.pages`, `next_page`); the other lifecycle
+tools answer page 1 and point at `shakerscan_hunt_get`, so reading on never repeats a start, finish
+or cancel. `shakerscan_hunt_get` with `capability: "<name>"` adds that capability's full manifest
+entry. None of these arguments is sent to the server. `shakerscan_hunt_query` asks for 25 rows when
+no `limit` is given, and a page larger than 32 KB is cut to fit, with `next_cursor` cleared and
+`mcp_view` naming the smaller `limit` to read it with.
+
+The start answer carries `budget_warnings` (every limit too small for a capability in the
+manifest, and a web Hunt's `max_http_requests` below one crawl plus one content discovery) and
+`verification` (the families `candidate.verify` can prove); a start that proposed bounds adds
+`mcp_permission_requests`, the `shakerscan approve` command to give the user. The candidate tool's
+schema lists the published locus keys, the evidence-reference forms and the verifiable families
+from `GET /hunts/contract`. Started from `shakerscan agent --allow`, the adapter sends the
+person's launch bounds as `allow` (with the gateway's pre-authorization id in
+`X-ShakerScan-Preauthorization`) on every start; the agent's own `allow` stays `proposed_allow`.
 
 Before capability execution, the adapter reloads `GET /hunts/{id}`, requires an active or
 awaiting-planner run, finds the capability in that Hunt's returned manifest, and validates input
@@ -148,7 +163,15 @@ never runs it twice. When no answer arrives at all, the error message itself nam
 again with.
 The runtime still revalidates target binding, approval, budgets, evidence, and proof contracts.
 Catalog/contract drift, redirects, oversized responses, unavailable APIs, and unexpected dispatch
-results fail closed.
+results fail closed. A redirect names the origin it points at and how to connect there (usually an
+`http://` address for an instance served over HTTPS). After a Hunt finished or was cancelled, a
+capability call with the agent's own `idempotency_key` still goes to the server, which replays an
+action it recorded under that key, as over REST; a call without a key is refused locally, since
+nothing new can start.
+
+Framing follows JSON-RPC 2.0: a message without an `id` is a notification and is never answered,
+an `id` that is not a string or an integer is refused with -32600, and a line over the input cap
+gets exactly one -32700 error.
 
 Tool annotations reflect these boundaries: Arsenal inspection and Hunt get/query are read-only;
 capability and verification operations are conservatively marked destructive and open-world;
