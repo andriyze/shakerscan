@@ -376,7 +376,9 @@ coverage.
   the Scan's `max_workers` (at most 4) and only as many as the slice's request rate covers at the
   measured response time; one request gate in the pinned transport spaces every connection of the
   slice so its aggregate rate never exceeds the rate one of its candidates was already paced at
-  when they ran one at a time.
+  when they ran one at a time. A SQLi slice whose own holds could not fund all of its candidates
+  (`state_changing_budget_exhausted` / `http_request_budget_exhausted`) is extended like a
+  wall-killed one.
   Each candidate's hold is carved from the slice's reservation before it sends anything, tool wall
   is still charged per process, and the receipt records the bound, the peak and the rate ceiling
   (`candidate_concurrency`).

@@ -439,3 +439,43 @@ def test_an_extension_is_admitted_at_its_earned_holds_or_skipped():
     # Ordinary work keeps the reviewed scaled-tier fallback it always had.
     assert admitted[ordinary.action_id].admission_status == "planned"
     assert admitted[ordinary.action_id].requested_budget == {"http_requests": 160, "tool_wall_seconds": 30}
+
+
+THOROUGH = {"http_requests": 60_000, "state_changing_requests": 6_000, "tool_wall_seconds": 10_800}
+
+
+@pytest.mark.parametrize("capability, reason, extended", [
+    ("sqli.verify_batch", "state_changing_budget_exhausted", True),
+    ("sqli.verify_batch", "http_request_budget_exhausted", True),
+    # A partial for any other reason is not a funding stop.
+    ("sqli.verify_batch", "adapter_failed", False),
+    # Dalfox restarts from scratch: only a wall-killed XSS slice is ever extended.
+    ("xss.verify_batch", "state_changing_budget_exhausted", False),
+])
+def test_a_sqli_slice_its_holds_left_with_unfunded_candidates_is_extended(
+    capability, reason, extended,
+):
+    # Soak 0eb39a8a (Thorough, honey): four candidates, three of them bodies, in one slice of
+    # 1,600 requests / 480 mutations / 720 s. One body attempt ran; the others could never be
+    # funded, and the slice settled partial with most of its holds unspent.
+    reserved = {"http_requests": 1_600, "state_changing_requests": 480, "tool_wall_seconds": 720}
+    consumed = {"http_requests": 159, "state_changing_requests": 106, "tool_wall_seconds": 600}
+    settled = SimpleNamespace(
+        status=SimpleNamespace(value="partial"), reason_code=SimpleNamespace(value=reason),
+        budget_reserved=reserved, budget_consumed=consumed,
+    )
+    planned = plan_verification_extensions(
+        parent_plan=_plan(_action("verify.sqli.r01", capability)),
+        parent_results={"verify.sqli.r01": settled},
+        profile_limits=THOROUGH, residual=THOROUGH,
+    )
+    if not extended:
+        assert planned == ()
+        return
+    assert len(planned) == 1
+    budget = planned[0]["budget"]
+    # 3.77 s per request measured: the lane share of the Thorough wall (2,700 s) at the
+    # slice's own ratios, which funds every body candidate's 480-mutation floor.
+    assert budget["tool_wall_seconds"] == 2_700
+    assert budget["state_changing_requests"] == 480 * 2_700 // 720
+    assert budget["state_changing_requests"] >= 3 * 480
