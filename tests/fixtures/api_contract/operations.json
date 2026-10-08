@@ -1185,6 +1185,41 @@
     "operation_id": "export_hunt_transactions_hunts__hunt_id__http_transactions_get"
   },
   {
+    "path": "/hunts/{hunt_id}/permission-events",
+    "method": "get",
+    "operation_id": "list_hunt_permission_events_hunts__hunt_id__permission_events_get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/permission-grants",
+    "method": "get",
+    "operation_id": "list_hunt_permission_grants_hunts__hunt_id__permission_grants_get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/permission-grants/{grant_id}/revoke",
+    "method": "post",
+    "operation_id": "revoke_hunt_permission_grant_hunts__hunt_id__permission_grants__grant_id__revoke_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/permission-requests",
+    "method": "get",
+    "operation_id": "list_hunt_permission_requests_hunts__hunt_id__permission_requests_get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/permission-requests/{request_id}",
+    "method": "get",
+    "operation_id": "get_hunt_permission_request_hunts__hunt_id__permission_requests__request_id__get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/permission-requests/{request_id}/decision",
+    "method": "post",
+    "operation_id": "decide_hunt_permission_request_hunts__hunt_id__permission_requests__request_id__decision_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/preauthorization",
+    "method": "get",
+    "operation_id": "get_hunt_preauthorization_hunts__hunt_id__preauthorization_get"
+  },
+  {
     "path": "/hunts/{hunt_id}/query",
     "method": "post",
     "operation_id": "query_hunt_hunts__hunt_id__query_post"

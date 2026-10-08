@@ -22,6 +22,8 @@ on:
       - 'api/retest_contract.py'
       - 'api/runtime/budget_reservations.py'
       - 'api/targets/asset_migration.py'
+      - 'api/public_api_contract.py'
+      - 'api/runtime/credential_store.py'
       - 'db/init.sql'
       - 'ui/**'
       - '.github/workflows/hunt-record-integrity.yml'
@@ -45,6 +47,8 @@ on:
       - 'api/retest_contract.py'
       - 'api/runtime/budget_reservations.py'
       - 'api/targets/asset_migration.py'
+      - 'api/public_api_contract.py'
+      - 'api/runtime/credential_store.py'
       - 'db/init.sql'
       - 'ui/**'
       - '.github/workflows/hunt-record-integrity.yml'
@@ -109,6 +113,9 @@ jobs:
             tests/test_hunt_budget_amendments_postgres.py \
             tests/test_hunt_coverage_ledger_postgres.py \
             tests/test_hunt_credential_uses_postgres.py \
+            tests/test_hunt_permission_requests_postgres.py \
+            tests/test_hunt_refusal_retry_postgres.py \
+            tests/test_public_retry_conflict_postgres.py \
             tests/test_hunt_finding_attribution_postgres.py \
             tests/test_service_intelligence_postgres.py
           python scripts/check_module_size.py

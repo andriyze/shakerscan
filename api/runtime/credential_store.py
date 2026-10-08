@@ -204,6 +204,13 @@ def _profile_id(value: Any) -> uuid.UUID:
         raise CredentialStoreError("profile_id must be a UUID") from exc
 
 
+def _hunt_uuid(value: Any) -> uuid.UUID:
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise CredentialStoreError("hunt_run_id must be a UUID") from exc
+
+
 def _name(value: Any) -> str:
     normalized = re.sub(r"\s+", " ", str(value or "").strip())
     if not _NAME_RE.fullmatch(normalized):
@@ -736,6 +743,7 @@ class PostgresCredentialProfileStore:
         target_kind: str,
         target_id: Any,
         capability: str,
+        hunt_run_id: Any = None,
     ) -> WorkerCredentialCiphertext:
         capability_name = str(capability or "").strip()
         if not _CAPABILITY_RE.fullmatch(capability_name):
@@ -756,6 +764,11 @@ class PostgresCredentialProfileStore:
                  AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
             _profile_id(profile_id), _target_kind(target_kind), str(_target_id(target_id)),
         )
+        if not row and hunt_run_id is not None:
+            row = await self._hunt_granted_for_worker(
+                conn, profile_id=profile_id, target_kind=target_kind, target_id=target_id,
+                hunt_run_id=hunt_run_id,
+            )
         if not row:
             raise CredentialStoreError("credential profile is unavailable for target")
         item = _row(row)
@@ -775,6 +788,39 @@ class PostgresCredentialProfileStore:
                 item.get("encrypted_metadata"), name="encrypted_metadata"
             ),
             allowed_capabilities=allowed,
+        )
+
+    async def _hunt_granted_for_worker(
+        self, conn: CredentialDatabase, *, profile_id: Any, target_kind: str, target_id: Any,
+        hunt_run_id: Any,
+    ) -> Any:
+        """Another target's profile a person allowed for one running Hunt, without a binding.
+
+        Only a live (unrevoked) ``credential.use`` grant of that Hunt, naming this consuming
+        target and the profile's current version, counts; the home binding's capabilities apply.
+        A Hunt that has finished admits nothing.
+        """
+        return await conn.fetchrow(
+            f"""SELECT p.*, v.encrypted_secret, v.encrypted_metadata,
+                      b.allowed_capabilities, $3::text AS granted_target_id
+               FROM credential_profiles p
+               JOIN credential_profile_versions v
+                 ON v.profile_id=p.id AND v.version=p.current_version
+               JOIN credential_profile_bindings b
+                 ON b.profile_id=p.id AND b.binding_kind='target'
+                AND b.binding_id=p.target_id::text AND b.is_active=true AND b.revoked_at IS NULL
+               JOIN hunt_permission_grants g
+                 ON g.kind='credential.use' AND g.revoked_at IS NULL AND g.hunt_run_id=$4
+                AND g.subject_json->>'profile_id' = p.id::text
+                AND (g.subject_json->>'profile_version')::int = p.current_version
+                AND g.subject_json->>'consuming_target_id' = $3::text
+               JOIN hunt_runs h ON h.id=g.hunt_run_id AND h.completed_at IS NULL
+                AND h.status IN ('active','awaiting_planner','budget_exhausted')
+               WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")}
+                 AND p.is_active=true
+                 AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
+            _profile_id(profile_id), _target_kind(target_kind), str(_target_id(target_id)),
+            _hunt_uuid(hunt_run_id),
         )
 
     async def deactivate_profile(

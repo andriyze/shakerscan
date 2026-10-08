@@ -17,6 +17,8 @@ from .budget_amendments import (
 )
 
 from .credential_uses import read_credential_uses
+from .permission_grants import settle_for_ended_hunt
+from .permission_store import pending_summary
 from .finding_verifications import HUNT_FINDINGS_QUERY
 from .coverage_ledger import (
     COVERAGE_WRITABLE_RUN_STATUSES,
@@ -304,10 +306,16 @@ def _public_action_error(summary: Mapping[str, Any], refusal_stage: str | None) 
     if not error:
         return {}
     public: dict[str, Any] = {"error": error[:500]}
+    coded = {
+        key: str(summary[key])[:500] for key in ("reason_code", "message", "permission_request_id", "slot")
+        if isinstance(summary.get(key), str) and summary.get(key)
+    }
+    public.update(coded)
     if refusal_stage:
         public["refusal"] = {
             "stage": refusal_stage,
             "reason": error[:500],
+            **coded,
             "retryable_with_smaller_action": bool(summary.get("retryable_with_smaller_action")),
             "shortages": {
                 str(key): int(value) for key, value in dict(summary.get("shortages") or {}).items()
@@ -380,6 +388,11 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
         and not item.get("receipt_id")
         and not has_accounting
         and str(result_summary.get("error") or "").startswith(BUDGET_REFUSAL_PREFIXES)
+    ) or (
+        # A coded admission refusal: recorded blocked, or parked awaiting a permission.
+        item.get("status") in {"blocked", "awaiting_permission"}
+        and not item.get("receipt_id")
+        and result_summary.get("refusal_stage") == "admission"
     )
     if refused_at_admission:
         reservation_id = str(result_summary.get("budget_reservation_id") or "") or None
@@ -740,6 +753,7 @@ class HuntRunService:
             # action ledger never named them. The immutable observation ledger does.
             live_candidates = await connection.fetch(HUNT_CANDIDATES_QUERY, hunt_uuid)
             credential_uses = await read_credential_uses(connection, hunt_uuid)
+            pending_permissions = await pending_summary(connection, hunt_uuid)
         result = public_hunt_run(row)
         result["actions"] = [public_hunt_action(action) for action in actions]
         result["outcome_summary"] = hunt_action_outcome_summary(result["actions"])
@@ -761,6 +775,9 @@ class HuntRunService:
         ]
         # Read-only: which attached credential each action used, by id and version only.
         result["credential_uses"] = credential_uses
+        # Requests waiting for a person; the Hunt's own status never changes because of them.
+        result["pending_permission_requests"] = pending_permissions
+        result["permission_requests_url"] = f"/hunts/{hunt_id}/permission-requests"
         return result
 
     async def amend_budget(self, hunt_id: str, request: HuntBudgetAmendmentRequest) -> dict[str, Any]:
@@ -1386,6 +1403,8 @@ class HuntRunService:
                     json.dumps(debrief),
                 )
                 await connection.execute("UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1", run_uuid)
+                # A pending permission request ends with the Hunt, in this transaction.
+                await settle_for_ended_hunt(connection, run_uuid, actor="hunt", source="hunt_finished")
         return {**public_hunt_run(row), "already_terminal": False}
 
     async def cancel(self, hunt_id: str) -> dict[str, Any]:
@@ -1406,16 +1425,19 @@ class HuntRunService:
         cancelled_ids: list[str] = []
         durable_job_ids: list[str] = []
         async with self._pool().acquire() as connection:
-            row = await connection.fetchrow(
-                """UPDATE hunt_runs SET status='cancelled', stop_reason='cancelled',
-                          completed_at=NOW(), updated_at=NOW()
-                   WHERE id=$1 AND status IN ('created','active','awaiting_planner','budget_exhausted')
-                     AND completed_at IS NULL
-                   RETURNING *""",
-                run_uuid,
-            )
-            if row:
-                await connection.execute("UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1", run_uuid)
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """UPDATE hunt_runs SET status='cancelled', stop_reason='cancelled',
+                              completed_at=NOW(), updated_at=NOW()
+                       WHERE id=$1 AND status IN ('created','active','awaiting_planner','budget_exhausted')
+                         AND completed_at IS NULL
+                       RETURNING *""",
+                    run_uuid,
+                )
+                if row:
+                    await connection.execute("UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1", run_uuid)
+                    # Pending permission requests are withdrawn with the cancellation.
+                    await settle_for_ended_hunt(connection, run_uuid, actor="hunt", source="hunt_cancelled")
             already_cancelled = not row
             if not row:
                 row = await hunt_run_or_404(connection, run_uuid)

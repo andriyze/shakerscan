@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 198,
+  "component_schema_count": 200,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -143,6 +143,8 @@
     "ModelSubmissionStaticRunRequest": "75db33940b838b40e3af7f78cb38f6df528bcd9aaa84455e4f147b2a170f29e2",
     "OperationPlanAction": "3e568bd9fa876bc4f27dfadee80f4b327cfffc6199837e110a91a2da2db94a5f",
     "OperationPlanRequest": "4b89871f289608ba2ac21cbd2972c11ab2e34c441c0d95c12b9bc1f3aade6369",
+    "PermissionDecisionRequest": "751e84341d5632f57353c77c76c3128c4788cc61b4e8dfb8bf28492d086878c0",
+    "PermissionRevokeRequest": "1c17c46c2f104c4802eb31e235f4c9f6642bb2c1cb5ff13379c72f7f351ac069",
     "PlannerHypothesisRequest": "b8116cfe3dc8d40d3136fdc94ba8dc2b920b21511892669d94757737e125085f",
     "PolicyProfileRequest": "d548181521df56813de4b960e643834b98c27afbeef0a0af4f2c31bc71440a73",
     "ProfileConfiguration": "38cdcfebb861a98f7aa6bdcf19d08fd2139dc3a8f25d95e6e7b0b6859a3a71dd",
@@ -204,9 +206,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "bead01059bfa9208d8435958d8408497447ce6f999bc0c9ff5f2e67976ff7e7f",
+  "contract_sha256": "36dbb07429276719c65966f67e72ec97fcaf5617c41d013c6c7628bb68417882",
   "openapi": "3.1.0",
-  "operation_count": 454,
+  "operation_count": 461,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1954,6 +1956,81 @@
       "deprecated": false,
       "operation_id": "export_hunt_transactions_hunts__hunt_id__http_transactions_get",
       "parameters_sha256": "38e2c79a0bb4f25daa2d39ce30f124db8296705f9392e511e3efeb7211672f7f",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "GET /hunts/{hunt_id}/permission-events": {
+      "deprecated": false,
+      "operation_id": "list_hunt_permission_events_hunts__hunt_id__permission_events_get",
+      "parameters_sha256": "d724644bb3ce1aa5adbf4f3cb119342f86d80254b08626ea6324ce0a9871fc87",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "GET /hunts/{hunt_id}/permission-grants": {
+      "deprecated": false,
+      "operation_id": "list_hunt_permission_grants_hunts__hunt_id__permission_grants_get",
+      "parameters_sha256": "2e4ac0bf7e01a02d968759249d186dbe624e65e94991e90043c21d9181994b44",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "GET /hunts/{hunt_id}/permission-requests": {
+      "deprecated": false,
+      "operation_id": "list_hunt_permission_requests_hunts__hunt_id__permission_requests_get",
+      "parameters_sha256": "6b19253819f5df59ed7680f8389dd287144d5a66c79367cc32a5fe43d8c3da3e",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "GET /hunts/{hunt_id}/permission-requests/{request_id}": {
+      "deprecated": false,
+      "operation_id": "get_hunt_permission_request_hunts__hunt_id__permission_requests__request_id__get",
+      "parameters_sha256": "8a3e415699679d5a9ee2dddf97f877835e6c1e09a2cefe16c93366a249ca17e7",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "GET /hunts/{hunt_id}/preauthorization": {
+      "deprecated": false,
+      "operation_id": "get_hunt_preauthorization_hunts__hunt_id__preauthorization_get",
+      "parameters_sha256": "2e4ac0bf7e01a02d968759249d186dbe624e65e94991e90043c21d9181994b44",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -4731,7 +4808,7 @@
       "deprecated": false,
       "operation_id": "start_hunt_hunts_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "b16d642a6d7639f756d68fdac876d684fb7d4caeec8b37bce2ec109e19131885",
+      "request_schema_sha256": "ae363bfc9141b7db91bb911e2d4663cf5c212a138e9b3b6c40dd059921a96b5c",
       "response_schema_sha256": {
         "200": "87f160d6eeb2c1bfa78deaf517c99df762cf0fc7ce99a07a44df48383dcf9421"
       },
@@ -4919,6 +4996,36 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": "hunt",
       "tags": []
+    },
+    "POST /hunts/{hunt_id}/permission-grants/{grant_id}/revoke": {
+      "deprecated": false,
+      "operation_id": "revoke_hunt_permission_grant_hunts__hunt_id__permission_grants__grant_id__revoke_post",
+      "parameters_sha256": "baed71f4b55f9e696637f8b983d2d8b89d7da003fc8f2b90b9a5cf99c61ed4fe",
+      "request_schema_sha256": "9d4c9c0f908bbc8d522cea76738ffc9ef52942191a5d382e0a39fe371f015629",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "POST /hunts/{hunt_id}/permission-requests/{request_id}/decision": {
+      "deprecated": false,
+      "operation_id": "decide_hunt_permission_request_hunts__hunt_id__permission_requests__request_id__decision_post",
+      "parameters_sha256": "a1db6039577db3349874268d3ba5bd3e2117057f761f22dd2aa2f8bc6d2aa60d",
+      "request_schema_sha256": "dc99b8750d2e2fe7d0d8aabdb636a24c707a91fec038cc3c49fff779c93ca407",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
     },
     "POST /hunts/{hunt_id}/query": {
       "deprecated": false,
@@ -6278,6 +6385,11 @@
       "GET /hunts/{hunt_id}/checkpoint",
       "GET /hunts/{hunt_id}/coverage-angles",
       "GET /hunts/{hunt_id}/http-transactions",
+      "GET /hunts/{hunt_id}/permission-events",
+      "GET /hunts/{hunt_id}/permission-grants",
+      "GET /hunts/{hunt_id}/permission-requests",
+      "GET /hunts/{hunt_id}/permission-requests/{request_id}",
+      "GET /hunts/{hunt_id}/preauthorization",
       "GET /hunts/{hunt_id}/record",
       "GET /hunts/{hunt_id}/ssh/actions/{action_id}/output",
       "PATCH /hunts/{hunt_id}/candidates/{candidate_id}",
@@ -6295,6 +6407,8 @@
       "POST /hunts/{hunt_id}/capabilities/{capability_name}",
       "POST /hunts/{hunt_id}/coverage-angles",
       "POST /hunts/{hunt_id}/finish",
+      "POST /hunts/{hunt_id}/permission-grants/{grant_id}/revoke",
+      "POST /hunts/{hunt_id}/permission-requests/{request_id}/decision",
       "POST /hunts/{hunt_id}/query",
       "POST /hunts/{hunt_id}/resume",
       "POST /hunts/{hunt_id}/shell-plans/{plan_id}/confirm",

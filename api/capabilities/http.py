@@ -151,6 +151,39 @@ def _origin_key(value: Any) -> tuple[str, str, int] | None:
     )
 
 
+def granted_destination(policy: Mapping[str, Any], origin: Any) -> Mapping[str, Any] | None:
+    """The destination a person authorized for this Hunt (``target.authorize``) matching
+    ``origin`` exactly by scheme, host and port, or None."""
+    try:
+        parsed = urllib.parse.urlsplit(str(origin or "").strip())
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
+    host = str(parsed.hostname or "").lower().rstrip(".")
+    for item in policy.get("granted_destinations") or ():
+        if (isinstance(item, Mapping) and str(item.get("host") or "") == host
+                and int(item.get("port") or 0) == port and item.get("scheme") == parsed.scheme):
+            return item
+    return None
+
+
+def granted_destination_target(target: TargetBinding, granted: Mapping[str, Any], origin: str) -> TargetBinding:
+    """The binding for an authorized destination: pinned to the addresses resolved and
+    scope-checked when the person allowed it; the Hunt's own host keeps its own addresses."""
+    if granted.get("same_host"):
+        if _origin_key(origin) in {_origin_key(value) for value in target.allowed_origins}:
+            return target
+        return replace(target, allowed_origins=(*target.allowed_origins, origin))
+    addresses = tuple(str(item) for item in granted.get("addresses") or () if str(item))
+    if not addresses:
+        raise ValueError("authorized destination has no resolved address")
+    host = str(granted["host"])
+    return replace(
+        target, canonical_host=host, allowed_origins=(origin,), allowed_addresses=addresses,
+        allowed_root_domains=(host,),
+    )
+
+
 def resolve_hunt_http_origin(target: TargetBinding, origin: Any, policy: Mapping[str, Any]) -> TargetBinding:
     """Select another service on the same frozen host under existing network authority.
 
@@ -168,8 +201,12 @@ def resolve_hunt_http_origin(target: TargetBinding, origin: Any, policy: Mapping
     if (any(c.isspace() or ord(c) < 32 for c in text) or "\\" in text
             or parsed.scheme not in {"http", "https"} or not parsed.hostname
             or parsed.username is not None or parsed.password is not None
-            or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or port == 0
-            or parsed.hostname.lower().rstrip(".") != target.canonical_host):
+            or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or port == 0):
+        raise ValueError("HTTP service origin must be on the Hunt's exact target host")
+    granted = granted_destination(policy, text)
+    if granted is not None:
+        return granted_destination_target(target, granted, _origin(text))
+    if parsed.hostname.lower().rstrip(".") != target.canonical_host:
         raise ValueError("HTTP service origin must be on the Hunt's exact target host")
     candidate = _origin(text)
     if _origin_key(candidate) in {_origin_key(value) for value in target.allowed_origins}:

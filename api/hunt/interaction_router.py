@@ -49,7 +49,7 @@ from .host_accounting import distinct_host_charge
 from .boundary_handoff import compile_candidate_boundary_handoff
 from .boundary_discovery import discover_hunt_boundaries
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
-from .verification_budget import record_budget_shortage, web_candidate_budget
+from .verification_budget import web_candidate_budget
 from . import finding_actions as _hunt_finding_actions
 from .asset_actions import NAMES as ASSET_ACTION_NAMES
 from .cancellation import (
@@ -65,6 +65,15 @@ from .settlement import (
 from .verification_refusal import VerificationRefused, raise_returned_refusal, refused_before_traffic
 from .finding_verifications import attribute_verified_finding
 from .credential_uses import HuntCredentialRefusal, admit_action_credentials, record_credential_uses
+from .permission_admission import (
+    MAX_ADMISSION_ATTEMPTS, budget_refusal, close_parked_action, parked_outcome, permission_required,
+    record_grant_use, settle_refusal, verification_budget_refusal,
+)
+from .permission_reasons import HuntRefusal, from_credential_refusal
+from .permission_subjects import (
+    approval_required_refusal, capability_refusal, destination_refusal, http_authority_refusal,
+    preflight_reason_code, replay_authority_refusal,
+)
 from .verification_credentials import HuntCredentialScope, hunt_credential_scope
 from .device_policy import DeviceHuntPolicyState
 from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
@@ -82,7 +91,7 @@ try:
     from capabilities.inline import ControlPlaneExecutionAdapter, DeviceExecutionAdapter, TlsInspectionExecutionAdapter
     from capabilities.network import CapabilityInputError, network_capability_adapter
     from capabilities.tls import inspect_tls_origin
-    from capabilities.http import resolve_hunt_http_origin
+    from capabilities.http import granted_destination, resolve_hunt_http_origin
     from http_experiment import MAX_REDIRECT_HOPS
     from runtime.budget_reservations import DurableBudgetReservation
     from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
@@ -109,7 +118,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..capabilities.inline import ControlPlaneExecutionAdapter, DeviceExecutionAdapter, TlsInspectionExecutionAdapter
     from ..capabilities.network import CapabilityInputError, network_capability_adapter
     from ..capabilities.tls import inspect_tls_origin
-    from ..capabilities.http import resolve_hunt_http_origin
+    from ..capabilities.http import granted_destination, resolve_hunt_http_origin
     from ..http_experiment import MAX_REDIRECT_HOPS
     from ..runtime.budget_reservations import DurableBudgetReservation
     from ..runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
@@ -1539,7 +1548,7 @@ async def _require_executable_hunt_or_recorded_action(hunt_id: str, idempotency_
             run["id"],
         )
     if recorded is None:
-        raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
+        raise HuntRefusal("hunt_not_runnable", f"Hunt is {run['status']}")
 
 
 def _hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
@@ -1585,6 +1594,43 @@ def _worker_replay_actual(
     }
 
 
+async def _resume_parked_action(
+    conn: Any, run: Any, action_id: uuid.UUID, existing_action: Any,
+    granted_requests: list[dict[str, Any]],
+) -> Any:
+    """A parked action on retry: re-admitted, or settled ``blocked``.
+
+    Granted, or still pending: the parked row is removed (inside the admission transaction) and
+    the same action id goes through full admission below. A grant changes what admission
+    allows and never skips it. A pending request whose refusal no longer applies (a person
+    raised the budget by amendment, say) lets the action through; if it still applies, the
+    refusal parks the action again under the same request and answers 409
+    ``permission_required``. Denied, expired or withdrawn: the action settles ``blocked`` with
+    ``permission_<status>`` and replays as such.
+    """
+    summary = _hunt_json(existing_action["result_summary"], {})
+    outcome, parked_request = await parked_outcome(conn, dict(run), action_id, summary)
+    if outcome == "pending" and str(run["status"]) not in {"active", "awaiting_planner"}:
+        # A stopped Hunt (budget_exhausted) cannot admit anything until the request is decided.
+        assert parked_request is not None
+        raise permission_required(parked_request, action_id, summary)
+    if outcome in {"granted", "pending"}:
+        assert parked_request is not None
+        await conn.execute(
+            "DELETE FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2 AND status='awaiting_permission'",
+            action_id, run["id"],
+        )
+        if outcome == "granted":
+            granted_requests.append(parked_request)
+        return None
+    await close_parked_action(conn, run, action_id, parked_request)
+    return await conn.fetchrow(
+        """SELECT capability_name, status, input_summary, result_summary, receipt_id
+           FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2""",
+        action_id, run["id"],
+    )
+
+
 async def _execute_hunt_capability_lifecycle(
     hunt_id: str,
     name: str,
@@ -1624,7 +1670,6 @@ async def _execute_hunt_capability_lifecycle(
     idempotency_key_digest = hashlib.sha256(
         request.idempotency_key.encode("utf-8")
     ).hexdigest()
-    admission_error: HTTPException | None = None
     admission_action_status = "running"
     admission_result_summary: dict[str, Any] = {}
     durable_store = PostgresBudgetReservationStore()
@@ -1634,681 +1679,729 @@ async def _execute_hunt_capability_lifecycle(
         f"api:{str(os.environ.get('HOSTNAME') or 'local')[:64]}:{os.getpid()}"
     )
     durable_lease_seconds = 120
-    async with _pool().acquire() as conn:
-        async with conn.transaction():
-            run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
-            action_id = uuid.uuid5(
-                uuid.UUID(str(run["id"])),
-                f"hunt-capability:{request.idempotency_key}",
-            )
-            existing_action = await conn.fetchrow(
-                """SELECT capability_name, status, input_summary, result_summary,
-                          receipt_id
-                   FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2""",
-                action_id,
-                run["id"],
-            )
-            if existing_action is not None:
-                existing_input = _hunt_json(existing_action["input_summary"], {})
-                if (
-                    str(existing_action["capability_name"]) != name
-                    or str(existing_input.get("input_digest") or "")
-                    != capability_input_digest
-                    or str(existing_input.get("idempotency_key_sha256") or "")
-                    != idempotency_key_digest
-                ):
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Hunt idempotency key was already used for another action",
+    admission_input_summary = {
+        "schema_version": "hunt-capability-input-summary/v1",
+        "input": _hunt_redacted_capability_input(name, request.input),
+        "input_digest": capability_input_digest,
+        "idempotency_key_sha256": idempotency_key_digest,
+    }
+    # Grants a pre-authorization applied on an earlier attempt, or the one a parked action
+    # waited for; their use is recorded with the admission that uses them.
+    granted_requests: list[dict[str, Any]] = []
+    revalidated = False
+    for _attempt in range(MAX_ADMISSION_ATTEMPTS):
+        admission_action_status = "running"
+        admission_result_summary = {}
+        durable_reservation = None
+        durable_action_digest = None
+        candidate_record = None
+        call_approval_context = None
+        prepared_network = network_target = network_policy = None
+        prepared_browser = browser_target = None
+        device_adapter_name = validated_device_input = None
+        try:
+            async with _pool().acquire() as conn:
+                async with conn.transaction():
+                    run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+                    action_id = uuid.uuid5(
+                        uuid.UUID(str(run["id"])),
+                        f"hunt-capability:{request.idempotency_key}",
                     )
-                existing_summary = _hunt_json(
-                    existing_action["result_summary"], {}
-                )
-                existing_status = str(existing_action["status"])
-                replayed_observations = await replay_observations(
-                    conn, hunt_id=run["id"], action_id=action_id,
-                    receipt_id=existing_action["receipt_id"], summary=existing_summary,
-                )
-                lifecycle.mark_replayed()
-                return {
-                    "hunt_id": hunt_id,
-                    "capability": name,
-                    "action_id": str(action_id),
-                    "idempotent_replay": True,
-                    "status": existing_status,
-                    "receipt_id": str(existing_action["receipt_id"] or "") or None,
-                    "action_result": HuntActionResult(
-                        hunt_id=str(run["id"]),
-                        action_id=str(action_id),
-                        capability_name=name,
-                        target_kind=str(run["target_kind"]),
-                        placement=placement,
-                        status=(
-                            "success"
-                            if existing_status == "completed"
-                            else existing_status
-                        ),
-                        observations=replayed_observations,
-                        errors=(
-                            (str(existing_summary.get("error")),)
-                            if existing_summary.get("error")
-                            else ()
-                        ),
-                        actual_budget=dict(
-                            existing_summary.get("budget_consumed") or {}
-                        ),
-                        partial=bool(existing_summary.get("partial")),
-                        timed_out=bool(existing_summary.get("timed_out")),
-                        execution_started=execution_started_from_budget(
-                            existing_summary.get("budget_consumed")
-                        ),
-                        parser_version=str(spec.output_schema),
-                    ).public_dict(),
-                    "result": existing_summary,
-                }
-            if run["status"] not in {"active", "awaiting_planner"}:
-                raise HTTPException(status_code=409, detail=f"Hunt is {run['status']}")
-            policy = _hunt_json(run["policy_json"], {})
-            context = _hunt_json(run["context_pack"], {})
-            target_context = (
-                dict(context.get("target") or {})
-                if isinstance(context.get("target"), Mapping)
-                else {}
-            )
-            if run["device_target_id"]:
-                current_target = await conn.fetchrow(
-                    "SELECT primary_locator, is_active FROM device_targets WHERE id=$1",
-                    run["device_target_id"],
-                )
-                frozen_locator = str(target_context.get("locator") or "").strip()
-                current_locator = str(
-                    current_target["primary_locator"] if current_target else ""
-                ).strip()
-            else:
-                current_target = await conn.fetchrow(
-                    "SELECT url, is_active FROM targets WHERE id=$1", run["target_id"],
-                )
-                frozen_locator = str(target_context.get("url") or "").strip()
-                current_locator = str(current_target["url"] if current_target else "").strip()
-            if not current_target or not current_target["is_active"]:
-                raise HTTPException(status_code=409, detail="Hunt target is no longer active")
-            if not frozen_locator or current_locator != frozen_locator:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Hunt target locator changed after admission",
-                )
-            if name == "candidate.verify":
-                candidate_uuid = _uuid_or_400(
-                    str(request.input.get("candidate_id") or ""), "candidate id",
-                )
-                candidate_record = await conn.fetchrow(
-                    """SELECT c.* FROM investigation_candidates c
-                       WHERE c.id=$1
-                         AND (($3::uuid IS NOT NULL AND c.target_id=$3) OR
-                              ($4::uuid IS NOT NULL AND c.device_target_id=$4))
-                         AND EXISTS (
-                             SELECT 1 FROM investigation_candidate_observations o
-                             WHERE o.candidate_id=c.id AND o.hunt_run_id=$2
-                         )""",
-                    candidate_uuid, run["id"], run["target_id"], run["device_target_id"],
-                )
-                if candidate_record is None:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="Candidate was not produced or observed by this Hunt",
-                    )
-                if str(candidate_record["status"] or "") in {
-                    "verified", "refuted", "expired",
-                }:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"Candidate is {candidate_record['status']}",
-                    )
-                if not run["device_target_id"]:
-                    # Refusals decided by the stored candidate alone are made here, before a
-                    # verification is counted or any budget reserved: they send no traffic, so
-                    # they must cost nothing.
-                    try:
-                        web_candidate_preflight(dict(candidate_record))
-                    except CandidateVerificationRefused as exc:
-                        raise HTTPException(
-                            status_code=exc.status_code, detail=exc.detail,
-                        ) from exc
-            allowed = {item["name"] for item in _hunt_public(run, include_context=False)["capabilities"]}
-            if name not in allowed:
-                raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
-            writes_http = False
-            workflow_http = name == "http.request" and bool(request.input.get("capture") or request.input.get("request_bindings"))
-            if name == "http.request":
-                try:
-                    writes_http = require_http_request_authority(request.input, policy)
-                except ValueError as exc:
-                    raise HTTPException(status_code=403, detail=str(exc)) from exc
-            if name == "collections.replay_active":
-                from capabilities.replay import require_hunt_replay_authority
-                try:
-                    require_hunt_replay_authority(name, policy)
-                except ValueError as exc:
-                    raise HTTPException(status_code=403, detail=str(exc)) from exc
-            principal_slot = (
-                agent_tools.normalize_principal_slot(request.input.get("as_principal"))
-                if name in {
-                    "http.request", "collections.replay_safe", "collections.replay_active", "auth.session.establish",
-                }
-                else "anonymous"
-            )
-            if is_scanner and agent_tools.normalize_principal_slot(
-                request.input.get("as_principal"),
-            ) != "anonymous":
-                # Scanner tools run without the Hunt's managed principal. Accepting the slot
-                # and running anonymously would record an unauthenticated attempt as if it
-                # had exercised that identity.
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"{name} runs anonymously in a Hunt and cannot apply as_principal; "
-                        "omit it, or use http.request with as_principal for an "
-                        "authenticated request"
-                    ),
-                )
-            if name == "auth.session.establish":
-                try:
-                    select_hunt_session_principal_reference(
-                        context, principal_slot,
-                    )
-                except CredentialReferenceError as exc:
-                    raise HTTPException(status_code=403, detail=str(exc)) from exc
-            if name == "authz.verify" and request.input.get("primary_principal"):
-                try:
-                    primary = select_hunt_immediate_principal_reference(context, "primary")
-                    secondary = select_hunt_immediate_principal_reference(context, "secondary")
-                    if primary["profile_id"] == secondary["profile_id"]:
-                        raise CredentialReferenceError(
-                            "authorization proof requires distinct primary and secondary profiles"
-                        )
-                except CredentialReferenceError as exc:
-                    raise HTTPException(status_code=403, detail=str(exc)) from exc
-            # Every credential this action will use must still be attached to the Hunt's
-            # target at its selected version; the uses are recorded with the action below.
-            try:
-                credential_uses = await admit_action_credentials(
-                    conn, run=run, capability=name,
-                    capability_input=request.input, context=context,
-                )
-            except HuntCredentialRefusal as exc:
-                raise exc.http_exception() from exc
-            if name in {"collections.replay_safe", "collections.replay_active"}:
-                principal = _hunt_managed_principal_reference(
-                    _hunt_json(run["context_pack"], {}), principal_slot, capability=name,
-                )
-                principal_slot = (
-                    str(principal["principal_slot"]) if principal is not None else "anonymous"
-                )
-            # Route by the capability's own placement, not by the target kind. A device Hunt
-            # now carries the web capabilities too, and sending every one of them down the
-            # device adapter meant `http.request` on a device answered "Native device Hunt
-            # adapter state is unavailable" instead of reaching the service.
-            if (
-                str(run["target_kind"]) == "device"
-                and not name.startswith("collections.")
-                and str(spec.hunt_executor or "").startswith("device")
-            ):
-                device_adapter_name = str(spec.adapter).split(".")[-1]
-                validated_device_input = dict(request.input)
-            uses_session = bool(
-                (
-                    name in {"http.request", "browser.navigate", "browser.interact", "browser.workflow"}
-                    and request.input.get("session_ref")
-                )
-                or (
-                    name == "authz.verify"
-                    and (
-                        (request.input.get("primary_session_ref") and request.input.get("secondary_session_ref"))
-                        or (request.input.get("primary_principal") and request.input.get("secondary_principal"))
-                    )
-                )
-            )
-            # Forging a client address is a distinct authority the operator granted, so a
-            # call that uses it is metered and re-approved like any other active action.
-            # Classifying it by the capability's static risk tier alone let anonymous
-            # forged-header requests run to the HTTP ceiling without ever touching
-            # max_active_actions, which breaks the multidimensional budget invariant.
-            forges_identity = bool(
-                agent_tools.IDENTITY_HEADERS & {
-                    str(header).strip().lower()
-                    for header in (request.input.get("headers") or {})
-                }
-            ) if isinstance(request.input.get("headers"), Mapping) else False
-            # Sending a request to an operator-confirmed origin instead of the target's
-            # resolved address is at least as significant as forging a header: it is the
-            # act that demonstrates an edge bypass. Left on the capability's passive tier
-            # it consumed no active action and was never re-approved per call.
-            uses_direct_origin = bool(
-                str(request.input.get("via_address") or "").strip()
-            )
-            # Selecting another service port on the same authorized host is an
-            # active act and is re-metered/re-approved per call, for every
-            # HTTP-capable capability that accepts an origin (http.request and
-            # the scanner capabilities), not only http.request.
-            uses_service_origin = False
-            if request.input.get("origin") is not None and (
-                name in {"http.request", "tls.inspect", "auth.session.establish", "authz.verify"}
-                or is_scanner or is_browser
-            ):
-                original, _ = web_hunt_target(run, context, policy)
-                try:
-                    selected = resolve_hunt_http_origin(original, request.input["origin"], policy)
-                except ValueError as exc:
-                    raise HTTPException(status_code=422, detail=str(exc)) from exc
-                uses_service_origin = selected.allowed_origins != original.allowed_origins
-            elif name in {"collections.replay_safe", "collections.replay_active"}:
-                # Replay takes no planner origin; it follows the operator's collection
-                # binding, which may name another port on the same host. Anonymous replay
-                # to such a port is the same active act as http.request with an origin.
-                original, _ = web_hunt_target(run, context, policy)
-                uses_service_origin = collection_uses_service_origin(
-                    original, context, request.input.get("collection_id"),
-                )
-            requires_call_approval = (
-                spec.requires_active_approval
-                or writes_http or workflow_http
-                or principal_slot != "anonymous"
-                or uses_session
-                or forges_identity
-                or uses_direct_origin
-                or uses_service_origin
-            )
-            if requires_call_approval:
-                authority_context = _hunt_json(run["context_pack"], {})
-                target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
-                target_url = str(target_context.get("url") or target_context.get("locator") or "")
-                call_approval_context = await _validate_approval_receipt_for_action(
-                    conn, policy.get("approval_receipt_id"), target_url=target_url,
-                    target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
-                    command=name, risk_tier=(
-                        "credential" if principal_slot != "anonymous" or uses_session
-                        else "active" if forges_identity or uses_direct_origin or uses_service_origin or writes_http or workflow_http
-                        else str(spec.risk_tier)
-                    ), always_require_receipt=True,
-                    require_target_binding=True,
-                    require_expiry=True, created_by=f"hunt_v2:{hunt_id}",
-                )
-            validated_scope_receipt_id = str(policy.get("scope_receipt_id") or "") or None
-            if call_approval_context:
-                current_scope_receipt_id = str(
-                    call_approval_context.get("scope_receipt_id") or ""
-                ) or None
-                if (
-                    validated_scope_receipt_id
-                    and current_scope_receipt_id != validated_scope_receipt_id
-                ):
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Hunt approval scope no longer matches its admitted policy",
-                    )
-                validated_scope_receipt_id = current_scope_receipt_id
-            used = _hunt_json(run["budget_used_json"], {})
-            budget = _hunt_json(run["budget_json"], {})
-            if name in {"candidate.verify", "authz.verify"}:
-                if int(used.get("verifications") or 0) >= int(
-                    budget.get("max_verifications") or 0
-                ):
-                    raise HTTPException(
-                        status_code=409, detail="Hunt verification budget exhausted",
-                    )
-                used["verifications"] = int(used.get("verifications") or 0) + 1
-            limits = _hunt_ledger_limits(budget)
-            if is_network:
-                authority_context = _hunt_json(run["context_pack"], {})
-                target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
-                try:
-                    network_target, target_url = web_hunt_target(run, authority_context, policy)
-                    network_policy = ScanPolicy(
-                        active_testing=bool(policy.get("active_testing")),
-                        allow_state_changing_http=bool(policy.get("allow_state_changing_http")),
-                        network_discovery=bool(policy.get("network_discovery")),
-                        subdomain_discovery=name == "subdomains.discover",
-                        scope_receipt_id=validated_scope_receipt_id,
-                        approval_receipt_id=policy.get("approval_receipt_id"),
-                    )
-                    prepared_network = network_capability_adapter(name).prepare(
-                        target=network_target, args=request.input, policy=network_policy,
-                        **({'context':authority_context} if name in {'ssh.connect', 'ssh.exec', 'ssh.close'} else {}),
-                    )
-                except (CapabilityInputError, ValueError) as exc:
-                    raise HTTPException(status_code=422, detail=str(exc)) from exc
-                charges = distinct_host_charge(context, prepared_network, {
-                    key: int(value) for key, value in prepared_network.estimated_budget.items()
-                    if key in limits
-                })
-            elif is_browser:
-                authority_context = _hunt_json(run["context_pack"], {})
-                target_context = (
-                    authority_context.get("target")
-                    if isinstance(authority_context.get("target"), Mapping)
-                    else {}
-                )
-                try:
-                    browser_target, target_url = web_hunt_target(run, authority_context, policy)
-                    prepared_browser = prepare_hunt_browser_action(name,
-                        target=browser_target,
-                        base_url=target_url,
-                        args=request.input, context=authority_context,
-                        policy={**policy, "scope_receipt_id": validated_scope_receipt_id},
-                    )
-                except (BrowserCapabilityInputError, ValueError) as exc:
-                    raise HTTPException(status_code=422, detail=str(exc)) from exc
-                charges = {
-                    key: int(value)
-                    for key, value in prepared_browser.estimated_budget.items()
-                    if key in limits
-                }
-            else:
-                charges = {
-                    key: int(value) for key, value in (
-                        agent_tools.canonical_hunt_scanner_budget(name) if is_scanner else spec.budget_cost
-                    ).items() if key in limits
-                }
-                if name == "authz.verify":
-                    from capabilities.authz_modes import authz_call_budget
-                    try:
-                        charges.update(authz_call_budget(request.input))
-                    except ValueError as exc:
-                        raise HTTPException(422,str(exc)) from exc
-                if name == "candidate.verify":
-                    assert candidate_record is not None
-                    if str(run["target_kind"]) == "device":
-                        contract_id = str(
-                            candidate_record["verifier_contract_id"] or ""
-                        )
-                        # A device verification performs no traffic itself: it queues a device scan
-                        # that sweeps the inventory profile's ports and may fan out to web children
-                        # with their own imported-request ceilings. A flat parent charge let a small
-                        # reservation authorize all of it, so the Hunt's budget bound the parent
-                        # action and nothing beneath it. Charge the complete fan-out instead, derived
-                        # from the same constants it uses, so an unaffordable fan-out is refused at
-                        # reservation rather than discovered as downstream traffic.
-                        charges.update(device_agent.device_verification_fanout_budget(
-                            contract_id=contract_id,
-                            web_scan_type=_DEVICE_VERIFICATION_WEB_SCAN_TYPE,
-                            max_web_origins=(
-                                _DEVICE_VERIFICATION_MAX_WEB_ORIGINS
-                                if contract_id in _DEVICE_VERIFICATION_WEB_CONTRACTS
-                                else 0
-                            ),
-                        ))
-                        if contract_id == "device.service_exposure":
-                            locus = _hunt_json(
-                                candidate_record["canonical_locus"], {}
-                            )
-                            transport_dimension = (
-                                "udp_ports_attempted"
-                                if str(locus.get("transport") or "").lower() == "udp"
-                                else "tcp_ports_attempted"
-                            )
-                            charges[transport_dimension] = 1
-                    else:
-                        family = family_proof.canonical_family(
-                            candidate_record["family"]
-                        )
-                        charges.update(web_candidate_budget(family))
-                        if family in _AGENT_MUTATING_VERIFY_FAMILIES:
-                            if not policy.get("allow_state_changing_http"):
-                                raise HTTPException(
-                                    status_code=403,
-                                    detail=(
-                                        "Candidate verification requires state-changing "
-                                        "HTTP authority for this proof family"
-                                    ),
-                                )
-                            charges["state_changing_requests"] = 12
-                if name == "http.request" and request.input.get("follow_redirects") is True:
-                    # Reserve the complete same-origin redirect envelope before the
-                    # first request. The planner cannot expand this fixed server limit.
-                    charges["http_requests"] = 1 + MAX_REDIRECT_HOPS
-                if validated_device_input is not None and device_adapter_name is not None:
-                    # An SSH proposal is control-plane-only. The exact user-
-                    # confirmed execution owns device fragility; proposing an
-                    # immutable plan must not consume or block on it.
-                    fragility_cost = (
-                        0
-                        if is_device_ssh_proposal
-                        else device_agent.tool_fragility_cost(
-                            device_adapter_name, validated_device_input,
-                        )
-                    )
-                    if fragility_cost:
-                        charges["device_fragility_points"] = fragility_cost
-                    if name == "device.service.verify":
-                        transport_dimension = (
-                            "udp_ports_attempted"
-                            if validated_device_input.get("transport") == "udp"
-                            else "tcp_ports_attempted"
-                        )
-                        charges.pop(
-                            "tcp_ports_attempted"
-                            if transport_dimension == "udp_ports_attempted"
-                            else "udp_ports_attempted",
-                            None,
-                        )
-                        charges[transport_dimension] = 1
-            if writes_http:
-                charges["state_changing_requests"] = 1
-            charges["agent_actions"] = 1
-            if requires_call_approval:
-                charges["active_actions"] = 1
-            if spec.hunt_executor == "worker_replay":
-                from hunt.replay_selection import select_hunt_replay
-                selected_replay = await select_hunt_replay(conn, run=run, context=context,
-                    values=request.input, capability_name=name, load_collection=_hunt_bound_collection)
-                charges["http_requests"] = len(selected_replay.request_ids)
-                charges["tool_wall_seconds"] = 60
-                if name == "collections.replay_active":
-                    charges["state_changing_requests"] = selected_replay.writes
-            reserve_device_traffic(run, spec, charges)
-            if is_device_adapter or (run["device_target_id"] and spec.placement_requirements.get("network_reachability")):
-                try:
-                    await require_device_admission(
-                        conn, run, fragility=int(charges.get("device_fragility_points") or 0),
-                        requests=(0 if is_device_queue or is_device_control or is_device_ssh_proposal
-                                  else int(charges.get("device_fragility_points") or 1)),
-                        scans=1 if is_device_queue else 0, capability_name=name,
-                    )
-                except ValueError as exc:
-                    raise HTTPException(status_code=409, detail=str(exc)) from exc
-            lifecycle.advance("revalidated")
-            worker_managed_budget = spec.hunt_executor == "worker_replay"
-            worker_durable_budget = spec.hunt_executor in {
-                "worker_network", "worker_scanner", "worker_browser",
-                "worker_auth", "worker_http",
-            }
-            api_managed_budget = spec.hunt_executor in {
-                "inline", "device_control", "device_http", "device_queue",
-                "device_ssh_proposal",
-            }
-            durable_budget = api_managed_budget or worker_durable_budget
-            if worker_managed_budget:
-                durable_action_digest = hunt_capability_action_digest(
-                    hunt_id=run["id"],
-                    action_id=action_id,
-                    capability_name=name,
-                    target_kind=str(run["target_kind"]),
-                    target_id=run["device_target_id"] or run["target_id"],
-                    capability_input=request.input,
-                    requested_budget=charges,
-                    scope_receipt_id=validated_scope_receipt_id,
-                    approval_receipt_id=policy.get("approval_receipt_id"),
-                )
-            if is_device_http:
-                await conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                    f"device-http:{run['device_target_id']}",
-                )
-                device_http_in_flight = await conn.fetchval(
-                    """SELECT EXISTS(
-                           SELECT 1
-                           FROM budget_reservations r
-                           JOIN hunt_runs h
-                             ON r.owner_kind='hunt' AND r.owner_id=h.id::text
-                           WHERE h.device_target_id=$1
-                             AND r.capability_name='device.http.probe'
-                             AND r.status IN ('reserved','running')
-                       )""",
-                    run["device_target_id"],
-                )
-                if device_http_in_flight:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="A device HTTP probe is already in flight for this Hunt",
-                    )
-            if is_device_ssh_proposal:
-                ssh_proposal_in_flight = await conn.fetchval(
-                    """SELECT EXISTS(
-                           SELECT 1 FROM budget_reservations
-                           WHERE owner_kind='hunt' AND owner_id=$1
-                             AND capability_name='device.ssh.propose'
-                             AND status IN ('reserved','running')
-                       )""",
-                    str(run["id"]),
-                )
-                if ssh_proposal_in_flight:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="An SSH proposal is already in flight for this Hunt",
-                    )
-            if name in {"ssh.exec", "ssh.close"} and request.input.get("session_id"):
-                from .ssh_stream import require_ssh_session_available
-                require_ssh_session_available(get_redis(), base_queue=_get("AGENT_TOOL_QUEUE_NAME"),
-                    hunt_id=hunt_id, session_id=request.input["session_id"])
-            if durable_budget:
-                durable_action_digest = hunt_capability_action_digest(
-                    hunt_id=run["id"],
-                    action_id=action_id,
-                    capability_name=name,
-                    target_kind=str(run["target_kind"]),
-                    target_id=run["device_target_id"] or run["target_id"],
-                    capability_input=request.input,
-                    requested_budget=charges,
-                    scope_receipt_id=validated_scope_receipt_id,
-                    approval_receipt_id=policy.get("approval_receipt_id"),
-                )
-                requested_reservation = DurableBudgetReservation.request(
-                    owner_kind="hunt",
-                    owner_id=str(run["id"]),
-                    capability_name=name,
-                    amounts=charges,
-                )
-                stored_reservation = await durable_store.create_requested(
-                    conn,
-                    action_id=str(action_id),
-                    action_digest=durable_action_digest,
-                    record=requested_reservation,
-                )
-                if stored_reservation.record.status != "requested":
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Hunt capability reservation is already active",
-                    )
-                durable_lease_seconds = hunt_capability_lease_seconds(charges)
-                try:
-                    reserved_record, reserved_used = (
-                        stored_reservation.record.reserve_against(
-                            limits=limits,
-                            consumed={
-                                key: int(used.get(key) or 0) for key in limits
-                            },
-                            lease_seconds=durable_lease_seconds,
-                        )
-                    )
-                except BudgetExceeded as exc:
-                    released = stored_reservation.record.release(
-                        proof_not_started=True,
-                        reason="budget_exhausted_before_execution",
-                    )
-                    await durable_store.persist_terminal(
-                        conn,
-                        previous=stored_reservation,
-                        terminal=released,
-                        ledger_after_settlement={
-                            key: int(used.get(key) or 0) for key in limits
-                        },
-                        receipt=None,
-                    )
-                    dimension = next(iter(exc.shortages), "unknown")
-                    shortage = await record_budget_shortage(
-                        conn, hunt_id=run["id"], limits=limits, used=used,
-                        shortages=exc.shortages,
-                    )
-                    admission_error = HTTPException(
-                        status_code=409,
-                        detail=shortage,
-                    )
-                    admission_action_status = "failed"
-                    admission_result_summary = {
-                        **shortage,
-                        "budget_reservation_id": released.reservation_id,
-                        "budget_reservation_state": released.status,
-                    }
-                else:
-                    durable_reservation = await durable_store.persist_transition(
-                        conn,
-                        previous=stored_reservation,
-                        current=reserved_record,
-                        ledger_after_hold=reserved_used,
-                    )
-                    used.update(reserved_used)
-                    await conn.execute(
-                        "UPDATE hunt_runs SET budget_used_json=$2, status='active', "
-                        "updated_at=NOW() WHERE id=$1",
+                    existing_action = await conn.fetchrow(
+                        """SELECT capability_name, status, input_summary, result_summary,
+                                  receipt_id
+                           FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2""",
+                        action_id,
                         run["id"],
-                        json.dumps(used),
                     )
-                    admission_action_status = "reserved"
-            elif not worker_managed_budget:
-                try:
-                    reserved_used = reserve_budget_snapshot(
-                        limits, {key: int(used.get(key) or 0) for key in limits}, charges,
+                    if existing_action is not None:
+                        existing_input = _hunt_json(existing_action["input_summary"], {})
+                        if (
+                            str(existing_action["capability_name"]) != name
+                            or str(existing_input.get("input_digest") or "")
+                            != capability_input_digest
+                            or str(existing_input.get("idempotency_key_sha256") or "")
+                            != idempotency_key_digest
+                        ):
+                            raise HuntRefusal(
+                                "idempotency_key_reused",
+                                "Hunt idempotency key was already used for another action",
+                            )
+                        if str(existing_action["status"]) == "awaiting_permission":
+                            existing_action = await _resume_parked_action(
+                                conn, run, action_id, existing_action, granted_requests,
+                            )
+                            if existing_action is None:
+                                # The grant may have changed the Hunt (a budget amendment with
+                                # resume, a policy flag): admit against the current row.
+                                run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
+                    if existing_action is not None:
+                        existing_summary = _hunt_json(
+                            existing_action["result_summary"], {}
+                        )
+                        existing_status = str(existing_action["status"])
+                        replayed_observations = await replay_observations(
+                            conn, hunt_id=run["id"], action_id=action_id,
+                            receipt_id=existing_action["receipt_id"], summary=existing_summary,
+                        )
+                        lifecycle.mark_replayed()
+                        return {
+                            "hunt_id": hunt_id,
+                            "capability": name,
+                            "action_id": str(action_id),
+                            "idempotent_replay": True,
+                            "status": existing_status,
+                            "receipt_id": str(existing_action["receipt_id"] or "") or None,
+                            "action_result": HuntActionResult(
+                                hunt_id=str(run["id"]),
+                                action_id=str(action_id),
+                                capability_name=name,
+                                target_kind=str(run["target_kind"]),
+                                placement=placement,
+                                status=(
+                                    "success"
+                                    if existing_status == "completed"
+                                    else existing_status
+                                ),
+                                observations=replayed_observations,
+                                errors=(
+                                    (str(existing_summary.get("error")),)
+                                    if existing_summary.get("error")
+                                    else ()
+                                ),
+                                actual_budget=dict(
+                                    existing_summary.get("budget_consumed") or {}
+                                ),
+                                partial=bool(existing_summary.get("partial")),
+                                timed_out=bool(existing_summary.get("timed_out")),
+                                execution_started=execution_started_from_budget(
+                                    existing_summary.get("budget_consumed")
+                                ),
+                                parser_version=str(spec.output_schema),
+                            ).public_dict(),
+                            "result": existing_summary,
+                        }
+                    if run["status"] not in {"active", "awaiting_planner"}:
+                        raise HuntRefusal("hunt_not_runnable", f"Hunt is {run['status']}")
+                    policy = _hunt_json(run["policy_json"], {})
+                    context = _hunt_json(run["context_pack"], {})
+                    target_context = (
+                        dict(context.get("target") or {})
+                        if isinstance(context.get("target"), Mapping)
+                        else {}
                     )
-                except BudgetExceeded as exc:
-                    dimension = next(iter(exc.shortages), "unknown")
-                    shortage = await record_budget_shortage(
-                        conn, hunt_id=run["id"], limits=limits, used=used,
-                        shortages=exc.shortages,
+                    if run["device_target_id"]:
+                        current_target = await conn.fetchrow(
+                            "SELECT primary_locator, is_active FROM device_targets WHERE id=$1",
+                            run["device_target_id"],
+                        )
+                        frozen_locator = str(target_context.get("locator") or "").strip()
+                        current_locator = str(
+                            current_target["primary_locator"] if current_target else ""
+                        ).strip()
+                    else:
+                        current_target = await conn.fetchrow(
+                            "SELECT url, is_active FROM targets WHERE id=$1", run["target_id"],
+                        )
+                        frozen_locator = str(target_context.get("url") or "").strip()
+                        current_locator = str(current_target["url"] if current_target else "").strip()
+                    if not current_target or not current_target["is_active"]:
+                        raise HuntRefusal("target_inactive", "Hunt target is no longer active")
+                    if not frozen_locator or current_locator != frozen_locator:
+                        raise HuntRefusal(
+                            "target_locator_changed", "Hunt target locator changed after admission",
+                        )
+                    if name == "candidate.verify":
+                        candidate_uuid = _uuid_or_400(
+                            str(request.input.get("candidate_id") or ""), "candidate id",
+                        )
+                        candidate_record = await conn.fetchrow(
+                            """SELECT c.* FROM investigation_candidates c
+                               WHERE c.id=$1
+                                 AND (($3::uuid IS NOT NULL AND c.target_id=$3) OR
+                                      ($4::uuid IS NOT NULL AND c.device_target_id=$4))
+                                 AND EXISTS (
+                                     SELECT 1 FROM investigation_candidate_observations o
+                                     WHERE o.candidate_id=c.id AND o.hunt_run_id=$2
+                                 )""",
+                            candidate_uuid, run["id"], run["target_id"], run["device_target_id"],
+                        )
+                        if candidate_record is None:
+                            raise HTTPException(
+                                status_code=404,
+                                detail="Candidate was not produced or observed by this Hunt",
+                            )
+                        if str(candidate_record["status"] or "") in {
+                            "verified", "refuted", "expired",
+                        }:
+                            raise HTTPException(
+                                status_code=409,
+                                detail=f"Candidate is {candidate_record['status']}",
+                            )
+                        if not run["device_target_id"]:
+                            # Refusals decided by the stored candidate alone are made here, before a
+                            # verification is counted or any budget reserved: they send no traffic, so
+                            # they must cost nothing.
+                            try:
+                                web_candidate_preflight(dict(candidate_record))
+                            except CandidateVerificationRefused as exc:
+                                code = preflight_reason_code(exc.detail)
+                                if code is None:
+                                    raise HTTPException(
+                                        status_code=exc.status_code, detail=exc.detail,
+                                    ) from exc
+                                raise HuntRefusal(code, exc.detail, status_code=exc.status_code) from exc
+                    allowed = {item["name"] for item in _hunt_public(run, include_context=False)["capabilities"]}
+                    if name not in allowed:
+                        # D31: say what is missing (and raise a request when a person can allow it).
+                        raise capability_refusal(run, name)
+                    writes_http = False
+                    workflow_http = name == "http.request" and bool(request.input.get("capture") or request.input.get("request_bindings"))
+                    if name == "http.request":
+                        try:
+                            writes_http = require_http_request_authority(request.input, policy)
+                        except ValueError as exc:
+                            coded = http_authority_refusal(request.input, policy, str(exc))
+                            if coded is not None:
+                                raise coded from exc
+                            raise HTTPException(status_code=403, detail=str(exc)) from exc
+                    if name == "collections.replay_active":
+                        from capabilities.replay import require_hunt_replay_authority
+                        try:
+                            require_hunt_replay_authority(name, policy)
+                        except ValueError as exc:
+                            raise (replay_authority_refusal(policy) or HTTPException(
+                                status_code=403, detail=str(exc),
+                            )) from exc
+                    principal_slot = (
+                        agent_tools.normalize_principal_slot(request.input.get("as_principal"))
+                        if name in {
+                            "http.request", "collections.replay_safe", "collections.replay_active", "auth.session.establish",
+                        }
+                        else "anonymous"
                     )
-                    admission_error = HTTPException(
-                        status_code=409,
-                        detail=shortage,
+                    if is_scanner and agent_tools.normalize_principal_slot(
+                        request.input.get("as_principal"),
+                    ) != "anonymous":
+                        # Scanner tools run without the Hunt's managed principal. Accepting the slot
+                        # and running anonymously would record an unauthenticated attempt as if it
+                        # had exercised that identity.
+                        raise HuntRefusal(
+                            "principal_anonymous_only",
+                            f"{name} runs anonymously in a Hunt and cannot apply as_principal; "
+                            "omit it, or use http.request with as_principal for an "
+                            "authenticated request",
+                        )
+                    if name == "auth.session.establish":
+                        try:
+                            select_hunt_session_principal_reference(
+                                context, principal_slot,
+                            )
+                        except CredentialReferenceError as exc:
+                            raise HTTPException(status_code=403, detail=str(exc)) from exc
+                    if name == "authz.verify" and request.input.get("primary_principal"):
+                        try:
+                            primary = select_hunt_immediate_principal_reference(context, "primary")
+                            secondary = select_hunt_immediate_principal_reference(context, "secondary")
+                            if primary["profile_id"] == secondary["profile_id"]:
+                                raise CredentialReferenceError(
+                                    "authorization proof requires distinct primary and secondary profiles"
+                                )
+                        except CredentialReferenceError as exc:
+                            raise HTTPException(status_code=403, detail=str(exc)) from exc
+                    # Every credential this action will use must still be attached to the Hunt's
+                    # target at its selected version; the uses are recorded with the action below.
+                    try:
+                        credential_uses = await admit_action_credentials(
+                            conn, run=run, capability=name,
+                            capability_input=request.input, context=context,
+                        )
+                    except HuntCredentialRefusal as exc:
+                        # Recorded on the Hunt (D35); another target's credential may be requested.
+                        raise from_credential_refusal(exc) from exc
+                    if name in {"collections.replay_safe", "collections.replay_active"}:
+                        principal = _hunt_managed_principal_reference(
+                            _hunt_json(run["context_pack"], {}), principal_slot, capability=name,
+                        )
+                        principal_slot = (
+                            str(principal["principal_slot"]) if principal is not None else "anonymous"
+                        )
+                    # Route by the capability's own placement, not by the target kind. A device Hunt
+                    # now carries the web capabilities too, and sending every one of them down the
+                    # device adapter meant `http.request` on a device answered "Native device Hunt
+                    # adapter state is unavailable" instead of reaching the service.
+                    if (
+                        str(run["target_kind"]) == "device"
+                        and not name.startswith("collections.")
+                        and str(spec.hunt_executor or "").startswith("device")
+                    ):
+                        device_adapter_name = str(spec.adapter).split(".")[-1]
+                        validated_device_input = dict(request.input)
+                    uses_session = bool(
+                        (
+                            name in {"http.request", "browser.navigate", "browser.interact", "browser.workflow"}
+                            and request.input.get("session_ref")
+                        )
+                        or (
+                            name == "authz.verify"
+                            and (
+                                (request.input.get("primary_session_ref") and request.input.get("secondary_session_ref"))
+                                or (request.input.get("primary_principal") and request.input.get("secondary_principal"))
+                            )
+                        )
                     )
-                    admission_action_status = "failed"
-                    admission_result_summary = shortage
-                else:
-                    used.update(reserved_used)
-                    await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, status='active', updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
-            await conn.execute(
-                """INSERT INTO hunt_actions (
-                       id, hunt_run_id, capability_name, status, input_summary,
-                       result_summary, completed_at
-                   ) VALUES ($1,$2,$3,$4,$5,$6,
-                             CASE WHEN $4='failed' THEN NOW() ELSE NULL END)""",
-                action_id, run["id"], name,
-                admission_action_status,
-                json.dumps({
-                    "schema_version": "hunt-capability-input-summary/v1",
-                    "input": _hunt_redacted_capability_input(name, request.input),
-                    "input_digest": capability_input_digest,
-                    "idempotency_key_sha256": idempotency_key_digest,
-                }),
-                json.dumps(admission_result_summary),
-            )
-            if admission_action_status != "failed":
-                await record_credential_uses(
-                    conn, hunt_id=run["id"], action_id=action_id, uses=credential_uses,
-                )
+                    # Forging a client address is a distinct authority the operator granted, so a
+                    # call that uses it is metered and re-approved like any other active action.
+                    # Classifying it by the capability's static risk tier alone let anonymous
+                    # forged-header requests run to the HTTP ceiling without ever touching
+                    # max_active_actions, which breaks the multidimensional budget invariant.
+                    forges_identity = bool(
+                        agent_tools.IDENTITY_HEADERS & {
+                            str(header).strip().lower()
+                            for header in (request.input.get("headers") or {})
+                        }
+                    ) if isinstance(request.input.get("headers"), Mapping) else False
+                    # Sending a request to an operator-confirmed origin instead of the target's
+                    # resolved address is at least as significant as forging a header: it is the
+                    # act that demonstrates an edge bypass. Left on the capability's passive tier
+                    # it consumed no active action and was never re-approved per call.
+                    uses_direct_origin = bool(
+                        str(request.input.get("via_address") or "").strip()
+                    )
+                    # Selecting another service port on the same authorized host is an
+                    # active act and is re-metered/re-approved per call, for every
+                    # HTTP-capable capability that accepts an origin (http.request and
+                    # the scanner capabilities), not only http.request.
+                    uses_service_origin = False
+                    if request.input.get("origin") is not None and (
+                        name in {"http.request", "tls.inspect", "auth.session.establish", "authz.verify"}
+                        or is_scanner or is_browser
+                    ):
+                        original, _ = web_hunt_target(run, context, policy)
+                        try:
+                            selected = resolve_hunt_http_origin(original, request.input["origin"], policy)
+                        except ValueError as exc:
+                            raise destination_refusal(
+                                original, request.input["origin"], policy, principal_slot=principal_slot,
+                            ) from exc
+                        granted_origin = granted_destination(policy, request.input["origin"])
+                        if (granted_origin is not None and not granted_origin.get("same_host")
+                                and principal_slot != "anonymous"):
+                            raise destination_refusal(
+                                original, request.input["origin"], {}, principal_slot=principal_slot,
+                            )
+                        # A destination a person authorized for this Hunt is part of its
+                        # authorized set, not another service picked by the planner.
+                        uses_service_origin = (
+                            granted_origin is None
+                            and selected.allowed_origins != original.allowed_origins
+                        )
+                    elif name in {"collections.replay_safe", "collections.replay_active"}:
+                        # Replay takes no planner origin; it follows the operator's collection
+                        # binding, which may name another port on the same host. Anonymous replay
+                        # to such a port is the same active act as http.request with an origin.
+                        original, _ = web_hunt_target(run, context, policy)
+                        uses_service_origin = collection_uses_service_origin(
+                            original, context, request.input.get("collection_id"),
+                        )
+                    requires_call_approval = (
+                        spec.requires_active_approval
+                        or writes_http or workflow_http
+                        or principal_slot != "anonymous"
+                        or uses_session
+                        or forges_identity
+                        or uses_direct_origin
+                        or uses_service_origin
+                    )
+                    if requires_call_approval and not policy.get("approval_receipt_id"):
+                        # D32: say which approval is missing and why this call needs it.
+                        raise approval_required_refusal(
+                            name, principal_slot=principal_slot, uses_session=uses_session,
+                            writes_http=writes_http or workflow_http, forges_identity=forges_identity,
+                            uses_direct_origin=uses_direct_origin, uses_service_origin=uses_service_origin,
+                        )
+                    if requires_call_approval:
+                        authority_context = _hunt_json(run["context_pack"], {})
+                        target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
+                        target_url = str(target_context.get("url") or target_context.get("locator") or "")
+                        call_approval_context = await _validate_approval_receipt_for_action(
+                            conn, policy.get("approval_receipt_id"), target_url=target_url,
+                            target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
+                            command=name, risk_tier=(
+                                "credential" if principal_slot != "anonymous" or uses_session
+                                else "active" if forges_identity or uses_direct_origin or uses_service_origin or writes_http or workflow_http
+                                else str(spec.risk_tier)
+                            ), always_require_receipt=True,
+                            require_target_binding=True,
+                            require_expiry=True, created_by=f"hunt_v2:{hunt_id}",
+                        )
+                    validated_scope_receipt_id = str(policy.get("scope_receipt_id") or "") or None
+                    if call_approval_context:
+                        current_scope_receipt_id = str(
+                            call_approval_context.get("scope_receipt_id") or ""
+                        ) or None
+                        if (
+                            validated_scope_receipt_id
+                            and current_scope_receipt_id != validated_scope_receipt_id
+                        ):
+                            raise HuntRefusal(
+                                "approval_scope_changed",
+                                "Hunt approval scope no longer matches its admitted policy",
+                            )
+                        validated_scope_receipt_id = current_scope_receipt_id
+                    used = _hunt_json(run["budget_used_json"], {})
+                    budget = _hunt_json(run["budget_json"], {})
+                    if name in {"candidate.verify", "authz.verify"}:
+                        if int(used.get("verifications") or 0) >= int(
+                            budget.get("max_verifications") or 0
+                        ):
+                            # A raise is grantable; the Hunt itself keeps running (other actions
+                            # never needed a verification).
+                            raise verification_budget_refusal(run, used, budget)
+                        used["verifications"] = int(used.get("verifications") or 0) + 1
+                    limits = _hunt_ledger_limits(budget)
+                    if is_network:
+                        authority_context = _hunt_json(run["context_pack"], {})
+                        target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
+                        try:
+                            network_target, target_url = web_hunt_target(run, authority_context, policy)
+                            network_policy = ScanPolicy(
+                                active_testing=bool(policy.get("active_testing")),
+                                allow_state_changing_http=bool(policy.get("allow_state_changing_http")),
+                                network_discovery=bool(policy.get("network_discovery")),
+                                subdomain_discovery=name == "subdomains.discover",
+                                scope_receipt_id=validated_scope_receipt_id,
+                                approval_receipt_id=policy.get("approval_receipt_id"),
+                            )
+                            prepared_network = network_capability_adapter(name).prepare(
+                                target=network_target, args=request.input, policy=network_policy,
+                                **({'context':authority_context} if name in {'ssh.connect', 'ssh.exec', 'ssh.close'} else {}),
+                            )
+                        except (CapabilityInputError, ValueError) as exc:
+                            raise HTTPException(status_code=422, detail=str(exc)) from exc
+                        charges = distinct_host_charge(context, prepared_network, {
+                            key: int(value) for key, value in prepared_network.estimated_budget.items()
+                            if key in limits
+                        })
+                    elif is_browser:
+                        authority_context = _hunt_json(run["context_pack"], {})
+                        target_context = (
+                            authority_context.get("target")
+                            if isinstance(authority_context.get("target"), Mapping)
+                            else {}
+                        )
+                        try:
+                            browser_target, target_url = web_hunt_target(run, authority_context, policy)
+                            prepared_browser = prepare_hunt_browser_action(name,
+                                target=browser_target,
+                                base_url=target_url,
+                                args=request.input, context=authority_context,
+                                policy={**policy, "scope_receipt_id": validated_scope_receipt_id},
+                            )
+                        except (BrowserCapabilityInputError, ValueError) as exc:
+                            raise HTTPException(status_code=422, detail=str(exc)) from exc
+                        charges = {
+                            key: int(value)
+                            for key, value in prepared_browser.estimated_budget.items()
+                            if key in limits
+                        }
+                    else:
+                        charges = {
+                            key: int(value) for key, value in (
+                                agent_tools.canonical_hunt_scanner_budget(name) if is_scanner else spec.budget_cost
+                            ).items() if key in limits
+                        }
+                        if name == "authz.verify":
+                            from capabilities.authz_modes import authz_call_budget
+                            try:
+                                charges.update(authz_call_budget(request.input))
+                            except ValueError as exc:
+                                raise HTTPException(422,str(exc)) from exc
+                        if name == "candidate.verify":
+                            assert candidate_record is not None
+                            if str(run["target_kind"]) == "device":
+                                contract_id = str(
+                                    candidate_record["verifier_contract_id"] or ""
+                                )
+                                # A device verification performs no traffic itself: it queues a device scan
+                                # that sweeps the inventory profile's ports and may fan out to web children
+                                # with their own imported-request ceilings. A flat parent charge let a small
+                                # reservation authorize all of it, so the Hunt's budget bound the parent
+                                # action and nothing beneath it. Charge the complete fan-out instead, derived
+                                # from the same constants it uses, so an unaffordable fan-out is refused at
+                                # reservation rather than discovered as downstream traffic.
+                                charges.update(device_agent.device_verification_fanout_budget(
+                                    contract_id=contract_id,
+                                    web_scan_type=_DEVICE_VERIFICATION_WEB_SCAN_TYPE,
+                                    max_web_origins=(
+                                        _DEVICE_VERIFICATION_MAX_WEB_ORIGINS
+                                        if contract_id in _DEVICE_VERIFICATION_WEB_CONTRACTS
+                                        else 0
+                                    ),
+                                ))
+                                if contract_id == "device.service_exposure":
+                                    locus = _hunt_json(
+                                        candidate_record["canonical_locus"], {}
+                                    )
+                                    transport_dimension = (
+                                        "udp_ports_attempted"
+                                        if str(locus.get("transport") or "").lower() == "udp"
+                                        else "tcp_ports_attempted"
+                                    )
+                                    charges[transport_dimension] = 1
+                            else:
+                                family = family_proof.canonical_family(
+                                    candidate_record["family"]
+                                )
+                                charges.update(web_candidate_budget(family))
+                                if family in _AGENT_MUTATING_VERIFY_FAMILIES:
+                                    if not policy.get("allow_state_changing_http"):
+                                        raise HTTPException(
+                                            status_code=403,
+                                            detail=(
+                                                "Candidate verification requires state-changing "
+                                                "HTTP authority for this proof family"
+                                            ),
+                                        )
+                                    charges["state_changing_requests"] = 12
+                        if name == "http.request" and request.input.get("follow_redirects") is True:
+                            # Reserve the complete same-origin redirect envelope before the
+                            # first request. The planner cannot expand this fixed server limit.
+                            charges["http_requests"] = 1 + MAX_REDIRECT_HOPS
+                        if validated_device_input is not None and device_adapter_name is not None:
+                            # An SSH proposal is control-plane-only. The exact user-
+                            # confirmed execution owns device fragility; proposing an
+                            # immutable plan must not consume or block on it.
+                            fragility_cost = (
+                                0
+                                if is_device_ssh_proposal
+                                else device_agent.tool_fragility_cost(
+                                    device_adapter_name, validated_device_input,
+                                )
+                            )
+                            if fragility_cost:
+                                charges["device_fragility_points"] = fragility_cost
+                            if name == "device.service.verify":
+                                transport_dimension = (
+                                    "udp_ports_attempted"
+                                    if validated_device_input.get("transport") == "udp"
+                                    else "tcp_ports_attempted"
+                                )
+                                charges.pop(
+                                    "tcp_ports_attempted"
+                                    if transport_dimension == "udp_ports_attempted"
+                                    else "udp_ports_attempted",
+                                    None,
+                                )
+                                charges[transport_dimension] = 1
+                    if writes_http:
+                        charges["state_changing_requests"] = 1
+                    charges["agent_actions"] = 1
+                    if requires_call_approval:
+                        charges["active_actions"] = 1
+                    if spec.hunt_executor == "worker_replay":
+                        from hunt.replay_selection import select_hunt_replay
+                        selected_replay = await select_hunt_replay(conn, run=run, context=context,
+                            values=request.input, capability_name=name, load_collection=_hunt_bound_collection)
+                        charges["http_requests"] = len(selected_replay.request_ids)
+                        charges["tool_wall_seconds"] = 60
+                        if name == "collections.replay_active":
+                            charges["state_changing_requests"] = selected_replay.writes
+                    reserve_device_traffic(run, spec, charges)
+                    if is_device_adapter or (run["device_target_id"] and spec.placement_requirements.get("network_reachability")):
+                        try:
+                            await require_device_admission(
+                                conn, run, fragility=int(charges.get("device_fragility_points") or 0),
+                                requests=(0 if is_device_queue or is_device_control or is_device_ssh_proposal
+                                          else int(charges.get("device_fragility_points") or 1)),
+                                scans=1 if is_device_queue else 0, capability_name=name,
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=409, detail=str(exc)) from exc
+                    if not revalidated:  # once, whatever the admission attempts
+                        lifecycle.advance("revalidated")
+                        revalidated = True
+                    worker_managed_budget = spec.hunt_executor == "worker_replay"
+                    worker_durable_budget = spec.hunt_executor in {
+                        "worker_network", "worker_scanner", "worker_browser",
+                        "worker_auth", "worker_http",
+                    }
+                    api_managed_budget = spec.hunt_executor in {
+                        "inline", "device_control", "device_http", "device_queue",
+                        "device_ssh_proposal",
+                    }
+                    durable_budget = api_managed_budget or worker_durable_budget
+                    if worker_managed_budget:
+                        durable_action_digest = hunt_capability_action_digest(
+                            hunt_id=run["id"],
+                            action_id=action_id,
+                            capability_name=name,
+                            target_kind=str(run["target_kind"]),
+                            target_id=run["device_target_id"] or run["target_id"],
+                            capability_input=request.input,
+                            requested_budget=charges,
+                            scope_receipt_id=validated_scope_receipt_id,
+                            approval_receipt_id=policy.get("approval_receipt_id"),
+                        )
+                    if is_device_http:
+                        await conn.execute(
+                            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                            f"device-http:{run['device_target_id']}",
+                        )
+                        device_http_in_flight = await conn.fetchval(
+                            """SELECT EXISTS(
+                                   SELECT 1
+                                   FROM budget_reservations r
+                                   JOIN hunt_runs h
+                                     ON r.owner_kind='hunt' AND r.owner_id=h.id::text
+                                   WHERE h.device_target_id=$1
+                                     AND r.capability_name='device.http.probe'
+                                     AND r.status IN ('reserved','running')
+                               )""",
+                            run["device_target_id"],
+                        )
+                        if device_http_in_flight:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="A device HTTP probe is already in flight for this Hunt",
+                            )
+                    if is_device_ssh_proposal:
+                        ssh_proposal_in_flight = await conn.fetchval(
+                            """SELECT EXISTS(
+                                   SELECT 1 FROM budget_reservations
+                                   WHERE owner_kind='hunt' AND owner_id=$1
+                                     AND capability_name='device.ssh.propose'
+                                     AND status IN ('reserved','running')
+                               )""",
+                            str(run["id"]),
+                        )
+                        if ssh_proposal_in_flight:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="An SSH proposal is already in flight for this Hunt",
+                            )
+                    if name in {"ssh.exec", "ssh.close"} and request.input.get("session_id"):
+                        from .ssh_stream import require_ssh_session_available
+                        require_ssh_session_available(get_redis(), base_queue=_get("AGENT_TOOL_QUEUE_NAME"),
+                            hunt_id=hunt_id, session_id=request.input["session_id"])
+                    if durable_budget:
+                        durable_action_digest = hunt_capability_action_digest(
+                            hunt_id=run["id"],
+                            action_id=action_id,
+                            capability_name=name,
+                            target_kind=str(run["target_kind"]),
+                            target_id=run["device_target_id"] or run["target_id"],
+                            capability_input=request.input,
+                            requested_budget=charges,
+                            scope_receipt_id=validated_scope_receipt_id,
+                            approval_receipt_id=policy.get("approval_receipt_id"),
+                        )
+                        requested_reservation = DurableBudgetReservation.request(
+                            owner_kind="hunt",
+                            owner_id=str(run["id"]),
+                            capability_name=name,
+                            amounts=charges,
+                        )
+                        stored_reservation = await durable_store.create_requested(
+                            conn,
+                            action_id=str(action_id),
+                            action_digest=durable_action_digest,
+                            record=requested_reservation,
+                        )
+                        if stored_reservation.record.status != "requested":
+                            raise HTTPException(
+                                status_code=409,
+                                detail="Hunt capability reservation is already active",
+                            )
+                        durable_lease_seconds = hunt_capability_lease_seconds(charges)
+                        try:
+                            reserved_record, reserved_used = (
+                                stored_reservation.record.reserve_against(
+                                    limits=limits,
+                                    consumed={
+                                        key: int(used.get(key) or 0) for key in limits
+                                    },
+                                    lease_seconds=durable_lease_seconds,
+                                )
+                            )
+                        except BudgetExceeded as exc:
+                            # Refused before anything was reserved: the transaction rolls back
+                            # (no reservation row), and the action is parked under its key for
+                            # a budget.raise instead of a failed row that replayed the refusal
+                            # forever, even after the budget was raised.
+                            raise budget_refusal(
+                                run, limits=limits, used=used, shortages=exc.shortages,
+                                charges=charges,
+                            ) from exc
+                        else:
+                            durable_reservation = await durable_store.persist_transition(
+                                conn,
+                                previous=stored_reservation,
+                                current=reserved_record,
+                                ledger_after_hold=reserved_used,
+                            )
+                            used.update(reserved_used)
+                            await conn.execute(
+                                "UPDATE hunt_runs SET budget_used_json=$2, status='active', "
+                                "updated_at=NOW() WHERE id=$1",
+                                run["id"],
+                                json.dumps(used),
+                            )
+                            admission_action_status = "reserved"
+                    elif not worker_managed_budget:
+                        try:
+                            reserved_used = reserve_budget_snapshot(
+                                limits, {key: int(used.get(key) or 0) for key in limits}, charges,
+                            )
+                        except BudgetExceeded as exc:
+                            raise budget_refusal(
+                                run, limits=limits, used=used, shortages=exc.shortages,
+                                charges=charges,
+                            ) from exc
+                        else:
+                            used.update(reserved_used)
+                            await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, status='active', updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))
+                    for granted_request in granted_requests:
+                        await record_grant_use(
+                            conn, hunt_id=run["id"], action_id=action_id, request=granted_request,
+                        )
+                    await conn.execute(
+                        """INSERT INTO hunt_actions (
+                               id, hunt_run_id, capability_name, status, input_summary,
+                               result_summary, completed_at
+                           ) VALUES ($1,$2,$3,$4,$5,$6,
+                                     CASE WHEN $4='failed' THEN NOW() ELSE NULL END)""",
+                        action_id, run["id"], name,
+                        admission_action_status,
+                        json.dumps({
+                            "schema_version": "hunt-capability-input-summary/v1",
+                            "input": _hunt_redacted_capability_input(name, request.input),
+                            "input_digest": capability_input_digest,
+                            "idempotency_key_sha256": idempotency_key_digest,
+                        }),
+                        json.dumps(admission_result_summary),
+                    )
+                    if admission_action_status != "failed":
+                        await record_credential_uses(
+                            conn, hunt_id=run["id"], action_id=action_id, uses=credential_uses,
+                        )
+        except HuntRefusal as refusal:
+            if action_id is None or (not refusal.recorded and refusal.kind is None):
+                raise
+            # A refusal is recorded (or its action parked) in its own transaction: the one
+            # that refused rolled back, so nothing was reserved or charged.
+            granted_requests.append(await settle_refusal(
+                _pool(), hunt_id=hunt_id, action_id=action_id, name=name,
+                input_summary=admission_input_summary, input_digest=capability_input_digest,
+                refusal=refusal,
+            ))
+            continue
+        break
+    else:
+        raise HTTPException(status_code=409, detail="Hunt admission did not settle; retry the same key")
 
     lifecycle.advance("admitted")
     assert action_id is not None
-    if admission_error is not None:
-        raise admission_error
 
     if api_managed_budget:
         if durable_reservation is None or durable_action_digest is None:
@@ -2524,6 +2617,13 @@ async def _execute_hunt_capability_lifecycle(
             verification_refused_before_traffic = isinstance(
                 candidate_adapter.blocked_exception, VerificationRefused,
             )
+            refusal_detail = getattr(candidate_adapter.blocked_exception, "detail", None)
+            if verification_refused_before_traffic and isinstance(refusal_detail, Mapping):
+                # D34: the code stays machine-readable in the action, not a repr string.
+                result = {**result, **{
+                    key: refusal_detail[key] for key in ("reason_code", "message", "slot", "profile_id")
+                    if key in refusal_detail
+                }, "error": str(refusal_detail.get("reason_code") or refusal_detail.get("error") or "")[:120]}
             if candidate_adapter.blocked_exception is not None:
                 raise candidate_adapter.blocked_exception
         elif name in ASSET_ACTION_NAMES:
@@ -4404,7 +4504,11 @@ async def _hunt_bound_collection(
         or str(item.get("selection_id") or "") == str(collection_uuid)
     ), None)
     if ref is None:
-        raise HTTPException(status_code=403, detail="Request collection is not bound to this Hunt")
+        raise HuntRefusal(
+            "collection_not_bound",
+            "Request collection is not bound to this Hunt; an operator binds collections to the "
+            "target (POST /targets/{id}/request-collections) before a Hunt starts.",
+        )
     actual_collection_uuid = _uuid_or_400(
         str(ref.get("collection_id") or ""), "bound request collection id",
     )

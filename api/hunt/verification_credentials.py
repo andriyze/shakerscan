@@ -156,6 +156,14 @@ def _refuse(code: str, message: str, *, slot: str | None = None, profile_id: str
     return HuntVerificationCredentialRefused(code, message, slot=slot, profile_id=profile_id)
 
 
+async def _hunt_granted(conn: Any, scope: HuntCredentialScope) -> dict[str, dict[str, Any]]:
+    from .credential_uses import live_credential_grants
+    try:
+        return await live_credential_grants(conn, scope.hunt_id)
+    except Exception:  # noqa: BLE001 - a store without the permission tables grants nothing
+        return {}
+
+
 def _principal_slots(row: Mapping[str, Any]) -> set[str]:
     slots = {str(row.get("auth_state") or "").strip().lower()}
     if str(row.get("role") or "").strip().lower() == "admin":
@@ -244,6 +252,16 @@ async def _select(
                 )
             profile_id = str(picks[0].get("profile_id") or "")
             profile = attached.get(profile_id)
+            granted = (await _hunt_granted(conn, scope)).get(profile_id) if profile is None else None
+            if granted is not None:
+                # Another target's credential a person allowed for this Hunt only.
+                try:
+                    candidate = await store.get_profile(conn, profile_id=profile_id)
+                except CredentialStoreError:
+                    candidate = None
+                if (candidate is not None and candidate.is_active and _unexpired(candidate, now)
+                        and candidate.current_version == granted["version"]):
+                    profile = candidate
             if profile is None:
                 raise _refuse(
                     CREDENTIAL_NOT_ATTACHED,
@@ -261,8 +279,9 @@ async def _select(
             principal = next(
                 (row for row in own_principals if str(row["profile_id"]) == profile_id), None,
             )
-            selection = _Selection(slot, profile, selected_source(
-                home_target_id=profile.target_id, hunt_target_id=scope.target_id,
+            selection = _Selection(slot, profile, (
+                str(granted["source"]) if granted is not None
+                else selected_source(home_target_id=profile.target_id, hunt_target_id=scope.target_id)
             ), principal)
         else:
             own = [row for row in own_principals if slot in _principal_slots(row)]
@@ -283,6 +302,23 @@ async def _select(
                     and profile.auth_kind in VERIFIER_AUTH_KINDS
                     and VERIFIER_CAPABILITY in profile.allowed_capabilities
                 ]
+                lacking = [
+                    profile for profile in attached.values()
+                    if profile_slot and profile.principal_slot == profile_slot
+                    and profile.auth_kind in VERIFIER_AUTH_KINDS
+                    and VERIFIER_CAPABILITY not in profile.allowed_capabilities
+                ]
+                if not fitting and lacking:
+                    # D37: credentials are attached; none allows the verifier. Attaching another
+                    # does not help; allowing authz.verify on one does (an approval receipt).
+                    raise _refuse(
+                        CREDENTIAL_CAPABILITY_NOT_GRANTED,
+                        f"Credentials attached to this target fill {slot} (a {profile_slot} "
+                        f"principal), but none allows {VERIFIER_CAPABILITY}. Allow "
+                        f"{VERIFIER_CAPABILITY} on one of them (an administrator's approval "
+                        "receipt) or select one that allows it.",
+                        slot=slot, profile_id=lacking[0].profile_id,
+                    )
                 if not fitting:
                     raise _refuse(
                         CREDENTIAL_MISSING_FOR_SLOT,
@@ -403,6 +439,8 @@ async def resolve_hunt_workflow_principal_contexts(
                 conn, profile_id=selection.profile.profile_id,
                 target_kind=scope.target_kind, target_id=scope.target_id,
                 capability=VERIFIER_CAPABILITY,
+                **({"hunt_run_id": scope.hunt_id} if selection.source.startswith(
+                    ("live_grant:", "preauthorized:")) else {}),
             )
         except CredentialStoreError as exc:
             raise _refuse(

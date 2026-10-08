@@ -64,6 +64,8 @@ class Store:
             "target_kind": "api",
             "target_id": TARGET_ID,
             "capability": "request.replay",
+            # A Hunt-owned resolution may use a credential allowed for that Hunt only.
+            "hunt_run_id": "hunt-1",
         }
         return WorkerCredentialCiphertext(
             metadata=self.profile,

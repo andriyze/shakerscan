@@ -89,7 +89,10 @@ def budget_limits_after(run: Mapping[str, Any], request: HuntBudgetAmendmentRequ
         if value < before[name]:
             raise HTTPException(422, f"Budget amendments cannot decrease {name}")
         if name not in permitted and value > 0:
-            raise HTTPException(403, f"{name} needs permission absent from this Hunt; a budget increase does not grant it")
+            raise HTTPException(403, {
+                "error": "budget_dimension_needs_permission", "reason_code": "budget_dimension_needs_permission",
+                "message": f"{name} needs permission absent from this Hunt; a budget increase does not grant it",
+            })
         after[name] = value
     if after == before:
         raise HTTPException(422, "At least one total limit must increase")
@@ -115,7 +118,10 @@ def require_resume_headroom(run: Mapping[str, Any], *, limits_override: Mapping[
     dimension = str(run.get("stop_reason") or "").removeprefix("budget_exhausted:")
     limits = {**HuntBudget(**budget).ledger_limits(), "candidates": budget["max_candidates"], "verifications": budget["max_verifications"]}
     if dimension not in limits or int(used.get(dimension) or 0) >= limits[dimension]:
-        raise HTTPException(409, "Increase the exhausted dimension before resuming this Hunt")
+        raise HTTPException(409, {
+            "error": "budget_resume_without_headroom", "reason_code": "budget_resume_without_headroom",
+            "message": "Increase the exhausted dimension before resuming this Hunt",
+        })
 
 
 def amendment_public(row: Mapping[str, Any]) -> dict[str, Any]:

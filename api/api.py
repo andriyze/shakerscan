@@ -860,7 +860,8 @@ try:
         HuntStartContract,
         bind_validated_receipts,
     )
-    from hunt.credential_uses import HuntCredentialRefusal, unattached_reference_refusal
+    from hunt.credential_uses import HuntCredentialRefusal
+    from hunt.start_permissions import record_start_permissions, validate_start_credentials
     from hunt.verification_credentials import (
         current_hunt_credential_scope,
         resolve_hunt_workflow_principal_contexts,
@@ -927,7 +928,8 @@ except ModuleNotFoundError:
         HuntStartContract,
         bind_validated_receipts,
     )
-    from api.hunt.credential_uses import HuntCredentialRefusal, unattached_reference_refusal
+    from api.hunt.credential_uses import HuntCredentialRefusal
+    from api.hunt.start_permissions import record_start_permissions, validate_start_credentials
     from api.hunt.verification_credentials import (
         current_hunt_credential_scope,
         resolve_hunt_workflow_principal_contexts,
@@ -13117,33 +13119,6 @@ async def _run_agent_hunt_for_episode(episode_id: str) -> dict[str, Any]:
     }
 
 
-async def _validate_hunt_credential_references(
-    conn: Any,
-    contract: HuntStartContract,
-    target_id: uuid.UUID,
-) -> list[dict[str, Any]]:
-    if not contract.credential_refs:
-        return []
-    profiles = await _generic_credential_store.list_profiles(
-        conn,
-        target_kind=contract.target_kind,
-        target_id=target_id,
-        include_inactive=True,
-    )
-    refusal = unattached_reference_refusal(contract.credential_refs, profiles)
-    if refusal is not None:
-        raise HTTPException(status_code=422, detail=refusal.public_detail())
-    try:
-        generic, _missing = validate_generic_credential_references(
-            contract.credential_refs,
-            profiles,
-            target_kind=contract.target_kind,
-        )
-    except CredentialReferenceError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return generic
-
-
 async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
     """Persist one native Hunt contract without translating authority."""
     target_uuid = _uuid_or_400(contract.target_id, "target id")
@@ -13165,12 +13140,12 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             if not web or not web["is_active"]:
                 raise HTTPException(
                     status_code=404,
-                    detail="Active web/API/network target not found",
+                    detail={"error": "target_not_found", "reason_code": "target_not_found", "message": "Active web/API/network target not found"},
                 )
             target_url = str(web["url"])
             db_target_id, device_target_id = target_uuid, None
-            credential_rows = await _validate_hunt_credential_references(
-                conn, contract, target_uuid,
+            credential_rows, preauthorized_credentials = await validate_start_credentials(
+                conn, contract, target_uuid, _generic_credential_store,
             )
             origins = await _target_web_origins(conn, target_uuid, target_url)
             (
@@ -13210,11 +13185,11 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             }
         elif contract.target_kind == "device":
             if not device or not device["is_active"]:
-                raise HTTPException(status_code=404, detail="Active device target not found")
+                raise HTTPException(status_code=404, detail={"error": "target_not_found", "reason_code": "target_not_found", "message": "Active device target not found"})
             target_url = str(device["primary_locator"])
             db_target_id, device_target_id = None, target_uuid
-            credential_rows = await _validate_hunt_credential_references(
-                conn, contract, target_uuid,
+            credential_rows, preauthorized_credentials = await validate_start_credentials(
+                conn, contract, target_uuid, _generic_credential_store,
             )
             (
                 collection_refs,
@@ -13387,6 +13362,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             _optional_uuid(validated_approval_id) if validated_approval_id else None,
         )
         await _hunt_skills.record_initial_skill_bindings(conn, hunt_run_id=row["id"], specs=bound.specs, requested_skill_ids=contract.skill_ids)
+        await record_start_permissions(conn, row, contract, preauthorized_credentials)
     return _hunt_public(row)
 
 

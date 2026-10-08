@@ -12,6 +12,7 @@ import pytest
 from fastapi import HTTPException
 
 from api.hunt.budget_amendments import BUDGET_AMENDMENT_SCHEMA_SQL
+from api.hunt.permission_store import HUNT_PERMISSION_SCHEMA_SQL
 from api.hunt.run_service import HuntRunService
 from api.hunt.start_contract import HuntBudget
 from api.runtime.budgets import reserve_budget_snapshot, reconcile_budget_snapshot
@@ -39,8 +40,13 @@ async def test_budget_amendment_serializes_with_usage_and_reloads_after_restart(
         await conn.execute(hunt_ddl.replace("    budget_revision INTEGER NOT NULL DEFAULT 0,\n", ""))
         await conn.execute("""CREATE TABLE hunt_actions (
             hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'running',
+            result_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+            completed_at TIMESTAMPTZ,
             private_http_result TEXT
         )""")
+        # Finishing or cancelling a Hunt withdraws its pending permission requests.
+        await conn.execute(HUNT_PERMISSION_SCHEMA_SQL)
         await conn.execute(BUDGET_AMENDMENT_SCHEMA_SQL)
         await conn.execute(BUDGET_AMENDMENT_SCHEMA_SQL)
         run = run_row(kind)

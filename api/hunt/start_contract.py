@@ -36,8 +36,11 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "target_id", "target_kind", "goal", "objective", "budget_profile", "policy_profile",
     "budgets", "policy", "credential_refs", "capabilities", "request_collection_ids",
     "approval_receipt_id", "scope_receipt_id", "schema_version", "skill_ids",
-    "direct_origin_addresses",
+    "direct_origin_addresses", "allow", "proposed_allow", "allow_asserted_by",
 })
+# Who set ``allow`` bounds. The Enterprise gateway sets this after the person's step-up (PR G1)
+# and must strip any value a client sent; on local OSS the bounds are the operator's own.
+ALLOW_ASSERTION_PROOFS = frozenset({"stepup", "launch_stepup", "local"})
 _ALLOWED_BUDGET_KEYS = frozenset({
     "max_duration_seconds",
     "max_capability_calls",
@@ -148,7 +151,15 @@ HUNT_BUDGET_DIMENSION_LABELS: Mapping[str, str] = {
 
 
 class HuntStartContractError(ValueError):
-    """The submitted Hunt request is outside the V2 authority contract."""
+    """The submitted Hunt request is outside the V2 authority contract.
+
+    ``code`` is the stable reason code (``permission_reasons.REASON_CODES``) when a person could
+    resolve the refusal; None for a malformed request.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def hunt_start_public_contract() -> dict[str, Any]:
@@ -162,6 +173,8 @@ def hunt_start_public_contract() -> dict[str, Any]:
     from .candidate_verification_preflight import (
         IDENTITY_ONLY_LOCATION_KEYS, ROUTE_LOCUS_KEYS,
     )
+    from .permission_bounds import CAPABILITY_FLAGS, MAX_BOUNDS
+    from .permission_reasons import PERMISSION_KINDS, REASON_CODES
     from .coverage_ledger import (
         COVERAGE_ANGLE_STATUSES, COVERAGE_LOCUS_KEYS, MAX_COVERAGE_BYTES_PER_HUNT,
         MAX_COVERAGE_EVENT_BYTES, MAX_COVERAGE_EVENTS_PER_HUNT,
@@ -179,7 +192,22 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "credential_refs": MAX_CREDENTIAL_REFS,
             "skill_ids": MAX_SKILLS,
             "direct_origin_addresses": MAX_DIRECT_ORIGIN_ADDRESSES,
+            "allow": MAX_BOUNDS,
         },
+        # Pre-authorization bounds (docs/hunt-permission-requests.md). ``allow`` is a person's
+        # (Enterprise: set with allow_asserted_by after step-up); ``proposed_allow`` is the
+        # agent's proposal and becomes one pending request for the person to approve.
+        "allow_bounds": {
+            "fields": ["allow", "proposed_allow"],
+            "grammar": [
+                "budget.raise:<N>x", "budget.raise:<max_dimension>=<total>",
+                "credential.use:<target-id|host>,...", "target.authorize:<host[:port]|*.domain[:port]>,...",
+                "capability:" + "|".join(sorted(CAPABILITY_FLAGS)), "ssh.host_trust:first-contact",
+            ],
+            "assertion_proofs": sorted(ALLOW_ASSERTION_PROOFS),
+        },
+        "permission_reason_codes": sorted(REASON_CODES),
+        "permission_kinds": list(PERMISSION_KINDS),
         "patterns": {
             "identifier": _ID_RE.pattern,
             "capability": _CAPABILITY_RE.pattern,
@@ -366,7 +394,8 @@ def _budget_overrides(value: Any, profile: str) -> dict[str, int]:
             raise HuntStartContractError(f"{key} must be {qualifier} integer")
         if amount > int(defaults[key]):
             raise HuntStartContractError(
-                f"{key} exceeds the {profile} Hunt profile ceiling ({defaults[key]})"
+                f"{key} exceeds the {profile} Hunt profile ceiling ({defaults[key]})",
+                code="budget_above_profile_ceiling",
             )
         result[key] = amount
     return result
@@ -388,7 +417,7 @@ def _credential_refs(value: Any) -> dict[str, str]:
             result[key] = item
     if len(result.values()) != len(set(result.values())):
         raise HuntStartContractError(
-            "credential references must use distinct profile IDs"
+            "credential references must use distinct profile IDs", code="credentials_not_distinct",
         )
     return result
 
@@ -562,6 +591,11 @@ class HuntStartContract:
     # What the server resolved rather than refused: implied authority and zeroed budget
     # dimensions. Reported on the start response so no adjustment is silent.
     adjustments: Sequence[str] = ()
+    # Pre-authorization bounds (``--allow``), parsed by the server: the person's own (``allow``,
+    # recorded as theirs) or the agent's proposal (``proposed_allow``, one pending request).
+    allow: Sequence[str] = ()
+    proposed_allow: Sequence[str] = ()
+    allow_asserted_by: Mapping[str, str] | None = None
 
     @property
     def resolved_budget(self) -> dict[str, int]:
@@ -649,6 +683,8 @@ class HuntStartContract:
             "skill_ids": list(self.skill_ids),
             "direct_origin_addresses": list(self.direct_origin_addresses),
             "policy_adjustments": list(self.adjustments),
+            "allow": list(self.allow),
+            "proposed_allow": list(self.proposed_allow),
             "secret_values_visible": False,
         }
 
@@ -821,7 +857,8 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         )
     if policy.allow_direct_origin and not direct_origin_addresses:
         raise HuntStartContractError(
-            "policy.allow_direct_origin requires at least one direct origin address"
+            "policy.allow_direct_origin requires at least one direct origin address",
+            code="direct_origin_address_required",
         )
 
     return HuntStartContract(
@@ -851,4 +888,36 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         ),
         direct_origin_addresses=direct_origin_addresses,
         adjustments=tuple(adjustments),
+        **_allow_fields(payload),
     )
+
+
+def _allow_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the start bounds through the one grammar; refuse a malformed bound by name."""
+    from .permission_bounds import BoundError, parse_bounds
+
+    fields: dict[str, Any] = {}
+    for name in ("allow", "proposed_allow"):
+        raw = payload.get(name)
+        if raw is None:
+            continue
+        if not isinstance(raw, (list, tuple)):
+            raise HuntStartContractError(f"{name} must be an array of bounds")
+        values = tuple(str(item or "").strip() for item in raw)
+        try:
+            parse_bounds(values, budget_fields=_ALLOWED_BUDGET_KEYS)
+        except BoundError as exc:
+            raise HuntStartContractError(str(exc), code="preauthorization_bound_invalid") from exc
+        fields[name] = values
+    assertion = payload.get("allow_asserted_by")
+    if assertion is not None:
+        if not isinstance(assertion, Mapping) or str(assertion.get("proof") or "") not in ALLOW_ASSERTION_PROOFS:
+            raise HuntStartContractError(
+                "allow_asserted_by must name the person and a proof (stepup, launch_stepup, local)",
+                code="preauthorization_bound_invalid",
+            )
+        person = str(assertion.get("person") or "").strip()
+        if not person or len(person) > 200:
+            raise HuntStartContractError("allow_asserted_by.person is required", code="preauthorization_bound_invalid")
+        fields["allow_asserted_by"] = {"person": person, "proof": str(assertion["proof"])}
+    return fields

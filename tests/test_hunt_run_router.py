@@ -394,6 +394,8 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
             if "FROM hunt_credential_uses" in query:
                 assert args[0] == uuid.UUID(hunt_id)
                 return [CREDENTIAL_USE_ROW]
+            if "FROM hunt_permission_requests" in query:
+                return []
             assert "FROM hunt_actions WHERE hunt_run_id=$1" in query
             assert args == (uuid.UUID(hunt_id),)
             return [{
@@ -607,9 +609,15 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
             raise AssertionError(query)
 
         async def execute(self, query, *args):
+            if "status='awaiting_permission'" in query:
+                return "UPDATE 0"  # parked actions settle with the finished Hunt
             assert query == "UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1"
             assert args == (uuid.UUID(hunt_id),)
             self.cleared_http_captures = True
+
+        async def fetch(self, query, *args):
+            assert "UPDATE hunt_permission_requests SET status='withdrawn'" in query
+            return []
 
     connection = Connection()
     service = HuntRunService(lambda: _Pool(connection))
@@ -708,9 +716,15 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
             )
 
         async def execute(self, query, *args):
+            if "status='awaiting_permission'" in query:
+                return "UPDATE 0"  # parked actions settle with the finished Hunt
             assert query == "UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1"
             assert args == (uuid.UUID(hunt_id),)
             self.cleared_http_captures = True
+
+        async def fetch(self, query, *args):
+            assert "UPDATE hunt_permission_requests SET status='withdrawn'" in query
+            return []
 
     connection = Connection()
     result = asyncio.run(HuntRunService(lambda: _Pool(connection)).finish(
@@ -798,6 +812,16 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
         (frozenset({"POST"}), "/hunts/{hunt_id}/resume", "resume_hunt"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/budget-amendments", "amend_hunt_budget"),
         (frozenset({"GET"}), "/hunts/{hunt_id}/budget-amendments", "get_hunt_budget_amendments"),
+        # Permission requests: reads and long-poll, a person's decision, revocation. No create.
+        (frozenset({"GET"}), "/hunts/{hunt_id}/permission-requests", "list_hunt_permission_requests"),
+        (frozenset({"GET"}), "/hunts/{hunt_id}/permission-requests/{request_id}", "get_hunt_permission_request"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/permission-requests/{request_id}/decision",
+         "decide_hunt_permission_request"),
+        (frozenset({"GET"}), "/hunts/{hunt_id}/permission-grants", "list_hunt_permission_grants"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/permission-grants/{grant_id}/revoke",
+         "revoke_hunt_permission_grant"),
+        (frozenset({"GET"}), "/hunts/{hunt_id}/preauthorization", "get_hunt_preauthorization"),
+        (frozenset({"GET"}), "/hunts/{hunt_id}/permission-events", "list_hunt_permission_events"),
         (
             frozenset({"POST"}),
             "/hunts/{hunt_id}/authorization-investigations",

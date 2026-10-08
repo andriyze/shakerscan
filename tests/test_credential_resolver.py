@@ -218,6 +218,8 @@ def test_http_resolution_is_exact_content_free_and_scrubbed_after_context():
         "target_kind": "api",
         "target_id": TARGET_ID,
         "capability": "request.replay",
+        # A Hunt-owned resolution may use a credential a person allowed for that Hunt only.
+        "hunt_run_id": "hunt-1",
     }
     assert retained is not None and retained._closed is True
     assert retained._material == {}

@@ -109,7 +109,7 @@ def allowed_capability_names(
         try:
             CAPABILITY_REGISTRY.require(name)
         except KeyError as exc:
-            raise HuntStartContractError(str(exc)) from exc
+            raise HuntStartContractError(str(exc), code="capability_unregistered") from exc
         if name not in available:
             raise HuntStartContractError(
                 f"capability {name} is outside this target, budget, or Hunt policy"
