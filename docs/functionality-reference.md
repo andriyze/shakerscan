@@ -263,11 +263,14 @@ control claims nothing.
 
 **Verified exposure checks** (`sensitive_exposure`, `exposure.verify_batch`, passive under ADR 0001):
 GETs of a reviewed seed list (`api/capabilities/exposure_probe.py`: `.env` variants, `.git/config` and
-`HEAD`, actuator `env`/`configprops`/index, OpenAPI documents, `config.json`, `appsettings.json`,
+`HEAD`, the credential stores `.git-credentials`, `.netrc`, `.npmrc` and `.pypirc`, actuator `env`/`configprops`/index, OpenAPI documents, `config.json`, `appsettings.json`,
 `web.config(.bak)`, `.DS_Store`, SQL dumps and backup archives, `phpinfo.php`, the Werkzeug console and
 `/debug/pprof/`) and of every discovered endpoint, redirects off. Each file type is proved by its own
 grammar (a git `[core]` section, a dotenv/properties body, actuator `propertySources`, an OpenAPI
-document, ASP.NET `<configuration>`, a dump header or file magic); a secret is proved only by the
+document, ASP.NET `<configuration>`, a dump header or file magic; for a credential store, one
+credentialed URL per line, netrc `machine ... password` tokens, an npm `_authToken`/`_auth`/
+`_password` assignment or a `[pypi]`/`[distutils]` ini with a `password`, its body always withheld);
+a secret is proved only by the
 narrow, entropy-screened contract shared with the Hunt verifier (`capabilities/secret_material.py`),
 so masked (`******`), indirect (`${VAR}`), placeholder and documentation-sample values never count,
 and values under an OpenAPI `example` are documentation. A key counts only when a whole name segment

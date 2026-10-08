@@ -30,6 +30,7 @@ from typing import Any
 from .secret_material import (
     SecretEvidence,
     fingerprinted_secret_evidence,
+    is_structured_secret_value,
     redact_text_assignments,
     redactable_assignments,
     secret_evidence,
@@ -59,6 +60,12 @@ SENSITIVE_SEED_PATHS: tuple[str, ...] = (
     "/.env.bak",
     "/.git/config",
     "/.git/HEAD",
+    # Credential stores a deployed home or build directory can leak (soak N42): git's
+    # credential helper store, netrc, and the npm and PyPI publishing configurations.
+    "/.git-credentials",
+    "/.netrc",
+    "/.npmrc",
+    "/.pypirc",
     "/.svn/entries",
     "/.hg/hgrc",
     "/.aws/credentials",
@@ -632,8 +639,144 @@ def _json_signature(path: str, text: str, document: Any) -> ExposureSignature | 
     return None
 
 
+# --- Credential stores (soak N42) -----------------------------------------------------------
+# Each is proved by its own grammar, never its name alone, and the whole body is withheld.
+# `.git-credentials`: one credentialed URL per line, as `git credential-store` writes them.
+_GIT_CREDENTIAL_LINE_RE = re.compile(
+    r"(?:https?|ftps?)://([^:/@\s]{1,256}):([^@\s]{1,1024})@([A-Za-z0-9.\-]{1,253})(?::\d{1,5})?(?:/\S{0,2048})?"
+)
+# `.npmrc`: ini assignments; an auth key, possibly scoped to a registry (`//host/:_authToken`).
+_NPMRC_LINE_RE = re.compile(r"[ \t]*([^=\s#;][^=\r\n]{0,511}?)[ \t]*=[ \t]*(.*?)[ \t]*")
+_NPMRC_AUTH_KEY_RE = re.compile(r"(?:^|:)(_authToken|_auth|_password)$")
+# `.pypirc`: an ini file with a [distutils] index-servers list or a [pypi]/[testpypi] section.
+_INI_SECTION_RE = re.compile(r"[ \t]*\[([^\]\r\n]{1,128})\][ \t]*")
+_INI_ASSIGNMENT_RE = re.compile(r"[ \t]*([A-Za-z0-9_.\-]{1,128})[ \t]*[=:][ \t]*(.*?)[ \t]*")
+_NETRC_KEYWORDS = frozenset({"machine", "default", "login", "password", "account", "macdef"})
+_CREDENTIAL_STORE_NAMES = frozenset({".git-credentials", ".netrc", "_netrc", ".npmrc", ".pypirc"})
+
+
+def _grammar_lines(text: str) -> list[str]:
+    return [
+        line.strip() for line in text[:_PARSE_MAX_CHARS].splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", ";"))
+    ]
+
+
+def _git_credentials_pairs(text: str) -> list[tuple[str, object]] | None:
+    lines = _grammar_lines(text)
+    pairs: list[tuple[str, object]] = []
+    for line in lines:
+        match = _GIT_CREDENTIAL_LINE_RE.fullmatch(line)
+        if match:
+            pairs.append((f"{match.group(3).lower()}.password", urllib.parse.unquote(match.group(2))))
+    # Every meaningful line is a credentialed URL, as the credential store writes them.
+    if not pairs or len(pairs) * 5 < len(lines) * 4:
+        return None
+    return pairs[:_MAX_DOCUMENT_PAIRS]
+
+
+def _netrc_pairs(text: str) -> list[tuple[str, object]] | None:
+    tokens = " ".join(_grammar_lines(text)).split()[:_MAX_DOCUMENT_PAIRS]
+    if not tokens or tokens[0] not in {"machine", "default"}:
+        return None
+    pairs: list[tuple[str, object]] = []
+    machine = "default"
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "default":
+            machine, index = "default", index + 1
+            continue
+        if token not in _NETRC_KEYWORDS or index + 1 >= len(tokens):
+            return None
+        value = tokens[index + 1]
+        if token == "machine":
+            machine = value.lower()
+        elif token in {"password", "account"}:
+            pairs.append((f"{machine}.{token}", value))
+        elif token == "macdef":
+            break
+        index += 2
+    return pairs or None
+
+
+def _npmrc_pairs(text: str) -> list[tuple[str, object]] | None:
+    lines = _grammar_lines(text)
+    assignments = [match for line in lines if (match := _NPMRC_LINE_RE.fullmatch(line))]
+    if len(assignments) * 5 < len(lines) * 4:
+        return None
+    pairs: list[tuple[str, object]] = [
+        (match.group(1).strip(), match.group(2).strip().strip("\"'"))
+        for match in assignments if _NPMRC_AUTH_KEY_RE.search(match.group(1).strip())
+    ]
+    return pairs[:_MAX_DOCUMENT_PAIRS] or None
+
+
+def _pypirc_pairs(text: str) -> list[tuple[str, object]] | None:
+    section = ""
+    sections: set[str] = set()
+    pairs: list[tuple[str, object]] = []
+    for line in _grammar_lines(text):
+        header = _INI_SECTION_RE.fullmatch(line)
+        if header:
+            section = header.group(1).strip().lower()
+            sections.add(section)
+            continue
+        assignment = _INI_ASSIGNMENT_RE.fullmatch(line)
+        if assignment is None:
+            if section == "distutils":
+                continue  # an index-servers continuation line
+            return None
+        if assignment.group(1).lower() == "password" and section:
+            pairs.append((f"{section}.password", assignment.group(2)))
+    if not sections & {"distutils", "pypi", "testpypi"}:
+        return None
+    return pairs[:_MAX_DOCUMENT_PAIRS] or None
+
+
+_CREDENTIAL_STORE_PARSERS = (
+    (".git-credentials", "git_credentials_store", _git_credentials_pairs),
+    (".netrc", "netrc_credentials", _netrc_pairs),
+    ("_netrc", "netrc_credentials", _netrc_pairs),
+    (".npmrc", "npmrc_auth_token", _npmrc_pairs),
+    (".pypirc", "pypirc_credentials", _pypirc_pairs),
+)
+
+
+def _credential_store(path: str, text: str) -> ExposureSignature | None:
+    """A credential store proved by its own grammar.
+
+    A stored credential that passes the shared entropy screen (or is a provider-format token)
+    verifies a ``configuration_secret_file``; a store whose values are placeholders, masked,
+    indirect (``${NPM_TOKEN}``) or low-entropy is a ``configuration_file`` observation. Either
+    way the body is withheld: the record keeps the class, the key names and fingerprints.
+    """
+    name = _last_segment(path)
+    if name not in _CREDENTIAL_STORE_NAMES:
+        return None
+    for file_name, pattern, parse in _CREDENTIAL_STORE_PARSERS:
+        if name != file_name:
+            continue
+        pairs = parse(text)
+        if pairs is None:
+            return None
+        found = [
+            secret_evidence(str(key), "config_secret_assignment", str(value).strip())
+            for key, value in pairs if is_structured_secret_value(value)
+        ]
+        found.extend(selfevident_secret_evidence(text[:_PARSE_MAX_CHARS]))
+        secrets = _dedupe(found)
+        if secrets:
+            return _sig("configuration_secret_file", pattern, secrets, pairs=pairs)
+        return _sig("configuration_file", pattern, pairs=pairs)
+    return None
+
+
 def _structured_text(path: str, text: str) -> ExposureSignature | None:
     """Proofs for non-HTML bodies whose own grammar identifies the file type."""
+    credential_store = _credential_store(path, text)
+    if credential_store is not None:
+        return credential_store
     if _GIT_CORE_HEADER_RE.search(text) and _GIT_CORE_KEY_RE.search(text):
         return _sig("version_control_exposure", "git_config_core_section",
                     _dedupe(selfevident_secret_evidence(text)))
@@ -819,7 +962,8 @@ _PROMOTABLE_EXPOSURE_CLASSES = frozenset(EXPOSURE_PROOF_CONTRACTS)
 _CONFIG_DOCUMENT_PATTERNS = frozenset({
     "dotenv_secret_assignment", "dotenv_assignments", "aspnet_web_config",
     "aspnet_web_config_backup", "actuator_property_sources", "json_configuration_secret",
-    "sql_dump",
+    "sql_dump", "git_credentials_store", "netrc_credentials", "npmrc_auth_token",
+    "pypirc_credentials",
 })
 # A known value shorter than this is too common to scrub or to test an excerpt for.
 _MIN_SCRUBBED_VALUE_LENGTH = 4

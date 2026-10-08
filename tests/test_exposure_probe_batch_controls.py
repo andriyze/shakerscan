@@ -145,3 +145,25 @@ def test_hunt_and_dast_share_one_secret_contract():
     assert workflow_experiment._is_placeholder_secret is secret_material.is_placeholder_secret
     body = f'{{"key":"{STRIPE}"}}'
     assert workflow_experiment._classify_selfevident_secret_values(body) == ["stripe_key"]
+
+
+# Soak N42: a credential store is a reviewed seed, verified and never stored in clear (the
+# classification tests are in tests/test_exposure_credential_stores.py).
+GIT_TOKEN = "ghp_" + "Zt8Qw3Er6Ty9Ui2Op5As7Df1Gh4Jk0Lz3Xc6V"
+GIT_CREDENTIALS = f"https://deploy:{GIT_TOKEN}@github.com\n"
+
+
+def test_the_batch_verifies_git_credentials_and_keeps_the_token_out(monkeypatch):
+    def answer(url):
+        if url.endswith("/.git-credentials"):
+            return 200, GIT_CREDENTIALS.encode()
+        return 404, b"not found"
+
+    receipt, proofs, transport = _run(monkeypatch, answer)
+    assert "https://app.example.test/.git-credentials" in transport.sent
+    verified = [item for item in proofs if item.get("proof_state") == "verified"]
+    assert [item["request_url"] for item in verified] == ["https://app.example.test/.git-credentials"]
+    assert verified[0]["proof_contract"] == "config_secret_exposure/v1"
+    text = json.dumps([receipt.observations, receipt.redacted_execution], default=str)
+    for canary in (GIT_TOKEN,):
+        assert canary not in text
