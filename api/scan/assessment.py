@@ -62,6 +62,10 @@ def withhold_unexamined_grade(report: dict[str, Any]) -> bool:
 
 def unexamined_coverage_reason(report: Mapping[str, Any]) -> str:
     """One sentence naming why the bound origin's application was not examined."""
+    coverage = report.get("coverage") if isinstance(report.get("coverage"), Mapping) else {}
+    if "application_surface_not_examined" in (coverage.get("reasons") or ()):
+        return ("the selected families only probe fixed, well-known locations; none examined "
+                "the application itself")
     http = report.get("http") if isinstance(report.get("http"), Mapping) else {}
     moved = http.get("application_origin_redirect") or http.get("redirect_origin")
     if moved and http_origin(moved) != http_origin(report.get("target")):

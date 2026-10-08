@@ -87,6 +87,10 @@ _REASON_LABELS = {
     "no_families_selected": (
         "The scan policy selected no check family, so only the baseline probes ran"
     ),
+    "application_surface_not_examined": (
+        "No selected check family examines the application itself; the selected families "
+        "only probe fixed, well-known locations"
+    ),
     "active_verifier_zero_attempts": "An active verifier had candidates but made no bounded attempt",
     "unproven_critical_high": "High or critical candidates still require deterministic proof",
     "report_grade_unreliable": "The final report marked the grade as provisional",

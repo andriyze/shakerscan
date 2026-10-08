@@ -280,6 +280,7 @@ const COVERAGE_REASON_LABELS = {
   malformed_naabu_jsonl: 'The port discovery step returned output that could not be read',
   slow_endpoints: 'Some endpoints answered too slowly to finish their checks in time',
   no_families_selected: 'The scan policy selected no check family, so only the baseline probes ran',
+  application_surface_not_examined: 'No selected check family examines the application itself; the selected families only probe fixed, well-known locations',
   selected_family_no_candidates: 'A selected check family had nothing to test on the discovered surface',
 }
 
