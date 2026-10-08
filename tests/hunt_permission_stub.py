@@ -130,6 +130,7 @@ class StubInstance:
         self.scheme = "http"
         if tls is not None:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(str(tls[0]), str(tls[1]))
             self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
             self.scheme = "https"
