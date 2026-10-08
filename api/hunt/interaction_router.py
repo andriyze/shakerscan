@@ -2615,6 +2615,7 @@ async def _execute_hunt_capability_lifecycle(
                 blocked_exceptions=(HTTPException,),
                 conservative_full_budget=True,
                 unstarted_exceptions=(VerificationRefused,),
+                measured_wall=True,
             )
             capability_execution = await dispatch_registered_adapter(
                 candidate_adapter,

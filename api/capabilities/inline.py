@@ -267,6 +267,7 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         blocked_exceptions: tuple[type[BaseException], ...],
         conservative_full_budget: bool = False,
         unstarted_exceptions: tuple[type[BaseException], ...] = (),
+        measured_wall: bool = False,
     ) -> None:
         super().__init__(
             specification=specification,
@@ -276,6 +277,8 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         )
         self._blocked_exceptions = blocked_exceptions
         self._conservative_full_budget = conservative_full_budget
+        # With a conservative traffic hold, still settle wall time to what elapsed (verification).
+        self._measured_wall = measured_wall
         # Blocks the operation guarantees it raised before reaching the target. They are the
         # one case a conservative operation can prove it consumed nothing.
         self._unstarted_exceptions = unstarted_exceptions
@@ -304,16 +307,19 @@ class ControlPlaneExecutionAdapter(_InlineAdapter):
         )
         # A conservative control-plane operation may have emitted traffic or
         # mutated verifier state before returning a failure/blocked result.
-        # Once invoked, settle its complete traffic hold rather than claiming the
+        # Once invoked, settle its complete hold rather than claiming the
         # unobservable partial execution consumed nothing -- unless it refused
-        # with an exception it raises only before any traffic. Wall time is the one
-        # dimension that is always observable, so it settles to the real elapsed
-        # time; the reservation only gates admission (D26: a verification that ran
-        # for 3 s held its whole 180 s against the Hunt's duration).
+        # with an exception it raises only before any traffic. ``measured_wall``
+        # (candidate verification) keeps the traffic hold but settles wall time,
+        # which is always observable, to what elapsed: the reservation only gates
+        # admission (D26: a verification that ran 3 s held its whole 180 s against
+        # the Hunt's duration).
         if unstarted:
             actual: dict[str, int] = {}
         elif self._conservative_full_budget:
-            actual = {**self._requested_budget, **self._wall_budget(started, execution_started=True)}
+            actual = dict(self._requested_budget)
+            if self._measured_wall:
+                actual.update(self._wall_budget(started, execution_started=True))
         else:
             actual = self._wall_budget(started, execution_started=succeeded)
         status = (

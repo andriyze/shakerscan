@@ -627,6 +627,7 @@ def test_candidate_verifier_block_conservatively_charges_the_full_traffic_hold()
             redacted_execution={"candidate_id": "redacted"},
             blocked_exceptions=(RuntimeError,),
             conservative_full_budget=True,
+            measured_wall=True,
         ),
         requested,
     )
@@ -652,12 +653,32 @@ def test_a_verification_that_ran_is_charged_its_real_wall_time_not_the_reservati
         ControlPlaneExecutionAdapter(
             specification=specification, operation=operation, requested_budget=requested,
             redacted_execution={}, blocked_exceptions=(RuntimeError,), conservative_full_budget=True,
+            measured_wall=True,
         ),
         requested,
     )
     assert result.status == "success"
     assert result.actual_budget["tool_wall_seconds"] == 1
     assert result.actual_budget["http_requests"] == 24
+
+
+def test_other_conservative_control_plane_actions_keep_their_whole_hold():
+    """Only verification settles wall time to what elapsed; asset actions keep their hold."""
+    specification = CAPABILITY_REGISTRY.require("collections.select")
+    requested = {"agent_actions": 1, "tool_wall_seconds": 5}
+
+    async def operation():
+        return {"ok": True}
+
+    result = _execute(
+        specification,
+        ControlPlaneExecutionAdapter(
+            specification=specification, operation=operation, requested_budget=requested,
+            redacted_execution={}, blocked_exceptions=(RuntimeError,), conservative_full_budget=True,
+        ),
+        requested,
+    )
+    assert result.actual_budget == requested
 
 
 def test_ports_discover_supports_a_bounded_contiguous_range():
