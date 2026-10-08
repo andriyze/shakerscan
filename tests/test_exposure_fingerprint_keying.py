@@ -17,8 +17,8 @@ from cryptography.fernet import Fernet
 from api.capabilities import secret_material
 from api.capabilities.exposure_probe import classify_exposure
 
-PASSWORD = "Vt9qLx2Rm7Zp4Kw8sJ3n"
-DOTENV = f"DB_PASSWORD={PASSWORD}\nAPP_ENV=prod\n".encode()
+CANARY_VALUE = "Vt9qLx2Rm7Zp4Kw8sJ3n"
+DOTENV = f"DB_PASSWORD={CANARY_VALUE}\nAPP_ENV=prod\n".encode()
 
 
 def _install(monkeypatch, key: str | None, tmp_path=None) -> None:
@@ -50,22 +50,22 @@ def _published_constant_salt(value: str) -> str:
 def test_fingerprints_are_stable_within_an_installation_and_differ_across_them(monkeypatch):
     key_a, key_b = Fernet.generate_key().decode(), Fernet.generate_key().decode()
     _install(monkeypatch, key_a)
-    first = secret_material.value_fingerprint(PASSWORD)
+    first = secret_material.value_fingerprint(CANARY_VALUE)
     _install(monkeypatch, key_a)  # a restart of the same installation
-    assert secret_material.value_fingerprint(PASSWORD) == first
+    assert secret_material.value_fingerprint(CANARY_VALUE) == first
     assert first.startswith("scrypt-keyed:")
     _install(monkeypatch, key_b)
-    assert secret_material.value_fingerprint(PASSWORD) != first
+    assert secret_material.value_fingerprint(CANARY_VALUE) != first
     # Nobody without the installation key can recompute it from the published salt.
-    assert _published_constant_salt(PASSWORD) not in first
+    assert _published_constant_salt(CANARY_VALUE) not in first
 
 
 def test_without_a_stable_key_fingerprints_are_private_and_say_so(monkeypatch):
     _install(monkeypatch, None)
-    fingerprint = secret_material.value_fingerprint(PASSWORD)
+    fingerprint = secret_material.value_fingerprint(CANARY_VALUE)
     assert fingerprint.startswith("scrypt-ephemeral:")
-    assert _published_constant_salt(PASSWORD) not in fingerprint
-    assert secret_material.value_fingerprint(PASSWORD) == fingerprint
+    assert _published_constant_salt(CANARY_VALUE) not in fingerprint
+    assert secret_material.value_fingerprint(CANARY_VALUE) == fingerprint
 
 
 def test_a_secret_bearing_body_keeps_only_a_keyed_digest(monkeypatch):
