@@ -13,6 +13,7 @@ import functools
 import hashlib
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
 import json
+import math
 import statistics
 import time
 import urllib.parse
@@ -190,6 +191,7 @@ except (ImportError, ModuleNotFoundError):
 from .action_plan import ScanAction, ScanActionPlan
 from .sqli_concurrency import (
     CANDIDATE_CONCURRENCY_ARG,
+    ELAPSED_DIMENSIONS,
     ConcurrentCandidates,
     RequestRateGate,
     slice_rate_ceiling,
@@ -3481,6 +3483,19 @@ class DatabaseNeutralScanActionDispatcher:
             ),
         )
         concurrent = request_gate is not None
+        # Tool wall a concurrent slice is charged: what resumed attempts already spent, plus the
+        # elapsed time in which any of its candidates ran -- never each process's seconds summed
+        # (soak N40; see sqli_concurrency). A slice that runs one candidate at a time is charged
+        # each attempt's wall, which is the same thing.
+        resumed_wall = 0
+
+        def charge_wall() -> None:
+            if not concurrent or "tool_wall_seconds" not in consumed:
+                return
+            consumed["tool_wall_seconds"] = min(
+                int(action.requested_budget.get("tool_wall_seconds", 0)),
+                resumed_wall + math.ceil(candidates.busy_seconds()),
+            )
 
         async def settle_attempt(row: Mapping[str, Any], result: Any, sink: list[Any]) -> None:
             """Count one finished attempt exactly once.
@@ -3600,10 +3615,13 @@ class DatabaseNeutralScanActionDispatcher:
                 result.status in _BATCH_SUCCESS_STATUSES, wall_killed,
             ))
             for name, amount in result.actual_budget.items():
+                if concurrent and name in ELAPSED_DIMENSIONS:
+                    continue
                 consumed[name] = min(
                     int(action.requested_budget.get(name, 0)),
                     consumed.get(name, 0) + int(amount),
                 )
+            charge_wall()
             # Any attempt that did not succeed counts. A timed-out external tool is
             # normalized to "partial" upstream, and "partial" was absent from this set --
             # so a batch in which every single attempt timed out, with every candidate
@@ -3753,6 +3771,9 @@ class DatabaseNeutralScanActionDispatcher:
                     ))
                     for name, amount in dict(prior.get("budget_consumed") or {}).items():
                         consumed[name] = consumed.get(name, 0) + int(amount)
+                        if name in ELAPSED_DIMENSIONS:
+                            resumed_wall += int(amount)
+                    charge_wall()
                     if str(prior.get("status") or "") not in _BATCH_SUCCESS_STATUSES:
                         terminal_failure = True
                     continue
@@ -3787,7 +3808,14 @@ class DatabaseNeutralScanActionDispatcher:
                         )
                     remaining_attempts = max(1, len(work) - position + 1)
                     # What the slice has neither consumed nor lent to a running candidate.
+                    charge_wall()
                     remaining_budget = candidates.holds.available(consumed)
+                    # Candidates that run in the same turn share the same seconds, so the
+                    # wall left is split across turns, not across candidates.
+                    wall_shares = (
+                        candidates.wall_shares(remaining_attempts) if concurrent
+                        else remaining_attempts
+                    )
                     # Never divide the reservation below what one attempt needs to
                     # reach a verdict. An even split gave each of thirteen candidates
                     # twelve seconds of sqlmap, so every attempt returned unproven and
@@ -3817,7 +3845,9 @@ class DatabaseNeutralScanActionDispatcher:
                         exhausted |= unfundable
                         continue
                     sub_budget = {
-                        name: max(1, floor.get(name, 1), amount // remaining_attempts)
+                        name: max(1, floor.get(name, 1), amount // (
+                            wall_shares if name in ELAPSED_DIMENSIONS else remaining_attempts
+                        ))
                         for name, amount in remaining_budget.items() if amount > 0
                     }
                     if tool == "nuclei" and sub_budget.get("tool_wall_seconds"):
@@ -4072,6 +4102,7 @@ class DatabaseNeutralScanActionDispatcher:
         finally:
             # Cancelled or failed while candidates were running: stop every one of them.
             await candidates.abandon()
+            charge_wall()
         # Each concurrent candidate's records were collected in its place in the slice.
         observations = [
             item for entry in observations

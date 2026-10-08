@@ -213,6 +213,9 @@ class FakeSqlmap:
     """Every stage call waits until the test releases it; the fake records what ran when."""
 
     def __init__(self, *, cancelled=lambda: False, wall_killed=frozenset()):
+        # A virtual clock: a stage that finishes moves it to its start plus the wall it took,
+        # so concurrent stages overlap exactly as the slice's elapsed accounting sees them.
+        self.now = [0.0]
         self.pending: list[tuple[asyncio.Event, dict]] = []
         self.running = 0
         self.peak = 0
@@ -247,6 +250,7 @@ class FakeSqlmap:
         self.concurrent_holds.append(total)
         release = asyncio.Event()
         self.pending.append((release, call))
+        started = self.now[0]
         try:
             await release.wait()
         except asyncio.CancelledError:
@@ -267,11 +271,13 @@ class FakeSqlmap:
             int(need * (LATENCY + 0.05)) > wall or need > int(budget["http_requests"])
         ):
             sent = int(wall / (LATENCY + 0.05))
+            self.now[0] = max(self.now[0], started + wall)
             return CapabilityAdapterResult(
                 status="partial", partial=True, timed_out=True, errors=("timeout",),
                 actual_budget={"http_requests": sent, "tool_wall_seconds": wall},
                 execution_started=True, parser_version="sqlmap-output/v1",
             )
+        self.now[0] = max(self.now[0], started + int(need * (LATENCY + 0.05)))
         return CapabilityAdapterResult(
             status="success",
             actual_budget={"http_requests": need, "tool_wall_seconds": int(need * (LATENCY + 0.05))},
@@ -330,6 +336,7 @@ def _receipt_for(monkeypatch, paths, *, bound=4, measured=True, gate_enforced=Tr
         _measured_on_target(backend, "verify.sqli.r01")
     fake = drive.pop("fake", None) or FakeSqlmap()
     monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", fake.execute)
+    monkeypatch.setattr(sqli_concurrency, "elapsed_clock", lambda: fake.now[0])
     dispatcher = _dispatcher(plan, backend, gate_enforced=gate_enforced, **drive.pop("dispatch", {}))
     receipt = asyncio.run(_drive(dispatcher, plan, plan.actions[0], fake, **drive))
     return receipt, fake, backend, plan
@@ -409,11 +416,16 @@ def test_every_candidate_hold_is_lent_before_it_sends_anything(monkeypatch):
             first_stage.add(value)
             stages_seen += 1
             assert stages_seen <= lends_seen
-    # What concurrent candidates held at once never exceeded the slice's reservation.
+    # What concurrent candidates held at once never exceeded the slice's reservation. Tool
+    # wall is elapsed time (soak N40): candidates running at once hold the same seconds, so it
+    # is each hold, not their sum, that stays inside the slice's wall.
     for total in fake.concurrent_holds:
         for name, amount in total.items():
-            assert amount <= SLICE[name]
-    assert all(hold["tool_wall_seconds"] >= 30 for hold in lent)
+            if name not in sqli_concurrency.ELAPSED_DIMENSIONS:
+                assert amount <= SLICE[name]
+    assert all(
+        30 <= hold["tool_wall_seconds"] <= SLICE["tool_wall_seconds"] for hold in lent
+    )
 
 
 def test_cancellation_stops_every_running_candidate_and_starts_no_other(monkeypatch):
@@ -473,9 +485,12 @@ def test_concurrent_finishes_settle_each_candidate_once_and_match_its_traffic(mo
 
     assert fake.peak == 4, "the candidates finished concurrently"
     sent = sum(NEGATIVE_VERDICT.values()) * len(PATHS)
-    seconds = sum(int(need * (LATENCY + 0.05)) for need in NEGATIVE_VERDICT.values()) * len(PATHS)
+    per_candidate = sum(int(need * (LATENCY + 0.05)) for need in NEGATIVE_VERDICT.values())
     assert receipt.budget_consumed["http_requests"] == sent
-    assert receipt.budget_consumed["tool_wall_seconds"] == seconds
+    # Tool wall is the slice's elapsed time (soak N40): four candidates side by side, then the
+    # last two -- two turns of one candidate's wall, not six candidates' process seconds.
+    assert receipt.budget_consumed["tool_wall_seconds"] == 2 * per_candidate
+    assert receipt.budget_consumed["tool_wall_seconds"] < per_candidate * len(PATHS)
     assert receipt.redacted_execution["attempted_count"] == len(PATHS)
     attempts = [item for item in receipt.observations if item.get("kind") == "candidate_attempt"]
     assert len(attempts) == len(PATHS)

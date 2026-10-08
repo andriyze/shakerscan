@@ -27,8 +27,20 @@ What bounds it:
   already lent to a running candidate, before it sends anything (:class:`SliceHolds`), so the
   holds of concurrent candidates never add up to more than the slice's reservation. Each is
   settled once, from the attempt's own traffic accounting, and its unspent part returns to the
-  slice. Tool wall stays process-seconds: concurrency does not make a second of wall cheaper,
-  it only stops the Scan's elapsed time running out before the tool wall does.
+  slice.
+* **Tool wall is elapsed time.** Requests and mutations are volumes, so concurrent holds are
+  summed. Tool wall is the time the slice holds the lane: the budget contract keeps every
+  profile's ``max_tool_wall_seconds`` at or below its ``max_duration_seconds`` ("tool wall never
+  exceeds total wall"; Balanced and Thorough set them equal) for a Scan whose orchestrator runs
+  one action at a time, so a tool second is a second of the Scan. Charging
+  each concurrent process its own seconds (soak N40, 43b9a549) billed two candidates running
+  side by side at twice real time: the Thorough plan's 10,800 s ran out at 43% of the Scan,
+  with 3 of 4 candidates unfinished and 25,295 requests unused. The slice is charged the
+  union of the intervals in which any of its candidates ran (:meth:`ConcurrentCandidates.
+  busy_seconds`), a running candidate's wall hold is not lent away from the others (they
+  overlap in time; each still ends inside the slice's wall), and every sqlmap process remains
+  bounded by its own hold. The request gate, not the wall, is what keeps concurrency from
+  adding load.
 
 A candidate that cannot be funded while others hold budget waits for one to settle; it is
 reported unfunded only when nothing is running. Cancellation reaches every running candidate
@@ -51,6 +63,13 @@ MAX_CONCURRENT_CANDIDATES = 4
 CANDIDATE_CONCURRENCY_ARG = "candidate_concurrency"
 # The smallest delay a paced attempt keeps between requests (the batch attempt's floor).
 _MINIMUM_DELAY_SECONDS = 0.05
+# Budget dimensions charged as the slice's elapsed time, not summed over concurrent candidates.
+ELAPSED_DIMENSIONS = frozenset({"tool_wall_seconds"})
+
+
+def elapsed_clock() -> float:
+    """The clock a slice's elapsed tool time is measured on (tests substitute a virtual one)."""
+    return time.monotonic()
 
 
 def planned_candidate_concurrency(max_workers: int) -> int:
@@ -152,10 +171,17 @@ class SliceHolds:
         return len(self._held)
 
     def available(self, consumed: Mapping[str, int]) -> dict[str, int]:
-        """What the slice has neither consumed nor lent to a running candidate."""
+        """What the slice has neither consumed nor lent to a running candidate.
+
+        An elapsed dimension (tool wall) is never lent away: candidates that run at once spend
+        the same seconds, so what is left of it is the reservation less the elapsed time
+        already charged.
+        """
         lent: dict[str, int] = {}
         for hold in self._held.values():
             for name, amount in hold.items():
+                if name in ELAPSED_DIMENSIONS:
+                    continue
                 lent[name] = lent.get(name, 0) + amount
         return {
             name: max(0, limit - int(consumed.get(name, 0)) - lent.get(name, 0))
@@ -186,6 +212,7 @@ class ConcurrentCandidates:
         bound: int,
         rate_ceiling: float,
         latency_seconds: float | None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.bound = max(1, int(bound or 1))
         self.rate_ceiling = float(rate_ceiling or 0.0)
@@ -193,6 +220,24 @@ class ConcurrentCandidates:
         self.holds = SliceHolds(reserved)
         self._running: dict[asyncio.Task[None], str] = {}
         self._capacity = asyncio.Event()
+        self._clock = clock or elapsed_clock
+        self._active = 0
+        self._busy_since: float | None = None
+        self._busy_total = 0.0
+
+    def busy_seconds(self) -> float:
+        """Elapsed seconds in which at least one candidate of the slice was running."""
+        running = (
+            self._clock() - self._busy_since
+            if self._active and self._busy_since is not None else 0.0
+        )
+        return self._busy_total + max(0.0, running)
+
+    def wall_shares(self, remaining_candidates: int) -> int:
+        """How many successive turns ``remaining_candidates`` take in the current slots: the
+        number of ways the slice's remaining wall is split, since candidates in one turn run
+        in the same seconds."""
+        return max(1, math.ceil(max(1, int(remaining_candidates)) / self.slots()))
 
     @property
     def running(self) -> int:
@@ -221,9 +266,16 @@ class ConcurrentCandidates:
         self.holds.lend(key, hold, consumed)
 
         async def run() -> None:
+            if not self._active:
+                self._busy_since = self._clock()
+            self._active += 1
             try:
                 await work()
             finally:
+                self._active -= 1
+                if not self._active and self._busy_since is not None:
+                    self._busy_total += max(0.0, self._clock() - self._busy_since)
+                    self._busy_since = None
                 # ``work`` counts the candidate's consumption as its last step, with no await
                 # after it, so the hold is never returned before or counted twice with it.
                 self.holds.settle(key)

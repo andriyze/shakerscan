@@ -418,8 +418,14 @@ coverage.
   when they ran one at a time. A SQLi slice whose own holds could not fund all of its candidates
   (`state_changing_budget_exhausted` / `http_request_budget_exhausted`) is extended like a
   wall-killed one.
-  Each candidate's hold is carved from the slice's reservation before it sends anything, tool wall
-  is still charged per process, and the receipt records the bound, the peak and the rate ceiling
+  Each candidate's request and mutation holds are carved from the slice's reservation before it
+  sends anything. Tool wall is elapsed time: the slice is charged the time in which any of its
+  candidates ran, not each process's seconds summed, and candidates running together share the
+  wall the slice has left (split across turns of the slots, not across candidates), because each
+  profile's tool wall is at most its duration (equal on Balanced and Thorough) for a Scan that
+  runs one action at a time. Every
+  sqlmap process is still bounded by its own hold, and the request gate, not the wall, keeps
+  concurrency from adding load. The receipt records the bound, the peak and the rate ceiling
   (`candidate_concurrency`).
 - **Other injection** (`injection_extra_checks.py`): SSI/ESI, prototype pollution, CSV/formula
   injection, RFI, LDAP/XPath, XXE/XML injection.
