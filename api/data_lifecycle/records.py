@@ -33,6 +33,9 @@ WORK = {
 TERMINAL = {**TERMINAL_BY_TABLE, 'model_intake_runner_jobs': frozenset({'completed', 'failed'})}
 QUEUED = ('pending', 'queued', 'created', 'scheduled')
 ABANDONED_MINUTES = 15
+# A finding another (surviving) Hunt verified is never deleted with the selected Hunt (D21).
+VERIFIED_BY_ANOTHER_HUNT = (f'EXISTS (SELECT 1 FROM finding_hunt_verifications fhv WHERE fhv.finding_id = r.id'
+                            f' AND NOT fhv.hunt_run_id = {ANY_ROOT})')
 # Rows without a cascading FK to the record, deleted before it in this order.
 DELETE_ORDER = ('tool_receipts', 'auth_sessions', 'investigation_candidates', 'findings',
                 'model_intake_admissions', 'model_intake_automatic_reviews', 'scans', 'credential_profiles')
@@ -67,8 +70,11 @@ def owned(kind: str, columns: dict) -> dict[str, str]:
         if has('investigation_candidates', 'hunt_run_id'):
             result['investigation_candidates'] = f'r.hunt_run_id = {ANY_ROOT}'
         if has('findings', 'hunt_run_id', 'scan_id'):
-            # Findings only this Hunt produced; one a scan also observed stays with that scan.
-            result['findings'] = f'r.hunt_run_id = {ANY_ROOT} AND r.scan_id IS NULL'
+            # Findings only this Hunt produced; one a scan also observed stays with that scan,
+            # and one another Hunt also verified passes to that Hunt (D21).
+            result['findings'] = f'r.hunt_run_id = {ANY_ROOT} AND r.scan_id IS NULL' + (
+                f' AND NOT {VERIFIED_BY_ANOTHER_HUNT}'
+                if has('finding_hunt_verifications', 'finding_id', 'hunt_run_id') else '')
     if kind == 'ai_target':
         if has('scans', 'ai_target_id'):
             result['scans'] = f'r.ai_target_id = {ANY_ROOT}'
@@ -99,11 +105,29 @@ async def owners(conn, kind: str, roots: list) -> dict[str, list[str]]:
         f'SELECT DISTINCT target_id FROM {table} WHERE id=ANY($1::uuid[]) AND target_id IS NOT NULL', roots)
     result['target_id'] = sorted(str(r['target_id']) for r in target_rows)
     findings = ('SELECT id FROM findings WHERE scan_id=ANY($1::uuid[])' if kind == 'scan' else
-                'SELECT id FROM findings WHERE hunt_run_id=ANY($1::uuid[]) AND scan_id IS NULL')
+                'SELECT id FROM findings r WHERE hunt_run_id=ANY($1::uuid[]) AND scan_id IS NULL'
+                f' AND NOT {VERIFIED_BY_ANOTHER_HUNT}')
     result['finding_id'] = sorted(str(r['id']) for r in await conn.fetch(findings, roots))
     if kind == 'scan':
         result['scan_id'] = sorted(str(r) for r in roots)
     return result
+
+
+async def hand_over_shared_findings(conn, kind: str, roots: list, columns: dict) -> int:
+    """Pass a deleted Hunt's findings that another Hunt verified to the earliest such Hunt.
+
+    Without this, the foreign key would only clear the owner, and the next Hunt to verify the
+    finding would take it although an earlier Hunt had already proved it.
+    """
+    if kind != 'hunt' or not {'finding_id', 'hunt_run_id', 'verified_at'} <= columns.get(
+            'finding_hunt_verifications', set()):
+        return 0
+    rows = await conn.fetch(f"""UPDATE findings r SET hunt_run_id=(
+            SELECT fhv.hunt_run_id FROM finding_hunt_verifications fhv
+            WHERE fhv.finding_id = r.id AND NOT fhv.hunt_run_id = {ANY_ROOT}
+            ORDER BY fhv.verified_at, fhv.id LIMIT 1), updated_at=NOW()
+        WHERE r.hunt_run_id = {ANY_ROOT} AND {VERIFIED_BY_ANOTHER_HUNT} RETURNING r.id""", roots)
+    return len(rows)
 
 
 def _abandoned(table: str, status: str, columns: dict) -> str:

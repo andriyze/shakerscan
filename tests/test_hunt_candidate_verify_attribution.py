@@ -19,15 +19,34 @@ ACTION = uuid.uuid4()
 
 
 class _Conn:
-    def __init__(self, result="UPDATE 1"):
+    """Unit double for the finding row: answers the owner read and records every statement."""
+
+    def __init__(self, result=None, owner=None):
         self.calls = []
         self.result = result
+        self.owner = owner
 
-    async def execute(self, sql, *args):
+    def _record(self, sql, args):
         self.calls.append((" ".join(sql.split()), args))
         if isinstance(self.result, Exception):
             raise self.result
-        return self.result
+
+    @asynccontextmanager
+    async def transaction(self):
+        yield self
+
+    async def fetchrow(self, sql, *args):
+        self._record(sql, args)
+        return {"id": args[0], "hunt_run_id": self.owner}
+
+    async def fetchval(self, sql, *args):
+        self._record(sql, args)
+        self.owner = args[1]
+        return self.owner
+
+    async def execute(self, sql, *args):
+        self._record(sql, args)
+        return "INSERT 0 1"
 
 
 class _Pool:
@@ -60,10 +79,31 @@ def test_a_verified_candidate_finding_is_attributed_to_the_hunt(monkeypatch):
         "verified_finding_id": str(FINDING),
     }, conn)
     assert result["hunt_attributed"] is True
-    ((sql, args),) = conn.calls
-    assert sql.startswith("UPDATE findings SET hunt_run_id=$1")
-    assert "last_verified_at IS NOT NULL" in sql
-    assert args == (HUNT, FINDING, TARGET)
+    assert result["hunt_attribution"]["role"] == "owner"
+    assert result["hunt_attribution"]["owner_hunt_id"] == str(HUNT)
+    (read, read_args), (claim, claim_args), (record, record_args) = conn.calls
+    assert read.startswith("SELECT id, hunt_run_id FROM findings") and read.endswith("FOR UPDATE")
+    assert "last_verified_at IS NOT NULL" in read and read_args == (FINDING, TARGET)
+    # Only an unowned finding is claimed, so a concurrent claim cannot overwrite an owner.
+    assert claim.startswith("UPDATE findings SET hunt_run_id=$2") and "hunt_run_id IS NULL" in claim
+    assert claim_args == (FINDING, HUNT)
+    assert record.startswith("INSERT INTO finding_hunt_verifications")
+    assert record_args == (FINDING, HUNT, ACTION)
+
+
+def test_a_finding_another_hunt_owns_is_not_taken_over(monkeypatch):
+    """D21: a later Hunt's re-verification is recorded beside the owner, never instead of it."""
+    first_hunt = uuid.uuid4()
+    conn = _Conn(owner=first_hunt)
+    result = _verify(monkeypatch, {"verified": True, "verified_finding_id": str(FINDING)}, conn)
+    assert result["hunt_attributed"] is True
+    assert result["hunt_attribution"] == {
+        "schema_version": "finding-hunt-verification/v1", "finding_id": str(FINDING),
+        "owner_hunt_id": str(first_hunt), "role": "additional",
+    }
+    assert not any(sql.startswith("UPDATE findings") for sql, _ in conn.calls)
+    ((record, record_args),) = [call for call in conn.calls if call[0].startswith("INSERT")]
+    assert record_args == (FINDING, HUNT, ACTION)
 
 
 def test_an_unverified_result_attributes_nothing(monkeypatch):
@@ -77,6 +117,7 @@ def test_attribution_failure_never_fails_the_verification(monkeypatch):
     result = _verify(monkeypatch, {"verified": True, "verified_finding_id": str(FINDING)},
                      _Conn(RuntimeError("database unavailable")))
     assert result["verified"] is True and result["hunt_attributed"] is False
+    assert "hunt_attribution" not in result
 
 
 def test_the_action_references_name_the_verified_finding_not_the_candidate(monkeypatch):

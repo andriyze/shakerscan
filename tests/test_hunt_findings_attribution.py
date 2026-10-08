@@ -20,6 +20,7 @@ def database():
           ('reverified','hunt_v2:hunt-a','completed','exploited','deterministic','target',NULL),
           ('unrelated','hunt_v2:hunt-a','completed','inconclusive','deterministic','target',NULL),
           ('wrong-owner','hunt_v2:hunt-a','completed','exploited','deterministic','other',NULL);
+        CREATE TABLE finding_hunt_verifications(finding_id TEXT,hunt_run_id TEXT);
         CREATE TABLE investigation_candidates(id TEXT,hunt_run_id TEXT);
         INSERT INTO investigation_candidates VALUES ('new','hunt-a'),('seen','hunt-b'),('foreign','hunt-b');
         CREATE TABLE investigation_candidate_observations(candidate_id TEXT,hunt_run_id TEXT);

@@ -1175,6 +1175,25 @@ CREATE TABLE findings (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Every Hunt that deterministically verified a finding (D21). findings.hunt_run_id names the
+-- first verifying Hunt (role owner); a later Hunt's verification is appended here as
+-- 'additional' instead of taking the finding over. The startup migration
+-- (api/targets/asset_migration.py, with the SQL in api/hunt/finding_verifications.py) installs
+-- this exact definition on converted databases.
+CREATE TABLE finding_hunt_verifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    finding_id UUID NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    action_id UUID NOT NULL REFERENCES hunt_actions(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('owner','additional')),
+    verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT finding_hunt_verifications_action_unique UNIQUE (finding_id, action_id)
+);
+CREATE INDEX idx_finding_hunt_verifications_run
+    ON finding_hunt_verifications(hunt_run_id, verified_at, id);
+CREATE INDEX idx_finding_hunt_verifications_finding
+    ON finding_hunt_verifications(finding_id, verified_at, id);
+
 CREATE OR REPLACE FUNCTION refresh_device_active_findings_count()
 RETURNS TRIGGER AS $$
 BEGIN

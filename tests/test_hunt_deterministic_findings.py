@@ -144,5 +144,7 @@ def test_device_proof_and_verification_use_the_device_inventory():
         }], target_kind="device",
     ))
     assert len(ids) == 1
-    assert all("device_target_id" in query for query in db.queries)
+    # The Hunt verification ledger (D21) names the finding, not its inventory.
+    assert all("device_target_id" in query for query in db.queries
+               if "finding_hunt_verifications" not in query)
     assert "UPDATE device_targets" in db.queries[-1]

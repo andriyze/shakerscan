@@ -1762,7 +1762,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 103 | `db/init.sql` + migrations |
+| Durable tables | 104 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -3077,6 +3077,7 @@ Scan feature or a second orchestration engine.
 | `evidence_retention_previews` | `db/init.sql` |
 | `export_events` | `db/init.sql` |
 | `finding_exceptions` | `db/init.sql` |
+| `finding_hunt_verifications` | `db/init.sql` |
 | `finding_verifications` | `db/init.sql` |
 | `findings` | `db/init.sql` |
 | `fleet_node_events` | `db/init.sql` |

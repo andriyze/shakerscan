@@ -176,6 +176,9 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                 else:
                     order = records.DELETE_ORDER if current['kind'] in records.RECORD_KINDS else OWNED_DELETE_ORDER
                 root = root_table(current['kind'])
+                if current['kind'] in records.RECORD_KINDS:
+                    # A finding another Hunt also verified stays, with that Hunt as its owner.
+                    await records.hand_over_shared_findings(conn, current['kind'], roots, columns)
                 if plan[1].get('scans'):
                     # Surviving scans that used a deleted scan as their comparison baseline.
                     await conn.execute(f"UPDATE scans r SET baseline_scan_id=NULL WHERE {plan[1]['scans']}", roots)

@@ -16,6 +16,7 @@ from api.hunt.deterministic_findings import (
     _xss_finding_records,
     materialize_verified_hunt_findings,
 )
+from api.hunt.finding_verifications import FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL
 from api.scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
 from api.scan.finding_reconciliation import reconcile_legacy_finding_row
 from scanner.finding_service_identity import service_origin
@@ -96,6 +97,7 @@ DDL = """
 CREATE TABLE targets(id uuid PRIMARY KEY, active_findings_count int DEFAULT 0, updated_at timestamptz);
 CREATE TABLE device_targets(LIKE targets INCLUDING ALL);
 CREATE TABLE hunt_runs(id uuid PRIMARY KEY);
+CREATE TABLE hunt_actions(id uuid PRIMARY KEY, hunt_run_id uuid REFERENCES hunt_runs(id));
 CREATE TABLE findings(
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), target_id uuid REFERENCES targets(id),
  device_target_id uuid REFERENCES device_targets(id), hunt_run_id uuid REFERENCES hunt_runs(id),
@@ -174,6 +176,7 @@ async def _database():
         await conn.execute(f'CREATE SCHEMA "{schema}"')
         await conn.execute(f'SET search_path TO "{schema}"')
         await conn.execute(DDL)
+        await conn.execute(FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL)
         yield conn
     finally:
         await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
@@ -189,6 +192,7 @@ def test_postgres_legacy_migration_keeps_id_history_and_separates_services(kind)
             column = "device_target_id" if kind == "device" else "target_id"
             await conn.execute(f"INSERT INTO {table}(id) VALUES($1)", target)
             await conn.execute("INSERT INTO hunt_runs(id) VALUES($1)", hunt)
+            await conn.execute("INSERT INTO hunt_actions(id,hunt_run_id) VALUES($1,$2)", action, hunt)
             baseline = "https://example.test"
             service = "https://example.test:8443"
 
