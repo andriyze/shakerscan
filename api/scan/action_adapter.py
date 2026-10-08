@@ -174,6 +174,12 @@ except (ImportError, ModuleNotFoundError):
     )
 
 from .action_plan import ScanAction, ScanActionPlan
+from .sqli_concurrency import (
+    CANDIDATE_CONCURRENCY_ARG,
+    ConcurrentCandidates,
+    RequestRateGate,
+    slice_rate_ceiling,
+)
 from .sqli_stages import prior_stages, run_staged_sqli_attempt
 from .verification_extension import EXTENDS_ARG, extension_lineage
 from .batch_carry import (
@@ -188,6 +194,7 @@ from .capability_result import (
 from .external_process import (
     BATCH_ATTEMPT_FLOORS,
     batch_attempt_floor,
+    batch_row_cost_class,
     order_batch_rows_by_cost_class,
     template_attempt_wall,
     template_retry_wall,
@@ -463,6 +470,12 @@ def batch_stop_reason(
     if unattempted:
         return CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
     return CapabilityResultReason.ADAPTER_FAILED.value
+
+
+# What one batch candidate may raise without failing the whole batch action.
+_BATCH_CANDIDATE_ERRORS = (
+    ScanWorkManifestError, ValueError, KeyError, TypeError, IndexError, AttributeError,
+)
 
 
 class ScanActionAdapterError(RuntimeError):
@@ -3181,470 +3194,588 @@ class DatabaseNeutralScanActionDispatcher:
         work = [(manifest_index, row, 0) for manifest_index, row in rows]
         first_pass = len(work)
         position = 0
-        while True:
-            if position >= len(work):
-                if position != first_pass or not still_empty:
-                    break
-                if self.cancelled():
-                    stopped_by_cancel = True
-                    break
-                work.extend(
-                    (manifest_index, row, 1) for manifest_index, row in rows
-                    if _batch_candidate_id(row, manifest_index) in still_empty
-                )
-                if position >= len(work):
-                    break
-            manifest_index, row, retry_round = work[position]
-            position += 1
-            # A path-segment candidate (family_hints: ["sqli"]) carries the sqlmap ``*`` marker in
-            # its URL; only the SQLi verifier understands it. Dalfox and the template sweeps would
-            # test the literal ``*`` as a value, so they skip it. The skip is recorded and kept
-            # out of the unattempted count: counting it there reported the slice partial for
-            # "insufficient_plan_budget" over a candidate no budget could have made testable,
-            # and that false gap failed the family's coverage.
-            if row.get("parameter_location") == "path" and family != "sqli":
-                inapplicable += 1
-                observations.append({
-                    "kind": "candidate_inapplicable",
-                    "candidate_id": str(row.get("candidate_id") or row.get("route_id") or ""),
+        # SQLi candidates of one slice may run concurrently, inside the slice's reservation and
+        # its pacing contract (see sqli_concurrency). Only a process runner that enforces the
+        # shared request gate in its pinned transport may run more than one; a plan compiled
+        # without the bound runs one candidate at a time, exactly as before.
+        concurrency_bound = (
+            int(action.capability_args.get(CANDIDATE_CONCURRENCY_ARG) or 1)
+            if tool == "sqlmap"
+            and getattr(self.process_runner, "enforces_request_gate", False) is True
+            else 1
+        )
+        rate_ceiling = slice_rate_ceiling(
+            action.requested_budget,
+            candidates=len(rows),
+            floors=[
+                batch_attempt_floor(action.capability_name, body_candidate=bool(cost_class))
+                for cost_class in sorted({batch_row_cost_class(row) for _, row in rows})
+            ],
+        )
+        request_gate = (
+            RequestRateGate(rate_ceiling) if concurrency_bound > 1 and rate_ceiling > 0 else None
+        )
+        candidates = ConcurrentCandidates(
+            action.requested_budget,
+            bound=concurrency_bound if request_gate is not None else 1,
+            rate_ceiling=rate_ceiling,
+            # The latest response time any candidate measured on this target.
+            latency_seconds=(
+                prior_stages(staged_sources, "").latency_seconds if tool == "sqlmap" else None
+            ),
+        )
+        concurrent = request_gate is not None
+
+        async def settle_attempt(row: Mapping[str, Any], result: Any, sink: list[Any]) -> None:
+            """Count one finished attempt exactly once.
+
+            Nothing is awaited after its consumption is counted, so a concurrent candidate's
+            hold (sqli_concurrency.ConcurrentCandidates) returns in the same step.
+            """
+            nonlocal attempted, retried, terminal_failure, attempt_timed_out, ceiling_stops
+            nonlocal stopped_by_cancel
+            attempt_id = str(row["attempt_id"])
+            candidate_id = str(row["candidate_id"])
+            retry_round = int(row["retry_round"])
+            execution_target = str(row["execution_target"])
+            body_request = dict(row["body_request"])
+            sub_budget = dict(row["sub_budget"])
+            if tool == "sqlmap":
+                for stage in result.stages:
+                    key = (
+                        "stages_carried" if stage["outcome"] == "carried"
+                        else "stages_run" if stage["outcome"] in _BATCH_SUCCESS_STATUSES
+                        else "stages_unfinished"
+                    )
+                    staged_summary[key] += 1
+            attempt_observations = tuple({
+                # The tool parsers read the tool's own output, which names the vulnerable parameter
+                # but not the endpoint. Without the locus a finding has no route, so it cannot be
+                # matched to an expectation, routed to a verifier (an unresolved route abstains by
+                # design), or acted on by an operator. The adapter resolved the request, so it
+                # supplies what the parser cannot -- and never overwrites a locus the parser set.
+                "url": execution_target,
+                "method": body_request.get("method", "GET"),
+                **dict(item), "attempt_id": attempt_id, "candidate_id": candidate_id,
+            } for item in result.observations)
+            proof_state = next((
+                str(item.get("proof_state"))
+                for item in attempt_observations if item.get("proof_state")
+            ), "unproven")
+            response_hashes = sorted({
+                str(value)
+                for item in attempt_observations
+                for key, value in item.items()
+                if "sha256" in str(key).lower() and str(value)
+            })[:20]
+            attempt_observations = (
+                {
+                    "kind": "candidate_attempt",
+                    "attempt_id": attempt_id,
+                    "candidate_id": candidate_id,
                     "family": family,
-                    "reason": "path_segment_candidate",
-                })
-                continue
-            candidate_id = _batch_candidate_id(row, manifest_index)
-            attempt_key = f"{manifest_digest}:{family}:{candidate_id}"
-            if retry_round:
-                attempt_key += f":retry:{retry_round}"
-            attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
-            route_identity = str(row.get("candidate_id") or row.get("route_id") or "")
-            carry = None if retry_round or attempt_id in completed else (
-                carried[attempt_id] if attempt_id in carried
-                else (admitted[route_identity], admission_source)
-                if route_identity and route_identity in admitted else None
-            )
-            if carry is not None:
-                carried_count += 1
-                attempted += 1
-                observations.extend(carried_records(carry[0], source=str(carry[1])))
-                attempt_log.append((candidate_id, 0, True, False))
-                continue
-            prior = completed.get(attempt_id)
-            if prior is not None:
-                resumed += 1
-                if retry_round:
-                    retried += 1
-                else:
-                    attempted += 1
-                # A resumed attempt keeps the outcome its checkpoint recorded. Counting it
-                # as merely "attempted" let a restart launder failure into success: every
-                # attempt of a wall-killed batch is checkpointed, so replaying them all
-                # produced terminal_failure=False, timed_out=False, unattempted=0 -- a
-                # clean success receipt for a batch that had proven nothing.
-                prior_status = str(prior.get("status") or "success")
-                if prior_status not in {"success", "succeeded", "completed"}:
-                    terminal_failure = True
-                # Only a wall-killed attempt timed out; partial is not a timeout.
-                prior_wall_killed = bool(prior.get("timed_out")) or prior_status == "timed_out"
-                if prior_wall_killed:
-                    attempt_timed_out = True
-                ceiling_stops |= attempt_ceiling_stops(prior.get("errors") or ())
-                observations.extend(prior.get("observations") or ())
-                prior_timed_out = (
-                    prior_status in {"timed_out", "partial"} or bool(prior.get("timed_out"))
-                )
-                prior_empty = retry_empty_timeouts and prior_timed_out and (
-                    _no_tool_output(prior.get("observations") or ())
-                    or (retry_partial_timeouts and prior_wall_killed)
-                )
-                if prior_empty and not retry_round:
-                    cut_off_attempts[candidate_id] = attempt_id
-                if retry_round and not _no_tool_output(prior.get("observations") or ()):
-                    retried_with_output.add(candidate_id)
-                prior_wall = int(dict(prior.get("budget_consumed") or {}).get(
-                    "tool_wall_seconds", 0,
-                ) or 0)
-                if not retry_round and prior_status in _BATCH_SUCCESS_STATUSES and prior_wall > 0:
-                    finished_walls.append(prior_wall)
-                self._settle_template_attempt(
-                    candidate_id, retry_round, prior_empty,
-                    succeeded=prior_status in _BATCH_SUCCESS_STATUSES,
-                    granted_wall=int(dict(prior.get("budget_consumed") or {}).get(
-                        "tool_wall_seconds", 0,
-                    )),
-                    attempt_errors=[str(item) for item in prior.get("errors") or ()],
-                    errors=errors, empty_timeouts=empty_timeouts,
-                    deferred_errors=deferred_errors, still_empty=still_empty,
-                    recovered=recovered,
-                )
-                attempt_log.append((
-                    candidate_id, retry_round,
-                    prior_status in _BATCH_SUCCESS_STATUSES, prior_wall_killed,
-                ))
-                for name, amount in dict(prior.get("budget_consumed") or {}).items():
-                    consumed[name] = consumed.get(name, 0) + int(amount)
-                if str(prior.get("status") or "") not in _BATCH_SUCCESS_STATUSES:
-                    terminal_failure = True
-                continue
-            if self.cancelled():
-                stopped_by_cancel = True
-                break
-            try:
-                body_request: dict[str, Any] = {}
-                if manifest_kind is ScanWorkManifestKind.CANDIDATE:
-                    # A body candidate is not describable by a URL, so resolve the whole request and
-                    # keep the body shape for the tool. A query candidate resolves to a bare URL
-                    # exactly as before.
-                    resolved = execution_request_for_manifest_candidate(
-                        endpoints, manifest, manifest_index,
-                    )
-                    execution_target = str(resolved["url"])
-                    if resolved.get("body_field_names"):
-                        body_request = {
-                            "method": str(resolved["method"]),
-                            "content_type": resolved.get("content_type"),
-                            "body_field_names": list(resolved["body_field_names"]),
-                            "injection_field": str(resolved["field_name"]),
-                        }
-                else:
-                    execution_target = execution_url_for_manifest_endpoint(
-                        manifest, manifest_index,
-                    )
-                remaining_attempts = max(1, len(work) - position + 1)
-                remaining_budget = {
-                    name: max(0, int(limit) - int(consumed.get(name, 0)))
-                    for name, limit in action.requested_budget.items()
-                }
-                # Never divide the reservation below what one attempt needs to
-                # reach a verdict. An even split gave each of thirteen candidates
-                # twelve seconds of sqlmap, so every attempt returned unproven and
-                # the family spent its whole budget proving nothing. The manifest is
-                # ranked, so funding the top of it and reporting the remainder as
-                # unattempted is strictly more useful than diluting all of it.
-                floor = batch_attempt_floor(
-                    action.capability_name, body_candidate=bool(body_request),
-                )
-                # Check the floor against what is actually left before building the
-                # slice: a dimension that has run out is absent from the slice
-                # entirely, so testing only the dimensions present would let an
-                # unfundable attempt through and fail it downstream instead.
-                unfundable = {
-                    name for name, amount in floor.items()
-                    if remaining_budget.get(name, 0) < amount
-                }
-                if unfundable:
-                    # Candidate cost classes can be mixed. An expensive body entry
-                    # must not suppress a later fundable query entry in the same
-                    # immutable slice.
-                    exhausted |= unfundable
-                    continue
-                sub_budget = {
-                    name: max(1, floor.get(name, 1), amount // remaining_attempts)
-                    for name, amount in remaining_budget.items() if amount > 0
-                }
-                if tool == "nuclei" and sub_budget.get("tool_wall_seconds"):
-                    planned_share = (
-                        int(action.requested_budget.get("tool_wall_seconds") or 0)
-                        // max(1, first_pass)
-                    )
-                    passive_pack = action.capability_name == "templates.passive_batch"
-                    sub_budget["tool_wall_seconds"] = (
-                        template_retry_wall(
-                            remaining_wall=remaining_budget["tool_wall_seconds"],
-                            planned_share=planned_share,
-                            passive_pack=passive_pack,
-                        )
-                        if retry_round else
-                        template_attempt_wall(
-                            remaining_wall=remaining_budget["tool_wall_seconds"],
-                            remaining_attempts=remaining_attempts,
-                            planned_share=planned_share,
-                            passive_pack=passive_pack,
-                            measured_wall=(
-                                statistics.median_low(finished_walls) if finished_walls else None
-                            ),
-                        )
-                    )
-                if body_request:
-                    # Every request a body attempt sends is a mutation, so the body scanner
-                    # requires state_changing_requests >= http_requests (capabilities/scanner.py).
-                    # The slice scales http_requests up with the abundant HTTP budget while the
-                    # state-changing budget stays near its floor, which left http > state_changing
-                    # and raised "body scanner requires a conservative state-changing reservation"
-                    # -- crashing the whole verify.sqli/verify.xss action. Bind the two: a body
-                    # attempt's HTTP reservation equals its state-changing reservation.
-                    state_changing = int(sub_budget.get("state_changing_requests", 0))
-                    if state_changing > 0:
-                        sub_budget["http_requests"] = min(
-                            int(sub_budget.get("http_requests", 0)), state_changing,
-                        )
-                elif tool == "nuclei" and worker_template_options.get(
-                    "nuclei_active_state_changing"
-                ):
-                    # Active Nuclei runs non-GET templates: conservatively every
-                    # request it sends may be a mutation, so bind the state-changing
-                    # reservation to the HTTP reservation exactly as a body attempt
-                    # does, so the adapter can settle it against requests sent.
-                    state_changing = int(sub_budget.get("state_changing_requests", 0))
-                    if state_changing > 0:
-                        sub_budget["http_requests"] = min(
-                            int(sub_budget.get("http_requests", 0)), state_changing,
-                        )
-                        sub_budget["state_changing_requests"] = int(
-                            sub_budget["http_requests"]
-                        )
-                if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
-                    exhausted |= {
-                        name for name in ("http_requests", "tool_wall_seconds")
-                        if not sub_budget.get(name)
-                    }
-                    break
-                if retry_round and int(sub_budget["tool_wall_seconds"]) <= empty_timeouts.get(
-                    candidate_id, 0,
-                ):
-                    # The residual would grant no more wall than the attempt that timed out
-                    # empty: retrying it would fail the same way. It stays unexamined.
-                    continue
-                if retry_round:
-                    retry_walls[candidate_id] = int(sub_budget["tool_wall_seconds"])
-                endpoint_urls.setdefault(candidate_id, redact_url(execution_target))
-                parsed = urllib.parse.urlsplit(execution_target)
-                registered_target = urllib.parse.urlunsplit(
-                    (parsed.scheme, parsed.netloc, "", "", "")
-                )
-                socket_factory = FrozenTargetSocketFactory(
-                    hostname=str(parsed.hostname or self.target.canonical_host),
-                    port=parsed.port or (443 if parsed.scheme == "https" else 80),
-                    frozen_addresses=self.target.allowed_addresses,
-                )
-                scanner_options = {"_batch_attempt": True, **body_request}
-                args = dict(primary.capability_args())
-                args.update(body_request)
-                if tool == "nuclei":
-                    scanner_options.update(worker_template_options)
-                    args.update(args_template_options)
-                elif tool == "dalfox":
-                    scanner_options["severity"] = "high"
-                    args["severity"] = "high"
-                legacy_spec = CAPABILITY_REGISTRY.require(legacy_capability)
-
-                async def execute_attempt(
-                    budget: Mapping[str, int], extra_options: Mapping[str, Any], job_suffix: str,
-                ) -> Any:
-                    prepared = fit_prepared_scan_capability(
-                        prepare_scan_external_capability(
-                            specification=legacy_spec,
-                            target=self.target,
-                            args=args,
-                            policy=self.policy,
-                        ),
-                        ledger_limits=budget,
-                    )
-                    adapter = ScannerExecutionAdapter(
-                        specification=legacy_spec,
-                        process_payload={
-                            "job_id": f"{self.job_id}:{action.action_id}:{job_suffix}",
-                            "tool_name": tool,
-                            "execution_target": execution_target,
-                            "registered_target": registered_target,
-                            "scanner_options": {**scanner_options, **extra_options},
-                            "trusted_headers": primary.headers(),
-                            "timeout_ms": int(budget["tool_wall_seconds"]) * 1_000,
-                            "pinned_address": socket_factory.primary_address,
-                            "authorized_addresses": list(self.target.allowed_addresses),
-                            "address_policy": socket_factory.policy_receipt,
-                            "oob_interactsh_server": None,
-                            "oob_interactsh_token": None,
-                        },
-                        process_runner=self.process_runner,
-                        requested_budget=dict(budget),
-                        redacted_execution=prepared.redacted_execution,
-                    )
-                    return await CapabilityExecutor().execute(
-                        CapabilityExecutionContext(
-                            specification=legacy_spec,
-                            target=self.target,
-                            requested_budget=dict(budget),
-                            adapter_managed_cancellation=True,
-                        ),
-                        adapter,
-                        heartbeat=heartbeat,
-                        cancelled=self.cancelled,
-                    )
-
-                if tool == "sqlmap":
-                    # One candidate, verified technique by technique; every finished stage
-                    # is checkpointed, so a later attempt continues instead of re-sending it.
-                    async def run_stage(
-                        technique: str, budget: Mapping[str, int], latency: float,
-                        _attempt_id: str = attempt_id,
-                    ) -> Any:
-                        return await execute_attempt(
-                            budget,
-                            {
-                                "technique": technique,
-                                **({"_measured_latency_seconds": round(latency, 3)} if latency else {}),
-                            },
-                            f"{_attempt_id[:16]}:{technique}",
-                        )
-
-                    async def checkpoint_stage(stage: Mapping[str, Any]) -> None:
-                        # sqli_stages builds the stage payload, always with a terminal status.
-                        await checkpoint_attempt(action.action_id, dict(stage))
-
-                    result = await run_staged_sqli_attempt(
-                        candidate_attempt_id=attempt_id,
-                        candidate_id=candidate_id,
-                        budget=sub_budget,
-                        prior=prior_stages(staged_sources, attempt_id),
-                        own_action_id=action.action_id,
-                        run_stage=run_stage,
-                        checkpoint=checkpoint_stage,
-                        cancelled=self.cancelled,
-                    )
-                    for stage in result.stages:
-                        key = (
-                            "stages_carried" if stage["outcome"] == "carried"
-                            else "stages_run" if stage["outcome"] in _BATCH_SUCCESS_STATUSES
-                            else "stages_unfinished"
-                        )
-                        staged_summary[key] += 1
-                else:
-                    result = await execute_attempt(sub_budget, {}, attempt_id[:16])
-                attempt_observations = tuple({
-                    # The tool parsers read the tool's own output, which names the vulnerable parameter
-                    # but not the endpoint. Without the locus a finding has no route, so it cannot be
-                    # matched to an expectation, routed to a verifier (an unresolved route abstains by
-                    # design), or acted on by an operator. The adapter resolved the request, so it
-                    # supplies what the parser cannot -- and never overwrites a locus the parser set.
-                    "url": execution_target,
-                    "method": body_request.get("method", "GET"),
-                    **dict(item), "attempt_id": attempt_id, "candidate_id": candidate_id,
-                } for item in result.observations)
-                proof_state = next((
-                    str(item.get("proof_state"))
-                    for item in attempt_observations if item.get("proof_state")
-                ), "unproven")
-                response_hashes = sorted({
-                    str(value)
-                    for item in attempt_observations
-                    for key, value in item.items()
-                    if "sha256" in str(key).lower() and str(value)
-                })[:20]
-                attempt_observations = (
-                    {
-                        "kind": "candidate_attempt",
-                        "attempt_id": attempt_id,
-                        "candidate_id": candidate_id,
-                        "family": family,
-                        "status": result.status,
-                        "proof_state": proof_state,
-                        "response_hashes": response_hashes,
-                        "budget_consumed": dict(result.actual_budget),
-                        **({"retry_round": retry_round} if retry_round else {}),
-                    },
-                    *attempt_observations,
-                )
-                attempt = {
-                    "attempt_id": attempt_id,
-                    "candidate_id": candidate_id,
                     "status": result.status,
-                    "timed_out": bool(result.timed_out),
-                    "budget_consumed": dict(result.actual_budget),
-                    "observations": attempt_observations,
-                    "errors": tuple(result.errors),
                     "proof_state": proof_state,
-                }
-                if result.status != "cancelled":
-                    await checkpoint_attempt(action.action_id, attempt)
-                if retry_round:
-                    retried += 1
-                    if result.observations:
-                        retried_with_output.add(candidate_id)
-                else:
-                    attempted += 1
-                observations.extend(attempt_observations)
-                result_timed_out = (
-                    result.status in {"timed_out", "partial"}
-                    or bool(getattr(result, "timed_out", False))
+                    "response_hashes": response_hashes,
+                    "budget_consumed": dict(result.actual_budget),
+                    **({"retry_round": retry_round} if retry_round else {}),
+                },
+                *attempt_observations,
+            )
+            attempt = {
+                "attempt_id": attempt_id,
+                "candidate_id": candidate_id,
+                "status": result.status,
+                "timed_out": bool(result.timed_out),
+                "budget_consumed": dict(result.actual_budget),
+                "observations": attempt_observations,
+                "errors": tuple(result.errors),
+                "proof_state": proof_state,
+            }
+            if result.status != "cancelled":
+                await checkpoint_attempt(action.action_id, attempt)
+            if retry_round:
+                retried += 1
+                if result.observations:
+                    retried_with_output.add(candidate_id)
+            else:
+                attempted += 1
+            sink.extend(attempt_observations)
+            result_timed_out = (
+                result.status in {"timed_out", "partial"}
+                or bool(getattr(result, "timed_out", False))
+            )
+            result_wall_killed = (
+                bool(getattr(result, "timed_out", False)) or result.status == "timed_out"
+            )
+            needs_retry = retry_empty_timeouts and result_timed_out and (
+                not result.observations or (retry_partial_timeouts and result_wall_killed)
+            )
+            if needs_retry and not retry_round:
+                cut_off_attempts[candidate_id] = attempt_id
+            if (
+                not retry_round and result.status in _BATCH_SUCCESS_STATUSES
+                and int(result.actual_budget.get("tool_wall_seconds", 0) or 0) > 0
+            ):
+                finished_walls.append(int(result.actual_budget["tool_wall_seconds"]))
+            self._settle_template_attempt(
+                candidate_id, retry_round,
+                needs_retry,
+                succeeded=result.status in _BATCH_SUCCESS_STATUSES,
+                granted_wall=int(sub_budget.get("tool_wall_seconds", 0)),
+                attempt_errors=[str(item) for item in result.errors],
+                errors=errors, empty_timeouts=empty_timeouts,
+                deferred_errors=deferred_errors, still_empty=still_empty,
+                recovered=recovered,
+            )
+            wall_killed = bool(getattr(result, "timed_out", False)) or result.status == "timed_out"
+            ceiling_stops |= attempt_ceiling_stops(result.errors)
+            attempt_log.append((
+                candidate_id, retry_round,
+                result.status in _BATCH_SUCCESS_STATUSES, wall_killed,
+            ))
+            for name, amount in result.actual_budget.items():
+                consumed[name] = min(
+                    int(action.requested_budget.get(name, 0)),
+                    consumed.get(name, 0) + int(amount),
                 )
-                result_wall_killed = (
-                    bool(getattr(result, "timed_out", False)) or result.status == "timed_out"
-                )
-                needs_retry = retry_empty_timeouts and result_timed_out and (
-                    not result.observations or (retry_partial_timeouts and result_wall_killed)
-                )
-                if needs_retry and not retry_round:
-                    cut_off_attempts[candidate_id] = attempt_id
-                if (
-                    not retry_round and result.status in _BATCH_SUCCESS_STATUSES
-                    and int(result.actual_budget.get("tool_wall_seconds", 0) or 0) > 0
-                ):
-                    finished_walls.append(int(result.actual_budget["tool_wall_seconds"]))
-                self._settle_template_attempt(
-                    candidate_id, retry_round,
-                    needs_retry,
-                    succeeded=result.status in _BATCH_SUCCESS_STATUSES,
-                    granted_wall=int(sub_budget.get("tool_wall_seconds", 0)),
-                    attempt_errors=[str(item) for item in result.errors],
-                    errors=errors, empty_timeouts=empty_timeouts,
-                    deferred_errors=deferred_errors, still_empty=still_empty,
-                    recovered=recovered,
-                )
-                wall_killed = bool(getattr(result, "timed_out", False)) or result.status == "timed_out"
-                ceiling_stops |= attempt_ceiling_stops(result.errors)
-                attempt_log.append((
-                    candidate_id, retry_round,
-                    result.status in _BATCH_SUCCESS_STATUSES, wall_killed,
-                ))
-                for name, amount in result.actual_budget.items():
-                    consumed[name] = min(
-                        int(action.requested_budget.get(name, 0)),
-                        consumed.get(name, 0) + int(amount),
+            # Any attempt that did not succeed counts. A timed-out external tool is
+            # normalized to "partial" upstream, and "partial" was absent from this set --
+            # so a batch in which every single attempt timed out, with every candidate
+            # started, aggregated to unattempted=0, terminal_failure=False and reported
+            # `success` with `timed_out=False`. That is how a family showed complete
+            # coverage while proving nothing at all.
+            if result.status not in {"success", "succeeded", "completed"}:
+                terminal_failure = True
+            if wall_killed:
+                attempt_timed_out = True
+            if result.status == "cancelled":
+                stopped_by_cancel = True
+
+        async def fail_attempt(
+            attempt_id: str, candidate_id: str, retry_round: int, exc: BaseException,
+        ) -> None:
+            nonlocal attempted, retried, terminal_failure
+            # One candidate that raises anywhere in its setup or execution must never fail the
+            # whole batch action. execution_request_for_manifest_candidate and the external
+            # capability preparation raise ValueError/ScanWorkManifestError on a candidate the
+            # manifest shift left unresolvable; without this the orchestrator failed the entire
+            # verify.sqli / verify.xss action, so every other candidate -- sqli-search included
+            # -- lost its verdict and the family read as gapped. Record this candidate as a
+            # failed attempt (checkpointed, counted) and continue to the next one.
+            failed_attempt = {
+                "attempt_id": attempt_id,
+                "candidate_id": candidate_id,
+                "status": "failed",
+                "timed_out": False,
+                "budget_consumed": {},
+                "observations": (),
+                "errors": (f"candidate_failed:{type(exc).__name__}",),
+                "proof_state": "not_proven",
+            }
+            try:
+                await checkpoint_attempt(action.action_id, failed_attempt)
+            except Exception:
+                pass
+            if retry_round:
+                retried += 1
+                still_empty.discard(candidate_id)
+            else:
+                attempted += 1
+            terminal_failure = True
+            attempt_log.append((candidate_id, retry_round, False, False))
+            errors.append(f"candidate_failed:{type(exc).__name__}")
+
+        try:
+            while True:
+                if position >= len(work):
+                    if position != first_pass or not still_empty:
+                        break
+                    if self.cancelled():
+                        stopped_by_cancel = True
+                        break
+                    work.extend(
+                        (manifest_index, row, 1) for manifest_index, row in rows
+                        if _batch_candidate_id(row, manifest_index) in still_empty
                     )
-                # Any attempt that did not succeed counts. A timed-out external tool is
-                # normalized to "partial" upstream, and "partial" was absent from this set --
-                # so a batch in which every single attempt timed out, with every candidate
-                # started, aggregated to unattempted=0, terminal_failure=False and reported
-                # `success` with `timed_out=False`. That is how a family showed complete
-                # coverage while proving nothing at all.
-                if result.status not in {"success", "succeeded", "completed"}:
-                    terminal_failure = True
-                if wall_killed:
-                    attempt_timed_out = True
-                if result.status == "cancelled":
+                    if position >= len(work):
+                        break
+                manifest_index, row, retry_round = work[position]
+                position += 1
+                # A path-segment candidate (family_hints: ["sqli"]) carries the sqlmap ``*`` marker in
+                # its URL; only the SQLi verifier understands it. Dalfox and the template sweeps would
+                # test the literal ``*`` as a value, so they skip it. The skip is recorded and kept
+                # out of the unattempted count: counting it there reported the slice partial for
+                # "insufficient_plan_budget" over a candidate no budget could have made testable,
+                # and that false gap failed the family's coverage.
+                if row.get("parameter_location") == "path" and family != "sqli":
+                    inapplicable += 1
+                    observations.append({
+                        "kind": "candidate_inapplicable",
+                        "candidate_id": str(row.get("candidate_id") or row.get("route_id") or ""),
+                        "family": family,
+                        "reason": "path_segment_candidate",
+                    })
+                    continue
+                candidate_id = _batch_candidate_id(row, manifest_index)
+                attempt_key = f"{manifest_digest}:{family}:{candidate_id}"
+                if retry_round:
+                    attempt_key += f":retry:{retry_round}"
+                attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
+                route_identity = str(row.get("candidate_id") or row.get("route_id") or "")
+                carry = None if retry_round or attempt_id in completed else (
+                    carried[attempt_id] if attempt_id in carried
+                    else (admitted[route_identity], admission_source)
+                    if route_identity and route_identity in admitted else None
+                )
+                if carry is not None:
+                    carried_count += 1
+                    attempted += 1
+                    observations.extend(carried_records(carry[0], source=str(carry[1])))
+                    attempt_log.append((candidate_id, 0, True, False))
+                    continue
+                prior = completed.get(attempt_id)
+                if prior is not None:
+                    resumed += 1
+                    if retry_round:
+                        retried += 1
+                    else:
+                        attempted += 1
+                    # A resumed attempt keeps the outcome its checkpoint recorded. Counting it
+                    # as merely "attempted" let a restart launder failure into success: every
+                    # attempt of a wall-killed batch is checkpointed, so replaying them all
+                    # produced terminal_failure=False, timed_out=False, unattempted=0 -- a
+                    # clean success receipt for a batch that had proven nothing.
+                    prior_status = str(prior.get("status") or "success")
+                    if prior_status not in {"success", "succeeded", "completed"}:
+                        terminal_failure = True
+                    # Only a wall-killed attempt timed out; partial is not a timeout.
+                    prior_wall_killed = bool(prior.get("timed_out")) or prior_status == "timed_out"
+                    if prior_wall_killed:
+                        attempt_timed_out = True
+                    ceiling_stops |= attempt_ceiling_stops(prior.get("errors") or ())
+                    observations.extend(prior.get("observations") or ())
+                    prior_timed_out = (
+                        prior_status in {"timed_out", "partial"} or bool(prior.get("timed_out"))
+                    )
+                    prior_empty = retry_empty_timeouts and prior_timed_out and (
+                        _no_tool_output(prior.get("observations") or ())
+                        or (retry_partial_timeouts and prior_wall_killed)
+                    )
+                    if prior_empty and not retry_round:
+                        cut_off_attempts[candidate_id] = attempt_id
+                    if retry_round and not _no_tool_output(prior.get("observations") or ()):
+                        retried_with_output.add(candidate_id)
+                    prior_wall = int(dict(prior.get("budget_consumed") or {}).get(
+                        "tool_wall_seconds", 0,
+                    ) or 0)
+                    if not retry_round and prior_status in _BATCH_SUCCESS_STATUSES and prior_wall > 0:
+                        finished_walls.append(prior_wall)
+                    self._settle_template_attempt(
+                        candidate_id, retry_round, prior_empty,
+                        succeeded=prior_status in _BATCH_SUCCESS_STATUSES,
+                        granted_wall=int(dict(prior.get("budget_consumed") or {}).get(
+                            "tool_wall_seconds", 0,
+                        )),
+                        attempt_errors=[str(item) for item in prior.get("errors") or ()],
+                        errors=errors, empty_timeouts=empty_timeouts,
+                        deferred_errors=deferred_errors, still_empty=still_empty,
+                        recovered=recovered,
+                    )
+                    attempt_log.append((
+                        candidate_id, retry_round,
+                        prior_status in _BATCH_SUCCESS_STATUSES, prior_wall_killed,
+                    ))
+                    for name, amount in dict(prior.get("budget_consumed") or {}).items():
+                        consumed[name] = consumed.get(name, 0) + int(amount)
+                    if str(prior.get("status") or "") not in _BATCH_SUCCESS_STATUSES:
+                        terminal_failure = True
+                    continue
+                if concurrent:
+                    # Wait for a free slot first: this candidate's hold is carved from what the
+                    # running ones have neither consumed nor been lent.
+                    while candidates.running and candidates.running >= candidates.slots():
+                        await candidates.wait()
+                if stopped_by_cancel or self.cancelled():
                     stopped_by_cancel = True
                     break
-            except (ScanWorkManifestError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
-                # One candidate that raises anywhere in its setup or execution must never fail the
-                # whole batch action. execution_request_for_manifest_candidate and the external
-                # capability preparation raise ValueError/ScanWorkManifestError on a candidate the
-                # manifest shift left unresolvable; without this the orchestrator failed the entire
-                # verify.sqli / verify.xss action, so every other candidate -- sqli-search included
-                # -- lost its verdict and the family read as gapped. Record this candidate as a
-                # failed attempt (checkpointed, counted) and continue to the next one.
-                failed_attempt = {
-                    "attempt_id": attempt_id,
-                    "candidate_id": candidate_id,
-                    "status": "failed",
-                    "timed_out": False,
-                    "budget_consumed": {},
-                    "observations": (),
-                    "errors": (f"candidate_failed:{type(exc).__name__}",),
-                    "proof_state": "not_proven",
-                }
                 try:
-                    await checkpoint_attempt(action.action_id, failed_attempt)
-                except Exception:
-                    pass
-                if retry_round:
-                    retried += 1
-                    still_empty.discard(candidate_id)
-                else:
-                    attempted += 1
-                terminal_failure = True
-                attempt_log.append((candidate_id, retry_round, False, False))
-                errors.append(f"candidate_failed:{type(exc).__name__}")
-                continue
+                    body_request: dict[str, Any] = {}
+                    if manifest_kind is ScanWorkManifestKind.CANDIDATE:
+                        # A body candidate is not describable by a URL, so resolve the whole request and
+                        # keep the body shape for the tool. A query candidate resolves to a bare URL
+                        # exactly as before.
+                        resolved = execution_request_for_manifest_candidate(
+                            endpoints, manifest, manifest_index,
+                        )
+                        execution_target = str(resolved["url"])
+                        if resolved.get("body_field_names"):
+                            body_request = {
+                                "method": str(resolved["method"]),
+                                "content_type": resolved.get("content_type"),
+                                "body_field_names": list(resolved["body_field_names"]),
+                                "injection_field": str(resolved["field_name"]),
+                            }
+                    else:
+                        execution_target = execution_url_for_manifest_endpoint(
+                            manifest, manifest_index,
+                        )
+                    remaining_attempts = max(1, len(work) - position + 1)
+                    # What the slice has neither consumed nor lent to a running candidate.
+                    remaining_budget = candidates.holds.available(consumed)
+                    # Never divide the reservation below what one attempt needs to
+                    # reach a verdict. An even split gave each of thirteen candidates
+                    # twelve seconds of sqlmap, so every attempt returned unproven and
+                    # the family spent its whole budget proving nothing. The manifest is
+                    # ranked, so funding the top of it and reporting the remainder as
+                    # unattempted is strictly more useful than diluting all of it.
+                    floor = batch_attempt_floor(
+                        action.capability_name, body_candidate=bool(body_request),
+                    )
+                    # Check the floor against what is actually left before building the
+                    # slice: a dimension that has run out is absent from the slice
+                    # entirely, so testing only the dimensions present would let an
+                    # unfundable attempt through and fail it downstream instead.
+                    unfundable = {
+                        name for name, amount in floor.items()
+                        if remaining_budget.get(name, 0) < amount
+                    }
+                    if unfundable:
+                        if candidates.running:
+                            # A running candidate may return part of its hold when it settles.
+                            position -= 1
+                            await candidates.wait()
+                            continue
+                        # Candidate cost classes can be mixed. An expensive body entry
+                        # must not suppress a later fundable query entry in the same
+                        # immutable slice.
+                        exhausted |= unfundable
+                        continue
+                    sub_budget = {
+                        name: max(1, floor.get(name, 1), amount // remaining_attempts)
+                        for name, amount in remaining_budget.items() if amount > 0
+                    }
+                    if tool == "nuclei" and sub_budget.get("tool_wall_seconds"):
+                        planned_share = (
+                            int(action.requested_budget.get("tool_wall_seconds") or 0)
+                            // max(1, first_pass)
+                        )
+                        passive_pack = action.capability_name == "templates.passive_batch"
+                        sub_budget["tool_wall_seconds"] = (
+                            template_retry_wall(
+                                remaining_wall=remaining_budget["tool_wall_seconds"],
+                                planned_share=planned_share,
+                                passive_pack=passive_pack,
+                            )
+                            if retry_round else
+                            template_attempt_wall(
+                                remaining_wall=remaining_budget["tool_wall_seconds"],
+                                remaining_attempts=remaining_attempts,
+                                planned_share=planned_share,
+                                passive_pack=passive_pack,
+                                measured_wall=(
+                                    statistics.median_low(finished_walls) if finished_walls else None
+                                ),
+                            )
+                        )
+                    if body_request:
+                        # Every request a body attempt sends is a mutation, so the body scanner
+                        # requires state_changing_requests >= http_requests (capabilities/scanner.py).
+                        # The slice scales http_requests up with the abundant HTTP budget while the
+                        # state-changing budget stays near its floor, which left http > state_changing
+                        # and raised "body scanner requires a conservative state-changing reservation"
+                        # -- crashing the whole verify.sqli/verify.xss action. Bind the two: a body
+                        # attempt's HTTP reservation equals its state-changing reservation.
+                        state_changing = int(sub_budget.get("state_changing_requests", 0))
+                        if state_changing > 0:
+                            sub_budget["http_requests"] = min(
+                                int(sub_budget.get("http_requests", 0)), state_changing,
+                            )
+                    elif tool == "nuclei" and worker_template_options.get(
+                        "nuclei_active_state_changing"
+                    ):
+                        # Active Nuclei runs non-GET templates: conservatively every
+                        # request it sends may be a mutation, so bind the state-changing
+                        # reservation to the HTTP reservation exactly as a body attempt
+                        # does, so the adapter can settle it against requests sent.
+                        state_changing = int(sub_budget.get("state_changing_requests", 0))
+                        if state_changing > 0:
+                            sub_budget["http_requests"] = min(
+                                int(sub_budget.get("http_requests", 0)), state_changing,
+                            )
+                            sub_budget["state_changing_requests"] = int(
+                                sub_budget["http_requests"]
+                            )
+                    if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
+                        if candidates.running:
+                            position -= 1
+                            await candidates.wait()
+                            continue
+                        exhausted |= {
+                            name for name in ("http_requests", "tool_wall_seconds")
+                            if not sub_budget.get(name)
+                        }
+                        break
+                    if retry_round and int(sub_budget["tool_wall_seconds"]) <= empty_timeouts.get(
+                        candidate_id, 0,
+                    ):
+                        # The residual would grant no more wall than the attempt that timed out
+                        # empty: retrying it would fail the same way. It stays unexamined.
+                        continue
+                    if retry_round:
+                        retry_walls[candidate_id] = int(sub_budget["tool_wall_seconds"])
+                    endpoint_urls.setdefault(candidate_id, redact_url(execution_target))
+                    parsed = urllib.parse.urlsplit(execution_target)
+                    registered_target = urllib.parse.urlunsplit(
+                        (parsed.scheme, parsed.netloc, "", "", "")
+                    )
+                    socket_factory = FrozenTargetSocketFactory(
+                        hostname=str(parsed.hostname or self.target.canonical_host),
+                        port=parsed.port or (443 if parsed.scheme == "https" else 80),
+                        frozen_addresses=self.target.allowed_addresses,
+                    )
+                    scanner_options = {"_batch_attempt": True, **body_request}
+                    args = dict(primary.capability_args())
+                    args.update(body_request)
+                    if tool == "nuclei":
+                        scanner_options.update(worker_template_options)
+                        args.update(args_template_options)
+                    elif tool == "dalfox":
+                        scanner_options["severity"] = "high"
+                        args["severity"] = "high"
+                    legacy_spec = CAPABILITY_REGISTRY.require(legacy_capability)
+
+                    # A concurrent candidate runs after the loop has moved on, so everything the
+                    # attempt needs from this iteration is bound now, not looked up when it runs.
+                    async def execute_attempt(
+                        budget: Mapping[str, int], extra_options: Mapping[str, Any], job_suffix: str,
+                        execution_target: str = execution_target,
+                        registered_target: str = registered_target,
+                        scanner_options: Mapping[str, Any] = scanner_options,
+                        args: Mapping[str, Any] = args,
+                        socket_factory: FrozenTargetSocketFactory = socket_factory,
+                        legacy_spec: Any = legacy_spec,
+                    ) -> Any:
+                        prepared = fit_prepared_scan_capability(
+                            prepare_scan_external_capability(
+                                specification=legacy_spec,
+                                target=self.target,
+                                args=dict(args),
+                                policy=self.policy,
+                            ),
+                            ledger_limits=budget,
+                        )
+                        adapter = ScannerExecutionAdapter(
+                            specification=legacy_spec,
+                            process_payload={
+                                "job_id": f"{self.job_id}:{action.action_id}:{job_suffix}",
+                                "tool_name": tool,
+                                "execution_target": execution_target,
+                                "registered_target": registered_target,
+                                "scanner_options": {**scanner_options, **extra_options},
+                                "trusted_headers": primary.headers(),
+                                "timeout_ms": int(budget["tool_wall_seconds"]) * 1_000,
+                                "pinned_address": socket_factory.primary_address,
+                                "authorized_addresses": list(self.target.allowed_addresses),
+                                "address_policy": socket_factory.policy_receipt,
+                                "oob_interactsh_server": None,
+                                "oob_interactsh_token": None,
+                                # In memory only: the pinned transport spaces every connection of
+                                # this slice's concurrent candidates by it.
+                                **({"_request_gate": request_gate} if request_gate is not None else {}),
+                            },
+                            process_runner=self.process_runner,
+                            requested_budget=dict(budget),
+                            redacted_execution=prepared.redacted_execution,
+                        )
+                        return await CapabilityExecutor().execute(
+                            CapabilityExecutionContext(
+                                specification=legacy_spec,
+                                target=self.target,
+                                requested_budget=dict(budget),
+                                adapter_managed_cancellation=True,
+                            ),
+                            adapter,
+                            heartbeat=heartbeat,
+                            cancelled=self.cancelled,
+                        )
+
+                    if tool == "sqlmap":
+                        # One candidate, verified technique by technique; every finished stage
+                        # is checkpointed, so a later attempt continues instead of re-sending it.
+                        async def run_stage(
+                            technique: str, budget: Mapping[str, int], latency: float,
+                            _attempt_id: str = attempt_id,
+                            _execute: Any = execute_attempt,
+                        ) -> Any:
+                            return await _execute(
+                                budget,
+                                {
+                                    "technique": technique,
+                                    **({"_measured_latency_seconds": round(latency, 3)} if latency else {}),
+                                },
+                                f"{_attempt_id[:16]}:{technique}",
+                            )
+
+                        async def checkpoint_stage(stage: Mapping[str, Any]) -> None:
+                            # sqli_stages builds the stage payload, always with a terminal status.
+                            await checkpoint_attempt(action.action_id, dict(stage))
+
+                        run_attempt = functools.partial(
+                            run_staged_sqli_attempt,
+                            candidate_attempt_id=attempt_id,
+                            candidate_id=candidate_id,
+                            budget=sub_budget,
+                            prior=prior_stages(staged_sources, attempt_id),
+                            own_action_id=action.action_id,
+                            run_stage=run_stage,
+                            checkpoint=checkpoint_stage,
+                            cancelled=self.cancelled,
+                            measured=candidates.measured,
+                        )
+                    else:
+                        run_attempt = functools.partial(
+                            execute_attempt, sub_budget, {}, attempt_id[:16],
+                        )
+                    row = {
+                        "attempt_id": attempt_id, "candidate_id": candidate_id,
+                        "retry_round": retry_round, "execution_target": execution_target,
+                        "body_request": body_request, "sub_budget": dict(sub_budget),
+                    }
+                    if concurrent:
+                        # The candidate's records keep its place in the slice whenever it finishes.
+                        sink: list[Any] = []
+                        observations.append(sink)  # type: ignore[arg-type]
+
+                        async def run_candidate(
+                            _row: Mapping[str, Any] = row, _run: Any = run_attempt,
+                            _sink: list[Any] = sink,
+                        ) -> None:
+                            try:
+                                await settle_attempt(_row, await _run(), _sink)
+                            except _BATCH_CANDIDATE_ERRORS as exc:
+                                await fail_attempt(
+                                    str(_row["attempt_id"]), str(_row["candidate_id"]),
+                                    int(_row["retry_round"]), exc,
+                                )
+
+                        candidates.launch(attempt_id, sub_budget, consumed, run_candidate)
+                        continue
+                    await settle_attempt(row, await run_attempt(), observations)
+                    if stopped_by_cancel:
+                        break
+                except _BATCH_CANDIDATE_ERRORS as exc:
+                    await fail_attempt(attempt_id, candidate_id, retry_round, exc)
+                    continue
+            await candidates.finish()
+        finally:
+            # Cancelled or failed while candidates were running: stop every one of them.
+            await candidates.abandon()
+        # Each concurrent candidate's records were collected in its place in the slice.
+        observations = [
+            item for entry in observations
+            for item in (entry if isinstance(entry, list) else (entry,))
+        ]
         for candidate_id, held in deferred_errors.items():
             if candidate_id not in recovered:
                 errors.extend(held)
@@ -3749,6 +3880,12 @@ class DatabaseNeutralScanActionDispatcher:
                 "checkpoint_mode": "after_each_candidate",
                 **({"extends": extends} if extends else {}),
                 **({"technique_stages": staged_summary} if tool == "sqlmap" else {}),
+                **({"candidate_concurrency": {
+                    "bound": candidates.bound,
+                    "peak": candidates.holds.peak,
+                    "rate_ceiling_per_second": round(rate_ceiling, 3),
+                    "gated_connections": request_gate.admitted,
+                }} if request_gate is not None else {}),
                 **({"carried_from_admission": admission_source} if admission_source else {}),
                 **({"carried_count": carried_count} if extends or admission_source else {}),
             },

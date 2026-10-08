@@ -372,7 +372,14 @@ coverage.
   were inconclusive), checkpoints every finished technique, and paces later techniques by the
   response time it measured. A slice its wall interrupted is continued by a verification extension
   in the next round, which resumes at the first unfinished technique (and can itself be continued)
-  instead of re-sending what was already settled.
+  instead of re-sending what was already settled. Candidates of one slice run concurrently, up to
+  the Scan's `max_workers` (at most 4) and only as many as the slice's request rate covers at the
+  measured response time; one request gate in the pinned transport spaces every connection of the
+  slice so its aggregate rate never exceeds the rate one of its candidates was already paced at
+  when they ran one at a time.
+  Each candidate's hold is carved from the slice's reservation before it sends anything, tool wall
+  is still charged per process, and the receipt records the bound, the peak and the rate ceiling
+  (`candidate_concurrency`).
 - **Other injection** (`injection_extra_checks.py`): SSI/ESI, prototype pollution, CSV/formula
   injection, RFI, LDAP/XPath, XXE/XML injection.
 - **SSRF / command injection / LFI / RCE**: high-risk active families, gated behind non-safe exploit

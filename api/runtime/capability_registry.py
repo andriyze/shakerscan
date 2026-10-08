@@ -884,6 +884,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "slice": {"type": "object"},
                 "profile": {"type": "string"},
                 "proof_policy": {"type": "string"},
+                # Candidates of the slice that may run at once (scan/sqli_concurrency.py).
+                "candidate_concurrency": {"type": "integer", "minimum": 1, "maximum": 4},
             }, required=(
                 "candidate_manifest_ref", "slice", "profile", "proof_policy",
             )),

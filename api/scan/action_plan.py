@@ -364,6 +364,10 @@ _FORBIDDEN_ACTION_KEYS = frozenset({
 # Defined in a leaf module so health_plan can raise them without importing this one;
 # re-exported here because this is where every caller imports them from.
 from .plan_errors import ScanActionPlacementError, ScanActionPlanError  # noqa: E402
+from .sqli_concurrency import (  # noqa: E402
+    CANDIDATE_CONCURRENCY_ARG,
+    planned_candidate_concurrency,
+)
 from .health_plan import with_authentication_health  # noqa: E402
 
 
@@ -1894,6 +1898,11 @@ class ScanActionPlanCompiler:
                 {
                     "candidate_manifest_ref": candidate_ref or "discover.web_crawl",
                     "endpoint_manifest_ref": endpoint_ref or None,
+                    # How many of the slice's candidates may run at once: the Scan's worker
+                    # ceiling, bounded again by the slice's pacing contract when it runs.
+                    CANDIDATE_CONCURRENCY_ARG: planned_candidate_concurrency(
+                        execution_plan.budget.max_workers,
+                    ),
                 },
                 manifest_ref=candidate_ref,
                 dependencies=active_dependencies,
