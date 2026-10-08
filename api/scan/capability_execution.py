@@ -339,6 +339,9 @@ SCAN_BASE_ORIGIN_CAPABILITIES = frozenset({
     "http.request", "web.probe", "web.crawl", "web.browser_crawl",
     "web.content_discover", "templates.scan", "templates.passive_scan",
     "xss.verify", "sqli.verify", "authz.verify",
+    # The canonical-host probes read the origin the scan selected. Taking the first frozen
+    # origin sent a scheme-less target's seed sweep to http:// (soak N38: 12 verified, not 19).
+    "web.spec_ingest", "exposure.verify_batch",
 })
 
 
