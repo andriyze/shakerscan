@@ -5,6 +5,11 @@ short-lived receipt (the UI defaulted to two hours), which felt like asking for 
 every scan. A standing authorization is the same receipt, created once for the target's scope
 with no expiry, and resolved automatically when a submission for that target carries none.
 
+It covers the credentials attached to this target: the target's own credential profiles and
+principals, and profiles another target shared to it through a credential grant. A Hunt may use
+any of them and records each use (``hunt_credential_uses``); an unattached credential is refused.
+The authorization never extends to another target, and a credential never authorizes one.
+
 What still ends it: an explicit revocation (the approval revoke endpoint or the target endpoint),
 or a change of the target's scope (a different host produces a different scope receipt, so the
 old authorization no longer matches and the target is authorized again). The dangerous tier

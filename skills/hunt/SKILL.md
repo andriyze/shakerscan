@@ -17,7 +17,9 @@ candidates, and proof. Do not start a second in-server reasoning loop.
 3. Express the investigation: target, target kind, objective, budget profile, selected credential
    profile IDs/request collections when needed, and the permissions the operator actually requested.
    Prefer server defaults and an empty capability list unless there is a concrete reason to narrow
-   execution. Do not manufacture restrictive allowlists.
+   execution. Do not manufacture restrictive allowlists. A Hunt may use the credentials attached
+   to its target (its own and those shared to it by grant); selecting profiles narrows that list.
+   `credential_not_attached` means the operator must attach or share the credential first.
 4. Reuse standing target authorization. When the target already has valid standing authorization,
    let ShakerScan resolve the target-bound approval; do not ask the operator to repeat approval or
    make them find/copy a receipt ID. Never invent authority or a receipt.

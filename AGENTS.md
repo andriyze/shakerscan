@@ -126,7 +126,7 @@ count was queued; `status: partial` means only some submissions succeeded.
 
 - Active testing requires persisted policy permission and a target-bound approval receipt. The
   receipt is normally the target's standing authorization, recorded once and resolved
-  automatically at submission and covers explicitly selected target credentials. The dangerous
+  automatically at submission and covers the credentials attached to the target. The dangerous
   tier keeps bounded per-action approvals. A UI checkbox or planner statement cannot
   replace server checks.
 - State-changing HTTP, direct-origin access, OOB callbacks, network discovery, and device-fragility
@@ -139,8 +139,8 @@ Reusable secrets belong only in encrypted credential profiles or request collect
 
 - A profile belongs to one home target and serves other targets only through an explicit
   operator grant (`POST /credential-profiles/{id}/grants`), recorded and revocable per target.
-  A grant makes the profile selectable on that target; it never authorizes testing it, which
-  still needs that target's own standing authorization. Grants stay within one asset kind (web,
+  A grant attaches it there (Hunts use attached credentials only and record each use); it never
+  authorizes testing that target, which still needs the target's own standing authorization. Grants stay within one asset kind (web,
   api, network and connected-device views share), and active capabilities need the receiving target's
   own approval. Never share a profile an operator did not ask to share.
 - Scan and Hunt requests carry opaque profile/selection IDs, never tokens, cookies, passwords,

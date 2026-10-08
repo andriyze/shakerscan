@@ -31,7 +31,7 @@ export function AuthorizeDialog({ assets, onClose, onDone }: {
     </div>}>
     <div className="space-y-4">
       {pending.length
-        ? <p className="text-sm leading-6 text-gray-300">Confirm that you own or are authorized to test <strong className="font-medium text-white break-all">{label}</strong>. One standing authorization per host covers its linked web apps and services; scans and Hunts reuse it without asking again, and you can revoke it from the target menu.</p>
+        ? <p className="text-sm leading-6 text-gray-300">Confirm that you own or are authorized to test <strong className="font-medium text-white break-all">{label}</strong>. One standing authorization per host covers its linked web apps and services, and it covers the credentials attached to this target (to each target, when you authorize several). Scans and Hunts reuse it without asking again, and you can revoke it from the target menu.</p>
         : <p className="text-sm text-gray-400">Everything selected is already authorized.</p>}
       {pending.length > 1 && <ul className="max-h-40 overflow-y-auto rounded-lg border border-gray-800 bg-gray-950/40 p-2 font-mono text-xs text-gray-300">
         {pending.map(asset => <li key={asset.id} className="truncate px-1 py-0.5">{asset.locator}</li>)}
