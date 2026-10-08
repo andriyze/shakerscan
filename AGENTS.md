@@ -344,12 +344,12 @@ existing evidence. Artifact/JavaScript inspection uses bounded capabilities, not
 Count attempted, admitted/executed, successful, rejected, and indeterminate actions separately. A
 missing/malformed result is not success. Report settled actual usage separately from ceilings.
 
-Budget exhaustion must still preserve the final debrief, unresolved leads, and reason. An operator
-may extend an unfinished Hunt through `/hunts/{id}/budget-amendments` (current revision, new totals,
-same key on retries) or by granting a permission request: a refused action waiting on one answers
-`permission_required`, and only a person decides it or sets start bounds for it, never the agent
-(`docs/hunt-permission-requests.md`). `resume` continues only when the reported exhausted dimension
-has headroom; it does not execute traffic, clear device pauses, change permissions, or reset usage.
+Exhaustion still keeps the debrief, leads and reason. Start with profile budgets, never lower one
+below what discovery needs, act on `budget_warnings`, and keep Hunt views compact (no `view: full`).
+An operator extends a Hunt via `/hunts/{id}/budget-amendments` or a permission request: on
+`awaiting_permission` tell the user the exact `shakerscan approve <id>` for their own terminal, keep
+working, wait with the wait tool, retry with the same key. Only a person decides or sets start bounds
+(`docs/hunt-permission-requests.md`). `resume` needs headroom; it runs no traffic and resets nothing.
 The admission snapshot remains historical. Cancellation is distinct. `GET /hunts` is durable searchable history; `/hunts/{id}/record` exports the explicit
 decision record and debrief, never hidden chain-of-thought. Requests-only export stays separate.
 

@@ -1,12 +1,15 @@
 # Hunt permission requests, granted live
 
-**Status:** design note, revised after owner decisions (2026-10-07); E2 implemented 2026-10-08.
-PR E1 implemented the attached credential list and `hunt_credential_uses`. PR E2 implements the
-engine side: closed reason codes, permission requests, grants, pre-authorization, the
-`awaiting_permission` action status, the read/decision/revoke routes, the MCP outcome and wait tool
-(see "E2 implementation notes" for where it differs). The terminal approve flow (E3) and the
-gateway step-up (G1) are not implemented yet. The owner approved the behaviour and the decisions
-recorded below; any code follows this note.
+**Status:** design note, revised after owner decisions (2026-10-07); E2 and E3 implemented
+2026-10-08. PR E1 implemented the attached credential list and `hunt_credential_uses`. PR E2
+implements the engine side: closed reason codes, permission requests, grants, pre-authorization,
+the `awaiting_permission` action status, the read/decision/revoke routes, the MCP outcome and wait
+tool (see "E2 implementation notes" for where it differs). PR E3 implements the terminal side:
+`shakerscan approve|deny`, `hunt permissions`, `--allow`, the approver session and the exact
+client protocol the gateway's step-up routes must serve ("E3: the terminal approval protocol and
+the G1 contract"). The gateway step-up (G1) is not implemented yet; until it is, an Enterprise
+approval ends with an exact error and decides nothing. The owner approved the behaviour and the
+decisions recorded below; any code follows this note.
 
 ## Problem and decision
 
@@ -492,6 +495,151 @@ Where the engine (PR E2) differs from, or makes concrete, the design above:
 - **UI.** The Hunt page lists pending requests read-only with the `shakerscan approve` command;
   Allow and Deny on the page are left to E3/G1.
 
+## E3: the terminal approval protocol and the G1 contract
+
+E3 is client code (`scripts/hunt_approve.py`, vendored into the `shakerscan` client as
+`_hunt_approve.py`, and reached through `scripts/v2_cli.py`), so `shakerscan approve` on a pip
+client and `./scanner.sh approve` on an engine install run the same protocol.
+
+**Commands.**
+- `shakerscan approve <request-id> [--hunt H] [--remember] [--total N]`,
+  `shakerscan approve --all-pending [--hunt H]`, `shakerscan deny <request-id> | --all-pending`.
+  The request is found among the open Hunts (`active`, `awaiting_planner`, `budget_exhausted`)
+  unless `--hunt` names its Hunt. The client prints only the server's `title`, `explanation`,
+  `effect`, kind, reason code and expiry. One proof covers every request shown.
+- `shakerscan approve --watch [--minutes 30]`: the opt-in approver session (below).
+- `shakerscan hunt permissions list [HUNT] [--status S] | show <id> | wait <id> [--seconds N]`:
+  JSON with the server-rendered text; `wait` answers `granted`, `denied`, `expired`, `withdrawn`
+  or `still_pending`. `shakerscan hunt call` refused with `permission_required` names the request
+  and the `shakerscan approve` command.
+- `--allow BOUND` (repeatable) on `shakerscan hunt start` and `shakerscan agent`;
+  `--propose-allow BOUND` on `hunt start` sends `proposed_allow` (one pending request), as the MCP
+  start tool does with its `allow` argument.
+- Every command that decides refuses to run without an interactive terminal (stdin a TTY), so a
+  command an agent runs in its own tool shell cannot decide or pre-authorize anything.
+
+**Which proof.** A connection with a service token is Enterprise: everything goes through the
+gateway's step-up routes and the engine's decision route is never called. A connection without a
+token is a local open-source engine: a `y/N` on this terminal, then `POST
+/hunts/{id}/permission-requests/{rid}/decision` with `decided_by: local-operator`,
+`decision_via: local_confirm` and a fresh `local-approve-<hex>` idempotency key. On OSS any local
+process that can reach the API could do the same; the command prints that before asking.
+
+**G1 gateway contract.** All routes take the service token as `Authorization: Bearer`; the token
+alone never approves. Every response from these routes, success or refusal, carries a
+`schema_version` starting `shakerscan-approval-` (a refusal under FastAPI's `detail`). The client
+uses that marker to tell a gateway without these routes (any other answer, such as today's named
+403 for an unknown route) apart from a refusal, and then prints an exact error ("this ShakerScan
+Enterprise gateway has no terminal approval yet: POST /_enterprise/approvals/begin answered HTTP
+403 (…). … needs the gateway's step-up routes (G1). Nothing was approved, denied or
+pre-authorized …") and exits 2. There is no fallback.
+
+1. `POST /_enterprise/approvals/begin`
+   ```json
+   {"schema_version": "shakerscan-approval-begin/v1",
+    "purpose": "permission_decision | preauthorization | approver_session",
+    "account": "<the sign-in name the person typed>",
+    "origin": "https://<gateway public origin>",
+    "decisions": [{"hunt_id": "…", "request_id": "…", "subject_digest": "<64 hex>",
+                   "decision": "allow | deny", "scope": "hunt | target", "choice": {"total": 1000}}],
+    "preauthorization": {"allow": ["budget.raise:2x", "…"], "use": "agent_launch | hunt_start"},
+    "session": {"ttl_seconds": 1800}}
+   ```
+   Exactly one of `decisions`, `preauthorization`, `session`, matching `purpose`. The gateway
+   checks the token, that `account` is a person with the operator or admin role (the gateway may
+   also require it to be the token's owner), that `origin` is its public URL, and for decisions
+   that each request is pending with that `subject_digest` (read from the engine). It answers:
+   ```json
+   {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": "<opaque>",
+    "set_digest": "<64 hex>", "methods": ["totp", "security_key"], "expires_at": "<ISO 8601>",
+    "nonce": "<base64url, with security_key>",
+    "webauthn": {"challenge": "<base64url>", "rpId": "<gateway host>",
+                 "allowCredentials": [{"type": "public-key", "id": "<base64url>"}],
+                 "userVerification": "required", "timeout": 120000}}
+   ```
+   `set_digest` is SHA-256 (hex) of the canonical JSON (`sort_keys`, separators `,` and `:`,
+   ASCII) of `{"schema_version": "shakerscan-approval-set/v1", "purpose", "account", "origin"}`
+   plus the purpose's part: `decisions` sorted by (`hunt_id`, `request_id`) with exactly the six
+   keys above; `preauthorization` with `allow` sorted and de-duplicated and `use`; or `session`
+   with `ttl_seconds`. The client computes the same digest and refuses a challenge that differs.
+   `methods` lists only what the person has enrolled. The WebAuthn `challenge` is
+   `base64url(SHA-256(base64url_decode(nonce) || bytes.fromhex(set_digest)))`; the client checks
+   it before asking the key, so a key touch signs exactly this set.
+2. `POST /_enterprise/approvals/finish`
+   ```json
+   {"schema_version": "shakerscan-approval-finish/v1", "approval_id": "…", "set_digest": "…",
+    "proof": {"method": "totp", "code": "123456"}}
+   ```
+   or `{"method": "security_key", "credential": {"id", "rawId", "type": "public-key",
+   "response": {"clientDataJSON", "authenticatorData", "signature", "userHandle"}}}` (base64url;
+   the shape `py_webauthn` verifies at sign-in, origin = the gateway's public URL, user
+   verification required), or `{"method": "approver_session", "session_id", "session_secret"}`.
+   TOTP goes through `mfa_verify` (per-counter replay protection); both routes are rate-limited
+   and lock out like login. An approval id is single-use and expires (five minutes suggested).
+   It answers `{"schema_version": "shakerscan-approval-result/v1", "approval_id", "decided_by":
+   "<person>", "decision_via": "terminal_stepup | approver_session"}` plus, by purpose:
+   - `results`: one `{"hunt_id", "request_id", "http_status", "request": <engine request> |
+     "error": <engine detail>}` per decision. The gateway makes each decision itself with
+     `POST /hunts/{hunt_id}/permission-requests/{request_id}/decision` and the body
+     `{decision, scope, subject_digest, choice, "idempotency_key": "approval:<approval_id>:<request_id>",
+     "decided_by": "<person>", "decision_via": "terminal_stepup" | "approver_session"}`; any
+     `decided_by` a client sent is ignored. It audits `hunt.permission.decided`. `allow` needs the
+     licence's `can_mutate`; `deny` is always possible.
+   - `preauthorization`: `{"id", "allow", "use", "proof": "stepup" | "launch_stepup",
+     "expires_at"}`, bound to the person and the token (suggested lifetime: `agent_launch` until
+     the token's working day ends, at most 12 h; `hunt_start` 10 minutes, one use). Audits
+     `hunt.preauthorized`.
+   - `session`: `{"session_id", "session_secret", "expires_at"}` for at most 30 minutes, bound to
+     the person and the token, revocable. Audits each use as `approver_session`.
+3. `POST /_enterprise/approvals/session/revoke` `{"schema_version":
+   "shakerscan-approval-session-revoke/v1", "session_id", "session_secret"}` answers
+   `{"schema_version": "shakerscan-approval-session/v1", "session_id", "revoked": true}`.
+4. **Hunt start with bounds.** `POST /hunts` with a non-empty `allow` must carry the header
+   `X-ShakerScan-Preauthorization: <id>`. The gateway checks that the id is live, belongs to this
+   token, and that every string in `allow` is in its `allow`; it then sets `allow_asserted_by:
+   {"person": "<person>", "proof": "launch_stepup" | "stepup"}`, removes the header, and forwards.
+   Without the header it refuses 403 with `{"schema_version": "shakerscan-approval-error/v1",
+   "error": "preauthorization_stepup_required", "message": "pre-authorization needs step-up: run
+   shakerscan approve"}`. It always removes a client-sent `allow_asserted_by`; `proposed_allow`
+   passes through unchanged (it becomes a pending request).
+5. **Never proxied:** the engine's decision and revoke routes stay out of every token allowlist.
+   The read routes (`permission-requests`, `permission-grants`, `preauthorization`,
+   `permission-events`) join `HUNT_READ`.
+
+Refusals use `{"detail": {"schema_version": "shakerscan-approval-error/v1", "error": "<code>",
+"message": "<text>"}}`; the client prints the code and message. Suggested codes:
+`stepup_failed`, `stepup_locked` (429), `role_insufficient`, `account_unknown`,
+`origin_mismatch`, `approval_unknown`, `approval_expired`, `approval_set_changed` (409),
+`session_invalid`, `preauthorization_invalid`, `feature_disabled`, `licence_read_only`.
+
+**`--allow` at launch.** `shakerscan agent --allow BOUND…` validates the `<kind>:<value>` shape
+locally (the engine parses the grammar). On Enterprise it runs one `preauthorization` step-up
+(`use: agent_launch`) before any agent process exists; a gateway without G1 gets the exact error
+and no agent starts. The agent's environment, and its MCP registrations (`.mcp.json` `env`,
+`opencode.json` `environment`, `codex mcp add --env`), then carry `SHAKERSCAN_HUNT_ALLOW` (the
+bounds, JSON) and `SHAKERSCAN_PREAUTHORIZATION_ID`; the MCP start tool and `hunt start` send them
+as `allow` and the header on every Hunt. The id is not a secret on its own (the gateway binds it to
+the token, the person and the bounds and lets nothing widen it); it is rewritten, or removed, on
+every `shakerscan agent` launch. On an open-source engine the bounds are the local operator's and
+are sent as given. `hunt start --allow` steps up itself (`use: hunt_start`) unless
+`--preauthorization ID` names one or the launch environment carries one; without a terminal it
+refuses and suggests `--propose-allow`.
+
+**The approver session, honestly.** `approve --watch` asks for one step-up (`approver_session`),
+then shows each new request and decides it on a keypress (`a`, `r` to remember where supported,
+`d`, `s`, `q`). The session secret lives only in that foreground process's memory: never on disk,
+in the environment or in config, never printed, wiped when the session ends, which also revokes it
+at the gateway. It does not protect against a process that can read the approver's memory (ptrace
+with `ptrace_scope=0`, or root), nor against an agent that can type into the person's terminal
+(`tmux send-keys`, `screen -X`); Python may also keep copies of the string the client cannot wipe.
+The guarantee is "no stored secret" and a bounded, revocable, audited window. The strong
+per-approval proof is a step-up code or key touch the agent never sees. On OSS `--watch` is the
+same loop, and each keypress is the confirmation.
+
+**Security keys.** CTAP2 over USB or NFC through python-fido2 when it is installed beside the
+client (`pipx inject shakerscan fido2`); without it the client says so and offers `--method totp`.
+Platform authenticators are not reachable from a pip-installed command.
+
 ## PR split
 
 **Engine**
@@ -512,7 +660,11 @@ Where the engine (PR E2) differs from, or makes concrete, the design above:
 **Gateway**
 - **G1:** the step-up approval routes (TOTP or security key bound to the person), the approver
   session, start pre-authorization, role rules (operator or admin), audit, licence and toggle
-  rules, allowlists, inventory and tests.
+  rules, allowlists, inventory and tests, to the contract in "E3: the terminal approval protocol
+  and the G1 contract". The routes differ from the earlier sketch in "Enterprise gateway changes":
+  pre-authorization and the approver session are `purpose`s of `begin`/`finish` rather than
+  routes of their own, the session is revoked with `POST …/session/revoke`, and start bounds carry
+  the pre-authorization id in the `X-ShakerScan-Preauthorization` header.
 
 ## Owner decisions recorded
 

@@ -26,6 +26,8 @@ RUNTIME_HELPERS = {
     "_mcp_stdio": "mcp_stdio.py",
     "_mcp_ssh_stream": "mcp_ssh_stream.py",
     "_api_stream": "api_stream.py",
+    "_hunt_approve": "hunt_approve.py",
+    "_redirect_hint": "redirect_hint.py",
 }
 # The agent kit as packaged (`_kit/claude` stands for the repository's `.claude`).
 # VERSION is the release the kit was built from, shown in the workspace note.

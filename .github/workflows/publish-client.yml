@@ -81,7 +81,7 @@ jobs:
           (cd /tmp && printf '%s\n' "$initialize" | /tmp/client-venv/bin/shakerscan mcp | grep -F '"serverInfo"')
           /tmp/client-venv/bin/python -c "import shakerscan._mcp, shakerscan._v2_cli, shakerscan._api_cli, shakerscan._scan_cli"
           # Every documented command must be reachable with no engine installed.
-          for command in connect disconnect agent api scan mcp hunt doctor version; do
+          for command in connect disconnect agent api scan mcp hunt approve deny doctor version; do
             /tmp/client-venv/bin/shakerscan "$command" --help >/dev/null 2>&1 \
               || { echo "shakerscan $command is not available in the built wheel" >&2; exit 1; }
           done

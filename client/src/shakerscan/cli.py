@@ -35,7 +35,9 @@ from . import __version__
 from ._vendored import kit_sources, load
 
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
-CLIENT_COMMANDS = ("connect", "disconnect", "agent", "api", "scan", "check", "mcp", "hunt", "doctor", "version")
+CLIENT_COMMANDS = (
+    "connect", "disconnect", "agent", "api", "scan", "check", "mcp", "hunt", "approve", "deny", "doctor", "version",
+)
 AGENTS = ("codex", "claude", "opencode", "pi")
 CONNECT_PATH = "/_enterprise/connect/"
 ENV_CONFIG_DIR = "SHAKERSCAN_CONFIG_DIR"
@@ -54,6 +56,24 @@ LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 class ClientError(Exception):
     """A configuration problem the operator can fix; reported without a traceback."""
+
+
+def build_source() -> str | None:
+    """The source commit a packaged client was built from (``_build.json``), or None.
+
+    D15: two builds of one released version (a ``git+…@<commit>`` install, say) used to look
+    identical; ``version``, ``doctor`` and the MCP ``serverInfo`` name the commit."""
+    try:
+        data = json.loads((Path(__file__).resolve().parent / "_build.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    commit = str(data.get("source_commit") or "") if isinstance(data, dict) else ""
+    return commit[:12] if re.fullmatch(r"[0-9a-f]{7,40}", commit) else None
+
+
+def client_version() -> str:
+    source = build_source()
+    return f"{__version__} (source {source})" if source else __version__
 
 
 # --- the saved profile -----------------------------------------------------------------------
@@ -346,6 +366,14 @@ def cmd_connect(args: argparse.Namespace) -> int:
                 "asked for), http://192.168.1.50:8080 (an open-source engine, no token), or a connect link"
             )
         url = f"{parts.scheme}://{parts.netloc}"
+        if parts.scheme == "http" and args.token_stdin:
+            # D16: a token given for an http:// address used to be dropped without a word, and
+            # the profile saved as a tokenless engine. A token is never sent over plain http.
+            raise ClientError(
+                f"a token is never sent over plain http, so {url} cannot be saved with one: use the "
+                f"instance's https:// address (shakerscan connect https://{parts.netloc}), or drop "
+                "--token-stdin for an open-source engine that has no login. Nothing was saved."
+            )
         if parts.scheme == "http" or args.no_token:
             token = None
             who = " (open-source engine reached by address; no token, no per-person identity)"
@@ -354,6 +382,8 @@ def cmd_connect(args: argparse.Namespace) -> int:
             if not token:
                 raise ClientError("no token given (an open-source engine over https needs --no-token)")
             who = ""
+    if token is not None:
+        verify_token(url, token, timeout=float(args.timeout or 20.0))
     directory = save_profile(url, token)
     if token is None:
         print(f"saved:     {url}{who}\n           address in {directory / 'config.json'}; no token file")
@@ -370,6 +400,28 @@ def cmd_connect(args: argparse.Namespace) -> int:
     else:
         print("next:      shakerscan agent claude   (the ShakerScan agent workspace against this instance)")
     return code
+
+
+def verify_token(url: str, token: str, *, timeout: float = 20.0) -> None:
+    """Refuse to save a token the instance does not accept (D16: a wrong token used to be saved,
+    the profile then failed every command). Nothing is written unless the instance answers an
+    authenticated request with this token."""
+    mcp = load("_mcp")
+    try:
+        client = mcp.ArsenalClient(mcp.normalize_api_url(url, allow_remote=True), timeout_seconds=timeout, api_token=token)
+        client.request_json("GET", "/health")
+    except (TypeError, ValueError) as exc:
+        raise ClientError(f"{exc}; nothing was saved") from exc
+    except mcp.MCPError as exc:
+        status = getattr(exc, "http_status", None)
+        if status == 401:
+            raise ClientError(
+                f"{url} refused this token (HTTP 401): check it, or create a new one in the console. "
+                "Nothing was saved."
+            ) from exc
+        if status is not None and 400 <= status < 500:
+            return  # past the token check; the route's own answer is doctor's to report
+        raise ClientError(f"cannot check the token against {url}: {_with_reason(exc)}. Nothing was saved.") from exc
 
 
 def cmd_disconnect(args: argparse.Namespace) -> int:  # noqa: ARG001
@@ -453,6 +505,7 @@ def _retire_legacy_agent_guide(workspace: Path) -> None:
 
 def prepare_workspace(
     workspace: Path, url: str, who: str, executable: str, *, authenticated: bool = True,
+    mcp_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Materialize the agent kit against the instance; return what was written.
 
@@ -483,8 +536,13 @@ def prepare_workspace(
     for name in ("AGENTS.md",):
         (workspace / name).write_text(note + sources[name].read_text(encoding="utf-8"), encoding="utf-8")
         written.append(name)
+    # `agent --allow`: the launch bounds reach the MCP server even where an agent starts it with a
+    # reduced environment. Rewritten on every launch, so a launch without --allow clears them.
+    env = dict(mcp_env or {})
     (workspace / ".mcp.json").write_text(
-        json.dumps({"mcpServers": {"shakerscan": {"command": executable, "args": mcp_args}}}, indent=2) + "\n",
+        json.dumps({"mcpServers": {"shakerscan": {
+            "command": executable, "args": mcp_args, **({"env": env} if env else {}),
+        }}}, indent=2) + "\n",
         encoding="utf-8",
     )
     written.append(".mcp.json")
@@ -492,7 +550,13 @@ def prepare_workspace(
         json.dumps(
             {
                 "$schema": "https://opencode.ai/config.json",
-                "mcp": {"shakerscan": {"type": "local", "command": [executable, *mcp_args], "enabled": True}},
+                # OpenCode loads AGENTS.md on its own; the Hunt skill is loaded with it so the
+                # permission, budget and view rules are in every session that drives a Hunt.
+                "instructions": ["skills/hunt/SKILL.md"],
+                "mcp": {"shakerscan": {
+                    "type": "local", "command": [executable, *mcp_args], "enabled": True,
+                    **({"environment": env} if env else {}),
+                }},
             },
             indent=2,
         )
@@ -583,6 +647,43 @@ def resolve_agent_instance(args: argparse.Namespace, environ: Mapping[str, str] 
     )
 
 
+_BOUND = re.compile(r"^[a-z][a-z._-]{1,40}:\S{1,480}$")
+
+
+def launch_preauthorization(args: argparse.Namespace, url: str, token_file: str | None) -> dict[str, str]:
+    """``agent --allow``: the person's start bounds for the agent's Hunts, as environment.
+
+    On Enterprise the person steps up once here, before any agent process exists; the gateway's
+    pre-authorization id then rides along with the bounds, and every Hunt the agent starts names
+    it (the gateway records the bounds as the person's and never widens them). On an open-source
+    engine the bounds are the local operator's, sent as given. Bounds the agent proposes itself
+    stay a pending request for the person."""
+    bounds = list(dict.fromkeys(str(item).strip() for item in getattr(args, "allow", None) or () if str(item).strip()))
+    if not bounds:
+        return {}
+    bad = [bound for bound in bounds if not _BOUND.fullmatch(bound)]
+    if bad:
+        raise ClientError(f"--allow takes <kind>:<value>, such as budget.raise:2x or capability:state-changing, not {bad[0]!r}")
+    env = {"SHAKERSCAN_HUNT_ALLOW": json.dumps(bounds)}
+    if token_file is None:
+        return env
+    if args.no_launch:
+        raise ClientError("--allow on an Enterprise instance steps up for the agent this command starts; drop --no-launch")
+    v2 = load("_v2_cli")
+    approval = v2._approval()
+    token = read_token(token_file)
+    try:
+        granted = approval.preauthorize(
+            v2._approval_send(v2.ApiClient(url, api_token=token, timeout=float(args.timeout or 60.0))),
+            url, approval.Terminal(), bounds, use="agent_launch", account=args.account, method=args.method,
+        )
+    except approval.ApprovalError as exc:
+        raise ClientError(f"{str(exc).rstrip('.')}. No agent was started.") from exc
+    print(f"allowed:   {', '.join(bounds)} (pre-authorization {granted['id']}"
+          + (f", until {granted['expires_at']}" if granted.get("expires_at") else "") + ")")
+    return {**env, "SHAKERSCAN_PREAUTHORIZATION_ID": str(granted["id"])}
+
+
 def cmd_agent(args: argparse.Namespace) -> int:
     url, token_file, who = resolve_agent_instance(args)
     authenticated = token_file is not None
@@ -591,16 +692,27 @@ def cmd_agent(args: argparse.Namespace) -> int:
         raise ClientError(f"unsupported agent '{args.agent}'; use one of {', '.join(AGENTS)}")
     if not agents and not args.no_launch:
         raise ClientError("no supported agent on this PATH; install Codex, Claude Code, OpenCode or Pi, or pass --no-launch")
-    agent = agents[0] if agents else AGENTS[0]
+    agent = agents[0] if agents else None
+    allowed = launch_preauthorization(args, url, token_file)
     workspace = Path(args.workspace).expanduser().resolve() if args.workspace else (Path.cwd() if args.here else config_dir() / "agent")
     executable = client_executable()
-    written = prepare_workspace(workspace, url, who, executable, authenticated=authenticated)
+    written = prepare_workspace(workspace, url, who, executable, authenticated=authenticated, mcp_env=allowed)
     print(f"workspace: {workspace} ({', '.join(written)})\ninstance:  {url} ({who})")
+    if agent is None:
+        # D18: with nothing installed, naming codex as the launch command sent people to an
+        # agent they did not have.
+        print("launch:    no supported agent is on this PATH. Install one of Codex, Claude Code, OpenCode "
+              f"or Pi, then run it in {workspace}, or run `shakerscan agent <name>` again")
+        return 0
+    if args.agent and not shutil.which(agent):
+        print(f"note:      {agent} is not on this PATH yet; install it before launching")
     if agent == "codex" and shutil.which("codex"):
         # Codex keeps MCP servers in its own configuration, not in the workspace.
         mcp_args = ["mcp"] if authenticated else ["mcp", "--url", url]
         result = subprocess.run(
-            ["codex", "mcp", "add", "shakerscan", "--", executable, *mcp_args],
+            ["codex", "mcp", "add", "shakerscan",
+             *[part for key, value in allowed.items() for part in ("--env", f"{key}={value}")],
+             "--", executable, *mcp_args],
             capture_output=True, text=True, timeout=120, check=False,
         )
         if result.returncode == 0:
@@ -614,16 +726,17 @@ def cmd_agent(args: argparse.Namespace) -> int:
         print("pi:        no MCP client; skills and slash commands passed explicitly, the instance via `shakerscan api|scan|hunt`")
     command = shlex.join(argv)
     if args.no_launch:
+        bounds = "".join(f"{key}={shlex.quote(value)} " for key, value in allowed.items())
         if authenticated:
-            print(f"launch:    cd {shlex.quote(str(workspace))} && {command}")
+            print(f"launch:    cd {shlex.quote(str(workspace))} && {bounds}{command}")
         else:
             # The kit's `shakerscan api` calls need the engine's address; the MCP registration
             # already carries it.
-            print(f"launch:    cd {shlex.quote(str(workspace))} && {ENV_URL}={shlex.quote(url)} {ENV_ALLOW_REMOTE}=true {command}")
+            print(f"launch:    cd {shlex.quote(str(workspace))} && {ENV_URL}={shlex.quote(url)} {ENV_ALLOW_REMOTE}=true {bounds}{command}")
         return 0
     if not shutil.which(agent):
         raise ClientError(f"{agent} is not on this PATH")
-    env = agent_environment(url, token_file, agent)
+    env = {**agent_environment(url, token_file, agent), **allowed}
     print(f"starting:  {agent} in {workspace}")
     sys.stdout.flush()
     os.chdir(workspace)
@@ -925,7 +1038,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_version(args: argparse.Namespace) -> int:  # noqa: ARG001
     """The client version, and the engine release installed beside it when there is one, so the
     output means the same thing whichever install channel put ``shakerscan`` on the PATH."""
-    print(f"shakerscan client {__version__}")
+    print(f"shakerscan client {client_version()}")
     engine = engine_version()
     if engine:
         print(f"engine {engine} ({engine_home() / 'scanner.sh'})")
@@ -959,7 +1072,8 @@ def cmd_mcp(args: argparse.Namespace) -> int:
         os.environ.pop(ENV_TOKEN, None)
         os.environ.pop(ENV_TOKEN_FILE, None)
     mcp = load("_mcp")
-    mcp.SERVER_VERSION = f"client-{__version__}"
+    source = build_source()
+    mcp.SERVER_VERSION = f"client-{__version__}" + (f"+{source}" if source else "")
     return int(mcp.main())
 
 
@@ -982,6 +1096,24 @@ def cmd_hunt(args: argparse.Namespace) -> int:
     return int(load("_v2_cli").main(["--api-url", url, *timeout, "hunt", *rest]))
 
 
+def cmd_approval(args: argparse.Namespace) -> int:
+    """``approve``/``deny``: the runtime CLI's terminal approval, against the connected instance.
+
+    Enterprise (a token): the person's step-up at the gateway. An open-source engine (no token):
+    a y/N confirmation sent to the engine's decision route."""
+    url = apply_connection(args)
+    rest = list(args.args)
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    if any(token in ("-h", "--help") for token in rest):
+        sys.stdout.write(f"shakerscan {args.command} [--url URL] [--token-file FILE] [--timeout SECONDS] ...\n"
+                         "  Against the connected instance unless --url names another. Run it yourself, in your\n"
+                         "  own terminal: it asks you (never an agent) for the decision.\n\n")
+        sys.stdout.flush()
+    timeout = ["--timeout", str(args.timeout)] if args.timeout is not None else []
+    return int(load("_v2_cli").main(["--api-url", url, *timeout, args.command, *rest]))
+
+
 def _with_reason(exc: Exception) -> str:
     """The adapter's error message plus the transport reason it carries (a timeout, a refused
     connection, a certificate failure), so `doctor` says why and not only that."""
@@ -997,7 +1129,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     mcp = load("_mcp")
     allow_remote = os.environ.get(ENV_ALLOW_REMOTE, "").strip().lower() in _TRUE
     token = os.environ.get(ENV_TOKEN, "").strip() or None
-    lines = [f"client:   {__version__}", f"api url:  {url}"]
+    lines = [f"client:   {client_version()}", f"api url:  {url}"]
     if not args.url and not os.environ.get(ENV_URL) is None and profile().get("url") == url:
         lines[-1] = f"api url:  {url} (saved profile in {config_dir()})"
     try:
@@ -1042,6 +1174,8 @@ COMMANDS = {
     "version": cmd_version,
     "mcp": cmd_mcp,
     "hunt": cmd_hunt,
+    "approve": cmd_approval,
+    "deny": cmd_approval,
     "doctor": cmd_doctor,
     "connect": cmd_connect,
     "disconnect": cmd_disconnect,
@@ -1052,7 +1186,7 @@ COMMANDS = {
 }
 
 # Commands that forward their arguments to a runtime CLI after the connection options.
-FORWARDING_COMMANDS = ("api", "scan", "hunt")
+FORWARDING_COMMANDS = ("api", "scan", "hunt", "approve", "deny")
 _CONNECTION_OPTIONS = ("--url", "--token-file", "--timeout")
 
 
@@ -1117,7 +1251,7 @@ def build_parser() -> argparse.ArgumentParser:
             f"{ENV_HOME} (default ~/.shakerscan) when it is installed: {INSTALL_ONE_LINER}"
         ),
     )
-    parser.add_argument("--version", action="version", version=f"shakerscan client {__version__}")
+    parser.add_argument("--version", action="version", version=f"shakerscan client {client_version()}")
     commands = parser.add_subparsers(dest="command", metavar="command")
 
     def connection(sub: argparse.ArgumentParser) -> None:
@@ -1181,6 +1315,17 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument("--workspace", help="workspace directory (default: ~/.config/shakerscan/agent)")
     agent.add_argument("--here", action="store_true", help="use the current directory as the workspace")
     agent.add_argument("--no-launch", action="store_true", help="prepare the workspace and print how to start")
+    agent.add_argument(
+        "--allow", action="append", default=[], metavar="BOUND",
+        help=(
+            "pre-authorize the agent's Hunts within this bound (repeatable): budget.raise:2x, "
+            "credential.use:<targets>, target.authorize:<patterns>, capability:state-changing, "
+            "capability:active-testing. Enterprise asks for your step-up once, before the agent starts"
+        ),
+    )
+    agent.add_argument("--account", help="Enterprise step-up for --allow: your sign-in name")
+    agent.add_argument("--method", choices=("totp", "security_key"), help="Enterprise step-up method for --allow")
+    agent.add_argument("--timeout", type=float, help="seconds per request for the --allow step-up (default 60)")
     api = commands.add_parser("api", help="call the instance's API: METHOD PATH [JSON] (the agent kit's one way in)")
     connection(api)
     api.add_argument("args", nargs=argparse.REMAINDER, help="METHOD PATH [JSON]")
@@ -1211,6 +1356,14 @@ def build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         help="the hunt subcommand and its options (`shakerscan hunt --help` lists the subcommands)",
     )
+    for name, text in (
+        ("approve", "allow a Hunt permission request in your own terminal: Enterprise with your TOTP code or "
+                    "security key, an open-source engine with a y/N; --all-pending, --watch"),
+        ("deny", "deny a Hunt permission request in your own terminal"),
+    ):
+        approval = commands.add_parser(name, help=text)
+        connection(approval)
+        approval.add_argument("args", nargs=argparse.REMAINDER, help="<request-id> | --all-pending [--hunt ID] ...")
     doctor = commands.add_parser(
         "doctor",
         help=(
@@ -1238,7 +1391,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `shakerscan scan --budget-profile fast URL` failed unless `--` came first.
         # Only the leading connection options are the client's; the rest is forwarded as is.
         own, forwarded = split_connection_options(argv[1:])
-        if argv[0] == "hunt":
+        if argv[0] in {"hunt", "approve", "deny"}:
             # The runtime Hunt CLI's subcommands are what `hunt --help` should list.
             if any(token in ("-h", "--help") for token in own):
                 own = [token for token in own if token not in ("-h", "--help")]

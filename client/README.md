@@ -11,6 +11,7 @@ shakerscan mcp                    # public MCP when no instance is configured
 shakerscan doctor --url https://scanner.example.com --token-file ./token
 shakerscan mcp    --url https://scanner.example.com --token-file ./token
 shakerscan hunt   --url https://scanner.example.com --token-file ./token list
+shakerscan approve <request-id>   # allow what a Hunt asks for, in your own terminal
 ```
 
 It installs the same `shakerscan` command name as the engine installer
@@ -19,7 +20,8 @@ without Docker, and any engine subcommand (`start`, `stop`, `status`, `update`, 
 a local engine install when one exists. The adapter and CLI are the runtime's own code, vendored
 at build time, and the tools an agent sees come from the instance's live contracts.
 
-Python 3.10 or newer, no third-party dependencies, AGPL-3.0-only. Documentation:
+Python 3.10 or newer, no third-party dependencies (a USB/NFC security key for `shakerscan approve`
+on Enterprise needs `pipx inject shakerscan fido2`), AGPL-3.0-only. Documentation:
 https://github.com/andriyze/shakerscan/blob/main/docs/client.md
 
 

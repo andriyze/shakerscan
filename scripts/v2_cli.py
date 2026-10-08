@@ -124,6 +124,52 @@ def _opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(_NoRedirect())
 
 
+def _redirect_text(exc: urllib.error.HTTPError, request_url: str) -> str:
+    """D17: say where the instance is and which option points there, not only "HTTP 308"."""
+    try:
+        from redirect_hint import redirect_explanation
+    except ModuleNotFoundError:
+        from scripts.redirect_hint import redirect_explanation
+    location = exc.headers.get("Location") if exc.headers is not None else None
+    return redirect_explanation(exc.code, location, request_url, option="--url")
+
+
+def _approval():
+    """The terminal approval protocol (scripts/hunt_approve.py), loaded when a command needs it."""
+    try:
+        import hunt_approve
+    except ModuleNotFoundError:
+        from scripts import hunt_approve
+    return hunt_approve
+
+
+def _approval_send(client: "ApiClient"):
+    """``send(method, path, payload, headers) -> (status, body)`` over this CLI's own client:
+    the bearer token, https only, and never a followed redirect."""
+    approval = _approval()
+
+    def send(method: str, path: str, payload: Mapping[str, Any] | None = None,
+             headers: Mapping[str, str] | None = None) -> tuple[int, Any]:
+        try:
+            return 200, client.request(method, path, payload=payload, headers=headers)
+        except CliError as exc:
+            if exc.http_status is None:
+                raise approval.ApprovalError(str(exc)) from exc
+            return exc.http_status, exc.api_detail if exc.api_detail is not None else str(exc)
+
+    return send
+
+
+def _launch_bounds() -> tuple[list[str], str | None]:
+    """``shakerscan agent --allow``: the person's bounds and the gateway pre-authorization id."""
+    try:
+        bounds = json.loads(os.environ.get("SHAKERSCAN_HUNT_ALLOW") or "[]")
+    except ValueError:
+        bounds = []
+    bounds = [str(item) for item in bounds if isinstance(item, str) and item.strip()] if isinstance(bounds, list) else []
+    return bounds, (os.environ.get("SHAKERSCAN_PREAUTHORIZATION_ID") or "").strip() or None
+
+
 class ApiClient:
     def __init__(self, base_url: str, *, timeout: float = 60.0, api_token: str | None = None) -> None:
         self.base_url = str(base_url or "").rstrip("/")
@@ -147,9 +193,10 @@ class ApiClient:
         *,
         payload: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> Any:
         body = None
-        headers = {"Accept": "application/json", **self._auth_headers()}
+        headers = {"Accept": "application/json", **dict(headers or {}), **self._auth_headers()}
         if payload is not None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             if len(body) > MAX_REQUEST_BYTES:
@@ -166,8 +213,7 @@ class ApiClient:
         except urllib.error.HTTPError as exc:
             if 300 <= exc.code < 400:
                 raise CliError(
-                    f"the API answered HTTP {exc.code} with a redirect; an authenticated "
-                    "request is never followed to another location",
+                    _redirect_text(exc, request.full_url),
                     error_type="api_error",
                     http_status=exc.code,
                 ) from exc
@@ -230,8 +276,7 @@ class ApiClient:
         except urllib.error.HTTPError as exc:
             if 300 <= exc.code < 400:
                 raise CliError(
-                    f"the API answered HTTP {exc.code} with a redirect; an authenticated "
-                    "request is never followed to another location",
+                    _redirect_text(exc, request.full_url),
                     error_type="api_error",
                     http_status=exc.code,
                 ) from exc
@@ -447,6 +492,87 @@ def _hunt_start_payload(args: argparse.Namespace, contract: Mapping[str, Any]) -
     }
 
 
+def _start_preauthorization(
+    args: argparse.Namespace, client: ApiClient, payload: dict[str, Any],
+) -> dict[str, str]:
+    """Put the start bounds into ``payload``; return the headers that carry their proof.
+
+    ``--allow`` bounds are the person's own. On an open-source engine they are sent as given:
+    the operator at the host is the trust boundary. On Enterprise they need the person's
+    step-up, done here before the Hunt starts (or named with ``--preauthorization`` / inherited
+    from ``shakerscan agent --allow``), and the gateway records them as that person's.
+    ``--propose-allow`` bounds are a proposal: one pending request a person approves."""
+    allow = list(dict.fromkeys(getattr(args, "allow", None) or ()))
+    launch_allow, launch_id = _launch_bounds()
+    if allow and payload.get("allow"):
+        raise CliError("give the bounds with --allow or in the request's allow, not both")
+    if not allow and not payload.get("allow") and launch_allow:
+        allow = launch_allow
+    if allow:
+        payload["allow"] = allow
+    if getattr(args, "propose_allow", None):
+        payload["proposed_allow"] = list(dict.fromkeys(args.propose_allow))
+    if not payload.get("allow") or not client.api_token:
+        return {}
+    approval = _approval()
+    preauthorization = getattr(args, "preauthorization", None) or launch_id
+    if not preauthorization:
+        try:
+            granted = approval.preauthorize(
+                _approval_send(client), client.base_url, approval.Terminal(sys.stdin, sys.stderr),
+                payload["allow"], use="hunt_start", account=getattr(args, "account", None),
+                method=getattr(args, "method", None),
+            )
+        except approval.ApprovalError as exc:
+            raise CliError(
+                f"{str(exc).rstrip('.')}. No Hunt was started. An agent proposes bounds with --propose-allow instead.",
+                error_type="preauthorization_required",
+            ) from exc
+        preauthorization = str(granted["id"])
+    return {approval.PREAUTHORIZATION_HEADER: preauthorization}
+
+
+def _permission_wait_outcome(request: Mapping[str, Any]) -> dict[str, Any]:
+    status = str(request.get("status") or "")
+    outcome = status if status in {"granted", "denied", "expired", "withdrawn"} else "still_pending"
+    return {"outcome": outcome, "permission_request": dict(request), "next": {
+        "granted": "Call the refused capability again with the same idempotency key and input.",
+        "still_pending": f"The person runs `shakerscan approve {request.get('id')}`; wait again.",
+    }.get(outcome, "Do not retry the refused action; the permission was not granted.")}
+
+
+def _run_permissions(args: argparse.Namespace, client: ApiClient) -> Any:
+    approval = _approval()
+    send = _approval_send(client)
+    try:
+        if args.permissions_command == "list":
+            if args.hunt_id:
+                suffix = f"?status={urllib.parse.quote(args.status)}" if args.status else ""
+                return client.get(f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/permission-requests{suffix}")
+            return {"requests": approval.list_pending(send)}
+        request = approval.find_request(send, args.request_id, args.hunt)
+        if args.permissions_command == "show":
+            return request
+        return _permission_wait_outcome(approval.wait_for(send, request, args.seconds))
+    except approval.ApprovalError as exc:
+        raise CliError(str(exc)) from exc
+
+
+def _awaiting_permission(exc: CliError, key: str) -> CliError:
+    """``hunt call`` refused with 409 permission_required: name the request and the command."""
+    detail = exc.api_detail if isinstance(exc.api_detail, Mapping) else {}
+    request = detail.get("permission_request") if isinstance(detail.get("permission_request"), Mapping) else None
+    if exc.http_status != 409 or detail.get("code") != "permission_required" or not request:
+        return exc
+    return CliError(
+        f"awaiting permission: {request.get('title')}. Ask the person to run `shakerscan approve "
+        f"{request.get('id')}` in their own terminal; meanwhile do other work, check with `shakerscan "
+        f"hunt permissions wait {request.get('id')}`, and on granted call again with --idempotency-key "
+        f"{key} and the same input. On denied or expired, do not retry.",
+        error_type="awaiting_permission", http_status=409, api_detail=dict(detail),
+    )
+
+
 def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
     if args.hunt_command == "skills":
         query = {}
@@ -506,10 +632,11 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
         contract = client.get("/hunts/contract")
         if not isinstance(contract, Mapping):
             raise CliError("running server returned an invalid Hunt contract")
-        return client.post(
-            "/hunts",
-            _hunt_start_payload(args, contract),
-            idempotency_key=_validate_idempotency_key(args.idempotency_key),
+        payload = _hunt_start_payload(args, contract)
+        headers = _start_preauthorization(args, client, payload)
+        return client.request(
+            "POST", "/hunts", payload=payload,
+            idempotency_key=_validate_idempotency_key(args.idempotency_key), headers=headers,
         )
     if args.hunt_command == "get":
         return client.get(f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}")
@@ -557,7 +684,10 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
         )
         body = {"idempotency_key": key, "input": inputs,
                 **({"experiment_key": experiment_key} if experiment_key is not None else {})}
-        response = _settled_capability(client, path, body)
+        try:
+            response = _settled_capability(client, path, body)
+        except CliError as exc:
+            raise _awaiting_permission(exc, key) from exc
         return {"idempotency_key": key, "response": response}
     if args.hunt_command == "candidate":
         if args.request:
@@ -637,6 +767,8 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
             f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/finish",
             {"summary": args.summary, "next_actions": args.next_action},
         )
+    if args.hunt_command == "permissions":
+        return _run_permissions(args, client)
     if args.hunt_command in {"cancel", "resume"}:
         return client.post(
             f"/hunts/{urllib.parse.quote(args.hunt_id, safe='')}/{args.hunt_command}",
@@ -969,6 +1101,21 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_start.add_argument("--capability", action="append", default=[])
     hunt_start.add_argument("--collection-id", action="append", default=[])
     hunt_start.add_argument(
+        "--allow", action="append", default=[], metavar="BOUND",
+        help=(
+            "pre-authorize requests inside this bound (repeatable): budget.raise:2x, "
+            "credential.use:<targets>, target.authorize:<patterns>, capability:state-changing, "
+            "capability:active-testing. Enterprise asks for your step-up first"
+        ),
+    )
+    hunt_start.add_argument(
+        "--propose-allow", action="append", default=[], metavar="BOUND",
+        help="propose bounds for a person to approve (one pending request); for agents",
+    )
+    hunt_start.add_argument("--preauthorization", help="Enterprise: a pre-authorization id from an earlier step-up")
+    hunt_start.add_argument("--account", help="Enterprise step-up: your sign-in name")
+    hunt_start.add_argument("--method", choices=("totp", "security_key"), help="Enterprise step-up method")
+    hunt_start.add_argument(
         "--skill-id", action="append", default=[],
         help=(
             "Pre-bind an already reviewed methodology (repeatable; normally start empty and "
@@ -999,6 +1146,25 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_query.add_argument(
         "--cursor", help="next_cursor from the previous page; keep kind and filter unchanged",
     )
+
+    hunt_permissions = hunt_commands.add_parser(
+        "permissions", help="Read permission requests (server-rendered text) and wait for decisions",
+    )
+    permission_commands = hunt_permissions.add_subparsers(dest="permissions_command", required=True)
+    permissions_list = permission_commands.add_parser(
+        "list", help="Pending requests of every open Hunt, or every request of one Hunt",
+    )
+    permissions_list.add_argument("hunt_id", nargs="?")
+    permissions_list.add_argument("--status", choices=("pending", "granted", "denied", "expired", "withdrawn"))
+    permissions_show = permission_commands.add_parser("show", help="One request, with its server-rendered text")
+    permissions_show.add_argument("request_id")
+    permissions_show.add_argument("--hunt", help="the request's Hunt (found automatically otherwise)")
+    permissions_wait = permission_commands.add_parser(
+        "wait", help="Wait for the person's decision: granted, denied, expired, withdrawn or still_pending",
+    )
+    permissions_wait.add_argument("request_id")
+    permissions_wait.add_argument("--hunt", help="the request's Hunt (found automatically otherwise)")
+    permissions_wait.add_argument("--seconds", type=_positive_seconds, default=300.0, help="how long to wait (default 300)")
 
     hunt_call = hunt_commands.add_parser("call", help="Call one server-returned capability")
     hunt_call.add_argument("hunt_id")
@@ -1050,6 +1216,12 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_cancel.add_argument("hunt_id")
     hunt_resume = hunt_commands.add_parser("resume", help="Resume a paused or interrupted Hunt")
     hunt_resume.add_argument("hunt_id")
+
+    for command, text in (
+        ("approve", "Allow a Hunt permission request in your own terminal (Enterprise: with your step-up)"),
+        ("deny", "Deny a Hunt permission request in your own terminal (Enterprise: with your step-up)"),
+    ):
+        _approval().add_arguments(products.add_parser(command, help=text), command)
 
     credentials = products.add_parser(
         "credentials", help="Create, rotate, or admission-test an encrypted profile",
@@ -1158,6 +1330,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if token and (len(token) > 4096 or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token)):
             raise CliError("SHAKERSCAN_API_TOKEN must be printable ASCII without spaces")
         client = ApiClient(args.api_url, api_token=token, timeout=args.timeout or DEFAULT_TIMEOUT_SECONDS)
+        if args.product in {"approve", "deny"}:
+            return _run_approval(args, client)
         if args.product == "hunt":
             result = _run_hunt(args, client)
         elif args.product == "credentials":
@@ -1172,6 +1346,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except CliError as exc:
         print(json.dumps(exc.public_dict(), sort_keys=True), file=sys.stderr)
+        return 2
+
+
+def _run_approval(args: argparse.Namespace, client: ApiClient) -> int:
+    """``shakerscan approve|deny``: human output, not JSON; the person reads it."""
+    approval = _approval()
+    try:
+        return approval.run(
+            args.product, args, _approval_send(client), enterprise=client.api_token is not None,
+            origin=client.base_url,
+        )
+    except approval.ApprovalError as exc:
+        print(f"shakerscan {args.product}: {exc}", file=sys.stderr)
         return 2
 
 
