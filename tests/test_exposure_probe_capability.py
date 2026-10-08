@@ -32,9 +32,15 @@ def test_secret_material_outranks_structural_disclosure():
 
     aws = classify_exposure(
         path="/config", status=200, headers={"Content-Type": "text/plain"},
-        body=b"aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        body=b"aws_secret_access_key = q7Rz2Vx9Lm4Tb8Nc1Hd6Kp3Ws5Fy0Ge2Ju7Ab9Q",
     )
     assert aws is not None and aws.severity == "critical"
+    # AWS's own documentation key is a sample, not a leak: the shared narrow secret
+    # contract screens it as a placeholder, as the Hunt verifier always has.
+    assert classify_exposure(
+        path="/config", status=200, headers={"Content-Type": "text/plain"},
+        body=b"aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    ) is None
 
 
 def test_deterministic_response_signatures_classify_high_exposure():

@@ -50,8 +50,11 @@ try:
     from capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from capabilities.exposure_probe import (
+        DIRECTORY_FOLLOW_UP_FLOOR,
         SENSITIVE_SEED_PATHS,
+        SOFT_404_CONTROL_COUNT,
         EXPOSURE_PROBE_PARSER_VERSION,
+        is_never_requested,
         is_sensitive_exposure_class,
         classify_confidential_file,
         classify_exposure,
@@ -115,8 +118,11 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from ..capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from ..capabilities.exposure_probe import (
+        DIRECTORY_FOLLOW_UP_FLOOR,
         SENSITIVE_SEED_PATHS,
+        SOFT_404_CONTROL_COUNT,
         EXPOSURE_PROBE_PARSER_VERSION,
+        is_never_requested,
         is_sensitive_exposure_class,
         classify_confidential_file,
         classify_exposure,
@@ -216,6 +222,7 @@ from .capability_execution import (
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import finalize_scan_report
 from .nuclei_execution import resolve_active_scan_nuclei_options
+from .negative_control import negative_control_entries
 from .nuclei_template_index import nuclei_templates_directory
 from .private_inputs import BrokerPrivateScanInputs
 from .work_manifests import (
@@ -497,6 +504,7 @@ def _exposure_observation(
         "finding_verdict": "verified" if proven else "not_proven",
         "exposure_class": signature.exposure_class,
         "severity": signature.severity,
+        "proof_contract": signature.proof_contract,
         "request_url": url,
         "discovered_via": discovered_via,
         "response_status": result.status_code,
@@ -504,6 +512,9 @@ def _exposure_observation(
         "response_body_sha256": hashlib.sha256(result.response_body).hexdigest(),
         "matched_signature": signature.matched_pattern,
         "redacted_excerpt": redacted_exposure_excerpt(result.response_body, signature),
+        # Key names, provider categories and keyed fingerprints of the proven secrets:
+        # enough to match a repeat sighting or a rotation, never the value itself.
+        "exposure_fingerprints": signature.secret_evidence(),
         "proof_producer": "shakerscan",
         "secret_values_visible": False,
     }
@@ -2333,12 +2344,19 @@ class DatabaseNeutralScanActionDispatcher:
             probes.extend(
                 (f"{base_origin}{path}", "seed_path") for path in SENSITIVE_SEED_PATHS
             )
+        # Content discovery requests the same curated paths, so a seed that answered
+        # is also a discovered endpoint; probing it twice would spend a request on a
+        # body this batch has already classified.
+        seed_urls = {f"{base_origin}{path}" for path in SENSITIVE_SEED_PATHS}
         window = endpoints.entries[start:min(len(endpoints.entries), start + count)]
         for entry in window:
             try:
-                probes.append((execution_url_for_endpoint(entry), "discovered_endpoint"))
+                url = execution_url_for_endpoint(entry)
             except (ScanWorkManifestError, KeyError):
                 continue
+            if url in seed_urls or is_never_requested(url):
+                continue
+            probes.append((url, "discovered_endpoint"))
 
         # Content disclosure is often served by middleware that overstates
         # Content-Length or closes mid-body (a directory index is the common
@@ -2359,8 +2377,14 @@ class DatabaseNeutralScanActionDispatcher:
         attempted = resumed = 0
         # Directory-listing follow-up is bounded independently of the sweep so a
         # browsable directory can never starve the probe list that found it.
-        follow_up_ceiling = max(10, http_ceiling // 10)
+        follow_up_ceiling = max(DIRECTORY_FOLLOW_UP_FLOOR, http_ceiling // 10)
         follow_up_spent = 0
+        # A host that answers every path with the same 200 body would make one
+        # lucky body match "prove" every seed. Paths that cannot exist are read the
+        # first time a signature matches, and a match whose body is byte-identical
+        # to the host's answer for an absent path is not specific to that path.
+        absent_bodies: set[str] | None = None
+        indistinguishable = 0
 
         async def probe(url: str, ordinal: int) -> Any:
             nonlocal consumed
@@ -2403,6 +2427,21 @@ class DatabaseNeutralScanActionDispatcher:
                 path=probe_url, status=result.status_code or 0,
                 headers=result.response_headers, body=result.response_body,
             )
+            if signature is not None:
+                if absent_bodies is None:
+                    absent_bodies = set()
+                    for control in negative_control_entries(
+                        SOFT_404_CONTROL_COUNT, seed=action.action_id,
+                    ):
+                        if self.cancelled() or consumed["http_requests"] >= http_ceiling:
+                            break
+                        ordinal += 1
+                        answer = await probe(f"{base_origin}/{control}", ordinal)
+                        if answer.status_code == 200 and answer.response_body:
+                            absent_bodies.add(hashlib.sha256(answer.response_body).hexdigest())
+                if hashlib.sha256(result.response_body).hexdigest() in absent_bodies:
+                    indistinguishable += 1
+                    signature = None
             attempt_observations: list[Mapping[str, Any]] = []
             if signature is not None:
                 attempt_observations.append(_exposure_observation(
@@ -2474,6 +2513,8 @@ class DatabaseNeutralScanActionDispatcher:
                 "slice": {"start": start, "count": count},
                 "probe_count": len(probes), "attempted_count": attempted,
                 "resumed_count": resumed, "unattempted_count": unattempted,
+                "indistinguishable_from_absent": indistinguishable,
+                "soft_404_controls_requested": absent_bodies is not None,
                 "checkpoint_mode": "after_each_candidate",
                 "secret_values_visible": False,
             },

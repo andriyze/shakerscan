@@ -226,9 +226,17 @@ def _canonical_proof_contract_v2(
 
 
 try:
-    from capabilities.exposure_probe import is_sensitive_exposure_class
+    from capabilities.exposure_probe import (
+        EXPOSURE_PROOF_CONTRACTS,
+        SECRET_MATERIAL_CLASSES,
+        is_sensitive_exposure_class,
+    )
 except ModuleNotFoundError:
-    from ..capabilities.exposure_probe import is_sensitive_exposure_class
+    from ..capabilities.exposure_probe import (
+        EXPOSURE_PROOF_CONTRACTS,
+        SECRET_MATERIAL_CLASSES,
+        is_sensitive_exposure_class,
+    )
 
 try:
     from scanner_tools.xss_evidence import apply_xss_execution_evidence as _apply_xss_execution_evidence
@@ -807,10 +815,16 @@ def _findings_for_action(
             if severity not in {"critical", "high", "medium", "low"}:
                 severity = "medium"
             exposure_class = str(item.get("exposure_class"))
-            secret_material = exposure_class in {
-                "private_key_material", "cloud_credential_material",
-                "environment_secret_file",
-            }
+            secret_material = exposure_class in SECRET_MATERIAL_CLASSES
+            # Only the shape the probe persists: field name, category, fingerprint, length.
+            exposure_fingerprints = [
+                {
+                    name: entry.get(name)
+                    for name in ("field", "category", "value_fingerprint", "value_length")
+                }
+                for entry in list(item.get("exposure_fingerprints") or ())[:50]
+                if isinstance(entry, Mapping)
+            ]
             finding = _base_finding(
                 tool="shakerscan_exposure_probe",
                 title=f"Sensitive exposure: {exposure_class.replace('_', ' ')}",
@@ -825,6 +839,9 @@ def _findings_for_action(
                     "response_body_sha256": item.get("response_body_sha256"),
                     "matched_signature": item.get("matched_signature"),
                     "redacted_excerpt": item.get("redacted_excerpt"),
+                    # The class names the contract; a stored observation cannot pick its own.
+                    "proof_contract": EXPOSURE_PROOF_CONTRACTS.get(exposure_class),
+                    "exposure_fingerprints": exposure_fingerprints,
                     "discovered_via": item.get("discovered_via"),
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
