@@ -220,7 +220,7 @@ from .capability_execution import (
     scan_parameterized_execution_candidates,
 )
 from .execution_backend import ActionHeartbeat, ActionLease
-from .finalizer import finalize_scan_report
+from .finalizer import _observed_url_key, finalize_scan_report
 from .nuclei_execution import resolve_active_scan_nuclei_options
 from .negative_control import negative_control_entries
 from .nuclei_template_index import nuclei_templates_directory
@@ -379,6 +379,92 @@ def _batch_candidate_id(row: Mapping[str, Any], manifest_index: int) -> str:
         row.get("candidate_id") or row.get("route_id")
         or hashlib.sha256(str(manifest_index).encode()).hexdigest()
     )
+
+
+def _template_match_identity(item: Mapping[str, Any]) -> tuple[str, str, str]:
+    """What makes two template matches the same finding: template, matcher and location.
+
+    The location is the matched URL as the finalizer compares response URLs, so a retry that
+    printed the same match with a trailing slash or a differently cased host is the same match.
+    """
+    location = item.get("matched_at") or item.get("url")
+    return (
+        str(item.get("template_id") or "").strip().lower(),
+        str(item.get("matcher_name") or "").strip().lower(),
+        _observed_url_key(location) or str(location or ""),
+    )
+
+
+def merge_retried_template_records(
+    observations: Sequence[Any], superseded: Mapping[str, str],
+) -> list[Any]:
+    """Keep the union of a retried endpoint's matches, each identity once (audit S001).
+
+    ``superseded`` maps an endpoint whose cut-off first attempt was retried to that first
+    attempt's id. The retry re-sends the whole pack, so a match it reproduced would only be a
+    duplicate: the retry's record stands and names the first attempt it reproduced (with that
+    attempt's evidence hashes). A first-attempt match the retry did not reproduce is still
+    evidence the target returned, so it is kept as it was -- same proof state, never raised --
+    and marked as not reproduced. Every other record, including both attempts' bookkeeping, is
+    unchanged. Previously every first-attempt match was dropped, so a retry that found a
+    different match, or finished with none, erased what the first attempt had found.
+    """
+    if not superseded:
+        return list(observations)
+    first_attempts = set(superseded.values())
+    retry_attempts: dict[str, str] = {}
+    retry_matches: dict[tuple[str, tuple[str, str, str]], dict[str, Any]] = {}
+    merged: list[Any] = []
+    for item in observations:
+        if (
+            isinstance(item, Mapping)
+            and item.get("candidate_id") in superseded
+            and item.get("attempt_id") not in first_attempts
+        ):
+            candidate_id = str(item["candidate_id"])
+            if item.get("attempt_id"):
+                retry_attempts.setdefault(candidate_id, str(item["attempt_id"]))
+            if item.get("kind") == "template_match":
+                record = dict(item)
+                retry_matches.setdefault((candidate_id, _template_match_identity(record)), record)
+                merged.append(record)
+                continue
+        merged.append(item)
+    result: list[Any] = []
+    for item in merged:
+        if not (
+            isinstance(item, Mapping)
+            and item.get("kind") == "template_match"
+            and item.get("attempt_id") in first_attempts
+            and superseded.get(str(item.get("candidate_id") or "")) == item.get("attempt_id")
+        ):
+            result.append(item)
+            continue
+        candidate_id = str(item["candidate_id"])
+        hashes = sorted({
+            str(value) for key, value in item.items()
+            if "sha256" in str(key).lower() and value
+        })
+        reproduced = retry_matches.get((candidate_id, _template_match_identity(item)))
+        if reproduced is not None:
+            # The retry's record is the match; it names where else it was seen.
+            reproduced["reproduced_from_attempt_ids"] = sorted({
+                *reproduced.get("reproduced_from_attempt_ids", ()), str(item["attempt_id"]),
+            })
+            if hashes:
+                reproduced["reproduced_from_evidence_sha256"] = sorted({
+                    *reproduced.get("reproduced_from_evidence_sha256", ()), *hashes,
+                })
+            continue
+        result.append({
+            **dict(item),
+            "retry_reproduced": False,
+            **(
+                {"retry_attempt_id": retry_attempts[candidate_id]}
+                if candidate_id in retry_attempts else {}
+            ),
+        })
+    return result
 
 
 def _no_tool_output(observations: Any) -> bool:
@@ -3829,21 +3915,13 @@ class DatabaseNeutralScanActionDispatcher:
             terminal_failure = any(not succeeded for _, _, succeeded, _ in standing)
             attempt_timed_out = any(timed_out for _, _, _, timed_out in standing)
         if (recovered or retried_with_output) and cut_off_attempts:
-            # A retry re-sends the whole pack with more wall than the cut-off first attempt had,
-            # so what that attempt reported before its wall would only duplicate the retry's
-            # matches. Its bookkeeping record stays, so the attempt remains on the receipt.
-            superseded_attempts = {
-                cut_off_attempts[item] for item in recovered | retried_with_output
+            # A retry re-sends the whole pack with more wall than the cut-off first attempt had.
+            # A match it reproduced is kept once; a match only the first attempt reported is
+            # kept too, marked as not reproduced (see merge_retried_template_records).
+            observations = merge_retried_template_records(observations, {
+                item: cut_off_attempts[item] for item in recovered | retried_with_output
                 if item in cut_off_attempts
-            }
-            observations = [
-                item for item in observations
-                if not (
-                    isinstance(item, Mapping)
-                    and item.get("attempt_id") in superseded_attempts
-                    and item.get("kind") != "candidate_attempt"
-                )
-            ]
+            })
         slow_endpoints = sorted(still_empty) if retry_partial_timeouts else []
         for candidate_id in slow_endpoints:
             # Named per endpoint, so coverage can say which endpoints were too slow for the
