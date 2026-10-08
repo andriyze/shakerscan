@@ -154,6 +154,11 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   After execution append the final `negative`, `partial`, `blocked`, or `candidate` state with
   the same-Hunt action IDs that settled it. `negative` must cite only completed actions that sent
   target traffic; `partial`, and `blocked` when it cites actions, need at least one such action.
+  Every action a `negative` or `partial` event cites must have examined that angle: the same
+  route (a concrete object path matches its template), host and port where both name one, and a
+  capability that tests the family (`xss.verify` only XSS, `sqli.verify` only SQL injection,
+  `authz.verify` only authorization; network capabilities never a route). Otherwise the event is
+  refused with `coverage_evidence_unrelated`.
   A queue handoff (an action whose result is only `queued`) is never evidence; record `testing`
   until its result arrives. A policy refusal is recorded as `blocked` with the blocker text alone.
   An event that cites no new evidence must keep the angle's existing `candidate_id`. One negative

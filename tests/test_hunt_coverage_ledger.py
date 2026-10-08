@@ -912,3 +912,99 @@ async def test_per_hunt_byte_bound_refuses_further_events():
     assert conn.inserted is None
     conn.recorded_bytes -= 1  # exactly at the bound is still accepted
     assert (await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=values))["angle"]
+
+
+class _RecordedActionConn(_Conn):
+    """_Conn whose actions carry the capability and recorded input, as hunt_actions rows do."""
+
+    def __init__(self, actions: dict[str, tuple[str, dict]]):
+        super().__init__({key: "completed" for key in actions})
+        self.recorded = actions
+
+    async def fetch(self, query, *args):
+        assert "capability_name" in query and "input_summary" in query
+        rows = await super().fetch(query, *args)
+        for row in rows:
+            capability, values = self.recorded[str(row["id"])]
+            row.update(capability_name=capability, input_summary=json.dumps({
+                "schema_version": "hunt-capability-input-summary/v1", "input": values,
+            }))
+        return rows
+
+
+async def _settle(status, capability, values, **angle):
+    action_id = str(uuid4())
+    conn = _RecordedActionConn({action_id: (capability, values)})
+    return await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle(
+        status=status, evidence_action_ids=[action_id], **angle,
+    ))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["negative", "partial"])
+async def test_a_settled_claim_cannot_cite_an_action_on_another_route(status):
+    """Audit Low (d): a negative claim on /api/orders/{id} cited a request to /api/users/7."""
+    with pytest.raises(CoverageLedgerError) as exc:
+        await _settle(status, "http.request",
+                      {"origin": "https://h.test", "method": "GET", "path": "/api/users/7"})
+    assert exc.value.code == "coverage_evidence_unrelated"
+    assert "/api/users/7, not /api/orders/{id}" in str(exc.value)
+    assert exc.value.details["unrelated_evidence"][0]["reason"].startswith("it addressed /api/users/7")
+    # The concrete object on the angle's route, query and all, is the angle's evidence.
+    settled = await _settle(status, "http.request",
+                            {"origin": "https://h.test", "method": "GET", "path": "/api/orders/7?x=1"})
+    assert settled["angle"]["status"] == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability,family,related", [
+    ("xss.verify", "sql_injection", False),
+    ("sqli.verify", "sql_injection", True),
+    ("xss.verify", "reflected_xss", True),
+    ("authz.verify", "authorization", True),
+    ("authz.verify", "reflected_xss", False),
+    ("ports.discover", "authorization", False),  # a network action never examined a route
+    ("web.content_discover", "authorization", True),  # target-wide, no route of its own
+])
+async def test_a_settled_claim_needs_a_capability_that_tests_its_family(capability, family, related):
+    values = {"origin": "https://h.test", "path": "/api/orders/7", "ports": "80,443"}
+    if related:
+        assert (await _settle("negative", capability, values, family=family))["angle"]
+    else:
+        with pytest.raises(CoverageLedgerError) as exc:
+            await _settle("negative", capability, values, family=family)
+        assert exc.value.code == "coverage_evidence_unrelated"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("values,related", [
+    ({"ports": "80,443"}, False),
+    ({"port_range": "1-1024"}, True),
+    ({"port": 22}, True),
+    ({"origin": "https://h.test"}, False),  # 443 by default
+])
+async def test_a_service_angle_needs_an_action_on_the_same_port(values, related):
+    angle = {"family": "ssh_weak_auth", "locus": {"service": "ssh", "port": 22}}
+    if related:
+        assert (await _settle("negative", "ports.discover", values, **angle))["angle"]
+    else:
+        with pytest.raises(CoverageLedgerError) as exc:
+            await _settle("negative", "ports.discover", values, **angle)
+        assert exc.value.code == "coverage_evidence_unrelated"
+
+
+@pytest.mark.asyncio
+async def test_a_settled_claim_needs_every_cited_action_related_and_the_same_host():
+    related, unrelated = str(uuid4()), str(uuid4())
+    conn = _RecordedActionConn({
+        related: ("http.request", {"origin": "https://h.test", "path": "/api/orders/7"}),
+        unrelated: ("http.request", {"origin": "https://other.test", "path": "/api/orders/7"}),
+    })
+    with pytest.raises(CoverageLedgerError) as exc:
+        await record_coverage_angle(conn, hunt_run_id=str(uuid4()), values=_angle(
+            status="negative", evidence_action_ids=[related, unrelated],
+            locus={"route": "/api/orders/{id}", "origin": "https://h.test"},
+        ))
+    assert exc.value.details["unrelated_evidence"] == [
+        {"action_id": unrelated, "reason": "it addressed host other.test, not h.test"},
+    ]

@@ -356,3 +356,53 @@ async def test_coverage_is_bounded_in_bytes_on_write_export_and_checkpoint():
             await pool.close()
         await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_settled_coverage_cites_only_actions_recorded_on_its_locus():
+    """Audit Low (d) against stored hunt_actions rows: their own recorded input decides."""
+    import asyncpg
+
+    assert urlsplit(DSN).hostname in {"localhost", "127.0.0.1", "::1", "postgres"}
+    ddl = (Path(__file__).resolve().parents[1] / "db/init.sql").read_text()
+    schema = "hunt_coverage_related_" + uuid4().hex
+    conn = await asyncpg.connect(DSN)
+    pool = None
+    try:
+        await conn.execute(f'CREATE SCHEMA "{schema}"; SET search_path TO "{schema}"')
+        await conn.execute("CREATE TABLE targets(id UUID PRIMARY KEY); "
+                           "CREATE TABLE device_targets(id UUID PRIMARY KEY); "
+                           "CREATE TABLE investigation_candidates(id UUID PRIMARY KEY, status TEXT)")
+        for table in ("hunt_runs", "hunt_actions"):
+            await conn.execute(re.search(rf"CREATE TABLE {table} \(.*?\n\);", ddl, re.S)[0])
+        for statement in COVERAGE_LEDGER_SCHEMA_STATEMENTS:
+            await conn.execute(statement)
+        target, hunt, on_route, elsewhere = uuid4(), uuid4(), uuid4(), uuid4()
+        await conn.execute("INSERT INTO targets VALUES($1)", target)
+        await conn.execute("INSERT INTO hunt_runs(id,target_kind,target_id) VALUES($1,'web',$2)", hunt, target)
+        ran = json.dumps({"budget_accounting": {"actual": {"http_requests": 1}}})
+        for action, path in ((on_route, "/records/41"), (elsewhere, "/health")):
+            await conn.execute(
+                "INSERT INTO hunt_actions(id,hunt_run_id,capability_name,status,input_summary,result_summary) "
+                "VALUES($1,$2,'http.request','completed',$3::jsonb,$4::jsonb)", action, hunt,
+                json.dumps({"schema_version": "hunt-capability-input-summary/v1",
+                            "input": {"origin": "https://records.test", "method": "GET", "path": path}}),
+                ran)
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2, server_settings={"search_path": schema})
+        service = HuntRunService(lambda: pool)
+        angle = {"family": "authorization", "locus": {"method": "GET", "route": "/records/{id}"},
+                 "mechanism": "cross-principal read", "status": "negative"}
+        with pytest.raises(CoverageLedgerError) as exc:
+            await service.record_coverage_angle(str(hunt), values={
+                **angle, "evidence_action_ids": [str(elsewhere)]})
+        assert exc.value.code == "coverage_evidence_unrelated"
+        assert exc.value.details["unrelated_evidence"] == [
+            {"action_id": str(elsewhere), "reason": "it addressed /health, not /records/{id}"}]
+        recorded = await service.record_coverage_angle(str(hunt), values={
+            **angle, "evidence_action_ids": [str(on_route)]})
+        assert recorded["angle"]["status"] == "negative"
+    finally:
+        if pool is not None:
+            await pool.close()
+        await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
+        await conn.close()
