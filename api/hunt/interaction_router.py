@@ -4459,6 +4459,7 @@ async def _execute_hunt_candidate_verification(
                     autonomous=False,
                 ),
                 cancelled=lambda: watch.refresh(force=True),
+                stop_reason=lambda: watch.stop_reason,
                 start_by=start_by,
             )
         raise_returned_refusal(result)

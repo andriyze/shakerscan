@@ -23,7 +23,10 @@ reservation is released), and it names the way on: call again with the next ``at
 a fresh action, so the Hunt is never blocked for good.
 
 A Hunt cancelled during the wait starts no proof: ``cancelled`` is read again before every retry,
-and a cancelled Hunt is refused before any traffic ("Hunt is cancelled", as at dispatch).
+and a cancelled Hunt is refused before any traffic ("Hunt is cancelled", as at dispatch). When the
+Hunt's status cannot be read during the wait, the retry is refused before any traffic as well (fail
+closed), but as ``cancellation_state_unavailable``: the Hunt was not cancelled, and calling verify
+again is the way on.
 """
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ from fastapi import HTTPException
 
 # The verifier's own refusal text (api.py ``_agent_finding_verification_lock``).
 VERIFICATION_IN_PROGRESS = "Finding verification is already in progress"
+CANCELLATION_STATE_UNAVAILABLE = "cancellation_state_unavailable"
 CONCURRENT_VERIFICATION_WAIT_SECONDS = 90.0
 POLL_SECONDS = 0.5
 
@@ -69,12 +73,14 @@ async def verify_after_concurrent_verifier(
     poll_seconds: float | None = None,
     cancelled: Callable[[], Awaitable[bool]] | None = None,
     start_by: float | None = None,
+    stop_reason: Callable[[], str | None] | None = None,
 ) -> Mapping[str, Any]:
     """Run ``verify``; while another verifier holds the finding, wait for it and run again.
 
     ``cancelled`` is awaited before every retry: a cancelled Hunt is refused before any traffic.
     ``start_by`` (event-loop time) is the last moment a retry may start, so its proof still ends
-    inside the action's reservation lease.
+    inside the action's reservation lease. ``stop_reason`` names why ``cancelled`` stopped the
+    wait (``HuntCancellationWatch.stop_reason``).
     """
     bound = CONCURRENT_VERIFICATION_WAIT_SECONDS if wait_seconds is None else float(wait_seconds)
     # Read at call time, not bound as a default, so the module setting is the one in force.
@@ -102,10 +108,20 @@ async def verify_after_concurrent_verifier(
             })
         await asyncio.sleep(max(0.01, min(poll, deadline - loop.time())))
         if cancelled is not None and await cancelled():
+            if stop_reason is not None and stop_reason() == CANCELLATION_STATE_UNAVAILABLE:
+                raise HTTPException(status_code=503, detail={
+                    "error": CANCELLATION_STATE_UNAVAILABLE,
+                    "reason_code": CANCELLATION_STATE_UNAVAILABLE,
+                    "message": (
+                        "The Hunt's state could not be read while this verification waited for "
+                        "another one, so it did not start and nothing was sent. The Hunt was not "
+                        "cancelled; call verify again with the next attempt."
+                    ),
+                })
             raise HTTPException(status_code=409, detail="Hunt is cancelled")
 
 
 __all__ = [
-    "CONCURRENT_VERIFICATION_WAIT_SECONDS", "VERIFICATION_IN_PROGRESS",
+    "CANCELLATION_STATE_UNAVAILABLE", "CONCURRENT_VERIFICATION_WAIT_SECONDS", "VERIFICATION_IN_PROGRESS",
     "verification_in_progress", "verification_start_by", "verify_after_concurrent_verifier",
 ]

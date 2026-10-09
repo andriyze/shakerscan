@@ -326,6 +326,7 @@ export const HUNT_START_CONTRACT = {
     "budget_exhausted",
     "budget_insufficient_for_action",
     "budget_resume_without_headroom",
+    "cancellation_state_unavailable",
     "capability_not_selected",
     "capability_requires_active_testing",
     "capability_requires_credentials",
