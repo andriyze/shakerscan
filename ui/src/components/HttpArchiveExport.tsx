@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Download, Search } from 'lucide-react'
 import { API_URL } from '@/lib/api'
 import { Button, Card, Input, Select, useToast } from '@/components/ui'
+import { collectArchiveExport, exportCapNotice, exportShortfallMessage } from '@/lib/httpArchiveExport.mjs'
 
 type ArchiveFormat = 'transactions' | 'har'
 /** 'har-raw' is the verbatim HAR; it needs the deployment's raw-export opt-in. */
@@ -145,11 +146,14 @@ export default function HttpArchiveExport({
   const rawHarUnavailable = archive?.raw_har?.available === false
   const rawHarReason = archive?.raw_har?.reason || 'Verbatim HAR is disabled on this deployment; export the masked HAR instead.'
 
-  const archiveUrl = (format: ArchiveFormat, pageOffset = 0, redaction: 'redacted' | 'raw' = 'redacted') => {
+  const archiveUrl = (
+    format: ArchiveFormat, pageOffset = 0, redaction: 'redacted' | 'raw' = 'redacted',
+    limit = format === 'transactions' ? PAGE_SIZE : 10_000,
+  ) => {
     const params = new URLSearchParams({
       format,
       redaction,
-      limit: String(format === 'transactions' ? PAGE_SIZE : 10_000),
+      limit: String(limit),
       offset: String(pageOffset),
     })
     if (search.trim()) params.set('search', search.trim())
@@ -196,12 +200,34 @@ export default function HttpArchiveExport({
     setDownloading(format)
     setExportError(null)
     try {
-      const response = await fetch(archiveUrl(raw ? 'har' : format, 0, raw ? 'raw' : 'redacted'))
-      if (!response.ok) {
-        const detail = await response.json().catch(() => null)
-        throw new Error(refusalMessage(detail, `Export failed (${response.status})`))
+      let blob: Blob
+      let shortfall: string | null = null
+      if (format === 'transactions') {
+        // The browse view pages 25 at a time; the export pages through every matching call.
+        const exported = await collectArchiveExport(async (pageOffset, limit) => {
+          const response = await fetch(archiveUrl('transactions', pageOffset, 'redacted', limit))
+          if (!response.ok) {
+            const detail = await response.json().catch(() => null)
+            throw new Error(refusalMessage(detail, `Export failed (${response.status})`))
+          }
+          return await response.json() as ArchiveDocument
+        })
+        shortfall = exportShortfallMessage(exported)
+        // Compact: indentation alone roughly doubles a large archive's size in memory.
+        try {
+          blob = new Blob([JSON.stringify(exported)], { type: 'application/json' })
+        } catch (cause) {
+          if (cause instanceof RangeError) throw new Error('This archive is too large for one browser export. Narrow the filters (method, status or search) and export again.')
+          throw cause
+        }
+      } else {
+        const response = await fetch(archiveUrl(raw ? 'har' : format, 0, raw ? 'raw' : 'redacted'))
+        if (!response.ok) {
+          const detail = await response.json().catch(() => null)
+          throw new Error(refusalMessage(detail, `Export failed (${response.status})`))
+        }
+        blob = await response.blob()
       }
-      const blob = await response.blob()
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url
@@ -210,7 +236,12 @@ export default function HttpArchiveExport({
       anchor.click()
       anchor.remove()
       URL.revokeObjectURL(url)
-      toast.success(raw ? 'Raw HAR export downloaded' : format === 'har' ? 'Masked HAR downloaded' : 'Request archive downloaded')
+      if (shortfall) {
+        setExportError(shortfall)
+        toast.error(shortfall)
+      } else {
+        toast.success(raw ? 'Raw HAR export downloaded' : format === 'har' ? 'Masked HAR downloaded' : 'Request archive downloaded')
+      }
     } catch (cause) {
       const message = cause instanceof Error && cause.message ? cause.message : 'Could not export request archive'
       setExportError(message)
@@ -274,7 +305,8 @@ export default function HttpArchiveExport({
               <Download className="h-4 w-4" />{downloading === 'hunt-record' ? 'Preparing…' : 'Full Hunt record'}
             </Button>
           )}
-          <Button size="sm" variant="secondary" onClick={() => download('transactions')} disabled={downloading !== null}>
+          <Button size="sm" variant="secondary" onClick={() => download('transactions')} disabled={downloading !== null}
+            title={archive ? exportCapNotice(archive.total) || `Every one of the ${archive.total} matching calls, masked, as one JSON file` : 'Every matching call, masked, as one JSON file'}>
             <Download className="h-4 w-4" />{downloading === 'transactions' ? 'Preparing…' : 'Requests JSON'}
           </Button>
           <Button size="sm" variant="secondary" onClick={() => download('har-raw')} disabled={downloading !== null || rawHarUnavailable}
@@ -288,6 +320,7 @@ export default function HttpArchiveExport({
         </div>
       </div>
       {rawHarUnavailable && <p className="mt-2 text-xs text-gray-500">Raw HAR unavailable: {rawHarReason}</p>}
+      {archive && exportCapNotice(archive.total) && <p className="mt-2 text-xs text-amber-300">{exportCapNotice(archive.total)}</p>}
       {exportError && <p role="alert" className="mt-2 text-xs text-red-300">{exportError}</p>}
       {browse && (
         <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950/30" onToggle={(event) => { if (event.currentTarget.open && !loaded && !loading) void load(0) }}>
@@ -357,7 +390,7 @@ export default function HttpArchiveExport({
       {menuOpen && <div role="menu" aria-label="Export" className="absolute right-0 z-30 mt-1 w-72 rounded-lg border border-gray-700 bg-gray-900 p-1 shadow-xl shadow-black/40">
         <button type="button" role="menuitem" className={item} onClick={() => choose(() => download('transactions'))}>
           <span className="text-sm text-gray-100">Requests JSON</span>
-          <span className="text-xs text-gray-500">Masked; safe to share</span>
+          <span className={`text-xs ${archive && exportCapNotice(archive.total) ? 'text-amber-300' : 'text-gray-500'}`}>{archive ? exportCapNotice(archive.total) || `All ${archive.total} matching calls; masked, safe to share` : 'Every matching call; masked, safe to share'}</span>
         </button>
         <button type="button" role="menuitem" className={item} disabled={rawHarUnavailable} title={rawHarUnavailable ? rawHarReason : undefined}
           onClick={() => choose(() => download('har-raw'))}>
