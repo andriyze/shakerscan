@@ -399,18 +399,34 @@ def save_state(path: Path, workspace: Path, state: Mapping) -> None:
 # --- moving to the XDG locations ---------------------------------------------------------------
 
 
+def _same_record(source: Path, target: Path) -> bool:
+    """Whether ``target`` already is ``source``: the same file (a launch stopped between the link
+    and the unlink) or, after a copy, the same bytes."""
+    try:
+        a, b = source.lstat(), target.lstat()
+        if not stat.S_ISREG(a.st_mode) or not stat.S_ISREG(b.st_mode):
+            return False
+        if (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino):
+            return True
+        return a.st_size == b.st_size and source.read_bytes() == target.read_bytes()
+    except OSError:
+        return False
+
+
 def _move_exclusive(source: Path, target: Path) -> str:
     """Move the plain file ``source`` to ``target`` without ever replacing ``target``:
-    ``moved``, ``exists`` (``target`` was there, it wins) or ``gone`` (another launch took
-    ``source`` first). A hard link to the new name, then the old name removed; where links do
-    not work (another file system), an exclusive copy."""
+    ``moved``, ``exists`` (``target`` was there with other content, it wins) or ``gone``
+    (another launch took ``source`` first). A hard link to the new name, then the old name
+    removed; where links do not work (another file system), an exclusive copy. A target that
+    already is the source (a move interrupted between its two steps) completes the move."""
     try:
         try:
             os.link(source, target, follow_symlinks=False)
         except (NotImplementedError, TypeError):
             os.link(source, target)
     except FileExistsError:
-        return "exists"
+        if not _same_record(source, target):
+            return "exists"
     except FileNotFoundError:
         return "gone"
     except OSError:
@@ -418,11 +434,13 @@ def _move_exclusive(source: Path, target: Path) -> str:
             data = source.read_bytes()
             fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
         except FileExistsError:
-            return "exists"
+            if not _same_record(source, target):
+                return "exists"
         except FileNotFoundError:
             return "gone"
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
+        else:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
     if not stat.S_ISREG(target.lstat().st_mode):  # source was swapped for a link in between
         target.unlink()
         return "gone"
@@ -456,24 +474,31 @@ def _rewrite_record(source: Path, target: Path, workspace: Path, notes: list[str
     return True
 
 
+SUPERSEDED = "superseded"
+
+
 def migrate_records(old: Path, new: Path) -> list[str]:
     """Move the client's workspace records from ``old`` (its configuration directory, where
     0.8.1 kept them) to ``new`` (its state directory). Links and anything that is not a plain
     record file are left where they are; a record already at ``new`` wins, and another launch
-    moving the same records at the same time is no error."""
+    moving the same records at the same time is no error. An older record that lost to a newer
+    one is kept under ``old/superseded/`` and reported once, when it is set aside."""
     if old.is_symlink() or not old.is_dir():
         return []
-    moved, left = 0, []
+    moved, left, superseded = 0, [], []
     try:
         entries = sorted(old.iterdir())
     except FileNotFoundError:
         return []
     for source in entries:
+        if source.name == SUPERSEDED:
+            continue
         try:
             info = source.lstat()
         except FileNotFoundError:
             continue  # another launch moved it
-        if source.suffix != ".json" or not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
+        if source.suffix != ".json" or not stat.S_ISREG(info.st_mode) or info.st_nlink > 1 and not \
+                _same_record(source, new / source.name):
             left.append(source.name)
             continue
         new.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -481,12 +506,22 @@ def migrate_records(old: Path, new: Path) -> list[str]:
         if outcome == "moved":
             moved += 1
         elif outcome == "exists" and (source.exists() or source.is_symlink()):
-            left.append(source.name)
+            aside = old / SUPERSEDED
+            with contextlib.suppress(FileExistsError):
+                aside.mkdir(mode=0o700)
+            if aside.is_symlink() or not aside.is_dir():
+                left.append(source.name)
+                continue
+            with contextlib.suppress(FileNotFoundError):
+                os.rename(source, aside / source.name)  # the entry itself; never a link's target
+                superseded.append(source.name)
     notes = [f"moved:     {moved} workspace record(s) from {old} to {new}"] if moved else []
+    if superseded:
+        notes.append(f"note:      {len(superseded)} older record(s) kept in {old / SUPERSEDED} "
+                     f"({', '.join(superseded[:5])}): a newer record for the same workspace is in {new}")
     if left:
-        notes.append(f"note:      left in {old}: {', '.join(left[:5])} (not plain record files, or a newer "
-                     f"record is already in {new})")
-    else:
+        notes.append(f"note:      left in {old}: {', '.join(left[:5])} (not plain record files)")
+    elif not superseded:
         with contextlib.suppress(OSError):
             old.rmdir()
     return notes
