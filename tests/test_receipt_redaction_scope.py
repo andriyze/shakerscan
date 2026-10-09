@@ -144,3 +144,43 @@ def test_only_a_bool_gets_the_descriptor_exemption_over_a_secret_name():
     """A number under a credential name is not automatically a fact about it."""
     assert key_is_sensitive("observed_access_key", item=1234) is True
     assert key_is_sensitive("secret_values_visible", item=False) is False
+
+
+# The SOA record a DNS posture check emits (api/capabilities/dns.py).
+SOA_RECORD = {
+    "primary_nameserver": "ns1.example.test", "responsible_mailbox": "hostmaster.example.test",
+    "serial": 2026100901, "refresh": 10800, "retry": 3600, "expire": 604800, "minimum": 300,
+}
+
+
+def test_dns_soa_timers_are_not_masked_as_secrets():
+    # The Posture tab showed SOA {'refresh': '***'}: `refresh` matched as a token word.
+    assert redact_receipt_value({"dns": {"soa": dict(SOA_RECORD)}}) == {"dns": {"soa": SOA_RECORD}}
+    assert key_is_sensitive("refresh", item=10800) is False
+    assert key_is_sensitive("refresh_interval", item=300) is False
+
+
+def test_refresh_tokens_stay_masked():
+    # A JWT login response names its refresh token "refresh"; a string under it is the token.
+    assert redact_receipt_value({"access": "x", "refresh": "opaque-refresh-value"})["refresh"] == MASK
+    assert redact_receipt_value({"refresh_token": "opaque-refresh-value"})["refresh_token"] == MASK
+    assert redact_receipt_value({"refreshToken": "opaque-refresh-value"})["refreshToken"] == MASK
+    # Any other secret part keeps the key masked even over a number.
+    assert key_is_sensitive("refresh_token", item=12345) is True
+    assert key_is_sensitive("refresh", item="12345") is True
+    assert key_is_sensitive("refresh") is True
+
+
+def test_only_exact_interval_names_with_a_bounded_integer_are_exempt():
+    # Numbers under any other refresh-named key are credential material, not timers.
+    for name, value in (
+        ("refresh_signing_key", 123456), ("refresh_api_key", 123456), ("refresh_session_key", 123456),
+        ("refresh_signature", 123456), ("refresh_pin", 1234), ("refresh_secret", 42), ("refresh_code", 987654),
+    ):
+        assert key_is_sensitive(name, item=value), name
+        assert redact_receipt_value({name: value})[name] == MASK, name
+    # A number too large for a DNS timer, a negative number, a float or a bool is not one.
+    for value in (2**32, 10**30, -1, 10800.0, True):
+        assert key_is_sensitive("refresh", item=value), value
+    assert key_is_sensitive("refresh", item=0) is False
+    assert key_is_sensitive("refresh", item=2**32 - 1) is False
