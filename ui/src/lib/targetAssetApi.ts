@@ -115,7 +115,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 const json = (method: string, body: unknown): RequestInit => ({ method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) })
 
-export interface TargetAssetGroup { root_domain: string; targets: TargetAsset[] }
+// discoverable: the server's Public Suffix List check that POST /discovery would accept the
+// domain (false for an IP or a group that is itself a public suffix, such as github.io).
+export interface TargetAssetGroup { root_domain: string; discoverable?: boolean; targets: TargetAsset[] }
 
 export interface InventoryQuery {
   search?: string; offset?: number; limit?: number; connected_only?: boolean; include_inactive?: boolean

@@ -213,16 +213,16 @@ async def domain_roots(conn, domain: str):
     The selection is the operator's explicit choice of a domain group; the preview lists every
     resolved target ID and the approval binds that exact list, so nothing is inferred later.
     """
-    from targets.asset_inventory import GROUP_DOMAIN, MULTI_PART_TLDS
-    grouped = GROUP_DOMAIN.format(tlds='$2')
-    rows = await conn.fetch(f"""WITH located AS (
-            SELECT t.id, t.root_domain, t.discovery_source,
-                   lower(split_part(target_asset_locator(t.url), '#', 1)) AS locator
-            FROM targets t)
-        SELECT id FROM located
-        WHERE COALESCE(discovery_source,'')<>'model-intake'
-          AND (({grouped})=$1 OR lower(root_domain)=$1)
-        ORDER BY id""", domain, sorted(MULTI_PART_TLDS))
+    try:
+        from targets.asset_inventory import group_domain
+    except ModuleNotFoundError:  # package import
+        from ..targets.asset_inventory import group_domain
+    wanted = str(domain or '').strip().lower().rstrip('.')
+    # Exactly the Targets list's group (Public Suffix List grouping), never a stored
+    # root_domain: a legacy root such as co.uk would select every registrant under it.
+    located = await conn.fetch("""SELECT id, target_asset_locator(url) AS locator FROM targets
+        WHERE COALESCE(discovery_source,'')<>'model-intake' AND url IS NOT NULL ORDER BY id""")
+    rows = [row for row in located if group_domain(row['locator'] or '') == wanted]
     hosts = [r['id'] for r in rows]
     if not hosts:
         raise HTTPException(404, 'No targets belong to this domain')

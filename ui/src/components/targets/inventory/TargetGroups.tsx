@@ -54,14 +54,14 @@ export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDelet
   const row = (asset: TargetAsset, nested = false) => <TargetRow key={asset.id} asset={asset} nested={nested}
     selected={selection.selected.has(asset.id)} onSelect={value => selection.toggle([asset.id], value)}
     actions={actions} busy={busy === asset.id} />
-  const discovery = featureEnabled('discovery')
+  const discovery = featureEnabled('discovery') && group.discoverable === true
   const domain = boundedDisplayText(group.root_domain, 120)
   const batch = [...new Set(group.targets.filter(asset => asset.is_active).flatMap(asset => scanUrls(asset)))]
   // A domain with nothing beneath it reads as one row, with discovery in its menu.
   if (root && !children.length) {
     return <section data-testid="target-domain-group" aria-label={`Targets in ${domain}`} className={GROUP_CARD}>
       <div role="rowgroup"><TargetRow asset={root} selected={selection.selected.has(root.id)} onSelect={value => selection.toggle([root.id], value)}
-        actions={actions} busy={busy === root.id} discoverDomain={group.root_domain} /></div>
+        actions={actions} busy={busy === root.id} discoverDomain={discovery ? group.root_domain : undefined} /></div>
     </section>
   }
   return <section data-testid="target-domain-group" aria-label={`Targets in ${domain}`} className={GROUP_CARD}>

@@ -194,8 +194,10 @@ Rules for bounds:
     against the bundled Public Suffix List including its private section (`api/scope/psl.py`, a
     pinned snapshot, never fetched at runtime). `*`, `*.com`, `*.co.uk`, `*.github.io`,
     `*.herokuapp.com` and `co.uk` are refused ("`*.co.uk` is a public suffix; name a domain you
-    control, e.g. `*.example.co.uk`"); `*.example.co.uk` and `*.user.github.io` are accepted. The
-    same rule applies to `credential.use` hosts.
+    control, e.g. `*.example.co.uk`"), and so is a wildcard whose subtree holds a public suffix
+    (`*.amazonaws.com` covers `*.s3.amazonaws.com`; `*.kawasaki.jp`, `*.crm.dev`). As in
+    `publicsuffixlist`, the parent of a `*.` rule is itself a public suffix. `*.example.co.uk` and
+    `*.user.github.io` are accepted. The same rule applies to `credential.use` hosts.
   - A pre-authorization stored before this check that names a public suffix is shown as stored,
     with a `refused_bounds` entry explaining why, and covers nothing. It is never reinterpreted
     as a narrower bound.

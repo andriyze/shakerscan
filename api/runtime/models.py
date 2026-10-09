@@ -10,9 +10,9 @@ from typing import Any, Mapping
 import urllib.parse
 
 try:
-    from scope.psl import is_public_suffix
+    from scope.psl import spans_public_suffix
 except ModuleNotFoundError:  # package import
-    from ..scope.psl import is_public_suffix
+    from ..scope.psl import spans_public_suffix
 
 
 WEB_ASSET_KINDS = frozenset({"web", "api", "network"})
@@ -127,7 +127,7 @@ class TargetBinding:
         # a binding persisted with one fails closed to its exact host and origins.
         roots = tuple(dict.fromkeys(
             root for root in (str(item).strip().lower().rstrip(".") for item in self.allowed_root_domains)
-            if root and not is_public_suffix(root)
+            if root and not spans_public_suffix(root)
         ))
         object.__setattr__(self, "allowed_root_domains", roots)
         if kind in {"web", "api", "device"} and not host:

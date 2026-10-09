@@ -30,9 +30,9 @@ except ModuleNotFoundError:  # package import (api.action_scope)
         embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
     )
 try:
-    from scope.psl import is_public_suffix, public_suffix_refusal
+    from scope.psl import public_suffix_refusal, spans_public_suffix
 except ModuleNotFoundError:  # package import (api.action_scope)
-    from api.scope.psl import is_public_suffix, public_suffix_refusal
+    from api.scope.psl import public_suffix_refusal, spans_public_suffix
 
 
 SAFE_LAB_ENVIRONMENTS = {"development", "dev", "preview", "staging", "lab", "test"}
@@ -116,13 +116,14 @@ def approval_context_mismatch(
 
 
 def scope_roots(roots: Any) -> tuple[str, ...]:
-    """The ``allowed_root_domains`` that may widen scope: a root that is itself a public suffix
-    (``co.uk``, ``github.io``, ``com``; Public Suffix List with its private section) would cover
-    every site under it, so it covers nothing. Persisted receipts and guards that carry one fail
+    """The ``allowed_root_domains`` that may widen scope. A root that is a public suffix
+    (``co.uk``, ``github.io``, ``com``; Public Suffix List with its private section), or has one
+    below it (``amazonaws.com`` over ``s3.amazonaws.com``), would cover other registrants' sites,
+    so it covers nothing. Persisted receipts and guards that carry one fail
     closed through this filter rather than being reinterpreted."""
     return tuple(
         root for root in (str(item or "").strip().lower().rstrip(".") for item in roots or ())
-        if root and not is_public_suffix(root)
+        if root and not spans_public_suffix(root)
     )
 
 

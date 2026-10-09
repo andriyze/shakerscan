@@ -4,9 +4,11 @@ import urllib.parse
 from typing import Any, Mapping
 try:
     from runtime.models import TargetBinding
+    from scope.roots import binding_roots
     from capabilities.network import CapabilityInputError
 except ModuleNotFoundError:
     from ..runtime.models import TargetBinding
+    from ..scope.roots import binding_roots
     from ..capabilities.network import CapabilityInputError
 
 
@@ -48,9 +50,8 @@ def web_hunt_target(
         parsed = urllib.parse.urlsplit(target_url)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise CapabilityInputError("persisted Hunt target URL is invalid")
-    root_domain = str(
-        target_context.get("root_domain") or parsed.hostname
-    ).lower().rstrip(".")
+    # A legacy spanning root_domain (co.uk) is recomputed from the host (scope.roots).
+    roots = binding_roots((), target_context.get("root_domain"), parsed.hostname)
     target = TargetBinding(
         target_id=str(target_id),
         target_kind=kind,
@@ -63,7 +64,7 @@ def web_hunt_target(
             for item in context.get("authorized_target_addresses") or ()
             if str(item)
         ),
-        allowed_root_domains=(root_domain,) if root_domain else (),
+        allowed_root_domains=roots,
         environment=str(target_context.get("environment") or "unknown"),
         scope_receipt_id=str(policy.get("scope_receipt_id") or "") or None,
     )

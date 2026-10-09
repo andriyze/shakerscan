@@ -19,10 +19,18 @@ API::
 
     public_suffix(host) -> str
     registrable_domain(host) -> str | None        # None when host is itself a public suffix
-    is_public_suffix(host) -> bool
-    require_registrable_or_below(host) -> str     # raises PublicSuffixError
-    public_suffix_refusal(host, wildcard=, port=) -> str | None
+    is_public_suffix(host) -> bool                # the host itself is a suffix (co.uk, kawasaki.jp)
+    suffix_below(host) -> str | None              # a suffix rule strictly below (amazonaws.com)
+    spans_public_suffix(host) -> bool             # a root/wildcard here covers other registrants
+    require_registrable_or_below(host, wildcard=, subtree=) -> str   # raises PublicSuffixError
+    public_suffix_refusal(host, wildcard=, port=, subtree=) -> str | None
     parse_domain(raw) -> str                      # a bare domain input; raises DomainNameError
+
+Use ``spans_public_suffix`` (or ``wildcard=True``/``subtree=True``) for anything that covers a
+subtree: a
+``*.`` pattern, a scope root, a discovery apex, a monitored CT root. Use ``is_public_suffix``
+only for an exact host. Semantics match ``publicsuffixlist``/``publicsuffix2``: the parent of a
+``*.`` rule (``kawasaki.jp`` for ``*.kawasaki.jp``) is itself a public suffix.
 
 Hosts are lowercased and a trailing dot is stripped; a non-ASCII host is encoded with IDNA 2008
 and the UTS #46 mapping (as ``action_scope._canonical_host``). Rules written as Unicode in the
@@ -30,6 +38,7 @@ list are converted to A-labels when it is loaded.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
 import ipaddress
@@ -83,9 +92,16 @@ def _ascii_rule(text: str) -> str:
     return text if text.isascii() else idna.encode(text, uts46=True).decode("ascii")
 
 
+@dataclass(frozen=True)
+class _RuleSet:
+    exact: frozenset[str]      # normal rules, plus the parent of every "*." rule
+    wildcard: frozenset[str]   # parents of "*." rules
+    exception: frozenset[str]  # "!" rules
+    below: dict[str, str]      # name -> one rule strictly below it (for refusal messages)
+
+
 @lru_cache(maxsize=1)
-def _rules() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
-    """(exact rules, parents of ``*.`` rules, ``!`` exception rules), all ASCII."""
+def _rules() -> _RuleSet:
     pin = _pin()
     try:
         raw = PSL_PATH.read_bytes()
@@ -110,7 +126,15 @@ def _rules() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
             wildcard.add(_ascii_rule(rule[2:]))
         else:
             exact.add(_ascii_rule(rule))
-    return frozenset(exact), frozenset(wildcard), frozenset(exception)
+    # As publicsuffixlist/publicsuffix2 do: the parent of "*.kawasaki.jp" is itself a suffix.
+    exact |= wildcard
+    below: dict[str, str] = {}
+    for name in sorted(exact | exception, key=lambda item: (item.count("."), item)):
+        shown = name if name in exception or name not in wildcard else "*." + name
+        labels = name.split(".")
+        for index in range(1, len(labels)):
+            below.setdefault(".".join(labels[index:]), shown)
+    return _RuleSet(frozenset(exact), frozenset(wildcard), frozenset(exception), below)
 
 
 def snapshot() -> dict[str, str]:
@@ -119,15 +143,24 @@ def snapshot() -> dict[str, str]:
     return {**_pin(), "licence": PSL_LICENSE}
 
 
+_DOTS = str.maketrans({"。": ".", "．": ".", "｡": "."})
+
+
 def _clean(host: str) -> str:
-    host = str(host or "").strip().lower()
+    """Lower case, IDNA 2008/UTS #46 A-labels, one trailing dot (any dot spelling) removed.
+
+    Raises ``PublicSuffixError`` for a name IDNA refuses or one with an empty label.
+    """
+    host = str(host or "").strip().translate(_DOTS).lower()
     if host.endswith("."):
         host = host[:-1]
     if host and not host.isascii():
         try:
-            host = idna.encode(host, uts46=True).decode("ascii")
+            host = idna.encode(host, uts46=True).decode("ascii").lower()
         except (UnicodeError, idna.IDNAError) as exc:
             raise PublicSuffixError(f"{host!r} is not a valid IDNA 2008 host name") from exc
+    if host and not _is_address(host) and "" in host.split("."):
+        raise PublicSuffixError(f"{host!r} has an empty label")
     return host
 
 
@@ -139,26 +172,34 @@ def _is_address(host: str) -> bool:
     return True
 
 
+def _numeric_tld(host: str) -> bool:
+    return host.rsplit(".", 1)[-1].isdigit()
+
+
 def public_suffix(host: str) -> str:
     """The public suffix of ``host`` under the PSL algorithm (default rule ``*``)."""
     labels = _clean(host).split(".")
-    exact, wildcard, exception = _rules()
+    rules = _rules()
     # An exception rule always prevails: its suffix is the rule minus its leftmost label.
     for index in range(len(labels)):
-        if ".".join(labels[index:]) in exception:
+        if ".".join(labels[index:]) in rules.exception:
             return ".".join(labels[index + 1:])
     for index in range(len(labels)):  # longest candidate first
         candidate = ".".join(labels[index:])
-        if candidate in exact or (index + 1 < len(labels) and ".".join(labels[index + 1:]) in wildcard):
+        if candidate in rules.exact or (
+            index + 1 < len(labels) and ".".join(labels[index + 1:]) in rules.wildcard
+        ):
             return candidate
     return labels[-1]
 
 
 def is_public_suffix(host: str) -> bool:
-    """True when ``host`` is itself a public suffix (``com``, ``co.uk``, ``github.io``, ``lab``).
+    """True when ``host`` is itself a public suffix (``com``, ``co.uk``, ``github.io``,
+    ``kawasaki.jp``, ``lab``).
 
-    An IP address is not a domain and is never a public suffix. A name IDNA refuses counts as
-    one, so it can never widen scope.
+    An IP address is not a domain and is never a public suffix. A name IDNA refuses, one with an
+    empty label, or one under an all-numeric "TLD" (``127.1``) counts as one, so it can never
+    widen scope.
     """
     try:
         host = _clean(host)
@@ -166,7 +207,32 @@ def is_public_suffix(host: str) -> bool:
         return True
     if not host or _is_address(host):
         return False
+    if _numeric_tld(host):
+        return True
     return public_suffix(host) == host
+
+
+def suffix_below(host: str) -> str | None:
+    """A public-suffix rule strictly below ``host`` (``s3.amazonaws.com`` for ``amazonaws.com``),
+    or None. A wildcard or root on such a name would cover other registrants' sites."""
+    try:
+        host = _clean(host)
+    except PublicSuffixError:
+        return None
+    return _rules().below.get(host)
+
+
+def spans_public_suffix(host: str) -> bool:
+    """True when a wildcard or scope root on ``host`` would cover sites of other registrants:
+    ``host`` is a public suffix, or a public-suffix rule lies below it (``amazonaws.com``,
+    ``crm.dev``). An address is neither. The check every root and ``*.`` pattern uses."""
+    try:
+        cleaned = _clean(host)
+    except PublicSuffixError:
+        return True
+    if cleaned and _is_address(cleaned):
+        return False
+    return is_public_suffix(cleaned) or suffix_below(cleaned) is not None
 
 
 def registrable_domain(host: str) -> str | None:
@@ -176,7 +242,7 @@ def registrable_domain(host: str) -> str | None:
         host = _clean(host)
     except PublicSuffixError:
         return None
-    if not host or _is_address(host) or "" in host.split("."):
+    if not host or _is_address(host) or _numeric_tld(host):
         return None
     suffix = public_suffix(host)
     if suffix == host:
@@ -184,36 +250,53 @@ def registrable_domain(host: str) -> str | None:
     return f"{host[: -len(suffix) - 1].split('.')[-1]}.{suffix}"
 
 
-def public_suffix_refusal(host: str, *, wildcard: bool = False, port: int | None = None) -> str | None:
-    """The refusal for a pattern on ``host`` that would cover a whole public suffix, else None.
+def public_suffix_refusal(host: str, *, wildcard: bool = False, port: int | None = None,
+                          subtree: bool | None = None) -> str | None:
+    """The refusal for a pattern on ``host`` that would cover sites of other registrants, else None.
 
-    ``*.example.co.uk`` and ``example.co.uk`` are fine; ``*.co.uk`` and ``co.uk`` are refused.
+    Any pattern on a public suffix is refused (``co.uk``, ``*.co.uk``). A wildcard is also refused
+    when a public-suffix rule lies below it (``*.amazonaws.com`` covers ``*.s3.amazonaws.com``).
+    ``*.example.co.uk`` and ``example.co.uk`` are fine. ``subtree`` (default: ``wildcard``)
+    applies the below-rule check to a bare name that covers its subtree (a root, a discovery
+    domain) while the message shows the name as typed.
     """
-    if not is_public_suffix(host):
-        return None
+    subtree = wildcard if subtree is None else subtree
     try:
-        host = _clean(host)
+        cleaned = _clean(host)
     except PublicSuffixError as exc:
         return str(exc)
-    shown = ("*." if wildcard else "") + host + (f":{port}" if port else "")
-    example = ("*." if wildcard else "") + "example." + host
-    return (f"{shown} is a public suffix; name a domain you control, e.g. {example} "
-            "(a pattern must name a registrable domain or a name below one)")
+    shown = ("*." if wildcard else "") + cleaned + (f":{port}" if port else "")
+    if is_public_suffix(cleaned):
+        candidate = "example." + cleaned
+        example = (f", e.g. {'*.' if wildcard else ''}{candidate}"
+                   if not spans_public_suffix(candidate) else "")
+        return (f"{shown} is a public suffix; name a domain you control{example} "
+                "(a pattern must name a registrable domain or a name below one)")
+    below = suffix_below(cleaned) if subtree else None
+    if below:
+        return (f"{shown} covers the public suffix {below}, whose sites belong to other "
+                f"registrants; name a domain you control below it")
+    return None
 
 
-def require_registrable_or_below(host: str, *, wildcard: bool = False) -> str:
-    """``host`` normalized, when it is a registrable domain or a name below one; else raise."""
-    refusal = public_suffix_refusal(host, wildcard=wildcard)
+def require_registrable_or_below(host: str, *, wildcard: bool = False, subtree: bool | None = None) -> str:
+    """``host`` normalized, when a pattern on it covers one registrant only; else raise.
+
+    ``wildcard`` (a ``*.`` pattern or a scope root) also refuses names with public-suffix rules
+    below them.
+    """
+    refusal = public_suffix_refusal(host, wildcard=wildcard, subtree=subtree)
     if refusal:
         raise PublicSuffixError(refusal)
     return _clean(host)
 
 
 def parse_domain(raw: str) -> str:
-    """A bare domain a person typed (discovery; apex scope later), normalized, at or below eTLD+1.
+    """A bare domain a person typed (discovery; apex scope later), normalized, at or below eTLD+1
+    and with no public suffix below it (discovery covers its whole subtree).
 
-    Refuses a scheme, path, port, userinfo, wildcard, IP literal, invalid label or a name over
-    253 characters, then a public suffix. Returns the IDNA ASCII, lower-case name.
+    Refuses a scheme, path, port, userinfo, wildcard, IP literal, an all-numeric TLD, an invalid
+    label or a name over 253 characters, then a public suffix. Returns the IDNA ASCII name.
     """
     text = str(raw or "").strip()
     shown = repr(text[:80])
@@ -231,16 +314,19 @@ def parse_domain(raw: str) -> str:
         raise DomainNameError(f"{shown}: give the domain without a port")
     if any(char.isspace() for char in text):
         raise DomainNameError(f"{shown} contains whitespace")
-    host = _clean(text)
+    try:
+        host = _clean(text)
+    except PublicSuffixError as exc:
+        raise DomainNameError(f"{shown} is not a valid host name ({exc})") from exc
     if len(host) > MAX_DOMAIN_LENGTH:
         raise DomainNameError(f"a domain is at most {MAX_DOMAIN_LENGTH} characters")
     if not all(_LABEL.fullmatch(label) for label in host.split(".")):
         raise DomainNameError(
             f"{shown} is not a valid host name (labels of letters, digits and hyphens, at most 63 each)"
         )
-    if _is_address(host):
-        raise DomainNameError(f"{shown} is an IP address; give a domain name")
-    return require_registrable_or_below(host)
+    if _is_address(host) or _numeric_tld(host):
+        raise DomainNameError(f"{shown} is an IP address or ends in a numeric label; give a domain name")
+    return require_registrable_or_below(host, subtree=True)
 
 
 _rules()  # verify the pinned snapshot at import: a mismatch fails closed, loudly
@@ -249,5 +335,5 @@ __all__ = [
     "DomainNameError", "MAX_DOMAIN_LENGTH", "PSL_LICENSE", "PSL_PATH", "PSL_PIN_PATH",
     "PublicSuffixError", "PublicSuffixListError", "is_public_suffix", "parse_domain",
     "public_suffix", "public_suffix_refusal", "registrable_domain", "require_registrable_or_below",
-    "snapshot",
+    "snapshot", "spans_public_suffix", "suffix_below",
 ]
