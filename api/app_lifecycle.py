@@ -12,6 +12,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+try:
+    import deployment_policy
+except ModuleNotFoundError:  # package import (api.app_lifecycle)
+    from . import deployment_policy
+
 
 AsyncPoolFactory = Callable[..., Awaitable[Any]]
 PoolCallback = Callable[[Any], Awaitable[Any]]
@@ -58,6 +63,8 @@ def create_api_lifespan(dependencies: ApiLifecycleDependencies):
 
     @asynccontextmanager
     async def lifespan(app: Any):
+        # A malformed destination setting stops startup with an error naming it.
+        deployment_policy.require_valid_destination_settings()
         pool_min = dependencies.int_env("DB_POOL_MIN_SIZE", 5)
         pool_max = dependencies.int_env("DB_POOL_MAX_SIZE", 25)
         statement_timeout_ms = dependencies.int_env(

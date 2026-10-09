@@ -58,6 +58,37 @@ def private_network_targets_policy(environ: dict[str, str] | None = None) -> str
     return "allow" if value in {"allow", "allowed", "1", "true", "yes", "on"} else "refuse"
 
 
+def _validate_nat64_prefixes_setting(raw: str | None = None) -> tuple[object, ...]:
+    try:
+        from scanner_tools.address_classes import validate_nat64_prefixes_setting
+    except ModuleNotFoundError:  # package import (api.deployment_policy)
+        from scanner.scanner_tools.address_classes import (
+            validate_nat64_prefixes_setting,
+        )
+    return validate_nat64_prefixes_setting(raw)
+
+
+def require_valid_destination_settings() -> None:
+    """Refuse to start the API or a worker with a malformed destination setting.
+
+    ``SHAKERSCAN_NAT64_PREFIXES`` is parsed once here; an invalid value raises ``RuntimeError``
+    naming the setting instead of failing each IPv6 destination check later as a 500.
+    """
+    try:
+        _validate_nat64_prefixes_setting()
+    except ValueError as exc:
+        raise RuntimeError(f"refusing to start: {exc}") from None
+
+
+def health_report() -> dict[str, object]:
+    """The deployment policy ``/health`` reports, with the NAT64 setting's readiness."""
+    try:
+        prefixes = {"status": "ok", "prefixes": [str(item) for item in _validate_nat64_prefixes_setting()]}
+    except ValueError as exc:
+        prefixes = {"status": "error", "error": str(exc)}
+    return {"private_network_targets": private_network_targets_policy(), "nat64_prefixes": prefixes}
+
+
 def private_network_targets_allowed(environ: dict[str, str] | None = None) -> bool:
     return private_network_targets_policy(environ) == "allow"
 

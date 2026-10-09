@@ -8821,6 +8821,7 @@ async def health():
             "healthy"
             if db_ok and redis_ok and artifacts_ok
             and action_budget_reconciliation.get("status") != "degraded"
+            and deployment_policy.health_report()["nat64_prefixes"]["status"] == "ok"
             else "degraded"
         ),
         "database": "ok" if db_ok else "error",
@@ -8846,9 +8847,7 @@ async def health():
             "max_workers": _compute_max_allowed_workers(),
             **fleet_capacity_source(),
         },
-        "deployment_policy": {
-            "private_network_targets": deployment_policy.private_network_targets_policy(),
-        },
+        "deployment_policy": deployment_policy.health_report(),
     }
 
 

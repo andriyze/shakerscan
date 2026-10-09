@@ -23339,8 +23339,8 @@ def report_worker_build_fingerprint() -> None:
 
 def main():
     """Entry point - runs async main in single event loop."""
-    # Run blocking preflight subprocesses synchronously before entering the
-    # event loop so they cannot stall asyncio tasks or healthchecks.
+    deployment_policy.require_valid_destination_settings()  # before any job is claimed
+    # Blocking preflight subprocesses run before the event loop: no stalled tasks/healthchecks.
     run_worker_preflight()
     report_worker_build_fingerprint()
     asyncio.run(async_main())

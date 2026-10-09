@@ -121,6 +121,22 @@ def test_fleet_edge_lifespan_never_duplicates_background_controllers():
     assert pool.closed is True
 
 
+@pytest.mark.parametrize("value", ["garbage", "10.0.0.0/8", "2001:db8::/80"])
+def test_lifespan_refuses_to_start_with_an_invalid_nat64_prefix_setting(monkeypatch, value):
+    """S2 of the #358 review: the setting used to fail only as a 500 on the first IPv6 check."""
+    monkeypatch.setenv("SHAKERSCAN_NAT64_PREFIXES", value)
+    dependencies, _pool, events = _dependencies()
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    async def exercise():
+        async with create_api_lifespan(dependencies)(app):
+            pass
+
+    with pytest.raises(RuntimeError, match="SHAKERSCAN_NAT64_PREFIXES"):
+        asyncio.run(exercise())
+    assert events == []
+
+
 def test_lifespan_rejects_missing_reordered_or_duplicate_controller_ownership():
     dependencies, _pool, _events = _dependencies()
     malformed = ApiLifecycleDependencies(
