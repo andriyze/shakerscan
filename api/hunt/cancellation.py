@@ -45,6 +45,7 @@ class HuntCancellationWatch:
         self._refresh_seconds = max(0.0, float(refresh_seconds))
         self._monotonic = monotonic
         self._cancelled = False
+        self._unavailable = False
         self._last_refresh: float | None = None
 
     @property
@@ -54,6 +55,14 @@ class HuntCancellationWatch:
     def cancelled(self) -> bool:
         """Return the last observed cancellation state. Never blocks."""
         return self._cancelled
+
+    @property
+    def stop_reason(self) -> str | None:
+        """Why work stops: ``cancelled``, or ``cancellation_state_unavailable`` when the Hunt's
+        status could not be read (fail closed, but not reported as a cancellation)."""
+        if not self._cancelled:
+            return None
+        return "cancellation_state_unavailable" if self._unavailable else "cancelled"
 
     async def refresh(self, *, force: bool = False) -> bool:
         """Re-read the Hunt's status, at most once per refresh interval unless forced.
@@ -76,6 +85,7 @@ class HuntCancellationWatch:
                 )
         except Exception:  # noqa: BLE001 - authority cannot be revalidated; stop target traffic
             self._cancelled = True
+            self._unavailable = True
             return True
         if str(status or "").strip().lower() in CANCELLING_STATUSES:
             self._cancelled = True

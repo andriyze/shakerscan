@@ -77,6 +77,73 @@ def test_a_cancelled_hunt_is_refused_before_the_retry():
     assert verify.calls == 1 and checks == [1]
 
 
+def _watch(read):
+    from api.hunt.cancellation import HuntCancellationWatch
+
+    class Pool:  # labelled double: the Hunt status read
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def fetchval(self, _query, *_args):
+            return read()
+
+    return HuntCancellationWatch(lambda: Pool(), "hunt-1")
+
+
+def test_an_unreadable_hunt_state_refuses_the_retry_without_calling_it_cancelled():
+    """The watch fails closed when its read fails; the refusal used to say "Hunt is cancelled"."""
+    verify = Busy(busy_calls=1)
+
+    def unreadable():
+        raise ConnectionError("database unavailable")
+
+    watch = _watch(unreadable)
+
+    async def scenario():
+        with pytest.raises(HTTPException) as refused:
+            await verify_after_concurrent_verifier(
+                verify, wait_seconds=30, poll_seconds=0.01,
+                cancelled=lambda: watch.refresh(force=True), stop_reason=lambda: watch.stop_reason,
+            )
+        return refused.value
+
+    refused = asyncio.run(scenario())
+    assert refused.status_code == 503
+    assert refused.detail["reason_code"] == "cancellation_state_unavailable"
+    assert "not cancelled" in refused.detail["message"]
+    assert verify.calls == 1, "no proof started after the failed read"
+
+
+def test_a_cancelled_hunt_read_by_the_watch_is_still_reported_as_cancelled():
+    verify = Busy(busy_calls=1)
+    watch = _watch(lambda: "cancelled")
+
+    async def scenario():
+        with pytest.raises(HTTPException) as refused:
+            await verify_after_concurrent_verifier(
+                verify, wait_seconds=30, poll_seconds=0.01,
+                cancelled=lambda: watch.refresh(force=True), stop_reason=lambda: watch.stop_reason,
+            )
+        return refused.value
+
+    refused = asyncio.run(scenario())
+    assert refused.status_code == 409 and refused.detail == "Hunt is cancelled"
+    assert watch.stop_reason == "cancelled" and verify.calls == 1
+
+
+def test_the_hunt_verify_path_passes_the_stop_reason():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "api" / "hunt" / "interaction_router.py").read_text()
+    assert "stop_reason=lambda: watch.stop_reason" in source
+
+
 def test_the_verify_lease_covers_the_wait_and_the_proof():
     verify_budget = {"tool_wall_seconds": 180}
     assert hunt_capability_lease_seconds(verify_budget) == 210

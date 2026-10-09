@@ -330,6 +330,9 @@ finding stays that Hunt's, your verification is recorded beside it, and both Hun
 in `outcome_summary.finding_ids`. If another Hunt is verifying the same finding at that moment, your
 verification waits for it (up to 90 s) and then runs. If it is still busy, the refusal is
 `verification_in_progress` and nothing was sent: verify again later with the next `attempt` (2, then 3).
+If the server could not read the Hunt's state during that wait, the refusal is
+`cancellation_state_unavailable` (the Hunt was not cancelled, and nothing was sent): verify again
+with the next `attempt`.
 
 Before verification, challenge each non-terminal candidate as if you were trying to reject it.
 `GET /hunts/{hunt_id}/checkpoint` exposes a compact `review_queue` for this purpose. Check the
