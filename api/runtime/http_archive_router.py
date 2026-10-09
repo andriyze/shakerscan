@@ -28,9 +28,10 @@ try:
         count_transactions,
         export_admission,
         export_read_budget,
+        is_light_export,
         purge_transactions,
         read_archive_stats,
-        read_transaction_bodies,
+        read_transaction_payloads,
         read_transactions,
     )
 except ModuleNotFoundError:  # package import layout
@@ -45,9 +46,10 @@ except ModuleNotFoundError:  # package import layout
         count_transactions,
         export_admission,
         export_read_budget,
+        is_light_export,
         purge_transactions,
         read_archive_stats,
-        read_transaction_bodies,
+        read_transaction_payloads,
         read_transactions,
     )
 
@@ -242,11 +244,14 @@ async def _export_document(
     raw_har = raw_har_availability()
     try:
         # The slot is taken before any row is read: a refused request holds no rows.
-        async with export_admission(export_caller(request)):
+        # A browse page has its own slots and smaller budgets: a user's browsing never waits
+        # behind a download, theirs or anyone's.
+        light = is_light_export(export_format, limit)
+        async with export_admission(export_caller(request), light=light):
             content, total = await _build_export_bytes(
                 scan_id=scan_id, hunt_run_id=hunt_run_id, export_format=export_format,
                 redaction=effective_redaction, method=method, status_code=status_code,
-                search=search, limit=limit, offset=offset, raw_har=raw_har,
+                search=search, limit=limit, offset=offset, raw_har=raw_har, light=light,
             )
     except ExportBusy as exc:
         raise HTTPException(
@@ -278,7 +283,7 @@ async def _export_document(
 async def _build_export_bytes(
     *, scan_id: str | None, hunt_run_id: str | None, export_format: str, redaction: str,
     method: str | None, status_code: int | None, search: str | None, limit: int, offset: int,
-    raw_har: Any,
+    raw_har: Any, light: bool = False,
 ) -> tuple[bytes, int]:
     async with _pool().acquire() as conn:
         scan_ids = await _scan_archive_ids(conn, scan_id) if scan_id else None
@@ -292,16 +297,19 @@ async def _build_export_bytes(
         stats = await read_archive_stats(
             conn, scan_id=scan_id, scan_ids=scan_ids, hunt_run_id=hunt_run_id,
         )
-        # Headers and metadata now; bodies a batch at a time while they are masked.
+        # Metadata now; headers and bodies a batch at a time while they are redacted.
         rows = await read_transactions(
             conn, scan_id=scan_id, scan_ids=scan_ids, hunt_run_id=hunt_run_id, method=method,
             status_code=status_code, search=search, limit=limit, offset=offset,
-            external_payload_budget=export_read_budget(redaction), bodies=False,
+            external_payload_budget=export_read_budget(redaction, light=light), payloads=False,
         )
 
-    async def read_bodies(ids, budget: int):
+    async def read_payloads(ids, budget: int):
         async with _pool().acquire() as conn:
-            return await read_transaction_bodies(conn, ids, external_payload_budget=budget)
+            return await read_transaction_payloads(
+                conn, ids, external_payload_budget=budget,
+                scan_id=scan_id, scan_ids=scan_ids, hunt_run_id=None if scan_id else hunt_run_id,
+            )
 
     owner = {"scan_id": scan_id, "hunt_id": hunt_run_id}
     if scan_ids and len(scan_ids) > 1:
@@ -309,7 +317,7 @@ async def _build_export_bytes(
     encoded = await build_export(
         rows, export_format=export_format, redaction=redaction,
         owner=owner, total=total,
-        archive_total=archive_total, stats=stats, read_bodies=read_bodies,
+        archive_total=archive_total, stats=stats, read_payloads=read_payloads, light=light,
     )
     del rows
     if export_format == "transactions":
