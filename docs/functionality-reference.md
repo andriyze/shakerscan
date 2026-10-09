@@ -481,8 +481,13 @@ backup artifacts; container registries; and Kubernetes/Terraform/cloud-storage e
 check contacts each MX host (or the target itself when it has none) only after resolving it once
 and judging every address under the scan's destination policy (the target's environment and
 `SHAKERSCAN_PRIVATE_NETWORK_TARGETS`, with the web scope guard's address classes); every probe
-connects to that one admitted address. A refused or single-label MX host (a Docker service name)
-is listed in `skipped_hosts` with its reason and never contacted.
+connects to an admitted address (tried in answer order) and the cipher probe keeps the MX name as
+SNI. A process a worker launches for a Scan reads an empty or missing
+`SHAKERSCAN_PRIVATE_NETWORK_TARGETS` as `refuse` (a fleet worker cannot know what the admitting
+deployment chose); fleet and broker worker Compose files pass the setting and
+`SHAKERSCAN_NAT64_PREFIXES`. A refused or single-label MX host (a Docker service name) is listed
+in `skipped_hosts` with its reason and never contacted, a null MX (RFC 7505) is reported as a
+domain that accepts no mail, and a result with no host tested grades `N/A`, never a pass.
 
 OpenAPI schemas can be supplied explicitly or discovered and exercised through Schemathesis. The
 scanner records schema/test errors as evidence rather than treating process exit as proof.
@@ -2947,7 +2952,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MODEL_INTAKE_ADAPTER_SELF_TEST` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_MODEL_INTAKE_RUNTIME_LOCK` | `scanner/scanner_tools/model_intake_scanners.py` |
-| `SHAKERSCAN_NAT64_PREFIXES` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/address_classes.py` |
+| `SHAKERSCAN_NAT64_PREFIXES` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml`, `scanner/scanner_tools/address_classes.py` |
 | `SHAKERSCAN_NETWORK_WORKER_ENABLED` | `api/devices/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_NODE_ID` | `api/artifact_storage.py`, `api/broker_worker.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py` |
 | `SHAKERSCAN_NODE_LABELS_JSON` | `api/worker.py` |
@@ -2960,7 +2965,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_POSTURE_NODE` | `api/public_check.py` |
 | `SHAKERSCAN_POSTURE_RESOLVER` | `api/public_check.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PREAUTHORIZATION_ID` | `scripts/v2_cli.py` |
-| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/device_posture.py` |
+| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml`, `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/host_guard.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_CONSUMER_GROUP` | `api/job_queue.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |

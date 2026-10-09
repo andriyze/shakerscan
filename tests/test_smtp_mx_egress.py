@@ -34,19 +34,21 @@ LAB = smtp_scanner.SmtpDestinationPolicy(environment="lab", allow_private=False)
 class Wire:
     """Unit fixture: records every resolution, command and connection the scanner attempts."""
 
-    def __init__(self, monkeypatch, *, mx=(), answers=None, starttls=False):
+    def __init__(self, monkeypatch, *, mx=(), answers=None, starttls=False, answering=None):
         self.mx = list(mx)
         self.answers = {name: list(values) for name, values in (answers or {}).items()}
         self.lookups: list[str] = []
         self.commands: list[list[str]] = []
         self.connections: list[tuple[str, int]] = []
         self.starttls = starttls
+        self.answering = answering  # addresses that answer on an SMTP port (None: all, per starttls)
 
         async def run_command(cmd, timeout=30):
             if cmd[0] == "dig":
                 return "".join(f"{priority} {host}.\n" for priority, host in self.mx), "", 0
             self.commands.append(list(cmd))
-            if cmd[0] == "openssl" and self.starttls:
+            connect = cmd[cmd.index("-connect") + 1].rsplit(":", 1)[0].strip("[]") if "-connect" in cmd else ""
+            if cmd[0] == "openssl" and (self.starttls if self.answering is None else connect in self.answering):
                 return "CONNECTION ESTABLISHED\nProtocol : TLSv1.3\n", "", 0
             return "", "Connection refused", 1
 
@@ -197,3 +199,92 @@ def test_the_policy_is_the_scans(monkeypatch):
     assert smtp_scanner.smtp_destination_policy({
         "SHAKERSCAN_CANONICAL_SCAN_EXECUTION": "not json", "SHAKERSCAN_PRIVATE_NETWORK_TARGETS": "refuse",
     }) == REFUSE
+
+
+# --- review follow-ups on #359 -------------------------------------------------------------
+
+ENVELOPE = json.dumps({"target_binding": {"environment": "production"}})
+
+
+def test_a_fleet_worker_without_the_setting_refuses_a_private_mx(monkeypatch):
+    """A fleet or broker worker may run without SHAKERSCAN_PRIVATE_NETWORK_TARGETS, which a
+    command-line run reads as allow. A worker-launched process (the canonical envelope is
+    present) cannot know what the admitting deployment chose, so it refuses."""
+    monkeypatch.delenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", raising=False)
+    monkeypatch.setenv("SHAKERSCAN_CANONICAL_SCAN_EXECUTION", ENVELOPE)
+    wire = Wire(monkeypatch, mx=[(10, "mx.example.test")], answers={"mx.example.test": ["10.0.0.5"]})
+    result = asyncio.run(smtp_scanner.check_smtp_security(
+        "example.test", timeout=1, resolver=wire.resolve, admitted_policy="refuse",
+    ))
+    assert wire.contacted() == set()
+    assert result["skipped_hosts"]["mx.example.test"]["reason"] == "loopback_or_private_range"
+    for setting in ("", "  "):
+        assert smtp_scanner.smtp_destination_policy({
+            "SHAKERSCAN_CANONICAL_SCAN_EXECUTION": ENVELOPE, "SHAKERSCAN_PRIVATE_NETWORK_TARGETS": setting,
+        }) == REFUSE
+    assert smtp_scanner.smtp_destination_policy({
+        "SHAKERSCAN_CANONICAL_SCAN_EXECUTION": ENVELOPE, "SHAKERSCAN_PRIVATE_NETWORK_TARGETS": "allow",
+    }) == ALLOW
+
+
+def test_the_stricter_of_the_admitted_and_the_local_policy_applies():
+    allow_here = {"SHAKERSCAN_PRIVATE_NETWORK_TARGETS": "allow"}
+    assert smtp_scanner.smtp_destination_policy(allow_here, admitted_policy="refuse") == REFUSE
+    assert smtp_scanner.smtp_destination_policy(allow_here, admitted_policy="allow") == ALLOW
+    assert smtp_scanner.smtp_destination_policy(
+        {"SHAKERSCAN_PRIVATE_NETWORK_TARGETS": "refuse"}, admitted_policy="allow",
+    ) == REFUSE
+
+
+def test_the_cipher_probe_keeps_the_mx_name_as_sni(monkeypatch):
+    wire = Wire(monkeypatch, mx=[(10, "mx.example.test")], starttls=True,
+                answers={"mx.example.test": [PUBLIC]})
+    _check(wire)
+    nmap = [cmd for cmd in wire.commands if cmd[0] == "nmap"]
+    assert nmap
+    for cmd in nmap:
+        assert cmd[cmd.index("--script-args") + 1] == "tls.servername=mx.example.test"
+        assert cmd[-1] == PUBLIC
+
+
+def test_the_admitted_addresses_are_tried_in_order(monkeypatch):
+    second = "93.184.216.35"
+    wire = Wire(monkeypatch, mx=[(10, "mx.example.test")], answering={second},
+                answers={"mx.example.test": ["10.0.0.5", PUBLIC, second]})
+    result = _check(wire)
+    destination = result["smtp_destinations"]["mx.example.test"]
+    assert destination["admitted"] == [PUBLIC, second]
+    assert destination["address"] == second
+    assert result["smtp_hosts"]["mx.example.test"]["address"] == second
+    assert "10.0.0.5" not in wire.contacted()
+    assert {host for host, _port in wire.connections} == {second}
+    assert {cmd[-1] for cmd in wire.commands if cmd[0] == "nmap"} == {second}
+
+
+def test_the_lookup_has_its_own_deadline():
+    async def hang(_host):
+        await asyncio.sleep(30)
+
+    record = asyncio.run(smtp_scanner.resolve_smtp_destination(
+        "slow.example.test", REFUSE, from_dns=True, resolver=hang, lookup_timeout=0.05,
+    ))
+    assert record["reason"] == "unresolved" and "TimeoutError" in record["detail"]
+
+
+def test_a_null_mx_says_the_domain_accepts_no_mail(monkeypatch):
+    wire = Wire(monkeypatch, mx=[(0, "")], answers={"example.test": [PUBLIC]})
+    result = _check(wire)
+    assert wire.lookups == [] and wire.contacted() == set()
+    skipped = result["skipped_hosts"]["example.test"]
+    assert skipped["reason"] == "null_mx"
+    assert "null MX" in skipped["detail"] and "accepts no mail" in skipped["detail"]
+    assert result["mx_analysis"]["null_mx"] is True
+    assert result["overall_assessment"]["grade"] == "N/A"
+
+
+def test_every_host_skipped_is_not_a_clean_pass(monkeypatch):
+    wire = Wire(monkeypatch, mx=[(10, "mx.example.test")], answers={"mx.example.test": ["10.0.0.5"]})
+    assessment = _check(wire)["overall_assessment"]
+    assert assessment["grade"] == "N/A"
+    assert assessment["risk_level"] == "unknown"
+    assert assessment["tested"] is False
