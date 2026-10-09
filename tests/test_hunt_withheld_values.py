@@ -337,7 +337,7 @@ def test_reference_round_trips_into_the_outgoing_header(monkeypatch, encryption_
         conn, run=RUN, action_id=ACTION, target=TARGET,
         values=collector.shown_values(json.dumps(observation)), status="success",
     ))
-    assert sealed == len(observation["withheld_values"])
+    assert sealed == {"sealed": len(observation["withheld_values"]), "status": "sealed"}
     ciphertext = conn.rows[ACTION]["private_http_result"]
     assert ciphertext.startswith("enc:fernet:") and API_KEYS[0] not in ciphertext
 
@@ -407,11 +407,11 @@ def test_nothing_is_sealed_without_encryption_or_a_live_hunt(monkeypatch):
     monkeypatch.setattr(secret_store, "_fernet", None)
     assert asyncio.run(persist_withheld_values(
         conn, run=RUN, action_id=ACTION, target=TARGET, values={1: "x" * 20}, status="success",
-    )) == 0
+    )) == {"sealed": 0, "status": "encryption_unavailable"}
     assert asyncio.run(persist_withheld_values(
         conn, run={**RUN, "status": "completed"}, action_id=ACTION, target=TARGET,
         values={1: "x" * 20}, status="success",
-    )) == 0
+    )) == {"sealed": 0, "status": "action_or_hunt_not_live"}
     assert conn.rows[ACTION]["private_http_result"] is None
 
 

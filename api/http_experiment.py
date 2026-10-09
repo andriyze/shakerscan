@@ -329,14 +329,30 @@ def normalize_experiment(target_url: str, raw: Any) -> dict[str, Any]:
     }
 
 
+def _masked_body(value: str) -> str:
+    """The masked-archive body masking over the whole bounded body (N56: SQL dump rows, markup
+    pairs, table cells, assignments, provider formats). Inside a Hunt worker withheld values
+    become ``[withheld:n]`` references, and every echo of a value the request sent is withheld."""
+    text = mask_body_text(value)
+    # A bare bearer credential in prose, which no assignment names. A reference is kept.
+    return re.sub(r"(?i)(bearer\s+)(?!\[withheld:)[a-z0-9._~+/=-]+", r"\1<redacted>", text)
+
+
 def _scrub_sample(value: str) -> str:
-    # The masked-archive body masking first (N56: SQL dump rows, markup pairs, table cells,
-    # assignments, provider formats), read a little past the sample so a value the cut would
-    # split is still recognised; inside a Hunt worker withheld values become references.
-    text = mask_body_text(value[:MAX_RESPONSE_SAMPLE + 1_024])[:MAX_RESPONSE_SAMPLE]
-    text = re.sub(r"(?i)(bearer\s+)[a-z0-9._~+/=-]+", r"\1<redacted>", text)
-    text = re.sub(r'(?i)("?(?:token|secret|password|api[_-]?key)"?\s*[:=]\s*")[^"]+"', r'\1<redacted>"', text)
-    return text
+    # Masked before it is cut, so a value is never split by the sample's end.
+    return _masked_body(value)[:MAX_RESPONSE_SAMPLE]
+
+
+def _body_digest(bounded: bytes, *, withheld: bool) -> str:
+    """A plain SHA-256 of a body that held a secret is an offline guessing oracle for that
+    secret; such a body gets this installation's keyed digest instead."""
+    if not withheld:
+        return hashlib.sha256(bounded).hexdigest()
+    try:
+        from capabilities.secret_material import keyed_body_digest
+    except ModuleNotFoundError:  # package import layout
+        from api.capabilities.secret_material import keyed_body_digest
+    return keyed_body_digest(bounded)
 
 
 def _semantically_populated(value: Any) -> bool:
@@ -384,14 +400,15 @@ def response_summary(
         name: str(response.headers.get(name) or "")[:1000]
         for name in selected_headers or []
     }
-    body_sample = _scrub_sample(text)
+    masked_text = _masked_body(text)
+    body_sample = masked_text[:MAX_RESPONSE_SAMPLE]
     summary = {
         "status": response.status_code,
         "content_type": str(response.headers.get("content-type") or "")[:200],
         "content_length": len(bounded),
         "content_length_header": int(response.headers["content-length"]) if str(response.headers.get("content-length") or "").isdigit() else None,
         "bytes_observed": len(body),
-        "body_sha256": hashlib.sha256(bounded).hexdigest(),
+        "body_sha256": _body_digest(bounded, withheld=masked_text != text),
         "body_digest_scope": "prefix" if truncated else "complete",
         "body_sample": body_sample,
         "json_type": type(parsed_json).__name__ if parsed_json is not None else None,
