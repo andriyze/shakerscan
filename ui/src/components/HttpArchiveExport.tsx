@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Download, Search } from 'lucide-react'
 import { API_URL } from '@/lib/api'
 import { bodyWithheldLabel } from '@/lib/archiveBodies.mjs'
+import { busyNotice, fetchRetryingBusy } from '@/lib/busyRetry.mjs'
 import { Button, Card, Input, Select, useToast } from '@/components/ui'
 import { collectArchiveExport, exportCapNotice, exportShortfallMessage } from '@/lib/httpArchiveExport.mjs'
 
@@ -142,6 +143,9 @@ export default function HttpArchiveExport({
   const [error, setError] = useState<string | null>(null)
   // A refused export stays on screen: a toast alone can be missed, and a silent failure was the bug.
   const [exportError, setExportError] = useState<string | null>(null)
+  // Set while the server says every export slot is busy and the request waits to retry.
+  const [busy, setBusy] = useState<string | null>(null)
+  const whenBusy = { onBusy: (seconds: number | null) => setBusy(busyNotice(seconds)) }
   const [search, setSearch] = useState('')
   const [method, setMethod] = useState('')
   const [statusCode, setStatusCode] = useState('')
@@ -173,7 +177,7 @@ export default function HttpArchiveExport({
   const load = async (nextOffset = 0) => {
     setLoading(true)
     try {
-      const response = await fetch(archiveUrl('transactions', nextOffset))
+      const response = await fetchRetryingBusy(archiveUrl('transactions', nextOffset), undefined, whenBusy)
       if (!response.ok) {
         const detail = await response.json().catch(() => null)
         throw new Error(refusalMessage(detail, `Archive request failed (${response.status})`))
@@ -213,7 +217,7 @@ export default function HttpArchiveExport({
       if (format === 'transactions') {
         // The browse view pages 25 at a time; the export pages through every matching call.
         const exported = await collectArchiveExport(async (pageOffset, limit) => {
-          const response = await fetch(archiveUrl('transactions', pageOffset, 'redacted', limit))
+          const response = await fetchRetryingBusy(archiveUrl('transactions', pageOffset, 'redacted', limit), undefined, whenBusy)
           if (!response.ok) {
             const detail = await response.json().catch(() => null)
             throw new Error(refusalMessage(detail, `Export failed (${response.status})`))
@@ -229,7 +233,7 @@ export default function HttpArchiveExport({
           throw cause
         }
       } else {
-        const response = await fetch(archiveUrl(raw ? 'har' : format, 0, raw ? 'raw' : 'redacted'))
+        const response = await fetchRetryingBusy(archiveUrl(raw ? 'har' : format, 0, raw ? 'raw' : 'redacted'), undefined, whenBusy)
         if (!response.ok) {
           const detail = await response.json().catch(() => null)
           throw new Error(refusalMessage(detail, `Export failed (${response.status})`))
@@ -262,7 +266,7 @@ export default function HttpArchiveExport({
   const downloadHuntRecord = async () => {
     setDownloading('hunt-record')
     try {
-      const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(ownerId)}/record`)
+      const response = await fetchRetryingBusy(`${API_URL}/hunts/${encodeURIComponent(ownerId)}/record`, undefined, whenBusy)
       if (!response.ok) {
         const detail = await response.json().catch(() => null)
         throw new Error(refusalMessage(detail, `Hunt record export failed (${response.status})`))
@@ -329,6 +333,7 @@ export default function HttpArchiveExport({
       </div>
       {rawHarUnavailable && <p className="mt-2 text-xs text-gray-500">Raw HAR unavailable: {rawHarReason}</p>}
       {archive && exportCapNotice(archive.total) && <p className="mt-2 text-xs text-amber-300">{exportCapNotice(archive.total)}</p>}
+      {busy && <p role="status" className="mt-2 text-xs text-amber-300">{busy}</p>}
       {exportError && <p role="alert" className="mt-2 text-xs text-red-300">{exportError}</p>}
       {browse && (
         <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950/30" onToggle={(event) => { if (event.currentTarget.open && !loaded && !loading) void load(0) }}>
@@ -414,6 +419,7 @@ export default function HttpArchiveExport({
           <span className="text-xs text-gray-500">Decisions, actions and debrief as JSON</span>
         </button>}
       </div>}
+      {busy && <p role="status" className="absolute right-0 mt-1 w-72 rounded-md border border-amber-900/60 bg-gray-900 p-2 text-xs text-amber-300">{busy}</p>}
       {exportError && <p role="alert" className="absolute right-0 mt-1 w-72 rounded-md border border-red-900/60 bg-gray-900 p-2 text-xs text-red-300">{exportError}</p>}
     </div>
   }

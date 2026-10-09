@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowUpDown, ChevronDown, ChevronRight, Search, X } from 'lucide-react'
 import { API_URL } from '@/lib/api'
 import { bodyWithheldLabel } from '@/lib/archiveBodies.mjs'
+import { busyNotice, fetchRetryingBusy } from '@/lib/busyRetry.mjs'
 import { Button, Card, ErrorState } from '@/components/ui'
 import { MethodBadge } from '@/components/collections/CollectionViewer'
 
@@ -80,6 +81,8 @@ export interface HuntArchive {
   fidelity: { value: string; detail: string } | null
   loading: boolean
   error: string | null
+  /** A notice while the archive is busy and the page waits to retry. */
+  busy: string | null
   loadMore: () => Promise<void>
 }
 
@@ -93,12 +96,14 @@ export function useHuntTransactions(huntId: string, version: number): HuntArchiv
   const [fidelity, setFidelity] = useState<{ value: string; detail: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
 
   // Filters run in the browser over redacted rows: a server-side URL search would match the raw stored
   // URL and could confirm a value the redacted view masks.
   const fetchPage = useCallback(async (offset: number) => {
     const params = new URLSearchParams({ format: 'transactions', redaction: 'redacted', limit: String(PAGE), offset: String(offset) })
-    const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/http-transactions?${params}`, { cache: 'no-store' })
+    const response = await fetchRetryingBusy(`${API_URL}/hunts/${encodeURIComponent(huntId)}/http-transactions?${params}`, { cache: 'no-store' },
+      { onBusy: seconds => setBusy(busyNotice(seconds)) })
     if (!response.ok) {
       const detail = await response.json().catch(() => null)
       throw new Error(typeof detail?.detail === 'string' ? detail.detail : `Request archive unavailable (${response.status})`)
@@ -142,7 +147,7 @@ export function useHuntTransactions(huntId: string, version: number): HuntArchiv
     finally { setLoading(false) }
   }, [fetchPage, rows.length])
 
-  return { rows, total, fidelity, loading, error, loadMore }
+  return { rows, total, fidelity, loading, error, busy, loadMore }
 }
 
 /** One request: a summary line that expands to the masked request and response. */
@@ -193,7 +198,7 @@ export function useExpandedSet() {
  * request and response on demand. Reads the redacted archive; never the raw HAR.
  */
 export function HuntRequestsPanel({ archive }: { archive: HuntArchive }) {
-  const { rows, total, fidelity, loading, error, loadMore } = archive
+  const { rows, total, fidelity, loading, error, busy, loadMore } = archive
   const [query, setQuery] = useState('')
   const [search, setSearch] = useState('')
   const [method, setMethod] = useState('')
@@ -225,6 +230,7 @@ export function HuntRequestsPanel({ archive }: { archive: HuntArchive }) {
         {fidelity.value === 'complete' ? 'complete capture' : `${fidelity.value} capture`}</span>}
       <span className="text-xs text-gray-500">Masked for display; secrets and session values are redacted.</span>
       {fidelity && fidelity.value !== 'complete' && fidelity.detail && <p className="basis-full text-xs text-amber-200/80">{fidelity.detail}</p>}
+      {busy && <p role="status" className="basis-full text-xs text-amber-300">{busy}</p>}
     </div>
     <div className="flex flex-wrap items-center gap-2 border-b border-gray-800 px-4 py-3">
       <div className="relative min-w-56 flex-1">
