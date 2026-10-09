@@ -23,7 +23,7 @@ import uuid
 
 from .credential_uses import live_credential_grants
 from .grant_authority import withholding
-from .permission_bounds import Bounds, bounds_from_public, merge
+from .permission_bounds import Bounds, bound_hosts, merge, parse_bounds, stored_bounds
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
     KIND_CAPABILITY_ENABLE,
@@ -234,6 +234,30 @@ def _host_port(subject: Mapping[str, Any]) -> str:
     return f"{host}:{port}" if port else host
 
 
+def _host_forms(value: Any) -> dict[str, str]:
+    """The canonical ASCII host (what is matched and connected to) and its Unicode form."""
+    try:
+        from action_scope import host_forms
+    except ModuleNotFoundError:
+        from ..action_scope import host_forms
+    return host_forms(_destination_host(value))
+
+
+def _unicode_forms_text(value: Any) -> str:
+    """``Canonical ASCII host: xn--... (Unicode: ...). `` for a host with a Unicode form."""
+    forms = _host_forms(value)
+    if forms["unicode"] == forms["ascii"]:
+        return ""
+    return (f"Canonical ASCII host (matched and connected to): {forms['ascii']} "
+            f"(Unicode: {_label(forms['unicode'], 253)}). ")
+
+
+def _unicode_note(value: Any) -> str:
+    """`` (Unicode: straße.example)`` after an ASCII host that has another form; else empty."""
+    forms = _host_forms(value)
+    return f" (Unicode: {_label(forms['unicode'], 253)})" if forms["unicode"] != forms["ascii"] else ""
+
+
 def _label(value: Any, limit: int = 80) -> str:
     """An operator-entered name, shown as a quoted value: printable, one line, bounded."""
     text = " ".join("".join(char if char.isprintable() else " " for char in str(value or "")).split())
@@ -248,7 +272,11 @@ def _credential_text(subject: Mapping[str, Any], display: Mapping[str, Any]) -> 
     name, auth_kind = _label(display.get("profile_name")), _label(display.get("auth_kind"), 40)
     credential = (f"'{name}' ({', '.join(item for item in (auth_kind, version) if item)})"
                   if name else f"{subject.get('profile_id')} ({version})")
-    home_name, home_host = _label(display.get("home_target_name")), _label(subject.get("home_host"), 253)
+    home_name = _label(display.get("home_target_name"))
+    raw_home = subject.get("home_host")
+    home_host = _label(_destination_host(raw_home) or raw_home, 253) if raw_home else ""
+    if home_host and _destination_host(raw_home):
+        home_host += _unicode_note(raw_home)
     home = (f"target '{home_name}'" if home_name else "another target") + (f" ({home_host})" if home_host else "")
     return credential, home
 
@@ -285,13 +313,16 @@ def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) ->
         # Remember records the standing authorization of the Hunt's own target, so it applies to
         # another service on the Hunt's host only; another host is a separate target.
         remember = bool(subject.get("same_host"))
+        # The title names only the canonical ASCII host (what is matched and connected to), so a
+        # look-alike spelling never leads; the explanation adds its Unicode form beside it.
         title = f"Authorize {_host_port(subject)} for this Hunt"
         verdict = f"Scope verdict: {subject.get('scope_verdict') or 'not blocked'}."
+        forms = _unicode_forms_text(subject.get("host"))
         if remember:
             explanation = (
                 f"The action targets {subject.get('scheme')}://{_host_port(subject)}, another "
                 f"service on the Hunt's host {subject.get('host')} that this Hunt may not reach yet. "
-                + verdict
+                + forms + verdict
             )
             effect = (
                 f"Adds {subject.get('origin')} to this Hunt's authorized services. Remember records "
@@ -302,7 +333,7 @@ def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) ->
             explanation = (
                 f"The action targets {subject.get('scheme')}://{_host_port(subject)}, another host: "
                 f"{subject.get('host')} is not the Hunt's target, and this Hunt may not reach it yet. "
-                f"It resolves to {addresses}, every one public. " + verdict
+                f"It resolves to {addresses}, every one public. " + forms + verdict
             )
             effect = (
                 f"Adds {subject.get('origin')} to this Hunt's authorized destinations, for this Hunt "
@@ -323,14 +354,35 @@ def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) ->
             "authorizes a destination. Remember shares it with this target (a credential grant)."
         )
     elif kind == KIND_PREAUTHORIZATION:
-        title = "Pre-authorize the bounds the agent proposed for this Hunt"
-        explanation = "The Hunt was started through the agent with these allow bounds: " + ", ".join(
-            str(item) for item in subject.get("allow") or ()
-        ) + "."
-        effect = (
-            "Requests inside these bounds are granted as they arise, as if you had started the "
-            "Hunt with them. Hard limits are never covered."
-        )
+        allow = [str(item) for item in subject.get("allow") or ()]
+        if subject.get("reapproval_of"):
+            title = "Pre-authorize these host bounds again, for the hosts they name"
+            explanation = (
+                "These bounds were pre-authorized for this Hunt before hosts were spelled with IDNA "
+                "2008/UTS #46 and were stored under another ASCII name ("
+                + ", ".join(_label(item, 253) for item in subject.get("previously_stored_as") or ())
+                + "). They are withheld and cover nothing until you approve them again: "
+                + ", ".join(allow) + "."
+            )
+            effect = (
+                "Requests inside these bounds are granted as they arise, for the hosts named below "
+                "only. Your other pre-authorized bounds and grants are unchanged."
+            )
+        else:
+            title = "Pre-authorize the bounds the agent proposed for this Hunt"
+            explanation = "The Hunt was started through the agent with these allow bounds: " + ", ".join(
+                allow
+            ) + "."
+            effect = (
+                "Requests inside these bounds are granted as they arise, as if you had started the "
+                "Hunt with them. Hard limits are never covered."
+            )
+        hosts = bound_hosts(allow)
+        if hosts:
+            # Each host bound by the canonical ASCII host it covers (IDNA 2008/UTS #46).
+            explanation += " Hosts covered: " + "; ".join(
+                f"{_label(item['bound'], 300)} covers {_label(item['display'], 600)}" for item in hosts
+            ) + "."
     elif kind in {KIND_SSH_EXEC, KIND_SSH_HOST_TRUST}:
         title = f"{kind} for this Hunt"
         explanation = "SSH permission requests are not raised in this release."
@@ -381,6 +433,7 @@ def public_request(row: Any) -> dict[str, Any]:
         **({"auto_grant_withheld_note": withheld_note(display["auto_grant_withheld"])}
            if display.get("auto_grant_withheld") else {}),
         **render(str(item["kind"]), subject, display),
+        **_request_hosts(str(item["kind"]), subject),
         "action_id": str(item["action_id"]) if item.get("action_id") else None,
         "capability_name": item.get("capability_name"),
         "created_at": _iso(item.get("created_at")),
@@ -392,6 +445,18 @@ def public_request(row: Any) -> dict[str, Any]:
         "grant_id": str(item["grant_id"]) if item.get("grant_id") else None,
         "approve_command": f"shakerscan approve {item['id']}",
     }
+
+
+def _request_hosts(kind: str, subject: Mapping[str, Any]) -> dict[str, Any]:
+    """The hosts a request names, canonical ASCII beside Unicode, for clients that show them."""
+    if kind == KIND_TARGET_AUTHORIZE and subject.get("host"):
+        return {"destination": {**_host_forms(subject.get("host")), "port": subject.get("port"),
+                                "scheme": subject.get("scheme")}}
+    if kind == KIND_CREDENTIAL_USE and subject.get("home_host"):
+        return {"home_host": _host_forms(subject.get("home_host"))}
+    if kind == KIND_PREAUTHORIZATION:
+        return {"bound_hosts": bound_hosts(str(item) for item in subject.get("allow") or ())}
+    return {}
 
 
 def public_grant(row: Any) -> dict[str, Any]:
@@ -416,11 +481,18 @@ def public_grant(row: Any) -> dict[str, Any]:
 
 
 def public_preauthorization(row: Any) -> dict[str, Any]:
+    """A stored pre-authorization. Rows loaded by ``load_preauthorizations`` also name the legacy
+    (IDNA 2003) host bounds withheld until a person approves them again."""
     item = dict(row)
+    bounds = _json(item.get("bounds_json"), {})
+    loaded = item.get("_stored")
+    legacy = [entry.public() for entry in loaded.legacy] if loaded is not None else []
     return {
         "id": str(item["id"]),
-        "bounds": _json(item.get("bounds_json"), {}),
+        "bounds": bounds,
         "bounds_digest": item["bounds_digest"],
+        "host_canonicalization": bounds.get("host_canonicalization") or "idna2003-legacy",
+        "reapproval_required": legacy,
         "created_by": item["created_by"],
         "proof": item["proof"],
         "created_at": _iso(item.get("created_at")),
@@ -680,18 +752,88 @@ async def record_preauthorization(
     return dict(row)
 
 
-async def hunt_bounds(conn: Any, hunt_id: Any) -> tuple[Bounds, list[dict[str, Any]]]:
+async def _approved_allow(conn: Any, row: Mapping[str, Any]) -> list[str] | None:
+    """The ``--allow`` strings a legacy pre-authorization row was parsed from, or None."""
+    if row.get("source_request_id"):
+        request = await conn.fetchrow(
+            "SELECT subject_json FROM hunt_permission_requests WHERE id=$1 AND hunt_run_id=$2",
+            row["source_request_id"], row["hunt_run_id"],
+        )
+        allow = _json(request["subject_json"], {}).get("allow") if request is not None else None
+    else:
+        run = await conn.fetchrow("SELECT context_pack FROM hunt_runs WHERE id=$1", row["hunt_run_id"])
+        context = _json(run["context_pack"], {}) if run is not None else {}
+        allow = (context.get("hunt_start_contract") or {}).get("allow")
+    return [str(item) for item in allow] if isinstance(allow, list) else None
+
+
+async def load_preauthorizations(conn: Any, hunt_id: Any) -> list[dict[str, Any]]:
+    """The Hunt's pre-authorization rows, each with ``_stored`` (``StoredBounds``).
+
+    A row stored before hosts were spelled with IDNA 2008/UTS #46 has no
+    ``host_canonicalization`` marker. It is re-derived from the strings the person approved: a
+    host bound whose IDNA 2003 and 2008 encodings differ (or whose source cannot be confirmed) is
+    withheld -- it matches nothing and is reported for re-approval -- and an identical one stands.
+    """
     rows = [dict(row) for row in await conn.fetch(
         "SELECT * FROM hunt_preauthorizations WHERE hunt_run_id=$1 ORDER BY created_at, id",
         uuid.UUID(str(hunt_id)),
     )]
-    return merge([bounds_from_public(_json(row["bounds_json"], {})) for row in rows]), rows
+    for row in rows:
+        value = _json(row["bounds_json"], {})
+        legacy = value.get("host_canonicalization") is None
+        source = await _approved_allow(conn, row) if legacy else None
+        row["_stored"] = stored_bounds(value, source_allow=source)
+    return rows
+
+
+async def offer_reapproval(conn: Any, run: Mapping[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Offer the person each legacy row's withheld host bounds as one pending request.
+
+    Only bounds whose original spelling is known and valid (``encoding_changed``) are offered, as
+    the person wrote them; approving (``shakerscan approve <id>``) records a new pre-authorization
+    under IDNA 2008/UTS #46 beside the old row, so nothing else the person granted is lost. Each
+    set is offered once per Hunt: a request already raised for it (pending or decided) is not
+    raised again. The caller holds the Hunt row lock.
+    """
+    offered: list[dict[str, Any]] = []
+    for row in rows:
+        loaded = row.get("_stored")
+        changed = [item for item in (loaded.legacy if loaded is not None else ())
+                   if item.reason == "encoding_changed"]
+        if not changed:
+            continue
+        allow = list(dict.fromkeys(item.bound for item in changed))
+        subject = {
+            "allow": allow, "bounds_digest": parse_bounds(allow).digest(),
+            "reapproval_of": str(row["id"]),
+            "previously_stored_as": list(dict.fromkeys(str(item.stored_as) for item in changed)),
+        }
+        seen = await conn.fetchval(
+            "SELECT 1 FROM hunt_permission_requests WHERE hunt_run_id=$1 AND subject_digest=$2 LIMIT 1",
+            uuid.UUID(str(run["id"])), subject_digest(KIND_PREAUTHORIZATION, subject),
+        )
+        if seen:
+            continue
+        request, created = await raise_request(
+            conn, run=run, kind=KIND_PREAUTHORIZATION, reason_code="preauthorization_reapproval",
+            subject=subject, actor="system", source="host_encoding_reapproval",
+        )
+        if request is not None and created:
+            offered.append(request)
+    return offered
+
+
+async def hunt_bounds(conn: Any, hunt_id: Any) -> tuple[Bounds, list[dict[str, Any]]]:
+    rows = await load_preauthorizations(conn, hunt_id)
+    return merge([row["_stored"].bounds for row in rows]), rows
 
 
 def covering_preauthorization(rows: list[dict[str, Any]], predicate: Any) -> dict[str, Any] | None:
     """The first stored pre-authorization whose own bounds satisfy ``predicate``."""
     for row in rows:
-        if predicate(bounds_from_public(_json(row["bounds_json"], {}))):
+        stored = row.get("_stored") or stored_bounds(_json(row["bounds_json"], {}))
+        if predicate(stored.bounds):
             return row
     return None
 
@@ -700,7 +842,8 @@ __all__ = [
     "DECISION_VIA", "DENIAL_COOLDOWN", "EVENTS", "HUNT_ACTION_STATUSES", "HUNT_PERMISSION_SCHEMA_SQL",
     "MAX_PENDING_PER_HUNT", "PREAUTHORIZATION_PROOFS", "REQUEST_STATUSES", "canonical_digest", "cooldown_identity",
     "covering_preauthorization", "expire_due", "hunt_bounds", "hunt_deadline", "list_events",
-    "list_grants", "list_requests", "live_credential_grants", "load_request", "pending_summary",
+    "list_grants", "list_requests", "live_credential_grants", "load_preauthorizations", "load_request",
+    "offer_reapproval", "pending_summary",
     "public_grant", "public_preauthorization", "public_request", "raise_request", "record_event",
     "recent_denial", "record_preauthorization", "render", "request_expiry", "subject_digest",
 ]

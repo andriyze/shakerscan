@@ -356,6 +356,7 @@ export const HUNT_START_CONTRACT = {
     "permission_withdrawn",
     "preauthorization_bound_invalid",
     "preauthorization_proposed",
+    "preauthorization_reapproval",
     "principal_anonymous_only",
     "scope_credential_other_host",
     "scope_destination_blocked",

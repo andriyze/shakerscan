@@ -16,6 +16,11 @@ import time
 from typing import Any, Mapping
 import urllib.parse
 
+try:
+    from .host_names import HostNameError, canonical_host
+except ImportError:  # direct host-side import in focused tests
+    from host_names import HostNameError, canonical_host
+
 
 BROWSER_STORAGE_SCHEMA = "scan-browser-storage/v1"
 # Session cookies otherwise disappear when the bootstrap Chromium exits. These
@@ -75,8 +80,8 @@ def _origin(value: str) -> str:
         raise BrowserProfileError("browser storage origin must be HTTP or HTTPS")
     scheme = parsed.scheme.lower()
     try:
-        host = parsed.hostname.encode("idna").decode("ascii").lower()
-    except UnicodeError:
+        host = canonical_host(parsed.hostname)
+    except HostNameError:
         raise BrowserProfileError("browser storage origin is invalid") from None
     authority = f"[{host}]" if ":" in host else host
     if port is not None and port != (443 if scheme == "https" else 80):

@@ -13,6 +13,11 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 import uuid
 
+try:
+    from scanner_tools.host_names import HostNameError, canonical_host
+except ModuleNotFoundError:  # package import
+    from scanner.scanner_tools.host_names import HostNameError, canonical_host
+
 SCHEMA_VERSION = "service-intelligence/v1"
 SERVICE_NAMESPACE = uuid.UUID("e4089322-9875-4dca-a92d-60be1c2694a1")
 MAX_EVIDENCE = 12
@@ -56,7 +61,10 @@ def origin(value: Any) -> str | None:
         if parts.username is not None or parts.password is not None:
             return None
         host = parts.hostname.lower().rstrip(".")
-        host = host.encode("idna").decode("ascii")
+        try:
+            host = canonical_host(host)
+        except HostNameError:
+            return None
         if any(c.isspace() for c in host) or "%" in host or len(host) > 253:
             return None
         port = parts.port

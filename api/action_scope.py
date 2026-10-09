@@ -15,8 +15,6 @@ import re
 import urllib.parse
 from typing import Any
 
-import idna
-
 import deployment_policy
 
 try:
@@ -24,10 +22,16 @@ try:
         IPAddress, always_refused, cloud_service_address, destination_block_reason,
         embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
     )
+    from scanner_tools.host_names import (
+        HOST_CANONICALIZATION, HostNameError, canonical_host, display_host, host_forms, unicode_host,
+    )
 except ModuleNotFoundError:  # package import (api.action_scope)
     from scanner.scanner_tools.address_classes import (
         IPAddress, always_refused, cloud_service_address, destination_block_reason,
         embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
+    )
+    from scanner.scanner_tools.host_names import (
+        HOST_CANONICALIZATION, HostNameError, canonical_host, display_host, host_forms, unicode_host,
     )
 
 
@@ -67,24 +71,18 @@ def _add_check(checks: list[ScopeCheck], name: str, status: str, message: str) -
 
 
 def _canonical_host(value: str | None) -> str:
-    """The ASCII host the HTTP client connects to.
+    """The ASCII host the HTTP client connects to, or "" when there is none.
 
-    A non-ASCII host is encoded with IDNA 2008 and the UTS #46 mapping, as httpx and browsers
-    resolve it: Python's ``idna`` codec is IDNA 2003, which maps ``straße.example`` to
-    ``strasse.example`` while the client connects to ``xn--strae-oqa.example``, so the scope
-    decision and the connection named different hosts. Full-width and zero-width spellings map
-    to the same ASCII host under both. A host neither encodes is returned unchanged (and is
-    refused as an invalid origin where one is required).
+    ``host_names.canonical_host`` (strict IDNA 2008 with the UTS #46 mapping, as httpx and
+    browsers encode): Python's ``idna`` codec is IDNA 2003, which maps ``straße.example`` to
+    ``strasse.example`` while the client connects to ``xn--strae-oqa.example``. A host strict
+    processing refuses (``a<ZWJ>b.example``, a malformed ``xn--`` label) is "" -- never the raw
+    spelling and never the IDNA 2003 form -- so every caller treats it as no host at all.
     """
-    host = str(value or "").strip().strip("[]").lower()
-    if host.endswith("."):
-        host = host[:-1]
     try:
-        if host.isascii():
-            return host.encode("idna").decode("ascii")
-        return idna.encode(host, uts46=True).decode("ascii").rstrip(".")
-    except (UnicodeError, idna.IDNAError):
-        return host
+        return canonical_host(value)
+    except HostNameError:
+        return ""
 
 
 def approval_context_value_matches(key: str, actual: Any, expected: Any) -> bool:
@@ -367,8 +365,8 @@ def evaluate_scope(
 
     raw = str(raw_url or "").strip()
     env = str(environment or "production").strip().lower()
-    allow_hosts = tuple(_canonical_host(item) for item in (allowed_hosts or ()) if str(item or "").strip())
-    allow_roots = tuple(_canonical_host(item) for item in (allowed_root_domains or ()) if str(item or "").strip())
+    allow_hosts = tuple(host for item in (allowed_hosts or ()) if (host := _canonical_host(item)))
+    allow_roots = tuple(host for item in (allowed_root_domains or ()) if (host := _canonical_host(item)))
 
     input_scope = {
         "url": raw,
@@ -416,7 +414,11 @@ def evaluate_scope(
             else:
                 _add_check(checks, "trailing_dot_host", "passed", "No trailing-dot hostname.")
 
-            if host_raw and (host_raw.lower() != host or host.startswith("xn--") or ".xn--" in host):
+            if host_raw and not host:
+                blocked.append("unicode_or_punycode_confusion")
+                _add_check(checks, "unicode_or_punycode_confusion", "blocked",
+                           "Hostname is not a valid IDNA 2008 / UTS #46 name and is refused.")
+            elif host_raw and (host_raw.lower() != host or host.startswith("xn--") or ".xn--" in host):
                 blocked.append("unicode_or_punycode_confusion")
                 _add_check(checks, "unicode_or_punycode_confusion", "blocked", "Unicode/punycode hostnames require explicit review.")
             else:
@@ -456,7 +458,7 @@ def evaluate_scope(
         if allow_hosts or allow_roots:
             dest_allowed = _host_matches(dest_host, allow_hosts, allow_roots)
         else:
-            dest_allowed = bool(base_host and dest_host == base_host)
+            dest_allowed = bool(base_host and dest_host and dest_host == base_host)
         if not dest_allowed:
             blocked.append("redirect_out_of_scope")
             redirect_results.append({"url": dest_raw, "host": dest_host, "verdict": "blocked", "reason": "redirect_out_of_scope"})
