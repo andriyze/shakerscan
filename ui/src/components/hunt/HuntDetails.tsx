@@ -5,7 +5,7 @@ import { Button, Card } from '@/components/ui'
 import type { DeviceAgentShellPlan } from '@/lib/api'
 import { HUNT_BUDGET_DIMENSIONS } from '@/lib/huntContract.generated'
 import type { HuntV2 } from '@/lib/huntV2'
-import { budgetUsage } from '@/lib/huntRunModel.mjs'
+import { budgetUsage, huntStopReasonText } from '@/lib/huntRunModel.mjs'
 import HuntBudgetEditor from './HuntBudgetEditor'
 import { formatHuntDuration } from './huntFormat'
 
@@ -156,7 +156,7 @@ export function HuntDetails({ hunt, shellPlans, confirmingPlanId, onConfirmPlan,
           {hunt.created_at && <div className="flex justify-between gap-3"><dt className="text-gray-500">Started</dt><dd className="text-gray-300">{new Date(hunt.created_at).toLocaleString()}</dd></div>}
           {hunt.completed_at && <div className="flex justify-between gap-3"><dt className="text-gray-500">Completed</dt><dd className="text-gray-300">{new Date(hunt.completed_at).toLocaleString()}</dd></div>}
           {formatHuntDuration(hunt.created_at, hunt.completed_at) && <div className="flex justify-between gap-3"><dt className="text-gray-500">{hunt.completed_at ? 'Elapsed' : 'Elapsed so far'}</dt><dd className="text-gray-300">{formatHuntDuration(hunt.created_at, hunt.completed_at)}</dd></div>}
-          {hunt.stop_reason && <div className="flex justify-between gap-3"><dt className="text-gray-500">Stop reason</dt><dd className="text-gray-300">{hunt.stop_reason.replaceAll('_', ' ')}</dd></div>}
+          {hunt.stop_reason && <div className="flex justify-between gap-3"><dt className="text-gray-500">Stop reason</dt><dd className="text-gray-300">{huntStopReasonText(hunt.stop_reason)}</dd></div>}
           {typeof policy.approval_receipt_id === 'string' && <div className="flex justify-between gap-3"><dt className="text-gray-500">Approval receipt</dt><dd className="break-all text-right font-mono text-gray-400">{policy.approval_receipt_id}</dd></div>}
           {typeof policy.scope_receipt_id === 'string' && <div className="flex justify-between gap-3"><dt className="text-gray-500">Scope receipt</dt><dd className="break-all text-right font-mono text-gray-400">{policy.scope_receipt_id}</dd></div>}
         </dl>

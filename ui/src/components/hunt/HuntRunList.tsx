@@ -6,6 +6,7 @@ import { huntStatusLabel } from '@/lib/labels'
 import type { HuntV2 } from '@/lib/huntV2'
 import { cleanTargetLocator, huntActivity, huntTargetTitle, targetRetired } from '@/lib/huntListModel.mjs'
 import { relativeTime } from '@/lib/targetInventoryModel.mjs'
+import { huntStopReasonLabel } from '@/lib/huntRunModel.mjs'
 
 export function huntStatusClass(status: string): string {
   if (status === 'active' || status === 'awaiting_planner') return 'bg-blue-500/10 text-blue-300 ring-blue-400/20'
@@ -52,7 +53,7 @@ export function HuntRunList({ runs, showTarget = true }: { runs: HuntV2[]; showT
               {locator && locator !== title && <span className="truncate font-mono">{locator}</span>}
               {targetRetired(hunt.target_url) && <span className="text-amber-300/80">· target retired</span>}</span>}
             <span>{hunt.target_kind} · {hunt.budget_profile}</span>
-            {hunt.stop_reason && !['completed', 'operator_completed'].includes(hunt.stop_reason) && <span className="text-amber-300/80">· {hunt.stop_reason.replaceAll('_', ' ')}</span>}
+            {hunt.stop_reason && !['completed', 'operator_completed'].includes(hunt.stop_reason) && <span className="text-amber-300/80">· {huntStopReasonLabel(hunt.stop_reason)}</span>}
           </span>
         </span>
         <span className="relative z-10 flex flex-wrap items-center gap-1.5 text-xs">

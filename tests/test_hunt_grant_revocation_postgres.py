@@ -523,6 +523,9 @@ def test_a_revoked_pre_authorized_grant_is_not_granted_again_by_the_start_bounds
     assert shown["auto_grant_withheld"]["coverage"] == "capability:state-changing"
     assert shown["auto_grant_withheld"]["fields"] == ["allow_state_changing_http"]
     assert shown["auto_grant_withheld"]["revoked_grant_id"] == str(auto["id"])
+    note = shown["auto_grant_withheld_note"]  # printed by `shakerscan approve` and `permissions show`
+    assert note.startswith(f"Asked again because grant {auto['id']} (state-changing) was revoked at ")
+    assert "by alice@example.test" in note and "allow_state_changing_http" in note
     withheld = {"coverage": "capability:state-changing", "fields": ["allow_state_changing_http"],
                 "flags": ["active-replay", "state-changing"]}
     (listed,) = run(env, list_grants(env.conn, hunt["id"]))

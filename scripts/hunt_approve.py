@@ -216,6 +216,8 @@ def render_request(request: Mapping[str, Any]) -> str:
         f"    request:  {request.get('id')} ({request.get('kind')}, {request.get('reason_code')}) "
         f"in Hunt {request.get('hunt_id')}",
     ]
+    if request.get("auto_grant_withheld_note"):
+        lines.append(f"    note:     {request.get('auto_grant_withheld_note')}")
     if request.get("expires_at"):
         lines.append(f"    expires:  {request.get('expires_at')}")
     if request.get("remember_supported"):

@@ -647,3 +647,14 @@ def test_a_failed_read_that_is_not_a_404_keeps_the_prompt():
     terminal = Waiting()
     approval.watch(engine, terminal, enterprise=False, origin="http://127.0.0.1:8080", hunt_id=HUNT, sleep=_ctrl_c)
     assert terminal.kept is True
+
+
+def test_the_prompt_says_why_a_request_the_start_bounds_covered_is_asked_again():
+    """R1: after a person revokes a grant, the start bounds stop granting what it covered; the
+    prompt prints the server's reason so the person knows why they are asked again."""
+    note = ("Asked again because grant g-1 (state-changing) was revoked at 2026-10-09T10:00:00+00:00 by "
+            "alice@example.test. The Hunt's start bounds no longer allow this automatically (it would turn "
+            "on allow_state_changing_http again); allowing it now is a new decision.")
+    rendered = approval.render_request({**_request(), "auto_grant_withheld_note": note})
+    assert f"    note:     {note}" in rendered.splitlines()
+    assert "note:" not in approval.render_request(_request())
