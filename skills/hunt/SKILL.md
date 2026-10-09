@@ -112,6 +112,28 @@ one hour, and are cleared on finish/cancel; they are not permanent credentials f
 A returned reference proves capture, not accepted application identity. Follow the protocol's
 pairing confirmation with a relevant authenticated request before reporting pairing complete.
 
+### Secrets the target leaks: use them by reference
+
+Credentials found in target responses (a `.env`, a SQL dump, `web.config`, a phpinfo table, a
+JSON `api_key`, a JWT in a bundle) are withheld from your view, not lost. `artifact.inspect`,
+`javascript.analyze` and `http.request` show each one as a marker such as `[withheld:2]` and list
+it in the observation's `withheld_values`: `ref` (`withheld://hunt/<action id>/2`), a three-
+character `preview`, its `length` and, for longer values, a keyed `fingerprint`. CSRF tokens and
+identifiers stay visible. To test whether a leaked secret grants access, bind it into a request;
+the worker sends the real value and you never see it (an `http.request` input):
+
+```
+{"method": "GET", "path": "/hub/admin",
+ "request_bindings": [{"withheld_ref": "withheld://hunt/<action id>/2", "header": "X-Admin-Token"}]}
+```
+
+Use `prefix` (`"Bearer "`) for an authorization header, or `body_pointer` with a JSON/form body
+template on an authorized write. A withheld-value binding is a workflow binding: it needs the Hunt's
+active testing permission, and a refusal raises a permission request like any other. The response
+stays readable; every echo of the bound value appears as a marker or `[withheld:bound]`.
+References last as long as the Hunt, at most 24 hours. Never ask the user to paste a withheld
+value, and never print or guess one: compare `preview`, `length` and `fingerprint` instead.
+
 For a bound `confirmed_active` collection, use the advertised `collections.replay_active` to
 replay the approved request selection. Safe replay still excludes writes. Reuse the same saved
 write authorization; a workflow action does not require a vulnerability-specific verifier.
