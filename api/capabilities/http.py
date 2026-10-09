@@ -218,12 +218,16 @@ def resolve_hunt_http_origin(target: TargetBinding, origin: Any, policy: Mapping
             or parsed.username is not None or parsed.password is not None
             or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or port == 0):
         raise ValueError("HTTP service origin must be on the Hunt's exact target host")
+    # The scope guard's host spelling (``action_scope._canonical_host``: IDNA 2008 with UTS #46,
+    # as httpx connects), and the admitted origin is recorded in that ASCII form.
+    host = _destination_host(parsed.hostname)
+    netloc = f"[{host}]" if ":" in host else host
+    candidate = _origin(f"{parsed.scheme}://{netloc}" + (f":{port}" if port is not None else ""))
     granted = granted_destination(policy, text)
     if granted is not None:
-        return granted_destination_target(target, granted, _origin(text))
-    if parsed.hostname.lower().rstrip(".") != target.canonical_host:
+        return granted_destination_target(target, granted, candidate)
+    if host != target.canonical_host:
         raise ValueError("HTTP service origin must be on the Hunt's exact target host")
-    candidate = _origin(text)
     if _origin_key(candidate) in {_origin_key(value) for value in target.allowed_origins}:
         return target
     # A different port or scheme on the SAME already-authorized host is another
