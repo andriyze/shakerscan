@@ -889,3 +889,63 @@ def test_workspace_legacy_symlink_is_moved_without_touching_target(tmp_path):
     assert outside.read_text() == "private operator guide"
     backup, = workspace.glob(".shakerscan-retired-CLAUDE-*.bak")
     assert backup.is_symlink()
+
+
+def test_rerunning_agent_keeps_the_persons_own_configuration(monkeypatch, tmp_path, capsys, clean_environ):
+    """L3: re-running `shakerscan agent` rewrote opencode.json and dropped the person's permission
+    block (their bash deny-list). The client's own keys are merged; everything else is kept and said."""
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    workspace = tmp_path / "ws"
+    argv = ["agent", "opencode", "--url", "http://192.168.1.50:8080", "--workspace", str(workspace), "--no-launch"]
+    assert cli.main(argv) == 0
+    assert "kept:" not in capsys.readouterr().out, "a fresh workspace has nothing of the person's"
+
+    deny = {"bash": {"*": "allow", "env": "deny", "printenv*": "deny", "*token*": "deny"}}
+    opencode = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
+    opencode["permission"] = deny
+    opencode["model"] = "openrouter/z-ai/glm-5.3-flash"
+    opencode["instructions"].append("NOTES.md")
+    opencode["mcp"]["other"] = {"type": "local", "command": ["other-mcp"]}
+    opencode["mcp"]["shakerscan"]["command"] = ["stale"]
+    (workspace / "opencode.json").write_text(json.dumps(opencode), encoding="utf-8")
+    mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+    mcp["mcpServers"]["other"] = {"command": "other-mcp"}
+    (workspace / ".mcp.json").write_text(json.dumps(mcp), encoding="utf-8")
+    settings = json.loads((workspace / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    settings["permissions"] = {"deny": ["Bash(env:*)"]}
+    (workspace / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+    (workspace / ".claude" / "settings.local.json").write_text('{"permissions": {"allow": []}}', encoding="utf-8")
+
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    opencode = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
+    assert opencode["permission"] == deny, "the deny-list survives"
+    assert opencode["model"] == "openrouter/z-ai/glm-5.3-flash"
+    assert opencode["instructions"] == ["skills/hunt/SKILL.md", "NOTES.md"]
+    assert opencode["mcp"]["other"] == {"type": "local", "command": ["other-mcp"]}
+    assert opencode["mcp"]["shakerscan"]["command"][-3:] == ["mcp", "--url", "http://192.168.1.50:8080"], (
+        "the client's own entry is refreshed"
+    )
+    assert json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["other"] == {"command": "other-mcp"}
+    settings = json.loads((workspace / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["permissions"] == {"deny": ["Bash(env:*)"]}
+    assert len(settings["hooks"]["SessionStart"]) == 1, "the kit's hook is not added twice"
+    assert (workspace / ".claude" / "settings.local.json").read_text(encoding="utf-8") == '{"permissions": {"allow": []}}'
+    assert "kept:      opencode.json: kept your permission, model, instructions, MCP servers other" in out, out
+    assert "kept:      .mcp.json: kept your MCP servers other" in out
+    assert "kept:      .claude/settings.json: kept your permissions" in out
+    assert "kept:      .claude/: kept 1 file(s) that are not part of the kit (settings.local.json)" in out
+
+
+def test_an_unreadable_agent_configuration_is_set_aside_not_lost(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "opencode.json").write_text('{"permission": {"bash": "deny"}, // a comment\n}', encoding="utf-8")
+    notes: list[str] = []
+    cli.prepare_workspace(workspace, "http://new.example:8080", "operator", "shakerscan",
+                          authenticated=False, notes=notes)
+    backup, = workspace.glob(".shakerscan-unreadable-opencode.json-*.bak")
+    assert "// a comment" in backup.read_text(encoding="utf-8")
+    assert any(note.startswith("opencode.json: not a JSON object, so it was moved to .shakerscan-unreadable-")
+               for note in notes), notes
+    assert json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))["mcp"]["shakerscan"]
