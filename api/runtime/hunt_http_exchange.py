@@ -171,36 +171,75 @@ def _private_payload(run_id: str, action_id: str, target: TargetBinding) -> dict
 WITHHOLDING_CAPABILITIES = frozenset({"artifact.inspect", "javascript.analyze", "http.request"})
 
 
-_MAX_SEEDED_VALUES = 512
+# Seeding is bounded by the text it scans for, most recent first: a long Hunt's oldest values
+# stop being searched before the scan gets slow.
+_MAX_SEEDED_CHARS = 65_536
 # Shorter values (a pairing PIN) would match ordinary text everywhere; their outputs are reduced.
 _MIN_SEEDED_CHARS = 6
+SQL_TABLES_KEY = "sql_tables"
+_MAX_SQL_PATHS = 64
+_MAX_SQL_TABLES = 256
+_MAX_SQL_COLUMNS = 256
 
 
-async def sealed_hunt_values(conn: Any, *, run_id: Any, target: TargetBinding) -> list[str]:
-    """Every value this Hunt has sealed for this target (withheld values and response captures),
-    still unexpired. Worker-private: used only to withhold their later echoes."""
+def _bounded_sql_tables(tables: Any) -> dict[str, dict[str, list[str]]]:
+    """Column names per resource path and table: names only, never values, bounded."""
+    result: dict[str, dict[str, list[str]]] = {}
+    if not isinstance(tables, Mapping):
+        return result
+    for path, by_table in list(tables.items())[:_MAX_SQL_PATHS]:
+        if not isinstance(by_table, Mapping):
+            continue
+        kept = {
+            str(table)[:128]: [str(column)[:128] for column in columns[:_MAX_SQL_COLUMNS]]
+            for table, columns in list(by_table.items())[:_MAX_SQL_TABLES]
+            if isinstance(columns, (list, tuple)) and columns
+        }
+        if kept:
+            result[str(path)[:2048]] = kept
+    return result
+
+
+async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding) -> dict[str, Any]:
+    """What this Hunt already knows about the target, from its sealed private results:
+    ``values`` (withheld values and response captures, most recent first, bounded) and
+    ``sql_tables`` (dump column names per resource path). Worker-private."""
     rows = await conn.fetch("""SELECT private_http_result FROM hunt_actions
-        WHERE hunt_run_id=$1 AND private_http_result IS NOT NULL""", uuid.UUID(str(run_id)))
-    digest, now, found = _target_digest(target), datetime.now(timezone.utc), []
+        WHERE hunt_run_id=$1 AND private_http_result IS NOT NULL
+        ORDER BY completed_at DESC NULLS LAST, id""", uuid.UUID(str(run_id)))
+    digest, now = _target_digest(target), datetime.now(timezone.utc)
+    values: list[str] = []
+    tables: dict[str, dict[str, list[str]]] = {}
+    budget = _MAX_SEEDED_CHARS
     for row in rows or ():
         try:
             private = json.loads(decrypt_secret(str(row["private_http_result"])))
             expires_at = datetime.fromisoformat(private.get(WITHHELD_EXPIRES_KEY) or private["expires_at"])
             if private.get("hunt_id") != str(run_id) or private.get("target_digest") != digest or expires_at <= now:
                 continue
-            values = [*(private.get(WITHHELD_SCHEMA_KEY) or {}).values(), *(private.get("values") or {}).values()]
+            found = [*(private.get(WITHHELD_SCHEMA_KEY) or {}).values(), *(private.get("values") or {}).values()]
+            learned = _bounded_sql_tables(private.get(SQL_TABLES_KEY))
         except Exception:
             continue  # an unreadable row seeds nothing; its own references refuse
-        found.extend(str(value) for value in values if isinstance(value, str) and len(value) >= _MIN_SEEDED_CHARS)
-        if len(found) >= _MAX_SEEDED_VALUES:
-            break
-    return list(dict.fromkeys(found))[:_MAX_SEEDED_VALUES]
+        for path, by_table in learned.items():
+            tables.setdefault(path, {})
+            for table, columns in by_table.items():
+                tables[path].setdefault(table, columns)  # most recent first wins
+        for value in found:
+            if isinstance(value, str) and len(value) >= _MIN_SEEDED_CHARS and len(value) <= budget and value not in values:
+                values.append(value)
+                budget -= len(value)
+    return {"values": values, "sql_tables": tables}
 
 
-def known_values_seed(pool: Any, run_id: Any, target: TargetBinding) -> Callable[[], Awaitable[list[str]]]:
-    async def seed() -> list[str]:
+async def sealed_hunt_values(conn: Any, *, run_id: Any, target: TargetBinding) -> list[str]:
+    return (await sealed_hunt_knowledge(conn, run_id=run_id, target=target))["values"]
+
+
+def known_values_seed(pool: Any, run_id: Any, target: TargetBinding) -> Callable[[], Awaitable[dict[str, Any]]]:
+    async def seed() -> dict[str, Any]:
         async with pool.acquire() as conn:
-            return await sealed_hunt_values(conn, run_id=run_id, target=target)
+            return await sealed_hunt_knowledge(conn, run_id=run_id, target=target)
     return seed
 
 
@@ -222,7 +261,13 @@ def withholding_operation(
 
     async def collecting() -> Any:
         if seed is not None:
-            collector.bind_known(await seed())
+            knowledge = await seed()
+            if isinstance(knowledge, Mapping):
+                collector.bind_known(knowledge.get("values") or (), found=True)
+                for path, by_table in (knowledge.get("sql_tables") or {}).items():
+                    collector.sql_tables.setdefault(path, {}).update(by_table)
+            else:
+                collector.bind_known(knowledge, found=True)
         with collecting_withheld_values(collector):
             return await operation()
 
@@ -244,11 +289,13 @@ async def persist_withheld_values(
     """
     if values is None:
         return {"sealed": 0, "status": "none"}
+    tables: dict[str, dict[str, list[str]]] = {}
     if not isinstance(values, Mapping):
         collector = values
         values = collector.shown_values(json.dumps(observations, default=str))
+        tables = _bounded_sql_tables(collector.sql_tables)
         collector.values.clear()
-    if not values:
+    if not values and not tables:
         return {"sealed": 0, "status": "none"}
     if status != "success" or not _hunt_is_live(run):
         return {"sealed": 0, "status": "action_or_hunt_not_live"}
@@ -270,6 +317,12 @@ async def persist_withheld_values(
         payload = prior
     payload[WITHHELD_EXPIRES_KEY] = (
         datetime.now(timezone.utc) + timedelta(seconds=WITHHELD_TTL_SECONDS)).isoformat()
+    if tables:
+        # Column names learned from a dump (not secret) travel with the action, for later windows.
+        merged = _bounded_sql_tables(payload.get(SQL_TABLES_KEY))
+        for path, by_table in tables.items():
+            merged.setdefault(path, {}).update(by_table)
+        payload[SQL_TABLES_KEY] = _bounded_sql_tables(merged)
     kept: dict[str, str] = {}
     for number, value in sorted(values.items()):
         payload[WITHHELD_SCHEMA_KEY] = {**kept, str(int(number)): str(value)}
@@ -287,7 +340,8 @@ async def persist_withheld_values(
         return {"sealed": 0, "status": "encryption_unavailable"}  # never stored in clear
     await conn.execute("UPDATE hunt_actions SET private_http_result=$3 WHERE id=$1 AND hunt_run_id=$2",
         uuid.UUID(source_id), uuid.UUID(run_id), sealed)
-    return {"sealed": len(kept), "status": "sealed" if len(kept) == len(values) else "partially_sealed"}
+    status_text = "sealed" if len(kept) == len(values) else "partially_sealed"
+    return {"sealed": len(kept), "status": status_text if values else "columns_only"}
 
 
 async def settle_private_results(
