@@ -12,7 +12,10 @@ the deliberate tightenings of this change, and nothing else:
 - SIIT ``::ffff:0:a.b.c.d`` is decoded;
 - an IPv6 zone id no longer hides a cloud-service address;
 - device plane: every embedded spelling is judged as the IPv4 address it carries, and a link-local
-  IPv4 address carried inside a translator or tunnel form is refused.
+  IPv4 address carried inside a translator or tunnel form is refused;
+- the cloud-service list gains the EKS Pod Identity agent (169.254.170.23, fd00:ec2::23) and
+  Oracle Cloud Classic metadata (192.0.0.192), refused everywhere, and the device plane refuses
+  the limited broadcast address 255.255.255.255 in every spelling.
 """
 from __future__ import annotations
 
@@ -126,11 +129,12 @@ SPECIAL_V4 = (
 )
 POINTS_V4 = (
     "169.254.169.254", "169.254.170.2", "100.100.100.200", "168.63.129.16", "255.255.255.255",
+    "169.254.170.23", "192.0.0.192", "192.0.0.8", "198.18.0.1", "192.0.2.1",
     "8.8.8.8", "93.184.216.34", "1.1.1.1", "100.63.255.255", "100.128.0.0", "169.254.10.20",
 )
 SPECIAL_V6 = (
     "::1", "::", "fe80::1", "fe80::1%eth0", "fc00::1", "fd12::7", "fd00:ec2::254", "fd00:ec2::254%eth0",
-    "fd00:ec2::254%25", "ff02::1", "2001:db8::1", "2606:4700:4700::1111", "2001:4860:4860::8888",
+    "fd00:ec2::254%25", "fd00:ec2::23", "fd00:ec2::23%eth0", "ff02::1", "2001:db8::1", "2606:4700:4700::1111", "2001:4860:4860::8888",
     "100::1", "2001:10::1", "2001:20::1", "64:ff9b::", "2002::", "2001::",
 )
 
@@ -178,9 +182,21 @@ def _carried(text):
     return (address, *new_embedded(address))
 
 
+# Cloud-service addresses added by this change (S4 of the #358 review), and the limited broadcast
+# address the device plane now refuses.
+_NEW_CLOUD = frozenset(ipaddress.ip_address(raw) for raw in ("169.254.170.23", "192.0.0.192", "fd00:ec2::23"))
+_BROADCAST = ipaddress.ip_address("255.255.255.255")
+
+
+def _carries_new_cloud(text):
+    return any(item in _NEW_CLOUD for item in _carried(text))
+
+
 def _deliberate_scope_tightening(text):
     address = _plain(text)
     carried = _carried(text)
+    if _carries_new_cloud(text):
+        return True
     shared = any(item.version == 4 and item in ipaddress.ip_network("100.64.0.0/10") for item in carried)
     siit = address.version == 6 and address in ipaddress.ip_network("::ffff:0:0:0/96")
     zoned_cloud = "%" in text and str(address) in _LEGACY_CLOUD
@@ -220,6 +236,8 @@ def test_a_hunt_destination_is_never_more_permissive(monkeypatch):
 def _deliberate_device_tightening(text, environment, policy):
     address = _plain(text)
     carried = new_embedded(address)
+    if _carries_new_cloud(text) or _BROADCAST in _carried(text):
+        return True
     if address.version == 6 and address.ipv4_mapped is None and carried:
         return True  # judged as the IPv4 address it carries
     if address.version == 6 and address.ipv4_mapped is not None:

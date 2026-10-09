@@ -16,13 +16,22 @@ import os
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 NAT64_PREFIXES_ENV = "SHAKERSCAN_NAT64_PREFIXES"
-# Special cloud-service destinations. They are not all link-local, so private-network permission
-# must not admit them.
-CLOUD_SERVICE_ADDRESSES = frozenset({
-    ipaddress.ip_address(raw) for raw in (
-        "169.254.169.254", "169.254.170.2", "100.100.100.200", "168.63.129.16", "fd00:ec2::254",
-    )
-})
+# Special cloud-service destinations: the one list the web scope guard, Hunt destinations and the
+# device plane (``device_posture.DEFAULT_DENIED_DEVICE_DESTINATIONS``) refuse. They are not all
+# link-local, so private-network permission must not admit them.
+CLOUD_SERVICE_ADDRESS_NAMES = {
+    "169.254.169.254": "AWS, GCP, OpenStack and Oracle instance metadata",
+    "169.254.170.2": "AWS ECS container credentials",
+    "169.254.170.23": "AWS EKS Pod Identity agent",
+    "100.100.100.200": "Alibaba Cloud instance metadata",
+    "168.63.129.16": "Azure host virtual service (WireServer)",
+    "192.0.0.192": "Oracle Cloud Classic instance metadata",
+    "fd00:ec2::254": "AWS instance metadata (IPv6)",
+    "fd00:ec2::23": "AWS EKS Pod Identity agent (IPv6)",
+}
+CLOUD_SERVICE_ADDRESSES = frozenset(ipaddress.ip_address(raw) for raw in CLOUD_SERVICE_ADDRESS_NAMES)
+# The limited broadcast address, in IPv4: never a host destination.
+LIMITED_BROADCAST = ipaddress.IPv4Address("255.255.255.255")
 
 # RFC 6598 shared address space (carrier-grade NAT). Neither ``is_private`` nor ``is_reserved``,
 # yet never a public destination: Tailscale and other overlay networks number their nodes from it.
@@ -161,7 +170,7 @@ def private_class(address: IPAddress) -> bool:
 
 
 __all__ = [
-    "CLOUD_SERVICE_ADDRESSES", "IPAddress", "NAT64_PREFIXES_ENV", "SHARED_ADDRESS_SPACE",
+    "CLOUD_SERVICE_ADDRESSES", "CLOUD_SERVICE_ADDRESS_NAMES", "IPAddress", "LIMITED_BROADCAST", "NAT64_PREFIXES_ENV", "SHARED_ADDRESS_SPACE",
     "cloud_service_address", "embedded_ipv4_addresses", "judged_addresses", "nat64_prefixes",
     "private_class", "shared_address_space", "validate_nat64_prefixes_setting", "without_scope",
 ]
