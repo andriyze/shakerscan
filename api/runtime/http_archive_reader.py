@@ -713,10 +713,11 @@ def masked_export_budget() -> int:
     return max(MIN_MASKED_EXPORT_BYTES, min(MAX_MASKED_EXPORT_BYTES, value))
 
 
-def is_light_export(export_format: str, limit: int) -> bool:
-    """A browse page (the UI's 25- and 250-row pages), not a download: bounded by its own small
-    budgets, so it is admitted beside heavy exports instead of waiting behind them."""
-    return export_format == "transactions" and 0 < int(limit) <= LIGHT_EXPORT_ROWS
+def is_light_export(export_format: str, limit: int, *, redaction: str) -> bool:
+    """A masked browse page (the UI's 25- and 250-row pages), not a download: bounded by its own
+    small budgets, so it is admitted beside heavy exports instead of waiting behind them. A raw
+    export has no body budget, so it is always heavy, however few rows it asks for."""
+    return redaction != "raw" and export_format == "transactions" and 0 < int(limit) <= LIGHT_EXPORT_ROWS
 
 
 def body_budget(redaction: str, *, light: bool = False) -> int | None:
