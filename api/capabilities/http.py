@@ -164,9 +164,14 @@ def granted_destination(policy: Mapping[str, Any], origin: Any) -> Mapping[str, 
     ``origin`` exactly by scheme, host and port, or None."""
     try:
         parsed = urllib.parse.urlsplit(str(origin or "").strip())
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        port = parsed.port
     except ValueError:
         return None
+    if port == 0:
+        # Not "the default port": ``destination_refusal`` refuses port 0 as an invalid origin,
+        # and ``parsed.port or 443`` used to read https://h:0 as a grant for https://h:443.
+        return None
+    port = port or (443 if parsed.scheme == "https" else 80)
     # The spelling the grant was recorded under (``permission_subjects.destination_host``).
     host = _destination_host(parsed.hostname)
     for item in policy.get("granted_destinations") or ():
