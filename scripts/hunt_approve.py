@@ -73,7 +73,9 @@ WATCH_POLL_SECONDS = 3.0
 # KEY_BURST_SECONDS of each other are one burst (an escape sequence or a paste), never a key; and
 # escape sequences are also followed byte by byte, whatever their timing (Terminal._feed).
 KEY_SETTLE_SECONDS = 0.75
-# ESC ] (OSC), ESC P (DCS), ESC _ (APC), ESC ^ (PM), ESC X (SOS): strings ended only by BEL or ST.
+# ESC ] (OSC), ESC P (DCS), ESC _ (APC), ESC ^ (PM), ESC X (SOS): strings ended only by BEL or ST,
+# or, at a prompt, by this long without input (a terminal sends its replies in one write).
+KEY_STRING_QUIET_SECONDS = 1.5
 _STRING_INTRODUCERS = frozenset(b"]P_^X")
 KEY_BURST_SECONDS = 0.03
 # `hunt permissions wait`: never more than one read of a request per this many seconds (L1).
@@ -291,6 +293,7 @@ class Terminal:
         self._key_fd: int | None = None
         self._escape = "idle"  # the escape-sequence state machine of key()
         self._utf8_left = 0  # continuation bytes still due for a UTF-8 character
+        self._last_input = 0.0  # when _feed last saw a byte (a control string's quiet reset)
 
     def require(self, what: str) -> None:
         try:
@@ -378,6 +381,7 @@ class Terminal:
         ST (``ESC \\``) ends, so a terminal's reply or a pasted control string never decides. A
         byte of 0x80 or above decides nothing: it is part of a UTF-8 character (followed through
         its continuation bytes) or is ignored, except a 0x9B outside UTF-8, which is CSI."""
+        self._last_input = time.monotonic()
         lone = len(data) == 1 and self._escape == "idle" and not self._utf8_left
         for byte in data:
             state = self._escape
@@ -396,7 +400,9 @@ class Terminal:
                     lone = False
             elif state == "escape":
                 self._escape = ("csi" if byte == 0x5B else "ss3" if byte == 0x4F
-                                else "string" if byte in _STRING_INTRODUCERS else "idle")
+                                else "string" if byte in _STRING_INTRODUCERS
+                                else "escape" if byte == 0x1B  # ESC ESC: a new sequence starts
+                                else "idle")
             elif state == "csi":
                 if 0x40 <= byte <= 0x7E:
                     self._escape = "idle"
@@ -410,6 +416,9 @@ class Terminal:
             else:  # ss3: one byte names the key
                 self._escape = "idle"
         return lone
+
+    def _string_open(self) -> bool:
+        return self._escape in {"string", "string-escape"}
 
     def drain_keys(self, seconds: float) -> int:
         """Discard every key typed before now and during the next ``seconds`` (keypress mode
@@ -452,18 +461,44 @@ class Terminal:
         if fd is None:
             answer = self.stdin.readline()[:1]
             return answer if answer and answer in choices else ""
+        next_poll = time.monotonic() + max(0.05, interval)
+        told = False
         while True:
-            if not select.select([fd], [], [], max(0.05, interval))[0]:
-                if keep_waiting is not None and not keep_waiting():
-                    self.stdout.write("\n")
+            now = time.monotonic()
+            wait = max(0.0, next_poll - now)
+            if self._string_open():
+                # A control string only BEL or ST ends would otherwise hold every later key. A
+                # terminal sends its replies in one write, so after a quiet pause the string is
+                # over (or was never going to end) and keys count again.
+                quiet_left = self._last_input + KEY_STRING_QUIET_SECONDS - now
+                if quiet_left <= 0:
+                    self._escape = "idle"
+                    told = False
+                    self.say("\n(the terminal control string ended after a pause; keys count again)")
+                    self.stdout.write(prompt)
                     self.stdout.flush()
-                    return None
+                    continue
+                wait = min(wait, quiet_left)
+            if not select.select([fd], [], [], max(0.01, wait))[0]:
+                if time.monotonic() >= next_poll:
+                    next_poll = time.monotonic() + max(0.05, interval)
+                    if keep_waiting is not None and not keep_waiting():
+                        self.stdout.write("\n")
+                        self.stdout.flush()
+                        return None
                 continue
             first = os.read(fd, 1)
             if not first:
                 raise ApprovalError("the terminal closed; nothing was decided")
             data = self._burst(fd, first)
-            if not self._feed(data):
+            was_open = self._string_open()
+            lone = self._feed(data)
+            if (was_open or self._string_open()) and not told:
+                told = True
+                self.say("\n(input ignored: a terminal control string is open)")
+                self.stdout.write(prompt)
+                self.stdout.flush()
+            if not lone:
                 continue  # an escape sequence (arrow, function or Alt key), a part of one, or a paste
             answer = chr(data[0])
             if answer in choices:  # exact: no case folding, so an uppercase letter never decides
