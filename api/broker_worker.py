@@ -614,6 +614,8 @@ async def _execute_broker_action_plan(
         cancelled=lambda: _scan_cancel_requested(scan_id),
         private_inputs=private_inputs,
     )
+    # No ``authority`` here: a fleet node has no database. The control plane re-checks the
+    # target's authorization when it leases each action (``_revalidate_broker_action_authority``).
     executor = ReceiptScanActionExecutor(
         scan_id=scan_id,
         target_id=target.target_id,

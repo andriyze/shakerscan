@@ -240,7 +240,7 @@ async def revalidate_scan_action_authority(
             conn, target_id=target_id, scope_target_id=scope_target,
             approval_receipt_id=_value(approval_receipt, "id"),
         )
-    return revalidate_action_authority(
+    decision = revalidate_action_authority(
         asset_authority_validated=asset_authority_validated,
         action=action,
         target_binding=target_binding,
@@ -250,3 +250,40 @@ async def revalidate_scan_action_authority(
         approval_receipt_id=approval_receipt_id,
         now=now,
     )
+    if (
+        decision is ActionAuthorityDecision.ALLOWED
+        and _standing_authorization(approval_receipt)
+        and target_id and (not scope_target or scope_target == target_id)
+        and not await _standing_receipt_still_current(conn, target_id, approval_receipt)
+    ):
+        # The receipt row alone is not the target's authorization: a revoke or a change that
+        # did not reach this row (a host change, a blocked scope, a revoked alias source) must
+        # stop the work exactly as it stops a new submission. An inherited receipt (target and
+        # scope differ) is already resolved afresh by standing_authorization_matches_target.
+        return ActionAuthorityDecision.REJECTED_REVOKED
+    return decision
+
+
+async def _standing_receipt_still_current(conn: Any, target_id: str, approval_receipt: Any) -> bool:
+    try:
+        from ..target_authorization import standing_authorization_is_current
+    except (ImportError, ModuleNotFoundError):
+        from target_authorization import standing_authorization_is_current
+    if not await standing_authorization_is_current(conn, target_id, _value(approval_receipt, "id")):
+        return False
+    context = _value(approval_receipt, "action_context", {}) or {}
+    if isinstance(context, str):
+        try:
+            context = json.loads(context)
+        except json.JSONDecodeError:
+            return False
+    source = str(context.get("derived_from_approval_receipt_id") or "") if isinstance(context, Mapping) else ""
+    if not source:
+        return True
+    # A www/apex alias receipt lives only as long as the authorization it was derived from.
+    import uuid
+    try:
+        source_id = uuid.UUID(source)
+    except ValueError:
+        return False
+    return await conn.fetchval("SELECT status FROM approval_receipts WHERE id=$1", source_id) == "active"

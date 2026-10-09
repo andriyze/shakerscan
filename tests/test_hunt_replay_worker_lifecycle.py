@@ -123,6 +123,15 @@ class Connection(AdmissionStore):
         self.store = Store()
 
     async def fetch(self, query, *args):
+        if "JOIN scope_receipts s ON s.id = a.scope_receipt_id" in query:
+            # The target's current standing authorization (target_authorization), which the
+            # dispatch re-check reads beside the receipt row: this fixture's target stands
+            # behind the receipt fetchrow returns.
+            return [{"id": uuid.UUID(int=6), "scope_receipt_id": "scope", "approved_by": "operator",
+                     "action_name": "target.authorization", "risk_tier": "active", "expires_at": None,
+                     "status": "active", "confirmations": ["confirm_authorized"], "scope_id": "scope",
+                     "scope_allowed_hosts": ["fixture.test"], "scope_normalized": {"host": "fixture.test"},
+                     "scope_verdict": "allowed"}] if args[3] in (None, uuid.UUID(int=6)) else []
         assert "FROM request_collection_requests" in query
         return [{"request_id": self.request_id, "ordinal": 0, "folder": "", "name": "fixture",
             "method": self.method, "redacted_url": self.collection["allowed_origins"][0] + "/probe",
