@@ -97,6 +97,9 @@ _MIN_KNOWN_VALUE_CHARS = 3
 _MIN_EDGE_FRAGMENT_CHARS = 4
 # A value found (in context, or sealed earlier) rather than sent: shorter ones match ordinary text.
 _MIN_FOUND_VALUE_CHARS = 6
+# A short found value must stand alone to match (``admin`` is also a word and a path); a longer
+# one matches anywhere, inside longer strings too (``aHunter2pass``, ``Hunter2pass9``).
+_WHOLE_TOKEN_BELOW_CHARS = 10
 _MAX_EDGE_VALUE_CHARS = 512
 
 
@@ -127,6 +130,9 @@ class WithheldValues:
         # window far past its CREATE TABLE still knows which column holds the password.
         self.sql_tables: dict[str, dict[str, list[str]]] = {}
         self.sql_path: str | None = None
+        # Context bytes read for masking: this action's, and the Hunt's so far (a budget).
+        self.context_bytes = 0
+        self.context_bytes_used = 0
 
     def bind_known(self, values: Any, *, found: bool = False) -> None:
         """Values every echo of which is withheld, in any encoding. Values this action *sends*
@@ -358,7 +364,7 @@ class KnownValueScrubber:
         for start, end, value in _scan(lowered, self._forms):
             if start < cursor:
                 continue
-            if self.whole_tokens and (
+            if self.whole_tokens and len(value) < _WHOLE_TOKEN_BELOW_CHARS and (
                 (start and lowered[start - 1].isalnum()) or (end < len(text) and lowered[end].isalnum())
             ):
                 continue
@@ -1076,13 +1082,16 @@ _URL_PARAM_RE = re.compile(r"([?&#;])([^=&#\s]{1,100})=([^&#\s]{0,2048})")
 
 # Values of those names that are plainly not credentials: ``?key=blue``, ``?reset=1``,
 # ``?code=SKU123`` (a product code), ``?key=user_settings`` (an enum).
-_URL_ENUM_RE = re.compile(r"^(?:[a-z]+(?:[_\-][a-z]+){0,3}|[A-Z]{2,8}[_\-]?\d{1,8}|[A-Z]{2,8}(?:[_\-][A-Z0-9]{1,8}){1,3})$")
+_URL_LOWER_ENUM_RE = re.compile(r"^[a-z]{1,24}(?:[_\-][a-z]{1,24}){0,3}$")
 
 
 def _plain_url_value(value: str) -> bool:
+    """For a code/token/reset/key-like parameter only a lowercase word enum, a boolean word or a
+    short number (``?reset=1``) is plainly not a credential. ``?code=482193``, ``?token=ABCD-1234``
+    and an upper-case code (``SKU123``, ``EXPIRED``) are withheld as references."""
     return bool(
-        len(value) < 6 or value.isdigit() or value.lower() in _PLAIN_WORDS
-        or _URL_ENUM_RE.match(value)
+        value.lower() in _PLAIN_WORDS or (value.isdigit() and len(value) <= 3)
+        or _URL_LOWER_ENUM_RE.match(value)
     )
 
 
@@ -1413,11 +1422,15 @@ _PLAIN_WORDS = frozenset({"true", "false", "yes", "no", "on", "off", "null", "no
 
 
 def plainly_not_secret(value: str) -> bool:
-    """Values a fail-closed row keeps: short, numeric, a date, an email, a UUID or a digest."""
+    """Values a fail-closed row keeps: short, numeric, a date, an email or a UUID. A 4-8 digit
+    string may be a PIN, an OTP or a recovery code, and 40/64 hex characters may be a key: with
+    the column unknown, those are withheld (as references) too."""
+    if value.isdigit() and 4 <= len(value) <= 8:
+        return False
     return bool(
         len(value) <= 3 or value.lower() in _PLAIN_WORDS or _NUMBER_LITERAL_RE.match(value)
         or _DATE_LITERAL_RE.match(value) or _EMAIL_LITERAL_RE.match(value)
-        or _UUID_RE.match(value) or _HEX_DIGEST_RE.match(value)
+        or _UUID_RE.match(value)
     )
 
 
@@ -1471,6 +1484,29 @@ def _sql_columns(text: str, position: int) -> tuple[list[str], int]:
     return columns, len(text)
 
 
+def _first_tuple_width(text: str, position: int) -> int | None:
+    """How many values the first row of a VALUES list holds (``None`` if it is cut off)."""
+    depth, width, seen = 0, 0, 0
+    for token in _SQL_TOKEN_RE.finditer(text, position):
+        value = token.group(0)
+        seen += 1
+        if seen > 4_096:
+            return None
+        if value == "(":
+            depth += 1
+            if depth == 1:
+                width = 1
+        elif value == ")":
+            depth -= 1
+            if depth == 0:
+                return width
+        elif value == "," and depth == 1:
+            width += 1
+        elif value == ";" and depth == 0:
+            return None
+    return None
+
+
 def _sql_rows(
     text: str, position: int, columns: list[str] | None, pieces: list[str], cursor: int,
 ) -> tuple[int, int]:
@@ -1507,38 +1543,115 @@ def _sql_rows(
     return len(text), cursor
 
 
+_COPY_ESCAPES = {"t": "\t", "n": "\n", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "\\": "\\"}
+_COPY_ESCAPE_RE = re.compile(r"\\(.)", re.DOTALL)
+# The table whose COPY block is open (its header seen, its ``\.`` not yet), per resource.
+OPEN_COPY_KEY = "\0copy_open"
+
+
+def copy_field_value(field: str) -> str | None:
+    """A COPY text-format field as the value it carries; ``\\N`` is NULL (``None``)."""
+    if field == "\\N":
+        return None
+    return _COPY_ESCAPE_RE.sub(lambda match: _COPY_ESCAPES.get(match.group(1), match.group(1)), field)
+
+
+def _copy_line(
+    text: str, line_start: int, line: str, columns: list[str] | None, pieces: list[str], cursor: int,
+    *, partial_head: bool = False,
+) -> int:
+    """Withhold the secret fields of one COPY row. ``partial_head``: the line was cut at its
+    start (a window), so its fields align to the columns' end and its first field is a tail."""
+    fields = line.split("\t")
+    if columns is not None and len(fields) != len(columns):
+        if partial_head and len(fields) < len(columns):
+            columns = columns[len(columns) - len(fields):]
+        elif len(fields) < len(columns):
+            columns = columns[:len(fields)]  # cut at the window's end
+        else:
+            columns = None  # contradicts the carried columns: fail closed
+    field_start = line_start
+    named = False
+    for index, field in enumerate(fields):
+        column = columns[index] if columns is not None and index < len(columns) else None
+        escaped = field.rstrip("\r")
+        raw = copy_field_value(escaped)
+        if raw is None or raw == "":
+            secret = named = False
+        elif partial_head and index == 0 and column is None:
+            secret, named = not _plain_fragment(raw) and _sql_secret_literal(raw, None, unknown=True), False
+        elif not named and _row_name_cell(raw, column, columns):
+            secret, named = False, True
+        else:
+            secret = (named and not _is_id_column(column)) or _sql_secret_literal(
+                raw, column, unknown=column is None)
+            named = False
+        if secret:
+            pieces.append(text[cursor:field_start])
+            pieces.append(_withhold(raw))
+            cursor = field_start + len(escaped)
+        field_start += len(field) + 1
+    return cursor
+
+
 def _copy_rows(
     text: str, position: int, columns: list[str] | None, pieces: list[str], cursor: int,
-) -> tuple[int, int]:
-    """Withhold the secret fields of pg_dump ``COPY ... FROM stdin;`` rows up to ``\\.``."""
+) -> tuple[int, int, bool]:
+    """Withhold the secret fields of pg_dump ``COPY ... FROM stdin;`` rows up to ``\\.``;
+    returns (end, cursor, whether the block ended in this text)."""
     line_start = text.find("\n", position)
     if line_start < 0:
-        return len(text), cursor
+        return len(text), cursor, False
     line_start += 1
     while line_start < len(text):
         line_end = text.find("\n", line_start)
         line_end = len(text) if line_end < 0 else line_end
         line = text[line_start:line_end]
         if line.rstrip("\r") == "\\.":
-            return line_end, cursor
-        field_start = line_start
-        named = False
-        for index, field in enumerate(line.split("\t")):
-            column = columns[index] if columns is not None and index < len(columns) else None
-            raw = field.rstrip("\r")
-            if not named and _row_name_cell(raw, column, columns):
-                secret, named = False, True
-            else:
-                secret = (named and not _is_id_column(column) and raw not in {"", "\\N"}) or _sql_secret_literal(
-                    raw, column, unknown=column is None)
-                named = False
-            if secret:
-                pieces.append(text[cursor:field_start])
-                pieces.append(_withhold(raw))
-                cursor = field_start + len(raw)
-            field_start += len(field) + 1
+            return line_end, cursor, True
+        cursor = _copy_line(text, line_start, line, columns, pieces, cursor)
         line_start = line_end + 1
-    return len(text), cursor
+    return len(text), cursor, False
+
+
+_COPY_RUN_LINES = 3
+
+
+def _mask_orphan_copy(
+    text: str, end: int, tables: dict[str, list[str]], pieces: list[str], cursor: int,
+) -> int:
+    """COPY rows before the first statement of a window: a run of lines with one tab count.
+
+    The open block's carried columns apply only when exactly that one block is open and its
+    column count matches; otherwise every field fails closed by its shape."""
+    lines: list[tuple[int, str]] = []
+    position = 0
+    while position < end:
+        line_end = text.find("\n", position, end)
+        line_end = end if line_end < 0 else line_end
+        lines.append((position, text[position:line_end]))
+        position = line_end + 1
+    counts: dict[int, int] = {}
+    for _start, line in lines[1:]:
+        tabs = line.count("\t")
+        if tabs:
+            counts[tabs] = counts.get(tabs, 0) + 1
+    if not counts:
+        return cursor
+    tabs, run = max(counts.items(), key=lambda item: item[1])
+    if run < _COPY_RUN_LINES and not any(line.rstrip("\r") == "\\." for _start, line in lines):
+        return cursor
+    open_tables = tables.get(OPEN_COPY_KEY) or []
+    carried = tables.get("copy:" + open_tables[0]) if len(open_tables) == 1 else None
+    columns = carried if carried is not None and len(carried) == tabs + 1 else None
+    for index, (line_start, line) in enumerate(lines):
+        if line.rstrip("\r") == "\\.":
+            tables.pop(OPEN_COPY_KEY, None)  # the block ended: what follows is not its rows
+            break
+        if "\t" not in line:
+            continue
+        cursor = _copy_line(text, line_start, line, columns, pieces, cursor, partial_head=index == 0)
+    return cursor
 
 
 # A window that starts inside a VALUES list: ``...'),(12,'bob','...');`` before any statement.
@@ -1566,6 +1679,12 @@ _PLAIN_FRAGMENT_RE = re.compile(
 )
 
 
+def _plain_fragment(value: str) -> bool:
+    """A cut tail that is plainly part of a date, time, number, host or email; a run of 4+
+    digits alone may be a PIN's tail and is not."""
+    return bool(_PLAIN_FRAGMENT_RE.match(value)) and not (value.isdigit() and len(value) >= 4)
+
+
 # What lies between two literals of one VALUES list: punctuation, numbers, NULL, hex blobs.
 _SQL_GAP_RE = re.compile(r"(?i)(?:[\s,();.+\-0-9]|null|true|false|_binary|0x[0-9a-f]+)*")
 
@@ -1591,7 +1710,7 @@ def _mask_orphan_rows(text: str, end: int, pieces: list[str], cursor: int) -> in
     start, literals = _orphan_literals(text, end)
     if start:
         tail = text[:start - 1]
-        if tail and not _PLAIN_FRAGMENT_RE.match(tail) and _sql_secret_literal(tail, None, unknown=True):
+        if tail and not _plain_fragment(tail) and _sql_secret_literal(tail, None, unknown=True):
             pieces.append(_withhold(tail))
             cursor = start - 1
     for literal in literals:
@@ -1621,6 +1740,8 @@ def mask_sql_values(text: str) -> str:
     position = 0
     first = _SQL_STATEMENT_RE.search(text)
     prefix_end = first.start() if first else len(text)
+    if prefix_end and (carried is not None or "\n\\.\n" in text or "COPY " in text[:prefix_end + 64]):
+        cursor = _mask_orphan_copy(text, prefix_end, tables, pieces, cursor)
     if prefix_end and _SQL_ORPHAN_ROWS_RE.search(text, 0, prefix_end) and (
         first or carried or _orphan_row_signals(text, prefix_end) >= 2
     ):
@@ -1646,12 +1767,23 @@ def mask_sql_values(text: str) -> str:
             if not _SQL_COPY_FROM_STDIN_RE.match(text, after):
                 position = after
                 continue
-            position, cursor = _copy_rows(text, after, columns, pieces, cursor)
+            if columns:
+                tables["copy:" + table] = columns
+            tables[OPEN_COPY_KEY] = [table]
+            position, cursor, ended = _copy_rows(text, after, columns, pieces, cursor)
+            if ended:
+                tables.pop(OPEN_COPY_KEY, None)
             continue
         values = _SQL_VALUES_RE.match(text, after)
         if values is None:
             position = after
             continue
+        width = _first_tuple_width(text, values.end())
+        if columns is not None and width is not None and width != len(columns):
+            # The rows contradict the remembered columns (another dump at this path, a changed
+            # table): forget them and fail closed.
+            tables.pop(table, None)
+            columns = None
         position, cursor = _sql_rows(text, values.end(), columns, pieces, cursor)
     if not pieces:
         return text
