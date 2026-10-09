@@ -310,6 +310,8 @@ def test_the_field_count_is_what_sqlmap_is_handed_after_leaf_deduplication():
 DRIFT: dict[str, float] = {}
 
 ENDPOINTS = {
+    "/s0": (13.1, 8), "/s1": (5.3, 4), "/s2": (8.0, 2), "/s3": (6.0, 3),
+    "/s4": (4.0, 1), "/s5": (10.0, 5), "/s6": (3.5, 2), "/s7": (7.0, 1),
     "/vuln": (5.3, 4),
     "/fast5": (0.08, 5),
     "/slow8": (8.0, 2),
@@ -332,6 +334,8 @@ class _Scan:
         self.found: set[tuple[str, str, str]] = set()
         # Tool wall the Scan spent outside these lanes (discovery, templates, exposure).
         self.earlier = earlier
+        # Fixture: tool wall the round's compile will need for first slices of new candidates.
+        self.pending_new_work = 0
         self.scan_id = str(uuid.uuid4())
         self.profile = {**BALANCED, "tool_wall_seconds": profile_wall}
         self.execution_plan = _plan(profile_wall)
@@ -522,6 +526,7 @@ class _Scan:
             stage_remaining_walls=stage_remaining_walls(observations),
             stage_remaining_requests=stage_remaining_walls(observations, key="remaining_requests"),
             stage_last_chance_walls=stage_last_chance_walls(observations),
+            reserved_for_new_work=self.pending_new_work,
         )
 
     def next_round(self, round_number):
@@ -1063,7 +1068,7 @@ def test_the_scans_last_wall_runs_a_unit_that_can_still_prove_an_injection(monke
         finally:
             ENDPOINTS["/vuln"] = (5.3, 4)
 
-    control, control_rounds = run(False)
+    control, _control_rounds = run(False)
     assert control.found == set() and control.residual()["tool_wall_seconds"] == 257
     monkeypatch.undo()
     scan, rounds = run(True)
@@ -1111,3 +1116,68 @@ def test_a_candidate_still_waiting_at_scan_end_says_what_it_did_not_reach(monkey
     chat = scan.outcomes()[scan.candidate("/chat")]
     assert chat["reason"] == "scan_budget_exhausted"
     assert chat["refuted_techniques"] == [] and chat["unfinished_techniques"] == ["U", "B", "E", "T"]
+
+
+def test_unsliced_candidates_get_a_first_slice_before_probes_and_lost_causes(monkeypatch):
+    """Follow-up 4: eight slow candidates on Balanced. Extensions are planned before the
+    round's compile adds first slices, so probes of candidates that will most likely be
+    inconclusive took the residual and the later candidates were never tested at all."""
+    paths = tuple(f"/s{index}" for index in range(8))
+
+    def run(reserve):
+        scan = _Scan(monkeypatch, paths, earlier=540)
+        queue = list(paths)
+        hold = {"http_requests": 1_200, "state_changing_requests": 600, "tool_wall_seconds": 420}
+        sliced = []
+
+        def first_slices():
+            # Fixture: the round's compile, which adds up to two first slices from what the
+            # extensions left (``compile_continuation_round``).
+            added = []
+            while queue and len(added) < 2 and (
+                scan.residual()["tool_wall_seconds"] - 420 * (len(added) + 1) > 0
+            ):
+                path = queue.pop(0)
+                action_id = f"verify.sqli.{len(sliced):03d}.r01"
+                scan.add(action_id, path=path, budget=hold)
+                sliced.append(path)
+                added.append(action_id)
+            return added
+
+        scan.run(set(first_slices()))
+        for round_number in range(2, 10):
+            scan.pending_new_work = len(queue) * 420 if reserve else 0
+            extensions = [action_id for action_id, _ in scan.next_round(round_number)]
+            fresh = first_slices()
+            if not extensions and not fresh:
+                break
+            scan.run(set(extensions) | set(fresh))
+        return sliced
+
+    # Control: without the reserve /s6 (3.5 s per request) and /s7 never got a first slice.
+    assert run(False) == ["/s0", "/s1", "/s2", "/s3", "/s4", "/s5"]
+    assert run(True) == ["/s0", "/s1", "/s2", "/s3", "/s4", "/s5", "/s6", "/s7"]
+
+
+def test_the_new_work_reserve_counts_candidates_beyond_the_verifier_offsets():
+    from scan.continuation_rounds import new_work_reserve
+
+    actions = tuple(
+        dataclasses.replace(
+            _action(f"{lane}.r02", capability, ordinal, capability_args={
+                "slice": {"start": 0, "count": 2}, "continuation_work_key": lane,
+            }),
+            action_digest=None,
+        )
+        for ordinal, (lane, capability) in enumerate((
+            ("verify.sqli", "sqli.verify_batch"), ("verify.xss", "xss.verify_batch"),
+        ))
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.UUID(int=2)), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=actions,
+    )
+    # Five candidates, two of them sliced in each lane: three SQLi body slices' attempt floor
+    # (420 s each) and three XSS ones' (120 s each).
+    assert new_work_reserve(plan, SimpleNamespace(entries=[{}] * 5)) == 3 * 420 + 3 * 120
+    assert new_work_reserve(plan, SimpleNamespace(entries=[{}] * 2)) == 0
