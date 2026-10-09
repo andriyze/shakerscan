@@ -754,7 +754,7 @@ async def execute_bound_http_request(
                 for name, value in response.headers.items()
                 if str(name).lower() in {
                     "authorization", "content-type", "content-length",
-                    "content-range", "accept-ranges", "location",
+                    "content-range", "accept-ranges", "location", "content-disposition",
                     *private_response_headers,
                 }
             },

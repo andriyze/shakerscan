@@ -130,6 +130,9 @@ class WithheldValues:
         # window far past its CREATE TABLE still knows which column holds the password.
         self.sql_tables: dict[str, dict[str, list[str]]] = {}
         self.sql_path: str | None = None
+        # The resource is named like a database dump (``.sql``, ``*backup*``): tab-separated rows
+        # in it are COPY rows even when no header is in view.
+        self.sql_dump_like = False
         # Context bytes read for masking: this action's, and the Hunt's so far (a budget).
         self.context_bytes = 0
         self.context_bytes_used = 0
@@ -1082,7 +1085,9 @@ _URL_PARAM_RE = re.compile(r"([?&#;])([^=&#\s]{1,100})=([^&#\s]{0,2048})")
 
 # Values of those names that are plainly not credentials: ``?key=blue``, ``?reset=1``,
 # ``?code=SKU123`` (a product code), ``?key=user_settings`` (an enum).
-_URL_LOWER_ENUM_RE = re.compile(r"^[a-z]{1,24}(?:[_\-][a-z]{1,24}){0,3}$")
+# Lowercase words of at most 12 letters (``blue``, ``user_settings``): a longer unbroken run of
+# letters (``qwxzkjhgfdsplmnbvcxz``) can be a token and is withheld.
+_URL_LOWER_ENUM_RE = re.compile(r"^[a-z]{1,12}(?:[_\-][a-z]{1,12}){0,3}$")
 
 
 def _plain_url_value(value: str) -> bool:
@@ -1617,6 +1622,26 @@ def _copy_rows(
 _COPY_RUN_LINES = 3
 
 
+_COPY_HEADER_RE = re.compile(r"(?i)\bCOPY[ \t]+[\w.\"]{1,200}[ \t]*(?:\([^)]{0,4096}\))?[ \t]*FROM[ \t]+stdin")
+_COPY_END_RE = re.compile(r"(?m)^\\\.\r?$")
+
+
+def _copy_evidence(text: str, end: int, tables: dict[str, list[str]], tabs: int) -> bool:
+    """Whether tab-separated lines are a PostgreSQL dump's COPY rows, not any tab-separated text:
+    a COPY block open in this resource's carried knowledge, a dump-like resource, a ``\\.`` or a
+    ``COPY ... FROM stdin`` header in view, or a learned COPY table as wide as the lines."""
+    collector = _COLLECTOR.get()
+    if tables.get(OPEN_COPY_KEY):
+        return True
+    if collector is not None and collector.sql_dump_like:
+        return True
+    if _COPY_END_RE.search(text) or _COPY_HEADER_RE.search(text):
+        return True
+    return any(
+        key.startswith("copy:") and len(columns) == tabs + 1 for key, columns in tables.items()
+    )
+
+
 def _mask_orphan_copy(
     text: str, end: int, tables: dict[str, list[str]], pieces: list[str], cursor: int,
 ) -> int:
@@ -1641,6 +1666,8 @@ def _mask_orphan_copy(
     tabs, run = max(counts.items(), key=lambda item: item[1])
     if run < _COPY_RUN_LINES and not any(line.rstrip("\r") == "\\." for _start, line in lines):
         return cursor
+    if not _copy_evidence(text, end, tables, tabs):
+        return cursor  # a TSV export, a log or a Makefile: tab-separated, but not a dump
     open_tables = tables.get(OPEN_COPY_KEY) or []
     carried = tables.get("copy:" + open_tables[0]) if len(open_tables) == 1 else None
     columns = carried if carried is not None and len(carried) == tabs + 1 else None
@@ -1740,7 +1767,7 @@ def mask_sql_values(text: str) -> str:
     position = 0
     first = _SQL_STATEMENT_RE.search(text)
     prefix_end = first.start() if first else len(text)
-    if prefix_end and (carried is not None or "\n\\.\n" in text or "COPY " in text[:prefix_end + 64]):
+    if prefix_end and "\t" in text[:prefix_end]:
         cursor = _mask_orphan_copy(text, prefix_end, tables, pieces, cursor)
     if prefix_end and _SQL_ORPHAN_ROWS_RE.search(text, 0, prefix_end) and (
         first or carried or _orphan_row_signals(text, prefix_end) >= 2
