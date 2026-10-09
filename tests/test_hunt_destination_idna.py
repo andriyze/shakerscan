@@ -69,3 +69,14 @@ def test_a_grant_matches_every_spelling(origin):
 def test_an_unencodable_host_is_an_invalid_origin():
     refusal = destination_refusal(TARGET, "https://" + "é" * 70 + ".example", {}, principal_slot="anonymous")
     assert refusal.reason_code == "scope_origin_invalid"
+
+
+@pytest.mark.parametrize("origin", ["https://evil.example:0", "http://evil.example:0"])
+def test_port_zero_is_not_the_default_port(origin):
+    """``destination_refusal`` refuses port 0; the grant match read it as 443 (or 80)."""
+    policy = {"granted_destinations": [
+        {"scheme": scheme, "host": "evil.example", "port": port, "addresses": ["93.184.216.34"]}
+        for scheme, port in (("https", 443), ("http", 80))
+    ]}
+    assert granted_destination(policy, origin) is None
+    assert destination_refusal(TARGET, origin, {}, principal_slot="anonymous").reason_code == "scope_origin_invalid"
