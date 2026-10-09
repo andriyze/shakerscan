@@ -1644,8 +1644,9 @@ concurrency-limited with per-tool timeouts and a global deadline.
   `64:ff9b:1::/48`), 6to4 and Teredo. A NAT64 gateway on a network-specific prefix cannot be
   recognised from the address, so a deployment that runs one lists its RFC 6052 prefixes in
   `SHAKERSCAN_NAT64_PREFIXES` (comma-separated, for example `2001:db8:64::/96`; prefix lengths
-  32, 40, 48, 56, 64 or 96; empty by default; set on the API and the workers). An invalid entry
-  makes destination checks fail closed with an error naming the setting.
+  32, 40, 48, 56, 64 or 96; empty by default; set on the API and the workers). The API and the
+  workers parse it at startup and refuse to start on an invalid entry, with an error naming the
+  setting; `/health` reports it under `deployment_policy.nat64_prefixes`.
 - **Coverage honesty**: an endpoint is only counted `tested` when scanner telemetry proves it was
   attempted/completed; timeouts/partials never inflate coverage.
 - **Local binding**: laptop mode binds to `127.0.0.1`; remote mode binds to a Tailscale IP. Exposing

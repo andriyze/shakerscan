@@ -86,6 +86,20 @@ def nat64_prefixes(raw: str | None = None) -> tuple[ipaddress.IPv6Network, ...]:
     )
 
 
+def validate_nat64_prefixes_setting(raw: str | None = None) -> tuple[ipaddress.IPv6Network, ...]:
+    """Parse ``SHAKERSCAN_NAT64_PREFIXES`` once, for process startup and readiness.
+
+    An invalid value used to surface only when an IPv6 address was first classified, as an
+    uncaught ``ValueError`` (a 500 from the API). The API and the workers call this before they
+    serve or claim work, so a malformed setting stops the process with an error naming it.
+    """
+    value = os.environ.get(NAT64_PREFIXES_ENV, "") if raw is None else raw
+    try:
+        return _parse_nat64_prefixes(value)
+    except ValueError as exc:
+        raise ValueError(f"{NAT64_PREFIXES_ENV} is invalid: {exc}") from None
+
+
 def embedded_ipv4_addresses(address: IPAddress) -> tuple[ipaddress.IPv4Address, ...]:
     """Every IPv4 address an IPv6 address carries and a translator or tunnel would reach.
 
@@ -149,5 +163,5 @@ def private_class(address: IPAddress) -> bool:
 __all__ = [
     "CLOUD_SERVICE_ADDRESSES", "IPAddress", "NAT64_PREFIXES_ENV", "SHARED_ADDRESS_SPACE",
     "cloud_service_address", "embedded_ipv4_addresses", "judged_addresses", "nat64_prefixes",
-    "private_class", "shared_address_space", "without_scope",
+    "private_class", "shared_address_space", "validate_nat64_prefixes_setting", "without_scope",
 ]
