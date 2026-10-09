@@ -366,17 +366,26 @@ def test_identifiers_in_sql_rows_stay_visible(body):
 def test_sql_rows_with_unknown_columns_fail_closed():
     # No column list and no CREATE TABLE in view: a string can be a password, so every literal is
     # withheld (as a reference) except shapes that are plainly not secrets.
+    # A 4-8 digit string (a PIN, an OTP) and 40/64 hex characters (possibly a key) are withheld
+    # too while the column is unknown; with a known non-secret column they stay visible.
     uuid_value = "9b2b7c1e-1111-4222-8333-444455556666"
     sha = "3f786850e387550fdab836ed7e6dc881de23001b"
+    key64 = "9b2c" * 16
     body = (
         "INSERT INTO t VALUES (17,'ak_9f3c9e1a7b2d84c60e5a9f1b3d7c2e8a4','Summer2023!','bob@fixture.test',"
-        f"'2024-01-03 09:12:44','{uuid_value}','{sha}','yes',3.5,NULL,'abc');"
+        f"'2024-01-03 09:12:44','{uuid_value}','{sha}','{key64}','482193','12345678','yes',3.5,NULL,'abc','12');"
     )
     masked, collector = _collect(body)
-    for secret in ("ak_9f3c9e1a7b2d84c60e5a9f1b3d7c2e8a4", "Summer2023!"):
+    for secret in ("ak_9f3c9e1a7b2d84c60e5a9f1b3d7c2e8a4", "Summer2023!", sha, key64, "482193", "12345678"):
         assert secret not in masked and secret in collector.values
-    for visible in ("17", "'bob@fixture.test'", "'2024-01-03 09:12:44'", uuid_value, sha, "'yes'", "3.5", "NULL", "'abc'"):
+    for visible in ("17", "'bob@fixture.test'", "'2024-01-03 09:12:44'", uuid_value, "'yes'", "3.5", "NULL", "'abc'", "'12'"):
         assert visible in masked
+
+
+def test_known_non_secret_columns_keep_digests_visible():
+    sha = "3f786850e387550fdab836ed7e6dc881de23001b"
+    body = f"INSERT INTO commits (id, commit_sha, build_number) VALUES (1,'{sha}','482193');"
+    assert mask_body_text(body) == body
 
 
 # --- Freedom: JWTs are usable references -----------------------------------------------------
@@ -682,7 +691,9 @@ def test_windows_far_past_create_table_never_leak(monkeypatch, encryption_key, s
         assert "Pass!q" not in text, (style, head_first, offset)
         sample = result["observation"]["text_sample"]
         assert "2024-02-19 14:07:31" in sample and "@fixture.test" in sample  # dates and emails stay
-        assert seen[-1][0] == max(0, offset - artifact_capability.SQL_CONTEXT_BYTES)
+        # 1 MiB of context while the columns are unknown; 64 KB once an earlier window taught them.
+        context = artifact_capability.CONTEXT_BYTES if head_first else artifact_capability.SQL_CONTEXT_BYTES
+        assert seen[-1][0] == max(0, offset - context)
 
 
 def test_carried_columns_reach_windows_past_the_context(monkeypatch, encryption_key):
@@ -717,20 +728,28 @@ def test_short_context_values_do_not_mask_words_or_paths(monkeypatch):
     assert "welcome admin, admin panel at /admin and /administrator" in result["observation"]["text_sample"]
 
 
-def test_found_values_match_whole_tokens_only():
+def test_short_found_values_match_whole_tokens_long_ones_anywhere():
     collector = masking.WithheldValues(ACTION)
-    collector.bind_known(["Summer2023", "abc"], found=True)
+    collector.bind_known(["admin1", "abc", "Hunter2pass"], found=True)
     with masking.collecting_withheld_values(collector):
-        masked = mask_body_text("pw Summer2023 and Summer20234 and xSummer2023 /Summer2023/ abc")
-    assert masked == "pw [withheld:1] and Summer20234 and xSummer2023 /[withheld:1]/ abc"
+        masked = mask_body_text(
+            "pw admin1 and admin12 and xadmin1 /admin1/ abc; login Hunter2pass, aHunter2pass, Hunter2pass9")
+    assert masked == (
+        "pw [withheld:1] and admin12 and xadmin1 /[withheld:1]/ abc; "
+        "login [withheld:2], a[withheld:2], [withheld:2]9")
 
 
 @pytest.mark.parametrize(("url", "withheld"), [
     ("/p?key=blue&sort=asc", None),
     ("/r?reset=1", None),
-    ("/shop?code=SKU123&lang=en", None),
     ("/settings?key=user_settings", None),
     ("/o?token=true", None),
+    # Under a code/token/key parameter only lowercase-word enums stay: an upper-case or digit
+    # code is a reference (consistently, a product SKU under ``code`` too).
+    ("/shop?code=SKU123&lang=en", "SKU123"),
+    ("/r?token=ABCD-1234", "ABCD-1234"),
+    ("/cb?code=482193", "482193"),
+    ("/r?token=EXPIRED", "EXPIRED"),
     ("/cb?code=AuthCode998877&state=xyz", "AuthCode998877"),
     ("/s?sig=abc123def456&expires=1", "abc123def456"),
     ("/r?reset=Zq7xLm2Pq9Rs", "Zq7xLm2Pq9Rs"),
@@ -770,3 +789,147 @@ def test_seeding_is_capped_by_characters_most_recent_first(encryption_key):
     with masking.collecting_withheld_values(collector):
         mask_body_text(("lorem ipsum dolor " * 2_000)[:32_768])
     assert time.perf_counter() - started < 2.0
+
+
+# --- Round 4 blocker: PostgreSQL COPY rows far from their header -----------------------------
+
+def _copy_dump(rows: int = 60_000, *, tables: int = 1) -> bytes:
+    parts = []
+    for table in range(tables):
+        parts.append(f"COPY public.users{table} (id, email, password, created_at) FROM stdin;\n")
+        parts.extend(
+            f"{i}\tu{i}@fixture.test\tFx{i}Pass\\\\t!q{table}\t2024-02-19 14:07:31\n" for i in range(rows))
+        parts.append("\\.\n\n")
+    return "".join(parts).encode()
+
+
+@pytest.mark.parametrize("path", ["/backup.sql", "/download?id=7"])
+@pytest.mark.parametrize("head_first", [False, True])
+def test_copy_rows_far_from_their_header_never_leak(monkeypatch, encryption_key, path, head_first):
+    document = _copy_dump()
+    assert len(document) > 3_000_000
+    conn = _KnowledgeRows()
+    if head_first:
+        _hunt_inspect_path(monkeypatch, document, path, 0, conn)
+    for offset in (200_000, 1_300_000, 3_000_000):
+        result, _seen = _hunt_inspect_path(monkeypatch, document, path, offset, conn)
+        text = json.dumps(result)
+        assert "Pass\\\\\\\\t!q" not in text and "Pass\\\\t!q" not in text, (path, head_first, offset)
+        sample = result["observation"]["text_sample"]
+        assert "@fixture.test" in sample and "2024-02-19 14:07:31" in sample
+
+
+def test_copy_values_are_sealed_unescaped():
+    # COPY text format: \t is a tab, \\ a backslash, \N a NULL.
+    field = "Fx" + "\\t" + "A" + "\\\\" + "B9"  # as written in the dump
+    body = f"COPY public.users (id, password) FROM stdin;\n1\t{field}\n2\t\\N\n\\.\n"
+    masked, collector = _collect(body)
+    assert collector.values == ["Fx\tA\\B9"]  # tab, backslash: the value the server holds
+    assert field not in masked and "2\t\\N" in masked
+
+
+def test_multiple_copy_blocks_use_only_the_open_one(monkeypatch, encryption_key):
+    document = _copy_dump(rows=30_000, tables=2)
+    conn = _KnowledgeRows()
+    _hunt_inspect_path(monkeypatch, document, "/backup.sql", 0, conn)  # learns users0 only
+    for offset in (len(document) // 2 + 500_000, len(document) - 50_000):  # inside users1
+        result, _seen = _hunt_inspect_path(monkeypatch, document, "/backup.sql", offset, conn)
+        assert "!q1" not in json.dumps(result).replace("!q1\\\\t", "")
+
+
+def _hunt_inspect_path(monkeypatch, document, path, offset, conn):
+    from runtime.hunt_http_exchange import sealed_hunt_knowledge, withholding_operation
+
+    action = str(uuid.uuid4())
+    seen: list = []
+    _range_server(monkeypatch, document, seen)
+
+    async def operation():
+        return await artifact_capability.inspect_target_artifact(
+            "https://honey.fixture.test", {"path": path, "offset": offset, "max_bytes": 16_384}, target=TARGET)
+
+    async def seed():
+        return await sealed_hunt_knowledge(conn, run_id=HUNT, target=TARGET)
+
+    wrapped, collector = withholding_operation("artifact.inspect", action, operation, seed)
+    result = asyncio.run(wrapped())
+    conn.rows[action] = {"status": "completed", "private_http_result": None}
+    asyncio.run(persist_withheld_values(
+        conn, run=RUN, action_id=action, target=TARGET, values=collector, status="success",
+        observations=[result]))
+    return result, seen
+
+
+# --- Round 4 should-fix: column knowledge keyed by path and query ------------------------------
+
+def test_column_knowledge_is_per_query_and_yields_to_contradicting_rows(monkeypatch, encryption_key):
+    head_a = "CREATE TABLE `users` (\n `id` int,\n `email` varchar(100),\n `password` varchar(255)\n);\n"
+    head_b = "CREATE TABLE `users` (\n `id` int,\n `password` varchar(255),\n `email` varchar(100)\n);\n"
+    dump_a = (head_a + "INSERT INTO `users` VALUES (1,'a@fixture.test','FxDumpA!q');\n").encode()
+    dump_b = (head_b + "".join(f"INSERT INTO `users` VALUES ({i},'Fx{i}DumpB!q','u{i}@fixture.test');\n"
+                               for i in range(60_000))).encode()
+    conn = _KnowledgeRows()
+    _hunt_inspect_path(monkeypatch, dump_a, "/download?id=1", 0, conn)
+    for offset in (1_500_000, 2_500_000):
+        result, _seen = _hunt_inspect_path(monkeypatch, dump_b, "/download?id=2", offset, conn)
+        assert "DumpB!q" not in json.dumps(result)
+    # The same key with a different column count: the carried columns are dropped, rows fail closed.
+    collector = masking.WithheldValues(ACTION)
+    collector.sql_path = "/x"
+    collector.sql_tables = {"/x": {"users": ["id", "email", "password"]}}
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text("INSERT INTO `users` VALUES (1,'FxWide!q','u@fixture.test','x','y');")
+    assert "FxWide!q" not in masked and "users" not in collector.sql_tables["/x"]
+
+
+# --- Round 4 should-fix: context cost -------------------------------------------------------
+
+def test_context_is_large_only_while_columns_are_unknown_and_within_budget(monkeypatch, encryption_key):
+    document = _big_dump("per_row_inserts")
+    conn = _KnowledgeRows()
+    _result, seen = _hunt_inspect_path(monkeypatch, document, "/backup.sql", 1_100_000, conn)
+    assert seen[-1][0] == 1_100_000 - artifact_capability.SQL_CONTEXT_BYTES  # columns unknown: 1 MiB
+    _hunt_inspect_path(monkeypatch, document, "/backup.sql", 0, conn)  # the head teaches the columns
+    _result, seen = _hunt_inspect_path(monkeypatch, document, "/backup.sql", 1_200_000, conn)
+    assert seen[-1][0] == 1_200_000 - artifact_capability.CONTEXT_BYTES
+    # Past the Hunt's context budget, even an unknown dump gets the small context.
+    monkeypatch.setattr(artifact_capability, "HUNT_CONTEXT_BUDGET_BYTES", artifact_capability.SQL_CONTEXT_BYTES)
+    result, seen = _hunt_inspect_path(monkeypatch, document, "/other.sql", 1_100_000, conn)
+    assert seen[-1][0] == 1_100_000 - artifact_capability.CONTEXT_BYTES
+    assert "Pass!q" not in json.dumps(result)  # fail-closed rows still cover it
+
+
+def test_the_archive_keeps_the_window_not_the_context(monkeypatch):
+    document = _big_dump("per_row_inserts")
+    recorded: list = []
+    seen: list = []
+
+    async def fake_execute(_target_url, args, **kwargs):
+        start, end = (int(part) for part in args["headers"]["Range"].split("=")[1].split("-"))
+        seen.append((start, end))
+        chunk = document[start:end + 1]
+        kwargs["transaction_recorder"]({
+            "status_code": 206, "response_body": chunk, "response_body_bytes": len(chunk),
+            "response_body_sha256": hashlib.sha256(chunk).hexdigest(), "fidelity": "wire_request",
+        })
+        kwargs["private_response_sink"](WorkerPrivateHTTPResponse(
+            status_code=206, final_url="https://honey.fixture.test/backup.sql", _body=chunk,
+            _headers={"content-type": "text/plain",
+                      "content-range": f"bytes {start}-{start + len(chunk) - 1}/{len(document)}"},
+            _cookies={}))
+        return {"ok": True, "response": {"status": 206}}
+
+    monkeypatch.setattr(artifact_capability, "execute_bound_http_request", fake_execute)
+    collector = masking.WithheldValues(ACTION)
+
+    async def run():
+        with masking.collecting_withheld_values(collector):
+            return await artifact_capability.inspect_target_artifact(
+                "https://honey.fixture.test", {"path": "/backup.sql", "offset": 1_100_000, "max_bytes": 16_384},
+                target=TARGET, transaction_recorder=recorded.append)
+
+    asyncio.run(run())
+    archived = recorded[0]
+    assert archived["response_body"] == document[1_100_000:1_100_000 + 16_384]
+    assert archived["response_body_bytes"] == 16_384 and archived["fidelity"] == "wire_request_window"
+    assert seen[0][0] == 1_100_000 - artifact_capability.SQL_CONTEXT_BYTES
