@@ -37,8 +37,8 @@ except ImportError:  # pragma: no cover - minimal host test environment
 
 try:
     from .address_classes import (
-        CLOUD_SERVICE_ADDRESSES, LIMITED_BROADCAST, embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
-        without_scope,
+        CLOUD_SERVICE_ADDRESSES, LIMITED_BROADCAST, embedded_ipv4_addresses, judged_addresses,
+        private_class, shared_address_space, without_scope,
     )
     from .common import run
     from .device_evidence import build_device_evidence_graph
@@ -55,8 +55,8 @@ try:
     from .ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
 except ImportError:  # pragma: no cover - flat scanner runtime
     from address_classes import (
-        CLOUD_SERVICE_ADDRESSES, LIMITED_BROADCAST, embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
-        without_scope,
+        CLOUD_SERVICE_ADDRESSES, LIMITED_BROADCAST, embedded_ipv4_addresses, judged_addresses,
+        private_class, shared_address_space, without_scope,
     )
     from common import run
     from device_evidence import build_device_evidence_graph

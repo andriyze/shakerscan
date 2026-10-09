@@ -477,7 +477,12 @@ critical checks (`critical_checks.py`) for default creds, directory listing, and
 Opt-in infrastructure families also cover SSH authentication posture; SMTP STARTTLS, banner, MX, and
 safe open-relay checks; VPN, RDP/VNC, IoT, industrial-protocol, and database-service exposure; IP/ASN
 and domain intelligence; third-party vendor resources; webhook signature bypass; package-manager and
-backup artifacts; container registries; and Kubernetes/Terraform/cloud-storage exposure.
+backup artifacts; container registries; and Kubernetes/Terraform/cloud-storage exposure. The SMTP
+check contacts each MX host (or the target itself when it has none) only after resolving it once
+and judging every address under the scan's destination policy (the target's environment and
+`SHAKERSCAN_PRIVATE_NETWORK_TARGETS`, with the web scope guard's address classes); every probe
+connects to that one admitted address. A refused or single-label MX host (a Docker service name)
+is listed in `skipped_hosts` with its reason and never contacted.
 
 OpenAPI schemas can be supplied explicitly or discovered and exercised through Schemathesis. The
 scanner records schema/test errors as evidence rather than treating process exit as proof.

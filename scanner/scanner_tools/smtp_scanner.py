@@ -13,9 +13,20 @@ Uses free tools only: openssl, nmap, dig
 
 import asyncio
 import hashlib
+import ipaddress
+import json
+import os
 import re
+import socket
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+try:
+    from .address_classes import LAB_ENVIRONMENTS, destination_block_reason
+except ImportError:  # pragma: no cover - flat scanner runtime
+    from address_classes import LAB_ENVIRONMENTS, destination_block_reason
 
 # ============================================================================
 # CONSTANTS
@@ -105,6 +116,128 @@ async def _run_command(cmd: list[str], timeout: int = 30) -> tuple[str, str, int
         raise
     except Exception as e:
         return "", str(e), -1
+
+
+# ============================================================================
+# DESTINATION POLICY (MX EGRESS)
+# ============================================================================
+
+Resolver = Callable[[str], Awaitable[list[str]]]
+
+
+@dataclass(frozen=True)
+class SmtpDestinationPolicy:
+    """The scan's destination policy, applied to every SMTP host before any connection.
+
+    An MX host is a name from the target's DNS, not the authorized target: the target's owner
+    can point it at 169.254.169.254, an internal address or a Docker service name. Each SMTP
+    host is resolved once, every address is judged by the web scope guard's classifier
+    (``address_classes.destination_block_reason``), and every connection (the STARTTLS and
+    cipher probes, the banner read and the relay test) goes to the one admitted address, so a
+    second lookup cannot rebind it.
+    """
+
+    environment: str = "production"
+    allow_private: bool = False
+
+    @property
+    def lab(self) -> bool:
+        return self.environment in LAB_ENVIRONMENTS
+
+
+def smtp_destination_policy(environ: Mapping[str, str] | None = None) -> SmtpDestinationPolicy:
+    """The policy of the scan this process runs: the target's environment from the canonical
+    execution envelope (production when absent) and ``SHAKERSCAN_PRIVATE_NETWORK_TARGETS``,
+    read as ``deployment_policy.private_network_targets_policy`` reads it."""
+    source = os.environ if environ is None else environ
+    environment = "production"
+    raw = str(source.get("SHAKERSCAN_CANONICAL_SCAN_EXECUTION") or "")
+    if raw:
+        try:
+            binding = json.loads(raw).get("target_binding") or {}
+            environment = str(binding.get("environment") or "").strip().lower() or "production"
+        except (ValueError, AttributeError):
+            environment = "production"
+    if environment == "unknown":
+        environment = "production"
+    value = str(source.get("SHAKERSCAN_PRIVATE_NETWORK_TARGETS") or "").strip().lower()
+    allow_private = not value or value in {"allow", "allowed", "1", "true", "yes", "on"}
+    return SmtpDestinationPolicy(environment=environment, allow_private=allow_private)
+
+
+async def _resolve_host_addresses(host: str) -> list[str]:
+    """One lookup of ``host`` (a literal address is itself)."""
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    return list(dict.fromkeys(str(info[4][0]) for info in infos))
+
+
+def _literal_address(host: str) -> str | None:
+    try:
+        return str(ipaddress.ip_address(host.strip("[]")))
+    except ValueError:
+        return None
+
+
+async def resolve_smtp_destination(
+    host: str,
+    policy: SmtpDestinationPolicy,
+    *,
+    from_dns: bool,
+    resolver: Resolver | None = None,
+) -> dict[str, Any]:
+    """Resolve ``host`` once and classify every address under ``policy``.
+
+    Returns ``{"host", "addresses", "refused", "address", "reason", "detail"}``: ``address`` is
+    the one admitted address every connection pins to, or None with a named ``reason``
+    (``mx_host_not_fully_qualified``, ``unresolved`` or ``loopback_or_private_range``).
+    ``from_dns`` marks a name taken from an MX record: a single-label one (a Docker service
+    name such as ``db``) is never a mail exchanger on the internet and is refused unresolved.
+    """
+    record: dict[str, Any] = {
+        "host": host, "addresses": [], "refused": [], "address": None, "reason": None,
+        "detail": None,
+    }
+    literal = _literal_address(host)
+    if from_dns and literal is None and "." not in host.strip().rstrip("."):
+        record["reason"] = "mx_host_not_fully_qualified"
+        record["detail"] = f"{host} is a single-label name, not a mail exchanger; not contacted"
+        return record
+    try:
+        addresses = [literal] if literal else await (resolver or _resolve_host_addresses)(host)
+    except (OSError, UnicodeError, ValueError) as exc:
+        record["reason"] = "unresolved"
+        record["detail"] = f"{host} could not be resolved ({type(exc).__name__}); not contacted"
+        return record
+    admitted: list[str] = []
+    for raw in addresses:
+        try:
+            parsed = ipaddress.ip_address(str(raw))
+        except ValueError:
+            record["refused"].append({"address": str(raw), "reason": "not_an_address"})
+            continue
+        record["addresses"].append(str(parsed))
+        reason = destination_block_reason(parsed, lab=policy.lab, allow_private=policy.allow_private)
+        if reason is None:
+            admitted.append(str(parsed))
+        else:
+            record["refused"].append({"address": str(parsed), "reason": reason})
+    if admitted:
+        record["address"] = admitted[0]
+    elif not record["addresses"] and not record["refused"]:
+        record["reason"] = "unresolved"
+        record["detail"] = f"{host} has no address; not contacted"
+    else:
+        record["reason"] = "loopback_or_private_range"
+        record["detail"] = (
+            f"{host} resolves only to addresses this scan's destination policy refuses "
+            f"({', '.join(item['address'] for item in record['refused'])}); not contacted"
+        )
+    return record
+
+
+def _host_port(address: str, port: int) -> str:
+    return f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
 
 
 def _parse_mx_records(dig_output: str) -> list[dict[str, Any]]:
@@ -264,8 +397,9 @@ def _assess_cipher_strength(ciphers: list[str]) -> dict[str, Any]:
 # STARTTLS TESTING
 # ============================================================================
 
-async def _test_starttls(host: str, port: int, timeout: int = 15) -> dict[str, Any]:
-    """Test STARTTLS support and configuration on a specific port."""
+async def _test_starttls(host: str, port: int, timeout: int = 15, *, address: str) -> dict[str, Any]:
+    """Test STARTTLS support and configuration on a specific port of the pinned ``address``;
+    ``host`` is only the TLS server name."""
     result = {
         "port": port,
         "port_description": SMTP_PORTS.get(port, "Unknown"),
@@ -283,7 +417,7 @@ async def _test_starttls(host: str, port: int, timeout: int = 15) -> dict[str, A
     if port == 465:
         cmd = [
             "openssl", "s_client",
-            "-connect", f"{host}:{port}",
+            "-connect", _host_port(address, port),
             "-servername", host,
             "-brief"
         ]
@@ -291,7 +425,7 @@ async def _test_starttls(host: str, port: int, timeout: int = 15) -> dict[str, A
         # For ports 25 and 587, use STARTTLS
         cmd = [
             "openssl", "s_client",
-            "-connect", f"{host}:{port}",
+            "-connect", _host_port(address, port),
             "-servername", host,
             "-starttls", "smtp",
             "-brief"
@@ -329,8 +463,8 @@ async def _test_starttls(host: str, port: int, timeout: int = 15) -> dict[str, A
     # Get cipher list if TLS is supported
     if result["starttls_supported"]:
         cipher_cmd = [
-            "nmap", "-Pn", "--host-timeout", "120s", "--script", "ssl-enum-ciphers",
-            "-p", str(port), host
+            "nmap", "-Pn", *(["-6"] if ":" in address else []), "--host-timeout", "120s",
+            "--script", "ssl-enum-ciphers", "-p", str(port), address
         ]
         cipher_stdout, _, _ = await _run_command(cipher_cmd, timeout + 10)
 
@@ -345,9 +479,9 @@ async def _test_starttls(host: str, port: int, timeout: int = 15) -> dict[str, A
 # OPEN RELAY TESTING (SAFE MODE)
 # ============================================================================
 
-async def _test_open_relay_safe(host: str, port: int = 25, timeout: int = 15) -> dict[str, Any]:
+async def _test_open_relay_safe(address: str, port: int = 25, timeout: int = 15) -> dict[str, Any]:
     """
-    Test for open relay vulnerability using SAFE methods only.
+    Test for open relay vulnerability using SAFE methods only, at the pinned ``address``.
 
     This does NOT actually send email - it only tests SMTP responses
     to RCPT TO commands with external addresses.
@@ -363,7 +497,7 @@ async def _test_open_relay_safe(host: str, port: int = 25, timeout: int = 15) ->
     try:
         # Create socket connection
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
+            asyncio.open_connection(address, port),
             timeout=timeout
         )
 
@@ -528,10 +662,11 @@ async def _analyze_mx_records(domain: str, timeout: int = 15) -> dict[str, Any]:
 # COMPREHENSIVE SMTP PORT SCAN
 # ============================================================================
 
-async def _scan_smtp_ports(host: str, timeout: int = 30) -> dict[str, Any]:
-    """Scan all SMTP ports and assess overall configuration."""
+async def _scan_smtp_ports(host: str, timeout: int = 30, *, address: str) -> dict[str, Any]:
+    """Scan all SMTP ports of the pinned ``address`` and assess overall configuration."""
     result = {
         "host": host,
+        "address": address,
         "ports_tested": list(SMTP_PORTS.keys()),
         "open_ports": [],
         "tls_results": {},
@@ -543,7 +678,7 @@ async def _scan_smtp_ports(host: str, timeout: int = 30) -> dict[str, Any]:
     # Test each port concurrently
     tasks = []
     for port in SMTP_PORTS:
-        tasks.append(_test_starttls(host, port, timeout))
+        tasks.append(_test_starttls(host, port, timeout, address=address))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -601,7 +736,10 @@ async def check_smtp_security(
     domain: str,
     timeout: int = 30,
     test_relay: bool = True,
-    safe_mode: bool = True
+    safe_mode: bool = True,
+    *,
+    policy: SmtpDestinationPolicy | None = None,
+    resolver: Resolver | None = None,
 ) -> dict[str, Any]:
     """
     Comprehensive SMTP security assessment.
@@ -611,6 +749,12 @@ async def check_smtp_security(
         timeout: Timeout for each test in seconds
         test_relay: Whether to test for open relay
         safe_mode: If True, only use non-intrusive tests
+        policy: The scan's destination policy (``smtp_destination_policy()`` when None)
+        resolver: One-shot name resolution (the system resolver when None)
+
+    Every SMTP host (each MX host, or the domain itself when it has none) is resolved once and
+    classified before it is contacted; a refused host is recorded in ``skipped_hosts`` with a
+    named reason and never connected to.
 
     Returns:
         Dict with SMTP security analysis
@@ -622,6 +766,8 @@ async def check_smtp_security(
         "smtp_hosts": {},
         "banner_analysis": {},
         "relay_tests": {},
+        "smtp_destinations": {},
+        "skipped_hosts": {},
         "overall_assessment": {
             "grade": "A",
             "risk_level": "info",
@@ -636,6 +782,7 @@ async def check_smtp_security(
 
     # Get MX hosts to test
     mx_hosts = [mx["host"] for mx in results["mx_analysis"].get("mx_records", [])]
+    from_dns = bool(mx_hosts)
 
     # If no MX records, try the domain directly
     if not mx_hosts:
@@ -643,18 +790,31 @@ async def check_smtp_security(
 
     # Limit to first 3 MX hosts
     mx_hosts = mx_hosts[:3]
+    policy = policy or smtp_destination_policy()
 
-    # Step 2: Test each MX host
+    # Step 2: Test each MX host, at the one address it was classified under
     for mx_host in mx_hosts:
+        destination = await resolve_smtp_destination(
+            mx_host, policy, from_dns=from_dns, resolver=resolver,
+        )
+        results["smtp_destinations"][mx_host] = destination
+        address = destination["address"]
+        if address is None:
+            results["skipped_hosts"][mx_host] = {
+                "reason": destination["reason"], "detail": destination["detail"],
+                "addresses": destination["addresses"],
+            }
+            continue
+
         # Port scan and TLS test
-        port_results = await _scan_smtp_ports(mx_host, timeout)
+        port_results = await _scan_smtp_ports(mx_host, timeout, address=address)
         results["smtp_hosts"][mx_host] = port_results
 
         # Get banner from port 25 or 587
         for port in [25, 587]:
             try:
                 reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(mx_host, port),
+                    asyncio.open_connection(address, port),
                     timeout=10
                 )
                 banner = await asyncio.wait_for(reader.readline(), timeout=5)
@@ -669,7 +829,7 @@ async def check_smtp_security(
 
         # Open relay test (safe mode only)
         if test_relay and safe_mode:
-            relay_result = await _test_open_relay_safe(mx_host, 25, timeout)
+            relay_result = await _test_open_relay_safe(address, 25, timeout)
             results["relay_tests"][mx_host] = relay_result
 
     # Step 3: Calculate overall assessment
@@ -707,6 +867,9 @@ async def check_smtp_security(
         if relay_results.get("potentially_vulnerable"):
             all_issues.append(f"{host}: Potential open relay detected")
             worst_grade = "F"
+
+    for host, skipped in results["skipped_hosts"].items():
+        all_recommendations.append(f"SMTP host {host} was not tested: {skipped['detail']}")
 
     results["overall_assessment"]["grade"] = worst_grade
     results["overall_assessment"]["issues"] = list(set(all_issues))[:20]
