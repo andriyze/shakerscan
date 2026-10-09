@@ -83,7 +83,7 @@ async def _perform_asset_action(pool, run, name, values):
             await require_hunt_delegation(conn, run, name, values)
             result = await persist_host_target(conn, HostTargetCreate(**{
                 key:value for key,value in values.items() if key in {'locator','name','environment','port_hints'}
-            }))
+            }), created_via='hunt')
         return {'ok':True,**result,'testing_authorized':False,'hunt_target_unchanged':True}
     if name == 'collections.bind':
         request = request_collection_api.RequestCollectionBindingUpsert(

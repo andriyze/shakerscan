@@ -11168,8 +11168,8 @@ async def _submit_scan(
         else:
             # Create new target
             target_id = await conn.fetchval("""
-                INSERT INTO targets (url, name, root_domain, asm_enabled, asm_config)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO targets (url, name, root_domain, asm_enabled, asm_config, discovery_source)
+                VALUES ($1, $2, $3, $4, $5, 'scan')
                 ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id
             """, normalized_target, request.name, extract_root_domain(normalized_target),

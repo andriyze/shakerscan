@@ -29,39 +29,53 @@ def test_discovery_counts_only_targets_a_person_added(monkeypatch):
     async def run():
         async with database() as conn:
             await _converted(conn)
-            app = await conn.fetchval(
-                "INSERT INTO targets(url, name) VALUES ('https://app.example.co.uk', 'app') RETURNING id")
+            mine = await conn.fetchval(
+                "INSERT INTO targets(url, name) VALUES ('https://app.mine.test', 'mine') RETURNING id")
+            await conn.execute("INSERT INTO targets(url, name) VALUES ('https://app.example.co.uk', 'app')")
             await conn.execute(
                 "INSERT INTO targets(url, name, discovery_source) VALUES ('https://x.other.test', 'x', 'subfinder')")
             await conn.execute(
                 "INSERT INTO targets(url, name, discovery_source) VALUES ('https://chat.ai.test', 'c', 'ai_session')")
+            # A scan submission's own target (2.8.2 marks it) is not a declaration.
+            await conn.execute(
+                "INSERT INTO targets(url, name, discovery_source) VALUES ('https://shop.scanned.test', 's', 'scan')")
             # An archived discovered row: the host row the asset model made for it stays active,
             # but it is not a person's declaration.
             await conn.execute("""INSERT INTO targets(url, name, discovery_source, is_active)
                 VALUES ('https://old.archived.test', 'o', 'subfinder', false)""")
-            # A host a person added on its own counts.
+            # A host a person added on its own counts; one a Hunt agent created does not.
             await conn.execute("""INSERT INTO targets(url, name, discovery_source)
                 VALUES ('host://db.hostonly.test', 'db', 'host')""")
+            await conn.execute("""INSERT INTO targets(url, name, discovery_source, metadata_json)
+                VALUES ('host://db.agent.test', 'db', 'host', '{"created_via": "hunt"}')""")
+            # A receipt bound to a declared target cannot name an unrelated root.
+            await conn.execute(RECEIPT_SQL, "unrelated", mine, '["victim.com"]')
             await conn.execute(RECEIPT_SQL, "unbound", None, '["scoped.test"]')
-            await conn.execute(RECEIPT_SQL, "bound", app, '["bound.test"]')
             first = await discovery.admit_discovery(conn, "example.co.uk", requested_by=discovery.requester())
             outcomes = {}
-            for name in ("dev.example.co.uk", "other.test", "unknown.test", "ai.test", "archived.test",
-                         "hostonly.test", "scoped.test", "bound.test"):
+            for name in ("dev.example.co.uk", "other.test", "unknown.test", "ai.test", "scanned.test",
+                         "archived.test", "hostonly.test", "agent.test", "victim.com", "scoped.test",
+                         "mine.test"):
                 try:
                     await discovery.admit_discovery(conn, name, requested_by=discovery.requester())
                     outcomes[name] = 200
                 except discovery.DiscoveryRefused as exc:
                     outcomes[name] = exc.status_code
-            run_row = await conn.fetchrow("SELECT * FROM discovery_runs WHERE id=$1", first)
-            return outcomes, dict(run_row)
+            run_row = dict(await conn.fetchrow("SELECT * FROM discovery_runs WHERE id=$1", first))
+            # A run older than ACTIVE_WINDOW no longer holds its apex.
+            await conn.execute(
+                "UPDATE discovery_runs SET created_at = NOW() - interval '3 hours' WHERE id = $1", first)
+            again = await discovery.admit_discovery(conn, "example.co.uk", requested_by=discovery.requester())
+            return outcomes, run_row, first, again
 
-    outcomes, run_row = asyncio.run(run())
+    outcomes, run_row, first, again = asyncio.run(run())
     assert outcomes == {
         "dev.example.co.uk": 409, "other.test": 403, "unknown.test": 403, "ai.test": 403,
-        "archived.test": 403, "hostonly.test": 200, "scoped.test": 403, "bound.test": 200,
+        "scanned.test": 403, "archived.test": 403, "hostonly.test": 200, "agent.test": 403,
+        "victim.com": 403, "scoped.test": 403, "mine.test": 200,
     }
     assert run_row["requested_by"] == "local-operator" and run_row["root_domain"] == "example.co.uk"
+    assert again != first
 
 
 def test_legacy_public_suffix_roots_are_recomputed_once(monkeypatch):

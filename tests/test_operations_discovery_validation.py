@@ -27,15 +27,13 @@ from operations import router as operations_router  # noqa: E402
 class FixtureConn:
     """Enough of an asyncpg connection for admission: targets, scope receipts, discovery runs.
 
-    It applies the automated-source exclusion; the ``host``-row and bound-receipt rules are SQL
-    and are exercised against PostgreSQL in ``test_admission_sql_on_real_postgresql``.
-    ``scope_roots`` entries are (roots, bound) where ``bound`` says the receipt is bound to a
-    person-added target.
+    It applies the automated-source exclusion; the ``host``-row and ``created_via`` rules are
+    SQL and are exercised against PostgreSQL in tests/test_target_asset_psl_postgres.py.
+    Scope receipts are never consulted: ``fetchval`` fails the test if admission asks.
     """
 
-    def __init__(self, targets=(), scope_roots=(), runs=()):
+    def __init__(self, targets=(), runs=()):
         self.targets = [dict(item) for item in targets]
-        self.scope_roots = [(list(roots), bound) for roots, bound in scope_roots]
         self.runs = [dict(item) for item in runs]
         self.locks = 0
         self.updates: list[tuple] = []
@@ -64,8 +62,7 @@ class FixtureConn:
 
     async def fetchval(self, query, *args):
         assert "FROM scope_receipts" in query
-        names, _undeclared = args
-        return any(bound and set(names) & set(roots) for roots, bound in self.scope_roots)
+        raise AssertionError(f"admission consulted something else: {query}")
 
 
 class FixturePool:
@@ -146,6 +143,7 @@ def test_a_subdomain_of_a_declared_apex_is_admitted_and_shares_its_apex_slot():
     [{"url": "https://shop.example.co.uk", "discovery_source": "ai_session"}],
     [{"url": "https://shop.example.co.uk", "discovery_source": "ai_gate"}],
     [{"url": "https://shop.example.co.uk:8443", "discovery_source": "device-service"}],
+    [{"url": "https://shop.example.co.uk", "discovery_source": "scan"}],
 ])
 def test_a_domain_with_no_declared_target_is_refused_with_403(targets):
     conn = FixtureConn(targets=targets)
@@ -156,14 +154,12 @@ def test_a_domain_with_no_declared_target_is_refused_with_403(targets):
     assert conn.runs == []
 
 
-def test_a_scope_receipt_root_admits_the_domain_only_when_bound_to_a_declared_target():
-    result, _ = start(FixtureConn(scope_roots=[(["example.org"], True)]), "example.org")
-    assert result["status"] == "queued"
-    with pytest.raises(HTTPException) as unbound:
-        start(FixtureConn(scope_roots=[(["example.org"], False)]), "example.org")
-    assert unbound.value.status_code == 403
+def test_a_host_target_counts_and_the_refusal_says_where_to_add_one():
     result, _ = start(FixtureConn(targets=[{"url": "host://db.example.net", "discovery_source": "host"}]), "example.net")
     assert result["status"] == "queued"
+    with pytest.raises(HTTPException) as refused:
+        start(FixtureConn(targets=[{"url": "https://a.example.org", "discovery_source": "scan"}]), "example.org")
+    assert "was added on the Targets page" in refused.value.detail
 
 
 def test_engine_wide_limit_refuses_with_429(monkeypatch):

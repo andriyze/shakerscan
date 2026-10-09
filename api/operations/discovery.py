@@ -6,11 +6,14 @@ and bounded so one caller cannot flood the queue or third-party sources:
 
 - the domain is a bare host name at or below a registrable domain (``scope.psl.parse_domain``:
   no scheme, path, port, wildcard or address; not a public suffix such as ``co.uk``);
-- its apex (eTLD+1) holds a target a person added: not one inserted by discovery, the CT
-  monitor, Model Intake, an AI session, AI Gate or an observed device service, nor a ``host``
-  row the asset model created as the owner of other rows (archived ones included). A scope
-  receipt that names the domain or apex as an allowed root also admits it, but only when the
-  receipt is bound to such a declared target (an unbound Arsenal preview admits nothing);
+- its apex (eTLD+1) holds a target a person added on the Targets page (``POST /targets``, a host
+  or device added there, or a manual finding's target), not one created by a scan submission
+  (``scan``), discovery, the CT monitor, Model Intake, an AI session, AI Gate, an observed device
+  service or a Hunt agent (``metadata.created_via``), nor a ``host`` row the asset model created as
+  the owner of other rows (archived ones included). Rows stored before 2.8.2 cannot be told apart:
+  a scan-submitted target then also read as ``manual`` and still counts. Scope receipts do not
+  admit a domain on their own: a receipt is only as good as its bound target, which must itself
+  be a declared target under the apex;
 - one discovery per apex is pending or running at a time, and at most
   ``SHAKERSCAN_DISCOVERY_MAX_ACTIVE`` (default 2) across the engine; a run older than
   ``ACTIVE_WINDOW`` no longer holds a slot, so a lost worker cannot block an apex for ever;
@@ -44,7 +47,7 @@ ACTIVE_WINDOW = timedelta(hours=2)
 ADMISSION_LOCK = 0x5348_4B44_4953_4331  # "SHKDISC1": serializes discovery admission
 # Targets inserted by automation do not count as declared by a person.
 UNDECLARED_SOURCES = ("subfinder", "gungnir-monitor", "model-intake", "ai_session", "ai_gate",
-                      "device-service")
+                      "device-service", "scan")
 DEFAULT_REQUESTER = "local-operator"
 
 
@@ -86,6 +89,7 @@ def requester() -> str:
 _DECLARED = """
     COALESCE({t}.is_active, true)
     AND COALESCE({t}.discovery_source, 'manual') <> ALL($2::text[])
+    AND COALESCE({t}.metadata_json->>'created_via', '') = ''
     AND (COALESCE({t}.discovery_source, 'manual') <> 'host'
          OR EXISTS (SELECT 1 FROM target_device_profiles p WHERE p.target_id = {t}.id)
          OR NOT EXISTS (SELECT 1 FROM targets m WHERE m.asset_owner_id = {t}.id))
@@ -95,17 +99,6 @@ SELECT t.url FROM targets t
 WHERE strpos(lower(t.url), $1) > 0 AND {_DECLARED.format(t='t')}
 LIMIT 5000
 """
-_DECLARED_SCOPE_SQL = f"""
-SELECT EXISTS (
-    SELECT 1 FROM scope_receipts s JOIN targets bound ON bound.id = s.target_id
-    WHERE s.verdict <> 'blocked'
-      AND jsonb_typeof(s.allowed_root_domains) = 'array'
-      AND s.allowed_root_domains ?| $1::text[]
-      AND {_DECLARED.format(t='bound')}
-)
-"""
-
-
 def _host(url: str) -> str:
     text = str(url or "").strip()
     if text.startswith("host://"):
@@ -117,14 +110,13 @@ def _host(url: str) -> str:
     return host.lower().rstrip(".")
 
 
-async def _declared(conn: Any, apex: str, domain: str) -> bool:
-    """A person-added target lives under ``apex``, or a scope receipt bound to a person-added
-    target names ``apex`` or ``domain`` as an allowed root."""
+async def _declared(conn: Any, apex: str) -> bool:
+    """A person-added target lives under ``apex`` (dot boundary)."""
     for row in await conn.fetch(_DECLARED_TARGETS_SQL, apex, list(UNDECLARED_SOURCES)):
         host = _host(row["url"])
         if host == apex or host.endswith("." + apex):
             return True
-    return bool(await conn.fetchval(_DECLARED_SCOPE_SQL, sorted({apex, domain}), list(UNDECLARED_SOURCES)))
+    return False
 
 
 async def admit_discovery(conn: Any, domain: str, *, requested_by: str) -> uuid.UUID:
@@ -132,10 +124,11 @@ async def admit_discovery(conn: Any, domain: str, *, requested_by: str) -> uuid.
     apex = registrable_domain(domain) or domain
     async with conn.transaction():
         await conn.execute("SELECT pg_advisory_xact_lock($1)", ADMISSION_LOCK)
-        if not await _declared(conn, apex, domain):
+        if not await _declared(conn, apex):
             raise DiscoveryRefused(403, (
-                f"Cannot discover subdomains of {domain}: no target under {apex} has been added. "
-                f"Add a target under {apex} first; discovery only expands a domain you declared."
+                f"Cannot discover subdomains of {domain}: no target under {apex} was added on the "
+                f"Targets page (targets a scan, discovery, the CT monitor or an agent created do not "
+                f"count). Add a target under {apex} first; discovery only expands a domain you declared."
             ))
         active = await conn.fetch(
             """SELECT id, root_domain FROM discovery_runs
