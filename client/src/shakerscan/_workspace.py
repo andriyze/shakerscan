@@ -14,8 +14,10 @@ What an agent may have written is made visible, not blocked: the security-releva
 configuration (permissions, plugins, providers, other MCP servers, instructions, hooks) are
 fingerprinted at each launch, and the next launch lists exactly what changed in between, hook
 command lines included. The fingerprint and the list of files and hook entries the kit wrote live
-in ``.shakerscan/workspace.json``; the kit's own stale files and hook entries are removed or
-replaced on a refresh, and the person's files are left alone.
+in the client's own configuration directory, never in the workspace (N1); the kit's own stale
+files and hook entries are removed or replaced on a refresh, and the person's files are left
+alone. Every write is a new file renamed into place through directories opened without following
+links (N2), so neither a symbolic nor a hard link is ever written through.
 
 Codex keeps its MCP servers in its own configuration (``codex mcp add`` replaces only the
 ``shakerscan`` entry) and Pi is given flags, so neither has a workspace file here.
@@ -23,24 +25,25 @@ Codex keeps its MCP servers in its own configuration (``codex mcp add`` replaces
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
-import shutil
+import stat
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
+import uuid
+from collections.abc import Mapping, Sequence
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 HUNT_SKILL_INSTRUCTION = "skills/hunt/SKILL.md"
 OPENCODE_SCHEMA = "https://opencode.ai/config.json"
-STATE_FILE = Path(".shakerscan") / "workspace.json"
 STATE_SCHEMA = "shakerscan-workspace/v1"
 # Every path the client writes in a workspace; none of them may be a link, and nothing under the
 # directories among them may be one either (``skills/`` is replaced whole, links included).
-WRITTEN_PATHS = ("skills", ".claude", "AGENTS.md", ".mcp.json", "opencode.json", ".shakerscan")
-SCANNED_DIRECTORIES = (".claude", ".shakerscan")
+WRITTEN_PATHS = ("skills", ".claude", "AGENTS.md", ".mcp.json", "opencode.json")
+SCANNED_DIRECTORIES = (".claude",)
 _SECRET_PATH = re.compile(r"(api[_-]?key|token|secret|passw|authorization|credential|cookie)", re.IGNORECASE)
 _DISPLAY_CHARS = 200
 
@@ -49,29 +52,170 @@ class WorkspaceError(Exception):
     """A workspace the client will not write into; nothing was written."""
 
 
+# --- the workspace, opened without following links ---------------------------------------------
+
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+# Directory-relative calls (openat, mkdirat, renameat, unlinkat) make every step of a write
+# refuse a link; without them (Windows) the paths are used, after refuse_links.
+SAFE_CALLS = bool(_NOFOLLOW and _DIRECTORY and os.open in os.supports_dir_fd
+                  and os.mkdir in os.supports_dir_fd and os.unlink in os.supports_dir_fd)
+
+
+def _parts(relative: str) -> list[str]:
+    parts = PurePosixPath(relative).parts
+    if not parts or PurePosixPath(relative).is_absolute() or any(part in {"", ".", ".."} for part in parts) \
+            or "\\" in relative or PurePosixPath(relative).as_posix() != relative:
+        raise WorkspaceError(f"{relative!r} is not a path inside the workspace")
+    return list(parts)
+
+
+class Root:
+    """A workspace directory. Every file is written as a new file (a fresh inode, its mode set
+    before it is renamed into place), so a hard link at the destination is replaced, never
+    written through; every directory on the way is opened with O_NOFOLLOW, so a component
+    swapped for a symbolic link after refuse_links is refused, not followed (N2)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def _directory(self, parts: Sequence[str], *, create: bool) -> int:
+        fd = os.open(self.path, os.O_RDONLY | _DIRECTORY)
+        try:
+            for index, part in enumerate(parts):
+                if create:
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(part, 0o755, dir_fd=fd)
+                try:
+                    child = os.open(part, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
+                except FileNotFoundError:
+                    raise
+                except OSError as exc:
+                    where = "/".join(parts[:index + 1])
+                    raise WorkspaceError(
+                        f"{self.path / where} is not a plain directory (a symbolic link?); nothing more "
+                        "was written there") from exc
+                os.close(fd)
+                fd = child
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def write(self, relative: str, data: bytes, mode: int = 0o644) -> None:
+        parts = _parts(relative)
+        if not SAFE_CALLS:
+            target = self.path.joinpath(*parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(data)
+                os.chmod(name, mode)
+                os.replace(name, target)
+            except BaseException:
+                Path(name).unlink(missing_ok=True)
+                raise
+            return
+        directory = self._directory(parts[:-1], create=True)
+        temporary = f".{parts[-1]}.{uuid.uuid4().hex}.tmp"
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600, dir_fd=directory)
+            try:
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fchmod(fd, mode)
+            finally:
+                os.close(fd)
+            os.rename(temporary, parts[-1], src_dir_fd=directory, dst_dir_fd=directory)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=directory)
+            raise
+        finally:
+            os.close(directory)
+
+    def read(self, relative: str) -> bytes | None:
+        """The file's bytes, None when it is not there; a link is refused, never followed."""
+        parts = _parts(relative)
+        if not SAFE_CALLS:
+            target = self.path.joinpath(*parts)
+            return target.read_bytes() if target.is_file() and not target.is_symlink() else None
+        try:
+            directory = self._directory(parts[:-1], create=False)
+        except FileNotFoundError:
+            return None
+        try:
+            fd = os.open(parts[-1], os.O_RDONLY | _NOFOLLOW, dir_fd=directory)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise WorkspaceError(f"{self.path / relative} is not a plain file (a symbolic link?)") from exc
+        finally:
+            os.close(directory)
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise WorkspaceError(f"{self.path / relative} is not a plain file")
+            return handle.read()
+
+    def unlink(self, relative: str) -> None:
+        parts = _parts(relative)
+        if not SAFE_CALLS:
+            self.path.joinpath(*parts).unlink()
+            return
+        directory = self._directory(parts[:-1], create=False)
+        try:
+            os.unlink(parts[-1], dir_fd=directory)  # removes the name; never follows a link
+        finally:
+            os.close(directory)
+
+    def rename(self, relative: str, name: str) -> None:
+        """Rename ``relative`` to ``name`` in the same directory (the entry itself, not a target)."""
+        parts = _parts(relative)
+        if not SAFE_CALLS:
+            source = self.path.joinpath(*parts)
+            os.replace(source, source.with_name(name))
+            return
+        directory = self._directory(parts[:-1], create=False)
+        try:
+            os.rename(parts[-1], name, src_dir_fd=directory, dst_dir_fd=directory)
+        finally:
+            os.close(directory)
+
+
 # --- links -------------------------------------------------------------------------------------
 
 
 def refuse_links(workspace: Path) -> None:
-    """Refuse (before any write) a workspace where a path the client writes is a link."""
+    """Refuse, before any write, a workspace where a path the client writes is a symbolic link
+    or a hard-linked file (the fail-early check; Root makes each write safe on its own)."""
     links: list[str] = []
     directories: list[str] = []
+
+    def check(path: Path) -> None:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+            links.append(path.relative_to(workspace).as_posix())
+
     for name in WRITTEN_PATHS:
         path = workspace / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        check(path)
         if path.is_symlink():
-            links.append(name)
-        elif name in {".mcp.json", "opencode.json", "AGENTS.md"} and path.is_dir():
+            continue
+        if name in {".mcp.json", "opencode.json", "AGENTS.md"} and path.is_dir():
             directories.append(name)
         elif name in SCANNED_DIRECTORIES and path.is_dir():
             for root, folders, files in os.walk(path, followlinks=False):
                 for entry in [*folders, *files]:
-                    if (Path(root) / entry).is_symlink():
-                        links.append((Path(root) / entry).relative_to(workspace).as_posix())
+                    check(Path(root) / entry)
     if links:
         raise WorkspaceError(
-            f"{workspace} has symbolic links where shakerscan writes the agent kit: {', '.join(sorted(links))}. "
-            "Writing through them would change files outside the workspace (an agent can plant such a "
-            "link). Remove them and run `shakerscan agent` again; nothing was written."
+            f"{workspace} has symbolic or hard links where shakerscan writes the agent kit: "
+            f"{', '.join(sorted(links))}. Writing through them would change files outside the workspace "
+            "(an agent can plant such a link). Remove them and run `shakerscan agent` again; nothing was written."
         )
     if directories:
         raise WorkspaceError(
@@ -84,8 +228,9 @@ def refuse_links(workspace: Path) -> None:
 
 
 def _strip_jsonc(text: str) -> str:
-    """``text`` without // and /* */ comments and trailing commas, strings left intact."""
+    """``text`` without // and /* */ comments and trailing commas; string contents untouched."""
     out: list[str] = []
+    pending_comma = False
     index, length = 0, len(text)
     while index < length:
         char = text[index]
@@ -93,6 +238,9 @@ def _strip_jsonc(text: str) -> str:
             end = index + 1
             while end < length and text[end] != '"':
                 end += 2 if text[end] == "\\" else 1
+            if pending_comma:
+                out.append(",")
+                pending_comma = False
             out.append(text[index:end + 1])
             index = end + 1
         elif text.startswith("//", index):
@@ -101,10 +249,23 @@ def _strip_jsonc(text: str) -> str:
         elif text.startswith("/*", index):
             close = text.find("*/", index + 2)
             index = length if close < 0 else close + 2
-        else:
+        elif char == ",":
+            if pending_comma:
+                out.append(",")
+            pending_comma = True  # written only if something other than } or ] follows
+            index += 1
+        elif char.isspace():
             out.append(char)
             index += 1
-    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+        else:
+            if pending_comma and char not in "}]":
+                out.append(",")
+            pending_comma = False
+            out.append(char)
+            index += 1
+    if pending_comma:
+        out.append(",")
+    return "".join(out)
 
 
 def _parse(text: str) -> tuple[Any, bool]:
@@ -115,65 +276,106 @@ def _parse(text: str) -> tuple[Any, bool]:
         return json.loads(_strip_jsonc(text)), True
 
 
-def _backup(path: Path, label: str, *, move: bool) -> Path:
-    fd, name = tempfile.mkstemp(prefix=f".shakerscan-{label}-", suffix=".bak", dir=path.parent)
-    os.close(fd)
-    backup = Path(name)
-    if move:
-        path.replace(backup)
-    else:
-        shutil.copyfile(path, backup)
-    return backup
+def _backup_name(label: str) -> str:
+    return f".shakerscan-{label.replace('/', '-')}-{uuid.uuid4().hex[:8]}.bak"
 
 
-def read_config(path: Path, label: str, notes: list[str]) -> dict:
-    """The JSON object in ``path`` ({} when there is none). JSONC (comments, trailing commas) is
-    read, and its original is kept beside it because the comments cannot be written back; a file
-    that is neither is moved aside with the reason, never silently overwritten."""
-    if not path.exists():
+def read_config(root: Root, relative: str, notes: list[str]) -> dict:
+    """The JSON object in ``relative`` ({} when there is none). JSONC (comments, trailing commas)
+    is read, and its original is kept beside it because the comments cannot be written back; a
+    file that is neither is moved aside with the reason, never silently overwritten."""
+    raw = root.read(relative)
+    if raw is None:
         return {}
     try:
-        text = path.read_text(encoding="utf-8")
-        loaded, jsonc = _parse(text)
+        loaded, jsonc = _parse(raw.decode("utf-8"))
         reason = "" if isinstance(loaded, dict) else "it is JSON but not an object"
     except UnicodeDecodeError:
         loaded, jsonc, reason = None, False, "it is not UTF-8 text"
     except ValueError as exc:
         loaded, jsonc, reason = None, False, f"it is not valid JSON or JSONC ({exc})"
+    parent = relative.rpartition("/")[0]
     if reason:
-        backup = _backup(path, f"unreadable-{label.replace('/', '-')}", move=True)
-        notes.append(f"moved:     {label}: {reason}, so it was moved to {backup.name} and written afresh")
+        name = _backup_name(f"unreadable-{relative}")
+        root.rename(relative, name)
+        notes.append(f"moved:     {relative}: {reason}, so it was moved to {name} and written afresh")
         return {}
     if jsonc:
-        backup = _backup(path, f"jsonc-{label.replace('/', '-')}", move=False)
-        notes.append(f"note:      {label} has comments or trailing commas; it is written back as plain JSON "
-                     f"without them, and the original is kept as {backup.name}")
+        name = _backup_name(f"jsonc-{relative}")
+        root.write(f"{parent}/{name}" if parent else name, raw, 0o600)
+        notes.append(f"note:      {relative} has comments or trailing commas; it is written back as plain JSON "
+                     f"without them, and the original is kept as {name}")
     return loaded
 
 
-def write_config(path: Path, config: Mapping) -> None:
-    """Replace ``path`` atomically."""
+def write_config(root: Root, relative: str, config: Mapping) -> None:
+    root.write(relative, (json.dumps(config, indent=2) + "\n").encode("utf-8"))
+
+
+# --- the client's record of a workspace (outside it) -------------------------------------------
+
+
+def state_path(state_directory: Path, workspace: Path) -> Path:
+    """Where the client keeps what it knows about ``workspace``: under its own configuration
+    directory, keyed by the workspace's real path. N1: kept inside the workspace, an agent could
+    edit it to have the client delete any file it names, drop the person's hooks as "the kit's",
+    or hide its own changes from the next launch's report."""
+    key = hashlib.sha256(str(workspace.resolve()).encode("utf-8")).hexdigest()[:32]
+    return state_directory / f"{key}.json"
+
+
+def _valid_state(state: Any, workspace: Path) -> bool:
+    if not isinstance(state, dict) or state.get("schema_version") != STATE_SCHEMA:
+        return False
+    if state.get("workspace") != str(workspace.resolve()):
+        return False
+    files = state.get("kit_files", {})
+    hooks = state.get("kit_hooks", {})
+    security = state.get("security", {})
+    if not isinstance(files, dict) or not isinstance(hooks, dict) or not isinstance(security, dict):
+        return False
+    target = (workspace / ".claude").resolve()
+    for relative, digest in files.items():
+        try:
+            _parts(relative)
+        except WorkspaceError:
+            return False
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return False
+        if not str((target / relative).resolve()).startswith(str(target) + os.sep):
+            return False
+    if not all(isinstance(groups, list) for groups in hooks.values()):
+        return False
+    return all(isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)
+               for item in security.values())
+
+
+def load_state(path: Path, workspace: Path, notes: list[str]) -> dict:
+    """The record of the last launch in ``workspace``; anything unexpected in it (a path that is
+    not inside ``.claude/``, a malformed entry) and the whole record is treated as absent."""
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        state = None
+    if _valid_state(state, workspace):
+        return state
+    notes.append(f"note:      the client's record of this workspace ({path}) was not valid and was ignored")
+    return {}
+
+
+def save_state(path: Path, workspace: Path, state: Mapping) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(config, indent=2) + "\n")
+            handle.write(json.dumps({"schema_version": STATE_SCHEMA, "workspace": str(workspace.resolve()),
+                                     **state}, indent=2) + "\n")
         os.replace(name, path)
     except BaseException:
         Path(name).unlink(missing_ok=True)
         raise
-
-
-def load_state(workspace: Path) -> dict:
-    try:
-        state = json.loads((workspace / STATE_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return state if isinstance(state, dict) and state.get("schema_version") == STATE_SCHEMA else {}
-
-
-def save_state(workspace: Path, state: Mapping) -> None:
-    (workspace / STATE_FILE).parent.mkdir(exist_ok=True)
-    write_config(workspace / STATE_FILE, {"schema_version": STATE_SCHEMA, **state})
 
 
 # --- merging -----------------------------------------------------------------------------------
@@ -266,28 +468,41 @@ def kept_note(label: str, kept: Sequence[str], managed: str) -> str | None:
 # --- the kit's .claude directory ----------------------------------------------------------------
 
 
-def _digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _mode(source: Path, relative: str) -> int:
+    mode = source.stat().st_mode & 0o777
+    return mode | 0o111 if relative.startswith("hooks/") and relative.endswith(".sh") else mode
 
 
-def refresh_claude_dir(source: Path, target: Path, notes: list[str], previous: Mapping) -> dict:
-    """Copy the kit's ``.claude`` into the workspace (no link anywhere: refuse_links ran first).
+def install_tree(root: Root, source: Path, prefix: str) -> None:
+    """Write every file of ``source`` under ``prefix`` as new files (no link followed)."""
+    for path in sorted(source.rglob("*")):
+        if path.is_file():
+            relative = path.relative_to(source).as_posix()
+            root.write(f"{prefix}/{relative}", path.read_bytes(), _mode(path, relative))
+
+
+def refresh_claude_dir(source: Path, root: Root, notes: list[str], previous: Mapping) -> dict:
+    """Write the kit's ``.claude`` into the workspace.
 
     The kit's files are refreshed; kit files a previous refresh wrote that the kit no longer ships
     are removed when unchanged (kept and named when the person changed them); files that were
-    never the kit's stay. ``settings.json`` is merged. Returns what the kit wrote, for the state."""
+    never the kit's stay. ``settings.json`` is merged. Returns what the kit wrote, for the state
+    the client keeps outside the workspace."""
+    target = root.path / ".claude"
     kit_files = {
-        path.relative_to(source).as_posix(): _digest(path)
+        path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(source.rglob("*")) if path.is_file() and path != source / "settings.json"
     }
     written_before = previous.get("kit_files") if isinstance(previous.get("kit_files"), Mapping) else {}
     removed, modified = [], []
     for relative, digest in written_before.items():
-        path = target / relative
-        if relative in kit_files or not path.is_file():
+        if relative in kit_files:
             continue
-        if _digest(path) == digest:
-            path.unlink()
+        content = root.read(f".claude/{relative}")
+        if content is None:
+            continue
+        if hashlib.sha256(content).hexdigest() == digest:
+            root.unlink(f".claude/{relative}")
             removed.append(relative)
         else:
             modified.append(relative)
@@ -297,23 +512,19 @@ def refresh_claude_dir(source: Path, target: Path, notes: list[str], previous: M
         if path.is_file() and path != settings and path.relative_to(target).as_posix() not in kit_files
         and path.relative_to(target).as_posix() not in written_before
     ) if target.is_dir() else []
-    existing = read_config(settings, ".claude/settings.json", notes)
+    existing = read_config(root, ".claude/settings.json", notes)
     for relative in kit_files:
-        destination = target / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source / relative, destination)
-        shutil.copymode(source / relative, destination)
+        root.write(f".claude/{relative}", (source / relative).read_bytes(), _mode(source / relative, relative))
     kit = json.loads((source / "settings.json").read_text(encoding="utf-8")) if (source / "settings.json").is_file() else {}
     previous_hooks = previous.get("kit_hooks") if isinstance(previous.get("kit_hooks"), Mapping) else None
     merged, kept = merge_claude_settings(existing, kit, previous_hooks)
     if merged:
-        write_config(settings, merged)
-    local = read_config(target / "settings.local.json", ".claude/settings.local.json", []) \
-        if (target / "settings.local.json").is_file() else {}
+        write_config(root, ".claude/settings.json", merged)
+    local = read_config(root, ".claude/settings.local.json", [])
     local_hooks = _hook_commands(local.get("hooks"))
-    for note in (kept_note(".claude/settings.json", kept, "the kit's hooks"),):
-        if note:
-            notes.append(note)
+    note = kept_note(".claude/settings.json", kept, "the kit's hooks")
+    if note:
+        notes.append(note)
     if removed:
         notes.append(f"removed:   .claude/: {len(removed)} file(s) the kit no longer ships ({', '.join(removed[:5])})")
     if modified:
@@ -398,17 +609,17 @@ def changes(before: Mapping[str, Sequence[str]], now: Mapping[str, Sequence[str]
     return lines
 
 
-def read_configs(workspace: Path, notes: list[str], reader: Callable[..., dict] = read_config) -> dict[str, dict]:
-    return {label: reader(workspace / label, label, notes)
-            for label in ("opencode.json", ".mcp.json", ".claude/settings.json", ".claude/settings.local.json")}
+CONFIGS = ("opencode.json", ".mcp.json", ".claude/settings.json", ".claude/settings.local.json")
 
 
-def quiet_configs(workspace: Path) -> dict[str, dict]:
+def quiet_configs(root: Root) -> dict[str, dict]:
     """The configs as they are, for a fingerprint; nothing moved, nothing noted."""
-    def reader(path: Path, label: str, notes: list[str]) -> dict:
+    configs = {}
+    for relative in CONFIGS:
         try:
-            value, _ = _parse(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        return value if isinstance(value, dict) else {}
-    return read_configs(workspace, [], reader)
+            raw = root.read(relative)
+            value, _ = _parse(raw.decode("utf-8")) if raw is not None else ({}, False)
+        except (OSError, ValueError, WorkspaceError):
+            value = {}
+        configs[relative] = value if isinstance(value, dict) else {}
+    return configs
