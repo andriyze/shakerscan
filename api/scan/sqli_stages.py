@@ -77,7 +77,12 @@ from typing import Any
 from .external_process import BATCH_ATTEMPT_REQUEST_HEADROOM, paced_request_delay
 
 # Requests a negative verdict costs per technique and tested field (soak host, 2026-10-07):
-# the stage order.
+# the stage order. Cheapest first was kept over sqlmap's own B, E, U, T order (and B first) after
+# the N55 review's simulation grid -- 576 scripted scenarios over Fast/Balanced/Thorough, 1-4
+# fields, 0.08-8 s per request, an injection by each technique on the first or last field: no
+# order is never worse. B, E, U, T found 413 against U, B, E, T's 433; B, U, E, T 426. Even when
+# a union- or error-injectable field is also boolean-injectable, B first loses four scenarios
+# U, B, E, T wins (a late-field union injection, a time-based one).
 SQLI_TECHNIQUE_NEGATIVE_COST: dict[str, int] = {"U": 53, "B": 87, "E": 144, "T": 189}
 SQLI_TECHNIQUE_STAGES: tuple[str, ...] = tuple(
     sorted(SQLI_TECHNIQUE_NEGATIVE_COST, key=SQLI_TECHNIQUE_NEGATIVE_COST.__getitem__)
