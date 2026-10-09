@@ -177,6 +177,7 @@ _MAX_SEEDED_CHARS = 65_536
 # Shorter values (a pairing PIN) would match ordinary text everywhere; their outputs are reduced.
 _MIN_SEEDED_CHARS = 6
 SQL_TABLES_KEY = "sql_tables"
+CONTEXT_BYTES_KEY = "context_bytes"
 _MAX_SQL_PATHS = 64
 _MAX_SQL_TABLES = 256
 _MAX_SQL_COLUMNS = 256
@@ -210,6 +211,7 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
     digest, now = _target_digest(target), datetime.now(timezone.utc)
     values: list[str] = []
     tables: dict[str, dict[str, list[str]]] = {}
+    context_bytes = 0
     budget = _MAX_SEEDED_CHARS
     for row in rows or ():
         try:
@@ -219,6 +221,7 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
                 continue
             found = [*(private.get(WITHHELD_SCHEMA_KEY) or {}).values(), *(private.get("values") or {}).values()]
             learned = _bounded_sql_tables(private.get(SQL_TABLES_KEY))
+            context_bytes += max(0, int(private.get(CONTEXT_BYTES_KEY) or 0))
         except Exception:
             continue  # an unreadable row seeds nothing; its own references refuse
         for path, by_table in learned.items():
@@ -229,7 +232,7 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
             if isinstance(value, str) and len(value) >= _MIN_SEEDED_CHARS and len(value) <= budget and value not in values:
                 values.append(value)
                 budget -= len(value)
-    return {"values": values, "sql_tables": tables}
+    return {"values": values, "sql_tables": tables, "context_bytes": context_bytes}
 
 
 async def sealed_hunt_values(conn: Any, *, run_id: Any, target: TargetBinding) -> list[str]:
@@ -266,6 +269,7 @@ def withholding_operation(
                 collector.bind_known(knowledge.get("values") or (), found=True)
                 for path, by_table in (knowledge.get("sql_tables") or {}).items():
                     collector.sql_tables.setdefault(path, {}).update(by_table)
+                collector.context_bytes_used = int(knowledge.get("context_bytes") or 0)
             else:
                 collector.bind_known(knowledge, found=True)
         with collecting_withheld_values(collector):
@@ -290,12 +294,14 @@ async def persist_withheld_values(
     if values is None:
         return {"sealed": 0, "status": "none"}
     tables: dict[str, dict[str, list[str]]] = {}
+    context_bytes = 0
     if not isinstance(values, Mapping):
         collector = values
         values = collector.shown_values(json.dumps(observations, default=str))
         tables = _bounded_sql_tables(collector.sql_tables)
+        context_bytes = int(getattr(collector, "context_bytes", 0) or 0)
         collector.values.clear()
-    if not values and not tables:
+    if not values and not tables and not context_bytes:
         return {"sealed": 0, "status": "none"}
     if status != "success" or not _hunt_is_live(run):
         return {"sealed": 0, "status": "action_or_hunt_not_live"}
@@ -317,6 +323,8 @@ async def persist_withheld_values(
         payload = prior
     payload[WITHHELD_EXPIRES_KEY] = (
         datetime.now(timezone.utc) + timedelta(seconds=WITHHELD_TTL_SECONDS)).isoformat()
+    if context_bytes:
+        payload[CONTEXT_BYTES_KEY] = int(payload.get(CONTEXT_BYTES_KEY) or 0) + context_bytes
     if tables:
         # Column names learned from a dump (not secret) travel with the action, for later windows.
         merged = _bounded_sql_tables(payload.get(SQL_TABLES_KEY))
@@ -341,7 +349,7 @@ async def persist_withheld_values(
     await conn.execute("UPDATE hunt_actions SET private_http_result=$3 WHERE id=$1 AND hunt_run_id=$2",
         uuid.UUID(source_id), uuid.UUID(run_id), sealed)
     status_text = "sealed" if len(kept) == len(values) else "partially_sealed"
-    return {"sealed": len(kept), "status": status_text if values else "columns_only"}
+    return {"sealed": len(kept), "status": status_text if values else "knowledge_only"}
 
 
 async def settle_private_results(

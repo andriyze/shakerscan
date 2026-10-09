@@ -156,20 +156,59 @@ _SQL_DUMP_PATH_RE = re.compile(
 _CONTEXT_COLLECTOR_ID = "00000000-0000-4000-8000-000000000000"
 
 
+# All the 1 MiB contexts of one Hunt together read at most this much; past it a window gets the
+# 64 KB context and rows whose columns are unknown fail closed.
+HUNT_CONTEXT_BUDGET_BYTES = 64 * 1_048_576
+
+
 def _resource_path(path: str) -> str:
-    return urllib.parse.urlsplit(path).path or path
+    """A resource's identity for carried column knowledge: path *and* query
+    (``/download?id=1`` and ``?id=2`` are different dumps)."""
+    parts = urllib.parse.urlsplit(path)
+    resource = parts.path or path
+    return f"{resource}?{parts.query}" if parts.query else resource
+
+
+def _columns_known(tables: dict[str, list[str]] | None) -> bool:
+    return bool(tables) and any(not key.startswith("\0") for key in tables)
 
 
 def _context_bytes(path: str) -> int:
+    """1 MiB of context only while a dump-like resource's columns are still unknown and the Hunt's
+    context budget allows; 64 KB otherwise (the carried columns or fail-closed rows cover it)."""
     collector = active_withheld_values()
-    resource = _resource_path(path)
-    if _SQL_DUMP_PATH_RE.search(resource) or (collector is not None and collector.sql_tables.get(resource)):
-        return SQL_CONTEXT_BYTES
-    return CONTEXT_BYTES
+    if collector is None or not _SQL_DUMP_PATH_RE.search(urllib.parse.urlsplit(path).path or path):
+        return CONTEXT_BYTES
+    if _columns_known(collector.sql_tables.get(_resource_path(path))):
+        return CONTEXT_BYTES
+    if collector.context_bytes_used + SQL_CONTEXT_BYTES > HUNT_CONTEXT_BUDGET_BYTES:
+        return CONTEXT_BYTES
+    return SQL_CONTEXT_BYTES
 
 
 # The values a window can show in part sit just before it; only those are collected.
 _NEAR_CONTEXT_BYTES = 65_536
+
+
+def _window_recorder(recorder: Callable[[dict[str, Any]], None] | None, lead: int):
+    """The archive keeps the requested window only: the context bytes before it are read to mask
+    the window, never stored (the archived row says its body is the window)."""
+    if recorder is None or not lead:
+        return recorder
+
+    def record(captured: dict[str, Any]) -> None:
+        body = captured.get("response_body")
+        if isinstance(body, (bytes, bytearray)) and int(captured.get("status_code") or 0) == 206:
+            window = bytes(body)[lead:]
+            captured = {
+                **captured, "response_body": window,
+                "response_body_sha256": hashlib.sha256(window).hexdigest(),
+                "response_body_bytes": len(window),
+                "response_digest_scope": "window", "fidelity": "wire_request_window",
+            }
+        recorder(captured)
+
+    return record
 
 
 def _context_secrets(context: bytes, body: bytes) -> list[str]:
@@ -287,8 +326,11 @@ async def inspect_target_artifact(
     lead = offset - context_start
     result, private = await _fetch_artifact(
         target_url, path=path, target=target, offset=context_start, length=lead + length,
-        transaction_recorder=transaction_recorder,
+        transaction_recorder=_window_recorder(transaction_recorder, lead),
     )
+    if collector is not None and lead > CONTEXT_BYTES:
+        collector.context_bytes_used += lead
+        collector.context_bytes += lead
     if not result.get("ok") or private is None:
         return {
             "ok": False,
