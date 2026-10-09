@@ -2,7 +2,14 @@
 """
 Gungnir CT Monitor Worker
 Monitors Certificate Transparency logs for all root domains in the targets table.
-Discovered subdomains are automatically added as targets.
+Discovered subdomains are automatically added as targets, bounded:
+
+- a root that is a public suffix (``co.uk`` stored by an older engine) is never monitored;
+- a CT name is used only when it is a valid host name on a label boundary under a monitored
+  root; a leading ``*.`` names its parent, any other wildcard is dropped;
+- each apex (eTLD+1) gains at most ``SHAKERSCAN_CT_MONITOR_DAILY_CAP`` new targets per UTC day
+  (default 100, as the scan-path discovery cap); the names over the cap are counted per apex and
+  day in Redis ``gungnir:suppressed`` and in the status, not inserted.
 
 Usage:
     python3 gungnir_worker.py
@@ -15,6 +22,7 @@ Control via API:
 
 import asyncio
 import os
+import re
 import signal
 import tempfile
 from datetime import datetime, timezone
@@ -22,12 +30,20 @@ from datetime import datetime, timezone
 import asyncpg
 import redis
 
+try:
+    from scope.psl import is_public_suffix, registrable_domain
+except ModuleNotFoundError:  # package import (api.gungnir_worker)
+    from .scope.psl import is_public_suffix, registrable_domain
+
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
 GUNGNIR_BIN = '/opt/tools/gungnir'
 DOMAIN_RELOAD_INTERVAL = 300  # Reload domains every 5 minutes
 STATUS_UPDATE_INTERVAL = 10   # Update Redis status every 10 seconds
+DEFAULT_DAILY_CAP = 100       # new targets per apex per UTC day, as DISCOVERY_TARGET_LIMIT
+SUPPRESSED_KEY = "gungnir:suppressed"  # field "<YYYY-MM-DD>:<apex>" -> names over the cap
+_HOST_LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
 
 # Global state
 db_pool = None
@@ -39,7 +55,77 @@ stats = {
     'session_found': 0,
     'last_discovery': None,
     'started_at': None,
+    'suppressed_count': 0,
 }
+
+
+def daily_cap() -> int:
+    """New CT-monitor targets allowed per apex per UTC day (SHAKERSCAN_CT_MONITOR_DAILY_CAP)."""
+    try:
+        value = int(os.environ.get("SHAKERSCAN_CT_MONITOR_DAILY_CAP", "") or DEFAULT_DAILY_CAP)
+    except ValueError:
+        value = DEFAULT_DAILY_CAP
+    return max(0, min(value, 10_000))
+
+
+def ct_name(raw: str) -> str | None:
+    """The host a CT log line names, or None. ``*.a.example.com`` names ``a.example.com``;
+    a wildcard anywhere else, an address or an invalid label drops the line."""
+    name = str(raw or "").strip().lower().rstrip(".")
+    if name.startswith("*."):
+        name = name[2:]
+    if not name or len(name) > 253 or "*" in name:
+        return None
+    labels = name.split(".")
+    if len(labels) < 2 or not all(_HOST_LABEL.fullmatch(label) for label in labels):
+        return None
+    if all(label.isdigit() for label in labels):
+        return None
+    return name
+
+
+def monitored_roots(roots: list[str]) -> list[str]:
+    """Distinct roots to watch: a public suffix (co.uk, github.io) would add every site under it."""
+    kept: list[str] = []
+    for root in roots:
+        name = str(root or "").strip().lower().rstrip(".")
+        if not name or name in kept:
+            continue
+        if is_public_suffix(name):
+            print(f"[gungnir] Not monitoring {name}: it is a public suffix", flush=True)
+            continue
+        kept.append(name)
+    return kept
+
+
+class ApexDailyCap:
+    """At most ``cap`` new targets per apex per UTC day, seeded from the database so a restart
+    does not reset it; names over the cap are counted, not inserted."""
+
+    def __init__(self, cap: int, *, today=None):
+        self.cap = cap
+        self._today = today or (lambda: datetime.now(timezone.utc).date())
+        self.day = None
+        self.added: dict[str, int] = {}
+        self.suppressed: dict[str, int] = {}
+
+    def _roll(self) -> None:
+        day = self._today()
+        if day != self.day:
+            self.day, self.added, self.suppressed = day, {}, {}
+
+    async def allows(self, apex: str, count_today) -> bool:
+        self._roll()
+        if apex not in self.added:
+            self.added[apex] = int(await count_today(apex, self.day))
+        return self.added[apex] < self.cap
+
+    def record_added(self, apex: str) -> None:
+        self.added[apex] = self.added.get(apex, 0) + 1
+
+    def record_suppressed(self, apex: str) -> str:
+        self.suppressed[apex] = self.suppressed.get(apex, 0) + 1
+        return f"{self.day.isoformat()}:{apex}"
 
 
 def get_redis():
@@ -60,6 +146,17 @@ async def get_monitored_domains() -> list[str]:
             WHERE root_domain IS NOT NULL AND is_active = true
         """)
         return [r['root_domain'] for r in rows if r['root_domain']]
+
+
+async def count_added_today(apex: str, day) -> int:
+    """New CT-monitor targets already recorded under ``apex`` since the start of ``day`` (UTC)."""
+    start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    async with db_pool.acquire() as conn:
+        return int(await conn.fetchval("""
+            SELECT COUNT(*) FROM targets
+            WHERE discovery_source = 'gungnir-monitor' AND created_at >= $2
+              AND (root_domain = $1 OR root_domain LIKE '%.' || $1)
+        """, apex, start) or 0)
 
 
 def match_root_domain(subdomain: str, domains: list[str]) -> str | None:
@@ -129,6 +226,7 @@ def update_redis_status(r: redis.Redis):
         "session_found": str(stats['session_found']),
         "last_discovery": stats['last_discovery'] or "",
         "started_at": stats['started_at'].isoformat() if stats['started_at'] else "",
+        "suppressed_over_daily_cap": str(stats['suppressed_count']),
         "uptime_seconds": str(uptime),
         "updated_at": now.isoformat(),
     })
@@ -145,8 +243,49 @@ async def status_updater():
         await asyncio.sleep(STATUS_UPDATE_INTERVAL)
 
 
-async def run_gungnir(domains: list[str]):
+async def handle_ct_name(raw: str, domains: list[str], seen: set[str], cap: ApexDailyCap,
+                         *, store=None, count_today=None, redis_client=None) -> str:
+    """Store one CT name as a target when it is new, valid, in scope and under its apex's cap.
+
+    Returns what happened: ``invalid``, ``duplicate``, ``out_of_scope``, ``suppressed``,
+    ``existing`` or ``added``.
+    """
+    subdomain = ct_name(raw)
+    if subdomain is None:
+        return "invalid"
+    if subdomain in seen:
+        return "duplicate"
+    seen.add(subdomain)
+    # Find the monitored root this name belongs to (dot boundary, most specific root)
+    domain = match_root_domain(subdomain, domains)
+    if not domain:
+        return "out_of_scope"
+    apex = registrable_domain(domain) or domain
+    if not await cap.allows(apex, count_today or count_added_today):
+        field = cap.record_suppressed(apex)
+        stats['suppressed_count'] += 1
+        try:
+            client = redis_client or get_redis()
+            client.hincrby(SUPPRESSED_KEY, field, 1)
+        except Exception as exc:  # the count is diagnostic; the cap itself already held
+            print(f"[gungnir] Could not record a suppressed name: {type(exc).__name__}", flush=True)
+        if cap.suppressed[apex] == 1:
+            print(f"[gungnir] Daily cap of {cap.cap} new targets reached for {apex}; "
+                  "further names are counted, not added", flush=True)
+        return "suppressed"
+    if not await (store or store_subdomain)(subdomain, domain):
+        return "existing"
+    cap.record_added(apex)
+    stats['found_count'] += 1
+    stats['session_found'] += 1
+    stats['last_discovery'] = subdomain
+    print(f"[gungnir] NEW: {subdomain} (root: {domain})", flush=True)
+    return "added"
+
+
+async def run_gungnir(domains: list[str], cap: "ApexDailyCap | None" = None):
     """Run gungnir with given domains and process output."""
+    cap = cap or ApexDailyCap(daily_cap())
     if not domains:
         print("[gungnir] No domains to monitor", flush=True)
         return
@@ -174,24 +313,7 @@ async def run_gungnir(domains: list[str]):
                 line = await proc.stdout.readline()
                 if not line:
                     break
-
-                subdomain = line.decode().strip().lower()
-                if not subdomain or subdomain in seen:
-                    continue
-
-                # Remove wildcard prefix
-                subdomain = subdomain.replace('*.', '')
-
-                # Find the monitored root this name belongs to
-                domain = match_root_domain(subdomain, domains)
-                if domain:
-                    seen.add(subdomain)
-                    is_new = await store_subdomain(subdomain, domain)
-                    if is_new:
-                        stats['found_count'] += 1
-                        stats['session_found'] += 1
-                        stats['last_discovery'] = subdomain
-                        print(f"[gungnir] NEW: {subdomain} (root: {domain})", flush=True)
+                await handle_ct_name(line.decode(errors="replace"), domains, seen, cap)
 
         async def read_stderr():
             while True:
@@ -239,10 +361,11 @@ async def monitor_loop():
     stats['session_found'] = 0
 
     print("[gungnir] Monitor started", flush=True)
+    cap = ApexDailyCap(daily_cap())
 
     while not shutdown_event.is_set():
         # Load current domains
-        domains = await get_monitored_domains()
+        domains = monitored_roots(await get_monitored_domains())
         stats['domains_count'] = len(domains)
 
         if not domains:
@@ -253,7 +376,7 @@ async def monitor_loop():
         # Run gungnir with timeout for domain reload
         try:
             await asyncio.wait_for(
-                run_gungnir(domains),
+                run_gungnir(domains, cap),
                 timeout=DOMAIN_RELOAD_INTERVAL
             )
         except asyncio.TimeoutError:
