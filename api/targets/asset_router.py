@@ -79,7 +79,9 @@ async def create_host_target(request: HostTargetCreate):
         return await persist_host_target(conn, request)
 
 
-async def persist_host_target(conn, request: HostTargetCreate):
+async def persist_host_target(conn, request: HostTargetCreate, *, created_via: str | None = None):
+    """Create or update a host target. ``created_via`` names automation that created it (a Hunt
+    agent); it is recorded on a new row only, so a host a person added keeps counting as theirs."""
     try:
         from scanner_tools.device_posture import normalize_device_locator
     except ModuleNotFoundError:
@@ -101,7 +103,8 @@ async def persist_host_target(conn, request: HostTargetCreate):
                     ) hints)) ELSE targets.metadata_json END
             RETURNING id,url,name,metadata_json,(xmax=0) AS created""",host_url(locator),request.name or locator,
             json.dumps({'environment':request.environment,'cohort':request.environment,
-                        'port_hints':request.port_hints}),bool(request.port_hints))
+                        'port_hints':request.port_hints,
+                        **({'created_via':created_via} if created_via else {})}),bool(request.port_hints))
         result = {'id':str(row['id']), 'asset_id':str(row['id']), 'url':row['url'],
                   'status':'created' if row['created'] else 'already_exists'}
         saved = row['metadata_json']

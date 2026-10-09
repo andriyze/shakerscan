@@ -10,6 +10,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from runtime.models import TargetBinding
+from scope.psl import registrable_domain, spans_public_suffix
 
 
 _QUERY_PLAN = (
@@ -154,32 +155,39 @@ def _safe_text(value: Any, limit: int) -> str:
 
 
 def _bound_name(target: TargetBinding, prefix: str) -> str:
+    """The query name for one plan entry, derived only from the frozen binding.
+
+    The plan's names are fixed: the canonical host, ``_dmarc.<host>``-style records under it,
+    and one zone-apex name for NS/SOA/DS. They are admitted from the host itself even when the
+    binding has no subtree root: a host whose registrable domain spans other registrants
+    (``typeform.com`` has ``pro.typeform.com`` below it) or a single-label lab host
+    (``localhost``) carries no root, and that never makes its own records unreachable. No name
+    outside the host and its apex is ever derived, so this grants no subtree. A binding whose
+    roots exist but do not cover the host is refused, as before.
+    """
     host = str(target.canonical_host or "").lower().rstrip(".")
     roots = tuple(
         str(root).lower().rstrip(".")
         for root in target.allowed_root_domains
         if str(root).strip()
     )
-    if (
-        not host
-        or not roots
-        or not any(host == root or host.endswith("." + root) for root in roots)
-    ):
+    if not host:
         raise ValueError("scope: DNS host is outside the frozen root binding")
-    if prefix == "root":
-        candidates = sorted(
-            (root for root in roots if host == root or host.endswith("." + root)),
-            key=len,
-            reverse=True,
-        )
-        if not candidates:
-            raise ValueError("scope: DNS root is outside the frozen root binding")
-        name = candidates[0]
-    else:
-        name = host if prefix == "host" else f"{prefix}.{host}"
-    if not any(name == root or name.endswith("." + root) for root in roots):
-        raise ValueError("scope: DNS query name is outside the frozen root binding")
-    return name
+    covering = sorted(
+        (root for root in roots if host == root or host.endswith("." + root)), key=len, reverse=True,
+    )
+    if roots and not covering:
+        raise ValueError("scope: DNS host is outside the frozen root binding")
+    if prefix != "root":
+        return host if prefix == "host" else f"{prefix}.{host}"
+    # The zone apex: the deepest covering root. When there is none, or the root is only the host
+    # because its registrable domain spans registrants (www.typeform.com), that registrable
+    # domain is queried as one name, as 2.8.0 did; otherwise the host itself.
+    apex = registrable_domain(host)
+    spanning_apex = apex if apex and apex != host and spans_public_suffix(apex) else None
+    if covering and (covering[0] != host or not spanning_apex):
+        return covering[0]
+    return spanning_apex or host
 
 
 def _txt_value(record: Any) -> str:
