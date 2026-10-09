@@ -902,6 +902,34 @@ def test_a_legacy_row_is_offered_back_when_read_before_any_request(env):
     assert offer["reason_code"] == "preauthorization_reapproval" and offer["status"] == "pending"
 
 
+def test_an_invalid_stored_spelling_never_breaks_admission_or_the_routes(env, monkeypatch):
+    """R3 review blocker: an unconfirmed legacy bound offered back in its stored IDNA 2003 spelling
+    (xn--i-7iq.example, refused by IDNA 2008) raised BoundError out of every admission of the Hunt
+    and made the permission routes answer 500. It is now reported and left out of the offer."""
+    from hunt import permission_router
+
+    monkeypatch.setattr(permission_router, "_pool_provider", lambda: env.pool)
+    hunt = run(env, env.hunt(budget={"max_capability_calls": 2}, used={"agent_actions": 2}))
+    row = {"budget_multiplier": 2.0, "budget_totals": {}, "credential_targets": [],
+           "target_patterns": ["xn--i-7iq.example", "api.example.com"], "capability_flags": [],
+           "ssh_host_trust_first_contact": False}
+    run(env, env.conn.execute(  # no source strings recorded: the bounds are unconfirmed
+        """INSERT INTO hunt_preauthorizations(hunt_run_id, bounds_json, bounds_digest, created_by, proof)
+           VALUES ($1,$2::jsonb,$3,'alice@example.test','stepup')""",
+        hunt["id"], json.dumps(row), canonical_digest(row)))
+
+    assert run(env, env.call(hunt, "invalid-stored-0001")) == "admitted", "the budget bound still grants"
+    listed = run(env, permission_router.list_hunt_permission_requests(str(hunt["id"]), status=None))
+    offer = next(item for item in listed["requests"] if item["reason_code"] == "preauthorization_reapproval")
+    assert offer["subject"]["allow"] == ["target.authorize:api.example.com"]
+    assert "may differ from what was originally typed" in offer["explanation"]
+    one = run(env, permission_router.get_hunt_permission_request(str(hunt["id"]), offer["id"], wait_seconds=0))
+    assert one["id"] == offer["id"]
+    (preauth,) = run(env, permission_router.get_hunt_preauthorization(str(hunt["id"])))["preauthorizations"]
+    reported = {item["bound"]: item["reason"] for item in preauth["reapproval_required"]}
+    assert reported["target.authorize:xn--i-7iq.example"] == "host_invalid"
+
+
 def test_a_legacy_proposal_is_replaced_by_the_same_bounds_for_the_hosts_they_name(env):
     """R3 review: a proposal digested under IDNA 2003 was refused with 409 telling the person to
     approve a request that was never raised. It is now withdrawn and raised again with its IDNA

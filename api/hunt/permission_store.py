@@ -22,7 +22,9 @@ from typing import Any
 import uuid
 
 from .credential_uses import live_credential_grants
-from .permission_bounds import Bounds, bound_hosts, legacy_host_changes, merge, parse_bounds, stored_bounds
+from .permission_bounds import (
+    BoundError, Bounds, bound_hosts, legacy_host_changes, merge, parse_bounds, stored_bounds,
+)
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
     KIND_CAPABILITY_ENABLE,
@@ -331,7 +333,9 @@ def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) ->
                 "These bounds were pre-authorized for this Hunt before hosts were spelled with IDNA "
                 "2008/UTS #46, and were stored as "
                 + ", ".join(_label(item, 253) for item in subject.get("previously_stored_as") or ())
-                + " under IDNA 2003. They are withheld and cover nothing until you approve them again: "
+                + " under IDNA 2003. The spelling shown is how a bound was stored, which may differ "
+                "from what was originally typed. They are withheld and cover nothing until you "
+                "approve them again: "
                 + ", ".join(allow) + "."
             )
             effect = (
@@ -792,7 +796,21 @@ async def offer_reapproval(conn: Any, run: Mapping[str, Any], rows: list[dict[st
                    if item.reason in {"encoding_changed", "source_unconfirmed"}]
         if not changed:
             continue
-        allow = list(dict.fromkeys(item.bound for item in changed))
+        # Each bound must parse on its own under IDNA 2008/UTS #46; one that does not is left out
+        # (it stays listed as withheld) so the rest are still offered and nothing here can fail
+        # an admission or a read.
+        allow, offered_from = [], []
+        for item in changed:
+            try:
+                parse_bounds([item.bound])
+            except BoundError:
+                continue
+            if item.bound not in allow:
+                allow.append(item.bound)
+                offered_from.append(item)
+        if not allow:
+            continue
+        changed = offered_from
         subject = {
             "allow": allow, "bounds_digest": parse_bounds(allow).digest(),
             "reapproval_of": str(row["id"]),
