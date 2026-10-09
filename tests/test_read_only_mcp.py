@@ -814,3 +814,63 @@ def test_mcp_verify_sends_the_attempt_a_retry_needs():
     assert client.calls[-1] == ("POST", f"/hunts/{hunt}/candidates/{candidate}/verify", {"attempt": 2})
     client.call_tool("shakerscan_hunt_verify", {"hunt_id": hunt, "candidate_id": candidate})
     assert client.calls[-1][2] in (None, {})
+
+
+def test_capability_tool_describes_each_capabilitys_input_fields():
+    """D50: input was an untyped object, so GLM in OpenCode sent input {} (or the fields at the top
+    level). The tool says where the fields go and lists each capability's fields from the contract."""
+    from api.hunt.start_contract import hunt_start_public_contract
+
+    live = hunt_start_public_contract()
+    http = next(call for call in live["tool_calls"] if call["name"] == "http.request")
+    assert http["input"]["required"] == ["method", "path"] and "headers" in http["input"]["fields"]
+
+    class ContractClient(ManifestHuntClient):
+        def request_json(self, method, path, payload=None):
+            if path == "/hunts/contract":
+                return {**_hunt_contract(), "tool_calls": live["tool_calls"]}
+            return super().request_json(method, path, payload)
+
+    tool = next(item for item in ContractClient().list_tools() if item["name"] == "shakerscan_hunt_capability")
+    assert "Example:" in tool["description"] and '"capability_name": "http.request"' in tool["description"]
+    described = tool["inputSchema"]["properties"]["input"]["description"]
+    assert "\nhttp.request: method, path (optional: " in described
+    assert "\nartifact.inspect: path" in described and "\ncandidate.verify: candidate_id" in described
+    assert "no required fields ({} is valid)" in described
+    assert tool["inputSchema"]["properties"]["input"]["type"] == "object"
+    # An engine whose contract predates the field still gets the examples.
+    older = next(item for item in ManifestHuntClient().list_tools() if item["name"] == "shakerscan_hunt_capability")
+    assert 'http.request {"method": "GET", "path": "/login"}' in older["inputSchema"]["properties"]["input"]["description"]
+
+
+@pytest.mark.parametrize(("arguments", "expected"), [
+    ({"input": {}}, ["Missing required input fields: method, path", "required method (one of GET|HEAD), path (string)",
+                     '"input": {"method": "GET", "path": "/"}']),
+    ({}, ["Missing required input fields: method, path", '"capability_name": "http.request"']),
+])
+def test_an_empty_capability_input_is_refused_with_the_fields_and_an_example(arguments, expected):
+    client = ManifestHuntClient()
+    with pytest.raises(mcp.MCPError) as refused:
+        client.call_tool("shakerscan_hunt_capability", {
+            "hunt_id": client.HUNT_ID, "capability_name": "http.request", **arguments,
+        })
+    assert refused.value.code == -32602
+    for text in expected:
+        assert text in refused.value.message, refused.value.message
+    assert refused.value.data["example_call"]["input"] == {"method": "GET", "path": "/"}
+    assert not any("/capabilities/" in path for _method, path, _payload in client.calls), "validation is unchanged"
+
+
+def test_a_capability_call_without_ids_or_with_fields_at_the_top_level_says_how_to_call():
+    client = ManifestHuntClient()
+    with pytest.raises(mcp.MCPError) as empty:
+        client.call_tool("shakerscan_hunt_capability", {})
+    message = empty.value.message
+    assert message.startswith("Missing required tool arguments: capability_name, hunt_id.")
+    assert "hunt_id (from shakerscan_hunt_start)" in message and "Example call: " in message
+    with pytest.raises(mcp.MCPError) as flat:
+        client.call_tool("shakerscan_hunt_capability", {
+            "hunt_id": client.HUNT_ID, "capability_name": "http.request", "method": "GET", "path": "/",
+        })
+    assert "Unknown tool arguments: method, path. method, path belong inside input, not at the top level." in flat.value.message
+    assert client.calls == [] or not any("/capabilities/" in path for _m, path, _p in client.calls)

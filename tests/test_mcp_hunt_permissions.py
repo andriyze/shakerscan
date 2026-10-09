@@ -77,13 +77,28 @@ def test_a_capability_outside_the_manifest_is_answered_by_the_server_not_the_ada
 def test_the_wait_tool_long_polls_and_reports_the_decision():
     path = f"/hunts/{HUNT}/permission-requests/{REQUEST}"
     pending = {"id": REQUEST, "status": "pending", "title": "Raise max_http_requests for this Hunt"}
-    client = _client({("GET", f"{path}?wait_seconds=1"): [pending, {**pending, "status": "granted"}],
-                      ("GET", f"{path}?wait_seconds=0"): {**pending, "status": "granted"}})
+    client = _client({("GET", f"{path}?wait_seconds=2"): pending,
+                      ("GET", f"{path}?wait_seconds=1"): {**pending, "status": "granted"}})
     result = client.call_tool("shakerscan_hunt_permission_wait", {
         "hunt_id": HUNT, "request_id": REQUEST, "wait_seconds": 2,
     })["structuredContent"]
     assert result["outcome"] == "granted"
     assert "same idempotency_key" in result["next"]
+
+
+def test_the_wait_tool_never_floods_an_engine_that_answers_at_once():
+    """L1: an answer that comes back before its hold is followed by a pause, never by a burst of
+    wait_seconds=0 reads (the CLI's wait sent 79-86 of them in its last second)."""
+    path = f"/hunts/{HUNT}/permission-requests/{REQUEST}"
+    pending = {"id": REQUEST, "status": "pending", "title": "Raise max_http_requests for this Hunt"}
+    client = _client({("GET", f"{path}?wait_seconds={seconds}"): pending for seconds in range(0, 5)})
+    result = client.call_tool("shakerscan_hunt_permission_wait", {
+        "hunt_id": HUNT, "request_id": REQUEST, "wait_seconds": 3,
+    })["structuredContent"]
+    reads = [seen for seen in client.opener.seen if seen[1].startswith(f"{path}?")]
+    assert result["outcome"] == "still_pending"
+    holds = [int(path_.rsplit("=", 1)[1]) for _method, path_ in reads]
+    assert holds[0] == 3 and 0 not in holds and len(holds) <= 3, holds
 
 
 def test_no_mcp_tool_can_decide_or_revoke_a_permission():
