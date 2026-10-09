@@ -443,11 +443,43 @@ def test_a_caller_holds_at_most_two_heavy_slots_and_browsing_is_never_held_up():
 
 
 def test_only_small_json_pages_are_browse_pages():
-    assert reader.is_light_export("transactions", 25)
-    assert reader.is_light_export("transactions", reader.LIGHT_EXPORT_ROWS)
-    assert not reader.is_light_export("transactions", reader.LIGHT_EXPORT_ROWS + 1)
-    assert not reader.is_light_export("transactions", 1_000)
-    assert not reader.is_light_export("har", 25)
+    assert reader.is_light_export("transactions", 25, redaction="redacted")
+    assert reader.is_light_export("transactions", reader.LIGHT_EXPORT_ROWS, redaction="redacted")
+    assert not reader.is_light_export("transactions", reader.LIGHT_EXPORT_ROWS + 1, redaction="redacted")
+    assert not reader.is_light_export("transactions", 1_000, redaction="redacted")
+    assert not reader.is_light_export("har", 25, redaction="redacted")
+    # A raw export has no body budget: never a browse page, however small.
+    assert not reader.is_light_export("transactions", 25, redaction="raw")
+    assert not reader.is_light_export("har", 25, redaction="raw")
+
+
+@pytest.mark.parametrize("redaction, light", [("redacted", True), ("raw", False)])
+def test_a_raw_page_takes_a_heavy_slot_and_its_caller_limit(monkeypatch, redaction, light):
+    taken = []
+
+    @asynccontextmanager
+    async def admission(caller=None, wait_seconds=None, *, light=False):
+        taken.append((caller, light))
+        yield
+
+    async def build(**kwargs):
+        taken.append(("budgets", kwargs["light"]))
+        return b"{}", 0
+
+    monkeypatch.setattr(archive_router, "export_admission", admission)
+    monkeypatch.setattr(archive_router, "_build_export_bytes", build)
+    monkeypatch.setattr(archive_router, "_authorize_raw", lambda request: None)
+
+    class Request:
+        client = type("Client", (), {"host": "198.51.100.7"})()
+        headers = None
+
+    asyncio.run(archive_router._export(
+        request=Request(), scan_id="11111111-1111-4111-8111-111111111111", hunt_run_id=None,
+        export_format="transactions", redaction=redaction, method=None, status_code=None,
+        search=None, limit=25, offset=0,
+    ))
+    assert taken == [("198.51.100.7", light), ("budgets", light)]
 
 
 def test_the_caller_is_the_peer_or_the_trusted_gateways_forwarded_address(monkeypatch):
