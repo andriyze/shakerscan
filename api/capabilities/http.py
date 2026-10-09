@@ -151,6 +151,14 @@ def _origin_key(value: Any) -> tuple[str, str, int] | None:
     )
 
 
+def _destination_host(value: Any) -> str:
+    try:
+        from action_scope import _canonical_host
+    except ModuleNotFoundError:
+        from ..action_scope import _canonical_host
+    return _canonical_host(value)
+
+
 def granted_destination(policy: Mapping[str, Any], origin: Any) -> Mapping[str, Any] | None:
     """The destination a person authorized for this Hunt (``target.authorize``) matching
     ``origin`` exactly by scheme, host and port, or None."""
@@ -159,9 +167,10 @@ def granted_destination(policy: Mapping[str, Any], origin: Any) -> Mapping[str, 
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
     except ValueError:
         return None
-    host = str(parsed.hostname or "").lower().rstrip(".")
+    # The spelling the grant was recorded under (``permission_subjects.destination_host``).
+    host = _destination_host(parsed.hostname)
     for item in policy.get("granted_destinations") or ():
-        if (isinstance(item, Mapping) and str(item.get("host") or "") == host
+        if (isinstance(item, Mapping) and _destination_host(item.get("host")) == host
                 and int(item.get("port") or 0) == port and item.get("scheme") == parsed.scheme):
             return item
     return None

@@ -188,8 +188,18 @@ def _iso(value: Any) -> Any:
 # ---------------------------------------------------------------------------------------------
 # Rendering. Every word a person reads comes from these templates and server-resolved values.
 
+def _destination_host(value: Any) -> str:
+    """``permission_subjects.destination_host``: lowercase IDNA ASCII, as the scope guard."""
+    try:
+        from action_scope import _canonical_host
+    except ModuleNotFoundError:
+        from ..action_scope import _canonical_host
+    return _canonical_host(value)
+
+
 def _host_port(subject: Mapping[str, Any]) -> str:
-    host = str(subject.get("host") or "")
+    # The ASCII (punycode) form, so a look-alike spelling cannot pass for another host.
+    host = _destination_host(subject.get("host"))
     port = subject.get("port")
     return f"{host}:{port}" if port else host
 
@@ -448,7 +458,7 @@ def cooldown_identity(kind: str, subject: Mapping[str, Any]) -> dict[str, Any]:
         port = subject.get("port")
         return {
             "kind": kind, "scheme": str(subject.get("scheme") or "").lower(),
-            "host": str(subject.get("host") or "").lower().rstrip("."),
+            "host": _destination_host(subject.get("host")),
             "port": int(port) if str(port or "").isdigit() else str(port or ""),
         }
     if kind == KIND_CREDENTIAL_USE:

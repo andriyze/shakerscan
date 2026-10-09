@@ -155,6 +155,22 @@ def approval_required_refusal(
 # ---------------------------------------------------------------------------------------------
 # Destinations.
 
+def destination_host(value: Any) -> str:
+    """The one spelling of a destination host that the subject, the grant and the denial
+    cooldown share, and that the approval screen shows: lowercase, no trailing dot, IDNA ASCII
+    (punycode), as the scope guard spells it (``action_scope._canonical_host``).
+
+    ``https://ｅｖｉｌ.example`` (full-width) and ``evil.example`` reach one host. The subject
+    used to key on the raw lowercased spelling, so after a person denied one, the other was a
+    new question and was asked again.
+    """
+    try:
+        from action_scope import _canonical_host
+    except ModuleNotFoundError:
+        from ..action_scope import _canonical_host
+    return _canonical_host(value)
+
+
 def destination_refusal(target: Any, origin: Any, policy: Mapping[str, Any], *, principal_slot: str) -> HuntRefusal:
     """Classify an origin ``resolve_hunt_http_origin`` refused."""
     text = str(origin or "").strip()
@@ -167,10 +183,12 @@ def destination_refusal(target: Any, origin: Any, policy: Mapping[str, Any], *, 
             or parsed.username or parsed.password or parsed.path not in {"", "/"}
             or parsed.query or parsed.fragment or port == 0):
         return HuntRefusal("scope_origin_invalid", "The origin must be scheme://host[:port] with nothing else.")
-    host = parsed.hostname.lower().rstrip(".")
+    host = destination_host(parsed.hostname)
+    if not host or not host.isascii():
+        return HuntRefusal("scope_origin_invalid", "The origin's host is not a valid hostname.")
     port = port or (443 if parsed.scheme == "https" else 80)
     origin_text = f"{parsed.scheme}://{host}:{port}"
-    same_host = host == str(target.canonical_host or "").lower()
+    same_host = host == destination_host(target.canonical_host)
     if not same_host and principal_slot != "anonymous":
         return HuntRefusal(
             "scope_credential_other_host",
@@ -208,10 +226,10 @@ def scanner_destination_refusal(target: Any, origin: Any) -> HuntRefusal | None:
     request is raised for it: no grant could make it run.
     """
     try:
-        host = (urllib.parse.urlsplit(str(origin or "").strip()).hostname or "").lower().rstrip(".")
+        host = destination_host(urllib.parse.urlsplit(str(origin or "").strip()).hostname)
     except ValueError:
         return None
-    if not host or host == str(target.canonical_host or "").lower():
+    if not host or host == destination_host(target.canonical_host):
         return None
     return HuntRefusal(
         "scope_scanner_other_host",
@@ -359,6 +377,6 @@ async def credential_use_refusal(conn: Any, run: Mapping[str, Any], refusal: Hun
 __all__ = [
     "approval_required_refusal", "preflight_reason_code",
     "capability_refusal", "complete_destination_subject", "credential_kind_error",
-    "credential_use_refusal", "destination_refusal", "http_authority_refusal",
+    "credential_use_refusal", "destination_host", "destination_refusal", "http_authority_refusal",
     "replay_authority_refusal", "resolve_destination_addresses", "scanner_destination_refusal",
 ]
