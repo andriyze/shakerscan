@@ -1247,3 +1247,73 @@ def test_a_last_chance_is_never_sized_at_or_below_the_wall_its_unit_was_killed_a
     fresh = resume_plan(["U:field0"], {}, fields=("field0", "field1"), rate_samples=[("U:field0", 4.0)])
     assert fresh.last_chance_wall == 80
 
+
+def test_the_share_demand_of_a_request_bound_slice_is_its_remaining_wall():
+    """Follow-up review: a fast request-bound slice's extension is sized in requests (up to the
+    round share), but its demand on the residual shares is what it will take -- about 92 s,
+    not 900 s -- so a slow neighbour's share is not starved by it."""
+    def result(status, reason, reserved, consumed):
+        return SimpleNamespace(
+            status=SimpleNamespace(value=status), reason_code=SimpleNamespace(value=reason),
+            budget_reserved=reserved, budget_consumed=consumed,
+        )
+
+    actions = tuple(
+        dataclasses.replace(
+            _action(action_id, "sqli.verify_batch", index, capability_args={
+                "slice": {"start": index, "count": 1}, "profile": "balanced_batch_v1",
+            }),
+            action_digest=None,
+        )
+        for index, action_id in enumerate(("verify.sqli.r01", "verify.sqli.001.r01"))
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.UUID(int=4)), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=actions,
+    )
+    planned = plan_verification_extensions(
+        parent_plan=plan,
+        parent_results={
+            # A fast body stopped by its 600-mutation hold: 92 s of units left.
+            "verify.sqli.r01": result(
+                "partial", "http_request_budget_exhausted",
+                {"http_requests": 1_200, "state_changing_requests": 600, "tool_wall_seconds": 420},
+                {"http_requests": 526, "state_changing_requests": 526, "tool_wall_seconds": 38},
+            ),
+            # A slow body wall-killed with most of its requests unsent.
+            "verify.sqli.001.r01": result(
+                "timed_out", "timed_out",
+                {"http_requests": 800, "state_changing_requests": 480, "tool_wall_seconds": 420},
+                {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 420},
+            ),
+        },
+        profile_limits=BALANCED, residual={**BALANCED, "tool_wall_seconds": 1_500},
+        stage_resume_walls={"verify.sqli.r01": 48, "verify.sqli.001.r01": 300},
+        stage_remaining_walls={"verify.sqli.r01": 92, "verify.sqli.001.r01": 5_000},
+        stage_remaining_requests={"verify.sqli.r01": 756, "verify.sqli.001.r01": 900},
+    )
+    shares = {
+        item["capability_args"][EXTENDS_ARG]: item["capability_args"].get(SCAN_WALL_SHARE_ARG)
+        for item in planned
+    }
+    # The fast slice's demand is its 92 s plus slack (152 s), not its 900 s request-sized
+    # extension: the slow slice's share is the 1,499 s left (less the finalizer) minus 152 s.
+    assert shares["verify.sqli.001.r01"] == 1_499 - 152
+
+
+def test_a_closed_candidate_accounts_for_every_technique(monkeypatch):
+    """Follow-up review: a closed candidate's refuted and inconclusive lists together cover
+    U, B, E and T, so no technique silently drops out of the report."""
+    scan = _Scan(monkeypatch, ("/chat", "/copilot"))
+    scan.add("verify.sqli.r01", path="/chat", budget=SLICE)
+    scan.add("verify.sqli.001.r01", path="/copilot", budget=SLICE)
+    scan.run({"verify.sqli.r01", "verify.sqli.001.r01"})
+    scan.drive()
+    closed = [item for item in scan.outcomes().values() if item["closed"]]
+    assert closed
+    for outcome in closed:
+        assert set(outcome["refuted_techniques"]) | set(outcome["inconclusive_techniques"]) == {
+            "U", "B", "E", "T",
+        }
+        assert outcome["unfinished_techniques"] == []
+        assert not set(outcome["refuted_techniques"]) & set(outcome["inconclusive_techniques"])
