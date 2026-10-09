@@ -1813,7 +1813,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 403 | Python sources + Compose manifests |
+| Runtime environment keys | 404 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 127 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2896,6 +2896,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_ALLOWED_HOSTS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_SANDBOX_GROUP_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_API_TOKEN` | `scripts/scan_cli.py`, `scripts/v2_cli.py` |
 | `SHAKERSCAN_API_TOKEN_FILE` | `scripts/scan_cli.py` |
 | `SHAKERSCAN_API_UID` | `docker-compose.release.yml` |

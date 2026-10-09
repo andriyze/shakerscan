@@ -795,6 +795,7 @@ persist_remote_access_env() { :; }
 warn_if_ui_port_has_foreign_listener() { :; }
 resolve_docker_socket_gid() { printf '0\n'; }
 write_dotenv_value() { :; }
+record_api_sandbox_group() { :; }
 resolve_start_workers() { printf '1\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull-prebuilt\n'; }
@@ -1161,6 +1162,7 @@ persist_remote_access_env() { :; }
 warn_if_ui_port_has_foreign_listener() { :; }
 resolve_docker_socket_gid() { printf '0\n'; }
 write_dotenv_value() { :; }
+record_api_sandbox_group() { :; }
 resolve_start_workers() { printf '1\n'; }
 restart_worker_count() { printf '3\n'; }
 set_build_env() { :; }

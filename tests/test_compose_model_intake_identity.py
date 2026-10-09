@@ -23,5 +23,7 @@ def test_every_worker_that_can_acquire_learns_the_configured_sandbox_group():
 def test_the_release_api_can_read_the_quarantine_it_stages_for_the_runner():
     # A root install keeps the API at 10002 and the sandbox at 10001; without the sandbox
     # group the API cannot traverse the quarantine and prepare_isolated_runtime fails with EACCES.
+    # scanner.sh renders the sandbox group into its own key (tests/test_api_group_add_unique.py
+    # covers the case where it is also the Docker socket's group).
     api = _service("docker-compose.release.yml", "api")
-    assert "${MODEL_INTAKE_SANDBOX_GID:-10001}" in [str(item) for item in api.get("group_add", [])]
+    assert "${SHAKERSCAN_API_SANDBOX_GROUP_GID:-10001}" in [str(item) for item in api.get("group_add", [])]
