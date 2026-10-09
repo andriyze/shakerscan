@@ -109,7 +109,9 @@ def test_the_budget_parses_and_clamps(monkeypatch):
     assert reader.masked_export_budget() == reader.MAX_MASKED_EXPORT_BYTES
     monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES", str(8 * MIB))
     assert reader.masked_export_budget() == 8 * MIB
-    assert reader.export_read_budget("redacted") == 8 * MIB
+    assert reader.export_read_budget("redacted") == 8 * MIB + reader.MAX_EXPORT_HEADER_BYTES
+    assert reader.export_read_budget("redacted", light=True) == \
+        reader.LIGHT_EXPORT_BODY_BYTES + reader.LIGHT_EXPORT_HEADER_BYTES
     assert reader.export_read_budget("raw") == reader.MAX_EXTERNAL_PAYLOAD_BYTES
 
 
@@ -302,10 +304,10 @@ def test_a_stopped_worker_pool_refuses_the_export(monkeypatch):
         def shutdown(self, **kwargs):
             pass
 
-    monkeypatch.setattr(reader, "_body_pool", Broken())
+    monkeypatch.setattr(reader, "_payload_pool", Broken())
     with pytest.raises(reader.ExportUnavailable):
         _pooled([_row(0, f"password={CANARY}")])
-    assert reader._body_pool is None  # a fresh pool is started next time
+    assert reader._payload_pool is None  # a fresh pool is started next time
 
 
 # --- Admission ---------------------------------------------------------------------------------
@@ -344,7 +346,7 @@ def test_a_refused_export_is_a_503_with_retry_after_and_reads_no_rows(monkeypatc
     reads = []
 
     @asynccontextmanager
-    async def busy(wait_seconds=None):
+    async def busy(*args, **kwargs):
         raise archive_router.ExportBusy("busy")
         yield  # pragma: no cover
 
@@ -400,39 +402,52 @@ def test_the_route_reads_external_payloads_within_the_masking_budget(monkeypatch
     response = asyncio.run(archive_router._export(
         request=object(), scan_id="11111111-1111-4111-8111-111111111111", hunt_run_id=None,
         export_format="transactions", redaction="redacted", method=None, status_code=None,
-        search=None, limit=10, offset=0,
+        search=None, limit=1_000, offset=0,
     ))
-    assert seen["external_payload_budget"] == 3 * MIB
+    assert seen["external_payload_budget"] == 3 * MIB + reader.MAX_EXPORT_HEADER_BYTES
     assert response.media_type == "application/json"
     assert CANARY not in response.body.decode()
     assert json.loads(response.body)["transactions"][0]["response"]["body"] == "password=***"
 
 
-def test_one_caller_holds_at_most_one_slot():
+def test_a_caller_holds_at_most_two_heavy_slots_and_browsing_is_never_held_up():
     async def scenario():
         release = asyncio.Event()
-        holding = asyncio.Event()
+        holding: list[str] = []
 
         async def hold(caller):
             async with reader.export_admission(caller):
-                holding.set()
+                holding.append(caller)
                 await release.wait()
 
-        first = asyncio.create_task(hold("198.51.100.7"))
-        await holding.wait()
-        # The same caller waits for its own slot, then is refused, though a slot is free...
+        holders = [asyncio.create_task(hold("198.51.100.7")) for _ in range(reader.MAX_EXPORTS_PER_CALLER)]
+        while len(holding) < reader.MAX_EXPORTS_PER_CALLER:
+            await asyncio.sleep(0)
+        # The same caller's third download waits, then is refused, though a slot is free...
         with pytest.raises(reader.ExportBusy):
             async with reader.export_admission("198.51.100.7", wait_seconds=0.05):
                 pass
-        # ...which another caller still gets at once.
-        async with reader.export_admission("203.0.113.9", wait_seconds=0.05):
+        # ...another caller still gets that slot at once, and with every heavy slot taken, a
+        # browse page of either caller is admitted.
+        async with (
+            reader.export_admission("203.0.113.9", wait_seconds=0.05),
+            reader.export_admission("198.51.100.7", wait_seconds=0.05, light=True),
+        ):
             pass
         release.set()
-        await first
+        await asyncio.gather(*holders)
         async with reader.export_admission("198.51.100.7", wait_seconds=0.05):
             return "admitted again"
 
     assert asyncio.run(scenario()) == "admitted again"
+
+
+def test_only_small_json_pages_are_browse_pages():
+    assert reader.is_light_export("transactions", 25)
+    assert reader.is_light_export("transactions", reader.LIGHT_EXPORT_ROWS)
+    assert not reader.is_light_export("transactions", reader.LIGHT_EXPORT_ROWS + 1)
+    assert not reader.is_light_export("transactions", 1_000)
+    assert not reader.is_light_export("har", 25)
 
 
 def test_the_caller_is_the_peer_or_the_trusted_gateways_forwarded_address(monkeypatch):
@@ -455,7 +470,7 @@ def test_the_caller_is_the_peer_or_the_trusted_gateways_forwarded_address(monkey
 
 def _lazy_row(index: int, size: int, **extra) -> dict:
     row = _row(index, "")
-    row.update(response_body=None, request_body=None, **{reader.LAZY_BODIES: {"response_body": size}}, **extra)
+    row.update(response_body=None, request_body=None, **{reader.LAZY_PAYLOADS: {"response_body": size}}, **extra)
     return row
 
 
@@ -471,7 +486,7 @@ def test_bodies_are_read_in_bounded_batches_and_never_past_the_budget(monkeypatc
         return {str(item): {"response_body": body, "request_body": None, "unavailable": set(), "omitted": set()}
                 for item in ids}, 0
 
-    encoded = asyncio.run(reader.build_export(rows, **_ARGUMENTS, total=8, stats=_COMPLETE, read_bodies=read_bodies))
+    encoded = asyncio.run(reader.build_export(rows, **_ARGUMENTS, total=8, stats=_COMPLETE, read_payloads=read_bodies))
     document = encoded.materialize()
     shown = [item["response"]["body"] is not None for item in document["transactions"]]
     assert shown == [True, True, True, False, False, False, False, False]  # 3 x ~1 MiB fit in 3 MiB
@@ -501,7 +516,7 @@ def test_a_lazily_read_body_gets_the_legacy_decoding_and_its_read_outcome(monkey
         }, 0  # row-3 was purged between the reads
 
     document = asyncio.run(reader.build_export(
-        rows, **_ARGUMENTS, total=4, stats={"attempted": 4, "stored": 4}, read_bodies=read_bodies,
+        rows, **_ARGUMENTS, total=4, stats={"attempted": 4, "stored": 4}, read_payloads=read_bodies,
     )).materialize()
     first, second, third, fourth = document["transactions"]
     assert first["response"]["body"] == "password=***"
@@ -538,19 +553,22 @@ def test_the_route_reads_rows_without_bodies(monkeypatch):
 
     async def _bodies(conn, ids, **kwargs):
         seen["body_ids"] = [str(item) for item in ids]
+        seen["owner"] = (kwargs.get("scan_id"), kwargs.get("scan_ids"), kwargs.get("hunt_run_id"))
         return {"row-0": {"response_body": f"password={CANARY}", "request_body": None,
                           "unavailable": set(), "omitted": set()}}, 0
 
     for name, value in (("_pool", lambda: _Pool()), ("_scan_archive_ids", _ids), ("count_transactions", _count),
                         ("read_archive_stats", _stats), ("read_transactions", _rows),
-                        ("read_transaction_bodies", _bodies)):
+                        ("read_transaction_payloads", _bodies)):
         monkeypatch.setattr(archive_router, name, value)
     response = asyncio.run(archive_router._export(
         request=object(), scan_id="11111111-1111-4111-8111-111111111111", hunt_run_id=None,
         export_format="transactions", redaction="redacted", method=None, status_code=None,
         search=None, limit=10, offset=0,
     ))
-    assert seen["bodies"] is False and seen["body_ids"] == ["row-0"]
+    assert seen["payloads"] is False and seen["body_ids"] == ["row-0"]
+    scan = "11111111-1111-4111-8111-111111111111"
+    assert seen["owner"] == (scan, (scan,), None)  # payloads are read for this scan only
     assert json.loads(response.body)["transactions"][0]["response"]["body"] == "password=***"
 
 
@@ -586,3 +604,151 @@ def test_masking_workers_do_not_rerun_the_launching_script(tmp_path):
         capture_output=True, text=True, timeout=120, check=True,
     )
     assert completed.stdout.splitlines() == ["MAIN RAN", "4"]
+
+
+# --- Headers are budgeted and redacted in the workers -------------------------------------------
+
+
+def test_headers_past_the_header_budget_are_withheld(monkeypatch):
+    monkeypatch.setattr(reader, "MAX_EXPORT_HEADER_BYTES", 2_000)
+    big = {"x-pad": "p" * 900, "authorization": f"Bearer {CANARY}"}
+    rows = [{**_row(index, "body"), "response_headers": big} for index in range(4)]
+    for redaction in ("redacted", "raw"):
+        document = reader.export_document(
+            rows, **{**_ARGUMENTS, "redaction": redaction}, total=4, stats={"attempted": 4, "stored": 4},
+        )
+        items = document["transactions"]
+        assert [bool(item["response"]["headers"]) for item in items] == [True, True, False, False]
+        assert [item["payload_omitted_reasons"] for item in items[2:]] == [{"response_headers": "header_budget"}] * 2
+        assert "headers left out because this export reached its header budget" in document["fidelity_detail"]
+        if redaction == "redacted":
+            assert CANARY not in json.dumps(document)
+            assert items[0]["response"]["headers"]["authorization"] != f"Bearer {CANARY}"
+    pooled = asyncio.run(reader.build_export(rows, **_ARGUMENTS, total=4, stats={"attempted": 4, "stored": 4}))
+    assert pooled.materialize() == reader.export_document(rows, **_ARGUMENTS, total=4, stats={"attempted": 4, "stored": 4})
+
+
+def test_private_workflow_headers_keep_only_their_names():
+    row = {**_row(0, "body"), "plane": "hunt", "capability_name": "collections.replay_safe",
+           "request_headers": {"x-pin": "4821", "cookie": f"s={CANARY}"}}
+    item = reader.export_document([row], **_ARGUMENTS, total=1)["transactions"][0]
+    assert item["request"]["headers"] == {"x-pin": "[REDACTED]", "cookie": "[REDACTED]"}
+    assert item["response"]["body"] is None
+
+
+def test_a_hostile_header_payload_is_withheld_not_fatal(monkeypatch):
+    def fails(value, masked, private):
+        raise RecursionError(f"cannot redact {value}")
+
+    monkeypatch.setattr(worker, "encoded_headers", fails)
+    rows = [{**_row(0, "body"), "request_headers": {"x": CANARY}}]
+    document = reader.export_document(rows, **_ARGUMENTS, total=1)
+    item = document["transactions"][0]
+    assert item["request"]["headers"] == {}
+    assert item["payload_omitted_reasons"]["request_headers"] == "masking_failed"
+    assert CANARY not in json.dumps(document)
+
+
+def test_payloads_are_read_only_for_the_exports_owner():
+    seen = {}
+
+    class Connection:
+        async def fetch(self, query, *params):
+            seen["query"], seen["params"] = query, params
+            return []
+
+    scan = "11111111-1111-4111-8111-111111111111"
+    asyncio.run(reader.read_transaction_payloads(Connection(), ["row-1"], external_payload_budget=0, scan_id=scan))
+    assert seen["query"].rstrip().endswith("AND t.scan_id=$2") and seen["params"] == (["row-1"], scan)
+    asyncio.run(reader.read_transaction_payloads(
+        Connection(), ["row-1"], external_payload_budget=0, scan_ids=[scan, "22222222-2222-4222-8222-222222222222"],
+    ))
+    assert "t.scan_id=ANY($2::uuid[])" in seen["query"]
+    asyncio.run(reader.read_transaction_payloads(Connection(), ["row-1"], external_payload_budget=0, hunt_run_id="h"))
+    assert seen["query"].rstrip().endswith("AND t.hunt_run_id=$2")
+    with pytest.raises(ValueError):
+        asyncio.run(reader.read_transaction_payloads(Connection(), ["row-1"], external_payload_budget=0))
+
+
+def test_a_browse_page_is_served_while_the_same_caller_downloads(monkeypatch):
+    @asynccontextmanager
+    async def acquire():
+        yield object()
+
+    class _Pool:
+        def acquire(self):
+            return acquire()
+
+    async def _ids(conn, scan_id):
+        return (scan_id,)
+
+    async def _count(conn, **kwargs):
+        return 1
+
+    async def _stats(conn, **kwargs):
+        return {}
+
+    async def _rows(conn, **kwargs):
+        return [_row(0, f"password={CANARY}")]
+
+    for name, value in (("_pool", lambda: _Pool()), ("_scan_archive_ids", _ids), ("count_transactions", _count),
+                        ("read_archive_stats", _stats), ("read_transactions", _rows)):
+        monkeypatch.setattr(archive_router, name, value)
+
+    class Request:
+        client = type("Client", (), {"host": "198.51.100.7"})()
+        headers = None  # no forwarding headers: the socket peer is the caller
+
+    def export(limit):
+        return archive_router._export(
+            request=Request(), scan_id="11111111-1111-4111-8111-111111111111", hunt_run_id=None,
+            export_format="transactions", redaction="redacted", method=None, status_code=None,
+            search=None, limit=limit, offset=0,
+        )
+
+    async def scenario():
+        release = asyncio.Event()
+        holding = 0
+
+        async def download():
+            nonlocal holding
+            async with archive_router.export_admission("198.51.100.7"):
+                holding += 1
+                await release.wait()
+
+        downloads = [asyncio.create_task(download()) for _ in range(reader.MAX_EXPORTS_PER_CALLER)]
+        while holding < reader.MAX_EXPORTS_PER_CALLER:
+            await asyncio.sleep(0)
+        page = await asyncio.wait_for(export(25), 30)  # the UI's 25-row browse page
+        release.set()
+        await asyncio.gather(*downloads)
+        return page
+
+    page = asyncio.run(scenario())
+    assert page.status_code == 200
+    assert json.loads(page.body)["transactions"][0]["response"]["body"] == "password=***"
+
+
+def test_the_spawn_launch_is_checked_and_falls_back_to_the_forkserver(monkeypatch):
+    code = worker._STANDARD_LAUNCH.__code__
+    assert "spawn" in code.co_names and "get_preparation_data" in code.co_names
+    assert worker._launch_without_main is not None
+    assert isinstance(worker.worker_context(), worker._WorkerContext)
+    monkeypatch.setattr(worker, "_launch_without_main", None)
+    calls = []
+
+    import multiprocessing
+
+    class Context:
+        def set_forkserver_preload(self, modules):
+            calls.append(modules)
+
+    monkeypatch.setattr(multiprocessing, "get_context", lambda method: calls.append(method) or Context())
+    worker.worker_context()
+    assert calls == ["forkserver", ["__main__", worker.__name__]]
+
+
+def test_the_reader_lists_every_archived_payload():
+    from api.runtime.archive_blob_secrets import PAYLOAD_FIELDS
+
+    assert reader.PAYLOAD_FIELDS == PAYLOAD_FIELDS
