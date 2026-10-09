@@ -596,10 +596,6 @@ try:
         compatibility_snapshot,
         record_compatibility_call,
     )
-    from scan.authorization import (
-        ActionAuthorityDecision,
-        revalidate_scan_action_authority,
-    )
     from scan.execution_backend import (
         ActionAlreadyTerminal,
         ActionLease,
@@ -725,10 +721,6 @@ except ModuleNotFoundError:
     from api.scan.compatibility import (
         compatibility_snapshot,
         record_compatibility_call,
-    )
-    from api.scan.authorization import (
-        ActionAuthorityDecision,
-        revalidate_scan_action_authority,
     )
     from api.scan.execution_backend import (
         ActionAlreadyTerminal,

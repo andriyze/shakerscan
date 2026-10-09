@@ -162,11 +162,28 @@ async def current_target_authorization(conn: Any, target_id: Any) -> dict[str, A
     return await resolve_target_authorization(conn, target_id, _current_exact_target_authorization)
 
 
-async def _current_exact_target_authorization(conn: Any, target_id: Any) -> dict[str, Any] | None:
+async def standing_authorization_is_current(conn: Any, target_id: Any, approval_receipt_id: Any) -> bool:
+    """True while this exact receipt is still one the target's current authorization accepts.
+
+    Running work bound to a standing receipt is re-checked with the same rules as the gate, so a
+    receipt the target no longer stands behind (its host changed, its scope is blocked, the
+    target is gone) stops the work even though the receipt row itself was never updated.
+    """
+    try:
+        approval_uuid = uuid.UUID(str(approval_receipt_id))
+    except (TypeError, ValueError):
+        return False
+    return await _current_exact_target_authorization(conn, target_id, approval_receipt_id=approval_uuid) is not None
+
+
+async def _current_exact_target_authorization(
+    conn: Any, target_id: Any, *, approval_receipt_id: uuid.UUID | None = None,
+) -> dict[str, Any] | None:
     """The target's standing (or still valid bounded) authorization, or None.
 
     Only receipts whose scope still names the target's current host count: a target whose URL
-    changed since the authorization was given must be authorized again.
+    changed since the authorization was given must be authorized again. With
+    ``approval_receipt_id`` only that receipt is considered.
     """
     try:
         target_uuid = uuid.UUID(str(target_id))
@@ -204,12 +221,14 @@ async def _current_exact_target_authorization(conn: Any, target_id: Any) -> dict
            -- at the gate, and at revoke, so re-authorizing is the way out.
            AND a.action_name = $3
            AND (a.expires_at IS NULL OR a.expires_at > NOW())
+           AND ($4::uuid IS NULL OR a.id = $4::uuid)
          ORDER BY (a.expires_at IS NULL) DESC, a.created_at DESC
          LIMIT 20
         """,
         target_uuid,
         list(STANDING_RISK_TIERS),
         STANDING_ACTION_NAME,
+        approval_receipt_id,
     )
     host = _host_key(_host(target.get("url", "")))
     for raw in rows:

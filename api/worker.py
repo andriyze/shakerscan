@@ -301,6 +301,7 @@ from scanner_tools.process_memory import ProcessTreeMemoryCeiling, kill_process_
 from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
+from scan.action_authority_guard import ScanAuthorityGuard
 from scan.executor import build_native_scan_execution
 from scan.stage_store import PostgresScanStageCheckpointStore
 from scan.negative_control import with_negative_controls
@@ -11543,17 +11544,18 @@ async def _execute_reserved_deterministic_scan(
         browser_login_adapter_factory=lambda action, dispatcher: build_scan_browser_login_adapter(db_pool, action=action, dispatcher=dispatcher),
         authentication_health_adapter_factory=lambda action, dispatcher: build_scan_health_adapter(db_pool, action=action, dispatcher=dispatcher),
     )
-    executor = ReceiptScanActionExecutor(
-        scan_id=scan_id,
-        target_id=execution.target_binding.target_id,
-        worker_id=worker_id,
-        dispatcher=dispatcher,
-        scope_receipt_id=execution.target_binding.scope_receipt_id,
-        approval_receipt_id=admission.plan.policy.approval_receipt_id,
-        credential_check=build_scan_credential_check(db_pool, options=normalized, target=execution.target_binding, scan_id=scan_id,
-            session_check=dispatcher.authentication_health_status),
-        user_cancelled=lambda: _scan_cancel_requested(scan_id),
-    )
+    # Every action re-checks the target's authorization before and while it runs, as Hunt
+    # and broker actions do; one guard spans every continuation round of this Scan.
+    authority = ScanAuthorityGuard.for_scan(db_pool, target_binding=execution.target_binding,
+        policy=admission.plan.policy, record_event=lambda name: record_operational_event(get_redis(), name))
+    def local_executor() -> ReceiptScanActionExecutor:
+        return ReceiptScanActionExecutor(scan_id=scan_id, target_id=execution.target_binding.target_id,
+            worker_id=worker_id, dispatcher=dispatcher, scope_receipt_id=execution.target_binding.scope_receipt_id,
+            approval_receipt_id=admission.plan.policy.approval_receipt_id, authority=authority,
+            credential_check=build_scan_credential_check(db_pool, options=normalized, target=execution.target_binding,
+                scan_id=scan_id, session_check=dispatcher.authentication_health_status),
+            user_cancelled=lambda: _scan_cancel_requested(scan_id))
+    executor = local_executor()
     initial_has_finalizer = any(
         action.action_id == "finalize.report" for action in plan.actions
     )
@@ -11606,20 +11608,9 @@ async def _execute_reserved_deterministic_scan(
             dispatcher.plan = amended_plan
             dispatcher.plan_revision = amended_revision
             dispatcher.backend = backend
-            amended_executor = ReceiptScanActionExecutor(
-                scan_id=scan_id,
-                target_id=execution.target_binding.target_id,
-                worker_id=worker_id,
-                dispatcher=dispatcher,
-                scope_receipt_id=execution.target_binding.scope_receipt_id,
-                approval_receipt_id=admission.plan.policy.approval_receipt_id,
-                credential_check=build_scan_credential_check(db_pool, options=normalized, target=execution.target_binding, scan_id=scan_id,
-                    session_check=dispatcher.authentication_health_status),
-                user_cancelled=lambda: _scan_cancel_requested(scan_id),
-            )
             return await ScanOrchestrator(
                 backend=backend,
-                executor=amended_executor,
+                executor=local_executor(),
                 event_callback=_local_scan_action_activity_callback(
                     plan=amended_plan,
                     scan_id=scan_id,
@@ -11631,6 +11622,8 @@ async def _execute_reserved_deterministic_scan(
             ).run(amended_plan)
 
         async def materialize_round(**kwargs: Any) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
+            if authority.withdrawn and not kwargs.get("finalize_only"):
+                return None  # no further work rounds once authorization is withdrawn
             return await _materialize_local_scan_continuation(
                 allocation=continuation_allocation,
                 dispatcher=dispatcher,
@@ -11656,11 +11649,11 @@ async def _execute_reserved_deterministic_scan(
         raise ScanCapabilityContractError(
             "canonical Scan finalization produced no report manifest"
         )
-    return await load_recorded_scan_report(
+    return await authority.annotate(await load_recorded_scan_report(
         db_pool, PostgresObservationManifestStore(), final_result, scan_id=scan_id,
         root_domains=execution.target_binding.allowed_root_domains,
         invalid_error=ScanCapabilityContractError,
-    )
+    ), scan_id=scan_id)
 
 
 async def _execute_scan_subdomain_discovery(
