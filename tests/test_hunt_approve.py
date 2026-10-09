@@ -17,6 +17,7 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 import types
 import urllib.error
@@ -523,3 +524,126 @@ def test_permissions_show_with_arguments_in_the_wrong_order_prints_its_own_usage
     assert "permissions show [-h] [--hunt HUNT] request_id" in err, err
     assert f"unrecognized arguments: {REQUEST}" in err
     assert "{hunt,approve,deny" not in err, "not the top-level usage"
+
+
+def _second_request():
+    return _request(id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", subject_digest="e" * 64,
+                    title="Allow state-changing HTTP for this Hunt", created_at="2026-10-09T10:01:00Z")
+
+
+class _PtyTerminal(approval.Terminal):
+    """The real Terminal on a pseudo-terminal, with its output recorded (labelled double)."""
+
+    def __init__(self):
+        import pty
+        self.master, slave = pty.openpty()
+        self.text_out = io.StringIO()
+        self.lock = threading.Lock()
+        super().__init__(os.fdopen(slave, "r", closefd=True), self)
+
+    def write(self, text):
+        with self.lock:
+            self.text_out.write(text)
+
+    def flush(self):
+        return None
+
+    def require(self, what):
+        return None
+
+    @property
+    def text(self):
+        with self.lock:
+            return self.text_out.getvalue()
+
+    def wait_for(self, text, count=1, timeout=10.0):
+        deadline = time.monotonic() + timeout
+        while self.text.count(text) < count:
+            assert time.monotonic() < deadline, f"never saw {text!r} x{count}: {self.text}"
+            time.sleep(0.01)
+
+
+def test_a_key_meant_for_a_request_that_ended_never_decides_the_next_one():
+    """The switch race: request A ends elsewhere while its prompt waits and request B is shown at
+    once. A key pressed for A (here: the moment B is announced) must not decide B; the switch is
+    announced and B takes only a fresh key."""
+
+    first, second = _request(), _second_request()
+    state = {"first": "pending", "second": "pending", "lists": 0, "sleeps": 0}
+    decisions = []
+
+    def engine(method, path, payload=None, headers=None):
+        if path.startswith(f"/hunts/{HUNT}/permission-requests?status=pending"):
+            state["lists"] += 1
+            return 200, {"requests": [first] if state["lists"] == 1 else
+                         ([second] if state["second"] == "pending" else [])}
+        if path == f"/hunts/{HUNT}/permission-requests/{first['id']}":
+            state["first"] = "expired"  # it expires while its prompt waits
+            return 200, {**first, "status": "expired"}
+        if path.endswith("/decision"):
+            decisions.append((path, payload["decision"]))
+            state["second"] = "granted" if payload["decision"] == "allow" else "denied"
+            return 200, {"request": {**second, "status": state["second"]}}
+        raise AssertionError(path)
+
+    def sleep(seconds):
+        state["sleeps"] += 1
+        if state["sleeps"] > 1:
+            raise KeyboardInterrupt
+
+    terminal = _PtyTerminal()
+
+    def person():
+        terminal.wait_for(f"now showing request {second['id']}")
+        os.write(terminal.master, b"a")  # meant for the request that just ended
+        terminal.wait_for("[q]uit: ", count=2)  # B's own prompt
+        os.write(terminal.master, b"d")
+
+    thread = threading.Thread(target=person, daemon=True)
+    thread.start()
+    assert approval.watch(engine, terminal, enterprise=False, origin="http://127.0.0.1:8080", hunt_id=HUNT,
+                          poll_seconds=0.2, sleep=sleep) == 0
+    thread.join(5)
+    assert f"request {first['id']} ended (expired); now showing request {second['id']} (press a new key for it)" in terminal.text
+    assert "(ignored keys pressed before this prompt was ready)" in terminal.text
+    assert decisions == [(f"/hunts/{HUNT}/permission-requests/{second['id']}/decision", "deny")], decisions
+    os.close(terminal.master)
+
+
+def test_a_request_gone_with_its_hunt_ends_its_prompt():
+    """A 404 while the prompt waits means the request ended with its Hunt; the prompt used to stay
+    until the watch's deadline because every read error counted as still pending."""
+    def engine(method, path, payload=None, headers=None):
+        if "?status=pending" in path:
+            return 200, {"requests": [_request()]}
+        if path == f"/hunts/{HUNT}/permission-requests/{REQUEST}":
+            return 404, {"detail": "Not Found"}
+        raise AssertionError(path)
+
+    class Waiting(Terminal):
+        def key(self, prompt, choices, *, keep_waiting=None, **_):
+            self.stdout.write(prompt)
+            self.abandoned = keep_waiting is not None and not keep_waiting()
+            return None if self.abandoned else "s"
+
+    terminal = Waiting()
+    assert approval.watch(engine, terminal, enterprise=False, origin="http://127.0.0.1:8080", hunt_id=HUNT,
+                          sleep=_ctrl_c) == 0
+    assert terminal.abandoned, "a 404 ends the prompt"
+    assert f"{TITLE}: no longer there (it ended with its Hunt)" in terminal.text
+
+
+def test_a_failed_read_that_is_not_a_404_keeps_the_prompt():
+    def engine(method, path, payload=None, headers=None):
+        if "?status=pending" in path:
+            return 200, {"requests": [_request()]}
+        return 503, {"detail": "unavailable"}
+
+    class Waiting(Terminal):
+        def key(self, prompt, choices, *, keep_waiting=None, **_):
+            self.kept = keep_waiting()
+            return "s"
+
+    terminal = Waiting()
+    approval.watch(engine, terminal, enterprise=False, origin="http://127.0.0.1:8080", hunt_id=HUNT, sleep=_ctrl_c)
+    assert terminal.kept is True

@@ -223,6 +223,9 @@ def test_approve_refuses_without_a_terminal(tmp_path):
     assert not [path for path in stub.routes() if path.endswith("/decision")]
 
 
+PROMPT = "[d]eny  [s]kip  [q]uit: "
+
+
 def _local_watch(stub: StubInstance, tmp_path: Path) -> Session:
     return Session(["approve", "--url", stub.url, "--watch", "--hunt", HUNT, "--minutes", "1"], _environment(tmp_path))
 
@@ -230,13 +233,13 @@ def _local_watch(stub: StubInstance, tmp_path: Path) -> Session:
 def test_watch_ignores_a_key_pressed_before_the_request_and_keeps_polling(tmp_path):
     """L2: a key typed before the keypress prompt was armed was echoed, then thrown away, and the
     watch sat in a blocking read: nothing decided, no polling (150 s seen). A key pressed before a
-    request is on the screen must not decide it, must be reported, and must not stop the watch."""
+    prompt is ready must not decide, must be reported, and must not stop the watch."""
     with StubInstance() as stub:
         session = _local_watch(stub, tmp_path)
         session.type("a")  # before the CLI has shown anything, let alone the request
         session.expect(f"watching Hunt {HUNT} for permission requests... (Ctrl-C to stop)")
-        session.expect("(ignored keys pressed before this request was shown)")
-        session.expect("[d]eny  [s]kip  [q]uit: ")
+        session.expect("(ignored keys pressed before this prompt was ready)")
+        session.expect(PROMPT)
         assert stub.request["status"] == "pending", "a key typed before the request decided nothing"
         session.type("d")
         session.expect(f"denied: {TITLE} (by local-operator, local confirmation)")
@@ -248,11 +251,16 @@ def test_watch_ignores_a_key_pressed_before_the_request_and_keeps_polling(tmp_pa
     assert "stopped watching for permission requests" in out and "approver session" not in out, out
 
 
-def test_watch_takes_a_key_pressed_as_soon_as_the_request_appears(tmp_path):
-    """L2, the reported case: the key sent the instant the request is on the screen."""
+def test_watch_needs_a_fresh_key_once_the_prompt_is_ready(tmp_path):
+    """L2, the reported case (a key sent the instant the request is on the screen): the key is
+    discarded on purpose, said so, and the watch is still there for the next key."""
     with StubInstance() as stub:
         session = _local_watch(stub, tmp_path)
         session.expect(TITLE)
+        session.type("a")
+        session.expect("(ignored keys pressed before this prompt was ready)")
+        session.expect(PROMPT)
+        assert stub.request["status"] == "pending"
         session.type("a")
         session.expect(f"granted: {TITLE} (by local-operator, local confirmation)", timeout=10)
         session.proc.send_signal(signal.SIGINT)
@@ -261,11 +269,73 @@ def test_watch_takes_a_key_pressed_as_soon_as_the_request_appears(tmp_path):
     assert stub.request["status"] == "granted"
 
 
+@pytest.mark.parametrize("burst", ["\x1b[A", "\x1b[D", "\x1bOA", "\x1ba", "\x1b", "allow\n", "dq"],
+                         ids=["up-arrow", "left-arrow", "up-arrow-ss3", "alt-a", "escape", "paste", "two-keys"])
+def test_escape_sequences_and_pastes_never_decide(tmp_path, burst):
+    """B1: bytes were read one at a time and lowercased, so the Up arrow (ESC [ A) allowed, the
+    Left arrow denied, Alt-a allowed and a paste decided on its first a/d/s/q. A burst is
+    discarded whole; the watch then still takes a lone key."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.expect(PROMPT)
+        session.type(burst)
+        time.sleep(1.0)
+        assert stub.request["status"] == "pending", f"{burst!r} decided the request"
+        assert not [path for path in stub.routes("POST") if path.endswith("/decision")]
+        session.type("d")
+        session.expect(f"denied: {TITLE}", timeout=10)
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    decisions = [body for method, path, body in stub.seen if path.endswith("/decision")]
+    assert [body["decision"] for body in decisions] == ["deny"], decisions
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP], ids=["SIGTERM", "SIGHUP"])
+def test_a_terminated_watch_restores_the_terminal(tmp_path, signum):
+    """SIGTERM and SIGHUP left the terminal in keypress mode (no echo) and skipped the session
+    revoke; they now end the watch as Ctrl-C does."""
+    import termios
+
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        before = termios.tcgetattr(session.master)
+        session.expect(PROMPT)
+        armed = termios.tcgetattr(session.master)
+        assert not armed[3] & termios.ECHO, "keypress mode is on while the prompt waits"
+        session.proc.send_signal(signum)
+        session.proc.wait(timeout=15)
+        after = termios.tcgetattr(session.master)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    assert after[3] & termios.ECHO and after[3] & termios.ICANON, "echo and line mode are back"
+    assert after[3] == before[3]
+    if signum == signal.SIGTERM:
+        assert "stopped watching for permission requests" in out, out
+    assert stub.request["status"] == "pending"
+
+
+def test_enterprise_watch_revokes_its_session_on_sigterm(enterprise):
+    stub, connection, env = enterprise("g1")
+    with stub:
+        session = Session(["approve", *connection, "--watch", "--hunt", HUNT, "--account", "alice",
+                           "--minutes", "1"], env)
+        session.expect("TOTP code for alice")
+        session.type(TOTP + "\n")
+        session.expect(PROMPT)
+        session.proc.send_signal(signal.SIGTERM)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    assert "approver session ended" in out
+    assert "/_enterprise/approvals/session/revoke" in stub.routes("POST"), "the session was revoked"
+    assert stub.sessions == {}, "the gateway no longer holds the session"
+
+
 def test_watch_keeps_polling_while_the_prompt_waits(tmp_path):
     """L2: waiting for the person's key never stops the watch from following the request."""
     with StubInstance() as stub:
         session = _local_watch(stub, tmp_path)
-        session.expect("[d]eny  [s]kip  [q]uit: ")
+        session.expect(PROMPT)
         stub._decide({"subject_digest": "d" * 64, "decision": "allow", "decided_by": "someone-else",
                       "decision_via": "local_confirm", "scope": "hunt"})
         session.expect(f"{TITLE}: granted elsewhere by someone-else", timeout=15)
