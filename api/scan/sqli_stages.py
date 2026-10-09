@@ -974,6 +974,10 @@ def sqli_budget_outcomes(
             refuted = list(dict.fromkeys([*verdict.get("refuted_techniques", ()), *refuted]))
         unfundable = [str(item) for item in (verdict or {}).get("unfundable_techniques") or ()]
         closed = bool((verdict or {}).get("closed")) or row.get("verdict") == "inconclusive"
+        if closed:
+            # Nothing fundable is left, so every technique not refuted is inconclusive: none may
+            # drop out of the report between the two lists.
+            unfundable = [item for item in SQLI_TECHNIQUE_STAGES if item not in refuted]
         outcome = {
             "candidate_id": candidate, "url": urls.get(candidate, ""),
             "reason": (
