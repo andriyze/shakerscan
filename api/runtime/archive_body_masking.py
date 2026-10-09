@@ -84,7 +84,7 @@ WITHHELD_MARKER_RE = re.compile(r"\[withheld:([1-9][0-9]{0,3})\]")
 WITHHELD_REF_RE = re.compile(
     r"^withheld://hunt/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/([1-9][0-9]{0,3})$"
 )
-MAX_WITHHELD_VALUES = 64
+MAX_WITHHELD_VALUES = 256
 MAX_WITHHELD_VALUE_CHARS = 8_192
 # Fingerprints are scrypt (memory-hard by design), so only the first few are computed.
 _MAX_FINGERPRINTED_REFERENCES = 20
@@ -95,6 +95,8 @@ _MIN_FINGERPRINTED_CHARS = 12
 # A bound value shorter than this is not searched for in echoes (it would match ordinary text).
 _MIN_KNOWN_VALUE_CHARS = 3
 _MIN_EDGE_FRAGMENT_CHARS = 4
+# A value found (in context, or sealed earlier) rather than sent: shorter ones match ordinary text.
+_MIN_FOUND_VALUE_CHARS = 6
 _MAX_EDGE_VALUE_CHARS = 512
 
 
@@ -118,23 +120,34 @@ class WithheldValues:
         self._fingerprints: dict[int, str | None] = {}
         # Values this action sends (bound by reference): withheld wherever the target echoes them.
         self.known: list[str] = []
-        self._known_scrubber: KnownValueScrubber | None = None
+        # Values found elsewhere (a window's preceding context, sealed earlier in the Hunt).
+        self.found: list[str] = []
+        self._known_scrubbers: list[KnownValueScrubber] | None = None
+        # SQL dump column knowledge, by resource path: carried between windows of one dump, so a
+        # window far past its CREATE TABLE still knows which column holds the password.
+        self.sql_tables: dict[str, dict[str, list[str]]] = {}
+        self.sql_path: str | None = None
 
-    def bind_known(self, values: Any) -> None:
-        """Values this action sends: every echo of one, in any encoding, is withheld too."""
+    def bind_known(self, values: Any, *, found: bool = False) -> None:
+        """Values every echo of which is withheld, in any encoding. Values this action *sends*
+        match anywhere; values *found* (a window's context, or sealed earlier in the Hunt) match
+        only as whole tokens of at least six characters. A value is numbered only when an echo is
+        actually withheld from this output."""
+        target = self.found if found else self.known
+        minimum = _MIN_FOUND_VALUE_CHARS if found else _MIN_KNOWN_VALUE_CHARS
         for value in values or ():
             text = str(value)
-            if len(text) >= _MIN_KNOWN_VALUE_CHARS and text not in self.known:
-                # Numbered only when an echo is actually withheld from this output.
-                self.known.append(text)
-        self._known_scrubber = None
+            if len(text) >= minimum and text not in target:
+                target.append(text)
+        self._known_scrubbers = None
 
-    def known_scrubber(self) -> KnownValueScrubber | None:
-        if not self.known:
-            return None
-        if self._known_scrubber is None:
-            self._known_scrubber = KnownValueScrubber(self.known)
-        return self._known_scrubber
+    def known_scrubbers(self) -> list[KnownValueScrubber]:
+        if self._known_scrubbers is None:
+            self._known_scrubbers = [
+                KnownValueScrubber(values, whole_tokens=found)
+                for values, found in ((self.known, False), (self.found, True)) if values
+            ]
+        return self._known_scrubbers
 
     def __repr__(self) -> str:
         return f"WithheldValues(action_id={self.action_id!r}, count={len(self.values)}, values_visible=False)"
@@ -255,27 +268,73 @@ def _base64_cores(value: str) -> set[str]:
     return cores
 
 
-class KnownValueScrubber:
-    """Withhold every echo of values an action sent: any case, HTML/JSON/URL-encoded, base64
-    (whole or inside a longer encoding), and a fragment cut by the text's start or end."""
+_INDEX_HEAD_CHARS = _MIN_KNOWN_VALUE_CHARS
 
-    def __init__(self, values: list[str]) -> None:
-        self.values = [value for value in values if len(value) >= _MIN_KNOWN_VALUE_CHARS]
+
+def _head_index(owners: dict[str, str]) -> dict[str, list[tuple[str, str]]]:
+    """``{first characters: [(form, value), ...] longest first}``; forms are matched as given."""
+    index: dict[str, list[tuple[str, str]]] = {}
+    for form, value in owners.items():
+        index.setdefault(form[:_INDEX_HEAD_CHARS], []).append((form, value))
+    for entries in index.values():
+        entries.sort(key=lambda entry: len(entry[0]), reverse=True)
+    return index
+
+
+def _scan(text: str, index: dict[str, list[tuple[str, str]]]) -> Iterator[tuple[int, int, str]]:
+    """Non-overlapping ``(start, end, value)`` matches of indexed forms, left to right."""
+    position, limit = 0, len(text) - _INDEX_HEAD_CHARS
+    while position <= limit:
+        entries = index.get(text[position:position + _INDEX_HEAD_CHARS])
+        if entries:
+            for form, value in entries:
+                if text.startswith(form, position):
+                    yield position, position + len(form), value
+                    position += len(form)
+                    break
+            else:
+                position += 1
+            continue
+        position += 1
+
+
+class KnownValueScrubber:
+    """Withhold every echo of known values: any case, HTML/JSON/URL-encoded (including encoders
+    that escape only the specials), base64 (whole or inside a longer encoding), and a fragment cut
+    by the text's start or end.
+
+    ``whole_tokens`` is for values *found* (in a window's context, or sealed earlier in the Hunt)
+    rather than sent: an echo must stand alone (no letter or digit beside it), so a found
+    ``admin`` password never masks the word or the ``/admin`` path. Edge fragments still count.
+    """
+
+    def __init__(self, values: list[str], *, whole_tokens: bool = False) -> None:
+        minimum = _MIN_FOUND_VALUE_CHARS if whole_tokens else _MIN_KNOWN_VALUE_CHARS
+        self.values = [value for value in dict.fromkeys(values) if len(value) >= minimum]
+        self.whole_tokens = whole_tokens
         owners: dict[str, str] = {}
         for value in sorted(self.values, key=len):
             for form in _encodings(value):
                 owners.setdefault(form.lower(), value)
-        self._owners = owners
-        forms = sorted(owners, key=len, reverse=True)
-        self._forms = re.compile("|".join(re.escape(form) for form in forms), re.IGNORECASE) if forms else None
+        # Indexed by each form's first characters: one dictionary lookup per text position, however
+        # many values are known (a regex alternation of thousands of forms is not linear in them).
+        self._forms = _head_index(owners)
         cores: dict[str, str] = {}
         for value in self.values:
             # A JWT claim or a JSON document carries the value JSON-escaped before encoding.
             for form in {value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]}:
                 for core in _base64_cores(form):
                     cores.setdefault(core, value)
-        self._core_owners = cores
-        self._cores = re.compile("|".join(re.escape(core) for core in sorted(cores, key=len, reverse=True))) if cores else None
+        self._cores = _head_index(cores)
+        # Edge fragments, indexed by a value's first and last few characters.
+        self._heads: dict[str, list[str]] = {}
+        self._tails: dict[str, list[str]] = {}
+        for value in self.values:
+            if len(value) <= _MAX_EDGE_VALUE_CHARS:
+                folded = value.lower()
+                self._heads.setdefault(folded[:_MIN_EDGE_FRAGMENT_CHARS], []).append(value)
+                self._tails.setdefault(folded[-_MIN_EDGE_FRAGMENT_CHARS:], []).append(value)
+        self._longest = max((len(value) for value in self.values), default=0)
 
     def __repr__(self) -> str:
         return f"KnownValueScrubber(count={len(self.values)}, values_visible=False)"
@@ -284,25 +343,45 @@ class KnownValueScrubber:
         """``replace(value)`` gives the replacement text for an echo of ``value``."""
         if not text or not self.values:
             return text
-        if self._forms is not None:
-            text = self._forms.sub(lambda match: replace(self._owners[match.group(0).lower()]), text)
-        if self._cores is not None:
+        if self._forms:
+            text = self._scrub_forms(text, replace)
+        if self._cores:
             text = self._scrub_cores(text, replace)
         return self._scrub_edges(text, replace)
+
+    def _scrub_forms(self, text: str, replace: Any) -> str:
+        lowered = text.lower()
+        if len(lowered) != len(text):  # a character whose lower case is longer: fold per character
+            lowered = "".join(char.lower()[:1] for char in text)
+        pieces: list[str] = []
+        cursor = 0
+        for start, end, value in _scan(lowered, self._forms):
+            if start < cursor:
+                continue
+            if self.whole_tokens and (
+                (start and lowered[start - 1].isalnum()) or (end < len(text) and lowered[end].isalnum())
+            ):
+                continue
+            pieces.append(text[cursor:start])
+            pieces.append(replace(value))
+            cursor = end
+        if not pieces:
+            return text
+        pieces.append(text[cursor:])
+        return "".join(pieces)
 
     def _scrub_cores(self, text: str, replace: Any) -> str:
         pieces: list[str] = []
         cursor = 0
-        for match in self._cores.finditer(text):
-            if match.start() < cursor:
+        for start, end, value in _scan(text, self._cores):
+            if start < cursor:
                 continue
-            start, end = match.start(), match.end()
             while start > cursor and text[start - 1] in _BASE64_RUN_CHARS:
                 start -= 1
             while end < len(text) and text[end] in _BASE64_RUN_CHARS:
                 end += 1
             pieces.append(text[cursor:start])
-            pieces.append(replace(self._core_owners[match.group(0)]))
+            pieces.append(replace(value))
             cursor = end
         if not pieces:
             return text
@@ -310,20 +389,32 @@ class KnownValueScrubber:
         return "".join(pieces)
 
     def _scrub_edges(self, text: str, replace: Any) -> str:
-        """A window or a truncated body can cut a value: its head ends the text, its tail starts it."""
-        lowered = text.lower()
-        for value in sorted(self.values, key=len, reverse=True):
-            if len(value) > _MAX_EDGE_VALUE_CHARS:
+        """A window or a truncated body can cut a value: its head ends the text, its tail starts it.
+        Indexed: only positions whose next few characters begin (or end) a known value are tried."""
+        size = _MIN_EDGE_FRAGMENT_CHARS
+        span = min(len(text), self._longest)
+        lowered_tail = text[-span:].lower() if span else ""
+        for index in range(len(lowered_tail) - size + 1):
+            candidates = self._heads.get(lowered_tail[index:index + size])
+            if not candidates:
                 continue
-            folded = value.lower()
-            for size in range(len(folded) - 1, _MIN_EDGE_FRAGMENT_CHARS - 1, -1):
-                if lowered.endswith(folded[:size]):
-                    text, lowered = text[:-size] + replace(value), lowered[:-size] + "\0"
-                    break
-            for size in range(len(folded) - 1, _MIN_EDGE_FRAGMENT_CHARS - 1, -1):
-                if lowered.startswith(folded[-size:]):
-                    text, lowered = replace(value) + text[size:], "\0" + lowered[size:]
-                    break
+            fragment = lowered_tail[index:]
+            match = next((value for value in candidates if
+                          len(fragment) < len(value) and value.lower().startswith(fragment)), None)
+            if match is not None:
+                text = text[:len(text) - len(fragment)] + replace(match)
+                break
+        lowered_head = text[:span].lower()
+        for end in range(min(len(lowered_head), self._longest - 1), size - 1, -1):
+            candidates = self._tails.get(lowered_head[end - size:end])
+            if not candidates:
+                continue
+            fragment = lowered_head[:end]
+            match = next((value for value in candidates if
+                          len(fragment) < len(value) and value.lower().endswith(fragment)), None)
+            if match is not None:
+                text = replace(match) + text[end:]
+                break
         return text
 
 
@@ -334,8 +425,11 @@ def scrub_known_values(text: str, values: list[str], replacement: str) -> str:
 
 def _mask_known_values(text: str) -> str:
     collector = _COLLECTOR.get()
-    scrubber = collector.known_scrubber() if collector is not None else None
-    return text if scrubber is None else scrubber.scrub(text, collector.marker)
+    if collector is None:
+        return text
+    for scrubber in collector.known_scrubbers():
+        text = scrubber.scrub(text, collector.marker)
+    return text
 
 
 _COLLECTOR: ContextVar[WithheldValues | None] = ContextVar("withheld_values", default=None)
@@ -980,6 +1074,18 @@ _URL_SECRET_PARAMS = frozenset({
 _URL_PARAM_RE = re.compile(r"([?&#;])([^=&#\s]{1,100})=([^&#\s]{0,2048})")
 
 
+# Values of those names that are plainly not credentials: ``?key=blue``, ``?reset=1``,
+# ``?code=SKU123`` (a product code), ``?key=user_settings`` (an enum).
+_URL_ENUM_RE = re.compile(r"^(?:[a-z]+(?:[_\-][a-z]+){0,3}|[A-Z]{2,8}[_\-]?\d{1,8}|[A-Z]{2,8}(?:[_\-][A-Z0-9]{1,8}){1,3})$")
+
+
+def _plain_url_value(value: str) -> bool:
+    return bool(
+        len(value) < 6 or value.isdigit() or value.lower() in _PLAIN_WORDS
+        or _URL_ENUM_RE.match(value)
+    )
+
+
 def mask_url_secrets(url: Any) -> Any:
     """Withhold the values of secret query/fragment parameters in one URL."""
     if not isinstance(url, str) or "=" not in url:
@@ -990,7 +1096,7 @@ def mask_url_secrets(url: Any) -> Any:
         if normalized_key_name(name) not in _URL_SECRET_PARAMS and not is_withheld_key(name):
             return match.group(0)
         raw = urllib.parse.unquote_plus(match.group(3))
-        if not raw or WITHHELD_MARKER_RE.fullmatch(raw) or raw == MASK:
+        if not raw or WITHHELD_MARKER_RE.fullmatch(raw) or raw == MASK or _plain_url_value(raw):
             return match.group(0)
         return f"{match.group(1)}{match.group(2)}={_withhold(raw)}"
 
@@ -1127,6 +1233,18 @@ _SESSION_ROW_NAMES = frozenset({
 def _names_row_secret(name: str) -> bool:
     """The name cell of a name->value row whose value is a secret."""
     return _names_secret(name) or normalized_key_name(name) in _SESSION_ROW_NAMES
+
+
+_SETTING_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]{1,80}$")
+
+
+def _row_name_cell(raw: str, column: str | None, columns: list[str] | None) -> bool:
+    """A settings row's name cell (``'mailserver_pass'``) in a known, non-secret column. With the
+    columns unknown nothing is exempt: a password can look like a setting name."""
+    return (
+        columns is not None and column is not None and not _names_secret(column)
+        and bool(_SETTING_NAME_RE.match(raw)) and _names_row_secret(raw)
+    )
 
 
 def _planner_form_token(tag: str, names: list[str]) -> bool:
@@ -1284,8 +1402,31 @@ def _is_id_column(column: str | None) -> bool:
     return column is not None and bool(_ID_COLUMN_RE.match(normalized_key_name(column)))
 
 
-def _sql_secret_literal(value: str, column: str | None) -> bool:
-    if not value or value.upper() in {"NULL", "\\N"} or _is_id_column(column):
+# When a row's columns are unknown (a window far past its CREATE TABLE, an INSERT without a
+# column list), every literal is withheld except shapes that are plainly not secrets.
+_NUMBER_LITERAL_RE = re.compile(r"^[+-]?\d{1,30}(?:\.\d{1,30})?$")
+_DATE_LITERAL_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?)?(?:Z|[+-]\d{2}:?\d{2})?$"
+)
+_EMAIL_LITERAL_RE = re.compile(r"^[^@\s'\"]{1,64}@[A-Za-z0-9.\-]{1,253}\.[A-Za-z]{2,24}$")
+_PLAIN_WORDS = frozenset({"true", "false", "yes", "no", "on", "off", "null", "none"})
+
+
+def plainly_not_secret(value: str) -> bool:
+    """Values a fail-closed row keeps: short, numeric, a date, an email, a UUID or a digest."""
+    return bool(
+        len(value) <= 3 or value.lower() in _PLAIN_WORDS or _NUMBER_LITERAL_RE.match(value)
+        or _DATE_LITERAL_RE.match(value) or _EMAIL_LITERAL_RE.match(value)
+        or _UUID_RE.match(value) or _HEX_DIGEST_RE.match(value)
+    )
+
+
+def _sql_secret_literal(value: str, column: str | None, *, unknown: bool = False) -> bool:
+    if not value or value.upper() in {"NULL", "\\N"}:
+        return False
+    if unknown:
+        return not plainly_not_secret(value)
+    if _is_id_column(column):
         return False
     if column is not None and _names_secret(column):
         return not is_location_value(column, value)
@@ -1331,7 +1472,7 @@ def _sql_columns(text: str, position: int) -> tuple[list[str], int]:
 
 
 def _sql_rows(
-    text: str, position: int, columns: list[str], pieces: list[str], cursor: int,
+    text: str, position: int, columns: list[str] | None, pieces: list[str], cursor: int,
 ) -> tuple[int, int]:
     """Withhold the secret literals of ``VALUES (...), (...);``; returns (end, cursor)."""
     depth = 0
@@ -1352,9 +1493,13 @@ def _sql_rows(
             return token.end(), cursor
         elif depth == 1 and value[0] in "'\"":
             raw = _sql_unquote(value)
-            column = columns[index] if index < len(columns) else None
-            secret = (named and not _is_id_column(column) and bool(raw)) or _sql_secret_literal(raw, column)
-            named = not secret and _names_row_secret(raw)
+            column = columns[index] if columns is not None and index < len(columns) else None
+            if not named and _row_name_cell(raw, column, columns):
+                secret, named = False, True  # a settings row's name cell: its value follows
+            else:
+                secret = (named and not _is_id_column(column) and bool(raw)) or _sql_secret_literal(
+                    raw, column, unknown=column is None)
+                named = False
             if secret:
                 pieces.append(text[cursor:token.start()])
                 pieces.append(f"{value[0]}{_withhold(raw)}{value[0]}")
@@ -1363,7 +1508,7 @@ def _sql_rows(
 
 
 def _copy_rows(
-    text: str, position: int, columns: list[str], pieces: list[str], cursor: int,
+    text: str, position: int, columns: list[str] | None, pieces: list[str], cursor: int,
 ) -> tuple[int, int]:
     """Withhold the secret fields of pg_dump ``COPY ... FROM stdin;`` rows up to ``\\.``."""
     line_start = text.find("\n", position)
@@ -1379,10 +1524,14 @@ def _copy_rows(
         field_start = line_start
         named = False
         for index, field in enumerate(line.split("\t")):
-            column = columns[index] if index < len(columns) else None
+            column = columns[index] if columns is not None and index < len(columns) else None
             raw = field.rstrip("\r")
-            secret = (named and not _is_id_column(column) and raw not in {"", "\\N"}) or _sql_secret_literal(raw, column)
-            named = not secret and _names_row_secret(raw)
+            if not named and _row_name_cell(raw, column, columns):
+                secret, named = False, True
+            else:
+                secret = (named and not _is_id_column(column) and raw not in {"", "\\N"}) or _sql_secret_literal(
+                    raw, column, unknown=column is None)
+                named = False
             if secret:
                 pieces.append(text[cursor:field_start])
                 pieces.append(_withhold(raw))
@@ -1392,12 +1541,90 @@ def _copy_rows(
     return len(text), cursor
 
 
+# A window that starts inside a VALUES list: ``...'),(12,'bob','...');`` before any statement.
+_SQL_ORPHAN_ROWS_RE = re.compile(r"\)[ \t\r\n]{0,8},[ \t\r\n]{0,8}\(|'[ \t]{0,8}\)[ \t]{0,8}[;,]")
+_SQL_LITERAL_RE = re.compile(r"'(?:[^'\\\r\n]|\\.|''){0,4096}'")
+
+
+# A string literal closing a row, then the next row or statement: ``'),(`` / ``');``.
+_SQL_ROW_END_RE = re.compile(r"'[ \t]{0,8}\)[ \t\r\n]{0,8}(?:,[ \t\r\n]{0,8}\(|;)")
+
+
+def _orphan_row_signals(text: str, end: int) -> int:
+    """How many row endings a window shows before its first statement (two are enough)."""
+    count = 0
+    for _match in _SQL_ROW_END_RE.finditer(text, 0, end):
+        count += 1
+        if count >= 2:
+            break
+    return count
+
+
+# The cut-off tail of a plainly non-secret literal: a date or time, a number, a host or email end.
+_PLAIN_FRAGMENT_RE = re.compile(
+    r"^(?:[\d\s:.\-+TZ]{1,40}|[A-Za-z0-9.\-]{0,64}@?[A-Za-z0-9\-]{0,63}(?:\.[A-Za-z0-9\-]{1,63})*\.[A-Za-z]{2,24})$"
+)
+
+
+# What lies between two literals of one VALUES list: punctuation, numbers, NULL, hex blobs.
+_SQL_GAP_RE = re.compile(r"(?i)(?:[\s,();.+\-0-9]|null|true|false|_binary|0x[0-9a-f]+)*")
+
+
+def _orphan_literals(text: str, end: int) -> tuple[int, list[re.Match[str]]]:
+    """``(start, literals)`` of a window that may begin inside a literal: of the two quote
+    parities, the one whose gaps read as a VALUES list (punctuation and numbers, not words)."""
+    first_quote = text.find("'", 0, end)
+    best: tuple[int, int, list[re.Match[str]]] | None = None
+    for start in (0, first_quote + 1) if first_quote >= 0 else (0,):
+        literals = list(_SQL_LITERAL_RE.finditer(text, start, end))
+        edges = [start, *(item for literal in literals for item in (literal.start(), literal.end()))]
+        gaps = [text[edges[index]:edges[index + 1]] for index in range(0, len(edges) - 1, 2)]
+        score = sum(1 if _SQL_GAP_RE.fullmatch(gap) else -2 for gap in gaps)
+        if best is None or score > best[0]:
+            best = (score, start, literals)
+    return (best[1], best[2]) if best else (0, [])
+
+
+def _mask_orphan_rows(text: str, end: int, pieces: list[str], cursor: int) -> int:
+    """Rows before the first statement of a window: their columns are unknown, so fail closed.
+    A window that opens inside a literal withholds that literal's tail too."""
+    start, literals = _orphan_literals(text, end)
+    if start:
+        tail = text[:start - 1]
+        if tail and not _PLAIN_FRAGMENT_RE.match(tail) and _sql_secret_literal(tail, None, unknown=True):
+            pieces.append(_withhold(tail))
+            cursor = start - 1
+    for literal in literals:
+        raw = _sql_unquote(literal.group(0))
+        if _sql_secret_literal(raw, None, unknown=True):
+            pieces.append(text[cursor:literal.start()])
+            pieces.append(f"'{_withhold(raw)}'")
+            cursor = literal.end()
+    return cursor
+
+
 def mask_sql_values(text: str) -> str:
-    """Withhold credential literals in SQL dump ``INSERT`` and ``COPY`` rows (one linear scan)."""
-    tables: dict[str, list[str]] = {}
+    """Withhold credential literals in SQL dump ``INSERT`` and ``COPY`` rows (one linear scan).
+
+    Column names come from the rows' own column list, the dump's ``CREATE TABLE``, or (inside a
+    Hunt, for windows of one resource) what earlier windows of the same dump showed. Rows whose
+    columns stay unknown fail closed.
+    """
+    collector = _COLLECTOR.get()
+    carried = (
+        collector.sql_tables.setdefault(collector.sql_path, {})
+        if collector is not None and collector.sql_path else None
+    )
+    tables: dict[str, list[str]] = carried if carried is not None else {}
     pieces: list[str] = []
     cursor = 0
     position = 0
+    first = _SQL_STATEMENT_RE.search(text)
+    prefix_end = first.start() if first else len(text)
+    if prefix_end and _SQL_ORPHAN_ROWS_RE.search(text, 0, prefix_end) and (
+        first or carried or _orphan_row_signals(text, prefix_end) >= 2
+    ):
+        cursor = _mask_orphan_rows(text, prefix_end, pieces, cursor)
     while True:
         statement = _SQL_STATEMENT_RE.search(text, position)
         if statement is None:
@@ -1410,9 +1637,11 @@ def mask_sql_values(text: str) -> str:
                 tables[table] = columns
             position = max(end, after)
             continue
-        columns = tables.get(table, [])
+        columns = tables.get(table)
         if text.startswith("(", after):
             columns, after = _sql_columns(text, after)
+            if columns and (table in tables or len(tables) < _MAX_SQL_TABLES):
+                tables[table] = columns
         if statement.group(3):
             if not _SQL_COPY_FROM_STDIN_RE.match(text, after):
                 position = after

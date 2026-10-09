@@ -395,6 +395,11 @@ def request_error_class(exc: BaseException) -> str:
     return f"request_error:{type(exc).__name__}"
 
 
+# The most a caller may read into a worker-private body: an artifact window with the dump
+# context that masks it (artifact.inspect reads up to 1 MiB before a SQL dump window).
+MAX_PRIVATE_BODY_BYTES = 1_114_112
+
+
 async def execute_bound_http_request(
     base_url: str,
     args: Mapping[str, Any],
@@ -610,7 +615,7 @@ async def execute_bound_http_request(
                     ) = await _read_bounded_response(
                         response,
                         deadline=request_deadline,
-                        body_limit=max(1, min(int(response_body_limit), 262_144)),
+                        body_limit=max(1, min(int(response_body_limit), MAX_PRIVATE_BODY_BYTES)),
                     )
                 finally:
                     await response.aclose()
@@ -743,7 +748,7 @@ async def execute_bound_http_request(
         private_response_sink(WorkerPrivateHTTPResponse(
             status_code=int(response.status_code),
             final_url=final_url,
-            _body=body[:max(1, min(int(response_body_limit), 262_144))],
+            _body=body[:max(1, min(int(response_body_limit), MAX_PRIVATE_BODY_BYTES))],
             _headers={
                 str(name).lower(): str(value)
                 for name, value in response.headers.items()
