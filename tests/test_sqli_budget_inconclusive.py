@@ -335,7 +335,7 @@ class _Scan:
         # Tool wall the Scan spent outside these lanes (discovery, templates, exposure).
         self.earlier = earlier
         # Fixture: tool wall the round's compile will need for first slices of new candidates.
-        self.pending_new_work = 0
+        self.pending_new_work: list[tuple[str, int]] = []
         self.scan_id = str(uuid.uuid4())
         self.profile = {**BALANCED, "tool_wall_seconds": profile_wall}
         self.execution_plan = _plan(profile_wall)
@@ -1146,7 +1146,7 @@ def test_unsliced_candidates_get_a_first_slice_before_probes_and_lost_causes(mon
 
         scan.run(set(first_slices()))
         for round_number in range(2, 10):
-            scan.pending_new_work = len(queue) * 420 if reserve else 0
+            scan.pending_new_work = [("verify.sqli", 420)] * len(queue) if reserve else []
             extensions = [action_id for action_id, _ in scan.next_round(round_number)]
             fresh = first_slices()
             if not extensions and not fresh:
@@ -1177,7 +1177,58 @@ def test_the_new_work_reserve_counts_candidates_beyond_the_verifier_offsets():
         scan_id=str(uuid.UUID(int=2)), execution_plan_digest="a" * 64,
         target_binding_digest=TARGET.digest, actions=actions,
     )
-    # Five candidates, two of them sliced in each lane: three SQLi body slices' attempt floor
-    # (420 s each) and three XSS ones' (120 s each).
-    assert new_work_reserve(plan, SimpleNamespace(entries=[{}] * 5)) == 3 * 420 + 3 * 120
-    assert new_work_reserve(plan, SimpleNamespace(entries=[{}] * 2)) == 0
+    body = {"body_field_names": ["a"], "family_hints": ["xss", "sqli"]}
+    query = {"family_hints": ["sqli"]}
+    # Five candidates, two of them sliced in each lane. The SQLi lane's three pending ones hold
+    # their own floors (a body's 420 s, a query's 30 s); the XSS lane counts only the bodies
+    # hinted for XSS (120 s each).
+    entries = [body, body, body, query, body]
+    assert new_work_reserve(plan, SimpleNamespace(entries=entries)) == [
+        ("verify.sqli", 420), ("verify.sqli", 30), ("verify.sqli", 420),
+        ("verify.xss", 120), ("verify.xss", 120),
+    ]
+    assert new_work_reserve(plan, SimpleNamespace(entries=entries[:2])) == []
+    # A family the Scan did not select reserves nothing.
+    sqli_only = ScanActionPlan(
+        scan_id=str(uuid.UUID(int=3)), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=actions[:1],
+    )
+    assert all(lane == "verify.sqli" for lane, _ in new_work_reserve(
+        sqli_only, SimpleNamespace(entries=entries),
+    ))
+
+
+def test_only_first_slices_the_compile_can_admit_are_reserved():
+    from scan.verification_extension import _admissible_reserve
+
+    # One pending body slice (540 s) with 257 s left cannot be admitted: nothing is held back.
+    assert _admissible_reserve([("verify.sqli", 540)], 257, 900) == 0
+    assert _admissible_reserve(540, 257, 900) == 0
+    # Smallest first, while they fit what is left; slices beyond one round's lane share are
+    # admitted in later rounds and stay reserved.
+    assert _admissible_reserve(
+        [("verify.sqli", 420)] * 3 + [("verify.xss", 120)], 1_000, 900,
+    ) == 420 + 420 + 120
+    assert _admissible_reserve([("verify.sqli", 420)] * 3, 5_000, 900) == 1_260
+    # A slice larger than its lane's round share is never admitted.
+    assert _admissible_reserve([("verify.sqli", 1_000)], 5_000, 900) == 0
+
+
+def test_an_unsliceable_pending_candidate_does_not_cost_the_last_chance(monkeypatch):
+    """Follow-up review: one pending first slice that cannot fit the 257 s left held that wall
+    back from the last chance, and the 4.0 s late-field injection was missed again."""
+    ENDPOINTS["/vuln"] = (4.0, 4)
+    try:
+        scan = _Scan(
+            monkeypatch, ("/vuln", "/chat"), vuln={("/vuln", "B", "field3")}, earlier=1_031,
+        )
+        scan.pending_new_work = [("verify.sqli", 540)]
+        scan.add("verify.sqli.r01", path="/vuln", budget=SLICE)
+        scan.add("verify.sqli.001.r01", path="/chat", budget=SLICE)
+        scan.run({"verify.sqli.r01", "verify.sqli.001.r01"})
+        scan.drive()
+    finally:
+        ENDPOINTS["/vuln"] = (5.3, 4)
+    assert scan.found == {("/vuln", "B", "field3")}
+    assert scan.residual()["tool_wall_seconds"] == 137
+

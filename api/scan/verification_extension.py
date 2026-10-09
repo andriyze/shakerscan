@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .action_plan import CAPABILITY_REGISTRY, _LANE_WALL_SHARE
@@ -477,6 +477,33 @@ def _request_scale(reserved: Mapping[str, int], needed: int | None) -> float:
     return max(1.0, int(needed) / held)
 
 
+def _admissible_reserve(new_work: int | Sequence[Any], residual_wall: int, lane_share: int) -> int:
+    """The wall of the pending first slices the Scan's compiles can really admit.
+
+    ``new_work`` lists ``(lane, wall floor)`` per pending first slice (a bare floor, or one
+    total, counts as a single slice). Smallest first, a slice is reserved while it fits what is
+    left; one whose floor no longer fits, or exceeds its lane's round share, will never be
+    admitted and reserves nothing -- holding wall for it only left that wall idle (soak N55
+    follow-up review). The lane share bounds one round's compile, not the Scan: slices beyond
+    it are admitted in later rounds, and are still reserved so probes do not take their wall.
+    """
+    if isinstance(new_work, int):
+        items: list[tuple[str, int]] = [("", int(new_work))] if new_work > 0 else []
+    else:
+        items = [
+            (str(item[0]), int(item[1])) if isinstance(item, (tuple, list)) else ("", int(item))
+            for item in new_work or ()
+        ]
+    reserve = 0
+    for _lane, floor in sorted(items, key=lambda item: item[1]):
+        if floor <= 0:
+            continue
+        if reserve + floor > residual_wall or floor > max(0, lane_share):
+            continue
+        reserve += floor
+    return reserve
+
+
 def _shortest_first_shares(demands: Mapping[int, int], total: int) -> dict[int, int]:
     """Divide ``total`` smallest demand first: each gets its demand while it lasts."""
     shares: dict[int, int] = {}
@@ -518,7 +545,7 @@ def plan_verification_extensions(
     stage_remaining_walls: Mapping[str, int] | None = None,
     stage_remaining_requests: Mapping[str, int] | None = None,
     stage_last_chance_walls: Mapping[str, int] | None = None,
-    reserved_for_new_work: int = 0,
+    reserved_for_new_work: int | Sequence[Any] = 0,
 ) -> tuple[dict[str, Any], ...]:
     """One optional extension per timed-out, latency-starved verifier slice not yet extended.
 
@@ -663,7 +690,7 @@ def plan_verification_extensions(
     # Candidates the Scan has not sliced yet: a first slice is worth more than a probe or the
     # continuation of a candidate that already cannot reach a full negative, so those are
     # funded only from what this reserve leaves (soak N55 review, follow-up 4).
-    reserve = min(max(0, int(reserved_for_new_work)), start["tool_wall_seconds"])
+    reserve = _admissible_reserve(reserved_for_new_work, start["tool_wall_seconds"], wall_ceiling)
     # Each SQLi extension carries its part of the Scan's residual: a technique whose remaining
     # units need more is inconclusive for budget (``sqli_stages.resume_plan``). The residual is
     # divided shortest-remaining-need first, so work that can conclude is funded to its end and

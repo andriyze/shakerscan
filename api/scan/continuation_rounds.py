@@ -238,22 +238,34 @@ class PreparedContinuation:
     options: dict[str, Any]
 
 
-def new_work_reserve(parent_plan: ScanActionPlan, candidates: Any) -> int:
-    """Tool wall to keep for the verifier slices this round will add for unsliced candidates.
+def new_work_reserve(parent_plan: ScanActionPlan, candidates: Any) -> list[tuple[str, int]]:
+    """The first verifier slices this round's compile may add, as ``(lane, wall floor)``.
 
-    Candidates beyond the verifier lanes' manifest offsets get their first slice in this or a
-    later round's compile, after the extensions are planned; each body slice holds the attempt
-    floor. Probes and continuations of candidates that cannot reach a full negative are funded
-    only from what this leaves (``plan_verification_extensions``).
+    Candidates beyond a verifier lane's manifest offset get their first slice in this or a
+    later round's compile, after the extensions are planned. Only lanes the Scan's families
+    selected (a verifier of that capability is in the plan) count, and each candidate holds its
+    own attempt floor: a request body's, or a query's much smaller one. The planner reserves
+    only those that can really be admitted (``plan_verification_extensions``), and funds probes
+    and continuations of candidates that cannot reach a full negative from what is left.
     """
     offsets = continuation_manifest_offsets(parent_plan)
-    entries = len(getattr(candidates, "entries", ()) or ())
-    reserve = 0
-    for lane, capability in (("verify.sqli", "sqli.verify_batch"), ("verify.xss", "xss.verify_batch")):
-        pending = max(0, entries - int(offsets.get(lane, 0)))
-        floor = int(batch_attempt_floor(capability, body_candidate=True).get("tool_wall_seconds", 0))
-        reserve += pending * floor
-    return reserve
+    selected = {action.capability_name for action in parent_plan.actions}
+    entries = list(getattr(candidates, "entries", ()) or ())
+    floors: list[tuple[str, int]] = []
+    for lane, capability, family in (
+        ("verify.sqli", "sqli.verify_batch", "sqli"), ("verify.xss", "xss.verify_batch", "xss"),
+    ):
+        if capability not in selected:
+            continue
+        for entry in entries[int(offsets.get(lane, 0)):]:
+            hints = entry.get("family_hints") if isinstance(entry, Mapping) else None
+            if hints and family not in hints:
+                continue
+            body = bool(isinstance(entry, Mapping) and entry.get("body_field_names"))
+            floors.append((lane, int(batch_attempt_floor(capability, body_candidate=body).get(
+                "tool_wall_seconds", 0,
+            ))))
+    return floors
 
 
 def compile_continuation_round(
