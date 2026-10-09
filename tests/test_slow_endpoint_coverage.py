@@ -113,3 +113,54 @@ def test_coverage_names_the_exposure_paths_that_never_answered():
     assert family["slow_endpoints"] == [f"{ORIGIN}/.env"]
     assert coverage["candidate_coverage"]["sensitive_exposure"]["incomplete_candidates"] == 1
     assert coverage["status"] == "partial"
+
+
+def test_a_budget_inconclusive_sqli_candidate_leaves_the_family_partial_and_named():
+    """N55: a candidate no round can fund is named, and SQLi coverage stays partial."""
+    from api.runtime.observation_manifests import ObservationManifest
+    from api.scan.action_plan import ScanActionPlan as PackagePlan
+    from api.scan.finalizer import finalize_scan_report
+    from tests.test_scan_orchestrator import SCAN_ID, _action as plan_action, _result as settle
+
+    batch = replace(
+        plan_action("verify.sqli.r01", 0, capability_name="sqli.verify_batch"),
+        capability_args={"slice": {"start": 0, "count": 1}, "manifest_entries": 1},
+        output_schema="sqlmap-batch/v1", action_digest=None,
+    )
+    final = plan_action("finalize.report", 1, dependencies=(batch.action_id,))
+    plan = PackagePlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(batch, final),
+    )
+    url = f"{ORIGIN}/api/v1/chat"
+    rows = (
+        {"kind": "candidate_attempt", "attempt_id": "1" * 64, "candidate_id": "c1",
+         "family": "sqli", "status": "partial", "proof_state": "unproven",
+         "verdict": "inconclusive", "inconclusive_reason": "budget",
+         "resume_wall_seconds": 1_380, "resume_technique": "U"},
+        {"kind": "sqli_budget_inconclusive", "family": "sqli", "candidate_id": "c1", "url": url,
+         "verdict": "inconclusive", "reason": "verdict_exceeds_round_budget",
+         "technique": "U", "refuted_techniques": [], "unsettled_techniques": ["U", "B", "E", "T"],
+         "field_count": 1, "seconds_per_request_ms": 20_000,
+         "predicted_wall_seconds": 1_380, "round_wall_ceiling_seconds": 900},
+    )
+    result = settle(
+        batch, status=CapabilityResultStatus.TIMED_OUT, reason=CapabilityResultReason.TIMED_OUT,
+    )
+    result = replace(result, observation_manifest_ref=ObservationManifest(
+        manifest_id="00000000-0000-4000-8000-0000000000ac", owner_id=SCAN_ID,
+        action_id=batch.action_id, capability_name=batch.capability_name,
+        output_schema=batch.output_schema, observation_count=len(rows),
+        content_sha256="0" * 64, size_bytes=512, object_key="scans/x.jsonl",
+    ).reference(), result_digest=None)
+    report = finalize_scan_report(
+        plan=plan, target_url=ORIGIN,
+        action_results={batch.action_id: result}, observations={batch.action_id: rows},
+    )
+    coverage = report["coverage"]
+    family = next(row for row in coverage["family_coverage"] if row["family"] == "sqli")
+    assert family["coverage_status"] == "partial"
+    assert family["reason"] == "action_incomplete"
+    assert family["slow_endpoints"] == [url]
+    assert family["slow_endpoint_count"] == 1
+    assert coverage["status"] == "partial"

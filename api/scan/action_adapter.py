@@ -198,8 +198,7 @@ from .sqli_concurrency import (
 )
 from .sqli_stages import (
     budget_inconclusive_record,
-    next_stage,
-    prior_resume_wall_seconds,
+    prior_resume,
     prior_stages,
     run_staged_sqli_attempt,
 )
@@ -483,17 +482,24 @@ def merge_retried_template_records(
     return result
 
 
-def _sqli_field_count(execution_target: str, body_request: Mapping[str, Any]) -> int:
-    """How many fields one sqlmap technique stage tests for this candidate.
+def _sqli_fields(
+    execution_target: str, body_request: Mapping[str, Any],
+) -> tuple[tuple[str, ...] | None, int]:
+    """The fields one sqlmap run tests for this candidate, and how many.
 
-    A body candidate hands sqlmap every declared field (``-p a,b``); a query candidate is the
-    URL itself, and sqlmap tests each of its query parameters.
+    A body candidate hands sqlmap exactly what ``agent_tools`` puts in ``-p`` (a nested JSON
+    body's leaf names, de-duplicated); a query candidate is the URL itself, and sqlmap tests
+    each of its query parameters.
     """
-    fields = body_request.get("body_field_names") if body_request else None
-    if isinstance(fields, (list, tuple)) and fields:
-        return len(fields)
+    if body_request:
+        try:
+            fields = agent_tools.sqlmap_injection_fields(body_request)
+        except ValueError:
+            fields = None
+        if fields:
+            return tuple(fields), len(fields)
     query = urllib.parse.urlsplit(str(execution_target or "")).query
-    return max(1, len(urllib.parse.parse_qsl(query, keep_blank_values=True)))
+    return None, max(1, len(urllib.parse.parse_qsl(query, keep_blank_values=True)))
 
 
 def _staged_resume_fields(result: Any) -> dict[str, Any]:
@@ -502,32 +508,46 @@ def _staged_resume_fields(result: Any) -> dict[str, Any]:
     if not technique:
         return {}
     rate = getattr(result, "seconds_per_request", None)
+    field_name = getattr(result, "resume_field", None)
     return {
         "resume_technique": str(technique),
+        **({"resume_field": str(field_name)} if field_name else {}),
         "field_count": int(getattr(result, "field_count", 1) or 1),
         **({"seconds_per_request_ms": round(float(rate) * 1_000)} if rate else {}),
+        **({"resume_probe": True} if getattr(result, "resume_probe", False) else {}),
     }
 
 
 def _budget_verdict(
     result: Any, *, candidate_id: str, ceiling: int | None,
+    fields: Sequence[str] | None, attempt_floor_wall: int = 0,
 ) -> dict[str, Any] | None:
-    """The inconclusive-for-budget record of a candidate no continuation round can fund."""
-    need = getattr(result, "resume_wall_seconds", None)
-    technique = getattr(result, "resume_technique", None)
-    if not ceiling or not need or not technique or int(need) <= int(ceiling):
+    """The inconclusive-for-budget record of a candidate no continuation round can fund.
+
+    That is a candidate whose next unit two measurements predict above the round's share, or
+    one whose attempt floor alone exceeds it: the planner never sizes an extension below the
+    floor, so on Fast (375 s share, 420 s body floor) no body candidate is ever extended. A
+    cancelled attempt never gets one: it stopped because it was told to.
+    """
+    if (
+        not ceiling or str(getattr(result, "status", "")) == "cancelled"
+        or not getattr(result, "resume_technique", None)
+        or not getattr(result, "resume_wall_seconds", None)
+        or not (
+            getattr(result, "budget_inconclusive", False)
+            or int(attempt_floor_wall) > int(ceiling)
+        )
+    ):
         return None
     return budget_inconclusive_record(
         candidate_id=candidate_id,
-        finished=[
-            str(stage["technique"]) for stage in getattr(result, "stages", ()) or ()
-            if stage.get("outcome") == "carried"
-            or (stage.get("outcome") in _BATCH_SUCCESS_STATUSES and not stage.get("timed_out"))
-        ],
-        technique=str(technique),
+        finished=getattr(result, "settled_units", ()) or (),
+        technique=str(result.resume_technique),
+        field_name=getattr(result, "resume_field", None),
+        fields=fields,
         field_count=getattr(result, "field_count", 1),
         seconds_per_request=getattr(result, "seconds_per_request", None),
-        predicted_wall_seconds=int(need),
+        predicted_wall_seconds=max(int(result.resume_wall_seconds), int(attempt_floor_wall)),
         round_wall_ceiling_seconds=int(ceiling),
     )
 
@@ -3627,6 +3647,10 @@ class DatabaseNeutralScanActionDispatcher:
             if tool == "sqlmap":
                 verdict = _budget_verdict(
                     result, candidate_id=candidate_id, ceiling=round_wall_ceiling,
+                    fields=row.get("sqli_fields"),
+                    attempt_floor_wall=int(batch_attempt_floor(
+                        action.capability_name, body_candidate=bool(body_request),
+                    ).get("tool_wall_seconds", 0)),
                 )
                 if verdict is not None:
                     # No round can fund the next stage: say so on the candidate's record
@@ -3977,14 +4001,22 @@ class DatabaseNeutralScanActionDispatcher:
                             sub_budget["state_changing_requests"] = int(
                                 sub_budget["http_requests"]
                             )
+                    # sqlmap runs each technique over every field it is handed (``-p``); a body
+                    # with several is verified one field per run (sqli_stages).
+                    sqli_fields, field_count = _sqli_fields(execution_target, body_request)
                     candidate_prior = (
-                        prior_stages(staged_sources, attempt_id) if tool == "sqlmap" else None
+                        prior_stages(staged_sources, attempt_id, fields=sqli_fields)
+                        if tool == "sqlmap" else None
                     )
-                    # sqlmap runs each technique over every field it is handed (``-p``).
-                    field_count = _sqli_field_count(execution_target, body_request)
-                    stage_need = (
-                        prior_resume_wall_seconds(candidate_prior, field_count=field_count)
+                    candidate_resume = (
+                        prior_resume(
+                            candidate_prior, fields=sqli_fields, field_count=field_count,
+                            round_wall_ceiling=round_wall_ceiling,
+                        )
                         if candidate_prior is not None else None
+                    )
+                    stage_need = (
+                        candidate_resume.wall_seconds if candidate_resume is not None else None
                     )
                     if stage_need is not None and sub_budget.get("tool_wall_seconds"):
                         # A resumed candidate re-runs its unfinished stage only on a hold
@@ -4010,10 +4042,9 @@ class DatabaseNeutralScanActionDispatcher:
                                 "resume_wall_seconds": stage_need,
                                 "available_wall_seconds": max(0, available - own_spent),
                             })
-                            technique = next_stage(candidate_prior.finished)
-                            if (
-                                technique is not None and round_wall_ceiling
-                                and stage_need > round_wall_ceiling
+                            if round_wall_ceiling and candidate_resume.technique is not None and (
+                                candidate_resume.budget_inconclusive
+                                or int(floor.get("tool_wall_seconds", 0)) > round_wall_ceiling
                             ):
                                 observations.append({
                                     "url": redact_url(execution_target),
@@ -4021,7 +4052,9 @@ class DatabaseNeutralScanActionDispatcher:
                                     **budget_inconclusive_record(
                                         candidate_id=candidate_id,
                                         finished=candidate_prior.finished,
-                                        technique=technique,
+                                        technique=candidate_resume.technique,
+                                        field_name=candidate_resume.field_name,
+                                        fields=sqli_fields,
                                         field_count=field_count,
                                         seconds_per_request=candidate_prior.seconds_per_request,
                                         predicted_wall_seconds=stage_need,
@@ -4132,16 +4165,23 @@ class DatabaseNeutralScanActionDispatcher:
                         # is checkpointed, so a later attempt continues instead of re-sending it.
                         async def run_stage(
                             technique: str, budget: Mapping[str, int], latency: float,
+                            field_name: str | None = None,
                             _attempt_id: str = attempt_id,
                             _execute: Any = execute_attempt,
                         ) -> Any:
+                            # One field per run when the body has several: ``-p`` names it.
+                            field_suffix = (
+                                ":" + hashlib.sha256(field_name.encode()).hexdigest()[:8]
+                                if field_name is not None else ""
+                            )
                             return await _execute(
                                 budget,
                                 {
                                     "technique": technique,
+                                    **({"injection_fields": [field_name]} if field_name is not None else {}),
                                     **({"_measured_latency_seconds": round(latency, 3)} if latency else {}),
                                 },
-                                f"{_attempt_id[:16]}:{technique}",
+                                f"{_attempt_id[:16]}:{technique}{field_suffix}",
                             )
 
                         async def checkpoint_stage(stage: Mapping[str, Any]) -> None:
@@ -4160,12 +4200,15 @@ class DatabaseNeutralScanActionDispatcher:
                             cancelled=self.cancelled,
                             measured=candidates.measured,
                             field_count=field_count,
+                            fields=sqli_fields,
+                            round_wall_ceiling=round_wall_ceiling,
                         )
                     else:
                         run_attempt = functools.partial(
                             execute_attempt, sub_budget, {}, attempt_id[:16],
                         )
                     row = {
+                        "sqli_fields": sqli_fields,
                         "attempt_id": attempt_id, "candidate_id": candidate_id,
                         "retry_round": retry_round, "execution_target": execution_target,
                         "body_request": body_request, "sub_budget": dict(sub_budget),

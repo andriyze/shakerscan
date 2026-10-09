@@ -63,6 +63,24 @@ def test_sqlmap_sends_the_body_and_targets_one_field():
     assert args[args.index("-p") + 1] == "email,password"
 
 
+def test_staged_sqli_narrows_p_to_one_field_and_keeps_the_whole_body():
+    # Soak N55: a staged unit tests one field per run; the request still carries every field.
+    opts = {
+        "method": "POST", "body_field_names": ["email", "password"],
+        "content_type": "application/json", "injection_field": "email",
+    }
+    args = agent_tools._tmpl_sqlmap(URL, {**opts, "injection_fields": ["password"]})
+    assert sorted(json.loads(args[args.index("--data") + 1])) == ["email", "password"]
+    assert args[args.index("-p") + 1] == "password"
+    assert agent_tools.sqlmap_injection_fields(opts) == ["email", "password"]
+    for subset in (["token"], [], "password"):
+        try:
+            agent_tools._tmpl_sqlmap(URL, {**opts, "injection_fields": subset})
+        except ValueError:
+            continue
+        raise AssertionError(f"a subset outside the tested fields was accepted: {subset!r}")
+
+
 def test_a_form_content_type_produces_a_form_body():
     args = agent_tools._tmpl_sqlmap(URL, {
         "method": "POST", "body_field_names": ["user", "pass"],

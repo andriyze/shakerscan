@@ -461,6 +461,8 @@ _INJECTION_BODY_PROPERTIES: Mapping[str, Any] = {
     "content_type": {"type": "string"},
     "body_field_names": {"type": "array"},
     "injection_field": {"type": "string"},
+    # Staged SQLi verification: the subset of the tested fields one run hands sqlmap (``-p``).
+    "injection_fields": {"type": "array"},
 }
 
 
