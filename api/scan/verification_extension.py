@@ -166,6 +166,11 @@ def extension_scale(
         (held_requests * (spent_wall / sent)) / held_wall
         if sent <= held_requests * _MAXIMUM_SPENT_FRACTION else None
     )
+    if latency_scale is None and request_need:
+        # A resumable slice whose request holds were sized for its units spends most of them
+        # by design; that it did is no sign it was not starved of wall. Its wall is bounded
+        # by the round share here and by its remaining units' predicted wall by the caller.
+        latency_scale = max(float(minimum), max(0, int(wall_ceiling)) / held_wall)
     if request_bound:
         # Whatever its latency says, it needs at least the holds its remaining units need.
         scale = max(latency_scale or 0.0, 1.0, float(minimum))
@@ -390,6 +395,21 @@ def _fair_walls(
     }
 
 
+# A rate measured on earlier units is a prediction, not a promise: an extension capped at
+# exactly the predicted wall of the units left is cut short by a slightly slower target and
+# spends one of the Scan's continuation rounds on the remainder.
+_REMAINING_WALL_SLACK = 1.2
+_REMAINING_WALL_SLACK_SECONDS = 60
+
+
+def _with_slack(remaining_wall: int) -> int:
+    """The remaining-wall cap with room for the rate to have been mispredicted."""
+    return max(
+        math.ceil(remaining_wall * _REMAINING_WALL_SLACK),
+        int(remaining_wall) + _REMAINING_WALL_SLACK_SECONDS,
+    )
+
+
 def _request_need(
     capability_name: str, reserved: Mapping[str, int], remaining_requests: int | None,
 ) -> dict[str, tuple[int, int]] | None:
@@ -574,9 +594,9 @@ def plan_verification_extensions(
                     math.floor(held_wall * scale),
                     max(
                         math.ceil(held_wall * floor),
-                        int((stage_remaining_walls or {}).get(
+                        _with_slack(int((stage_remaining_walls or {}).get(
                             action.action_id, held_wall * scale,
-                        )),
+                        ))),
                     ),
                 )
             ),
