@@ -546,6 +546,7 @@ def plan_verification_extensions(
     stage_remaining_requests: Mapping[str, int] | None = None,
     stage_last_chance_walls: Mapping[str, int] | None = None,
     reserved_for_new_work: int | Sequence[Any] = 0,
+    final_round: bool = False,
 ) -> tuple[dict[str, Any], ...]:
     """One optional extension per timed-out, latency-starved verifier slice not yet extended.
 
@@ -690,7 +691,11 @@ def plan_verification_extensions(
     # Candidates the Scan has not sliced yet: a first slice is worth more than a probe or the
     # continuation of a candidate that already cannot reach a full negative, so those are
     # funded only from what this reserve leaves (soak N55 review, follow-up 4).
-    reserve = _admissible_reserve(reserved_for_new_work, start["tool_wall_seconds"], wall_ceiling)
+    # In the Scan's last continuation round no later compile will admit a first slice, so
+    # nothing is held back for one.
+    reserve = 0 if final_round else _admissible_reserve(
+        reserved_for_new_work, start["tool_wall_seconds"], wall_ceiling,
+    )
     # Each SQLi extension carries its part of the Scan's residual: a technique whose remaining
     # units need more is inconclusive for budget (``sqli_stages.resume_plan``). The residual is
     # divided shortest-remaining-need first, so work that can conclude is funded to its end and

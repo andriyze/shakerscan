@@ -33,6 +33,7 @@ import scan.action_adapter as action_adapter_module
 from hunt.capability_executor import CapabilityAdapterResult
 from runtime.models import ScanPolicy
 from scan.action_plan import ScanActionPlan
+from scan.continuation import MAX_SCAN_CONTINUATION_ROUNDS
 from scan.execution_backend import PostgresScanExecutionBackend
 from scan.finalizer import _SLOW_ENDPOINT_RECORD_KINDS
 from scan.sqli_stages import (
@@ -474,10 +475,14 @@ class _Scan:
         left["tool_wall_seconds"] -= self.earlier
         return left
 
-    def drive(self, rounds=8):
-        """Continue round by round until the planner funds nothing; return the rounds run."""
+    def drive(self, rounds=MAX_SCAN_CONTINUATION_ROUNDS - 1):
+        """Continue round by round until the planner funds nothing; return the rounds run.
+
+        Production runs continuation revisions r01..r08 (``MAX_SCAN_CONTINUATION_ROUNDS``);
+        r01 is the first slices, so at most seven rounds of extensions follow.
+        """
         ran = []
-        for round_number in range(2, 2 + rounds):
+        for round_number in range(2, 2 + min(rounds, MAX_SCAN_CONTINUATION_ROUNDS - 1)):
             added = self.next_round(round_number)
             if not added:
                 break
@@ -511,7 +516,7 @@ class _Scan:
             and item.get("status") == "success" and not item.get("carried_from")
         }
 
-    def plan_extensions(self):
+    def plan_extensions(self, round_number=2):
         """Plan the next round exactly as ``compile_continuation_round`` does."""
         plan = self.plan()
         observations = {
@@ -527,10 +532,11 @@ class _Scan:
             stage_remaining_requests=stage_remaining_walls(observations, key="remaining_requests"),
             stage_last_chance_walls=stage_last_chance_walls(observations),
             reserved_for_new_work=self.pending_new_work,
+            final_round=round_number >= MAX_SCAN_CONTINUATION_ROUNDS,
         )
 
     def next_round(self, round_number):
-        planned = self.plan_extensions()
+        planned = self.plan_extensions(round_number)
         added = []
         for spec in planned:
             action_id = f"{spec['action_id']}.r{round_number:02d}"
@@ -791,7 +797,7 @@ class _HoneyScan(_Scan):
         )
 
     def next_round(self, round_number):
-        planned = self.plan_extensions()
+        planned = self.plan_extensions(round_number)
         sqli = []
         for spec in planned:
             action_id = f"{spec['action_id']}.r{round_number:02d}"
@@ -1145,7 +1151,7 @@ def test_unsliced_candidates_get_a_first_slice_before_probes_and_lost_causes(mon
             return added
 
         scan.run(set(first_slices()))
-        for round_number in range(2, 10):
+        for round_number in range(2, MAX_SCAN_CONTINUATION_ROUNDS + 1):
             scan.pending_new_work = [("verify.sqli", 420)] * len(queue) if reserve else []
             extensions = [action_id for action_id, _ in scan.next_round(round_number)]
             fresh = first_slices()
@@ -1317,3 +1323,30 @@ def test_a_closed_candidate_accounts_for_every_technique(monkeypatch):
         }
         assert outcome["unfinished_techniques"] == []
         assert not set(outcome["refuted_techniques"]) & set(outcome["inconclusive_techniques"])
+
+
+def test_the_last_round_holds_nothing_back_for_first_slices_no_compile_will_admit(monkeypatch):
+    """Follow-up review: in the Scan's last continuation round no later compile admits a first
+    slice, so wall reserved for one would only sit idle -- here, the 4.0 s late-field
+    injection's last chance."""
+    ENDPOINTS["/vuln"] = (4.0, 4)
+    try:
+        scan = _Scan(
+            monkeypatch, ("/vuln", "/chat"), vuln={("/vuln", "B", "field3")}, earlier=1_031,
+        )
+        scan.add("verify.sqli.r01", path="/vuln", budget=SLICE)
+        scan.add("verify.sqli.001.r01", path="/chat", budget=SLICE)
+        scan.run({"verify.sqli.r01", "verify.sqli.001.r01"})
+        # Fixture: two pending query candidates (120 s each) that fit what will be left.
+        scan.pending_new_work = [("verify.sqli", 120), ("verify.sqli", 120)]
+        for round_number in range(2, 5):
+            scan.run({action_id for action_id, _ in scan.next_round(round_number)})
+    finally:
+        ENDPOINTS["/vuln"] = (5.3, 4)
+    assert scan.residual()["tool_wall_seconds"] == 257
+    # Before the last round the 240 s reserve leaves too little for the last chance ...
+    assert scan.plan_extensions(5) == ()
+    # ... and in round 8 nothing is reserved, so the last chance gets the 256 s.
+    [last] = scan.plan_extensions(MAX_SCAN_CONTINUATION_ROUNDS)
+    assert last["capability_args"][LAST_CHANCE_ARG] is True
+    assert last["budget"]["tool_wall_seconds"] == 256
