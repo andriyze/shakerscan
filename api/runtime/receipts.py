@@ -62,6 +62,14 @@ _SENSITIVE_PARTS = frozenset({
     "authorization", "auth", "bearer", "cookie", "credential", "password", "passwd",
     "private", "secret", "token", "refresh", "credentials",
 })
+# Exact names that hold an interval when their value is a bounded integer. `refresh` is a
+# refresh token in a JWT login response ({"access": ..., "refresh": ...}) but the SOA refresh
+# timer in DNS posture, which masking hid on the Posture tab. Only these exact names, and only
+# a non-negative integer that fits a 32-bit DNS timer, are exempt; a string under them, any
+# other refresh_* key (refresh_token, refresh_signing_key, refresh_pin) and any larger number
+# stay masked.
+_INTERVAL_KEYS = frozenset({"refresh", "refresh_interval"})
+_INTERVAL_MAX = 2**32 - 1
 # `key` names secret material only when another part says which key it is.
 _KEY_QUALIFIER_PARTS = frozenset({
     "access", "api", "auth", "client", "consumer", "encryption", "hmac", "host",
@@ -143,6 +151,8 @@ def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
     # deliberately not exempted here: they are covered below, where the rule can see
     # whether the name actually qualifies a credential.
     if item is not _UNSET and isinstance(item, bool) and describes:
+        return False
+    if joined in _INTERVAL_KEYS and type(item) is int and 0 <= item <= _INTERVAL_MAX:
         return False
     if any(part in _SENSITIVE_PARTS for part in parts):
         return True
