@@ -196,8 +196,11 @@ Rules for bounds:
     by one strict IDNA 2008/UTS #46 canonicalizer (`scanner_tools/host_names.py`), as the HTTP
     client connects: `straße.example` is `xn--strae-oqa.example`, never `strasse.example`. A host
     strict processing refuses (a ZWJ/ZWNJ outside its script, a malformed `xn--` label) is
-    refused, not re-encoded with the IDNA 2003 codec. Approval text shows the canonical ASCII host
-    with its Unicode form beside it.
+    refused, not re-encoded with the IDNA 2003 codec. An IP literal is kept in its canonical
+    form (`2001:DB8::0001` is `2001:db8::1`), and a numeric spelling that is not canonical
+    dotted-decimal IPv4 (`010.000.000.001`, `127.1`, `2852039166`, `0x7f.0.0.1`) is refused for
+    targets, scopes and bounds. The target list's SQL compares the same way. Approval text shows
+    the canonical ASCII host with its Unicode form beside it.
   - Bounds stored before this (no `host_canonicalization` in `bounds_json`) were parsed with
     IDNA 2003. On load each host bound is re-derived from the strings the person approved: one
     whose IDNA 2003 and 2008 encodings are identical stands; one that differs, or whose source

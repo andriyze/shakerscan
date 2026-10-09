@@ -138,6 +138,18 @@ def test_authorization_does_not_follow_a_target_whose_host_changed():
     assert len(conn.approvals) == 2
 
 
+@pytest.mark.parametrize('spelling', ['host://010.000.000.001', 'host://10.0.1', 'host://167772161'])
+def test_a_non_canonical_ipv4_spelling_is_never_reported_authorized(spelling, monkeypatch):
+    """R3 follow-up: PostgreSQL inet reads 010.000.000.001 as 10.0.0.1 while resolvers may read
+    it as octal; the host comparison refuses the spelling instead of matching either address."""
+    monkeypatch.setenv('SHAKERSCAN_PRIVATE_NETWORK_TARGETS', 'allow')
+    conn = _Conn(url='host://10.0.0.1')
+    asyncio.run(ta.authorize_target(conn, TARGET_ID, approved_by='alice'))
+    assert asyncio.run(ta.current_target_authorization(conn, TARGET_ID))['standing']
+    conn.url = spelling
+    assert asyncio.run(ta.current_target_authorization(conn, TARGET_ID)) is None
+
+
 def test_revocation_ends_the_standing_authorization():
     conn = _Conn()
     asyncio.run(ta.authorize_target(conn, TARGET_ID, approved_by="alice"))

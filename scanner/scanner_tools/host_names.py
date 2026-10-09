@@ -31,14 +31,36 @@ class HostNameError(ValueError):
     """A host that is not a valid DNS name under strict IDNA 2008 / UTS #46."""
 
 
+def _numeric_label(label: str) -> bool:
+    """A label a URL parser or resolver may read as part of an IPv4 number (decimal, octal or
+    ``0x`` hex). No top-level domain is numeric, so a host ending in one is an address spelling."""
+    return bool(label) and (label.isdigit() or (label.startswith("0x") and all(
+        char in "0123456789abcdef" for char in label[2:])))
+
+
 def _ip_literal(host: str) -> str | None:
+    """The canonical text of an IP literal (``2001:DB8::0001`` is ``2001:db8::1``, as
+    PostgreSQL ``inet`` and the target inventory spell it), or None for a DNS name.
+
+    Only the canonical dotted-quad IPv4 form is accepted. ``010.000.000.001``, ``127.1``,
+    ``2130706433`` and ``0x7f.0.0.1`` are refused: many resolvers and URL parsers read them as
+    octal, shortened or hex addresses, so the text would name another address than the one a
+    scope check or bound compared.
+    """
     if ":" in host:
-        return host  # an IPv6 literal (with any zone) is not a DNS name; kept as spelled
+        try:
+            return str(ipaddress.IPv6Address(host))
+        except ValueError as exc:
+            raise HostNameError(f"host {host!r} is not a valid IPv6 address") from exc
     try:
-        ipaddress.IPv4Address(host)
+        return str(ipaddress.IPv4Address(host))
     except ValueError:
-        return None
-    return host
+        pass
+    if _numeric_label(host.rsplit(".", 1)[-1]):
+        raise HostNameError(
+            f"host {host!r} is not a canonical IPv4 address (dotted decimal, no leading zeros)"
+        )
+    return None
 
 
 def _check_a_label(label: str, host: str) -> None:
@@ -55,8 +77,9 @@ def _check_a_label(label: str, host: str) -> None:
 def canonical_host(value: object) -> str:
     """The ASCII host (lower case, no trailing dot, A-labels) the HTTP client connects to.
 
-    IP literals are returned as spelled (lower case, without brackets). Raises ``HostNameError``
-    for an empty host or one that strict IDNA 2008 / UTS #46 processing refuses.
+    IP literals are returned in canonical form, without brackets. Raises ``HostNameError`` for an
+    empty host, a non-canonical IPv4 spelling, or one that strict IDNA 2008 / UTS #46 processing
+    refuses.
     """
     host = str(value or "").strip()
     if host.startswith("[") and host.endswith("]"):
@@ -80,6 +103,9 @@ def canonical_host(value: object) -> str:
             ) from exc
         if ascii_host.endswith("."):
             ascii_host = ascii_host[:-1]
+        literal = _ip_literal(ascii_host)  # a full-width spelling of an address
+        if literal is not None:
+            return literal
     if not ascii_host or len(ascii_host) > _MAX_HOST:
         raise HostNameError(f"host {host!r} is empty or longer than {_MAX_HOST} characters")
     for label in ascii_host.split("."):

@@ -306,3 +306,33 @@ def test_the_credential_approval_names_the_canonical_home_host():
     assert "target 'Shop' (xn--fa-hia.example (Unicode: faß.example))" in shown["explanation"]
     request = public_request(_request_row(KIND_CREDENTIAL_USE, subject))
     assert request["home_host"] == {"ascii": "xn--fa-hia.example", "unicode": "faß.example"}
+
+
+# --- address spellings (one canonicalizer, also for target/scope comparison) ----------------
+
+@pytest.mark.parametrize("spelling", ["010.000.000.001", "127.1", "2130706433", "0x7f.0.0.1",
+                                      "０１０.0.0.1"])  # full-width 010.0.0.1
+def test_non_canonical_ipv4_spellings_are_refused(spelling):
+    """Many resolvers read 010.000.000.001 as octal (8.0.0.1); PostgreSQL inet reads it as
+    10.0.0.1. Text that names two addresses is refused, never compared."""
+    with pytest.raises(HostNameError, match="canonical IPv4"):
+        canonical_host(spelling)
+    with pytest.raises(BoundError):
+        parse_bounds([f"target.authorize:{spelling}"])
+
+
+@pytest.mark.parametrize("spelling, canonical", [
+    ("192.0.2.1", "192.0.2.1"), ("[2001:DB8::0001]", "2001:db8::1"), ("2001:db8:0:0::1", "2001:db8::1"),
+    ("１９２.0.2.1", "192.0.2.1"),
+])
+def test_ip_literals_have_one_canonical_spelling(spelling, canonical):
+    assert canonical_host(spelling) == canonical
+
+
+def test_target_authorization_compares_hosts_with_the_one_canonicalizer():
+    from target_authorization import _host_key
+
+    assert _host_key("[2001:DB8::0001]") == _host_key("2001:db8::1") == "2001:db8::1"
+    assert _host_key("Straße.Example.") == _host_key("xn--strae-oqa.example")
+    assert _host_key("strasse.example") != _host_key("straße.example")
+    assert _host_key("010.000.000.001") == "", "refused: matches no scope host"

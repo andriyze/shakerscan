@@ -20792,7 +20792,6 @@ def test_normalize_target_url_preserves_operator_choice_for_all_http_targets():
         "http://169.254.169.254",
         "http://[fe80::1]",
         "http://metadata.google.internal/",
-        "http://2852039166/",
         "http://host.docker.internal:3001",
         "http://192.168.1.50",
         "http://127.0.0.1:3000",
@@ -20800,6 +20799,17 @@ def test_normalize_target_url_preserves_operator_choice_for_all_http_targets():
     ):
         norm, _note = api_module.normalize_target_url(allowed)
         assert norm
+
+
+@pytest.mark.parametrize("spelling", ["http://2852039166/", "http://169.254.0xa9fe/", "http://0251.0376.0251.0376/",
+                                      "http://010.000.000.001/"])
+def test_normalize_target_url_refuses_ambiguous_ipv4_spellings(spelling):
+    """R3 follow-up: an integer, hex or leading-zero spelling names one address to a resolver
+    (2852039166 is 169.254.169.254; 010.0.0.1 may be octal) and another, or a DNS name, to the
+    scope check and PostgreSQL inet. The operator's destination stays allowed in its canonical
+    dotted form (above); the ambiguous text is refused with a clear reason."""
+    with pytest.raises(api_module.TargetNormalizationError, match="canonical IPv4"):
+        api_module.normalize_target_url(spelling)
 
 
 def test_normalize_target_url_rejects_oversized_hostname():
