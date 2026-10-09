@@ -26,6 +26,8 @@ URL = "http://192.168.1.50:8080"
 @pytest.fixture(autouse=True)
 def _config_dir(monkeypatch, tmp_path):
     monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     for key in (cli.ENV_URL, cli.ENV_TOKEN, cli.ENV_TOKEN_FILE):
         monkeypatch.delenv(key, raising=False)
 
@@ -41,7 +43,7 @@ def _json(path):
 
 
 def _record(tmp_path, workspace):
-    return _workspace.state_path(tmp_path / "cfg" / "workspaces", workspace)
+    return _workspace.state_path(tmp_path / "state" / "shakerscan" / "workspaces", workspace)
 
 
 # --- L3: merged, not rewritten -----------------------------------------------------------------
@@ -176,7 +178,7 @@ def test_a_record_naming_a_path_outside_claude_is_ignored_and_deletes_nothing(tm
     record.write_text(json.dumps(state), encoding="utf-8")
     notes = _rerun(workspace)
     assert victim.read_text(encoding="utf-8") == "authorized key\n", "nothing outside .claude/ is deleted"
-    assert any("record of this workspace" in note and "was not valid and was ignored" in note for note in notes), notes
+    assert any("changes since the last launch could not be checked (record invalid" in note for note in notes), notes
 
 
 def test_a_record_planted_in_the_workspace_is_never_read(tmp_path):
@@ -225,7 +227,7 @@ def test_a_tampered_record_is_ignored(tmp_path):
         state = {**_json(record), **tampered}
         record.write_text(json.dumps(state), encoding="utf-8")
         notes = _rerun(workspace)
-        assert any("was not valid and was ignored" in note for note in notes), (tampered, notes)
+        assert any("could not be checked (record invalid" in note for note in notes), (tampered, notes)
 
 
 # --- B2 and N2: never written through a link -----------------------------------------------------
@@ -373,3 +375,91 @@ def test_kit_hooks_are_executable_and_written_as_new_files(tmp_path):
     assert os.access(hook, os.X_OK)
     _rerun(workspace)
     assert hook.stat().st_ino != first, "a refresh writes a new file, never into the old one"
+
+
+# --- where the client keeps things (XDG) --------------------------------------------------------
+
+
+def test_the_record_lives_in_the_state_directory_and_the_default_workspace_in_the_data_directory(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
+    out = capsys.readouterr().out
+    workspace = tmp_path / "data" / "shakerscan" / "agent"
+    assert f"workspace: {workspace} (" in out
+    assert _record(tmp_path, workspace).is_file()
+    assert not (tmp_path / "cfg" / "agent").exists() and not (tmp_path / "cfg" / "workspaces").exists()
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert cli.state_dir() == tmp_path / "home" / ".local" / "state" / "shakerscan"
+    monkeypatch.setenv("XDG_DATA_HOME", "relative/path")  # not absolute: ignored, as XDG says
+    assert cli.default_workspace() == tmp_path / "home" / ".local" / "share" / "shakerscan" / "agent"
+
+
+def test_an_existing_default_workspace_and_its_record_move_once(tmp_path, monkeypatch, capsys):
+    """0.8.1 kept the default workspace in ~/.config/shakerscan/agent (beside the token) and the
+    records in ~/.config/shakerscan/workspaces; both move, once, and the move is reported."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    old = tmp_path / "cfg" / "agent"
+    cli.prepare_workspace(old, URL, "operator", "shakerscan", authenticated=False,
+                          state_directory=tmp_path / "cfg" / "workspaces")
+    opencode = _json(old / "opencode.json")
+    opencode["permission"] = {"bash": {"env": "deny"}}
+    (old / "opencode.json").write_text(json.dumps(opencode), encoding="utf-8")
+    other = tmp_path / "other-ws"
+    cli.prepare_workspace(other, URL, "operator", "shakerscan", authenticated=False,
+                          state_directory=tmp_path / "cfg" / "workspaces")
+
+    assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
+    out = capsys.readouterr().out
+    new = tmp_path / "data" / "shakerscan" / "agent"
+    assert f"moved:     the default agent workspace from {old} to {new} (and its record)" in out, out
+    assert "moved:     2 workspace record(s) from" in out
+    assert not old.exists() and _json(new / "opencode.json")["permission"] == {"bash": {"env": "deny"}}
+    assert "could not be checked" not in out, "the moved record still describes the moved workspace"
+    assert 'changed opencode.json.permission' in out or 'added opencode.json.permission.bash.env' in out, out
+    assert _record(tmp_path, other).is_file(), "other workspaces' records move too"
+    assert not (tmp_path / "cfg" / "workspaces").exists()
+    assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
+    assert "moved:" not in capsys.readouterr().out, "once"
+
+
+def test_an_old_default_workspace_that_is_a_link_is_not_moved(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.txt").write_text("keep", encoding="utf-8")
+    (tmp_path / "cfg").mkdir()
+    (tmp_path / "cfg" / "agent").symlink_to(elsewhere, target_is_directory=True)
+    assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
+    out = capsys.readouterr().out
+    assert "is not a plain directory; it was not moved" in out
+    assert (tmp_path / "cfg" / "agent").is_symlink() and [p.name for p in elsewhere.iterdir()] == ["keep.txt"]
+
+
+def test_an_old_default_workspace_is_not_moved_over_a_new_one(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    (tmp_path / "cfg" / "agent").mkdir(parents=True)
+    (tmp_path / "data" / "shakerscan" / "agent").mkdir(parents=True)
+    assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
+    assert "an old default workspace remains at" in capsys.readouterr().out
+    assert (tmp_path / "cfg" / "agent").is_dir()
+
+
+def test_workspace_overrides_still_work_and_say_nothing_of_the_default(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    (tmp_path / "cfg" / "agent").mkdir(parents=True)
+    workspace = tmp_path / "mine"
+    assert cli.main(["agent", "--url", URL, "--workspace", str(workspace), "--no-launch"]) == 0
+    out = capsys.readouterr().out
+    assert f"workspace: {workspace.resolve()} (" in out and "default agent workspace" not in out
+    assert (tmp_path / "cfg" / "agent").is_dir(), "the default is only moved when it is used"
+
+
+def test_a_prepared_workspace_without_its_record_says_so_plainly(tmp_path):
+    workspace = tmp_path / "ws"
+    assert not [note for note in _rerun(workspace) if "could not be checked" in note], "a new workspace"
+    _record(tmp_path, workspace).unlink()
+    notes = _rerun(workspace)
+    assert any(note.startswith("note:      changes since the last launch could not be checked (record missing")
+               for note in notes), notes

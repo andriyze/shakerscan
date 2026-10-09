@@ -350,18 +350,36 @@ def _valid_state(state: Any, workspace: Path) -> bool:
                for item in security.values())
 
 
+def _prepared_before(workspace: Path) -> bool:
+    """Whether the client prepared ``workspace`` before (its MCP registration is there)."""
+    for name, key in (("opencode.json", "mcp"), (".mcp.json", "mcpServers")):
+        try:
+            config, _ = _parse((workspace / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(config, dict) and isinstance(config.get(key), dict) and "shakerscan" in config[key]:
+            return True
+    return False
+
+
 def load_state(path: Path, workspace: Path, notes: list[str]) -> dict:
     """The record of the last launch in ``workspace``; anything unexpected in it (a path that is
-    not inside ``.claude/``, a malformed entry) and the whole record is treated as absent."""
+    not inside ``.claude/``, a malformed entry) and the whole record is treated as absent. For a
+    workspace the client prepared before, a missing or invalid record is said plainly: what
+    changed since the last launch cannot be checked this time."""
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
+        if _prepared_before(workspace):
+            notes.append("note:      changes since the last launch could not be checked (record missing: "
+                         f"{path}); this launch records the settings for the next one")
         return {}
     except (OSError, ValueError):
         state = None
     if _valid_state(state, workspace):
         return state
-    notes.append(f"note:      the client's record of this workspace ({path}) was not valid and was ignored")
+    notes.append("note:      changes since the last launch could not be checked (record invalid: "
+                 f"{path}); it was ignored, and this launch records the settings for the next one")
     return {}
 
 
@@ -376,6 +394,80 @@ def save_state(path: Path, workspace: Path, state: Mapping) -> None:
     except BaseException:
         Path(name).unlink(missing_ok=True)
         raise
+
+
+# --- moving to the XDG locations ---------------------------------------------------------------
+
+
+def _rewrite_record(source: Path, target: Path, workspace: Path) -> bool:
+    """Move one record to ``target``, naming ``workspace``; False when it is not a plain file."""
+    try:
+        info = source.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
+        return False
+    try:
+        state = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(state, dict):
+        return False
+    state["workspace"] = str(workspace)
+    save_state(target, workspace, {key: value for key, value in state.items()
+                                   if key not in {"schema_version", "workspace"}})
+    source.unlink()
+    return True
+
+
+def migrate_records(old: Path, new: Path) -> list[str]:
+    """Move the client's workspace records from ``old`` (its configuration directory, where
+    0.8.1 kept them) to ``new`` (its state directory). Links and anything that is not a plain
+    record file are left where they are; a record already at ``new`` wins."""
+    if old.is_symlink() or not old.is_dir():
+        return []
+    moved, left = 0, []
+    for source in sorted(old.iterdir()):
+        target = new / source.name
+        info = source.lstat()
+        if source.suffix != ".json" or not stat.S_ISREG(info.st_mode) or info.st_nlink > 1 or target.exists():
+            left.append(source.name)
+            continue
+        new.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.replace(source, target)  # renames the entry itself; a link is never followed
+        moved += 1
+    notes = [f"moved:     {moved} workspace record(s) from {old} to {new}"] if moved else []
+    if left:
+        notes.append(f"note:      left in {old}: {', '.join(left[:5])} (not plain record files, or already moved)")
+    else:
+        with contextlib.suppress(OSError):
+            old.rmdir()
+    return notes
+
+
+def migrate_default_workspace(old: Path, new: Path, records: Path) -> list[str]:
+    """Move the default agent workspace from ``old`` (``~/.config/shakerscan/agent``, inside the
+    client's configuration, next to its token) to ``new`` (``~/.local/share/shakerscan/agent``),
+    once, with its record. The directory entry is renamed, never followed: a link stays where
+    it is, and so does a workspace when ``new`` already exists or is on another file system."""
+    if not old.exists() and not old.is_symlink():
+        return []
+    if old.is_symlink() or not old.is_dir():
+        return [(f"note:      {old} (the old default workspace) is not a plain directory; it was not moved, "
+                 f"and the default workspace is now {new}")]
+    if new.exists() or new.is_symlink():
+        return [(f"note:      an old default workspace remains at {old}; {new} already exists, so it was not "
+                 "moved (remove or merge it yourself)")]
+    old_real = old.resolve()
+    new.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.rename(old, new)
+    except OSError as exc:
+        return [(f"note:      could not move the old default workspace {old} to {new} ({exc.strerror or exc}); "
+                 f"it was left in place, and the default workspace is now {new}")]
+    moved_record = _rewrite_record(state_path(records, old_real), state_path(records, new.resolve()), new.resolve())
+    return [f"moved:     the default agent workspace from {old} to {new}"
+            + (" (and its record)" if moved_record else "")]
 
 
 # --- merging -----------------------------------------------------------------------------------

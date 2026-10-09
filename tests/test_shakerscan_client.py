@@ -37,6 +37,8 @@ def _hermetic_config_dir(monkeypatch, tmp_path):
     """The client keeps its record of agent workspaces in its configuration directory; keep it
     in the test's own directory (a test that sets its own overrides this)."""
     monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg-default"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state-default"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data-default"))
 
 
 @pytest.fixture
@@ -318,7 +320,8 @@ def test_the_installed_kit_names_its_release_not_unknown(tmp_path):
     )
     env = {key: value for key, value in os.environ.items() if not key.startswith("SHAKERSCAN_")}
     env["PYTHONPATH"] = str(site)
-    env["SHAKERSCAN_CONFIG_DIR"] = str(tmp_path / "cfg")  # the workspace record stays in the test
+    env["SHAKERSCAN_CONFIG_DIR"] = str(tmp_path / "cfg")
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")  # the workspace record stays in the test
     result = subprocess.run([sys.executable, "-c", script], env=env, cwd=tmp_path, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
