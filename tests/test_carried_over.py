@@ -33,7 +33,7 @@ def test_counts_only_rows_this_run_neither_wrote_last_saw_nor_reported():
     reported = [{"fingerprint": "fp-xfo"}, {"fingerprint": "fp-new", "title": "same title"}]
     summary = summarize_carried_over(SCAN, reported, history)
     assert summary == {
-        "count": 2, "material": 2, "highest": "critical", "complete": True,
+        "count": 2, "from_hunts": 0, "from_other": 0, "material": 2, "highest": "critical", "complete": True,
         "total_active": 6, "unloaded_active": 0,
     }
 

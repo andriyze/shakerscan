@@ -53,6 +53,14 @@ except ModuleNotFoundError:
     from scanner.release_identity import published_scanner_version
 from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
 from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
+from scan.deployment_gate_rows import (
+    deployment_gate_findings as _deployment_gate_findings,
+    finish_blockers,
+    gate_completeness,
+    load_scan_finding_ids,
+    load_target_blocking_rows,
+    with_report_identity,
+)
 from scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
 from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
 from scan.finding_reconciliation import reconcile_legacy_finding_row
@@ -7812,29 +7820,6 @@ def _is_ai_demo_target_row(row: dict[str, Any]) -> bool:
 
 
 
-def _deployment_gate_findings(findings: Any, *, minimum: str = "high", limit: int = 20) -> list[dict[str, Any]]:
-    if not isinstance(findings, list):
-        return []
-    threshold = SEVERITY_ORDER.get(minimum, SEVERITY_ORDER["high"])
-    selected: list[dict[str, Any]] = []
-    for finding in findings:
-        if not isinstance(finding, dict):
-            continue
-        severity = str(finding.get("severity") or "info").lower()
-        if SEVERITY_ORDER.get(severity, 0) < threshold:
-            continue
-        selected.append({
-            "id": finding.get("id") or finding.get("source_finding_id"),
-            "fingerprint": finding.get("fingerprint"),
-            "title": finding.get("title"),
-            "severity": severity,
-            "tool": finding.get("tool"),
-            "url": finding.get("url"),
-        })
-    selected.sort(key=lambda item: SEVERITY_ORDER.get(str(item.get("severity")), 0), reverse=True)
-    return selected[:limit]
-
-
 def _deployment_gate_required_evidence_missing(
     result: dict[str, Any], product: str, *, strict_model_intake: bool = False
 ) -> list[dict[str, Any]]:
@@ -8069,6 +8054,8 @@ def build_deployment_decision(
     db_exceptions: list[dict[str, Any]] | None = None,
     target_active_findings: list[dict[str, Any]] | None = None,
     target_history: dict[str, Any] | None = None,
+    persisted_finding_ids: dict[str, str] | None = None,
+    target_active: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = _decode_json_value(scan.get("result")) or {}
     run_kind = str(scan.get("run_kind") or "")
@@ -8120,11 +8107,7 @@ def build_deployment_decision(
     if product == "dast" and isinstance(findings, list):
         # Report rows carry no persisted identity, and findings.scan_id moves to whichever
         # scan last saw a row. Derive the fingerprint persistence keyed each row by.
-        findings = [
-            {**item, "fingerprint": item.get("fingerprint") or canonical_finding_fingerprint(item)}
-            if isinstance(item, dict) else item
-            for item in findings
-        ]
+        findings = with_report_identity(findings)
 
     if raw_decision == "review":
         raw_decision = "needs_approval"
@@ -8157,6 +8140,8 @@ def build_deployment_decision(
                                       minimum=str(policy_profile.get("minimum_block_severity") or "high")),
             target_history, scan.get("id"),
         )
+    if product == "dast":
+        finish_blockers(blocking_findings, persisted_finding_ids)
     exceptions = _exception_records(scan, result if isinstance(result, dict) else {}, db_exceptions=db_exceptions)
     # A policy-scoped exception (non-null policy_id) only applies when the scan is
     # evaluated under that exact policy profile — so a lenient-policy waiver cannot
@@ -8185,6 +8170,8 @@ def build_deployment_decision(
     if raw_decision == "block" and not blocking_findings and applied_exceptions:
         raw_decision = "needs_approval"
         rationale = "Blocking findings are covered by active time-bound policy exceptions."
+    if product == "dast":
+        raw_decision, rationale = gate_completeness(raw_decision, rationale, missing, target_active)
 
     return {
         "scan_id": str(scan.get("id")),
@@ -8194,6 +8181,7 @@ def build_deployment_decision(
         "policy_name": policy_name,
         "policy_profile": policy_profile["id"],
         "rationale": rationale,
+        "blocking_count": len(blocking_findings),
         "blocking_findings": blocking_findings,
         "applied_exceptions": applied_exceptions,
         "exceptions_disabled_by_profile": exceptions_disabled,
@@ -11968,16 +11956,11 @@ async def get_scan_deployment_decision(scan_id: str):
                     r["id"] for r in all_targets
                     if _canonical_target_key(r["url"], r.get("discovery_source")) == canon
                 ] or [target_id]
-        taf_rows = await conn.fetch("""
-            SELECT id, fingerprint, title, severity, tool, url
-            FROM findings
-            WHERE target_id = ANY($1::uuid[]) AND status = 'active'
-              AND severity IN ('critical', 'high')
-            LIMIT 200
-        """, sibling_ids) if sibling_ids else []
+        target_active = await load_target_blocking_rows(conn, sibling_ids)
         target_history = await load_target_history(conn, sibling_ids)
+        persisted_finding_ids = await load_scan_finding_ids(conn, scan["id"])
 
-    target_active_findings = gate_findings_from_rows(taf_rows)
+    target_active_findings = gate_findings_from_rows(target_active["rows"])
 
     db_policy_profiles: dict[str, dict[str, Any]] = {}
     for r in profile_rows:
@@ -12015,6 +11998,8 @@ async def get_scan_deployment_decision(scan_id: str):
         db_exceptions=db_exceptions,
         target_active_findings=target_active_findings,
         target_history=target_history,
+        persisted_finding_ids=persisted_finding_ids,
+        target_active=target_active,
     )
 
 

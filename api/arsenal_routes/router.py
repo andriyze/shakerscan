@@ -53,6 +53,7 @@ try:
     )
     from redaction import redact_sensitive
     from research_agent import canonical_hash as _research_canonical_hash
+    from scan.deployment_gate_rows import summarize_for_agent
 except ModuleNotFoundError:  # package import in host-side tests
     from .. import (
         adjudicate,
@@ -72,6 +73,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..redaction import redact_sensitive
     from ..research_agent import canonical_hash as _research_canonical_hash
+    from ..scan.deployment_gate_rows import summarize_for_agent
 
 
 try:
@@ -7627,7 +7629,8 @@ async def _arsenal_dispatch_deployment_decision(p: dict[str, Any]) -> dict[str, 
     scan_id = str(p.get("scan_id") or "").strip()
     if not scan_id:
         raise HTTPException(status_code=400, detail="deployment.decision requires a scan_id parameter")
-    return await get_scan_deployment_decision(scan_id)
+    # An agent gets blocking_count and a bounded list, never thousands of rows.
+    return summarize_for_agent(await get_scan_deployment_decision(scan_id))
 
 
 async def _arsenal_dispatch_local_agent_plan_dry_run(p: dict[str, Any]) -> dict[str, Any]:

@@ -6042,9 +6042,15 @@ export interface DeploymentBlockingFinding {
   // prior scan (not necessarily re-detected by this scan) — surfaced so the gate's
   // "block" decision is explainable.
   from_target_active?: boolean
+  // Who found it: this scan, a Hunt on the target, or an earlier scan.
+  origin?: 'this_scan' | 'hunt' | 'earlier_scan' | 'other'
+  scan_id?: string
+  hunt_run_id?: string
 }
 
 export interface DeploymentDecision {
+  scan_id?: string
+  blocking_count?: number
   decision?: string
   deploy_decision?: string
   policy_profile?: string
@@ -6079,6 +6085,10 @@ export interface DeploymentDecision {
   /** The target's unresolved findings this scan did not observe, computed next to the gate. */
   carried_over?: {
     count?: number
+    /** Of those, the rows a Hunt created rather than an earlier scan. */
+    from_hunts?: number
+    /** Of those, rows with neither a scan nor a Hunt behind them (manual, AI session, device). */
+    from_other?: number
     material?: number
     highest?: string | null
     complete?: boolean

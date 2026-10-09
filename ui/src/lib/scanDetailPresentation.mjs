@@ -392,6 +392,8 @@ export function carriedOverFromDecision(decision) {
     state: complete ? 'ready' : 'partial',
     count: Math.max(0, Number(summary.count)),
     material: Math.max(0, Number(summary.material) || 0),
+    fromHunts: Math.max(0, Number(summary.from_hunts) || 0),
+    fromOther: Math.max(0, Number(summary.from_other) || 0),
     highest: summary.highest ? String(summary.highest).toLowerCase() : null,
     complete,
     source: 'server',
@@ -408,7 +410,7 @@ export function carriedOverSummary(scan, targetFindings, historyState = 'ready')
   const scanRecord = record(scan)
   const scanId = String(scanRecord.id || '')
   if (historyState === 'loading' || historyState === 'error') {
-    return { state: historyState, count: 0, material: 0, highest: null, complete: false }
+    return { state: historyState, count: 0, material: 0, fromHunts: 0, fromOther: 0, highest: null, complete: false }
   }
   const reported = Array.isArray(record(scanRecord.result).findings) ? record(scanRecord.result).findings : []
   const reportedFingerprints = new Set(
@@ -425,7 +427,56 @@ export function carriedOverSummary(scan, targetFindings, historyState = 'ready')
   const highest = order.find((severity) => carried.some((finding) => String(record(finding).severity || '').toLowerCase() === severity)) || null
   const material = carried.filter((finding) => ['critical', 'high', 'medium'].includes(String(record(finding).severity || '').toLowerCase())).length
   const complete = historyState !== 'partial'
-  return { state: complete ? 'ready' : 'partial', count: carried.length, material, highest, complete }
+  // A row a Hunt created (a Hunt that re-proves a scan's row leaves its scan_id in place).
+  const fromHunts = carried.filter((finding) => record(finding).hunt_run_id && !record(finding).scan_id).length
+  const fromOther = carried.filter((finding) => !record(finding).hunt_run_id && !record(finding).scan_id).length
+  return { state: complete ? 'ready' : 'partial', count: carried.length, material, fromHunts, fromOther, highest, complete }
+}
+
+/** Where each release-gate blocker came from. The server labels every DAST blocker with an
+ *  `origin` ('this_scan', 'hunt', 'earlier_scan'); an older API marks only carried rows with
+ *  `from_target_active`, which reads as an earlier scan. A Hunt's finding is never counted as
+ *  an earlier scan's. */
+export function blockerOrigin(blocker, scanId) {
+  const item = record(blocker)
+  const origin = String(item.origin || '')
+  if (origin === 'this_scan' || origin === 'hunt' || origin === 'earlier_scan' || origin === 'other') return origin
+  if (item.from_target_active === true && String(item.scan_id || '') !== String(scanId || '')) return 'earlier_scan'
+  return 'this_scan'
+}
+
+export function blockerProvenance(blockers, scanId) {
+  const counts = { thisScan: 0, hunts: 0, earlierScans: 0, other: 0 }
+  for (const blocker of Array.isArray(blockers) ? blockers : []) {
+    const origin = blockerOrigin(blocker, scanId)
+    if (origin === 'hunt') counts.hunts += 1
+    else if (origin === 'earlier_scan') counts.earlierScans += 1
+    else if (origin === 'other') counts.other += 1
+    else counts.thisScan += 1
+  }
+  return counts
+}
+
+/** The provenance clause after the blocker count, or '' when every blocker is this scan's. */
+export function blockerProvenanceText(blockers, scanId) {
+  const { thisScan, hunts, earlierScans, other } = blockerProvenance(blockers, scanId)
+  if (hunts === 0 && earlierScans === 0 && other === 0) return ''
+  const parts = [`${thisScan} from this scan`]
+  if (hunts > 0) parts.push(`${hunts} found by Hunt${hunts === 1 ? '' : 's'} on this target`)
+  if (earlierScans > 0) parts.push(`${earlierScans} unresolved on this target from earlier scans`)
+  if (other > 0) parts.push(`${other} recorded on this target outside a scan or Hunt`)
+  return parts.join(' · ')
+}
+
+/** Who found the carried-over rows, for the "Carried over" tile. */
+export function carriedSourceText(carried) {
+  const item = record(carried)
+  const hunts = Number(item.fromHunts) || 0
+  const other = Number(item.fromOther) || 0
+  const parts = [`Found by earlier scans`]
+  if (hunts > 0) parts.push(`${hunts} by Hunt${hunts === 1 ? '' : 's'}`)
+  if (other > 0) parts.push(`${other} recorded outside a scan or Hunt`)
+  return parts.length === 1 ? parts[0] : `${parts[0]} or other sources (${parts.slice(1).join(', ')})`
 }
 
 // The release line states provenance only when the decision supplies it: a blocker the gate
@@ -436,13 +487,13 @@ export function releaseLine(decision, scanId, confirmedCount) {
   const verdict = String(item.decision || item.deploy_decision || '').toLowerCase()
   if (!verdict) return null
   const blockers = Array.isArray(item.blocking_findings) ? item.blocking_findings : []
-  const earlier = blockers.filter((blocker) => (
-    record(blocker).from_target_active === true && String(record(blocker).scan_id || '') !== String(scanId || '')
-  ))
+  const { hunts, earlierScans, other } = blockerProvenance(blockers, scanId)
   const rationale = String(item.rationale || item.reason || '').trim()
   if (verdict === 'block' || verdict === 'blocked') {
-    if (blockers.length > 0 && earlier.length === blockers.length && confirmedCount === 0) {
-      return { verdict, tone: 'block', text: `Release is blocked by ${blockers.length} unresolved finding${blockers.length === 1 ? '' : 's'} from earlier scans that this run did not re-examine.` }
+    if (blockers.length > 0 && hunts + earlierScans + other === blockers.length && confirmedCount === 0) {
+      const sources = [earlierScans > 0 && 'earlier scans', hunts > 0 && (hunts === 1 ? 'a Hunt' : 'Hunts'), other > 0 && 'other records'].filter(Boolean)
+      const source = sources.length > 1 ? `${sources.slice(0, -1).join(', ')} and ${sources.at(-1)}` : sources[0]
+      return { verdict, tone: 'block', text: `Release is blocked by ${blockers.length} unresolved finding${blockers.length === 1 ? '' : 's'} from ${source} that this run did not re-examine.` }
     }
     return { verdict, tone: 'block', text: blockers.length > 0
       ? `Release is blocked by ${blockers.length} unresolved finding${blockers.length === 1 ? '' : 's'} on this target.`
