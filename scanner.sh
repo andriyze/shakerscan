@@ -668,6 +668,20 @@ explain_storage_init_failure() {
     echo "credentials, request collections and sessions can then no longer be decrypted."
 }
 
+# Compose validates the whole file (interpolation included) before any subcommand runs. Report a
+# failure here as the configuration error it is, quoting Compose, since the caller would otherwise
+# go on to blame the registry or the network.
+compose_config_is_valid() {
+    local output status=0
+    output="$(compose config --quiet 2>&1)" || status=$?
+    [ "$status" -eq 0 ] && return 0
+    echo -e "${RED}Error: Docker Compose rejected the ShakerScan configuration (${COMPOSE_FILE_ARGS[*]}):${NC}" >&2
+    printf '%s\n' "$output" | sed 's/^/  /' >&2
+    echo "This is a configuration problem, not an image download or network problem." >&2
+    echo "Check any value it names in .env or your environment; if those are ShakerScan's own, report it at https://github.com/andriyze/shakerscan/issues" >&2
+    return 1
+}
+
 pull_prebuilt_images() {
     if [ "$USE_PREBUILT" -ne 1 ]; then
         return 0
@@ -678,6 +692,10 @@ pull_prebuilt_images() {
         return 0
     fi
 
+    # `compose pull` fails the same way for an invalid compose file as for an unreachable registry.
+    # Validate first, so a configuration error is reported as one, with Compose's own message,
+    # instead of as a pull or network problem.
+    compose_config_is_valid || return 1
     echo -e "${BLUE}Pulling prebuilt Docker images...${NC}"
     if ! compose pull api worker ui model-intake-signer model-intake-worker model-intake-sandbox; then
         local image
@@ -689,7 +707,8 @@ pull_prebuilt_images() {
             "${MODEL_INTAKE_IMAGE:-${MODEL_INTAKE_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"; do
             if ! docker image inspect "$image" >/dev/null 2>&1; then
                 echo -e "${RED}Error: image pull failed and $image is not cached.${NC}" >&2
-                echo "Check Docker Hub/network access and run './scanner.sh start' again." >&2
+                echo "Docker Compose's reason is printed above (commonly Docker Hub/network access);" >&2
+                echo "fix it and run './scanner.sh start' again." >&2
                 return 1
             fi
         done
@@ -770,6 +789,54 @@ resolve_docker_socket_gid() {
         fi
     done
     host_docker_socket_gid
+}
+
+# The API needs two supplementary groups: the Docker socket's (to stage the Model Intake runner)
+# and the sandbox's (to read the quarantine it stages). They are the same group when the operator's
+# PRIMARY group owns the socket (after `newgrp docker` or `sg docker`), and Compose rejects a
+# group_add list with two equal entries ("items at 0 and 1 are equal"). Compose cannot drop an
+# entry conditionally, so the second entry gets its own key: the sandbox group when it differs from
+# the socket's, otherwise a group that grants nothing new -- the API's own primary group, or the
+# overflow group nobody owns files as. 65534 is safe because the API already holds the socket group,
+# which is the sandbox group in that case; the entry only has to differ from it.
+api_sandbox_group_gid() {
+    local docker_gid="${1:-0}" sandbox_gid="${2:-10001}" api_gid="${3:-10002}" candidate
+    for candidate in "$sandbox_gid" "$api_gid" 65534 65533; do
+        if [ "$candidate" != "$docker_gid" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+}
+
+# Every Compose call interpolates group_add, so the launcher derives the key from the current values
+# (the environment first, then .env) at startup, writes it to .env there when it is missing or
+# stale, and derives it again whenever start records a new socket group. Commands that never
+# prepare runtime files (scale, reset, stop) therefore see the key in both the environment and
+# .env, including on an install upgraded from a release without it.
+export_api_sandbox_group() {
+    local docker_gid sandbox_gid api_gid
+    docker_gid="${SHAKERSCAN_DOCKER_GID:-$(read_dotenv_value SHAKERSCAN_DOCKER_GID | tr -d '\r')}"
+    sandbox_gid="${MODEL_INTAKE_SANDBOX_GID:-$(read_dotenv_value MODEL_INTAKE_SANDBOX_GID | tr -d '\r')}"
+    api_gid="${SHAKERSCAN_API_GID:-$(read_dotenv_value SHAKERSCAN_API_GID | tr -d '\r')}"
+    export SHAKERSCAN_API_SANDBOX_GROUP_GID="$(api_sandbox_group_gid "$docker_gid" "$sandbox_gid" "$api_gid")"
+}
+
+record_api_sandbox_group() {
+    export_api_sandbox_group
+    write_dotenv_value SHAKERSCAN_API_SANDBOX_GROUP_GID "$SHAKERSCAN_API_SANDBOX_GROUP_GID"
+}
+
+# At launcher start: export the key, and also write it to an existing .env when it is missing or
+# stale. `sudo docker compose` (Docker needing sudo) does not pass the environment through, so
+# Compose reads only .env there; an .env from an older release would otherwise give a `reset`
+# (down -v, then up) run before any `start` an API without the sandbox group.
+sync_api_sandbox_group() {
+    export_api_sandbox_group
+    [ -f "$SCRIPT_DIR/.env" ] || return 0
+    if [ "$(read_dotenv_value SHAKERSCAN_API_SANDBOX_GROUP_GID | tr -d '\r')" != "$SHAKERSCAN_API_SANDBOX_GROUP_GID" ]; then
+        write_dotenv_value SHAKERSCAN_API_SANDBOX_GROUP_GID "$SHAKERSCAN_API_SANDBOX_GROUP_GID"
+    fi
 }
 
 warn_if_ui_port_has_foreign_listener() {
@@ -2092,6 +2159,7 @@ prepare_runtime_files() {
     write_dotenv_value SHAKERSCAN_API_UID "$SHAKERSCAN_API_UID"
     write_dotenv_value SHAKERSCAN_API_GID "$SHAKERSCAN_API_GID"
     write_dotenv_value SHAKERSCAN_DOCKER_GID "$SHAKERSCAN_DOCKER_GID"
+    record_api_sandbox_group
     mkdir -p results
     mkdir -p results/model-intake-quarantine results/model-intake-sandbox
     mkdir -p .shakerscan-model-intake-runner-stage
@@ -2465,6 +2533,7 @@ start_services() {
     if [ "$USE_PREBUILT" -eq 1 ]; then
         export SHAKERSCAN_DOCKER_GID="$(resolve_docker_socket_gid)"
         write_dotenv_value SHAKERSCAN_DOCKER_GID "$SHAKERSCAN_DOCKER_GID"
+        record_api_sandbox_group
     fi
     # The images are ready, so taking a stack down now cannot strand the host without a runnable
     # release. Stop it completely the way `restart` does, keeping its worker count and opt-in lanes.
@@ -4302,6 +4371,8 @@ if [ "$LAN_ACCESS" -eq 1 ]; then
 fi
 
 load_access_env
+# Before any Compose call: commands that never prepare runtime files still interpolate group_add.
+sync_api_sandbox_group
 
 if ! configure_access_mode; then
     exit 1

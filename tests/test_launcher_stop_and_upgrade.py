@@ -239,6 +239,7 @@ set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull\n'; }
 resolve_docker_socket_gid() { printf '0\n'; }
 write_dotenv_value() { :; }
+record_api_sandbox_group() { :; }
 record_runtime_mode() { :; }
 compose() { printf 'compose:%s\n' "$*"; }
 compose_up() {
