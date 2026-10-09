@@ -2206,6 +2206,32 @@ def test_canonical_scan_target_binding_freezes_dns_and_both_inferred_origins(mon
     assert guard["scope_receipt_id"] == "scope-1"
 
 
+def test_scan_binding_of_an_upgraded_target_recomputes_a_legacy_public_suffix_root(monkeypatch):
+    # A guard queued by an engine before 2.8.1 can carry the two-label root co.uk. It must not be
+    # kept (it spans every .co.uk site) and must not leave the scan without a root either: the
+    # root is recomputed from the host, and DNS binding proceeds as for any target.
+    async def resolve(_url, *, subject, environment="production"):
+        return ["192.0.2.11"]
+
+    monkeypatch.setattr(api_module, "_resolve_runtime_target_addresses", resolve)
+    monkeypatch.setattr(fleet_router_module, "_resolve_runtime_target_addresses", resolve)
+    guard = asyncio.run(api_module._freeze_scan_target_binding(
+        target_id="00000000-0000-4000-8000-000000000002",
+        target_kind="web",
+        target_url="https://shop.example.co.uk",
+        scope_receipt_id="scope-2",
+        scheme_inferred=False,
+        existing_guard={"allowed_root_domains": ["co.uk"], "environment": "production"},
+    ))
+    assert guard["allowed_root_domains"] == ["example.co.uk"]
+    assert guard["allowed_addresses"] == ["192.0.2.11"]
+    no_guard = asyncio.run(api_module._freeze_scan_target_binding(
+        target_id="00000000-0000-4000-8000-000000000003", target_kind="web",
+        target_url="https://victim.github.io", scope_receipt_id=None, scheme_inferred=False,
+    ))
+    assert no_guard["allowed_root_domains"] == ["victim.github.io"]
+
+
 def test_scan_options_reject_crlf_in_auth_header():
     # auth_header flows into curl `-H` arguments downstream. CR/LF in the
     # value would let a scan submitter smuggle additional request headers

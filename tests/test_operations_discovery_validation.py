@@ -218,9 +218,34 @@ def test_the_admission_module_never_creates_processes():
 DSN = os.environ.get("DISCOVERY_TEST_DATABASE_URL")
 
 
+def _real_asyncpg(monkeypatch):
+    # Another test module may leave an asyncpg stub in sys.modules; this test needs the driver.
+    if not hasattr(sys.modules.get("asyncpg"), "connect"):
+        monkeypatch.delitem(sys.modules, "asyncpg", raising=False)
+    return pytest.importorskip("asyncpg")
+
+
+async def _fresh_database(dsn: str, asyncpg, *, before_migrations=None):
+    import retest_contract
+
+    conn = await asyncpg.connect(dsn)
+    await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+    await conn.execute((ROOT / "db" / "init.sql").read_text(encoding="utf-8"))
+    if before_migrations:
+        await before_migrations(conn)
+    # The startup migrations an engine runs (scope_receipts, discovery_runs.requested_by, the
+    # target asset model and the legacy root recompute).
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        await retest_contract.run_schema_migrations(pool)
+    finally:
+        await pool.close()
+    return conn
+
+
 @pytest.mark.skipif(not DSN, reason="Requires an explicit disposable PostgreSQL database")
-def test_admission_sql_on_real_postgresql():
-    asyncpg = pytest.importorskip("asyncpg")
+def test_admission_sql_on_real_postgresql(monkeypatch):
+    asyncpg = _real_asyncpg(monkeypatch)
     from disposable_postgres import require_disposable_database
 
     dsn = require_disposable_database(DSN or "", "shakerscan_discovery_test")
@@ -269,3 +294,45 @@ def test_admission_sql_on_real_postgresql():
     assert runs[first]["requested_by"] == "ana" and runs[first]["status"] == "pending"
     assert runs[scoped]["root_domain"] == "scoped.test"
     assert again != first  # a run older than ACTIVE_WINDOW no longer holds the apex
+
+
+@pytest.mark.skipif(not DSN, reason="Requires an explicit disposable PostgreSQL database")
+def test_upgrade_recomputes_legacy_public_suffix_roots_and_keeps_monitoring(monkeypatch):
+    asyncpg = _real_asyncpg(monkeypatch)
+    from disposable_postgres import require_disposable_database
+    from scope.roots import monitored_root
+
+    dsn = require_disposable_database(DSN or "", "shakerscan_discovery_test")
+
+    async def legacy_rows(conn):
+        # As an engine before 2.8.1 stored them: two-label roots.
+        await conn.execute("""INSERT INTO targets(url, name, root_domain, is_root) VALUES
+            ('https://shop.example.co.uk', 'shop', 'co.uk', false),
+            ('https://example.co.uk', 'apex', 'co.uk', false),
+            ('https://victim.github.io', 'pages', 'github.io', false),
+            ('https://api.example.com', 'api', 'example.com', false)""")
+
+    async def go():
+        conn = await _fresh_database(dsn, asyncpg, before_migrations=legacy_rows)
+        try:
+            rows = {row["url"]: (row["root_domain"], row["is_root"]) for row in await conn.fetch(
+                "SELECT url, root_domain, is_root FROM targets WHERE url LIKE 'https://%'")}
+            # A second start changes nothing (idempotent).
+            from scope.roots import recompute_spanning_target_roots
+
+            again = await recompute_spanning_target_roots(conn)
+            return rows, again
+        finally:
+            await conn.close()
+
+    rows, again = asyncio.run(go())
+    assert rows == {
+        "https://shop.example.co.uk": ("example.co.uk", False),
+        "https://example.co.uk": ("example.co.uk", True),
+        "https://victim.github.io": ("victim.github.io", True),
+        "https://api.example.com": ("example.com", False),
+    }
+    assert again == 0
+    # Before the migration has run, the CT monitor already watches the recomputed root.
+    assert monitored_root("co.uk", "https://shop.example.co.uk") == "example.co.uk"
+    assert monitored_root("co.uk", "https://co.uk") == ""

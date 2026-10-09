@@ -9,9 +9,9 @@ import json
 from typing import Any, Mapping
 
 try:
-    from scope.psl import is_public_suffix
+    from scope.psl import spans_public_suffix
 except ModuleNotFoundError:  # package import
-    from ..scope.psl import is_public_suffix
+    from ..scope.psl import spans_public_suffix
 
 try:
     from ..runtime.capability_registry import CAPABILITY_REGISTRY
@@ -80,7 +80,7 @@ def _host_in_scope(host: str, scope_receipt: Any) -> bool:
     roots = {
         item.strip().lower().rstrip(".")
         for item in _sequence(_value(scope_receipt, "allowed_root_domains", ()))
-        if item.strip() and not is_public_suffix(item)
+        if item.strip() and not spans_public_suffix(item)
     }
     try:
         address = str(ipaddress.ip_address(normalized))

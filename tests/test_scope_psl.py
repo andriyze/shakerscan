@@ -131,3 +131,84 @@ def test_every_image_that_runs_the_api_carries_the_scope_package_and_snapshot():
               if line.startswith("COPY --from=scanner-runtime /app/")}
     packages = {path.name for path in (ROOT / "api").iterdir() if (path / "__init__.py").is_file()}
     assert packages - {"ai_gate_boundary"} <= copied | {"ai_gate"}, sorted(packages - copied)
+
+
+# Names the 2.8.1 first cut got wrong, with the answers of the reference implementation
+# (publicsuffixlist, same snapshot): the parent of a "*." rule is itself a public suffix. A
+# sample of the 281 differing names; scratch tooling compares all 43,322 generated names.
+REFERENCE_WILDCARD_PARENTS = [
+    ('airflow.ap-southeast-1.on.aws', 'airflow.ap-southeast-1.on.aws', None),
+    ('airflow.eu-central-2.on.aws', 'airflow.eu-central-2.on.aws', None),
+    ('aivencloud.com', 'aivencloud.com', None),
+    ('ap-east-1.airflow.amazonaws.com', 'ap-east-1.airflow.amazonaws.com', None),
+    ('ap-east-1.rds.amazonaws.com', 'ap-east-1.rds.amazonaws.com', None),
+    ('cn-northwest-1.airflow.amazonaws.com.cn', 'cn-northwest-1.airflow.amazonaws.com.cn', None),
+    ('compute.amazonaws.com.cn', 'compute.amazonaws.com.cn', None),
+    ('developer.app', 'developer.app', None),
+    ('inbrowser.link', 'inbrowser.link', None),
+    ('nagoya.jp', 'nagoya.jp', None),
+    ('pa.crm.dev', 'pa.crm.dev', None),
+    ('paywhirl.com', 'paywhirl.com', None),
+    ('r.appspot.com', 'r.appspot.com', None),
+    ('rds.cn-north-1.amazonaws.com.cn', 'rds.cn-north-1.amazonaws.com.cn', None),
+    ('s.brave.dev', 's.brave.dev', None),
+    ('us-west-2.cs.amazonlightsail.com', 'us-west-2.cs.amazonlightsail.com', None),
+    ('webpaas.ovh.net', 'webpaas.ovh.net', None),
+    ('kawasaki.jp', 'kawasaki.jp', None),
+    ('a.kawasaki.jp', 'a.kawasaki.jp', None),
+    ('b.a.kawasaki.jp', 'a.kawasaki.jp', 'b.a.kawasaki.jp'),
+    ('city.kawasaki.jp', 'kawasaki.jp', 'city.kawasaki.jp'),
+]
+
+
+@pytest.mark.parametrize(("host", "suffix", "registrable"), REFERENCE_WILDCARD_PARENTS)
+def test_wildcard_rule_parents_are_public_suffixes_as_in_the_reference(host, suffix, registrable):
+    assert public_suffix(host) == suffix
+    assert registrable_domain(host) == registrable
+
+
+@pytest.mark.parametrize("host", [
+    "amazonaws.com", "compute.amazonaws.com", "0e.vc", "kawasaki.jp", "on.aws", "crm.dev",
+    "co.uk", "github.io", "com",
+])
+def test_a_wildcard_or_root_spanning_public_suffixes_is_refused(host):
+    assert psl.spans_public_suffix(host)
+    refusal = psl.public_suffix_refusal(host, wildcard=True)
+    assert refusal and ("is a public suffix" in refusal or "covers the public suffix" in refusal)
+    with pytest.raises(PublicSuffixError):
+        require_registrable_or_below(host, wildcard=True)
+    with pytest.raises(PublicSuffixError):
+        parse_domain(host)
+
+
+def test_a_name_with_a_suffix_below_is_fine_as_an_exact_host_only():
+    # amazonaws.com is Amazon's own host; *.amazonaws.com would cover s3.amazonaws.com tenants.
+    assert registrable_domain("amazonaws.com") == "amazonaws.com"
+    assert not is_public_suffix("amazonaws.com")
+    assert psl.suffix_below("amazonaws.com")
+    assert require_registrable_or_below("amazonaws.com") == "amazonaws.com"
+    assert "covers the public suffix" in psl.public_suffix_refusal("amazonaws.com", wildcard=True)
+
+
+@pytest.mark.parametrize("host", ["example.com", "example.co.uk", "user.github.io", "www.ck",
+                                  "city.kawasaki.jp", "b.a.kawasaki.jp", "bucket.s3.amazonaws.com"])
+def test_names_owned_by_one_registrant_do_not_span(host):
+    assert not psl.spans_public_suffix(host)
+    assert require_registrable_or_below(host, wildcard=True)
+
+
+@pytest.mark.parametrize(("raw", "normalized"), [
+    ("example.com。", "example.com"), ("EXAMPLE.COM．", "example.com"),
+    ("example｡com", "example.com"), ("bücher.de。", "xn--bcher-kva.de"),
+])
+def test_ideographic_and_fullwidth_dots_normalize(raw, normalized):
+    assert registrable_domain(raw) == normalized
+    assert parse_domain(raw) == normalized
+
+
+@pytest.mark.parametrize("host", ["a..example.com", ".example.com", "example.com..", "..", "127.1", "1.2.3.4.5"])
+def test_empty_labels_and_numeric_tlds_never_widen_scope(host):
+    assert registrable_domain(host) is None
+    assert is_public_suffix(host) and psl.spans_public_suffix(host)
+    with pytest.raises(PublicSuffixError):
+        parse_domain(host)

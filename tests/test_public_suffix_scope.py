@@ -148,3 +148,61 @@ def test_api_scope_matchers_ignore_public_suffix_roots():
 ])
 def test_target_root_domain_is_the_registrable_domain(url, root):
     assert extract_root_domain(url) == root
+
+
+@pytest.mark.parametrize("bound", [
+    "target.authorize:*.amazonaws.com", "target.authorize:*.compute.amazonaws.com",
+    "target.authorize:*.0e.vc", "target.authorize:*.kawasaki.jp", "target.authorize:*.on.aws",
+    "target.authorize:*.crm.dev", "target.authorize:kawasaki.jp",
+])
+def test_bounds_whose_subtree_holds_public_suffixes_are_refused(bound):
+    with pytest.raises(BoundError, match="public suffix"):
+        parse_bounds([bound])
+
+
+def test_exact_hosts_with_suffixes_below_stay_exact_hosts():
+    (pattern,) = parse_bounds(["target.authorize:amazonaws.com"]).target_patterns
+    assert not pattern.wildcard and pattern.covers("amazonaws.com", None)
+    assert not pattern.covers("bucket.s3.amazonaws.com", None)
+    (pattern,) = parse_bounds(["target.authorize:*.city.kawasaki.jp"]).target_patterns
+    assert pattern.covers("www.city.kawasaki.jp", None)
+
+
+def test_a_persisted_bound_over_a_spanning_subtree_fails_closed():
+    bounds = bounds_from_public({"target_patterns": ["*.amazonaws.com"], "credential_targets": []})
+    assert not bounds.covers_target(host="bucket.s3.amazonaws.com", port=443)
+    assert refused_bounds({"target_patterns": ["*.amazonaws.com"]})[0]["bound"] == "target.authorize:*.amazonaws.com"
+
+
+@pytest.mark.parametrize("root", ["amazonaws.com", "on.aws", "crm.dev", "kawasaki.jp"])
+def test_scope_receipts_never_widen_through_a_spanning_root(root):
+    host = {"amazonaws.com": "x.s3.amazonaws.com", "on.aws": "a.airflow.af-south-1.on.aws",
+            "crm.dev": "t.aa.crm.dev", "kawasaki.jp": "x.y.kawasaki.jp"}[root]
+    receipt = evaluate_scope(f"https://{host}/", allowed_root_domains=[root])
+    assert receipt.verdict == "blocked"
+    assert "allowed_root_public_suffix" in receipt.blocked_by
+    assert receipt.allowed_root_domains == ()
+
+
+def test_binding_roots_recompute_a_legacy_root_from_the_host():
+    from scope.roots import binding_roots, root_for_host
+
+    assert binding_roots(["co.uk"], "co.uk", "shop.example.co.uk") == ("example.co.uk",)
+    assert binding_roots(["example.co.uk", "co.uk"], None, "x") == ("example.co.uk",)
+    assert binding_roots((), "co.uk", "shop.example.co.uk") == ("example.co.uk",)
+    assert binding_roots((), "example.com", "api.example.com") == ("example.com",)
+    # No stored root: the exact host, as before (never widened to its registrable domain).
+    assert binding_roots((), None, "api.example.com") == ("api.example.com",)
+    assert binding_roots((), "github.io", "victim.github.io") == ("victim.github.io",)
+    assert binding_roots((), "amazonaws.com", "console.amazonaws.com") == ("console.amazonaws.com",)
+    assert binding_roots((), None, "github.io") == ()
+    assert root_for_host("bucket.s3.amazonaws.com") == "bucket.s3.amazonaws.com"
+
+
+def test_hunt_binding_of_an_upgraded_target_recomputes_its_root():
+    import importlib
+
+    target_binding = importlib.import_module("hunt.target_binding")
+    source = (ROOT / "api" / "hunt" / "target_binding.py").read_text()
+    assert "binding_roots((), target_context.get(\"root_domain\"), parsed.hostname)" in source
+    assert target_binding.binding_roots((), "co.uk", "app.example.co.uk") == ("example.co.uk",)

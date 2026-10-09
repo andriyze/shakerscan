@@ -1277,6 +1277,14 @@ async def _run_schema_migrations_once(pool) -> None:
                 ON targets(asm_enabled) WHERE asm_enabled = true
             """)
 
+            # Engines before 2.8.1 stored two-label roots (co.uk for shop.example.co.uk), which
+            # span registrants; recompute them from each URL under the Public Suffix List.
+            try:
+                from scope.roots import recompute_spanning_target_roots
+            except ModuleNotFoundError:
+                from api.scope.roots import recompute_spanning_target_roots
+            await recompute_spanning_target_roots(conn)
+
             # Who requested a Targets-page discovery run (POST /discovery, 2.8.1).
             await conn.execute("""
                 ALTER TABLE discovery_runs

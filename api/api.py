@@ -1172,6 +1172,7 @@ try:
     from command_arsenal import test_local_agent_capability
     from command_arsenal import validate_command_parameters as _validate_command_parameters
     from action_scope import scope_roots as _scope_roots
+    from scope.roots import binding_roots
 except ModuleNotFoundError as exc:
     if exc.name not in {"command_arsenal", "action_scope"}:
         raise
@@ -1190,6 +1191,7 @@ except ModuleNotFoundError as exc:
     from api.command_arsenal import test_local_agent_capability
     from api.command_arsenal import validate_command_parameters as _validate_command_parameters
     from api.action_scope import scope_roots as _scope_roots
+    from api.scope.roots import binding_roots
 
 
 try:
@@ -10572,11 +10574,8 @@ async def _freeze_scan_target_binding(
         if origin not in allowed_origins:
             allowed_origins.append(origin)
     inferred_origins = [canonical_collection_origin(f"{scheme}://{parsed.netloc}") for scheme in ("https", "http")] if scheme_inferred else []
-    roots = [
-        str(item).strip().lower().rstrip(".")
-        for item in guard.get("allowed_root_domains") or ()
-        if str(item).strip()
-    ] or [extract_root_domain(target_url) or canonical_host]
+    # Spanning roots (a legacy co.uk) are dropped and recomputed from the host before the fallback.
+    roots = list(binding_roots(guard.get("allowed_root_domains"), extract_root_domain(target_url), canonical_host))
     # Judge the answers under the same environment this binding will carry, so a lab target's
     # own addresses are admitted and a production one's are not by accident.
     binding_environment = str(guard.get("environment") or "unknown").strip().lower()
