@@ -146,9 +146,11 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(rf"(?i)\b({_SENSITIVE_TEXT_KEY})\s*=\s*([^&\s,;]+)"), r"\1=***"),
     # bare key: value (YAML/config), unquoted value of 4+ chars
     (re.compile(rf"(?i)\b({_SENSITIVE_COLON_KEY})(\s*:\s*)([^\s,;\"']{{4,}})"), r"\1\2***"),
-    # JSON / dict-literal "key": "value"
+    # JSON / dict-literal "key": "value". An empty value carries nothing and stays empty, so a
+    # display never shows "***" where nothing was declared (N54: a seed's empty password read as
+    # if a value had been stored and sent), matching the key=value rule and redact_sensitive.
     (
-        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(["\'])[^"\']*(["\'])'),
+        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(["\'])[^"\']+(["\'])'),
         r"\1\2***\3",
     ),
     # JSON numeric/boolean/null secret values.
