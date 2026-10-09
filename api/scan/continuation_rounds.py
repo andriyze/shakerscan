@@ -45,6 +45,7 @@ from .continuation import (
 )
 from .manifest_store import PostgresScanManifestStore
 from .verification_extension import (
+    budget_concluded_slices,
     plan_verification_extensions,
     resume_observation_action_ids,
     stage_resume_walls,
@@ -259,10 +260,12 @@ def compile_continuation_round(
     root_results = {key: parent_results[key] for key in allocation.parent_action_ids}
     # The receipts of resumable slices name the least wall their unfinished candidates need;
     # extensions are sized from those checkpoints. Only root observations define worklists.
-    resume_walls = stage_resume_walls({
+    resume_observations = {
         key: observations.get(key, ())
         for key in resume_observation_action_ids(parent_plan, parent_results)
-    })
+    }
+    resume_walls = stage_resume_walls(resume_observations)
+    concluded = budget_concluded_slices(resume_observations)
     observations = {key: observations.get(key, ()) for key in allocation.parent_action_ids}
     endpoints, candidates = build_discovery_continuation_manifests(
         allocation=allocation,
@@ -321,6 +324,7 @@ def compile_continuation_round(
             profile_limits=execution_plan.budget.ledger_limits(),
             residual=residual,
             stage_resume_walls=resume_walls,
+            budget_concluded=concluded,
         )
         if revision_number >= 2 and not finalize_only else ()
     )

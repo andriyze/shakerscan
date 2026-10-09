@@ -213,6 +213,37 @@ def stage_resume_walls(observations: Mapping[str, Any]) -> dict[str, int]:
     return walls
 
 
+def budget_concluded_slices(observations: Mapping[str, Any]) -> dict[str, str]:
+    """Resumable slices whose every unfinished candidate is inconclusive for budget.
+
+    ``"positive_only"`` when one of them still has a cheap unit that could prove an injection
+    (``sqli_stages.resume_plan``), else ``"closed"``: a closed slice is never extended, and a
+    positive-only one only while no other lane has work waiting. A slice whose every unfinished
+    candidate is on a probe round is ``"probe"``: it is funded at its floor and no more.
+    """
+    concluded: dict[str, str] = {}
+    for action_id, rows in (observations or {}).items():
+        unfinished = [
+            row for row in rows or ()
+            if isinstance(row, Mapping)
+            and row.get("kind") in _RESUME_RECORD_KINDS
+            and not row.get("carried_from")
+            and (row.get("resume_wall_seconds") or row.get("verdict"))
+        ]
+        if unfinished and all(row.get("verdict") == "inconclusive" for row in unfinished):
+            concluded[str(action_id)] = (
+                "positive_only"
+                if any(row.get("positive_only") and row.get("resume_wall_seconds")
+                       for row in unfinished)
+                else "closed"
+            )
+        elif unfinished and all(row.get("resume_probe") for row in unfinished):
+            # A probe re-measures a rate; like a positive-only unit it is funded at its floor,
+            # never water-filled.
+            concluded[str(action_id)] = "probe"
+    return concluded
+
+
 def resume_observation_action_ids(
     parent_plan: Any, parent_results: Mapping[str, Any],
 ) -> tuple[str, ...]:
@@ -302,6 +333,7 @@ def plan_verification_extensions(
     profile_limits: Mapping[str, int],
     residual: Mapping[str, int],
     stage_resume_walls: Mapping[str, int] | None = None,
+    budget_concluded: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """One optional extension per timed-out, latency-starved verifier slice not yet extended.
 
@@ -346,6 +378,11 @@ def plan_verification_extensions(
         result = parent_results.get(action.action_id)
         if result is None or not _extendable_stop(action.capability_name, result):
             continue
+        concluded = (budget_concluded or {}).get(action.action_id)
+        if concluded == "closed":
+            # Every unfinished candidate of the slice is inconclusive for budget, with nothing
+            # cheap left that could prove an injection (soak N55).
+            continue
         reserved = dict(getattr(result, "budget_reserved", {}) or {})
         held_wall = int(reserved.get("tool_wall_seconds") or 0)
         floor = (
@@ -381,14 +418,52 @@ def plan_verification_extensions(
             current = by_id.get(str(current.capability_args.get(EXTENDS_ARG)))
         lanes.setdefault(action.capability_name, []).append({
             "index": index, "action": action, "reserved": reserved, "depth": depth,
-            "need_wall": int(math.floor(held_wall * scale)),
+            "need_wall": (
+                math.ceil(held_wall * floor) if concluded in {"probe", "positive_only"}
+                else int(math.floor(held_wall * scale))
+            ),
             "floor_wall": int(math.ceil(held_wall * floor)),
             "held_wall": held_wall,
+            "positive_only": concluded == "positive_only",
+            "probe": concluded == "probe",
         })
+    # A candidate already inconclusive for budget is funded only for a cheap unit that could
+    # still prove an injection, and only while no other lane has work waiting (soak N55).
+    waiting = {
+        name for name, items in lanes.items()
+        if any(not item["positive_only"] for item in items)
+    }
+    for name in list(lanes):
+        if waiting - {name}:
+            lanes[name] = [item for item in lanes[name] if not item["positive_only"]]
+        if not lanes[name]:
+            del lanes[name]
     planned_by_index: dict[int, dict[str, Any]] = {}
-    for capability_name in sorted(lanes):
-        eligible = sorted(lanes[capability_name], key=lambda item: (item["depth"], item["index"]))
-        allowance = max(0, min(wall_ceiling, remaining.get("tool_wall_seconds", 0)))
+    # The residual is shared fairly between the lanes with work waiting, not handed to the
+    # lanes in name order: soak scan 9de6a910's SQLi extensions drained it before the login
+    # form's XSS extension was considered. Each lane first holds an equal part of what is left
+    # (never above its round share); a lane whose floors did not fit its part may then use
+    # what the others left, smallest floor first.
+    start_wall = max(0, int(remaining.get("tool_wall_seconds", 0)))
+    part = min(wall_ceiling, start_wall // max(1, len(lanes)))
+    order = sorted(lanes, key=lambda name: (min(item["floor_wall"] for item in lanes[name]), name))
+    funded: set[str] = set()
+    passes = [(name, part) for name in order]
+    passes += [(name, None) for name in order]
+    for capability_name, lane_part in passes:
+        if lane_part is None:
+            if capability_name in funded:
+                continue
+            lane_part = min(wall_ceiling, max(0, remaining.get("tool_wall_seconds", 0)))
+        eligible = sorted(
+            lanes[capability_name],
+            # Work that can still conclude a candidate first, then probes, then positive-only.
+            key=lambda item: (
+                item["positive_only"], item["probe"], item["depth"], item["index"],
+            ),
+        )
+        eligible = [item for item in eligible if item["index"] not in planned_by_index]
+        allowance = max(0, min(lane_part, remaining.get("tool_wall_seconds", 0)))
         walls = _fair_walls(eligible, allowance)
         for item in eligible:
             wall = walls.get(item["index"])
@@ -413,6 +488,7 @@ def plan_verification_extensions(
             }
             for name, amount in budget.items():
                 remaining[name] = remaining.get(name, 0) - amount
+            funded.add(capability_name)
             planned_by_index[item["index"]] = {
                 "action_id": extension_action_id(action.action_id),
                 "stage": action.stage,

@@ -668,8 +668,12 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
         if subset is not None:
             if (
                 not isinstance(subset, (list, tuple)) or not subset
-                or not all(isinstance(item, str) and item in fields for item in subset)
+                or not all(
+                    isinstance(item, str) and item in fields and "," not in item
+                    for item in subset
+                )
             ):
+                # sqlmap splits -p on commas: a name containing one cannot be named alone.
                 raise ValueError("injection fields must be a subset of the tested body fields")
             fields = list(dict.fromkeys(subset))
         args += ["--data", body, "-p", ",".join(fields)]

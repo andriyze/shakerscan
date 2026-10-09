@@ -31,6 +31,11 @@ permissions. Historical mode names are translated only at the compatibility boun
 select a second engine or module registry. Phases are ordered where later work depends on earlier
 discovery, while individual capabilities may apply their own bounded concurrency.
 
+Fast does not continue slow request-body SQLi candidates; use Balanced, Thorough or Hunt. On any
+ceiling, a SQLi candidate whose remaining techniques cannot fit one continuation round is reported
+as inconclusive for budget, naming what it settled and what could not be funded, and the
+continuation residual is shared between the verifier lanes rather than taken by SQLi first.
+
 ### Parent, plan, shard, merge
 
 Eligible active scans can use the shipped local scatter/gather path:

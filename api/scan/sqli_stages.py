@@ -187,17 +187,25 @@ RateSample = tuple[str, float]
 
 
 def _relevant(samples: Iterable[Any], key: str | None = None) -> list[float]:
-    """The rates measured on ``key``'s own runs, or on every run when it has none.
+    """The rates a unit is predicted from: its own runs, else its technique's, else all.
 
-    Techniques differ in their rate (time-based waits), so a unit that already ran is
-    predicted from its own runs; ``samples`` holds ``(unit_key, rate)`` pairs or bare rates.
+    Techniques differ in their rate (time-based blind waits on its payloads), so time-based is
+    never predicted from union-based while a time-based run has measured anything. ``samples``
+    holds ``(unit_key, rate)`` pairs or bare rates.
     """
     pairs = [
         (str(item[0]), float(item[1])) if isinstance(item, tuple) else ("", float(item))
         for item in samples or ()
     ]
-    own = [rate for name, rate in pairs if key is not None and name == key]
-    return own or [rate for _name, rate in pairs]
+    if key is None:
+        return [rate for _name, rate in pairs]
+    technique = key.split(":", 1)[0]
+    own = [rate for name, rate in pairs if name == key]
+    same = [
+        rate for name, rate in pairs
+        if name == technique or name.startswith(f"{technique}:")
+    ]
+    return own or same or [rate for _name, rate in pairs]
 
 
 def robust_rate(samples: Iterable[Any], key: str | None = None) -> float | None:
@@ -330,6 +338,17 @@ class Resume:
     probe: bool = False
     # The rate the wall was predicted at.
     seconds_per_request: float | None = None
+    # Techniques confirmed unfundable in any round: the candidate cannot reach a full negative.
+    unfundable: tuple[str, ...] = ()
+    # Inconclusive, but its next unit is cheap enough to fund while no other lane is waiting,
+    # since it could still prove an injection.
+    positive_only: bool = False
+
+
+# A unit of an inconclusive candidate is still worth funding for a positive only when it needs
+# at most this share of one round (and only while no other lane is waiting; see
+# ``verification_extension``).
+CHEAP_POSITIVE_ROUND_SHARE = 0.5
 
 
 def resume_plan(
@@ -347,34 +366,90 @@ def resume_plan(
 
     That is its first unit without a verdict, re-run on a hold strictly larger than any it
     already ran out of (the stage guard refuses one no larger): the largest wall that unit was
-    killed at, plus one stage's minimum. With a robust rate it is never below the unit's
-    predicted wall: a hold a few seconds above the one the unit ran out of is not progress when
-    it needs ten times that. A unit predicted above ``round_wall_ceiling`` gets one probe round
-    at the ceiling while the rate rests on a single measurement; with two measurements, or a
-    kill at the ceiling already, the candidate is inconclusive for budget.
+    killed at, plus one stage's minimum. With a rate it is never below the unit's predicted
+    wall: a hold a few seconds above the one the unit ran out of is not progress when it needs
+    ten times that.
+
+    Rates are judged per unit: its own runs, else its technique's, else all of the candidate's
+    (``_relevant``), and a prediction rests on their minimum.
+
+    A unit is unfundable when it is predicted above ``round_wall_ceiling`` on two or more rate
+    samples, judged by their minimum (or when it was already killed at the ceiling). The
+    candidate is inconclusive for budget as soon as any technique it still has to run is
+    unfundable -- it can no longer reach a full negative, whatever its next unit costs -- and
+    it is then funded only for a cheap next unit that could still prove an injection
+    (``positive_only``). A technique predicted above the ceiling on a single sample is not yet
+    a verdict: the candidate gets one probe round with the least hold that measures its rate
+    again on the next unit (``probe``), and the planner funds no more than that.
     """
     unit = next_unit(finished, fields, proven=proven)
     if unit is None:
         return Resume(None)
-    technique, field_name = unit
-    key = unit_key(technique, field_name)
-    count = max(1, int(field_count or 1)) if field_name is None else 1
-    floor = int(wall_killed.get(key, 0)) + MINIMUM_STAGE_WALL_SECONDS
-    relevant = _relevant(rate_samples, key)
-    rate = min(relevant) if relevant else None
-    predicted = predicted_stage_wall_seconds(
-        technique, field_count=count, seconds_per_request=rate,
-        sent_before_kill=int((killed_sent or {}).get(key, 0)),
-    )
-    need = max(floor, predicted or 0)
-    if not round_wall_ceiling or predicted is None or need <= round_wall_ceiling:
-        return Resume(need, technique, field_name, seconds_per_request=rate)
-    if len(relevant) >= 2 or floor > round_wall_ceiling:
-        return Resume(
-            need, technique, field_name, budget_inconclusive=True, seconds_per_request=rate,
+    samples = list(rate_samples or ())
+    killed = dict(killed_sent or {})
+
+    def assess(technique: str, field_name: str | None) -> tuple[int, int | None, float | None, bool]:
+        key = unit_key(technique, field_name)
+        count = max(1, int(field_count or 1)) if field_name is None else 1
+        floor = int(wall_killed.get(key, 0)) + MINIMUM_STAGE_WALL_SECONDS
+        relevant = _relevant(samples, key)
+        rate = min(relevant) if relevant else None
+        predicted = predicted_stage_wall_seconds(
+            technique, field_count=count, seconds_per_request=rate,
+            sent_before_kill=int(killed.get(key, 0)),
         )
+        need = max(floor, predicted or 0)
+        unfundable = bool(round_wall_ceiling) and predicted is not None and (
+            need > int(round_wall_ceiling or 0)
+            and (len(relevant) >= 2 or floor > int(round_wall_ceiling or 0))
+        )
+        return need, predicted, rate, unfundable
+
+    technique, field_name = unit
+    need, _predicted, rate, next_unfundable = assess(technique, field_name)
+    keys = set(finished)
+    remaining_units = [
+        (name, next(
+            item for tech, item in stage_units(fields)
+            if tech == name and not _settled(keys, tech, item)
+        ))
+        for name in SQLI_TECHNIQUE_STAGES
+        if any(
+            tech == name and not _settled(keys, tech, item)
+            for tech, item in stage_units(fields)
+        )
+    ]
+    assessed = {name: assess(name, item) for name, item in remaining_units}
+    unfundable = tuple(name for name, result in assessed.items() if result[3])
+    # Predicted above the share on a single sample: not yet a verdict, but not worth a full
+    # round either. One probe re-measures the rate on the next unit with the least hold that
+    # can: more than that unit was ever killed at, and enough for a rate sample.
+    unconfirmed = bool(round_wall_ceiling) and any(
+        result[1] is not None and result[0] > int(round_wall_ceiling or 0) and not result[3]
+        for result in assessed.values()
+    )
+    if unfundable:
+        cheap = (
+            not next_unfundable and round_wall_ceiling
+            and need <= int(round_wall_ceiling) * CHEAP_POSITIVE_ROUND_SHARE
+        )
+        return Resume(
+            need if (cheap or next_unfundable) else None, technique, field_name,
+            budget_inconclusive=True, seconds_per_request=rate, unfundable=unfundable,
+            positive_only=bool(cheap),
+        )
+    if not unconfirmed:
+        return Resume(need, technique, field_name, seconds_per_request=rate)
+    key = unit_key(technique, field_name)
+    probe_wall = max(
+        int(wall_killed.get(key, 0)) + MINIMUM_STAGE_WALL_SECONDS,
+        MINIMUM_STAGE_WALL_SECONDS + math.ceil(
+            MINIMUM_RATE_SAMPLE_REQUESTS * KILLED_STAGE_GROWTH * float(rate or 0)
+        ),
+    )
     return Resume(
-        int(round_wall_ceiling), technique, field_name, probe=True, seconds_per_request=rate,
+        min(need, probe_wall, int(round_wall_ceiling or need)), technique, field_name,
+        probe=True, seconds_per_request=rate,
     )
 
 
@@ -426,14 +501,18 @@ def budget_inconclusive_record(
     fields: Sequence[str] | None = None,
     field_count: int | None,
     seconds_per_request: float | None,
-    predicted_wall_seconds: int,
+    predicted_wall_seconds: int | None,
     round_wall_ceiling_seconds: int,
+    unfundable_techniques: Sequence[str] = (),
+    positive_only: bool = False,
 ) -> dict[str, Any]:
-    """The explicit verdict for a candidate whose next unit no round can fund.
+    """The explicit verdict for a candidate that can no longer reach a full negative.
 
-    The candidate is neither proven nor refuted: the units it settled were negative, and the
-    next one is predicted, on two measurements, to need more wall than one continuation round
-    may grant the lane, so no extension is planned for it.
+    The candidate is neither proven nor refuted: the units it settled were negative, and a
+    technique it still has to run is predicted, on two or more rate samples judged by their
+    minimum, to need more wall than one continuation round may grant the lane. It is no longer
+    funded, except for a cheap next unit that could still prove an injection
+    (``positive_only``) while no other lane is waiting.
     """
     keys = set(finished)
     units = stage_units(fields)
@@ -457,8 +536,14 @@ def budget_inconclusive_record(
         **({"field": field_name} if field_name is not None else {}),
         "field_count": max(1, int(field_count or 1)),
         "seconds_per_request_ms": round(float(seconds_per_request or 0) * 1_000),
-        "predicted_wall_seconds": int(predicted_wall_seconds),
+        "settled_units": sorted(keys),
+        "unfundable_techniques": list(unfundable_techniques or (technique,)),
+        **(
+            {"predicted_wall_seconds": int(predicted_wall_seconds)}
+            if predicted_wall_seconds else {}
+        ),
         "round_wall_ceiling_seconds": int(round_wall_ceiling_seconds),
+        "positive_only": bool(positive_only),
     }
 
 
@@ -484,6 +569,9 @@ class StagedAttempt:
     # The next round is a probe at the round's share that measures the rate again.
     resume_probe: bool = False
     settled_units: tuple[str, ...] = ()
+    # Techniques no round can fund, and whether the next unit is funded only for a positive.
+    unfundable_techniques: tuple[str, ...] = ()
+    positive_only: bool = False
 
 
 RunStage = Callable[..., Awaitable[Any]]
@@ -604,8 +692,17 @@ async def run_staged_sqli_attempt(
             int(stage_budget.get("http_requests", 1)), wall,
             minimum_seconds=_MINIMUM_DELAY_SECONDS, latency_seconds=latency,
         )
-        if ran_here and latency > 0 and (
-            _unit_requests(technique, field_name, count) * (latency + delay) > wall
+        probing = bool(round_wall_ceiling) and resume_plan(
+            settled, wall_killed, fields=fields, field_count=count, rate_samples=samples,
+            killed_sent=killed_sent, round_wall_ceiling=round_wall_ceiling,
+        ).probe and wall >= MINIMUM_STAGE_WALL_SECONDS + math.ceil(
+            MINIMUM_RATE_SAMPLE_REQUESTS * (latency + delay)
+        )
+        # Never predicted faster than the candidate has been observed to answer.
+        observed = robust_rate(samples, key)
+        per_request = max(latency + delay, observed or 0.0)
+        if ran_here and (latency > 0 or observed) and not probing and (
+            _unit_requests(technique, field_name, count) * per_request > wall
         ):
             # This attempt already settled a unit, and the next one cannot reach its verdict
             # in the wall left at the response time just measured: starting it would only be
@@ -617,6 +714,9 @@ async def run_staged_sqli_attempt(
             stages.append({**label, "outcome": "wall_exhausted"})
             errors.append("timeout")
             break
+        # Otherwise, when the candidate's verdict rests on a single rate sample, the wall the
+        # unit cannot finish in is spent re-measuring it instead of being returned: a run of
+        # at least ``MINIMUM_RATE_SAMPLE_REQUESTS`` is the second sample a budget verdict needs.
         ran_here = True
         if field_name is None:
             result = await run_stage(technique, stage_budget, latency)
@@ -716,4 +816,6 @@ async def run_staged_sqli_attempt(
         budget_inconclusive=resume.budget_inconclusive,
         resume_probe=resume.probe,
         settled_units=tuple(sorted(settled)),
+        unfundable_techniques=resume.unfundable,
+        positive_only=resume.positive_only,
     )
