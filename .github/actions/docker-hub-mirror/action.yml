@@ -2,10 +2,30 @@ name: Docker Hub pull-through mirror
 description: >-
   Make the runner's Docker daemon pull Docker Hub images through mirror.gcr.io, falling back to
   Docker Hub when the mirror cannot serve an image. Anonymous Docker Hub pulls are rate limited
-  per runner IP; the mirror is not. Run it before any pull and before docker/setup-buildx-action.
+  per runner IP; the mirror is not. Run it before any pull and before docker/setup-buildx-action,
+  and before the read-only Docker Hub login.
 runs:
   using: composite
   steps:
+    - name: Drop the runner image's Docker Hub login so the daemon can use the mirror
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The hosted runner image ships a docker.io login (account "githubactions"). dockerd sends
+        # the docker.io credentials to every docker.io mirror too, mirror.gcr.io answers foreign
+        # credentials with 401 "authentication failed", and dockerd then falls back to Docker Hub,
+        # where PR pulls hit the rate limit. Without credentials the mirror issues an anonymous
+        # token. The read-only login, when its secrets exist, runs after this step.
+        # Only key names are printed, never credential values.
+        config="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+        if [ -s "$config" ]; then
+          jq -c '{auths: ((.auths // {}) | keys), credsStore, credHelpers}' "$config"
+        fi
+        docker logout > /dev/null 2>&1 || true
+        if [ -s "$config" ] && jq -e '((.auths // {}) | keys | map(select(test("docker\\.io"))) | length) > 0' "$config" > /dev/null; then
+          # Not fatal: pulls then fall back to Docker Hub exactly as before this action existed.
+          echo "::warning::a docker.io credential is still configured after docker logout; the mirror may be skipped"
+        fi
     - name: Add mirror.gcr.io to the Docker daemon's registry mirrors
       shell: bash
       run: |

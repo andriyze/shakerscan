@@ -18,6 +18,12 @@ token exists: .github/actions/docker-hub-mirror adds mirror.gcr.io to the daemon
 registry-mirrors (dockerd falls back to Docker Hub itself), and every docker-container builder
 from docker/setup-buildx-action gets the same mirror in its buildkitd config, which BuildKit and
 `buildx imagetools` read. The read-only login stays for anything the mirror cannot serve.
+
+The hosted runner image ships a docker.io login ("githubactions"). dockerd reuses docker.io
+credentials for docker.io mirrors, mirror.gcr.io rejects them with 401, and dockerd then falls
+back to Docker Hub (seen on PR #380), so the mirror action logs that out first. The read-only
+login runs after it. CI-only commands name the mirror directly: the disposable PostgreSQL 16
+fixture, the buildx builder image and the digest-pinned Go builder of the native-tools build.
 """
 import re
 from pathlib import Path
@@ -113,6 +119,13 @@ def test_step_pulls_go_through_the_mirror(workflow, job_name, pulls):
     mirrors = [i for i, step in enumerate(steps) if step.get("uses") == MIRROR_ACTION]
     first_pull = next(i for i, step in enumerate(steps) if pulls(step))
     assert len(mirrors) == 1 and mirrors[0] < first_pull, (workflow, job_name)
+    # The mirror action logs out of docker.io; the read-only login must come after it.
+    login = next(i for i, step in enumerate(steps) if _is_login(step))
+    assert mirrors[0] < login, (workflow, job_name)
+    # A failed pull leaves dockerd's endpoint fallbacks in the job log.
+    diagnostics = [step for step in steps if step.get("name") == "Show Docker daemon registry fallbacks"]
+    assert len(diagnostics) == 1 and diagnostics[0]["if"] == "failure()", (workflow, job_name)
+    assert "journalctl -u docker" in diagnostics[0]["run"], (workflow, job_name)
     # The daemon restart must not race a step that already uses Docker.
     assert not any("docker" in step.get("run", "") for step in steps[:mirrors[0]]), (workflow, job_name)
     if any("docker/setup-buildx-action" in step.get("uses", "") for step in steps):
@@ -129,6 +142,7 @@ def test_every_pr_buildx_builder_uses_the_mirror():
                     builders += 1
                     assert re.fullmatch(r"docker/setup-buildx-action@[0-9a-f]{40}", step["uses"]), (path.name, name)
                     assert step["with"]["buildkitd-config-inline"] == BUILDKIT_MIRROR, (path.name, name)
+                    assert step["with"]["driver-opts"] == "image=mirror.gcr.io/moby/buildkit:buildx-stable-1", (path.name, name)
     assert builders == 2
 
 
@@ -139,6 +153,13 @@ def test_mirror_action_merges_the_daemon_config_and_waits_for_it():
     assert 'current="$(sudo cat "$config")"' in run
     assert '."registry-mirrors" = ((."registry-mirrors" // []) + ["https://mirror.gcr.io"] | unique)' in run
     assert "sudo systemctl restart docker" in run
+    # The runner's docker.io login is removed so dockerd does not send it to the mirror (401),
+    # and only key names of the client config are printed, never values.
+    assert "docker logout" in run
+    assert run.index("docker logout") < run.index("sudo systemctl restart docker")
+    assert "jq -c '{auths: ((.auths // {}) | keys), credsStore, credHelpers}'" in run
+    logout_step = action["runs"]["steps"][0]["run"]
+    assert "docker logout" in logout_step and 'cat "$config"' not in logout_step
     # Fails loudly if the daemon did not pick the mirror up, instead of silently pulling anonymously.
     assert "RegistryConfig.Mirrors" in run and "exit 1" in run
 
@@ -164,3 +185,18 @@ def test_pr_service_containers_pull_through_the_mirror_without_credentials():
                 assert "credentials" not in service, where
             assert "container" not in job, (path.name, name)
     assert services >= 11
+
+
+def test_ci_only_commands_name_the_mirror_directly():
+    docs = {p.name: d for p, d in _pr_workflows()}
+    fixture = next(step for step in docs["authenticated-assurance.yml"]["jobs"]["acceptance"]["steps"]
+                   if step.get("name") == "Start explicitly disposable restore fixture")
+    assert "shakerscan_assurance_test mirror.gcr.io/library/postgres:16\n" in fixture["run"]
+    build = next(step for step in docs["verify-rc-native-tools.yml"]["jobs"]["verify"]["steps"]
+                 if step.get("name") == "Build and verify patched native scanners")
+    assert "sed -n 's/^ARG MODEL_INTAKE_GO_BUILDER=//p' scanner/Dockerfile.model-intake" in build["run"]
+    assert '--build-arg "MODEL_INTAKE_GO_BUILDER=mirror.gcr.io/library/$builder"' in build["run"]
+    # The mirrored builder stays the Dockerfile's digest-pinned official image.
+    dockerfile = (ROOT / "scanner/Dockerfile.model-intake").read_text()
+    builder = re.search(r"^ARG MODEL_INTAKE_GO_BUILDER=(\S+)$", dockerfile, re.MULTILINE).group(1)
+    assert re.fullmatch(r"[a-z0-9._-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}", builder)

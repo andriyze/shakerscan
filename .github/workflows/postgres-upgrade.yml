@@ -55,3 +55,9 @@ jobs:
 
       - name: Migrate PostgreSQL 16 data to 18 through the launcher
         run: bash scripts/postgres_upgrade_smoke.sh
+      # Why a Docker pull did not use the mirror: dockerd logs each endpoint it falls back from.
+      - name: Show Docker daemon registry fallbacks
+        if: failure()
+        run: |
+          sudo journalctl -u docker --since -15min --no-pager \
+            | grep -iE 'mirror|fallback|next endpoint|toomanyrequests|error' | tail -n 100 || true

@@ -44,6 +44,8 @@ jobs:
         with:
           # The docker-container builder ignores the daemon's mirrors; give BuildKit (and
           # `buildx imagetools`, which reads this builder's registry config) the same mirror.
+          # The builder's own image comes from the mirror as well, not through the daemon.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
@@ -51,5 +53,17 @@ jobs:
         # Version and dependency assertions execute inside this Dockerfile target.
         # Do not export/load the multi-GB builder merely to repeat those assertions.
         run: |
+          # The same digest-pinned Go builder the Dockerfile names, fetched from Google's Docker
+          # Hub mirror; the digest pin means the mirror cannot change its content.
+          builder="$(sed -n 's/^ARG MODEL_INTAKE_GO_BUILDER=//p' scanner/Dockerfile.model-intake)"
+          [[ "$builder" =~ ^[a-z0-9._-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::unexpected MODEL_INTAKE_GO_BUILDER: $builder"; exit 1; }
           docker buildx build --target model-intake-go-tools --progress=plain \
+            --build-arg "MODEL_INTAKE_GO_BUILDER=mirror.gcr.io/library/$builder" \
             -f scanner/Dockerfile.model-intake .
+      # Why a Docker pull did not use the mirror: dockerd logs each endpoint it falls back from.
+      - name: Show Docker daemon registry fallbacks
+        if: failure()
+        run: |
+          sudo journalctl -u docker --since -15min --no-pager \
+            | grep -iE 'mirror|fallback|next endpoint|toomanyrequests|error' | tail -n 100 || true
