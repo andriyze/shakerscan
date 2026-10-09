@@ -512,15 +512,21 @@ class SubdomainsDiscoverAdapter:
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
         for line in str(output or "").splitlines():
+            source = None
             try:
                 row = json.loads(line)
                 raw = row.get("host") or row.get("input") if isinstance(row, dict) else None
+                if isinstance(row, dict) and isinstance(row.get("source"), str):
+                    source = row["source"].strip().lower()[:64] or None
             except json.JSONDecodeError:
                 raw = line
             # Canonical name strictly below the bound root, compared on label boundaries.
             host = subdomain_of(raw, root_domain)
             if host:
-                observations.append({"kind": "subdomain", "host": host, "root_domain": root_domain})
+                observations.append({
+                    "kind": "subdomain", "host": host, "root_domain": root_domain,
+                    **({"source": source} if source else {}),
+                })
             elif line.strip():
                 errors.append("out_of_scope_or_malformed_subdomain_record")
         partial = bool(timed_out or errors)

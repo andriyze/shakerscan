@@ -104,6 +104,9 @@ async def discover_subdomains(
         "crtsh": set(),
     }
 
+    # Subfinder's upstream source per name, when it reports one (``-json``).
+    source_details: dict[str, set[str]] = {}
+
     # Create tasks for each enabled source
     tasks = []
 
@@ -165,6 +168,10 @@ async def discover_subdomains(
         elif source_name == "subfinder":
             subdomains = source_result.get("subdomains", [])
             error = source_result.get("error")
+            for name, upstream in (source_result.get("sources") or {}).items():
+                accepted = subdomain_of(name, domain)
+                if accepted:
+                    source_details.setdefault(accepted, set()).update(map(str, upstream or ()))
 
         elif source_name == "crtsh":
             # CT monitor has subdomain_discovery nested
@@ -228,6 +235,19 @@ async def discover_subdomains(
         "crtsh_exclusive": len(crtsh_only),
         "overlap": len(overlap),
         "total_unique": len(all_subdomains),
+    }
+
+    # Which sources named each subdomain: a certificate (Gungnir, crt.sh, a CT-backed subfinder
+    # source) keeps a name that a wildcard DNS answer would otherwise explain away.
+    name_sources: dict[str, set[str]] = {}
+    for source_name, names in source_subdomains.items():
+        for name in names:
+            name_sources.setdefault(name, set()).add(source_name)
+    for name, upstream in source_details.items():
+        if name in name_sources:
+            name_sources[name].update(f"subfinder:{item}" for item in upstream)
+    result["name_sources"] = {
+        name: sorted(sources) for name, sources in sorted(name_sources.items())
     }
 
     # Set final results

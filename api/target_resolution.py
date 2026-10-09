@@ -38,9 +38,14 @@ except ModuleNotFoundError:  # package-native import layout
     from api import action_scope, target_authorization
 
 try:
-    from scanner_tools.discovered_names import filter_subdomains, subdomain_of
+    import discovery_wildcards
 except ModuleNotFoundError:  # package-native import layout
-    from scanner.scanner_tools.discovered_names import filter_subdomains, subdomain_of
+    from api import discovery_wildcards
+
+try:
+    from scanner_tools.discovered_names import canonical_name, filter_subdomains, subdomain_of
+except ModuleNotFoundError:  # package-native import layout
+    from scanner.scanner_tools.discovered_names import canonical_name, filter_subdomains, subdomain_of
 
 RESOLVES = "resolves"
 NO_ADDRESS = "no_address"
@@ -65,6 +70,9 @@ _NO_RECORD_ERRORS = frozenset(
 )
 
 Lookup = Callable[[str], Awaitable[list[str]]]
+# Addresses plus the first CNAME hop (None when the name is not an alias, UNKNOWN_HOP when the
+# hop could not be read).
+Answer = Callable[[str], Awaitable[tuple[list[str], str | None]]]
 
 
 async def system_lookup(hostname: str) -> list[str]:
@@ -81,6 +89,60 @@ async def system_lookup(hostname: str) -> list[str]:
         if address not in addresses:
             addresses.append(address)
     return addresses
+
+
+# The CNAME lookup of a name the resolver says is an alias failed: its first hop is unknown,
+# so it can never be judged an echo of a wildcard.
+UNKNOWN_HOP = "?"
+
+
+async def first_cname_hop(hostname: str) -> str | None:
+    """The name ``hostname``'s own CNAME record points at; None without one, UNKNOWN_HOP on a fault."""
+    import dns.asyncresolver
+    import dns.exception
+    import dns.resolver
+
+    resolver = dns.asyncresolver.Resolver()
+    resolver.timeout = resolver.lifetime = LOOKUP_TIMEOUT_SECONDS
+    try:
+        answer = await resolver.resolve(hostname, "CNAME", raise_on_no_answer=False)
+    except dns.resolver.NXDOMAIN:
+        return None
+    except (dns.exception.DNSException, OSError):
+        return UNKNOWN_HOP
+    if answer.rrset is None:
+        return None
+    for record in answer.rrset:
+        return canonical_name(str(getattr(record, "target", record))) or UNKNOWN_HOP
+    return None
+
+
+async def system_answer(hostname: str) -> tuple[list[str], str | None]:
+    """``system_lookup`` plus the first CNAME hop, when the name is an alias.
+
+    The first hop, not the canonical name the chain ends at: two names that alias different
+    records can both end at one CDN edge, and only the record a name itself publishes says
+    whether it is a wildcard's answer.
+    """
+    records = await asyncio.get_running_loop().getaddrinfo(
+        hostname, None, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP,
+        flags=socket.AI_CANONNAME,
+    )
+    addresses: list[str] = []
+    canonical = ""
+    for record in records:
+        if not canonical and len(record) > 3 and record[3]:
+            canonical = str(record[3])
+        try:
+            address = str(ipaddress.ip_address(str(record[4][0]).split("%", 1)[0]))
+        except (IndexError, ValueError):
+            continue
+        if address not in addresses:
+            addresses.append(address)
+    terminal = canonical_name(canonical) if canonical else None
+    if not terminal or terminal == _clean_host(hostname):
+        return addresses, None
+    return addresses, (await first_cname_hop(_clean_host(hostname))) or UNKNOWN_HOP
 
 
 def lookup_error_status(exc: BaseException) -> str:
@@ -288,24 +350,60 @@ async def classify_hosts(
     otherwise costs every name its full timeout, about a minute for a full discovery window.
     Names the deadline leaves unjudged are ``not_checked``.
     """
+    judged = await judge_hosts(
+        names, lookup=lookup, concurrency=concurrency, timeout=timeout,
+        deadline_seconds=deadline_seconds,
+    )
+    return [(name, status) for name, status, _addresses, _canonical in judged]
+
+
+async def judge_hosts(
+    names: Iterable[str],
+    *,
+    lookup: Lookup | None = None,
+    answer: Answer | None = None,
+    concurrency: int = DISCOVERY_CONCURRENCY,
+    timeout: float = LOOKUP_TIMEOUT_SECONDS,
+    deadline_seconds: float | None = None,
+) -> list[tuple[str, str, list[str], str | None]]:
+    """``(name, status, addresses, canonical)`` per distinct name, as ``classify_hosts`` judges.
+
+    ``answer`` also reports the CNAME target; with only ``lookup`` (or neither) it is None.
+    """
     unique = list(dict.fromkeys(_clean_host(name) for name in names if _clean_host(name)))
     gate = asyncio.Semaphore(max(1, int(concurrency)))
     loop = asyncio.get_running_loop()
     stop_at = None if deadline_seconds is None else loop.time() + max(0.0, float(deadline_seconds))
 
-    async def one(name: str) -> tuple[str, str]:
+    async def resolve(host: str) -> tuple[list[str], str | None]:
+        if answer is not None:
+            return await answer(host)
+        return await (lookup or system_lookup)(host), None
+
+    async def one(name: str) -> tuple[str, str, list[str], str | None]:
         async with gate:
             budget = timeout
             if stop_at is not None:
                 remaining = stop_at - loop.time()
                 if remaining <= 0:
-                    return name, NOT_CHECKED
+                    return name, NOT_CHECKED, [], None
                 budget = min(timeout, remaining)
-            status, _addresses = await lookup_host(name, lookup=lookup, timeout=budget)
+            canonical: str | None = None
+            if _is_address_literal(name):
+                status, addresses = RESOLVES, [str(ipaddress.ip_address(name))]
+            else:
+                try:
+                    addresses, canonical = await asyncio.wait_for(resolve(name), budget)
+                    addresses = list(addresses)
+                    status = RESOLVES if addresses else NO_ADDRESS
+                except asyncio.TimeoutError:
+                    status, addresses = UNKNOWN, []
+                except OSError as exc:
+                    status, addresses = lookup_error_status(exc), []
             if status == UNKNOWN and stop_at is not None and loop.time() >= stop_at:
                 # Cut off by the deadline, not answered by the resolver.
-                return name, NOT_CHECKED
-            return name, status
+                return name, NOT_CHECKED, [], None
+            return name, status, addresses, canonical
 
     return list(await asyncio.gather(*(one(name) for name in unique)))
 
@@ -314,7 +412,9 @@ async def plan_discovered_targets(
     names: Iterable[str],
     *,
     root_domain: str | None = None,
+    evidence: Mapping[str, Iterable[str]] | None = None,
     lookup: Lookup | None = None,
+    answer: Answer | None = None,
     resolve_limit: int = DISCOVERY_RESOLVE_LIMIT,
     deadline_seconds: float | None = None,
 ) -> dict[str, Any]:
@@ -328,19 +428,52 @@ async def plan_discovered_targets(
     and listed under ``not_checked``; names beyond ``resolve_limit`` are counted, not resolved.
 
     With ``root_domain``, only canonical names strictly below it (on a label boundary) are
-    planned; the rest are counted under ``outside_root_count`` and never resolved.
+    planned; the rest are counted under ``outside_root_count`` and never resolved. Wildcard DNS
+    is detected under it too (``discovery_wildcards``): random labels for the apex and a bounded
+    set of parents are resolved first, in the same lookups, concurrency and deadline, and a name
+    whose answer is only a wildcard's, with no certificate naming it in ``evidence``
+    (``{name: [source, ...]}``), is listed under ``wildcard_suppressed`` instead of scannable.
     """
     submitted = list(names or [])
     outside_root = 0
+    root = canonical_name(root_domain) if root_domain is not None else None
     if root_domain is not None:
         submitted, outside_root = filter_subdomains(submitted, root_domain)
     candidates = submitted[: max(0, int(resolve_limit))]
-    classified = await classify_hosts(candidates, lookup=lookup, deadline_seconds=deadline_seconds)
+    probes = (
+        discovery_wildcards.probe_names(discovery_wildcards.probe_parents(root, candidates))
+        if root and candidates else []
+    )
+    if answer is None and lookup is None:
+        answer = system_answer
+    judged_all = await judge_hosts(
+        [probe for _parent, probe in probes] + candidates,
+        lookup=lookup, answer=answer, deadline_seconds=deadline_seconds,
+    )
+    probe_set = {probe for _parent, probe in probes}
+    judged = [row for row in judged_all if row[0] not in probe_set]
+    wildcards, judged_parents = discovery_wildcards.wildcard_answers(
+        probes, {row[0]: row[1:] for row in judged_all if row[0] in probe_set},
+        resolves=RESOLVES, no_address=NO_ADDRESS, unknown_hop=UNKNOWN_HOP,
+    )
+    suppressed, per_parent = discovery_wildcards.suppress_echoes(
+        root or "", judged, wildcards=wildcards, judged_parents=judged_parents,
+        evidence=evidence, resolves=RESOLVES,
+    ) if wildcards else (set(), {})
+    records, notes = discovery_wildcards.wildcard_summary(wildcards, per_parent)
+    classified = [(name, status) for name, status, *_rest in judged]
     return {
-        "scannable": [name for name, status in classified if status != NO_ADDRESS],
+        "scannable": [
+            name for name, status in classified
+            if status != NO_ADDRESS and name not in suppressed
+        ],
         "unresolved": [name for name, status in classified if status == NO_ADDRESS],
         "unknown": [name for name, status in classified if status == UNKNOWN],
         "not_checked": [name for name, status in classified if status == NOT_CHECKED],
+        "wildcard_suppressed": [name for name, _status in classified if name in suppressed],
+        "wildcards": records,
+        "wildcard_notes": notes,
+        "wildcard_parents_probed": len({parent for parent, _probe in probes}),
         "submitted_count": len(submitted),
         "resolve_limit": max(0, int(resolve_limit)),
         "outside_root_count": outside_root,
@@ -361,9 +494,14 @@ async def store_discovered_targets(
     label boundary is never inserted, whichever planner produced the plan.
     """
     planned = list(plan.get("scannable") or [])
-    scannable = [name for name in planned if subdomain_of(name, root_domain)]
+    # Insert exactly the canonical name and root this gate validated, never the plan's spelling.
+    root = canonical_name(root_domain) or str(root_domain or "")
+    scannable = list(dict.fromkeys(
+        accepted for name in planned if (accepted := subdomain_of(name, root))
+    ))
     outside_root = int(plan.get("outside_root_count") or 0) + len(planned) - len(scannable)
     unresolved = list(plan.get("unresolved") or [])
+    suppressed = list(plan.get("wildcard_suppressed") or [])
     added = 0
     failed = 0
     for name in scannable[: max(0, int(target_limit))]:
@@ -374,7 +512,7 @@ async def store_discovered_targets(
                 VALUES ($1, $2, false, $3)
                 ON CONFLICT (canonical_key) DO NOTHING
                 """,
-                f"https://{name}", root_domain, source,
+                f"https://{name}", root, source,
             )
         except Exception:  # noqa: BLE001 -- one refused row must not drop the rest of the run
             failed += 1
@@ -382,7 +520,7 @@ async def store_discovered_targets(
         if str(tag or "").strip().endswith(" 1"):
             added += 1
     return {
-        "checked": len(scannable) + len(unresolved),
+        "checked": len(scannable) + len(unresolved) + len(suppressed),
         "scannable": len(scannable),
         "added": added,
         "unresolved_count": len(unresolved),
@@ -390,6 +528,10 @@ async def store_discovered_targets(
         "unknown_count": len(plan.get("unknown") or []),
         "insert_failed": failed,
         "outside_root_count": outside_root,
+        "wildcard_suppressed_count": len(suppressed),
+        "wildcard_suppressed": suppressed[:_REPORTED_NAME_LIMIT],
+        "wildcards": list(plan.get("wildcards") or []),
+        "notes": list(plan.get("wildcard_notes") or []),
     }
 
 

@@ -2680,7 +2680,7 @@ async def run_discovery(root_domain: str) -> dict:
     try:
         result = json.loads(stdout.decode())
         return {
-            'subdomains': result.get('subdomains', []),
+            'subdomains': result.get('subdomains', []), 'name_sources': result.get('name_sources', {}),
             'by_source': result.get('by_source', {}),
             'total': result.get('subdomain_count', 0)
         }
@@ -14004,7 +14004,7 @@ async def process_discovery_job(job_data: dict):
 
     completed_at = utc_now()
     error = result.get('error')
-    dns_plan = None if error else await target_resolution.plan_discovered_targets(result.get('subdomains', []), root_domain=root_domain)
+    dns_plan = None if error else await target_resolution.plan_discovered_targets(result.get('subdomains', []), root_domain=root_domain, evidence=result.get('name_sources'))
 
     # Update database
     async with db_pool.acquire() as conn:
