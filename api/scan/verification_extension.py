@@ -24,6 +24,16 @@ extension is itself extended in the next round -- at the same lane share, bounde
 reconciled residual and the round bound -- until its candidates finish or the budget is gone.
 An XSS extension still re-runs Dalfox from scratch, so it is never extended again.
 
+An extension needs evidence that it can make progress, not just a slower target. Soak scan
+9de6a910 (2.8.0, Balanced, honey) extended two chat candidates whose slices had settled no
+stage at 13 and 5 s per request: each extension was granted 450 s against a 440 s floor, and
+union-based alone needed 424 and 212 requests there, so both were killed in the same stage
+again -- 900 s, a quarter of the Scan, that also crowded out the extension of the login form's
+XSS slice. Each unfinished SQLi candidate now names the wall its next stage is predicted to
+need at its own measured rate (``sqli_stages.resume_wall_seconds``), and that prediction is the
+extension's floor: a slice whose candidates cannot fit one round's lane share is not extended
+at all, and its receipt records the candidates as inconclusive for budget.
+
 Every wall-killed slice of a lane is eligible in the same round, and the lane's wall share is
 divided fairly among them (see ``plan_verification_extensions``): candidates with the fewest
 extensions go first, and the share is spread max-min above each slice's progress floor.
@@ -72,6 +82,20 @@ _CARRIED_ARGS_EXCLUDED = frozenset({"continuation_work_key", EXTENDS_ARG, SIGNAL
 # wall-killed -- was never extended, while 7,121 of the Scan's 10,800 tool-wall seconds were
 # never allocated. Its measured latency sizes an extension exactly as a wall-killed slice's does.
 _UNFUNDED_STOP_REASONS = frozenset(reason.value for reason in BUDGET_EXHAUSTION_REASONS.values())
+
+
+def lane_round_wall_ceiling(execution_plan: Any) -> int | None:
+    """The most tool wall one lane's extensions may hold in a round, from the Scan's plan.
+
+    ``execution_plan`` is the canonical execution-plan mapping a worker runs under (its
+    ``budget.max_tool_wall_seconds`` is the profile wall ``plan_verification_extensions``
+    divides). None when the plan does not name it.
+    """
+    budget = execution_plan.get("budget") if isinstance(execution_plan, Mapping) else None
+    wall = budget.get("max_tool_wall_seconds") if isinstance(budget, Mapping) else None
+    if isinstance(wall, bool) or not isinstance(wall, int) or wall <= 0:
+        return None
+    return int(wall * EXTENSION_WALL_SHARE)
 
 
 def _status(result: Any) -> str:
@@ -298,7 +322,9 @@ def plan_verification_extensions(
         str(action.capability_args.get(EXTENDS_ARG))
         for action in actions if action.capability_args.get(EXTENDS_ARG)
     }
-    wall_ceiling = int(int(profile_limits.get("tool_wall_seconds") or 0) * EXTENSION_WALL_SHARE)
+    wall_ceiling = lane_round_wall_ceiling(
+        {"budget": {"max_tool_wall_seconds": int(profile_limits.get("tool_wall_seconds") or 0)}}
+    ) or 0
     # The terminal finalizer is always funded from the same residual.
     finalizer = dict(CAPABILITY_REGISTRY.require("scan.finalize").budget_cost)
     remaining = {

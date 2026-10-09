@@ -308,9 +308,10 @@ def test_a_chained_extension_carries_candidates_settled_two_rounds_back(monkeypa
         calls.append((target.split("app.example.test", 1)[1].split("?")[0], technique))
         wall = int(context.requested_budget["tool_wall_seconds"])
         if "/slow" in target and technique == "T" and wall < 600:
+            # Wall-killed at the slow endpoint's 3 s per request: its 189 requests need 567 s.
             return CapabilityAdapterResult(
                 status="partial", partial=True, timed_out=True, errors=("timeout",),
-                actual_budget={"http_requests": 50, "tool_wall_seconds": wall},
+                actual_budget={"http_requests": wall // 3, "tool_wall_seconds": wall},
                 execution_started=True, parser_version="sqlmap-output/v1",
             )
         return CapabilityAdapterResult(

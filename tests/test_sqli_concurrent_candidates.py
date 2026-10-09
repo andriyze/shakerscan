@@ -267,9 +267,18 @@ class FakeSqlmap:
             )
         wall = int(budget["tool_wall_seconds"])
         need = NEGATIVE_VERDICT[technique]
-        if (path, technique) in self.wall_killed or (
-            int(need * (LATENCY + 0.05)) > wall or need > int(budget["http_requests"])
-        ):
+        if (path, technique) in self.wall_killed:
+            # Interrupted half-way through the stage at the target's rate (the worker was
+            # stopped): it settles no verdict, and its own rate says the stage fits a resume.
+            sent = need // 2
+            took = int(sent * (LATENCY + 0.05))
+            self.now[0] = max(self.now[0], started + took)
+            return CapabilityAdapterResult(
+                status="partial", partial=True, timed_out=True, errors=("timeout",),
+                actual_budget={"http_requests": sent, "tool_wall_seconds": took},
+                execution_started=True, parser_version="sqlmap-output/v1",
+            )
+        if int(need * (LATENCY + 0.05)) > wall or need > int(budget["http_requests"]):
             sent = int(wall / (LATENCY + 0.05))
             self.now[0] = max(self.now[0], started + wall)
             return CapabilityAdapterResult(
