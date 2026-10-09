@@ -155,6 +155,11 @@ jobs:
     services:
       postgres:
         image: postgres:18
+        # Read-only Docker Hub credentials for the pull. Empty secrets (forks, Dependabot) make
+        # the runner skip the login and pull anonymously, as before.
+        credentials:
+          username: ${{ secrets.DOCKERHUB_READ_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
         env:
           POSTGRES_PASSWORD: learning-ci-only
           POSTGRES_DB: hunt_learning_test
