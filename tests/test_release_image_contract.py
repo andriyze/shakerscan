@@ -123,7 +123,7 @@ def test_release_images_remove_fixable_runtime_vulnerabilities():
         "github.com/getkin/kin-openapi@v0.144.0",
         "github.com/go-git/go-git/v5@v5.19.2",
         "github.com/labstack/echo/v4@v4.15.3",
-        "golang.org/x/mod@v0.40.0",
+        "golang.org/x/mod@v0.41.0",
     ):
         assert dependency in scanner
     assert "pip uninstall -y --break-system-packages msgpack setuptools" in scanner
