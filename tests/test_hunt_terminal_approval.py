@@ -318,6 +318,39 @@ def test_a_sequence_split_in_time_or_an_uppercase_key_never_decides(tmp_path, pi
     assert decisions == ["allow"], decisions
 
 
+@pytest.mark.parametrize(("pieces", "close"), [
+    ((b"\x1b]", b"a"), b"\x07"),
+    ((b"\x1bP", b"d"), b"\x1b\\"),
+    ((b"\x1b_", b"a"), b"\x07"),
+    ((b"\x1b^", b"d"), b"\x07"),
+    ((b"\x1bX", b"a"), b"\x07"),
+    ((b"\x9b", b"a"), b""),
+    ((b"\xc4\x9b",), b""),
+], ids=["osc", "dcs", "apc", "pm", "sos", "c1-csi", "utf8-with-9b"])
+def test_control_strings_and_8bit_csi_never_decide(tmp_path, pieces, close):
+    """OSC, DCS, APC, PM and SOS are strings that only BEL or ST end, so a key inside one (here
+    0.3 s after the introducer) is part of it; a lone 0x9B is CSI and swallows up to its final
+    byte; a UTF-8 character whose last byte is 0x9B is just a character. None decides."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.expect(PROMPT)
+        for piece in pieces:
+            os.write(session.master, piece)
+            time.sleep(0.3)
+        time.sleep(0.7)
+        assert stub.request["status"] == "pending", f"{pieces!r} decided the request"
+        if close:
+            os.write(session.master, close)  # the string ends; the next lone key counts again
+            time.sleep(0.3)
+        session.type("a")
+        session.expect(f"granted: {TITLE}", timeout=10)
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    decisions = [body["decision"] for method, path, body in stub.seen if path.endswith("/decision")]
+    assert decisions == ["allow"], decisions
+
+
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP], ids=["SIGTERM", "SIGHUP"])
 def test_a_terminated_watch_restores_the_terminal(tmp_path, signum):
     """SIGTERM and SIGHUP left the terminal in keypress mode (no echo) and skipped the session
