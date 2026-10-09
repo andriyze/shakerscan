@@ -363,12 +363,20 @@ def test_identifiers_in_sql_rows_stay_visible(body):
     assert mask_body_text(body) == body
 
 
-def test_sql_rows_without_columns_withhold_issued_key_prefixes():
-    # Without column names a row withholds what its own shape proves; the column context of a
-    # window read at an offset is restored by artifact.inspect (see the pagination tests).
-    body = "INSERT INTO t VALUES (1,'ak_9f3c9e1a7b2d84c60e5a9f1b3d7c2e8a4','SKU-2024-0042');"
-    masked = mask_body_text(body)
-    assert "ak_9f3c" not in masked and "SKU-2024-0042" in masked
+def test_sql_rows_with_unknown_columns_fail_closed():
+    # No column list and no CREATE TABLE in view: a string can be a password, so every literal is
+    # withheld (as a reference) except shapes that are plainly not secrets.
+    uuid_value = "9b2b7c1e-1111-4222-8333-444455556666"
+    sha = "3f786850e387550fdab836ed7e6dc881de23001b"
+    body = (
+        "INSERT INTO t VALUES (17,'ak_9f3c9e1a7b2d84c60e5a9f1b3d7c2e8a4','Summer2023!','bob@fixture.test',"
+        f"'2024-01-03 09:12:44','{uuid_value}','{sha}','yes',3.5,NULL,'abc');"
+    )
+    masked, collector = _collect(body)
+    for secret in ("ak_9f3c9e1a7b2d84c60e5a9f1b3d7c2e8a4", "Summer2023!"):
+        assert secret not in masked and secret in collector.values
+    for visible in ("17", "'bob@fixture.test'", "'2024-01-03 09:12:44'", uuid_value, sha, "'yes'", "3.5", "NULL", "'abc'"):
+        assert visible in masked
 
 
 # --- Freedom: JWTs are usable references -----------------------------------------------------
@@ -594,3 +602,171 @@ def test_skill_withheld_ref_example_validates_against_the_registry():
     example = json.loads(block.replace("<action id>", ACTION))
     CAPABILITY_REGISTRY.validate_hunt_input("http.request", example)
     assert require_http_request_authority(example, {"active_testing": True}) is False
+
+
+# --- Round 3 blocker: dumps whose CREATE TABLE lies far before the window -------------------
+
+def _big_dump(style: str, rows: int = 18_000) -> bytes:
+    head = ("CREATE TABLE `users` (\n `id` int,\n `email` varchar(100),\n `password` varchar(255),\n"
+            " `created_at` datetime\n);\n")
+    if style == "per_row_inserts":
+        body = "".join(
+            f"INSERT INTO `users` VALUES ({i},'u{i}@fixture.test','Fx{i}Pass!q','2024-02-19 14:07:31');\n"
+            for i in range(rows))
+    else:  # mysqldump --extended-insert, statements of about 1 MB (net_buffer_length)
+        chunks, size = [], 0
+        statement: list[str] = []
+        for i in range(rows):
+            tuple_text = f"({i},'u{i}@fixture.test','Fx{i}Pass!q','2024-02-19 14:07:31')"
+            statement.append(tuple_text)
+            size += len(tuple_text)
+            if size > 1_000_000:
+                chunks.append("INSERT INTO `users` VALUES " + ",".join(statement) + ";\n")
+                statement, size = [], 0
+        if statement:
+            chunks.append("INSERT INTO `users` VALUES " + ",".join(statement) + ";\n")
+        body = "".join(chunks)
+    return (head + body).encode()
+
+
+class _KnowledgeRows(_ActionRows):
+    def __init__(self):
+        super().__init__()
+        self.rows = {}
+
+    async def fetchrow(self, sql, *args):
+        return self.rows.get(str(args[0]))
+
+    async def fetch(self, sql, *args):
+        return [row for row in self.rows.values() if row["private_http_result"]]
+
+
+def _hunt_inspect(monkeypatch, document: bytes, offset: int, conn=None):
+    """One artifact.inspect action as the worker runs it: seeded, collected, sealed."""
+    from runtime.hunt_http_exchange import sealed_hunt_knowledge, withholding_operation
+
+    action = str(uuid.uuid4())
+    seen: list = []
+    _range_server(monkeypatch, document, seen)
+
+    async def operation():
+        return await artifact_capability.inspect_target_artifact(
+            "https://honey.fixture.test", {"path": "/backup.sql", "offset": offset, "max_bytes": 16_384},
+            target=TARGET)
+
+    async def seed():
+        return await sealed_hunt_knowledge(conn, run_id=HUNT, target=TARGET) if conn else {"values": [], "sql_tables": {}}
+
+    wrapped, collector = withholding_operation("artifact.inspect", action, operation, seed)
+    result = asyncio.run(wrapped())
+    if conn is not None:
+        conn.rows[action] = {"status": "completed", "private_http_result": None}
+        asyncio.run(persist_withheld_values(
+            conn, run=RUN, action_id=action, target=TARGET, values=collector, status="success",
+            observations=[result],
+        ))
+    return result, seen
+
+
+@pytest.mark.parametrize("style", ["per_row_inserts", "extended_insert"])
+@pytest.mark.parametrize("head_first", [False, True])
+def test_windows_far_past_create_table_never_leak(monkeypatch, encryption_key, style, head_first):
+    document = _big_dump(style)
+    assert len(document) > 1_100_000
+    conn = _KnowledgeRows() if head_first else None
+    if head_first:
+        _hunt_inspect(monkeypatch, document, 0, conn)  # the planner reads the dump's head first
+    for offset in (70_000, 200_000, 1_100_000, len(document) - 20_000):
+        result, seen = _hunt_inspect(monkeypatch, document, offset, conn)
+        text = json.dumps(result)
+        assert "Pass!q" not in text, (style, head_first, offset)
+        sample = result["observation"]["text_sample"]
+        assert "2024-02-19 14:07:31" in sample and "@fixture.test" in sample  # dates and emails stay
+        assert seen[-1][0] == max(0, offset - artifact_capability.SQL_CONTEXT_BYTES)
+
+
+def test_carried_columns_reach_windows_past_the_context(monkeypatch, encryption_key):
+    """With the head read earlier, a window past the 1 MB context withholds exactly the password
+    column, so the planner still reads the other columns and can bind the password."""
+    document = _big_dump("per_row_inserts")
+    conn = _KnowledgeRows()
+    _hunt_inspect(monkeypatch, document, 0, conn)
+    result, _seen = _hunt_inspect(monkeypatch, document, len(document) - 20_000, conn)
+    sample = result["observation"]["text_sample"]
+    rows = [line for line in sample.splitlines() if line.startswith("INSERT INTO") and line.endswith(");")]
+    assert rows and all("@fixture.test','[withheld:" in line for line in rows)
+    assert result["observation"]["withheld_values"]
+
+
+@pytest.mark.parametrize("window", [
+    "),(17,'u17@fixture.test','Fx17Pass!q','2024-02-19 14:07:31'),(18,'u18@fixture.test','Fx18Pass!q','2024-02-19 14:07:31');",
+    "17Pass!q','2024-02-19 14:07:31');\nINSERT INTO `users` VALUES (18,'u18@fixture.test','Fx18Pass!q','2024-02-19 14:07:31');",
+])
+def test_orphan_rows_with_unknown_columns_fail_closed(window):
+    masked, collector = _collect(window)
+    assert "Fx18Pass!q" not in masked and "Fx18Pass!q" in collector.values
+    assert "2024-02-19 14:07:31" in masked and "u18@fixture.test" in masked
+
+
+# --- Round 3 freedom: no over-masking from context or URL values -----------------------------
+
+def test_short_context_values_do_not_mask_words_or_paths(monkeypatch):
+    document = (b"INSERT INTO users (username,password) VALUES ('admin','admin');\n" + b"x" * 100
+                + b"\nwelcome admin, admin panel at /admin and /administrator\n")
+    result, _seen = _inspect_at(monkeypatch, document, 120, 4_096, masking.WithheldValues(ACTION))
+    assert "welcome admin, admin panel at /admin and /administrator" in result["observation"]["text_sample"]
+
+
+def test_found_values_match_whole_tokens_only():
+    collector = masking.WithheldValues(ACTION)
+    collector.bind_known(["Summer2023", "abc"], found=True)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text("pw Summer2023 and Summer20234 and xSummer2023 /Summer2023/ abc")
+    assert masked == "pw [withheld:1] and Summer20234 and xSummer2023 /[withheld:1]/ abc"
+
+
+@pytest.mark.parametrize(("url", "withheld"), [
+    ("/p?key=blue&sort=asc", None),
+    ("/r?reset=1", None),
+    ("/shop?code=SKU123&lang=en", None),
+    ("/settings?key=user_settings", None),
+    ("/o?token=true", None),
+    ("/cb?code=AuthCode998877&state=xyz", "AuthCode998877"),
+    ("/s?sig=abc123def456&expires=1", "abc123def456"),
+    ("/r?reset=Zq7xLm2Pq9Rs", "Zq7xLm2Pq9Rs"),
+])
+def test_url_parameters_keep_plain_values_and_withhold_tokens(url, withheld):
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = masking.mask_url_secrets(url)
+    if withheld is None:
+        assert masked == url and collector.values == []
+    else:
+        assert withheld not in masked and collector.values == [withheld]
+
+
+# --- Round 3 should-fix: seeding is bounded and fast ------------------------------------------
+
+def test_seeding_is_capped_by_characters_most_recent_first(encryption_key):
+    import random
+    import string
+    import time
+
+    from runtime.hunt_http_exchange import _MAX_SEEDED_CHARS, sealed_hunt_knowledge
+
+    rng = random.Random(7)
+    conn = _KnowledgeRows()
+    for index in range(40):
+        action = str(uuid.UUID(int=10_000 + index))
+        conn.rows[action] = {"status": "completed", "private_http_result": None}
+        values = {n: "".join(rng.choice(string.ascii_letters + string.digits) for _ in range(400)) for n in range(1, 14)}
+        asyncio.run(persist_withheld_values(conn, run=RUN, action_id=action, target=TARGET,
+                                            values=values, status="success"))
+    knowledge = asyncio.run(sealed_hunt_knowledge(conn, run_id=HUNT, target=TARGET))
+    assert 0 < sum(len(value) for value in knowledge["values"]) <= _MAX_SEEDED_CHARS
+    collector = masking.WithheldValues(ACTION)
+    started = time.perf_counter()
+    collector.bind_known(knowledge["values"], found=True)
+    with masking.collecting_withheld_values(collector):
+        mask_body_text(("lorem ipsum dolor " * 2_000)[:32_768])
+    assert time.perf_counter() - started < 2.0

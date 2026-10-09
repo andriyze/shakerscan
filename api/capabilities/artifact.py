@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import re
+import urllib.parse
 from typing import Any, Callable, Mapping
 
 from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request
@@ -24,12 +25,12 @@ except ModuleNotFoundError:
 try:
     from runtime.archive_body_masking import (
         MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
-        holds_withheld_material, mask_body_text, scrub_known_values,
+        holds_withheld_material, mask_body_text, mask_sql_values, scrub_known_values,
     )
 except ModuleNotFoundError:
     from api.runtime.archive_body_masking import (
         MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
-        holds_withheld_material, mask_body_text, scrub_known_values,
+        holds_withheld_material, mask_body_text, mask_sql_values, scrub_known_values,
     )
 try:
     from capabilities.secret_material import keyed_body_digest
@@ -146,14 +147,48 @@ def _jwt_replacement(match: re.Match[str]) -> str:
 # A window read at an offset is masked with up to this much of what precedes it: a dump's column
 # names, a ``DB_PASSWORD=`` label or a ``value="`` cut just before the window (N56 review).
 CONTEXT_BYTES = 65_536
+# A SQL dump keeps its CREATE TABLE (the column names that say which value is a password) far
+# from later rows: a dump-like resource gets up to this much context, still in one request.
+SQL_CONTEXT_BYTES = 1_048_576
+_SQL_DUMP_PATH_RE = re.compile(
+    r"(?i)(?:\.(?:sql|dump|mysql|pgsql|psql|bak)(?:\.txt)?$|(?:^|/)[^/]*(?:dump|backup)[^/]*$)"
+)
 _CONTEXT_COLLECTOR_ID = "00000000-0000-4000-8000-000000000000"
 
 
+def _resource_path(path: str) -> str:
+    return urllib.parse.urlsplit(path).path or path
+
+
+def _context_bytes(path: str) -> int:
+    collector = active_withheld_values()
+    resource = _resource_path(path)
+    if _SQL_DUMP_PATH_RE.search(resource) or (collector is not None and collector.sql_tables.get(resource)):
+        return SQL_CONTEXT_BYTES
+    return CONTEXT_BYTES
+
+
+# The values a window can show in part sit just before it; only those are collected.
+_NEAR_CONTEXT_BYTES = 65_536
+
+
 def _context_secrets(context: bytes, body: bytes) -> list[str]:
-    """Every value the masking withholds from the context and window read as one span."""
-    probe = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=4_096)
+    """Every value the masking withholds near the window, read with the context before it.
+
+    The whole span is read first for its column names (kept on the action's collector for later
+    windows of the dump); the values are then collected from the near context and the window,
+    whose rows are parsed with those columns."""
+    collector = active_withheld_values()
+    shared = (collector.sql_tables, collector.sql_path) if collector is not None else ({}, "context")
+    if len(context) > _NEAR_CONTEXT_BYTES:
+        learner = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=0)
+        learner.sql_tables, learner.sql_path = shared
+        with collecting_withheld_values(learner):
+            mask_sql_values(context.decode("utf-8", errors="replace"))
+    probe = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=16_384)
+    probe.sql_tables, probe.sql_path = shared
     with collecting_withheld_values(probe):
-        mask_body_text((context + body).decode("utf-8", errors="replace"))
+        mask_body_text((context[-_NEAR_CONTEXT_BYTES:] + body).decode("utf-8", errors="replace"))
     return probe.values
 
 
@@ -170,7 +205,7 @@ def _masked_window_text(body: bytes, context: bytes = b"") -> str:
     known = _context_secrets(context, body) if context else []
     collector = active_withheld_values()
     if known and collector is not None:
-        collector.bind_known(known)
+        collector.bind_known(known, found=True)
     elif known:
         text = scrub_known_values(text, known, MASK)
     text = mask_body_text(text)
@@ -245,7 +280,10 @@ async def inspect_target_artifact(
     offset = max(0, int(args.get("offset") or 0))
     length = max(1, min(MAX_INSPECT_BYTES, int(args.get("max_bytes") or MAX_PUBLIC_TEXT)))
     # One range from up to CONTEXT_BYTES before the window: the context masks, the window shows.
-    context_start = max(0, offset - CONTEXT_BYTES)
+    collector = active_withheld_values()
+    if collector is not None:
+        collector.sql_path = _resource_path(path)
+    context_start = max(0, offset - _context_bytes(path))
     lead = offset - context_start
     result, private = await _fetch_artifact(
         target_url, path=path, target=target, offset=context_start, length=lead + length,
