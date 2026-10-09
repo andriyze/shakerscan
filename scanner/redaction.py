@@ -17,8 +17,10 @@ same key-set via :func:`is_sensitive_key` when checking structured payloads.
 
 from __future__ import annotations
 
+import bisect
 import re
 import urllib.parse
+from collections.abc import Callable
 from typing import Any
 
 MASK = "***"
@@ -123,62 +125,199 @@ SENSITIVE_QUERY_KEYS: frozenset[str] = frozenset(
 # (header / query-string / env-var `key=value` shapes). The third catches
 # JSON / dict-literal `"api_key": "SECRET"` shapes, which transcript request and
 # response bodies embed as text and which the `=`-only pattern misses.
-_SENSITIVE_TEXT_KEY = (
-    r"[a-z0-9_-]*(?:api[_-]?key|secret|token(?!s(?:[_-]|$)|izer(?:[_-]|$))|password|passwd|pwd|authorization|"
+# The sensitive words of a key name. A key is a ``[a-z0-9_-]`` name containing one of them.
+_SENSITIVE_WORDS = (
+    r"(?:api[_-]?key|secret|token(?!s(?:[_-]|$)|izer(?:[_-]|$))|password|passwd|pwd|authorization|"
     r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
-    r"refresh[_-]?token|csrf|xsrf|signature|bearer)[a-z0-9_-]*"
+    r"refresh[_-]?token|csrf|xsrf|signature|bearer)"
 )
-# Same key set for the bare `key: value` (YAML/config) shape, minus authorization/
+# Same word set for the bare `key: value` (YAML/config) shape, minus authorization/
 # bearer — those are owned by the dedicated Authorization header rule below, and
 # letting this rule also match them would clobber its "Bearer ***" output.
-_SENSITIVE_COLON_KEY = (
-    r"[a-z0-9_-]*(?:api[_-]?key|secret|token(?!s(?:[_-]|$)|izer(?:[_-]|$))|password|passwd|pwd|"
+_SENSITIVE_COLON_WORDS = (
+    r"(?:api[_-]?key|secret|token(?!s(?:[_-]|$)|izer(?:[_-]|$))|password|passwd|pwd|"
     r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
-    r"refresh[_-]?token|csrf|xsrf|signature)[a-z0-9_-]*"
+    r"refresh[_-]?token|csrf|xsrf|signature)"
 )
+_NAME_CHARS = "[a-z0-9_-]"
+_SENSITIVE_TEXT_KEY = rf"{_NAME_CHARS}*{_SENSITIVE_WORDS}{_NAME_CHARS}*"
+_SENSITIVE_COLON_KEY = rf"{_NAME_CHARS}*{_SENSITIVE_COLON_WORDS}{_NAME_CHARS}*"
+# The same key sets, written so a regex engine cannot backtrack through a long name: the name's
+# first sensitive word is found once (atomic), then the rest of the name is taken whole
+# (possessive). A sensitive word and the rest of a name are both drawn from ``[a-z0-9_-]``, so
+# the rest always reaches the end of the name, and any other split of the same name ends there
+# too: what follows decides the match, exactly as with the plain form above, but a name of
+# ``token-`` repeated is read once instead of once per split (external release audit,
+# 2026-10-09).
+_SENSITIVE_TEXT_KEY_ONCE = rf"(?>{_NAME_CHARS}*?{_SENSITIVE_WORDS}){_NAME_CHARS}*+"
+_SENSITIVE_COLON_KEY_ONCE = rf"(?>{_NAME_CHARS}*?{_SENSITIVE_COLON_WORDS}){_NAME_CHARS}*+"
+# The first word boundary of a ``[a-z0-9_-]`` name, the name before it kept in group 1. The
+# lookbehind admits only a name's first character, and the boundary is committed to (atomic), so
+# a failed key is not retried at the name's later boundaries: any match from a later boundary
+# ends where the one from the first boundary does, with the same text before it unchanged.
+_NAME_FIRST_BOUNDARY = r"(?<![a-z0-9_-])(?>([a-z0-9_-]*?)\b)"
 # A Hunt body masking marker (``[withheld:3]``, api/runtime/archive_body_masking.py) already stands
 # in for a withheld value and carries none; masking it again would lose the planner's reference.
 # Anchored: only a whole value that is a marker is spared (``password=[withheld:1]Hunter2pass``
 # is still a value to mask).
 _NOT_WITHHELD_MARKER = r"(?!\[withheld:[1-9][0-9]{0,3}\](?=$|[&\s,;]))"
 _NOT_WITHHELD_QUOTED = r"(?!\[withheld:[1-9][0-9]{0,3}\][\"'])"
-_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+# ``<password ...>value</password>``: the element's value up to the first closing tag of the
+# same name, closing-tag names compared as ``(?i)<(name)>.*?</\1>`` compares them. As one regex,
+# every opening tag without its closing tag searched to the end of the text again, so a body of
+# unclosed ``<password>`` tags was quadratic; the closing tags are indexed once instead.
+_XML_OPEN_RE = re.compile(rf"(?i)<({_SENSITIVE_TEXT_KEY_ONCE})(?=[\s>])")
+_XML_CLOSE_RE = re.compile(r"(?i)</([a-z0-9_-]+)\s*>")
+# An element whose whole value is already a Hunt marker (``<password>[withheld:1]</password>``)
+# is left alone, as the single regex's ``(?!\[withheld:n\]</)`` left it.
+_XML_MARKER_VALUE_RE = re.compile(r"\[withheld:[1-9][0-9]{0,3}\]</")
+# A backreference under IGNORECASE compares simple lowercase forms. Within ``(?i)[a-z0-9_-]``
+# only these two characters lowercase differently from ``str.lower``'s full mapping or
+# otherwise fold to ASCII: U+0130 to ``i`` and the Kelvin sign to ``k``.
+_BACKREF_FOLD = str.maketrans({"\u0130": "i", "\u212a": "k"})
+
+
+def _xml_name(name: str) -> str:
+    return name.translate(_BACKREF_FOLD).lower()
+
+
+def _mask_xml_elements(text: str) -> str:
+    if "</" not in text:
+        return text
+    closes: dict[str, list[tuple[int, int]]] = {}
+    for match in _XML_CLOSE_RE.finditer(text):
+        closes.setdefault(_xml_name(match.group(1)), []).append((match.start(), match.end()))
+    pieces: list[str] = []
+    cursor = position = 0
+    tag_close = -1  # the first ``>`` at or after the current tag's name
+    while True:
+        opening = _XML_OPEN_RE.search(text, position)
+        if opening is None:
+            break
+        after = opening.end()
+        if text[after] == ">":
+            tag_end = after + 1
+        else:
+            if tag_close < after:
+                tag_close = text.find(">", after)
+            if tag_close < 0:
+                break  # no later opening tag can be closed either
+            tag_end = tag_close + 1
+        if _XML_MARKER_VALUE_RE.match(text, tag_end):
+            position = opening.start() + 1
+            continue
+        candidates = closes.get(_xml_name(opening.group(1)), [])
+        index = bisect.bisect_left(candidates, (tag_end, -1))
+        if index == len(candidates):
+            position = opening.start() + 1
+            continue
+        close_start, close_end = candidates[index]
+        pieces.extend((text[cursor:tag_end], MASK, text[close_start:close_end]))
+        cursor = position = close_end
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+# ``mysql ... -p<password>`` on one line: the first ``-p`` with a value after the client's name,
+# as ``(?i)(\b(?:mysql|mariadb)\b[^\r\n]*?\s-p)(?!\s)(\S+)`` finds it. As that regex, every
+# mention of the client on a line without such a flag read the line to its end again, so a line
+# of repeated ``mysql`` words was quadratic. Mentions are taken in order, so the next flag and
+# the next line break after a mention are found by searches that only move forward.
+_MYSQL_RE = re.compile(r"(?i)\b(?:mysql|mariadb)\b")
+_MYSQL_FLAG_RE = re.compile(r"(?i)\s-p(?=\S)")
+_LINE_BREAK_RE = re.compile(r"[\r\n]")
+_NON_SPACE_RE = re.compile(r"\S+")
+
+
+def _mask_mysql_passwords(text: str) -> str:
+    pieces: list[str] = []
+    cursor = position = 0
+    flag: re.Match[str] | None = None
+    flag_from = -1  # where ``flag`` was searched from; None found there means none after it
+    line_break = -1
+    while True:
+        mention = _MYSQL_RE.search(text, position)
+        if mention is None:
+            break
+        after = mention.end()
+        if flag_from < 0 or (flag is not None and flag.start() < after):
+            flag, flag_from = _MYSQL_FLAG_RE.search(text, after), after
+        if flag is None:
+            break  # no flag after this mention, so none after any later one
+        if line_break < after:
+            found = _LINE_BREAK_RE.search(text, after)
+            line_break = found.start() if found else len(text)
+        # ``[^\r\n]*?`` stops at the line break, which ``\s`` may itself be.
+        if flag.start() > line_break:
+            position = mention.start() + 1
+            continue
+        value_end = _NON_SPACE_RE.match(text, flag.end()).end()
+        pieces.extend((text[cursor:flag.end()], MASK))
+        cursor = position = value_end
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str] | Callable[[str], str], ...] = (
     # Authorization: Bearer/Basic/Digest <token>  (\S+ so base64 +/= is covered)
     (re.compile(r"(?i)(authorization:\s*(?:bearer|basic|digest|negotiate))\s+\S+"), r"\1 ***"),
     (re.compile(r"(?i)(proxy-authorization:\s*(?:bearer|basic|digest|negotiate))\s+\S+"), r"\1 ***"),
     # Cookie / Set-Cookie / X-API-Key / X-Auth-Token header lines (mask value to EOL)
     (re.compile(r"(?i)\b((?:set-)?cookie|x-api-key|x-auth-token)(\s*:\s*)[^\r\n]+"), r"\1\2***"),
-    # key=value (query / env / form) for any sensitive key name (password family included)
-    (re.compile(rf"(?i)\b({_SENSITIVE_TEXT_KEY})\s*=\s*{_NOT_WITHHELD_MARKER}([^&\s,;]+)"), r"\1=***"),
+    # key=value (query / env / form) for any sensitive key name (password family included).
+    # A key starts at a word boundary, and a name such as ``token-token-...`` has one at every
+    # hyphen; every boundary of one name shares that name's end and what follows it, so only the
+    # name's first boundary is tried (``_NAME_FIRST_BOUNDARY``), and the name before it is kept.
+    (
+        re.compile(
+            rf"(?i){_NAME_FIRST_BOUNDARY}({_SENSITIVE_TEXT_KEY_ONCE})\s*=\s*{_NOT_WITHHELD_MARKER}([^&\s,;]+)"
+        ),
+        r"\1\2=***",
+    ),
     # bare key: value (YAML/config), unquoted value of 4+ chars
-    (re.compile(rf"(?i)\b({_SENSITIVE_COLON_KEY})(\s*:\s*){_NOT_WITHHELD_MARKER}([^\s,;\"']{{4,}})"), r"\1\2***"),
+    (
+        re.compile(
+            rf"(?i){_NAME_FIRST_BOUNDARY}({_SENSITIVE_COLON_KEY_ONCE})(\s*:\s*){_NOT_WITHHELD_MARKER}"
+            r"([^\s,;\"']{4,})"
+        ),
+        r"\1\2\3***",
+    ),
     # JSON / dict-literal "key": "value". An empty value carries nothing and stays empty, so a
     # display never shows "***" where nothing was declared (N54: a seed's empty password read as
     # if a value had been stored and sent), matching the key=value rule and redact_sensitive.
     (
-        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(["\']){_NOT_WITHHELD_QUOTED}[^"\']+(["\'])'),
+        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY_ONCE}["\']\s*:\s*)(["\']){_NOT_WITHHELD_QUOTED}[^"\']+(["\'])'),
         r"\1\2***\3",
     ),
     # JSON numeric/boolean/null secret values.
     (
-        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(?:-?\d+(?:\.\d+)?|true|false|null)'),
+        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY_ONCE}["\']\s*:\s*)(?:-?\d+(?:\.\d+)?|true|false|null)'),
         r'\1"***"',
     ),
-    # HTML multipart/form fields and simple XML credential elements.
+    # HTML multipart/form fields: a part named for a secret, its blank line, then its value up to
+    # the next boundary. Every field of one line shares that line's end, so the line is read once
+    # from its start (the first secret-named field on it decides) instead of once per field: a
+    # line of ``name="password"`` fields read to its end per field took minutes on 1 MB.
     (
-        re.compile(rf'(?is)(name=["\']{_SENSITIVE_TEXT_KEY}["\'][^\r\n]*\r?\n\r?\n).*?(?=\r?\n--|$)'),
+        re.compile(
+            rf'(?is)(?<![^\r\n])((?>[^\r\n]*?name=["\']{_SENSITIVE_TEXT_KEY_ONCE}["\'])'
+            r"[^\r\n]*+\r?\n\r?\n).*?(?=\r?\n--|$)"
+        ),
         r"\1***",
     ),
-    (
-        re.compile(rf'(?is)(<({_SENSITIVE_TEXT_KEY})(?:\s[^>]*)?>)(?!\[withheld:[1-9][0-9]{{0,3}}\]</).*?(</\2\s*>)'),
-        r"\1***\3",
-    ),
+    # Simple XML credential elements.
+    _mask_xml_elements,
     # Standalone JWTs and common command-line password forms in planner/free-text output.
     (
         re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}(?![A-Za-z0-9_-])"),
         "***",
     ),
-    (re.compile(r"(?i)(\b(?:mysql|mariadb)\b[^\r\n]*?\s-p)(?!\s)(\S+)"), r"\1***"),
+    # ``mysql ... -p<password>`` command lines.
+    _mask_mysql_passwords,
     # Planner prose such as "token LEAKED_TOKEN_ABC123". Require an opaque-looking value
     # to avoid masking ordinary phrases such as "token bucket".
     (
@@ -190,6 +329,16 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"(?i)\b((?:postgres(?:ql)?|mysql|mongodb|redis|amqp|https?|ftp)://[^\s:@/]+:)(?!\[withheld:[1-9][0-9]{0,3}\]@)([^\s@/]+)(@)"),
         r"\1***\3",
     ),
+)
+
+
+def _pattern_rule(pattern: re.Pattern[str], replacement: str) -> Callable[[str], str]:
+    return lambda text: pattern.sub(replacement, text)
+
+
+# Every free-text rule, in order.
+_TEXT_RULES: tuple[Callable[[str], str], ...] = tuple(
+    rule if callable(rule) else _pattern_rule(*rule) for rule in _TEXT_PATTERNS
 )
 
 _EMPTY = (None, "", [], {})
@@ -250,8 +399,8 @@ def redact_text(text: Any, *, known_values=()) -> Any:
         return text
     for value in sorted({value for value in known_values if isinstance(value, str) and value}, key=len, reverse=True):
         text = text.replace(value, MASK)
-    for pattern, replacement in _TEXT_PATTERNS:
-        text = pattern.sub(replacement, text)
+    for rule in _TEXT_RULES:
+        text = rule(text)
     return text
 
 
