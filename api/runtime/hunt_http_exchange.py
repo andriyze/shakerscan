@@ -10,7 +10,7 @@ import copy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import json
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 import uuid
 
 from .hunt_http_exchange_contract import pointer_get, pointer_set
@@ -63,6 +63,8 @@ class HttpWorkflowExchange:
     encrypted_result: str | None = field(default=None, repr=False)
     captured_names: tuple[str, ...] = ()
     capture_error: str | None = None
+    # Withheld values this request sends (worker-private): scrubbed from the planner's view.
+    bound_values: list[str] = field(default_factory=list, repr=False)
 
     def __repr__(self) -> str:
         return f"HttpWorkflowExchange(action_id={self.action_id!r}, secret_values_visible=False)"
@@ -137,6 +139,136 @@ async def _captured_value(conn: Any, *, run_id: str, target: TargetBinding, bind
         raise ValueError("HTTP workflow response reference is expired or no longer bound to this Hunt") from None
 
 
+# --- Withheld values -------------------------------------------------------------------------
+# A capability output (an artifact window, an HTTP body sample) withholds credential-shaped values
+# behind ``[withheld:n]`` markers (archive_body_masking). The raw values are sealed here, on the
+# same encrypted, Hunt- and target-bound, expiring action row a response capture uses, and cleared
+# with it when the Hunt ends. A later ``http.request`` binds one by ``withheld_ref`` under the same
+# active-testing authority, budget and scope as any other workflow binding (N56).
+
+WITHHELD_SCHEMA_KEY = "withheld"
+_MAX_WITHHELD_PAYLOAD_BYTES = 65_536
+
+
+def _private_payload(run_id: str, action_id: str, target: TargetBinding) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    return {"schema_version": SCHEMA, "hunt_id": run_id, "source_action_id": action_id,
+        "target_digest": _target_digest(target),
+        "expires_at": (now + timedelta(seconds=CAPTURE_TTL_SECONDS)).isoformat(), "values": {}}
+
+
+# Capabilities whose planner-facing output carries a sample of the target's response body.
+WITHHOLDING_CAPABILITIES = frozenset({"artifact.inspect", "http.request"})
+
+
+def withholding_operation(capability_name: str, action_id: Any, operation: Callable[[], Awaitable[Any]]):
+    """``(operation, collector)``: run a body-sampling capability with a withheld-value collector.
+
+    Inside it, every value the body masking withholds becomes a ``[withheld:n]`` marker and stays
+    in the collector; other capabilities run unchanged with no collector.
+    """
+    if capability_name not in WITHHOLDING_CAPABILITIES:
+        return operation, None
+    from .archive_body_masking import WithheldValues, collecting_withheld_values
+    collector = WithheldValues(str(action_id))
+
+    async def collecting() -> Any:
+        with collecting_withheld_values(collector):
+            return await operation()
+
+    return collecting, collector
+
+
+async def persist_withheld_values(
+    conn: Any, *, run: Mapping[str, Any], action_id: Any, target: TargetBinding,
+    values: Any, status: str, observations: Any = None,
+) -> int:
+    """Seal the values an action's output withheld; returns how many are referenceable.
+
+    ``values`` is ``{number: value}`` or the action's collector, of which only the values whose
+    markers reached ``observations`` (the planner's view) are sealed: a workflow response reduced
+    to its status shows none. Merged into the action's private result, beside any response
+    capture. Values past the payload bound are dropped, so their references refuse rather than
+    send something else.
+    """
+    if values is None:
+        return 0
+    if not isinstance(values, Mapping):
+        collector = values
+        values = collector.shown_values(json.dumps(observations, default=str))
+        collector.values.clear()
+    if not values or status != "success" or run["status"] not in {
+            "active", "awaiting_planner", "budget_exhausted"} or run.get("completed_at"):
+        return 0
+    run_id, source_id = str(run["id"]), str(uuid.UUID(str(action_id)))
+    row = await conn.fetchrow("SELECT private_http_result FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2",
+        uuid.UUID(source_id), uuid.UUID(run_id))
+    payload = _private_payload(run_id, source_id, target)
+    existing = str(row["private_http_result"] or "") if row else ""
+    if existing.startswith("enc:fernet:"):
+        try:
+            prior = json.loads(decrypt_secret(existing))
+            if prior.get("hunt_id") == run_id and prior.get("source_action_id") == source_id:
+                payload = prior
+        except Exception:
+            payload = _private_payload(run_id, source_id, target)
+    kept: dict[str, str] = {}
+    for number, value in sorted(values.items()):
+        payload[WITHHELD_SCHEMA_KEY] = {**kept, str(int(number)): str(value)}
+        if len(json.dumps(payload, ensure_ascii=False).encode()) > _MAX_WITHHELD_PAYLOAD_BYTES:
+            break
+        kept[str(int(number))] = str(value)
+    payload[WITHHELD_SCHEMA_KEY] = kept
+    try:
+        sealed = encrypt_secret(json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")))
+    except Exception:
+        sealed = None  # no encryption key: the values stay withheld and unreferenceable
+    finally:
+        payload.clear()
+    if not str(sealed or "").startswith("enc:fernet:"):
+        return 0  # never store a withheld value in clear
+    await conn.execute("UPDATE hunt_actions SET private_http_result=$3 WHERE id=$1 AND hunt_run_id=$2",
+        uuid.UUID(source_id), uuid.UUID(run_id), sealed)
+    return len(kept)
+
+
+async def settle_private_results(
+    conn: Any, *, run: Mapping[str, Any], status: str, exchange: HttpWorkflowExchange | None,
+    withheld: Any, action_id: Any, target: TargetBinding, observations: Any,
+    receipt_result: dict[str, Any],
+) -> None:
+    """Inside the action's settlement: persist its response captures and seal its withheld values."""
+    if exchange is not None:
+        await exchange.persist(conn, run=run, status=status)
+        receipt_result["captures"] = exchange.public_result()
+    await persist_withheld_values(conn, run=run, action_id=action_id, target=target,
+        values=withheld, status=status, observations=observations)
+
+
+async def _withheld_value(conn: Any, *, run_id: str, target: TargetBinding, reference: str) -> str:
+    from .archive_body_masking import WITHHELD_REF_RE
+    match = WITHHELD_REF_RE.fullmatch(str(reference))
+    if match is None:
+        raise ValueError("withheld value reference is invalid")
+    source_id, number = match.group(1), int(match.group(2))
+    row = await conn.fetchrow("""SELECT private_http_result FROM hunt_actions
+        WHERE id=$1 AND hunt_run_id=$2 AND status='completed'""", uuid.UUID(source_id), uuid.UUID(run_id))
+    ciphertext = str(row["private_http_result"] or "") if row else ""
+    if len(ciphertext) > 131_072 or not ciphertext.startswith("enc:fernet:"):
+        raise ValueError("withheld value reference is unavailable in this Hunt")
+    try:
+        private = json.loads(decrypt_secret(ciphertext))
+        expires_at = datetime.fromisoformat(private["expires_at"])
+        if (private["schema_version"] != SCHEMA or private["hunt_id"] != run_id
+                or private["source_action_id"] != source_id
+                or private["target_digest"] != _target_digest(target)
+                or expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc)):
+            raise ValueError("binding changed or expired")
+        return str(_scalar(private[WITHHELD_SCHEMA_KEY][str(number)]))
+    except Exception:
+        raise ValueError("withheld value reference is expired or no longer bound to this Hunt") from None
+
+
 async def prepare_http_exchange(
     conn: Any, *, run: Mapping[str, Any], action_id: Any, target: TargetBinding,
     context: Mapping[str, Any], policy: Mapping[str, Any], values: Mapping[str, Any],
@@ -154,7 +286,10 @@ async def prepare_http_exchange(
     inputs.pop("request_bindings", None)
     headers = dict(trusted_headers)
     for binding in values.get("request_bindings") or ():
-        if "source_action_id" in binding:
+        if "withheld_ref" in binding:
+            value = await _withheld_value(conn, run_id=run_id, target=target, reference=binding["withheld_ref"])
+            exchange.bound_values.append(str(value))
+        elif "source_action_id" in binding:
             value = await _captured_value(conn, run_id=run_id, target=target, binding=binding)
         else:
             selected = ({"profile_id": binding["profile_id"], "profile_version": binding["profile_version"]}

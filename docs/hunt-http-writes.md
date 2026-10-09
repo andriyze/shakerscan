@@ -94,6 +94,41 @@ is labeled as such, not falsely attributed to a verified managed-principal ident
 A captured reference or HTTP 200 alone is not universal proof of successful pairing;
 interpret the protocol's confirmation and the authenticated follow-up together.
 
+## Withheld target secrets
+
+Capability outputs a planner reads (`artifact.inspect` text samples and `http.request` body
+samples) apply the same body masking as the masked HTTP archive: values under or beside a
+secret name in JSON, YAML, assignments, form fields, markup key/value pairs
+(`<add key="ApiKey" value="...">`), labelled table cells (phpinfo-style `DB_PASSWORD` rows),
+SQL dump `INSERT`/`COPY` rows, and provider-format secrets. Inside a Hunt each withheld value
+appears as a marker such as `[withheld:2]`, and the observation's `withheld_values` lists its
+reference (`withheld://hunt/<action id>/2`), a masked preview of at most three characters,
+its length and a keyed fingerprint. The raw value never reaches the planner or the model
+provider.
+
+To test whether a leaked credential grants access, bind it by reference:
+
+```json
+{
+  "method": "GET",
+  "path": "/hub/admin",
+  "request_bindings": [
+    {"withheld_ref": "withheld://hunt/44444444-4444-4444-8444-444444444444/2", "header": "X-Admin-Token"}
+  ]
+}
+```
+
+A withheld-value binding is a workflow binding: it needs the Hunt's active testing permission
+and an active-action allowance, and it keeps the target, scope and budget rules of any other
+request. The worker resolves the value from the source action's encrypted private result,
+which is bound to this Hunt and target, expires after one hour, and is cleared when the Hunt
+ends. Only values whose markers reached the planner are sealed. When every binding of a
+request is a withheld value, the planner keeps the response summary, with each bound value
+replaced by `[withheld:bound]` wherever the target echoes it. The archive still treats that
+request as a private workflow. These uses are not entries in `hunt_credential_uses`, which
+records saved credential profiles only. The request's bindings name the reference that was
+used.
+
 ## Active collection replay
 
 Bind an existing encrypted collection and its `confirmed_active` selection when starting

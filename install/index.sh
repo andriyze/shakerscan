@@ -695,6 +695,7 @@ download "$REPO_RAW_BASE/api/runtime/observation_manifests.py" "$INSTALL_DIR/api
 download "$REPO_RAW_BASE/api/runtime/receipts.py" "$INSTALL_DIR/api/runtime/receipts.py"
 download "$REPO_RAW_BASE/api/runtime/request_shape.py" "$INSTALL_DIR/api/runtime/request_shape.py"
 download "$REPO_RAW_BASE/api/runtime/json_fields.py" "$INSTALL_DIR/api/runtime/json_fields.py"
+download "$REPO_RAW_BASE/api/runtime/archive_body_masking.py" "$INSTALL_DIR/api/runtime/archive_body_masking.py"
 download "$REPO_RAW_BASE/api/agent_tools.py" "$INSTALL_DIR/api/agent_tools.py"
 download "$REPO_RAW_BASE/api/check_registry.py" "$INSTALL_DIR/api/check_registry.py"
 download "$REPO_RAW_BASE/api/http_experiment.py" "$INSTALL_DIR/api/http_experiment.py"

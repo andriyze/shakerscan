@@ -36,22 +36,29 @@ is untouched; it is a separate, deployment-gated choice.
 
 from __future__ import annotations
 
+import html
 import json
 import math
 import re
-from typing import Any
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Iterator
 
 try:
     from capabilities.secret_material import (
         SELF_EVIDENT_SECRET_PATTERNS,
         is_non_secret_value_shape,
         is_redactable_key_name,
+        is_secret_key_name,
+        normalized_key_name,
     )
 except ModuleNotFoundError:  # package import layout
     from api.capabilities.secret_material import (
         SELF_EVIDENT_SECRET_PATTERNS,
         is_non_secret_value_shape,
         is_redactable_key_name,
+        is_secret_key_name,
+        normalized_key_name,
     )
 
 try:
@@ -60,6 +67,134 @@ except ModuleNotFoundError:  # package import layout
     from scanner.redaction import MASK, is_sensitive_key
 
 _MASKED_JSON_VALUE = json.dumps(MASK)
+
+
+# --- Withheld-value references (Hunt) ----------------------------------------------------------
+# A masked archive view replaces every withheld value with ``***``. A Hunt planner reads the same
+# masking through its capability outputs, but must still be able to *use* a leaked credential (the
+# "leaked secret -> access" test). While a collector is active, each withheld value is replaced by
+# a short marker (``[withheld:3]``) and the raw value stays in the collector, which the worker
+# seals into the action's encrypted private result. The planner binds the value back into a later
+# request by its reference (``withheld://hunt/<action id>/3``); the raw value never leaves the
+# worker. Without a collector (the archive export and every other caller) nothing changes.
+
+WITHHELD_MARKER_RE = re.compile(r"\[withheld:([1-9][0-9]{0,3})\]")
+WITHHELD_REF_RE = re.compile(
+    r"^withheld://hunt/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/([1-9][0-9]{0,3})$"
+)
+MAX_WITHHELD_VALUES = 64
+MAX_WITHHELD_VALUE_CHARS = 8_192
+# Fingerprints are scrypt (memory-hard by design), so only the first few are computed.
+_MAX_FINGERPRINTED_REFERENCES = 20
+
+
+def withheld_preview(value: str) -> str:
+    """A masked preview: at most the first three characters of a long value, never more."""
+    return (value[:3] + "…") if len(value) >= 16 else "…"
+
+
+class WithheldValues:
+    """Raw values withheld from one capability output, numbered in first-seen order.
+
+    Worker-private: ``repr`` never shows a value. ``entries`` gives the public view (reference,
+    marker, masked preview, length, keyed fingerprint), never a value.
+    """
+
+    def __init__(self, action_id: str, *, limit: int = MAX_WITHHELD_VALUES) -> None:
+        self.action_id = str(action_id)
+        self.limit = limit
+        self.values: list[str] = []
+        self._numbers: dict[str, int] = {}
+        self._fingerprints: dict[int, str | None] = {}
+
+    def __repr__(self) -> str:
+        return f"WithheldValues(action_id={self.action_id!r}, count={len(self.values)}, values_visible=False)"
+
+    def marker(self, raw: str) -> str:
+        value = str(raw).strip()
+        if WITHHELD_MARKER_RE.fullmatch(value):
+            return value  # already withheld by an earlier pass: keep its reference
+        if (
+            not value or value == MASK or len(value) > MAX_WITHHELD_VALUE_CHARS
+            or WITHHELD_MARKER_RE.search(value)
+        ):
+            return MASK
+        number = self._numbers.get(value)
+        if number is None:
+            if len(self.values) >= self.limit:
+                return MASK
+            self.values.append(value)
+            number = len(self.values)
+            self._numbers[value] = number
+        return f"[withheld:{number}]"
+
+    def shown_numbers(self, *texts: str | None) -> list[int]:
+        numbers: set[int] = set()
+        for text in texts:
+            if text:
+                numbers.update(int(match.group(1)) for match in WITHHELD_MARKER_RE.finditer(text))
+        return sorted(item for item in numbers if 1 <= item <= len(self.values))
+
+    def shown_values(self, *texts: str | None) -> dict[int, str]:
+        """The values whose markers reached a public output: only these are worth sealing."""
+        return {number: self.values[number - 1] for number in self.shown_numbers(*texts)}
+
+    def reference(self, number: int) -> str:
+        return f"withheld://hunt/{self.action_id}/{number}"
+
+    def entries(self, *texts: str | None) -> list[dict[str, Any]]:
+        """Public entries for the markers that appear in ``texts`` (all when none are given)."""
+        shown = self.shown_numbers(*texts) if texts else range(1, len(self.values) + 1)
+        result = []
+        for number in shown:
+            value = self.values[number - 1]
+            result.append({
+                "ref": self.reference(number),
+                "marker": f"[withheld:{number}]",
+                "preview": withheld_preview(value),
+                "length": len(value),
+                "fingerprint": self._fingerprint(number, value),
+            })
+        return result
+
+    def _fingerprint(self, number: int, value: str) -> str | None:
+        if number not in self._fingerprints:
+            if len(self._fingerprints) >= _MAX_FINGERPRINTED_REFERENCES:
+                return None
+            try:
+                from capabilities.secret_material import value_fingerprint
+            except ModuleNotFoundError:  # package import layout
+                from api.capabilities.secret_material import value_fingerprint
+            self._fingerprints[number] = value_fingerprint(value)
+        return self._fingerprints[number]
+
+
+_COLLECTOR: ContextVar[WithheldValues | None] = ContextVar("withheld_values", default=None)
+
+
+@contextmanager
+def collecting_withheld_values(collector: WithheldValues) -> Iterator[WithheldValues]:
+    """Within this context, masking keeps withheld values in ``collector`` behind markers."""
+    token = _COLLECTOR.set(collector)
+    try:
+        yield collector
+    finally:
+        _COLLECTOR.reset(token)
+
+
+def active_withheld_values() -> WithheldValues | None:
+    return _COLLECTOR.get()
+
+
+def _withhold(raw: str) -> str:
+    """The replacement for one withheld value: ``***``, or a marker while collecting."""
+    collector = _COLLECTOR.get()
+    return MASK if collector is None else collector.marker(raw)
+
+
+def _withhold_json(raw: str) -> str:
+    collector = _COLLECTOR.get()
+    return _MASKED_JSON_VALUE if collector is None else json.dumps(collector.marker(raw))
 # Keys that name a value but are not secret-named themselves: a Postman variable's ``key``,
 # an i18n table's ``keys``. Their *value* is a name, judged by the descriptor rule below.
 _NEUTRAL_KEYS = frozenset({"key", "keys"})
@@ -93,9 +228,44 @@ def is_withheld_key(key: Any) -> bool:
     if not text or len(text) > _KEY_MAX_CHARS or text.startswith("/"):
         # A route (``/auth/token``) in a specification's ``paths`` is not a secret name.
         return False
-    if text.lower() in _NEUTRAL_KEYS:
+    normalized = normalized_key_name(text)
+    if (
+        text.lower() in _NEUTRAL_KEYS or normalized in _NON_SECRET_KEY_NAMES
+        or normalized.rsplit("_", 1)[-1] in _DESCRIPTIVE_LAST_SEGMENTS
+    ):
         return False
     return is_redactable_key_name(text) or is_sensitive_key(text)
+
+
+# Database and structure terms that end in ``key`` but name no secret: a ``Primary key`` label in
+# a schema page, a DynamoDB ``sort_key``, a published ``public_key`` (PR #361 review).
+_NON_SECRET_KEY_NAMES = frozenset({
+    "primary_key", "primary_keys", "foreign_key", "foreign_keys", "unique_key", "sort_key",
+    "partition_key", "hash_key", "range_key", "composite_key", "surrogate_key", "natural_key",
+    "candidate_key", "index_key", "public_key", "publishable_key",
+})
+# A last word that makes the name describe a secret rather than hold it: ``tokens_used: 42``,
+# ``password_length``, ``token_type: bearer``, ``session_expires``.
+_DESCRIPTIVE_LAST_SEGMENTS = frozenset({
+    "used", "count", "counts", "remaining", "limit", "limits", "total", "length", "size",
+    "ttl", "type", "expires", "expiry", "expiration", "enabled", "required", "policy",
+})
+# A name whose last word says its value is a location (``Token URL``, ``tokenUrl``,
+# ``auth_endpoint``): a plain URL under it is where a secret is exchanged, not the secret.
+_LOCATION_SEGMENTS = frozenset({"url", "uri", "endpoint", "href", "link"})
+_URL_VALUE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]{0,30}://")
+
+
+def is_location_value(key: Any, value: Any) -> bool:
+    """Whether ``value`` is a credential-free URL under a name that says it is a location."""
+    if not isinstance(value, str) or key is None:
+        return False
+    text = value.strip().strip("\"'")
+    segments = normalized_key_name(str(key)).split("_")
+    return (
+        segments[-1] in _LOCATION_SEGMENTS and bool(_URL_VALUE_RE.match(text))
+        and is_non_secret_value_shape(text)
+    )
 
 
 def _opens_credential_context(key: Any) -> bool:
@@ -130,7 +300,10 @@ def _is_credential_shaped(token: str) -> bool:
 def mask_credential_shaped(text: str) -> str:
     """Withhold every credential-shaped token in ``text`` (one linear scan)."""
     return _CREDENTIAL_TOKEN_RE.sub(
-        lambda match: MASK if _is_credential_shaped(match.group(0)) else match.group(0), text,
+        lambda match: (
+            _withhold(match.group(0)) if _is_credential_shaped(match.group(0)) else match.group(0)
+        ),
+        text,
     )
 
 
@@ -242,7 +415,9 @@ def mask_json_text(text: str) -> str:
     cursor = 0
     for start, end, frame, key in values:
         if withheld_in(frame, key) or frame_withheld(frame):
-            replacement = _MASKED_JSON_VALUE
+            if text[start] == '"' and is_location_value(key, _string_value(text[start:end])):
+                continue
+            replacement = _withhold_json(_string_value(text[start:end]))
         elif text[start] == '"':
             # Prose and examples inside a string: a key walk never reads them.
             decoded = _string_value(text[start:end])
@@ -286,7 +461,7 @@ def _yaml_line(line: str) -> tuple[int, bool, str | None, str | None, int]:
 
 
 def _masked_line(line: str, offset: int) -> str:
-    return line[:offset] + MASK
+    return line[:offset] + _withhold(line[offset:].strip().strip("\"'"))
 
 
 def mask_yaml_text(text: str) -> str:
@@ -366,7 +541,9 @@ def mask_yaml_text(text: str) -> str:
     if not any(masked) and not shaped:
         return text
     return "\n".join(
-        _masked_line(line, parsed[index][4]) if masked[index] else shaped.get(index, line)
+        _masked_line(line, parsed[index][4])
+        if masked[index] and not is_location_value(parsed[index][2], parsed[index][3])
+        else shaped.get(index, line)
         for index, line in enumerate(lines)
     )
 
@@ -400,7 +577,7 @@ def mask_html_fields(text: str) -> str:
                 continue
             quote = item.group(2)[0] if item.group(2)[0] in "\"'" else '"'
             pieces.append(body[cursor:item.start(2)])
-            pieces.append(f"{quote}{MASK}{quote}")
+            pieces.append(f"{quote}{_withhold(item.group(2).strip(chr(34) + chr(39)))}{quote}")
             cursor = item.end(2)
         pieces.append(body[cursor:])
         start = match.start(1) - match.start(0)
@@ -444,7 +621,7 @@ def mask_embedded_objects(text: str) -> str:
             if token[0] in "\"'" and _KEY_SUFFIX_RE.match(text, literal.end()):
                 continue  # a key names a field; only values are withheld
             pieces.append(text[cursor:literal.start()])
-            pieces.append(f'"{MASK}"')
+            pieces.append(f'"{_withhold(token[1:-1] if token[0] in chr(34) + chr(39) else token)}"')
             cursor = literal.end()
         pieces.append(text[cursor:end])
         cursor = end
@@ -461,7 +638,8 @@ def mask_embedded_objects(text: str) -> str:
 # words are separated by spaces or tabs only, so a label never spans lines. A value that opens
 # an object or array is left to the embedded-object pass.
 _TEXT_ASSIGNMENT_RE = re.compile(
-    r"(?<![A-Za-z0-9_.\-])((?:[A-Za-z][A-Za-z0-9_\-]{0,40}[ \t]){0,2}[A-Za-z_][A-Za-z0-9_.\-]{0,80})"
+    # ``<`` too: in ``<add key="ApiKey" ...>`` the tag name is not the first word of a label.
+    r"(?<![A-Za-z0-9_.\-<])((?:[A-Za-z][A-Za-z0-9_\-]{0,40}[ \t]){0,2}[A-Za-z_][A-Za-z0-9_.\-]{0,80})"
     r"([\"']?[ \t]*[:=][ \t]*[\"']?)"
     # The value is only looked at, not consumed, so a value that itself starts a label
     # (``description: 'Signing key: ...'``) is scanned again as one.
@@ -475,11 +653,304 @@ def mask_text_assignments(text: str) -> str:
     cursor = 0
     for match in _TEXT_ASSIGNMENT_RE.finditer(text):
         # ``Master key`` reads as ``master_key``; a lone neutral ``key`` stays a name.
-        if match.start(3) < cursor or not is_withheld_key(re.sub(r"[ \t]+", "_", match.group(1))):
+        label = re.sub(r"[ \t]+", "_", match.group(1))
+        if match.start(3) < cursor or not is_withheld_key(label):
+            continue
+        if is_location_value(label, match.group(3)):
             continue
         pieces.append(text[cursor:match.start(3)])
-        pieces.append(MASK)
+        pieces.append(_withhold(match.group(3)))
         cursor = match.end(3)
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+# --- Markup key/value pairs (web.config, XML settings) -----------------------------------------
+# ``<add key="ApiKey" value="..."/>``: the secret name is the value of one attribute and the secret
+# the value of another, so neither a key walk nor an assignment scan sees the pair (N56).
+
+_MARKUP_TAG_RE = re.compile(r"<[A-Za-z][\w:.\-]{0,63}([^<>]{0,4096})>")
+_MARKUP_NAME_ATTRIBUTES = frozenset({
+    "key", "name", "id", "property", "param", "setting", "variable", "env",
+})
+_MARKUP_VALUE_ATTRIBUTES = frozenset({"value", "content", "default", "val", "data"})
+
+
+def _names_secret(name: str) -> bool:
+    """A name that holds a secret, by the narrow configuration contract (not ``Primary key``)."""
+    return bool(name) and is_secret_key_name(name, server_side=True)
+
+
+def mask_markup_pairs(text: str) -> str:
+    """Withhold the value attribute of a markup element whose name attribute is secret."""
+    def tag(match: re.Match[str]) -> str:
+        body = match.group(1)
+        attributes = list(_HTML_ATTRIBUTE_RE.finditer(body))
+        names = [
+            item.group(2).strip("\"'") for item in attributes
+            if item.group(1).lower() in _MARKUP_NAME_ATTRIBUTES
+        ]
+        secret_name = next((name for name in names if _names_secret(name)), None)
+        if secret_name is None:
+            return match.group(0)
+        pieces: list[str] = []
+        cursor = 0
+        for item in attributes:
+            if item.group(1).lower() not in _MARKUP_VALUE_ATTRIBUTES:
+                continue
+            raw = item.group(2).strip("\"'")
+            if not raw or is_location_value(secret_name, raw):
+                continue
+            quote = item.group(2)[0] if item.group(2)[0] in "\"'" else '"'
+            pieces.append(body[cursor:item.start(2)])
+            pieces.append(f"{quote}{_withhold(html.unescape(raw))}{quote}")
+            cursor = item.end(2)
+        if not pieces:
+            return match.group(0)
+        pieces.append(body[cursor:])
+        start = match.start(1) - match.start(0)
+        return match.group(0)[:start] + "".join(pieces) + match.group(0)[start + len(body):]
+
+    return _MARKUP_TAG_RE.sub(tag, text)
+
+
+# --- HTML table cells (phpinfo, admin and status pages) ----------------------------------------
+# ``<tr><td class="e">DB_PASSWORD</td><td class="v">...</td></tr>``: the label is one cell and the
+# secret the next ones in the same row; or a header row names the column (N56).
+
+_TABLE_CELL_RE = re.compile(r"(?i)<(t[dh])\b[^<>]{0,512}>([^<]{0,4096})")
+_ROW_BREAK_RE = re.compile(r"(?i)<(/?)(tr|table)\b")
+
+
+def _cell_label(text: str) -> str:
+    # phpinfo labels environment entries ``$_SERVER['DB_PASSWORD']``.
+    return html.unescape(text).strip().strip("$_[]'\" ")
+
+
+def mask_table_cells(text: str) -> str:
+    """Withhold table cells labelled as secrets by their row's first cell or column header."""
+    pieces: list[str] = []
+    cursor = 0
+    previous_end = 0
+    columns: list[bool] = []
+    row_tags: list[str] = []
+    row_labels: list[bool] = []
+    row_secret = False
+    for cell in _TABLE_CELL_RE.finditer(text):
+        breaks = list(_ROW_BREAK_RE.finditer(text, previous_end, cell.start())) if row_tags else []
+        if breaks or not row_tags:
+            if row_tags and all(tag == "th" for tag in row_tags):
+                columns = row_labels  # a header row names the columns of the rows below it
+            if any(item.group(2).lower() == "table" for item in breaks):
+                columns = []
+            row_tags, row_labels, row_secret = [], [], False
+        previous_end = cell.end()
+        tag, content = cell.group(1).lower(), cell.group(2)
+        index = len(row_tags)
+        row_tags.append(tag)
+        row_labels.append(_names_secret(_cell_label(content)))
+        if tag == "th":
+            continue
+        column_secret = index < len(columns) and columns[index]
+        if index == 0 and not column_secret:
+            row_secret = row_labels[0]
+            continue
+        if not (row_secret or column_secret):
+            continue
+        value = html.unescape(content).strip()
+        if not value or value == MASK or WITHHELD_MARKER_RE.fullmatch(value):
+            continue
+        if _URL_VALUE_RE.match(value) and is_non_secret_value_shape(value):
+            continue
+        leading = len(content) - len(content.lstrip())
+        trailing = len(content.rstrip())
+        pieces.append(text[cursor:cell.start(2) + leading])
+        pieces.append(_withhold(value))
+        cursor = cell.start(2) + trailing
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+# --- SQL dumps -----------------------------------------------------------------------------------
+# A leaked ``backup.sql`` carries credentials as quoted literals in ``INSERT`` rows (and pg_dump
+# ``COPY`` rows). A literal is withheld when its column is secret-named (from the statement's
+# column list or the dump's ``CREATE TABLE``) or when it looks like a key by itself: a key-like
+# prefix (``ak_``, ``st_``, ``sk_live_``) or a long mixed-class token. UUIDs and hex digests (a git
+# SHA, a SHA-256) are identifiers, not keys, and stay visible (N56).
+
+_SQL_STATEMENT_RE = re.compile(
+    r"(?i)\b(?:(CREATE[ \t\r\n]{1,16}TABLE)(?:[ \t\r\n]{1,16}IF[ \t\r\n]{1,16}NOT[ \t\r\n]{1,16}EXISTS)?"
+    r"|(INSERT)(?:[ \t\r\n]{1,16}IGNORE)?[ \t\r\n]{1,16}INTO|(COPY))[ \t\r\n]{1,16}"
+    r"((?:[`\"\[]?[\w$]{1,64}[`\"\]]?\.){0,2}[`\"\[]?[\w$]{1,64}[`\"\]]?)[ \t\r\n]{0,16}"
+)
+_SQL_TOKEN_RE = re.compile(
+    r"'(?:[^'\\]|\\.|'')*'?|\"(?:[^\"\\]|\\.)*\"?|`[^`]*`?|[(),;]|[^\s'\"`(),;]+|\s+"
+)
+_SQL_CONSTRAINT_WORDS = frozenset({
+    "primary", "unique", "key", "constraint", "index", "foreign", "check", "fulltext", "spatial",
+    "exclude", "like", "period",
+})
+_SQL_VALUES_RE = re.compile(r"(?i)[ \t\r\n]{0,16}VALUES?\b")
+_SQL_COPY_FROM_STDIN_RE = re.compile(r"(?i)[ \t\r\n]{0,16}FROM[ \t]{1,16}stdin")
+_SQL_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0"}
+_KEYLIKE_PREFIX_RE = re.compile(r"^[A-Za-z]{2,8}_(?:(?:live|test|prod)_)?[A-Za-z0-9]{16,256}$")
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_HEX_DIGEST_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+# A dump's column lists are remembered for at most this many tables.
+_MAX_SQL_TABLES = 256
+
+
+def _sql_identifier(token: str) -> str:
+    return token.strip().split(".")[-1].strip("`\"[]")
+
+
+def looks_like_key_literal(value: str) -> bool:
+    """A literal that is a key by its own shape: a key-like prefix or a long mixed-class token."""
+    if _UUID_RE.match(value) or _HEX_DIGEST_RE.match(value):
+        return False
+    if _KEYLIKE_PREFIX_RE.match(value):
+        return True
+    return bool(_CREDENTIAL_TOKEN_RE.fullmatch(value)) and _is_credential_shaped(value)
+
+
+def _sql_secret_literal(value: str, column: str | None) -> bool:
+    if not value or value.upper() in {"NULL", "\\N"}:
+        return False
+    if column is not None and _names_secret(column):
+        return not is_location_value(column, value)
+    return looks_like_key_literal(value)
+
+
+def _sql_unquote(token: str) -> str:
+    quote = token[0]
+    inner = token[1:-1] if len(token) > 1 and token.endswith(quote) else token[1:]
+    if quote == "'":
+        inner = inner.replace("''", "'")
+        inner = re.sub(r"\\(.)", lambda match: _SQL_ESCAPES.get(match.group(1), match.group(1)), inner)
+    return inner
+
+
+def _sql_columns(text: str, position: int) -> tuple[list[str], int]:
+    """The column names of the parenthesised definition or list at ``position``, and its end."""
+    columns: list[str] = []
+    depth = 0
+    expect_name = False
+    for token in _SQL_TOKEN_RE.finditer(text, position):
+        value = token.group(0)
+        if value == "(":
+            depth += 1
+            expect_name = depth == 1
+            continue
+        if value.isspace():
+            continue
+        if depth <= 0 or value == ";":
+            return columns, token.start()
+        if value == ")":
+            depth -= 1
+            if depth == 0:
+                return columns, token.end()
+        elif value == ",":
+            expect_name = depth == 1
+        elif expect_name:
+            expect_name = False
+            name = _sql_identifier(value)
+            if name.lower() not in _SQL_CONSTRAINT_WORDS:
+                columns.append(name)
+    return columns, len(text)
+
+
+def _sql_rows(
+    text: str, position: int, columns: list[str], pieces: list[str], cursor: int,
+) -> tuple[int, int]:
+    """Withhold the secret literals of ``VALUES (...), (...);``; returns (end, cursor)."""
+    depth = 0
+    index = 0
+    for token in _SQL_TOKEN_RE.finditer(text, position):
+        value = token.group(0)
+        if value == "(":
+            depth += 1
+            if depth == 1:
+                index = 0
+        elif value == ")":
+            depth -= 1
+        elif value == ",":
+            if depth == 1:
+                index += 1
+        elif value == ";" and depth <= 0:
+            return token.end(), cursor
+        elif depth == 1 and value[0] in "'\"":
+            raw = _sql_unquote(value)
+            column = columns[index] if index < len(columns) else None
+            if _sql_secret_literal(raw, column):
+                pieces.append(text[cursor:token.start()])
+                pieces.append(f"{value[0]}{_withhold(raw)}{value[0]}")
+                cursor = token.end()
+    return len(text), cursor
+
+
+def _copy_rows(
+    text: str, position: int, columns: list[str], pieces: list[str], cursor: int,
+) -> tuple[int, int]:
+    """Withhold the secret fields of pg_dump ``COPY ... FROM stdin;`` rows up to ``\\.``."""
+    line_start = text.find("\n", position)
+    if line_start < 0:
+        return len(text), cursor
+    line_start += 1
+    while line_start < len(text):
+        line_end = text.find("\n", line_start)
+        line_end = len(text) if line_end < 0 else line_end
+        line = text[line_start:line_end]
+        if line.rstrip("\r") == "\\.":
+            return line_end, cursor
+        field_start = line_start
+        for index, field in enumerate(line.split("\t")):
+            column = columns[index] if index < len(columns) else None
+            raw = field.rstrip("\r")
+            if _sql_secret_literal(raw, column):
+                pieces.append(text[cursor:field_start])
+                pieces.append(_withhold(raw))
+                cursor = field_start + len(raw)
+            field_start += len(field) + 1
+        line_start = line_end + 1
+    return len(text), cursor
+
+
+def mask_sql_values(text: str) -> str:
+    """Withhold credential literals in SQL dump ``INSERT`` and ``COPY`` rows (one linear scan)."""
+    tables: dict[str, list[str]] = {}
+    pieces: list[str] = []
+    cursor = 0
+    position = 0
+    while True:
+        statement = _SQL_STATEMENT_RE.search(text, position)
+        if statement is None:
+            break
+        table = _sql_identifier(statement.group(4)).lower()
+        after = statement.end()
+        if statement.group(1):
+            columns, end = _sql_columns(text, after)
+            if columns and (table in tables or len(tables) < _MAX_SQL_TABLES):
+                tables[table] = columns
+            position = max(end, after)
+            continue
+        columns = tables.get(table, [])
+        if text.startswith("(", after):
+            columns, after = _sql_columns(text, after)
+        if statement.group(3):
+            if not _SQL_COPY_FROM_STDIN_RE.match(text, after):
+                position = after
+                continue
+            position, cursor = _copy_rows(text, after, columns, pieces, cursor)
+            continue
+        values = _SQL_VALUES_RE.match(text, after)
+        if values is None:
+            position = after
+            continue
+        position, cursor = _sql_rows(text, values.end(), columns, pieces, cursor)
     if not pieces:
         return text
     pieces.append(text[cursor:])
@@ -496,7 +967,7 @@ _PRIVATE_KEY_BLOCK_RE = re.compile(
 
 def mask_provider_secrets(text: str) -> str:
     """Mask every provider-format secret, screened or not, and every private key block."""
-    text = _PRIVATE_KEY_BLOCK_RE.sub(MASK, text)
+    text = _PRIVATE_KEY_BLOCK_RE.sub(lambda match: _withhold(match.group(0)), text)
     for label, pattern in SELF_EVIDENT_SECRET_PATTERNS:
         if label == "private_key" or not pattern.groups:
             continue
@@ -504,7 +975,7 @@ def mask_provider_secrets(text: str) -> str:
         def replace(match: re.Match[str]) -> str:
             whole = match.group(0)
             start, end = match.start(1) - match.start(0), match.end(1) - match.start(0)
-            return whole[:start] + MASK + whole[end:]
+            return whole[:start] + _withhold(match.group(1)) + whole[end:]
 
         text = pattern.sub(replace, text)
     return text
@@ -521,6 +992,9 @@ def mask_body_text(text: str) -> str:
     else:
         text = mask_yaml_text(text)
         text = mask_html_fields(text)
+        text = mask_markup_pairs(text)
+        text = mask_table_cells(text)
+        text = mask_sql_values(text)
         text = mask_embedded_objects(text)
         text = mask_text_assignments(text)
     return mask_provider_secrets(text)
@@ -542,6 +1016,18 @@ def withhold_body_secrets(value: Any) -> Any:
 
 
 __all__ = [
+    "MAX_WITHHELD_VALUES",
+    "WITHHELD_MARKER_RE",
+    "WITHHELD_REF_RE",
+    "WithheldValues",
+    "active_withheld_values",
+    "collecting_withheld_values",
+    "is_location_value",
+    "looks_like_key_literal",
+    "mask_markup_pairs",
+    "mask_sql_values",
+    "mask_table_cells",
+    "withheld_preview",
     "is_withheld_key",
     "mask_body_text",
     "mask_credential_shaped",
