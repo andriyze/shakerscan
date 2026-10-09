@@ -1,8 +1,8 @@
 """POST /discovery admission: validation, declared target, per-apex and global limits, requester.
 
 Unit tests use an in-memory fixture connection (no network, no scanner process). The last test
-runs the real SQL against an explicit disposable PostgreSQL database when
-DISCOVERY_TEST_DATABASE_URL names one.
+runs the engine's real startup migrations against an explicit disposable PostgreSQL database
+when DISCOVERY_TEST_DATABASE_URL names one.
 """
 from __future__ import annotations
 
@@ -25,11 +25,17 @@ from operations import router as operations_router  # noqa: E402
 
 
 class FixtureConn:
-    """Enough of an asyncpg connection for admission: targets, scope receipts, discovery runs."""
+    """Enough of an asyncpg connection for admission: targets, scope receipts, discovery runs.
+
+    It applies the automated-source exclusion; the ``host``-row and bound-receipt rules are SQL
+    and are exercised against PostgreSQL in ``test_admission_sql_on_real_postgresql``.
+    ``scope_roots`` entries are (roots, bound) where ``bound`` says the receipt is bound to a
+    person-added target.
+    """
 
     def __init__(self, targets=(), scope_roots=(), runs=()):
         self.targets = [dict(item) for item in targets]
-        self.scope_roots = [list(item) for item in scope_roots]
+        self.scope_roots = [(list(roots), bound) for roots, bound in scope_roots]
         self.runs = [dict(item) for item in runs]
         self.locks = 0
         self.updates: list[tuple] = []
@@ -49,17 +55,17 @@ class FixtureConn:
 
     async def fetch(self, query, *args):
         if "FROM targets" in query:
-            (apex,) = args
-            return [{"url": row["url"], "source": row.get("discovery_source", "manual")}
-                    for row in self.targets if apex in row["url"].lower()]
+            apex, undeclared = args
+            return [{"url": row["url"]} for row in self.targets
+                    if row.get("discovery_source", "manual") not in undeclared and apex in row["url"].lower()]
         if "FROM discovery_runs" in query:
             return [row for row in self.runs if row["status"] in {"pending", "running"}]
         raise AssertionError(query)
 
     async def fetchval(self, query, *args):
         assert "FROM scope_receipts" in query
-        (names,) = args
-        return any(set(names) & set(roots) for roots in self.scope_roots)
+        names, _undeclared = args
+        return any(bound and set(names) & set(roots) for roots, bound in self.scope_roots)
 
 
 class FixturePool:
@@ -71,7 +77,7 @@ class FixturePool:
         yield self.conn
 
 
-def start(conn, root_domain, *, requested_by="local-operator", fail_enqueue=False):
+def start(conn, root_domain, *, fail_enqueue=False):
     queued: list[dict] = []
 
     def enqueue(_redis, _queue, job):
@@ -82,7 +88,7 @@ def start(conn, root_domain, *, requested_by="local-operator", fail_enqueue=Fals
     operations_router.configure_operations_router(
         lambda: FixturePool(conn), get_redis=lambda: object(), enqueue_job=enqueue,
     )
-    result = asyncio.run(operations_router.start_discovery(root_domain=root_domain, requested_by=requested_by))
+    result = asyncio.run(operations_router.start_discovery(root_domain=root_domain))
     return result, queued
 
 
@@ -108,14 +114,18 @@ def test_public_suffix_refusal_names_a_domain_to_use_instead():
 
 def test_targets_page_flow_queues_the_normalized_domain_and_records_the_requester():
     conn = FixtureConn(targets=DECLARED)
-    result, queued = start(conn, " Example.CO.UK. ", requested_by="Ana Admin (oidc:ana)\n")
+    result, queued = start(conn, " Example.CO.UK. ")
     assert result["status"] == "queued" and result["root_domain"] == "example.co.uk"
     (job,) = queued
     assert job["type"] == "discovery" and job["root_domain"] == "example.co.uk"
     assert job["discovery_id"] == result["discovery_id"]
     (run,) = conn.runs
     assert str(run["id"]) == result["discovery_id"] and run["root_domain"] == "example.co.uk"
-    assert run["requested_by"] == "Ana Admin (oidc:ana)"
+    # Derived by the engine, never a caller-supplied value.
+    assert run["requested_by"] == "local-operator"
+    import inspect
+
+    assert list(inspect.signature(operations_router.start_discovery).parameters) == ["root_domain"]
     assert conn.locks == 1
 
 
@@ -133,9 +143,9 @@ def test_a_subdomain_of_a_declared_apex_is_admitted_and_shares_its_apex_slot():
     [{"url": "https://notexample.co.uk"}, {"url": "https://example.co.uk.evil.test"}],
     [{"url": "https://shop.example.co.uk", "discovery_source": "subfinder"}],
     [{"url": "https://shop.example.co.uk", "discovery_source": "gungnir-monitor"}],
-    # The host row the asset model creates beside a discovered origin is not a declaration.
-    [{"url": "https://shop.example.co.uk", "discovery_source": "subfinder"},
-     {"url": "host://shop.example.co.uk", "discovery_source": "host"}],
+    [{"url": "https://shop.example.co.uk", "discovery_source": "ai_session"}],
+    [{"url": "https://shop.example.co.uk", "discovery_source": "ai_gate"}],
+    [{"url": "https://shop.example.co.uk:8443", "discovery_source": "device-service"}],
 ])
 def test_a_domain_with_no_declared_target_is_refused_with_403(targets):
     conn = FixtureConn(targets=targets)
@@ -146,9 +156,12 @@ def test_a_domain_with_no_declared_target_is_refused_with_403(targets):
     assert conn.runs == []
 
 
-def test_a_scope_receipt_root_admits_the_domain_and_host_targets_count():
-    result, _ = start(FixtureConn(scope_roots=[["example.org"]]), "example.org")
+def test_a_scope_receipt_root_admits_the_domain_only_when_bound_to_a_declared_target():
+    result, _ = start(FixtureConn(scope_roots=[(["example.org"], True)]), "example.org")
     assert result["status"] == "queued"
+    with pytest.raises(HTTPException) as unbound:
+        start(FixtureConn(scope_roots=[(["example.org"], False)]), "example.org")
+    assert unbound.value.status_code == 403
     result, _ = start(FixtureConn(targets=[{"url": "host://db.example.net", "discovery_source": "host"}]), "example.net")
     assert result["status"] == "queued"
 
@@ -243,57 +256,8 @@ async def _fresh_database(dsn: str, asyncpg, *, before_migrations=None):
     return conn
 
 
-@pytest.mark.skipif(not DSN, reason="Requires an explicit disposable PostgreSQL database")
-def test_admission_sql_on_real_postgresql(monkeypatch):
-    asyncpg = _real_asyncpg(monkeypatch)
-    from disposable_postgres import require_disposable_database
-
-    dsn = require_disposable_database(DSN or "", "shakerscan_discovery_test")
-
-    async def go():
-        import retest_contract
-
-        conn = await asyncpg.connect(dsn)
-        await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
-        await conn.execute((ROOT / "db" / "init.sql").read_text(encoding="utf-8"))
-        # The startup migrations an engine runs (scope_receipts, discovery_runs.requested_by).
-        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
-        try:
-            await retest_contract.run_schema_migrations(pool)
-        finally:
-            await pool.close()
-        try:
-            await conn.execute("INSERT INTO targets(url, name) VALUES ('https://app.example.co.uk', 'app')")
-            await conn.execute(
-                "INSERT INTO targets(url, name, discovery_source) VALUES ('https://x.other.test', 'x', 'subfinder')"
-            )
-            await conn.execute(
-                """INSERT INTO scope_receipts (id, input_scope, normalized_scope, verdict, blocked_by, warnings,
-                       checks, environment, allowed_hosts, allowed_root_domains, redirect_destinations)
-                   VALUES ('r1', '{}', '{}', 'allowed', '[]', '[]', '[]', 'production', '[]',
-                           '["scoped.test"]', '[]')"""
-            )
-            first = await discovery.admit_discovery(conn, "example.co.uk", requested_by="ana")
-            outcomes = {}
-            for name in ("dev.example.co.uk", "other.test", "unknown.test"):
-                try:
-                    await discovery.admit_discovery(conn, name, requested_by="ana")
-                    outcomes[name] = 200
-                except discovery.DiscoveryRefused as exc:
-                    outcomes[name] = exc.status_code
-            scoped = await discovery.admit_discovery(conn, "scoped.test", requested_by="ana")
-            runs = {row["id"]: dict(row) for row in await conn.fetch("SELECT * FROM discovery_runs")}
-            await conn.execute("UPDATE discovery_runs SET created_at = NOW() - interval '3 hours' WHERE id = $1", first)
-            again = await discovery.admit_discovery(conn, "example.co.uk", requested_by="ana")
-            return first, outcomes, scoped, runs, again
-        finally:
-            await conn.close()
-
-    first, outcomes, scoped, runs, again = asyncio.run(go())
-    assert outcomes == {"dev.example.co.uk": 409, "other.test": 403, "unknown.test": 403}
-    assert runs[first]["requested_by"] == "ana" and runs[first]["status"] == "pending"
-    assert runs[scoped]["root_domain"] == "scoped.test"
-    assert again != first  # a run older than ACTIVE_WINDOW no longer holds the apex
+# The admission SQL (declared targets, bound receipts) runs against PostgreSQL in
+# tests/test_target_asset_psl_postgres.py, which the target-assets CI job executes.
 
 
 @pytest.mark.skipif(not DSN, reason="Requires an explicit disposable PostgreSQL database")
