@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Iterable
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -131,6 +131,34 @@ REQUIRED_TARGET_TRANSPORT_ANCHORS = {
 }
 
 
+# Device and network-device connect sites (review gap (e) of #358). A device destination is
+# checked and pinned once (``validate_device_destination`` in the worker,
+# ``_pin_device_origin`` in the API process) and the connect helpers below take that pinned
+# address as their argument. A network call anywhere else in these modules is a new, unreviewed
+# connect site, and fails the gate.
+DEVICE_CONNECT_ROOTS = (
+    REPOSITORY_ROOT / "scanner" / "scanner_tools",
+    REPOSITORY_ROOT / "api" / "devices",
+)
+DEVICE_CONNECT_MODULE_PREFIXES = ("scanner/scanner_tools/device_", "api/devices/")
+REVIEWED_DEVICE_CONNECT_SITES = {
+    ("scanner/scanner_tools/device_control_plane.py", "_rtsp_exchange", "asyncio.open_connection"),
+    ("scanner/scanner_tools/device_posture.py", "_probe_http", "asyncio.open_connection"),
+    ("scanner/scanner_tools/device_reachability.py", "_probe_tcp_port", "asyncio.open_connection"),
+    ("scanner/scanner_tools/device_safety.py", "check_device_health", "asyncio.open_connection"),
+    ("scanner/scanner_tools/device_web.py", "_request", "asyncio.open_connection"),
+    ("scanner/scanner_tools/device_web.py", "_assess_tls_trust", "asyncio.open_connection"),
+}
+# The API process sends device requests to a connect address stored by an earlier posture scan
+# or to the device's locator. Every function that sends one must first pin and check that address
+# with ``_pin_device_origin``; deleting the call used to leave every test green.
+DEVICE_PIN_MODULES = ("api/devices/router.py", "api/api.py")
+DEVICE_PIN_SENDERS = frozenset({
+    "_device_request_pinned_http", "_device_request_pinned_control_http",
+})
+DEVICE_PIN_GUARD = "_pin_device_origin"
+
+
 def _relative(path: Path) -> str:
     try:
         return path.resolve().relative_to(REPOSITORY_ROOT).as_posix()
@@ -224,6 +252,100 @@ def find_violations(paths: Iterable[Path]) -> tuple[str, ...]:
     return tuple(violations)
 
 
+class _FunctionCallVisitor(ast.NodeVisitor):
+    """Network calls with the name of the function they are made in."""
+
+    def __init__(self) -> None:
+        self.aliases: dict[str, str] = {}
+        self.stack: list[str] = []
+        self.calls: list[tuple[str, str, int]] = []
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for item in node.names:
+            self.aliases[item.asname or item.name.split(".", 1)[0]] = item.name
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        module = str(node.module or "")
+        for item in node.names:
+            self.aliases[item.asname or item.name] = f"{module}.{item.name}" if module else item.name
+
+    def _function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    visit_FunctionDef = _function
+    visit_AsyncFunctionDef = _function
+
+    def visit_Call(self, node: ast.Call) -> None:
+        raw = _qualified_name(node.func)
+        if raw:
+            first, separator, suffix = raw.partition(".")
+            qualified = self.aliases.get(first, first) + (separator + suffix if separator else "")
+            if qualified in NETWORK_CALLS:
+                self.calls.append((self.stack[-1] if self.stack else "<module>", qualified, node.lineno))
+        self.generic_visit(node)
+
+
+def find_device_connect_site_violations(
+    sources: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Every network call in a device module sits in a reviewed, pinned connect helper."""
+    if sources is None:
+        sources = {
+            _relative(path): path.read_text(encoding="utf-8")
+            for root in DEVICE_CONNECT_ROOTS for path in sorted(Path(root).rglob("*.py"))
+            if _relative(path).startswith(DEVICE_CONNECT_MODULE_PREFIXES)
+        }
+    violations: list[str] = []
+    for relative, source in sorted(sources.items()):
+        try:
+            tree = ast.parse(source, filename=relative)
+        except SyntaxError as exc:
+            violations.append(f"{relative}: cannot inspect: {exc}")
+            continue
+        visitor = _FunctionCallVisitor()
+        visitor.visit(tree)
+        for function, call, line in visitor.calls:
+            if (relative, function, call) not in REVIEWED_DEVICE_CONNECT_SITES:
+                violations.append(
+                    f"{relative}:{line}: unreviewed device connect site {call} in {function}; "
+                    "connect only to a validated, pinned device address"
+                )
+    return tuple(violations)
+
+
+def find_device_pin_violations(
+    sources: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Each API-side device request is preceded by ``_pin_device_origin`` in its function."""
+    if sources is None:
+        sources = {
+            relative: (REPOSITORY_ROOT / relative).read_text(encoding="utf-8")
+            for relative in DEVICE_PIN_MODULES
+        }
+    violations: list[str] = []
+    for relative, source in sources.items():
+        tree = ast.parse(source, filename=relative)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            calls = [
+                (item.lineno, item.func.id) for item in ast.walk(node)
+                if isinstance(item, ast.Call) and isinstance(item.func, ast.Name)
+            ]
+            sends = [line for line, name in calls if name in DEVICE_PIN_SENDERS]
+            if not sends or node.name == DEVICE_PIN_GUARD:
+                continue
+            guards = [line for line, name in calls if name == DEVICE_PIN_GUARD]
+            if not guards or min(guards) > min(sends):
+                violations.append(
+                    f"{relative}:{min(sends)}: {node.name} sends a device request without "
+                    f"pinning its address with {DEVICE_PIN_GUARD} first"
+                )
+    return tuple(violations)
+
+
 def find_target_transport_anchor_violations() -> tuple[str, ...]:
     violations: list[str] = []
     for relative_path, anchors in REQUIRED_TARGET_TRANSPORT_ANCHORS.items():
@@ -305,6 +427,8 @@ def main() -> int:
         *find_violations(args.paths or DEFAULT_ROOTS),
         *find_target_transport_anchor_violations(),
         *find_non_target_egress_allowlist_violations(),
+        *find_device_connect_site_violations(),
+        *find_device_pin_violations(),
     )
     if violations:
         for violation in violations:
