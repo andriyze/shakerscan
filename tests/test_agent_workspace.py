@@ -43,8 +43,7 @@ def _json(path):
 
 
 def _record(tmp_path, workspace):
-    # With SHAKERSCAN_CONFIG_DIR set (an isolated profile), state sits beside it.
-    return _workspace.state_path(tmp_path / "cfg.state" / "workspaces", workspace)
+    return _workspace.state_path(tmp_path / "state" / "shakerscan" / "workspaces", workspace)
 
 
 # --- L3: merged, not rewritten -----------------------------------------------------------------
@@ -386,19 +385,56 @@ def test_the_record_lives_in_the_state_directory_and_the_default_workspace_in_th
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
     assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
     out = capsys.readouterr().out
-    workspace = tmp_path / "cfg.data" / "agent"  # an isolated profile keeps its own state and data
+    workspace = tmp_path / "data" / "shakerscan" / "agent"  # $XDG_DATA_HOME/shakerscan/agent
     assert f"workspace: {workspace} (" in out
-    assert _record(tmp_path, workspace).is_file()
+    assert _record(tmp_path, workspace).is_file()  # $XDG_STATE_HOME/shakerscan/workspaces
     assert not (tmp_path / "cfg" / "agent").exists() and not (tmp_path / "cfg" / "workspaces").exists()
-    # Without an isolated profile: the XDG directories, with the XDG fallbacks.
-    monkeypatch.delenv(cli.ENV_CONFIG_DIR)
-    assert cli.state_dir() == tmp_path / "state" / "shakerscan"
+
+
+def test_the_directory_precedence(tmp_path, monkeypatch):
+    """Explicit SHAKERSCAN_STATE_DIR/DATA_DIR, then XDG, then beside SHAKERSCAN_CONFIG_DIR, then
+    the defaults; each must be absolute."""
+    monkeypatch.setenv("SHAKERSCAN_STATE_DIR", str(tmp_path / "explicit-state"))
+    monkeypatch.setenv("SHAKERSCAN_DATA_DIR", str(tmp_path / "explicit-data"))
+    assert cli.state_dir() == tmp_path / "explicit-state" and cli.data_dir() == tmp_path / "explicit-data"
+    monkeypatch.setenv("SHAKERSCAN_STATE_DIR", "relative/state")
+    with pytest.raises(cli.ClientError, match="SHAKERSCAN_STATE_DIR must be an absolute path"):
+        cli.state_dir()
+    monkeypatch.delenv("SHAKERSCAN_STATE_DIR")
+    monkeypatch.delenv("SHAKERSCAN_DATA_DIR")
+    assert cli.state_dir() == tmp_path / "state" / "shakerscan"  # XDG
     assert cli.default_workspace() == tmp_path / "data" / "shakerscan" / "agent"
+    monkeypatch.setenv("XDG_STATE_HOME", "relative/path")  # not absolute: ignored, as XDG says
+    monkeypatch.delenv("XDG_DATA_HOME")
+    assert cli.state_dir() == tmp_path / "cfg.state" and cli.data_dir() == tmp_path / "cfg.data"  # beside the profile
+    monkeypatch.delenv(cli.ENV_CONFIG_DIR)
     monkeypatch.delenv("XDG_STATE_HOME")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert cli.state_dir() == tmp_path / "home" / ".local" / "state" / "shakerscan"
-    monkeypatch.setenv("XDG_DATA_HOME", "relative/path")  # not absolute: ignored, as XDG says
     assert cli.default_workspace() == tmp_path / "home" / ".local" / "share" / "shakerscan" / "agent"
+
+
+@pytest.mark.parametrize("value", ["/", "relative/cfg"])
+def test_a_config_dir_without_a_usable_sibling_names_the_variable_to_set(monkeypatch, value):
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, value)
+    with pytest.raises(cli.ClientError, match="set SHAKERSCAN_STATE_DIR to an absolute directory"):
+        cli.state_dir()
+
+
+def test_an_unwritable_state_directory_names_the_variable_to_set(tmp_path, monkeypatch, capsys):
+    locked = tmp_path / "etc"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        monkeypatch.delenv("XDG_STATE_HOME")
+        monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(locked / "shakerscan"))  # -> /etc/shakerscan.state
+        assert cli.main(["agent", "--url", URL, "--workspace", str(tmp_path / "ws"), "--no-launch"]) == 2
+        err = capsys.readouterr().err
+        assert f"cannot use {locked / 'shakerscan.state'} for the client's state" in err, err
+        assert "set SHAKERSCAN_STATE_DIR to a writable absolute directory" in err
+    finally:
+        locked.chmod(0o700)
 
 
 def test_an_existing_default_workspace_and_its_record_move_once(tmp_path, monkeypatch, capsys):
@@ -417,7 +453,7 @@ def test_an_existing_default_workspace_and_its_record_move_once(tmp_path, monkey
 
     assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
     out = capsys.readouterr().out
-    new = tmp_path / "cfg.data" / "agent"
+    new = tmp_path / "data" / "shakerscan" / "agent"
     assert f"moved:     the default agent workspace from {old} to {new} (and its record)" in out, out
     assert "moved:     2 workspace record(s) from" in out
     assert not old.exists() and _json(new / "opencode.json")["permission"] == {"bash": {"env": "deny"}}
@@ -445,7 +481,7 @@ def test_an_old_default_workspace_that_is_a_link_is_not_moved(tmp_path, monkeypa
 def test_an_old_default_workspace_is_not_moved_over_a_new_one(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
     (tmp_path / "cfg" / "agent").mkdir(parents=True)
-    (tmp_path / "cfg.data" / "agent").mkdir(parents=True)
+    (tmp_path / "data" / "shakerscan" / "agent").mkdir(parents=True)
     assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
     assert "an old default workspace remains at" in capsys.readouterr().out
     assert (tmp_path / "cfg" / "agent").is_dir()
@@ -516,7 +552,34 @@ def test_a_newer_record_written_meanwhile_is_never_overwritten(tmp_path, monkeyp
     monkeypatch.setattr(os, "link", raced)
     notes = _workspace.migrate_records(old, new)
     assert (new / "a.json").read_text(encoding="utf-8") == '{"from": "newer launch"}'
-    assert (old / "a.json").is_file() and any("left in" in note for note in notes), notes
+    assert (old / "superseded" / "a.json").read_text(encoding="utf-8") == '{"from": "old"}', "kept, set aside"
+    assert any("1 older record(s) kept in" in note for note in notes), notes
+    monkeypatch.undo()
+    assert _workspace.migrate_records(old, new) == [], "reported once"
+
+
+def test_a_move_interrupted_between_link_and_unlink_is_completed(tmp_path):
+    old, new = _old_records(tmp_path, "a.json")
+    new.mkdir(parents=True)
+    os.link(old / "a.json", new / "a.json")  # a launch stopped after the link
+    notes = _workspace.migrate_records(old, new)
+    assert notes == [f"moved:     1 workspace record(s) from {old} to {new}"], notes
+    assert not (old / "a.json").exists() and (new / "a.json").read_text(encoding="utf-8") == '{"from": "old"}'
+    assert not old.exists()
+
+
+def test_a_copy_that_already_matches_completes_the_move(tmp_path, monkeypatch):
+    old, new = _old_records(tmp_path, "a.json")
+    new.mkdir(parents=True)
+    (new / "a.json").write_text('{"from": "old"}', encoding="utf-8")  # a copy fallback stopped after the copy
+
+    def no_links(*args, **kwargs):
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(os, "link", no_links)
+    notes = _workspace.migrate_records(old, new)
+    assert notes == [f"moved:     1 workspace record(s) from {old} to {new}"], notes
+    assert not (old / "a.json").exists()
 
 
 def test_the_loser_of_a_concurrent_default_workspace_move_says_it_moved(tmp_path, monkeypatch):
