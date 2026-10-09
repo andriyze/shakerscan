@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from api.capabilities.dns import inspect_dns_posture
 from api.capabilities.inline import DnsInspectionExecutionAdapter
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
@@ -534,3 +536,49 @@ def test_a_ds_digest_is_reported_as_hex_not_a_bytes_repr():
     record = SimpleNamespace(key_tag=2371, algorithm=13, digest_type=2, digest=b",\xdaA\x01")
     value = _record_value("DS", record)
     assert value == {"key_tag": 2371, "algorithm": 13, "digest_type": 2, "digest": "2CDA4101"}
+
+
+def _upgraded(host: str, stored_root: str | None, scheme: str = "https") -> TargetBinding:
+    # The binding an upgraded target gets: guard roots and the stored root_domain go through
+    # binding_roots, which never keeps a root that spans registrants.
+    from api.scope.roots import binding_roots
+
+    return TargetBinding(
+        target_id="target-upgraded", target_kind="web", canonical_host=host,
+        allowed_origins=(f"{scheme}://{host}",), allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=binding_roots(None, stored_root, host), scope_receipt_id="scope-u",
+    )
+
+
+
+@pytest.mark.parametrize(("host", "stored_root", "scheme", "roots", "apex"), [
+    # typeform.com has a public-suffix rule below it (pro.typeform.com), so no subtree root is
+    # safe; its own records stay reachable.
+    ("typeform.com", "typeform.com", "https", (), "typeform.com"),
+    ("typeform.com", None, "https", (), "typeform.com"),
+    # Single-label lab hosts have no registrable domain.
+    ("localhost", "localhost", "http", (), "localhost"),
+    ("juice-shop", None, "http", (), "juice-shop"),
+    # Unchanged from 2.8.0: the zone apex is still the registrable domain.
+    ("www.typeform.com", "typeform.com", "https", ("www.typeform.com",), "typeform.com"),
+    ("shop.example.co.uk", "co.uk", "https", ("example.co.uk",), "example.co.uk"),
+])
+def test_dns_posture_of_upgraded_targets_keeps_the_hosts_own_records(host, stored_root, scheme, roots, apex):
+    target = _upgraded(host, stored_root, scheme)
+    assert target.allowed_root_domains == roots
+    resolver = _Resolver()
+    result = asyncio.run(inspect_dns_posture(target, timeout_seconds=15, resolver=resolver, doh_query=None))
+    assert result["status"] == "success", result
+    names = {name for name, _query_type, _kwargs in resolver.calls}
+    assert {host, apex, f"_dmarc.{host}", f"_mta-sts.{host}", f"_smtp._tls.{host}"} <= names
+    # Nothing outside the host and its zone apex is ever asked.
+    assert all(name in {host, apex} or name.endswith("." + host) for name in names)
+
+
+def test_a_binding_whose_roots_do_not_cover_the_host_is_still_refused():
+    target = TargetBinding(
+        target_id="t", target_kind="web", canonical_host="typeform.com",
+        allowed_origins=("https://typeform.com",), allowed_root_domains=("example.test",),
+    )
+    result = asyncio.run(inspect_dns_posture(target, timeout_seconds=15, resolver=_Resolver()))
+    assert result["status"] == "blocked"
