@@ -55,7 +55,7 @@ try:
         export_admission,
         export_read_budget,
         read_archive_stats,
-        read_transaction_bodies,
+        read_transaction_payloads,
         read_transactions,
     )
 except ModuleNotFoundError:  # package import layout
@@ -66,7 +66,7 @@ except ModuleNotFoundError:  # package import layout
         export_admission,
         export_read_budget,
         read_archive_stats,
-        read_transaction_bodies,
+        read_transaction_payloads,
         read_transactions,
     )
 
@@ -1336,7 +1336,7 @@ class HuntRunService:
             transactions = await read_transactions(
                 connection, scan_id=None, hunt_run_id=hunt_id,
                 limit=MAX_EXPORT_ROWS, offset=0,
-                external_payload_budget=export_read_budget("redacted"), bodies=False,
+                external_payload_budget=export_read_budget("redacted"), payloads=False,
             )
             # The full event history, superseded events included, with an explicit
             # bound; the per-Hunt event cap keeps it below MAX_EXPORT_ROWS.
@@ -1352,14 +1352,16 @@ class HuntRunService:
             scrub_text=True,
         )
         notes = _decode_json(_row_dict(row).get("notes"), [])
-        async def read_bodies(ids, budget: int):
+        async def read_payloads(ids, budget: int):
             async with self._pool().acquire() as connection:
-                return await read_transaction_bodies(connection, ids, external_payload_budget=budget)
+                return await read_transaction_payloads(
+                    connection, ids, external_payload_budget=budget, hunt_run_id=hunt_id,
+                )
 
         archive = await build_export(
             transactions, export_format="transactions", redaction="redacted",
             owner={"hunt_id": hunt_id}, total=total, archive_total=total, stats=stats,
-            read_bodies=read_bodies,
+            read_payloads=read_payloads,
         )
         record = {
             "schema_version": "hunt-record/v1",

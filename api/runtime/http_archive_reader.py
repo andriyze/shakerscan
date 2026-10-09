@@ -38,8 +38,8 @@ from .archive_export_worker import (
     MASKING_FAILED,
     OVER_MASKING_LIMIT,
     _decoded,
-    encode_bodies,
-    encode_body,
+    encode_payload,
+    encode_payloads,
     initialize_worker,
     legacy_body,
     stored_body_size,
@@ -63,6 +63,8 @@ MAX_EXPORT_ROWS = 10_000
 # budget is reported as omitted from that export, never shown as empty.
 MAX_EXTERNAL_PAYLOAD_BYTES = 64 * 1024 * 1024
 _BODY_FIELDS = ("request_body", "response_body")
+# Every payload of a call, in the order archive_blob_secrets.PAYLOAD_FIELDS lists them.
+PAYLOAD_FIELDS = ("request_headers", "request_body", "response_headers", "response_body")
 # A masked export holds at most this many bytes of JSON body text (configurable with
 # SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES): bytes as the response carries them, escapes
 # included, so an export of multi-byte or escaped text cannot exceed it. Past it, further bodies
@@ -70,15 +72,27 @@ _BODY_FIELDS = ("request_body", "response_body")
 DEFAULT_MASKED_EXPORT_BYTES = 32 * 1024 * 1024
 MIN_MASKED_EXPORT_BYTES = 1024 * 1024
 MAX_MASKED_EXPORT_BYTES = 256 * 1024 * 1024
-# At most this many exports are read, masked and rendered at once; a request waits this long for
-# a slot before it is refused (503 with Retry-After) rather than queueing with its rows loaded.
-MAX_CONCURRENT_EXPORT_BUILDS = 2
+# Every export, raw included, holds at most this many encoded bytes of headers; past it further
+# headers are withheld (payload_omitted_reasons: header_budget).
+MAX_EXPORT_HEADER_BYTES = 16 * 1024 * 1024
+# At most this many heavy exports (downloads, HARs, Hunt records) are read, masked and rendered at
+# once, at most two per caller; a request waits this long for a slot before it is refused (503
+# with Retry-After) rather than queueing with its rows loaded.
+MAX_CONCURRENT_EXPORT_BUILDS = 3
+MAX_EXPORTS_PER_CALLER = 2
 EXPORT_ADMISSION_WAIT_SECONDS = 2.0
+# A browse page (JSON, at most this many rows) has smaller budgets and its own slots, so a user's
+# browsing is never refused because their own or anyone's download is running.
+LIGHT_EXPORT_ROWS = 250
+LIGHT_EXPORT_BODY_BYTES = 8 * 1024 * 1024
+LIGHT_EXPORT_HEADER_BYTES = 4 * 1024 * 1024
+MAX_CONCURRENT_BROWSE_PAGES = 8
+BROWSE_ADMISSION_WAIT_SECONDS = 10.0
 EXPORT_RETRY_AFTER_SECONDS = 10
 # Worker processes that decode, mask and encode bodies for every export (archive_export_worker).
 MASKING_WORKERS = 2
-# Bodies are read from the archive a batch at a time: at most this many stored bytes (one body
-# at least) and this many bodies per batch.
+# Payloads are read from the archive a batch at a time: at most this many stored bytes (one
+# payload at least) and this many payloads per batch.
 EXPORT_BATCH_BYTES = 8 * 1024 * 1024
 EXPORT_BATCH_BODIES = 256
 # Bodies go to a worker in chunks: at most this many stored bytes (one body at least) and bodies
@@ -110,30 +124,42 @@ LEFT JOIN evidence_objects rb ON rb.id = t.request_body_object_id
 LEFT JOIN evidence_objects sh ON sh.id = t.response_headers_object_id
 LEFT JOIN evidence_objects sb ON sb.id = t.response_body_object_id
 """
-# The same rows without body content: which bodies are stored, and how large, instead.
-_SELECT_WITHOUT_BODIES = (
-    _SELECT.replace("rb.content AS request_body", "NULL AS request_body")
+# The same rows without payload content: which payloads are stored, and how large, instead.
+_SELECT_WITHOUT_PAYLOADS = (
+    _SELECT.replace("rh.content AS request_headers", "NULL AS request_headers")
+    .replace("rb.content AS request_body", "NULL AS request_body")
+    .replace("sh.content AS response_headers", "NULL AS response_headers")
     .replace("sb.content AS response_body", "NULL AS response_body")
     .replace(
         "\nFROM http_transactions t\n",
-        ",\n       (rb.id IS NOT NULL) AS request_body_stored, (sb.id IS NOT NULL) AS response_body_stored"
+        ",\n       (rh.id IS NOT NULL) AS request_headers_stored, (rb.id IS NOT NULL) AS request_body_stored,"
+        "\n       (sh.id IS NOT NULL) AS response_headers_stored, (sb.id IS NOT NULL) AS response_body_stored"
         "\nFROM http_transactions t\n",
     )
 )
-_SELECT_BODIES = """
+# Payloads by id, only of the export's own owner: the owner clause is appended by
+# ``read_transaction_payloads``, which refuses to run without one.
+_SELECT_PAYLOADS = """
 SELECT t.id, t.request_body_sha256, t.response_body_sha256,
-       rb.content AS request_body, sb.content AS response_body,
+       rh.content AS request_headers, rb.content AS request_body,
+       sh.content AS response_headers, sb.content AS response_body,
+       rh.storage_uri AS request_headers_storage_uri, rh.content_sha256 AS request_headers_content_sha256,
+       rh.size_bytes AS request_headers_size_bytes,
        rb.storage_uri AS request_body_storage_uri, rb.content_sha256 AS request_body_content_sha256,
        rb.size_bytes AS request_body_size_bytes,
+       sh.storage_uri AS response_headers_storage_uri, sh.content_sha256 AS response_headers_content_sha256,
+       sh.size_bytes AS response_headers_size_bytes,
        sb.storage_uri AS response_body_storage_uri, sb.content_sha256 AS response_body_content_sha256,
        sb.size_bytes AS response_body_size_bytes
 FROM http_transactions t
+LEFT JOIN evidence_objects rh ON rh.id = t.request_headers_object_id
 LEFT JOIN evidence_objects rb ON rb.id = t.request_body_object_id
+LEFT JOIN evidence_objects sh ON sh.id = t.response_headers_object_id
 LEFT JOIN evidence_objects sb ON sb.id = t.response_body_object_id
 WHERE t.id = ANY($1::uuid[])
 """
-# A row read without its bodies carries {field: stored size} here.
-LAZY_BODIES = "_stored_bodies"
+# A row read without its payloads carries {field: stored size} here.
+LAZY_PAYLOADS = "_stored_payloads"
 
 
 def _scan_ids(scan_id: str | None, scan_ids: Sequence[str] | None) -> tuple[str, ...]:
@@ -189,11 +215,11 @@ async def read_transactions(
     offset: int = 0,
     results_dir: Path | None = None,
     external_payload_budget: int = MAX_EXTERNAL_PAYLOAD_BYTES,
-    bodies: bool = True,
+    payloads: bool = True,
 ) -> list[dict[str, Any]]:
-    """The matching transactions. With ``bodies=False`` a row says which bodies the archive holds
-    (``LAZY_BODIES``: field -> stored size) instead of carrying them, so an export can read them
-    in batches within its budget (``read_transaction_bodies``)."""
+    """The matching transactions. With ``payloads=False`` a row says which headers and bodies the
+    archive holds (``LAZY_PAYLOADS``: field -> stored size) instead of carrying them, so an export
+    can read them in batches within its budgets (``read_transaction_payloads``)."""
     clauses: list[str] = []
     params: list[Any] = []
     owners = _append_scan_clause(
@@ -220,7 +246,7 @@ async def read_transactions(
     where = " WHERE " + " AND ".join(clauses)
     params.extend([min(int(limit), MAX_EXPORT_ROWS), max(0, int(offset))])
     rows = await conn.fetch(
-        f"{_SELECT if bodies else _SELECT_WITHOUT_BODIES}{where} ORDER BY t.started_at, t.sequence, t.id"
+        f"{_SELECT if payloads else _SELECT_WITHOUT_PAYLOADS}{where} ORDER BY t.started_at, t.sequence, t.id"
         f" LIMIT ${len(params) - 1} OFFSET ${len(params)}",
         *params,
     )
@@ -229,7 +255,7 @@ async def read_transactions(
     except ModuleNotFoundError:  # package import layout
         from .archive_blob_secrets import PAYLOAD_FIELDS
     rows = [dict(row) for row in rows]
-    fields = PAYLOAD_FIELDS if bodies else tuple(key for key in PAYLOAD_FIELDS if key not in _BODY_FIELDS)
+    fields = PAYLOAD_FIELDS if payloads else ()
     loaded, omitted, _used = await _load_external_payloads(
         rows, fields,
         results_dir=results_dir or Path(os.environ.get("RESULTS_DIR") or "/results"),
@@ -239,17 +265,17 @@ async def read_transactions(
     for row in rows:
         metadata = _decoded(row.get("metadata_json")) or {}
         unavailable = set(metadata.get("payloads_unavailable") or ()) if isinstance(metadata, dict) else set()
-        if not bodies:
-            # Which bodies the archive holds, and their stored size, without their content:
-            # ``read_transaction_bodies`` fetches them later, a batch at a time.
+        if not payloads:
+            # Which payloads the archive holds, and their stored size, without their content:
+            # ``read_transaction_payloads`` fetches them later, a batch at a time.
             stored: dict[str, int] = {}
-            for key in _BODY_FIELDS:
+            for key in PAYLOAD_FIELDS:
                 size = row.pop(f"{key}_size_bytes", None)
                 if row.pop(f"{key}_stored", False):
                     stored[key] = int(size or 0)
                 row.pop(f"{key}_storage_uri", None)
                 row.pop(f"{key}_content_sha256", None)
-            row[LAZY_BODIES] = stored
+            row[LAZY_PAYLOADS] = stored
         omitted_fields = _reveal_payloads(row, fields, loaded, omitted, unavailable)
         if unavailable:
             row["payload_unavailable"] = sorted(unavailable)
@@ -293,24 +319,37 @@ def _reveal_payloads(
     return omitted_fields
 
 
-async def read_transaction_bodies(
+async def read_transaction_payloads(
     conn, ids: Sequence[Any], *, external_payload_budget: int, results_dir: Path | None = None,
+    scan_id: str | None = None, scan_ids: Sequence[str] | None = None, hunt_run_id: str | None = None,
 ) -> tuple[dict[str, dict[str, Any]], int]:
-    """The bodies of these transactions, decrypted but not legacy-decoded (the masking worker
-    does that), with what could not be shown: ``({id: {field, "unavailable", "omitted"}}, bytes
-    of external payload read)``."""
-    rows = [dict(row) for row in await conn.fetch(_SELECT_BODIES, list(ids))]
+    """The headers and bodies of these transactions of one owner (a scan, its retests, or a
+    hunt), decrypted but not legacy-decoded (the masking worker does that), with what could not
+    be shown: ``({id: {field, "unavailable", "omitted"}}, bytes of external payload read)``.
+
+    An id of another owner is not read: a caller cannot fetch payloads by bare id.
+    """
+    params: list[Any] = [list(ids)]
+    clauses: list[str] = []
+    owners = _append_scan_clause(clauses, params, column="t.scan_id", scan_id=scan_id, scan_ids=scan_ids)
+    if not owners and hunt_run_id:
+        params.append(hunt_run_id)
+        clauses.append(f"t.hunt_run_id=${len(params)}")
+    elif not owners:
+        raise ValueError("payloads are read for one scan or one hunt")
+    query = _SELECT_PAYLOADS + "".join(f" AND {clause}" for clause in clauses)
+    rows = [dict(row) for row in await conn.fetch(query, *params)]
     loaded, omitted, used = await _load_external_payloads(
-        rows, _BODY_FIELDS,
+        rows, PAYLOAD_FIELDS,
         results_dir=results_dir or Path(os.environ.get("RESULTS_DIR") or "/results"),
         budget=external_payload_budget,
     )
     found: dict[str, dict[str, Any]] = {}
     for row in rows:
         unavailable: set[str] = set()
-        omitted_fields = _reveal_payloads(row, _BODY_FIELDS, loaded, omitted, unavailable, legacy=False)
+        omitted_fields = _reveal_payloads(row, PAYLOAD_FIELDS, loaded, omitted, unavailable, legacy=False)
         found[str(row["id"])] = {
-            **{key: row.get(key) for key in _BODY_FIELDS},
+            **{key: row.get(key) for key in PAYLOAD_FIELDS},
             "unavailable": unavailable, "omitted": omitted_fields,
         }
     return found, used
@@ -642,23 +681,26 @@ def _unarchived_clauses(stats: Mapping[str, Any], unarchived: list[str]) -> str:
 
 
 # --- Building an export -------------------------------------------------------------------------
-# Every body an export shows is decoded, masked (unless raw) and JSON-encoded by
-# ``archive_export_worker``; the projection around it carries a placeholder that the rendered
-# response replaces with those bytes. ``export_document`` runs the bodies in this process (its
-# callers are synchronous); ``build_export`` runs them in a worker process pool, because the
-# regex engine holds the interpreter lock for a whole pass over a body and an API thread would
-# still stall the event loop (external release audit, 2026-10-09). Both apply the same budget in
-# the same order, so they show the same text and omit the same bodies.
+# Every payload an export shows is decoded, redacted or masked (unless raw) and sized by
+# ``archive_export_worker``: a body comes back as JSON text that the rendered response splices
+# in at a placeholder, headers as the redacted mapping. ``export_document`` runs them in this
+# process (its callers are synchronous); ``build_export`` runs them in a worker process pool,
+# because the regex engine holds the interpreter lock for a whole pass and an API thread would
+# still stall the event loop (external release audit, 2026-10-09). Both apply the same budgets in
+# the same order, so they show the same text and omit the same payloads.
 
 EXTERNAL_READ_BUDGET = "external_read_budget"
 MASKING_BUDGET = "masking_budget"
+HEADER_BUDGET = "header_budget"
 _OMISSION_DETAIL = {
     EXTERNAL_READ_BUDGET: "stored externally beyond this export's read budget",
     MASKING_BUDGET: "beyond this export's masking budget",
+    HEADER_BUDGET: "beyond this export's header budget",
     OVER_MASKING_LIMIT: "over the masking size limit, so only a raw export carries it",
     MASKING_FAILED: "could not be masked within the masking worker's memory",
 }
 _MASKING_OMISSIONS = frozenset({MASKING_BUDGET, OVER_MASKING_LIMIT, MASKING_FAILED})
+_HEADER_FIELDS = ("request_headers", "response_headers")
 
 
 def masked_export_budget() -> int:
@@ -671,16 +713,35 @@ def masked_export_budget() -> int:
     return max(MIN_MASKED_EXPORT_BYTES, min(MAX_MASKED_EXPORT_BYTES, value))
 
 
-def export_read_budget(redaction: str) -> int:
-    """External payload bytes to read for an export: a masked one cannot show more than its budget."""
+def is_light_export(export_format: str, limit: int) -> bool:
+    """A browse page (the UI's 25- and 250-row pages), not a download: bounded by its own small
+    budgets, so it is admitted beside heavy exports instead of waiting behind them."""
+    return export_format == "transactions" and 0 < int(limit) <= LIGHT_EXPORT_ROWS
+
+
+def body_budget(redaction: str, *, light: bool = False) -> int | None:
+    """Encoded body bytes an export may hold: none for a raw one, less for a browse page."""
+    if redaction == "raw":
+        return None
+    budget = masked_export_budget()
+    return min(budget, LIGHT_EXPORT_BODY_BYTES) if light else budget
+
+
+def header_budget(*, light: bool = False) -> int:
+    """Encoded header bytes any export may hold, raw included."""
+    return LIGHT_EXPORT_HEADER_BYTES if light else MAX_EXPORT_HEADER_BYTES
+
+
+def export_read_budget(redaction: str, *, light: bool = False) -> int:
+    """External payload bytes to read for an export: never more than its budgets can show."""
     if redaction == "raw":
         return MAX_EXTERNAL_PAYLOAD_BYTES
-    return min(MAX_EXTERNAL_PAYLOAD_BYTES, masked_export_budget())
+    return min(MAX_EXTERNAL_PAYLOAD_BYTES, (body_budget(redaction, light=light) or 0) + header_budget(light=light))
 
 
-class _BodyBudget:
-    """The encoded body bytes one masked export may still hold; once one body does not fit,
-    every later body is left out too, so an export is always a prefix plus what follows it."""
+class _Budget:
+    """The encoded bytes one export may still hold of one kind of payload; once one does not
+    fit, every later one is left out too, so an export is always a prefix plus what follows."""
 
     def __init__(self, limit: int | None) -> None:
         self.remaining = limit
@@ -699,70 +760,84 @@ class _BodyBudget:
         return True
 
 
-class _BodyJob:
-    """One body of one call: in hand (``value``) or still in the archive (``stored``)."""
+class _Budgets:
+    def __init__(self, bodies: int | None, headers: int | None) -> None:
+        self.body = _Budget(bodies)
+        self.headers = _Budget(headers)
 
-    __slots__ = ("field", "index", "legacy", "masked", "present", "reason", "size", "value")
+
+class _PayloadJob:
+    """One payload of one call: in hand (``value``) or still in the archive (``stored``)."""
+
+    __slots__ = ("extra", "field", "index", "kind", "masked", "present", "reason", "size", "value")
 
     def __init__(
         self, index: int, field: str, value: Any, masked: bool, *,
-        stored_size: int | None = None, legacy: tuple[Any] | None = None,
+        stored_size: int | None = None, extra: Any = None,
     ) -> None:
-        self.index, self.field, self.value, self.masked, self.legacy = index, field, value, masked, legacy
-        # A body read later (``stored_size`` known) is present before it is in hand.
-        self.present = value is not None or stored_size is not None
+        self.index, self.field, self.value, self.masked = index, field, value, masked
+        self.kind = "headers" if field in _HEADER_FIELDS else "body"
+        # body: (recorded digest,) when legacy decoding is still due; headers: private workflow.
+        self.extra = extra
+        # A payload read later (``stored_size`` known) is present before it is in hand; an empty
+        # header set has nothing to show or withhold.
+        empty = self.kind == "headers" and isinstance(value, (dict, str)) and value in ({}, "", "{}")
+        self.present = (value is not None and not empty) or stored_size is not None
         self.size = stored_body_size(value) if stored_size is None else stored_size
         self.reason: str | None = None  # set when the read could not deliver it
 
 
-def _wants(job: _BodyJob, budget: _BodyBudget) -> bool:
-    """Whether the body is worth reading and encoding now (budget state only ever tightens)."""
+def _budget_of(job: _PayloadJob, budgets: _Budgets) -> _Budget:
+    return budgets.headers if job.kind == "headers" else budgets.body
+
+
+def _wants(job: _PayloadJob, budgets: _Budgets) -> bool:
+    """Whether the payload is worth reading and encoding now (budgets only ever tighten)."""
     if not job.present or job.reason is not None:
         return False
-    if not job.masked:
-        return True
-    return job.size <= MAX_MASKED_BODY_CHARS and budget.fits(job.size)
+    if job.kind == "body" and job.masked and job.size > MAX_MASKED_BODY_CHARS:
+        return False
+    return _budget_of(job, budgets).fits(job.size)
 
 
-Outcome = tuple[bytes | None, str | None]
+Outcome = tuple[Any, int, str | None]  # (body fragment or header mapping, encoded size, reason)
+Settled = tuple[Any, str | None]
 
 
-def _settle(job: _BodyJob, budget: _BodyBudget, outcome: Outcome | None) -> Outcome:
-    """The body's final fragment or omission reason, decided in row order."""
+def _settle(job: _PayloadJob, budgets: _Budgets, outcome: Outcome | None) -> Settled:
+    """The payload's final value or omission reason, decided in row order."""
     if job.reason is not None:
         return None, job.reason
     if not job.present:
         return None, None
-    if not job.masked:
-        assert outcome is not None
-        return outcome
-    if job.size > MAX_MASKED_BODY_CHARS:
+    if job.kind == "body" and job.masked and job.size > MAX_MASKED_BODY_CHARS:
         return None, OVER_MASKING_LIMIT
+    budget = _budget_of(job, budgets)
     if not budget.fits(job.size):
         budget.exhausted = True
-        return None, MASKING_BUDGET
+        return None, HEADER_BUDGET if job.kind == "headers" else MASKING_BUDGET
     assert outcome is not None
-    fragment, reason = outcome
+    value, size, reason = outcome
     if reason is not None:
         return None, reason
-    if fragment is not None and not budget.charge(job.size, len(fragment)):
-        return None, MASKING_BUDGET
-    return fragment, None
+    if value is not None and not budget.charge(job.size, size):
+        return None, HEADER_BUDGET if job.kind == "headers" else MASKING_BUDGET
+    return value, None
 
 
-def _project_without_bodies(row: Mapping[str, Any], *, redaction: str) -> tuple[dict[str, Any], dict[str, bool]]:
-    """One archived call redacted (unless raw), its bodies set aside: ``(item, body allowed)``."""
+def _project_without_payloads(row: Mapping[str, Any], *, redaction: str) -> tuple[dict[str, Any], dict[str, bool], bool]:
+    """One archived call redacted (unless raw), its payloads set aside:
+    ``(item, body allowed, headers private)``."""
     item = dict(row)
     bodies = {key: True for key in _BODY_FIELDS}
-    item.pop(LAZY_BODIES, None)
-    for key in _BODY_FIELDS:
+    private = False
+    item.pop(LAZY_PAYLOADS, None)
+    for key in (*_BODY_FIELDS, *_HEADER_FIELDS):
         item[key] = None
-    for key in ("request_headers", "response_headers"):
-        item[key] = _decoded(item.get(key))
     if redaction != "raw":
-        # Bodies are masked on their own (masked_body_text): a value beside a secret-named
-        # parameter or nested below a secret-named key is not under a sensitive dictionary key,
-        # and a stored body is text (N39).
+        # Payloads are redacted on their own (archive_export_worker): a value beside a
+        # secret-named parameter or nested below a secret-named key is not under a sensitive
+        # dictionary key, and a stored body is text (N39).
         item = redact_sensitive(item, redact_strings=True, scrub_text=True)
         # State-changing Hunt bodies can contain low-entropy pairing PINs or newly
         # issued credentials. Key-name redaction and an unsalted body digest are
@@ -783,22 +858,24 @@ def _project_without_bodies(row: Mapping[str, Any], *, redaction: str) -> tuple[
         }):
             # Response captures and arbitrary header bindings can contain PINs or
             # tokens under any name, including on GET. Keep values and their
-            # brute-forceable digests raw-export-only in every public archive view.
+            # brute-forceable digests raw-export-only in every public archive view
+            # (header values become "[REDACTED]" in the worker).
+            private = True
             for prefix in ("request", "response"):
                 bodies[prefix + "_body"] = False
                 item[prefix + "_body_sha256"] = None
-                item[prefix + "_headers"] = {key: "[REDACTED]" for key in (item.get(prefix + "_headers") or {})}
-    return item, bodies
+    return item, bodies, private
 
 
-def _projection(item: Mapping[str, Any], bodies: Mapping[str, Any], reasons: Mapping[str, str]) -> dict[str, Any]:
-    """The exported shape of one call; ``bodies`` holds what each side shows (a placeholder)."""
+def _projection(item: Mapping[str, Any], shown: Mapping[str, Any], reasons: Mapping[str, str]) -> dict[str, Any]:
+    """The exported shape of one call; ``shown`` holds what each payload shows (a body as its
+    placeholder, headers as the redacted mapping)."""
     def side(prefix: str) -> dict[str, Any]:
         field = prefix + "_body"
         withheld = reasons.get(field) in _MASKING_OMISSIONS
         return {
-            "headers": item.get(prefix + "_headers") or {},
-            "body": bodies.get(field),
+            "headers": shown.get(prefix + "_headers") or {},
+            "body": shown.get(field),
             # A body this export left out carries no digest, so nothing reads as present.
             "sha256": None if withheld else item.get(field + "_sha256"),
             "bytes": item.get(field + "_bytes"),
@@ -879,32 +956,36 @@ class EncodedExport:
         return walk(self.document if document is None else document)
 
 
-def _plan(rows: Sequence[Mapping[str, Any]], redaction: str) -> tuple[list[dict[str, Any]], list[_BodyJob]]:
+
+def _plan(rows: Sequence[Mapping[str, Any]], redaction: str) -> tuple[list[dict[str, Any]], list[_PayloadJob]]:
     items: list[dict[str, Any]] = []
-    jobs: list[_BodyJob] = []
+    jobs: list[_PayloadJob] = []
     masked = redaction != "raw"
     for index, row in enumerate(rows):
-        item, allowed = _project_without_bodies(row, redaction=redaction)
+        item, allowed, private = _project_without_payloads(row, redaction=redaction)
         items.append(item)
-        stored = row.get(LAZY_BODIES)
-        for field in _BODY_FIELDS:
+        stored = row.get(LAZY_PAYLOADS)
+        for field in PAYLOAD_FIELDS:
+            is_body = field in _BODY_FIELDS
+            permitted = allowed[field] if is_body else True
+            in_hand_extra = None if is_body else private
             if stored is None:
-                jobs.append(_BodyJob(index, field, row.get(field) if allowed[field] else None, masked))
-            elif allowed[field] and field in stored:
-                jobs.append(_BodyJob(
+                jobs.append(_PayloadJob(index, field, row.get(field) if permitted else None, masked, extra=in_hand_extra))
+            elif permitted and field in stored:
+                jobs.append(_PayloadJob(
                     index, field, None, masked, stored_size=stored[field],
-                    legacy=(row.get(f"{field}_sha256"),),
+                    extra=(row.get(f"{field}_sha256"),) if is_body else private,
                 ))
             else:
-                jobs.append(_BodyJob(index, field, None, masked))
+                jobs.append(_PayloadJob(index, field, None, masked))
     return items, jobs
 
 
 def _assemble(
     rows: Sequence[Mapping[str, Any]],
     items: list[dict[str, Any]],
-    jobs: list[_BodyJob],
-    outcomes: list[Outcome],
+    jobs: list[_PayloadJob],
+    outcomes: list[Settled],
     *,
     export_format: str,
     redaction: str,
@@ -920,14 +1001,16 @@ def _assemble(
     reasons: list[dict[str, str]] = [
         {field: EXTERNAL_READ_BUDGET for field in (row.get("payload_omitted") or ())} for row in rows
     ]
-    for job, (fragment, reason) in zip(jobs, outcomes):
+    for job, (value, reason) in zip(jobs, outcomes):
         if reason is not None:
             reasons[job.index][job.field] = reason
-        elif fragment is not None:
+        elif value is not None and job.kind == "headers":
+            shown[job.index][job.field] = value
+        elif value is not None:
             key = str(len(fragments))
-            fragments[key] = fragment
+            fragments[key] = value
             shown[job.index][job.field] = f"\x00archive-body:{token}:{key}\x00"
-    projected = [_projection(item, body, why) for item, body, why in zip(items, shown, reasons)]
+    projected = [_projection(item, show, why) for item, show, why in zip(items, shown, reasons)]
     document = _envelope(
         rows, projected, export_format=export_format, redaction=redaction, owner=owner,
         total=total, archive_total=archive_total, stats=stats, creator_version=creator_version,
@@ -951,8 +1034,11 @@ def _omission_notes(projected: Sequence[Mapping[str, Any]]) -> list[str]:
         notes.append(f"{counts[OVER_MASKING_LIMIT]} recorded call(s) have a body over the "
                      f"{MAX_MASKED_BODY_CHARS}-character masking limit, withheld from every masked view")
     if counts[MASKING_FAILED]:
-        notes.append(f"{counts[MASKING_FAILED]} recorded call(s) have a body that could not be masked "
-                     "within the masking worker's memory, withheld from this export")
+        notes.append(f"{counts[MASKING_FAILED]} recorded call(s) have a payload that could not be masked "
+                     "safely, withheld from this export")
+    if counts[HEADER_BUDGET]:
+        notes.append(f"{counts[HEADER_BUDGET]} recorded call(s) have headers left out because this export "
+                     "reached its header budget; export fewer calls at a time to include them")
     return notes
 
 
@@ -1058,25 +1144,29 @@ def _envelope(
     }
 
 
-def _budget_for(redaction: str) -> _BodyBudget:
-    return _BodyBudget(None if redaction == "raw" else masked_export_budget())
+
+def _settle_in_process(jobs: list[_PayloadJob], budgets: _Budgets) -> list[Settled]:
+    return [
+        _settle(job, budgets, encode_payload(job.kind, job.value, job.masked, job.extra) if _wants(job, budgets) else None)
+        for job in jobs
+    ]
+
+
+def _budgets_for(redaction: str, *, light: bool = False) -> _Budgets:
+    return _Budgets(body_budget(redaction, light=light), header_budget(light=light))
 
 
 def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
     """One archived call, redacted unless the caller explicitly asked for raw."""
     items, jobs = _plan([row], redaction)
-    budget = _BodyBudget(None)
-    outcomes = [
-        _settle(job, budget, encode_body(job.value, job.masked, job.legacy) if _wants(job, budget) else None)
-        for job in jobs
-    ]
+    outcomes = _settle_in_process(jobs, _Budgets(None, None))
     reasons = {field: EXTERNAL_READ_BUDGET for field in (row.get("payload_omitted") or ())}
     shown: dict[str, Any] = {}
-    for job, (fragment, reason) in zip(jobs, outcomes):
+    for job, (value, reason) in zip(jobs, outcomes):
         if reason is not None:
             reasons[job.field] = reason
-        elif fragment is not None:
-            shown[job.field] = json.loads(fragment)
+        elif value is not None:
+            shown[job.field] = value if job.kind == "headers" else json.loads(value)
     return _projection(items[0], shown, reasons)
 
 
@@ -1090,14 +1180,11 @@ def export_document(
     archive_total: int | None = None,
     stats: Mapping[str, int] | None = None,
     creator_version: str = "2.0.0",
+    light: bool = False,
 ) -> dict[str, Any]:
     """Build the export envelope in this process, stating what it is and what it is not."""
     items, jobs = _plan(rows, redaction)
-    budget = _budget_for(redaction)
-    outcomes = [
-        _settle(job, budget, encode_body(job.value, job.masked, job.legacy) if _wants(job, budget) else None)
-        for job in jobs
-    ]
+    outcomes = _settle_in_process(jobs, _budgets_for(redaction, light=light))
     encoded = _assemble(
         rows, items, jobs, outcomes, export_format=export_format, redaction=redaction, owner=owner,
         total=total, archive_total=archive_total, stats=stats, creator_version=creator_version,
@@ -1117,19 +1204,22 @@ class ExportUnavailable(RuntimeError):
 
 
 class _ExportSlots:
-    """``MAX_CONCURRENT_EXPORT_BUILDS`` export slots, at most one per caller.
+    """``capacity`` export slots, at most ``per_caller`` of them held by one caller.
 
-    Each slot holds one export's rows, a batch of bodies, fragments and response at once, so the
-    slots, not the request rate, bound the memory exports use; one caller cannot take them all.
+    Each slot holds one export's rows, a batch of payloads, fragments and response at once, so
+    the slots, not the request rate, bound the memory exports use.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, capacity: int, per_caller: int | None) -> None:
+        self.capacity, self.per_caller = capacity, per_caller
         self.active = 0
         self.callers: dict[str, int] = {}
         self.waiters: list[asyncio.Future[None]] = []
 
     def _free_for(self, caller: str | None) -> bool:
-        return self.active < MAX_CONCURRENT_EXPORT_BUILDS and not (caller and self.callers.get(caller))
+        if self.active >= self.capacity:
+            return False
+        return not (caller and self.per_caller and self.callers.get(caller, 0) >= self.per_caller)
 
     async def acquire(self, caller: str | None, wait_seconds: float) -> None:
         loop = asyncio.get_running_loop()
@@ -1165,24 +1255,32 @@ class _ExportSlots:
                 waiter.set_result(None)
 
 
-_admission: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _ExportSlots] = weakref.WeakKeyDictionary()
-_body_pool: ProcessPoolExecutor | None = None
+_admission: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, _ExportSlots]] = weakref.WeakKeyDictionary()
+_payload_pool: ProcessPoolExecutor | None = None
 
 
 @asynccontextmanager
 async def export_admission(
-    caller: str | None = None, wait_seconds: float | None = None,
+    caller: str | None = None, wait_seconds: float | None = None, *, light: bool = False,
 ) -> AsyncIterator[None]:
-    """An export slot, taken before any row is read; at most one per ``caller`` at a time.
+    """An export slot, taken before any row is read.
 
-    A request that cannot get one within ``EXPORT_ADMISSION_WAIT_SECONDS`` is refused with
-    ``ExportBusy`` instead of queueing with its rows loaded.
+    A heavy export (a download, a HAR, a Hunt record) takes one of ``MAX_CONCURRENT_EXPORT_BUILDS``
+    slots, at most ``MAX_EXPORTS_PER_CALLER`` per caller. A browse page (``is_light_export``)
+    takes one of ``MAX_CONCURRENT_BROWSE_PAGES`` separate slots with no per-caller rule, so a
+    user's own browsing never waits behind their download. A request that cannot get a slot in
+    time is refused with ``ExportBusy`` (503 with Retry-After) instead of queueing with its rows.
     """
     loop = asyncio.get_running_loop()
-    slots = _admission.get(loop)
-    if slots is None:
-        slots = _admission[loop] = _ExportSlots()
-    await slots.acquire(caller, EXPORT_ADMISSION_WAIT_SECONDS if wait_seconds is None else wait_seconds)
+    pools = _admission.get(loop)
+    if pools is None:
+        pools = _admission[loop] = {
+            "heavy": _ExportSlots(MAX_CONCURRENT_EXPORT_BUILDS, MAX_EXPORTS_PER_CALLER),
+            "light": _ExportSlots(MAX_CONCURRENT_BROWSE_PAGES, None),
+        }
+    slots = pools["light" if light else "heavy"]
+    default_wait = BROWSE_ADMISSION_WAIT_SECONDS if light else EXPORT_ADMISSION_WAIT_SECONDS
+    await slots.acquire(caller, default_wait if wait_seconds is None else wait_seconds)
     try:
         yield
     finally:
@@ -1193,33 +1291,33 @@ def _workers() -> ProcessPoolExecutor:
     """The masking worker pool, started on the first export.
 
     Its processes import only the masking modules (``worker_context``) and are not recycled:
-    a recycled worker paid a fresh interpreter start for every few hundred bodies.
+    a recycled worker paid a fresh interpreter start for every few hundred payloads.
     """
-    global _body_pool
-    if _body_pool is None:
-        _body_pool = ProcessPoolExecutor(
+    global _payload_pool
+    if _payload_pool is None:
+        _payload_pool = ProcessPoolExecutor(
             max_workers=MASKING_WORKERS, mp_context=worker_context(), initializer=initialize_worker,
         )
-    return _body_pool
+    return _payload_pool
 
 
 def _discard_workers() -> None:
-    global _body_pool
-    pool, _body_pool = _body_pool, None
+    global _payload_pool
+    pool, _payload_pool = _payload_pool, None
     if pool is not None:
         pool.shutdown(wait=False, cancel_futures=True)
 
 
-async def _encode_in_workers(jobs: list[_BodyJob], budget: _BodyBudget) -> list[Outcome]:
-    """Every body encoded in the worker pool and settled in order.
+async def _encode_in_workers(jobs: list[_PayloadJob], budgets: _Budgets) -> list[Settled]:
+    """Every payload encoded in the worker pool and settled in order.
 
-    Consecutive bodies travel in chunks of at most ``WORKER_CHUNK_BYTES`` (one body at least)
-    and ``WORKER_CHUNK_BODIES``, at most ``WORKER_CHUNKS_IN_FLIGHT`` chunks ahead: one round
-    trip per body cost more than masking a small one.
+    Consecutive payloads travel in chunks of at most ``WORKER_CHUNK_BYTES`` (one at least) and
+    ``WORKER_CHUNK_BODIES``, at most ``WORKER_CHUNKS_IN_FLIGHT`` chunks ahead: one round trip per
+    payload cost more than masking a small one.
     """
     loop = asyncio.get_running_loop()
     pool = _workers()
-    outcomes: list[Outcome] = []
+    outcomes: list[Settled] = []
     chunk_of: dict[int, tuple[asyncio.Future[list[Outcome]], int]] = {}
     in_flight: list[asyncio.Future[list[Outcome]]] = []
     submitted = 0
@@ -1230,7 +1328,7 @@ async def _encode_in_workers(jobs: list[_BodyJob], budget: _BodyBudget) -> list[
         size = 0
         while submitted < len(jobs):
             job = jobs[submitted]
-            if not (_wants(job, budget) and job.value is not None):
+            if not (_wants(job, budgets) and job.value is not None):
                 submitted += 1
                 continue
             if members and (size + job.size > WORKER_CHUNK_BYTES or len(members) >= WORKER_CHUNK_BODIES):
@@ -1240,7 +1338,8 @@ async def _encode_in_workers(jobs: list[_BodyJob], budget: _BodyBudget) -> list[
             submitted += 1
         if members:
             future = loop.run_in_executor(
-                pool, encode_bodies, [(jobs[i].value, jobs[i].masked, jobs[i].legacy) for i in members],
+                pool, encode_payloads,
+                [(jobs[i].kind, jobs[i].value, jobs[i].masked, jobs[i].extra) for i in members],
             )
             in_flight.append(future)
             for offset, index in enumerate(members):
@@ -1256,8 +1355,8 @@ async def _encode_in_workers(jobs: list[_BodyJob], budget: _BodyBudget) -> list[
                     break
             entry = chunk_of.pop(position, None)
             outcome = (await entry[0])[entry[1]] if entry is not None else None
-            outcomes.append(_settle(job, budget, outcome))
-            job.value = None  # the fragment, if any, is all this export keeps
+            outcomes.append(_settle(job, budgets, outcome))
+            job.value = None  # the settled value, if any, is all this export keeps
     except BrokenProcessPool as exc:
         _discard_workers()
         raise ExportUnavailable("the archive masking workers stopped") from exc
@@ -1267,12 +1366,12 @@ async def _encode_in_workers(jobs: list[_BodyJob], budget: _BodyBudget) -> list[
     return outcomes
 
 
-BodyReader = Callable[[Sequence[Any], int], Awaitable[tuple[dict[str, dict[str, Any]], int]]]
+PayloadReader = Callable[[Sequence[Any], int], Awaitable[tuple[dict[str, dict[str, Any]], int]]]
 
 
-def _batches(jobs: list[_BodyJob]) -> Iterator[list[_BodyJob]]:
-    """Consecutive jobs holding at most ``EXPORT_BATCH_BYTES`` of stored body (one body at least)."""
-    batch: list[_BodyJob] = []
+def _batches(jobs: list[_PayloadJob]) -> Iterator[list[_PayloadJob]]:
+    """Consecutive jobs holding at most ``EXPORT_BATCH_BYTES`` of stored payload (one at least)."""
+    batch: list[_PayloadJob] = []
     size = 0
     for job in jobs:
         if batch and (size + job.size > EXPORT_BATCH_BYTES or len(batch) >= EXPORT_BATCH_BODIES):
@@ -1285,35 +1384,35 @@ def _batches(jobs: list[_BodyJob]) -> Iterator[list[_BodyJob]]:
 
 
 async def _encode_read_lazily(
-    rows: Sequence[Mapping[str, Any]], items: list[dict[str, Any]], jobs: list[_BodyJob],
-    budget: _BodyBudget, read_bodies: BodyReader, read_budget: int,
-) -> list[Outcome]:
-    """Read bodies a batch at a time, only those the budget can still take, and encode them.
+    rows: Sequence[Mapping[str, Any]], items: list[dict[str, Any]], jobs: list[_PayloadJob],
+    budgets: _Budgets, read_payloads: PayloadReader, read_budget: int,
+) -> list[Settled]:
+    """Read payloads a batch at a time, only those the budgets can still take, and encode them.
 
-    The rows came without their bodies (``read_transactions(bodies=False)``), so an export holds
-    one batch of stored bodies at a time, never every body it lists.
+    The rows came without their payloads (``read_transactions(payloads=False)``), so an export
+    holds one batch of stored headers and bodies at a time, never every payload it lists.
     """
-    outcomes: list[Outcome] = []
+    outcomes: list[Settled] = []
     for batch in _batches(jobs):
-        wanted = [job for job in batch if job.value is None and _wants(job, budget)]
+        wanted = [job for job in batch if job.value is None and _wants(job, budgets)]
         if wanted:
             ids = list(dict.fromkeys(rows[job.index]["id"] for job in wanted))
-            found, used = await read_bodies(ids, read_budget)
+            found, used = await read_payloads(ids, read_budget)
             read_budget = max(0, read_budget - used)
             for job in wanted:
-                bodies = found.get(str(rows[job.index]["id"]))
-                if bodies is None or job.field in bodies["unavailable"]:
+                payloads = found.get(str(rows[job.index]["id"]))
+                if payloads is None or job.field in payloads["unavailable"]:
                     job.present = False  # purged since, or unreadable: the call says so
                     unavailable = items[job.index].setdefault("payload_unavailable", [])
                     if job.field not in unavailable:
                         unavailable.append(job.field)
-                elif job.field in bodies["omitted"]:
+                elif job.field in payloads["omitted"]:
                     job.reason = EXTERNAL_READ_BUDGET
                 else:
-                    job.value = bodies[job.field]
+                    job.value = payloads[job.field]
                     job.present = job.value is not None
             del found
-        outcomes.extend(await _encode_in_workers(batch, budget))
+        outcomes.extend(await _encode_in_workers(batch, budgets))
     return outcomes
 
 
@@ -1327,22 +1426,23 @@ async def build_export(
     archive_total: int | None = None,
     stats: Mapping[str, int] | None = None,
     creator_version: str = "2.0.0",
-    read_bodies: BodyReader | None = None,
+    read_payloads: PayloadReader | None = None,
+    light: bool = False,
 ) -> EncodedExport:
-    """``export_document`` with every body decoded, masked and encoded in the worker pool.
+    """``export_document`` with every payload decoded, redacted and encoded in the worker pool.
 
     A scanned service chooses what it returns, and the archive keeps it; masking that body
     for a later export must not stall every other request the API is serving (external
-    release audit, 2026-10-09). Rows read without bodies get them from ``read_bodies`` a batch
-    at a time. Call it holding ``export_admission``.
+    release audit, 2026-10-09). Rows read without payloads get them from ``read_payloads`` a
+    batch at a time. Call it holding ``export_admission``.
     """
     items, jobs = _plan(rows, redaction)
-    budget = _budget_for(redaction)
-    if read_bodies is None:
-        outcomes = await _encode_in_workers(jobs, budget)
+    budgets = _budgets_for(redaction, light=light)
+    if read_payloads is None:
+        outcomes = await _encode_in_workers(jobs, budgets)
     else:
         outcomes = await _encode_read_lazily(
-            rows, items, jobs, budget, read_bodies, export_read_budget(redaction),
+            rows, items, jobs, budgets, read_payloads, export_read_budget(redaction, light=light),
         )
     return _assemble(
         rows, items, jobs, outcomes, export_format=export_format, redaction=redaction, owner=owner,
@@ -1468,7 +1568,7 @@ __all__ = [
     "DEFAULT_MASKED_EXPORT_BYTES",
     "EXPORT_RETRY_AFTER_SECONDS",
     "EncodedExport",
-    "LAZY_BODIES",
+    "LAZY_PAYLOADS",
     "ExportBusy",
     "ExportUnavailable",
     "MAX_CONCURRENT_EXPORT_BUILDS",
@@ -1476,6 +1576,7 @@ __all__ = [
     "build_export",
     "export_admission",
     "export_read_budget",
+    "is_light_export",
     "masked_export_budget",
     "REDACTION_MODES",
     "archive_fidelity",
@@ -1484,6 +1585,6 @@ __all__ = [
     "export_document",
     "project",
     "purge_transactions",
-    "read_transaction_bodies",
+    "read_transaction_payloads",
     "read_transactions",
 ]

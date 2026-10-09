@@ -1235,29 +1235,33 @@ def test_a_masked_export_reads_bodies_lazily_and_shows_what_a_full_read_shows(tm
 
     async def scenario(pool):
         t, sibling, scan, f, other, e = await seeded(pool)
+        other_scan = uuid4()
+        async with pool.acquire() as c:
+            await c.execute("INSERT INTO scans(id,target_id,target_url,status) VALUES($1,$2,$3,'completed')",
+                            other_scan, t, f"https://{t}.example.invalid")
         calls = [_large_tx(scan, t, 1, inline.encode()), _large_tx(scan, t, 2, external.encode()),
                  _large_tx(scan, t, 3, b"plain body")]
         async with pool.acquire() as c:
             await archive_recorded_calls(c, calls, results_dir=tmp_path, label="lazy bodies",
                                          owner_kind="scan", owner_id=str(scan))
             full = await reader.read_transactions(c, scan_id=str(scan), results_dir=tmp_path)
-            light = await reader.read_transactions(c, scan_id=str(scan), results_dir=tmp_path, bodies=False)
-        assert all(row["response_body"] is None for row in light)
-        assert [sorted(row[reader.LAZY_BODIES]) for row in light] == [["response_body"]] * 3
+            light = await reader.read_transactions(c, scan_id=str(scan), results_dir=tmp_path, payloads=False)
+        assert all(row["response_body"] is None and row["request_headers"] is None for row in light)
+        assert all("response_body" in row[reader.LAZY_PAYLOADS] for row in light)
         read: list[str] = []
 
         async def read_bodies(ids, budget):
             read.extend(str(item) for item in ids)
             async with pool.acquire() as c:
-                return await reader.read_transaction_bodies(
-                    c, ids, external_payload_budget=budget, results_dir=tmp_path,
+                return await reader.read_transaction_payloads(
+                    c, ids, external_payload_budget=budget, results_dir=tmp_path, scan_id=str(scan),
                 )
 
         stats = {"attempted": 3, "stored": 3, "failed": 0, "dropped": 0}
         for redaction in ("redacted", "raw"):
             arguments = {"export_format": "transactions", "redaction": redaction,
                          "owner": {"scan_id": str(scan)}, "total": 3, "stats": stats}
-            lazy = (await reader.build_export(light, read_bodies=read_bodies, **arguments)).materialize()
+            lazy = (await reader.build_export(light, read_payloads=read_bodies, **arguments)).materialize()
             assert lazy == reader.export_document(full, **arguments)
             if redaction == "redacted":
                 assert "LazyCanary7Q" not in json.dumps(lazy)
@@ -1268,11 +1272,22 @@ def test_a_masked_export_reads_bodies_lazily_and_shows_what_a_full_read_shows(tm
         monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES", str(len(inline) + 8))
         read.clear()
         small = (await reader.build_export(
-            light, read_bodies=read_bodies, export_format="transactions", redaction="redacted",
+            light, read_payloads=read_bodies, export_format="transactions", redaction="redacted",
             owner={"scan_id": str(scan)}, total=3, stats=stats,
         )).materialize()
         assert [item["payload_omitted_reasons"] for item in small["transactions"]] == [
             {}, {"response_body": "masking_budget"}, {"response_body": "masking_budget"},
         ]
         assert str(light[1]["id"]) not in read  # the large external body is never fetched
+
+        # Payloads are read only for the export's own owner: another scan's id yields nothing.
+        async with pool.acquire() as c:
+            found, _used = await reader.read_transaction_payloads(
+                c, [light[0]["id"]], external_payload_budget=0, results_dir=tmp_path, scan_id=str(other_scan),
+            )
+            assert found == {}
+            found, _used = await reader.read_transaction_payloads(
+                c, [light[0]["id"]], external_payload_budget=0, results_dir=tmp_path, scan_id=str(scan),
+            )
+            assert list(found) == [str(light[0]["id"])]
     run(scenario)

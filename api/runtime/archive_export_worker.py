@@ -190,9 +190,41 @@ def encode_body(value: Any, masked: bool, legacy: tuple[Any] | None = None) -> t
         return None, MASKING_FAILED
 
 
-def encode_bodies(work: list[tuple[Any, bool, tuple[Any] | None]]) -> list[tuple[bytes | None, str | None]]:
-    """``encode_body`` for several consecutive bodies in one round trip to the worker."""
-    return [encode_body(value, masked, legacy) for value, masked, legacy in work]
+def encoded_headers(value: Any, masked: bool, private: bool) -> tuple[Any, int]:
+    """One call's stored headers as the archive view shows them, and their encoded size.
+
+    Masked: key-name and free-text redaction (the shared redactor), and for a private workflow
+    every value withheld. Raw: decoded only.
+    """
+    headers = _decoded(value)
+    if masked:
+        headers = redact_sensitive(headers, redact_strings=True, scrub_text=True)
+        if private:
+            headers = {key: "[REDACTED]" for key in (headers or {})}
+    size = len(utf8(json.dumps(headers, ensure_ascii=False)))
+    return headers, size
+
+
+def encode_payload(kind: str, value: Any, masked: bool, extra: Any = None) -> tuple[Any, int, str | None]:
+    """Worker entry point for one payload: ``(value shown, encoded bytes, omission reason)``.
+
+    A body comes back as its JSON fragment (``extra``: the recorded digest when legacy decoding
+    is still due), headers as the redacted mapping (``extra``: private workflow). Any failure
+    withholds the payload (``masking_failed``); nothing about it is logged or raised.
+    """
+    if kind == "headers":
+        try:
+            headers, size = encoded_headers(value, masked, bool(extra))
+        except Exception:  # noqa: BLE001 - one hostile payload must not fail the export
+            return None, 0, MASKING_FAILED
+        return headers, size, None
+    fragment, reason = encode_body(value, masked, extra)
+    return fragment, len(fragment) if fragment is not None else 0, reason
+
+
+def encode_payloads(work: list[tuple[str, Any, bool, Any]]) -> list[tuple[Any, int, str | None]]:
+    """``encode_payload`` for several consecutive payloads in one round trip to the worker."""
+    return [encode_payload(kind, value, masked, extra) for kind, value, masked, extra in work]
 
 
 def initialize_worker() -> None:
@@ -234,18 +266,30 @@ class _SpawnWithoutMain:
         return data
 
 
-_STANDARD_LAUNCH = _popen_spawn_posix.Popen._launch
-_launch_without_main = types.FunctionType(
-    _STANDARD_LAUNCH.__code__,
-    {**vars(_popen_spawn_posix), "spawn": _SpawnWithoutMain()},
-    _STANDARD_LAUNCH.__name__,
-    _STANDARD_LAUNCH.__defaults__,
-    _STANDARD_LAUNCH.__closure__,
-)
+_STANDARD_LAUNCH = getattr(_popen_spawn_posix.Popen, "_launch", None)
+
+
+def _rebound_launch() -> Any | None:
+    """The standard launch reading ``spawn`` through ``_SpawnWithoutMain``, or None when this
+    Python's launch is not the shape it was checked against (it must look up
+    ``spawn.get_preparation_data`` through the module global ``spawn``)."""
+    code = getattr(_STANDARD_LAUNCH, "__code__", None)
+    if code is None or "spawn" not in code.co_names or "get_preparation_data" not in code.co_names:
+        return None
+    if _STANDARD_LAUNCH.__closure__:
+        return None
+    return types.FunctionType(
+        code, {**vars(_popen_spawn_posix), "spawn": _SpawnWithoutMain()},
+        _STANDARD_LAUNCH.__name__, _STANDARD_LAUNCH.__defaults__, None,
+    )
+
+
+_launch_without_main = _rebound_launch()
 
 
 class _WorkerPopen(_popen_spawn_posix.Popen):
-    _launch = _launch_without_main
+    if _launch_without_main is not None:
+        _launch = _launch_without_main
 
 
 class _WorkerProcess(_mp_context.SpawnProcess):
@@ -258,6 +302,17 @@ class _WorkerContext(_mp_context.SpawnContext):
     Process = _WorkerProcess
 
 
-def worker_context() -> _mp_context.SpawnContext:
-    """A spawn context whose children import only what their work needs."""
-    return _WorkerContext()
+def worker_context() -> _mp_context.BaseContext:
+    """A context whose children import only what their work needs.
+
+    Normally the spawn method without the main-module instruction. If this Python's spawn launch
+    has changed shape, fall back to the forkserver: the parent's main is then imported once, in
+    the server, and every worker forks from it with this module preloaded.
+    """
+    if _launch_without_main is not None:
+        return _WorkerContext()
+    import multiprocessing
+
+    context = multiprocessing.get_context("forkserver")
+    context.set_forkserver_preload(["__main__", __name__])
+    return context
