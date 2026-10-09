@@ -41,6 +41,9 @@ jobs:
       matrix:
         shard: [dast, core, browser, images]
     env:
+      # True only when the read-only Docker Hub secrets exist; forks and Dependabot get false
+      # and keep pulling anonymously, as before.
+      HAS_DH_READ: ${{ secrets.DOCKERHUB_READ_USERNAME != '' && secrets.DOCKERHUB_READ_TOKEN != '' }}
       POSTGRES_PASSWORD: ci-postgres-credential-0000000000000001
       REDIS_PASSWORD: ci-redis-credential-000000000000000001
       SHAKERSCAN_E2E_REQUIRE_NETWORK_WORKER: "true"
@@ -132,6 +135,15 @@ jobs:
             printf '%s\n' "$rc" > "$RUNNER_TEMP/browser-toolchain.status.tmp"
             mv "$RUNNER_TEMP/browser-toolchain.status.tmp" "$RUNNER_TEMP/browser-toolchain.status"
           ) &
+
+      # Authenticated, read-only Docker Hub pulls avoid the anonymous pull rate limit (429
+      # toomanyrequests). Skipped, so pulls stay anonymous, when the read secrets are absent.
+      - name: Log in to Docker Hub for read-only pulls
+        if: env.HAS_DH_READ == 'true' && steps.shard.outputs.stack == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          username: ${{ secrets.DOCKERHUB_READ_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
 
       - name: Use the containerd image store so the local build can reuse cached layers
         if: steps.shard.outputs.stack == 'true'
