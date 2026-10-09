@@ -1009,6 +1009,15 @@ def worker_runtime_identity(configured: str | None = None) -> str:
     return base or hostname or "broker-worker"
 
 
+def _require_valid_destination_settings() -> None:
+    """Refuse to start with a malformed destination setting, as the API and workers do."""
+    try:
+        import deployment_policy
+    except ModuleNotFoundError:  # package import (api.broker_worker)
+        from . import deployment_policy
+    deployment_policy.require_valid_destination_settings()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ShakerScan outbound-only HTTPS broker worker")
     parser.add_argument("--state", default=os.environ.get("FLEET_BROKER_STATE_PATH", "/run/shakerscan-fleet/broker-state.json"))
@@ -1016,6 +1025,7 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     assert_outbound_only_runtime_environment()
+    _require_valid_destination_settings()
     worker_id = worker_runtime_identity(args.worker_id)
     os.environ["SHAKERSCAN_BROKER_LEASE"] = "1"
     os.environ["ARTIFACT_STORAGE_REQUIRED"] = "false"
