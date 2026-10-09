@@ -5,6 +5,7 @@ import Link from '@/components/WorkspaceLink'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { Card } from '@/components/ui'
 import { API_URL } from '@/lib/api'
+import { fetchRetryingBusy } from '@/lib/busyRetry.mjs'
 import type { HuntV2 } from '@/lib/huntV2'
 import { actionOutcomes, callArguments, requestsByAction, type ActionOutcome } from '@/lib/huntRunModel.mjs'
 import { RequestRow, useExpandedSet, type HuntArchive, type HuntTransaction } from './HuntRequestsPanel'
@@ -131,7 +132,7 @@ export function HuntTimeline({ hunt, archive }: { hunt: HuntV2; archive: HuntArc
   // and the reason it failed. It is the same document the Export menu downloads.
   useEffect(() => {
     let cancelled = false
-    fetch(`${API_URL}/hunts/${encodeURIComponent(hunt.hunt_id)}/record`, { cache: 'no-store' })
+    fetchRetryingBusy(`${API_URL}/hunts/${encodeURIComponent(hunt.hunt_id)}/record`, { cache: 'no-store' })
       .then(async response => {
         if (!response.ok) throw new Error(`Call details unavailable (${response.status})`)
         return response.json()
