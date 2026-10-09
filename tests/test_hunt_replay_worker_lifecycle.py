@@ -43,7 +43,8 @@ from runtime.reservation_store import StoredBudgetReservation, ReservationConfli
 from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
 # The worker functions exec here resolve these by name, as api/worker.py imports them.
 from hunt.dispatch_authority import (  # noqa: F401
-    HuntDispatchRejected, dispatch_http_target, dispatch_scope_binding, settle_rejected_dispatch,
+    HuntDispatchRejected, dispatch_http_target, dispatch_replay_authority, dispatch_scope_binding,
+    settle_rejected_dispatch, settle_rejected_replay_dispatch,
 )
 from scanner_tools.request_collections import RequestSelector, select_requests
 from scanner_tools.request_replay import ReplayAuthorization, RequestReplayError, build_selected_replay_plan
@@ -151,6 +152,10 @@ class Connection(AdmissionStore):
             action = self.actions[str(args[0])]
             if "SET status=$2" in query:
                 action.update(status=args[1], result_summary=json.loads(args[2]), receipt_id=args[3])
+            elif "SET status='blocked'" in query:
+                if action["status"] not in {"reserved", "running"}:
+                    return "UPDATE 0"
+                action.update(status="blocked", result_summary=json.loads(args[2]))
             elif "status='running'" in query:
                 action["status"] = "running"
             else:
@@ -218,7 +223,7 @@ def worker(conn):
     return namespace["process_request_collection_replay_job"]
 
 
-async def execute(conn, capability="collections.replay_safe"):
+async def execute(conn, capability="collections.replay_safe", *, before_worker=None):
     fn = admission(conn)
     async def approval(*_, **kwargs):
         conn.approvals.append(kwargs["risk_tier"])
@@ -248,6 +253,8 @@ async def execute(conn, capability="collections.replay_safe"):
         "allowed_origins": conn.collection["allowed_origins"], "replay_policy": conn.collection["replay_policy"], "capability_name": capability,
         "selector": {"request_ids": [conn.request_id], "limit": 1}, "tool_wall_seconds": 60,
     }
+    if before_worker is not None:
+        before_worker(conn)
     await worker(conn)(job)
     return conn.result
 
@@ -351,4 +358,40 @@ def test_active_replay_without_saved_grant_never_reaches_worker(field):
         with pytest.raises(HTTPException, match="state-changing HTTP permission"):
             await execute(conn, "collections.replay_active")
         assert not conn.actions and not conn.store.rows
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("withdrawn", ["state_changing", "allowlist"])
+def test_active_replay_whose_grant_was_revoked_after_admission_is_blocked_at_dispatch(withdrawn):
+    """R1 review: a revoked active-replay grant (its state-changing field off, or the capability
+    gone from the allowlist) between admission and the worker read as a failed contract error.
+    It is a dispatch refusal: nothing is reserved or sent, and the action is settled blocked."""
+    async def scenario():
+        wire = []
+
+        async def serve(reader, writer):
+            wire.append(await reader.readuntil(b"\r\n\r\n"))
+            writer.close()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        async with server:
+            origin = f"http://fixture.test:{server.sockets[0].getsockname()[1]}"
+            conn = Connection(kind="web", origin=origin, registered_origin=origin, active_limit=2, method="PUT")
+
+            def revoke(conn):  # the grant is revoked after admission, before the worker runs
+                if withdrawn == "state_changing":
+                    conn.run["policy_json"]["allow_state_changing_http"] = False
+                else:
+                    conn.run["policy_json"]["allowed_capabilities"] = ["collections.replay_safe", "http.request"]
+
+            result = await execute(conn, "collections.replay_active", before_worker=revoke)
+            assert result["status"] == "blocked", result
+            assert result["reason_code"] == "dispatch_authority_rejected" and result["refusal_stage"] == "dispatch"
+            assert result["execution_started"] is False and result["durable_budget_settled"] is True
+            assert result["message"].startswith("Hunt action authority rejected at dispatch")
+            (action,) = conn.actions.values()
+            assert action["status"] == "blocked"
+            assert action["result_summary"]["reason_code"] == "dispatch_authority_rejected"
+            assert not conn.store.rows, "no hold was taken"
+            assert wire == [], "nothing was sent"
     asyncio.run(scenario())

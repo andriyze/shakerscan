@@ -39,6 +39,7 @@ import uuid
 try:
     from capabilities.http import granted_destination, resolve_hunt_http_origin
     from capabilities.network import CapabilityInputError
+    from capabilities.replay import require_hunt_replay_authority
     from runtime.budgets import BUDGET_DIMENSIONS
     from runtime.hunt_http_contract import (
         HttpAuthorityWithdrawn,
@@ -49,6 +50,7 @@ try:
 except ModuleNotFoundError:
     from ..capabilities.http import granted_destination, resolve_hunt_http_origin
     from ..capabilities.network import CapabilityInputError
+    from ..capabilities.replay import require_hunt_replay_authority
     from ..runtime.budgets import BUDGET_DIMENSIONS
     from ..runtime.hunt_http_contract import (
         HttpAuthorityWithdrawn,
@@ -180,6 +182,21 @@ def require_dispatchable(
     return policy
 
 
+def dispatch_replay_authority(capability_name: str, policy: Mapping[str, Any], *, replay_policy: str | None) -> bool:
+    """``require_hunt_replay_authority`` at dispatch, on the Hunt's current policy, plus the
+    persisted allowlist: a replay whose authority was withdrawn after admission (its
+    ``active-replay`` or state-changing grant revoked) is a dispatch refusal, read as blocked."""
+    try:
+        active = require_hunt_replay_authority(capability_name, policy, replay_policy=replay_policy)
+    except ValueError as exc:
+        raise HuntDispatchRejected(f"Hunt action authority rejected at dispatch: {exc}") from exc
+    if capability_name not in {str(item) for item in policy.get("allowed_capabilities") or ()}:
+        raise HuntDispatchRejected(
+            "Hunt action authority rejected at dispatch: replay capability is outside the persisted Hunt allowlist"
+        )
+    return active
+
+
 def dispatch_http_request_authority(
     capability_input: Mapping[str, Any], policy: Mapping[str, Any], *, requested_budget: Mapping[str, Any],
 ) -> bool:
@@ -243,7 +260,7 @@ async def dispatch_scope_binding(
 
 
 async def settle_rejected_dispatch(
-    pool: Any, job_data: Mapping[str, Any], exc: BaseException, *, job_id: str,
+    pool: Any, job_data: Mapping[str, Any], exc: BaseException, *, job_id: str, store: Any = None,
 ) -> dict[str, Any]:
     """Release a refused dispatch's hold and settle its action ``blocked``, in one transaction.
 
@@ -261,15 +278,51 @@ async def settle_rejected_dispatch(
         "durable_budget_settled": False,
     }
     try:
-        return await _settle_rejected_dispatch(pool, job_data, message, result)
+        return await _settle_rejected_dispatch(pool, job_data, message, result, store)
     except Exception as failure:  # noqa: BLE001 - never leave the job without a result
         logger.warning("Hunt dispatch refusal could not be settled at once (%s); stale recovery releases it",
                        type(failure).__name__)
         return result
 
 
+async def settle_rejected_replay_dispatch(
+    pool: Any, job_data: Mapping[str, Any], exc: BaseException, *, job_id: str, store: Any = None,
+) -> dict[str, Any]:
+    """``settle_rejected_dispatch`` for a request-collection replay job, whose worker creates its
+    own hold: a refusal before that hold exists has nothing to release, and the action is
+    settled ``blocked`` with the same dispatch-refusal summary. Never raises."""
+    store = store if store is not None else PostgresBudgetReservationStore()
+    data = {**dict(job_data), "budget_reservation_id": job_data.get("reservation_id")}
+    result = await settle_rejected_dispatch(pool, data, exc, job_id=job_id, store=store)
+    if result.get("durable_budget_settled"):
+        return result
+    message = str(exc)[:240]
+    try:
+        hunt_id = uuid.UUID(str(job_data.get("hunt_id") or ""))
+        action_id = uuid.UUID(str(job_data.get("action_id") or ""))
+        reservation_id = str(uuid.UUID(str(job_data.get("reservation_id") or "")))
+        async with pool.acquire() as conn, conn.transaction():
+            if await store.load(conn, reservation_id, for_update=True) is not None:
+                return result  # a hold exists and was not settled above: leave it to its own path
+            blocked = {
+                "job_id": job_id, "status": "blocked", "ok": False, "error": DISPATCH_REJECTED,
+                "reason_code": DISPATCH_REJECTED, "message": message, "refusal_stage": "dispatch",
+                "execution_started": False, "durable_budget_settled": True, "reservation_id": None,
+                "budget_consumed": {},
+            }
+            updated = await conn.execute(
+                """UPDATE hunt_actions SET status='blocked', completed_at=NOW(), result_summary=$3::jsonb
+                   WHERE id=$1 AND hunt_run_id=$2 AND status IN ('reserved','running')""",
+                action_id, hunt_id, json.dumps({key: value for key, value in blocked.items() if key != "job_id"}),
+            )
+            return blocked if str(updated).endswith(" 1") else result
+    except Exception as failure:  # noqa: BLE001 - never leave the job without a result
+        logger.warning("Hunt replay dispatch refusal could not be settled (%s)", type(failure).__name__)
+        return result
+
+
 async def _settle_rejected_dispatch(
-    pool: Any, job_data: Mapping[str, Any], message: str, result: dict[str, Any],
+    pool: Any, job_data: Mapping[str, Any], message: str, result: dict[str, Any], store: Any = None,
 ) -> dict[str, Any]:
     try:
         hunt_id = uuid.UUID(str(job_data.get("hunt_id") or ""))
@@ -277,7 +330,7 @@ async def _settle_rejected_dispatch(
         reservation_id = str(uuid.UUID(str(job_data.get("budget_reservation_id") or "")))
     except ValueError:
         return result
-    store = PostgresBudgetReservationStore()
+    store = store if store is not None else PostgresBudgetReservationStore()
     async with pool.acquire() as conn:
         async with conn.transaction():
             run = await conn.fetchrow(
@@ -334,9 +387,11 @@ __all__ = [
     "destination_hard_limit",
     "dispatch_http_request_authority",
     "dispatch_http_target",
+    "dispatch_replay_authority",
     "dispatch_scope_binding",
     "granted_destination_recheck",
     "public_address",
     "require_dispatchable",
     "settle_rejected_dispatch",
+    "settle_rejected_replay_dispatch",
 ]

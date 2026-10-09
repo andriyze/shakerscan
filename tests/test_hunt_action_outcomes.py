@@ -273,9 +273,14 @@ def test_unified_startup_installs_the_candidate_schema_on_converted_instances(mo
         ("runtime.ai_template_secrets", "encrypt_stored_templates"),
         ("runtime.archive_blob_secrets", "encrypt_stored_blobs"),
         ("runtime.credential_migration", "migrate_legacy_web_credentials"),
-        ("hunt.grant_repair", "repair_grant_authority"),
+        ("hunt.grant_repair", "signal_repair_cancellations"),
     ):
         monkeypatch.setattr(importlib.import_module(module), name, noop)
+
+    async def nothing_to_repair(_conn):
+        return [], {}
+
+    monkeypatch.setattr(importlib.import_module("hunt.grant_repair"), "rebuild_or_cancel", nothing_to_repair)
     asyncio.run(asset_migration.run_unified_startup(Pool(), baseline))
     assert any(
         "CREATE INDEX IF NOT EXISTS idx_investigation_candidate_observations_hunt_run" in statement
