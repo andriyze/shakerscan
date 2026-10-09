@@ -14,6 +14,11 @@ from dataclasses import dataclass
 from typing import Any
 
 try:
+    from .registrable import spans_public_suffix as _psl_spans
+except ImportError:  # pragma: no cover - flat-module fallback
+    from registrable import spans_public_suffix as _psl_spans
+
+try:
     from .request_meter import RequestBudgetExceeded, get_request_meter
 except ImportError:  # pragma: no cover - flat-module fallback
     from request_meter import RequestBudgetExceeded, get_request_meter
@@ -870,12 +875,14 @@ def is_in_scope_url(url: str, base_url: str | None, allow_subdomains: bool = Tru
         return False
     if target_host == base_host:
         return True
-    if allow_subdomains and target_host.endswith(f".{base_host}"):
+    # A subtree that holds other registrants' sites (a public suffix such as github.io, or a
+    # name with one below it) never brings its subdomains into scope.
+    if allow_subdomains and target_host.endswith(f".{base_host}") and not _psl_spans(base_host):
         return True
     # Common case: base host is www.example.com, allow apex + subdomains.
     if allow_subdomains and base_host.startswith("www."):
         apex = base_host[4:]
-        if target_host == apex or target_host.endswith(f".{apex}"):
+        if (target_host == apex or target_host.endswith(f".{apex}")) and not _psl_spans(apex):
             return True
     return False
 
