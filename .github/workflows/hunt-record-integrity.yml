@@ -69,12 +69,9 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:18
-        # Read-only Docker Hub credentials for the pull. Empty secrets (forks, Dependabot) make
-        # the runner skip the login and pull anonymously, as before.
-        credentials:
-          username: ${{ secrets.DOCKERHUB_READ_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
+        # Docker Hub's official image through Google's pull-through mirror: services are pulled
+        # before any step can log in, and anonymous Docker Hub pulls hit the rate limit.
+        image: mirror.gcr.io/library/postgres:18
         env:
           POSTGRES_DB: hunt_records
           POSTGRES_PASSWORD: hunt-records-disposable-ci
