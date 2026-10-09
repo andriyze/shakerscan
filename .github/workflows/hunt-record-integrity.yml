@@ -118,6 +118,7 @@ jobs:
             tests/test_hunt_coverage_ledger_postgres.py \
             tests/test_hunt_credential_uses_postgres.py \
             tests/test_hunt_permission_requests_postgres.py \
+            tests/test_hunt_grant_revocation_postgres.py \
             tests/test_hunt_live_grant_dispatch_postgres.py \
             tests/test_hunt_refusal_retry_postgres.py \
             tests/test_public_retry_conflict_postgres.py \
