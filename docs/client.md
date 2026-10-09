@@ -253,7 +253,14 @@ the explicitly named ShakerScan resources. Pi reaches the instance through `shak
 `scan` and `hunt`. `--no-launch` prepares the workspace and prints a shell-safe command to
 start it; with no supported agent on the PATH it says so instead of naming one. OpenCode
 workspaces also load `skills/hunt/SKILL.md` as instructions (`opencode.json`), so the permission,
-budget and view rules are in every session that drives a Hunt. The
+budget and view rules are in every session that drives a Hunt. Running `shakerscan agent` again
+on an existing workspace merges these files instead of rewriting them: the client updates only
+its own parts (`mcp.shakerscan` and the Hunt skill instruction in `opencode.json`,
+`mcpServers.shakerscan` in `.mcp.json`, the kit's hooks in `.claude/settings.json`) and keeps
+everything else, such as an OpenCode `permission` block with a bash deny-list, Claude Code
+`permissions`, other MCP servers and `.claude/settings.local.json`; each `kept:` line says what
+was kept. A file that is not a JSON object is moved aside (`.shakerscan-unreadable-*.bak`), never
+silently overwritten. The
 kit's API calls go through `shakerscan api`, so the same commands work locally and remotely.
 
 `shakerscan api METHOD PATH [JSON]` calls the instance directly (`shakerscan api GET
@@ -318,6 +325,9 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   one step-up; its secret is held only in that process's memory (see
   `docs/hunt-permission-requests.md` for what that does and does not protect against).
 - **Open-source engine (no token).** A `y/N` at the prompt, sent to the engine's decision route.
+  `--watch` says which Hunts it watches, decides on a single key, ignores (and says so) a key
+  pressed before a request was on the screen, keeps polling while it waits for your key, and ends
+  with "stopped watching for permission requests".
   The engine has no accounts: anyone who can reach its API could decide, and the command says so.
 - Neither runs without an interactive terminal, so an agent cannot run it in its own shell. Never
   type a code into an agent's chat.
@@ -352,8 +362,8 @@ follow `next_cursor`.
 
 A client built from a repository checkout (a release, or `pipx install
 "git+https://github.com/andriyze/shakerscan@<commit>#subdirectory=client"`) also records the commit
-it was built from: `shakerscan version` prints `shakerscan client 0.8.0 (source 1a2b3c4d5e6f)`,
-`doctor` shows the same, and the MCP `serverInfo.version` is `client-0.8.0+1a2b3c4d5e6f`.
+it was built from: `shakerscan version` prints `shakerscan client 0.8.1 (source 1a2b3c4d5e6f)`,
+`doctor` shows the same, and the MCP `serverInfo.version` is `client-0.8.1+1a2b3c4d5e6f`.
 
 The client has its own version (`client/src/shakerscan/__init__.py`), tagged `client-vX.Y.Z`,
 independent of the engine release: because tool catalogues come from the live contracts, one
