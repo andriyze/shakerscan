@@ -164,6 +164,7 @@ from runtime.scan_credentials import (
     resolve_scan_interactive_credential,
     scan_credential_resolution_capability,
 )
+from operations.discovery import discovery_domain, queued_domain_refusal
 from scan.collection_replay import (
     EXECUTABLE_REPLAY_POLICIES,
     ScanCollectionReplayContractError,
@@ -2667,29 +2668,19 @@ def _effective_request_budget_mode(options: dict[str, Any] | None) -> str:
 
 
 async def run_discovery(root_domain: str) -> dict:
-    """Execute subdomain discovery."""
-    cmd = ['python3', SCANNER_PATH, root_domain, '--subfinder', '--quick']
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
+    """Execute subdomain discovery; a queued domain that fails validation spawns nothing."""
+    refused = queued_domain_refusal(root_domain)
+    if refused:
+        return refused
+    cmd = ['python3', SCANNER_PATH, discovery_domain(root_domain), '--subfinder', '--quick']
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     stdout, stderr = await proc.communicate()
-
     try:
         result = json.loads(stdout.decode())
-        return {
-            'subdomains': result.get('subdomains', []), 'name_sources': result.get('name_sources', {}),
-            'by_source': result.get('by_source', {}),
-            'total': result.get('subdomain_count', 0)
-        }
     except json.JSONDecodeError:
-        return {
-            'error': stderr.decode(),
-            'root_domain': root_domain,
-            'subdomains': []
-        }
+        return {'error': stderr.decode(), 'root_domain': root_domain, 'subdomains': []}
+    return {'subdomains': result.get('subdomains', []), 'name_sources': result.get('name_sources', {}),
+            'by_source': result.get('by_source', {}), 'total': result.get('subdomain_count', 0)}
 
 
 def generate_finding_fingerprint(finding: dict) -> str:

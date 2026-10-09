@@ -1277,6 +1277,12 @@ async def _run_schema_migrations_once(pool) -> None:
                 ON targets(asm_enabled) WHERE asm_enabled = true
             """)
 
+            # Who requested a Targets-page discovery run (POST /discovery, 2.8.1).
+            await conn.execute("""
+                ALTER TABLE discovery_runs
+                ADD COLUMN IF NOT EXISTS requested_by TEXT
+            """)
+
             # Recurring schedules now have a first-class kind. Existing
             # installs may still encode ASM waves as scan_options.kind.
             await conn.execute("""
