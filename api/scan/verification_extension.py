@@ -60,6 +60,9 @@ from .sqli_stages import MINIMUM_STAGE_WALL_SECONDS
 EXTENDS_ARG = "extends"
 # A resumable extension's fair part of the Scan's tool-wall residual when it was planned.
 SCAN_WALL_SHARE_ARG = "scan_wall_share"
+# A resumable extension that is the Scan's final attempt at a unit: the residual cannot fund the
+# unit's negative verdict, but can a run that proves an injection.
+LAST_CHANCE_ARG = "last_chance"
 # A proof re-planned behind an extension also reads candidate signals from the verifier slices
 # its original escalation depended on (terminal actions of an earlier round).
 SIGNAL_SOURCES_ARG = "signal_sources"
@@ -82,6 +85,7 @@ _SCALED_DIMENSIONS = ("http_requests", "state_changing_requests", "tool_wall_sec
 _ROUND_SUFFIX = re.compile(r"\.r\d{2}$")
 _CARRIED_ARGS_EXCLUDED = frozenset({
     "continuation_work_key", EXTENDS_ARG, SIGNAL_SOURCES_ARG, SCAN_WALL_SHARE_ARG,
+    LAST_CHANCE_ARG,
 })
 # A resumable slice that stopped because its own holds could not fund the candidates it was
 # given. Soak scan 0eb39a8a (Thorough, honey) planned four SQLi candidates, three of them
@@ -275,6 +279,23 @@ def stage_resume_walls(observations: Mapping[str, Any]) -> dict[str, int]:
             and isinstance(row.get("resume_wall_seconds"), int)
             and not isinstance(row.get("resume_wall_seconds"), bool)
             and int(row["resume_wall_seconds"]) > 0
+        ]
+        if needs:
+            walls[str(action_id)] = min(needs)
+    return walls
+
+
+def stage_last_chance_walls(observations: Mapping[str, Any]) -> dict[str, int]:
+    """The least wall a final run at each resumable slice's next unit needs to prove anything."""
+    walls: dict[str, int] = {}
+    for action_id, rows in (observations or {}).items():
+        needs = [
+            int(row["last_chance_wall_seconds"]) for row in rows or ()
+            if isinstance(row, Mapping)
+            and row.get("kind") in _RESUME_RECORD_KINDS
+            and not row.get("carried_from")
+            and row.get("resume_wall_seconds")
+            and isinstance(row.get("last_chance_wall_seconds"), int)
         ]
         if needs:
             walls[str(action_id)] = min(needs)
@@ -483,6 +504,7 @@ def plan_verification_extensions(
     budget_concluded: Mapping[str, str] | None = None,
     stage_remaining_walls: Mapping[str, int] | None = None,
     stage_remaining_requests: Mapping[str, int] | None = None,
+    stage_last_chance_walls: Mapping[str, int] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """One optional extension per timed-out, latency-starved verifier slice not yet extended.
 
@@ -516,6 +538,9 @@ def plan_verification_extensions(
     }
     by_id = {action.action_id: action for action in actions}
     lanes: dict[str, list[dict[str, Any]]] = {}
+    # Resumable slices whose next unit could still prove an injection on less than its
+    # negative verdict needs: the round's last chance if nothing else can be funded.
+    last_chance_pool: list[dict[str, Any]] = []
     for index, action in enumerate(actions):
         chained = bool(action.capability_args.get(EXTENDS_ARG))
         if (
@@ -577,6 +602,13 @@ def plan_verification_extensions(
             request_bound=request_bound,
             request_need=request_need,
         )
+        last_chance_wall = (stage_last_chance_walls or {}).get(action.action_id)
+        if last_chance_wall and concluded != "closed":
+            last_chance_pool.append({
+                "index": index, "action": action, "reserved": reserved,
+                "request_need": request_need, "last_chance_wall": int(last_chance_wall),
+                "resume_wall": int((stage_resume_walls or {}).get(action.action_id) or 0),
+            })
         if scale is None:
             continue
         depth = 0
@@ -727,6 +759,62 @@ def plan_verification_extensions(
                 "budget": budget,
                 "dependencies": (),
             }
+    # The last chance: what is left cannot fund any planned slice's next negative verdict, but
+    # it can fund a final run that may still prove an injection (a late field's positive needs
+    # a fraction of a negative's requests). It holds whatever the round has left.
+    # Only when nothing else could be planned: the round is then the Scan's last.
+    left_wall = (
+        0 if planned_by_index
+        else min(wall_ceiling, max(0, remaining.get("tool_wall_seconds", 0)))
+    )
+    for item in sorted(last_chance_pool, key=lambda row: (row["last_chance_wall"], row["index"])):
+        if (
+            item["index"] in planned_by_index or left_wall < item["last_chance_wall"]
+            # Only a unit the Scan's residual itself cannot fund to its negative verdict; one
+            # this round merely did not reach waits for the next round instead.
+            or max(0, remaining.get("tool_wall_seconds", 0)) >= item["resume_wall"]
+        ):
+            continue
+        needs = item["request_need"] or {}
+        budget: dict[str, int] = {}
+        for name, amount in item["reserved"].items():
+            amount = int(amount)
+            if amount <= 0:
+                continue
+            room = max(0, int(remaining.get(name, 0)))
+            if name == "tool_wall_seconds":
+                budget[name] = left_wall
+            elif name in needs:
+                budget[name] = min(room, needs[name][1])
+            elif name in _SCALED_DIMENSIONS:
+                budget[name] = min(room, amount)
+            else:
+                budget[name] = amount
+        floors = batch_attempt_floor(item["action"].capability_name, body_candidate=True)
+        if any(
+            budget.get(name, 0) < min(int(floors.get(name) or 0), int(item["reserved"].get(name) or 0))
+            for name in ("http_requests", "state_changing_requests")
+        ):
+            continue
+        for name, amount in budget.items():
+            remaining[name] = remaining.get(name, 0) - amount
+        left_wall = 0
+        action = item["action"]
+        planned_by_index[item["index"]] = {
+            "action_id": extension_action_id(action.action_id),
+            "stage": action.stage,
+            "capability_name": action.capability_name,
+            "capability_args": {
+                **{
+                    key: value for key, value in action.capability_args.items()
+                    if key not in _CARRIED_ARGS_EXCLUDED
+                },
+                EXTENDS_ARG: action.action_id,
+                LAST_CHANCE_ARG: True,
+            },
+            "budget": budget,
+            "dependencies": (),
+        }
     planned: list[dict[str, Any]] = [planned_by_index[index] for index in sorted(planned_by_index)]
     extended = {
         str(item["capability_args"][EXTENDS_ARG]): str(item["action_id"]) for item in planned

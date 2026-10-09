@@ -352,6 +352,8 @@ class Resume:
     remaining_wall: int | None = None
     # The requests every fundable unit left needs for its negative verdict.
     remaining_requests: int | None = None
+    # The least wall a last attempt at the next unit needs to be able to prove an injection.
+    last_chance_wall: int | None = None
     # A technique is predicted above the share on a single sample: likely to be judged
     # unfundable once measured again, so it does not divide the Scan's residual.
     unconfirmed: bool = False
@@ -467,6 +469,21 @@ def resume_plan(
         need, technique, field_name, seconds_per_request=rate, unfundable=tuple(unfundable),
         remaining_wall=remaining_wall if rate is not None else None, unconfirmed=unconfirmed,
         remaining_requests=remaining_requests,
+        last_chance_wall=last_chance_wall_seconds(rate),
+    )
+
+
+def last_chance_wall_seconds(seconds_per_request: float | None) -> int | None:
+    """The least wall in which a run can still prove an injection at the measured rate.
+
+    A positive needs far fewer requests than a negative verdict (sqlmap stops at the first
+    confirmed payload); this is the probe's minimum -- enough requests for a rate sample, half
+    again -- which is the least a final attempt is worth starting with.
+    """
+    if not seconds_per_request:
+        return None
+    return MINIMUM_STAGE_WALL_SECONDS + math.ceil(
+        MINIMUM_RATE_SAMPLE_REQUESTS * KILLED_STAGE_GROWTH * float(seconds_per_request)
     )
 
 
@@ -601,6 +618,7 @@ class StagedAttempt:
     # A technique it still has is above the share on a single sample (``Resume.unconfirmed``).
     resume_unconfirmed: bool = False
     remaining_requests: int | None = None
+    last_chance_wall_seconds: int | None = None
 
 
 RunStage = Callable[..., Awaitable[Any]]
@@ -622,6 +640,7 @@ async def run_staged_sqli_attempt(
     fields: Sequence[str] | None = None,
     round_wall_ceiling: int | None = None,
     scan_wall_share: int | None = None,
+    last_chance: bool = False,
 ) -> StagedAttempt:
     """Verify one candidate unit by unit from what earlier checkpoints left unsettled.
 
@@ -632,7 +651,9 @@ async def run_staged_sqli_attempt(
     ``field_count`` is how many fields a whole-technique unit tests (default: one).
     ``round_wall_ceiling`` and ``scan_wall_share`` bound what is funded (``resume_plan``): a
     unit of a technique that cannot be funded is not run, and the attempt moves on to the
-    next technique that can.
+    next technique that can. ``last_chance`` is the Scan's final attempt at the next unit: its
+    hold cannot fund the unit's negative verdict but can a positive, so the unit is started
+    even on a hold no larger than one it already ran out of.
     """
     fields = tuple(dict.fromkeys(str(item) for item in fields or ())) or None
     count = max(1, int(field_count or (len(fields) if fields else 1)))
@@ -728,7 +749,7 @@ async def run_staged_sqli_attempt(
             stages.append({**label, "outcome": "wall_exhausted"})
             errors.append("timeout")
             break
-        if prior.wall_killed.get(key, 0) >= wall:
+        if prior.wall_killed.get(key, 0) >= wall and not (last_chance and not ran_here):
             # The same unit already ran out of a hold at least this large: re-running it
             # would send the same requests and stop the same way. The candidate stays
             # incomplete for want of wall, and nothing new was interrupted, so this does
@@ -873,6 +894,7 @@ async def run_staged_sqli_attempt(
         remaining_wall_seconds=resume.remaining_wall,
         resume_unconfirmed=resume.unconfirmed,
         remaining_requests=resume.remaining_requests,
+        last_chance_wall_seconds=resume.last_chance_wall,
     )
 
 

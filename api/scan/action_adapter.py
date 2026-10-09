@@ -208,6 +208,7 @@ from .sqli_stages import (
 )
 from .verification_extension import (
     EXTENDS_ARG,
+    LAST_CHANCE_ARG,
     SCAN_WALL_SHARE_ARG,
     extension_lineage,
     lane_round_wall_ceiling,
@@ -531,6 +532,10 @@ def _staged_resume_fields(result: Any) -> dict[str, Any]:
         **(
             {"remaining_requests": int(result.remaining_requests)}
             if getattr(result, "remaining_requests", None) else {}
+        ),
+        **(
+            {"last_chance_wall_seconds": int(result.last_chance_wall_seconds)}
+            if getattr(result, "last_chance_wall_seconds", None) else {}
         ),
         **(
             {"remaining_wall_seconds": int(result.remaining_wall_seconds)}
@@ -3561,6 +3566,8 @@ class DatabaseNeutralScanActionDispatcher:
         )
         # A continuation round names each extension's fair part of what the Scan has left; a
         # technique whose remaining units need more is inconclusive for budget (soak N55).
+        # The planner's final attempt at a unit the residual cannot fund to a negative verdict.
+        last_chance = tool == "sqlmap" and action.capability_args.get(LAST_CHANCE_ARG) is True
         raw_share = action.capability_args.get(SCAN_WALL_SHARE_ARG)
         scan_wall_share = (
             int(raw_share) if isinstance(raw_share, int) and not isinstance(raw_share, bool)
@@ -4045,6 +4052,11 @@ class DatabaseNeutralScanActionDispatcher:
                             floor["tool_wall_seconds"] = min(
                                 int(floor.get("tool_wall_seconds", 0)), int(early.wall_seconds),
                             )
+                        if last_chance:
+                            floor["tool_wall_seconds"] = min(
+                                int(floor.get("tool_wall_seconds", 0)),
+                                int(remaining_budget.get("tool_wall_seconds", 0)),
+                            )
                     # Check the floor against what is actually left before building the
                     # slice: a dimension that has run out is absent from the slice
                     # entirely, so testing only the dimensions present would let an
@@ -4171,6 +4183,9 @@ class DatabaseNeutralScanActionDispatcher:
                             "tool_wall_seconds", 0,
                         ))
                         available = int(remaining_budget.get("tool_wall_seconds", 0))
+                        if last_chance:
+                            # The final attempt holds whatever the Scan has left.
+                            stage_need = min(stage_need, max(0, available - own_spent))
                         if available < stage_need + own_spent:
                             if candidates.running:
                                 position -= 1
@@ -4337,6 +4352,7 @@ class DatabaseNeutralScanActionDispatcher:
                             fields=sqli_fields,
                             round_wall_ceiling=round_wall_ceiling,
                             scan_wall_share=scan_wall_share,
+                            last_chance=last_chance,
                         )
                     else:
                         run_attempt = functools.partial(

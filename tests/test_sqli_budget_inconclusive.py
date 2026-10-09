@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import sys
 import uuid
 from types import SimpleNamespace
 
@@ -50,11 +51,13 @@ from scan.sqli_stages import (
 )
 from scan.verification_extension import (
     EXTENDS_ARG,
+    LAST_CHANCE_ARG,
     SCAN_WALL_SHARE_ARG,
     budget_concluded_slices,
     lane_round_wall_ceiling,
     plan_verification_extensions,
     resume_observation_action_ids,
+    stage_last_chance_walls,
     stage_remaining_walls,
     stage_resume_walls,
 )
@@ -411,7 +414,7 @@ class _Scan:
             execution_started=True, parser_version="sqlmap-output/v1",
         )
 
-    def add(self, action_id, *, path, budget, extends=None, share=None):
+    def add(self, action_id, *, path, budget, extends=None, share=None, last_chance=None):
         args = {
             "candidate_manifest_ref": self.candidates.reference().canonical_dict(),
             "endpoint_manifest_ref": self.endpoints.reference().canonical_dict(),
@@ -419,6 +422,7 @@ class _Scan:
             "profile": "balanced_batch_v1", "proof_policy": "deterministic_differential_required",
             **({EXTENDS_ARG: extends} if extends else {}),
             **({SCAN_WALL_SHARE_ARG: share} if share else {}),
+            **({LAST_CHANCE_ARG: True} if last_chance else {}),
         }
         self.actions.append(dataclasses.replace(
             _action(action_id, "sqli.verify_batch", len(self.actions), capability_args=args),
@@ -517,6 +521,7 @@ class _Scan:
             budget_concluded=budget_concluded_slices(observations),
             stage_remaining_walls=stage_remaining_walls(observations),
             stage_remaining_requests=stage_remaining_walls(observations, key="remaining_requests"),
+            stage_last_chance_walls=stage_last_chance_walls(observations),
         )
 
     def next_round(self, round_number):
@@ -533,6 +538,7 @@ class _Scan:
                 action_id, path=path, budget=spec["budget"],
                 extends=spec["capability_args"][EXTENDS_ARG],
                 share=spec["capability_args"].get(SCAN_WALL_SHARE_ARG),
+                last_chance=spec["capability_args"].get(LAST_CHANCE_ARG),
             )
             added.append((action_id, int(spec["budget"]["tool_wall_seconds"])))
         return added
@@ -802,6 +808,7 @@ class _HoneyScan(_Scan):
                 action_id, path=self.order[original.capability_args["slice"]["start"]],
                 budget=budget, extends=spec["capability_args"][EXTENDS_ARG],
                 share=spec["capability_args"].get(SCAN_WALL_SHARE_ARG),
+                last_chance=spec["capability_args"].get(LAST_CHANCE_ARG),
             )
             sqli.append(action_id)
         return sqli
@@ -1030,3 +1037,43 @@ def test_a_slice_sized_for_its_units_is_extended_although_it_spent_most_requests
     finally:
         DRIFT.clear()
 
+
+def test_the_scans_last_wall_runs_a_unit_that_can_still_prove_an_injection(monkeypatch):
+    """Follow-up 1: the 4.0 s late-field boolean injection. With 257 s left, boolean-based on
+    field 3 cannot reach its negative verdict (368 s), but its positive needs about 120 s."""
+    import scan.verification_extension as extension_module
+
+    def run(last_chance):
+        ENDPOINTS["/vuln"] = (4.0, 4)
+        try:
+            # Fixture: the residual 9de6a910's other families left (earlier work, both XSS
+            # slices), with the 13.1 s chat candidate beside the form.
+            scan = _Scan(
+                monkeypatch, ("/vuln", "/chat"), vuln={("/vuln", "B", "field3")}, earlier=1_031,
+            )
+            if not last_chance:
+                monkeypatch.setattr(
+                    sys.modules[__name__], "stage_last_chance_walls", lambda _observations: {},
+                )
+            scan.add("verify.sqli.r01", path="/vuln", budget=SLICE)
+            scan.add("verify.sqli.001.r01", path="/chat", budget=SLICE)
+            scan.run({"verify.sqli.r01", "verify.sqli.001.r01"})
+            rounds = scan.drive()
+            return scan, rounds
+        finally:
+            ENDPOINTS["/vuln"] = (5.3, 4)
+
+    control, control_rounds = run(False)
+    assert control.found == set() and control.residual()["tool_wall_seconds"] == 257
+    monkeypatch.undo()
+    scan, rounds = run(True)
+    assert [[wall for _, wall in added] for added in rounds] == [[900], [900], [604], [256]]
+    last = scan.actions[-1]
+    assert last.capability_args[extension_module.LAST_CHANCE_ARG] is True
+    assert scan.found == {("/vuln", "B", "field3")}
+    assert scan.residual()["tool_wall_seconds"] == 137
+    # Not a last chance while the residual can still fund the unit's negative verdict.
+    assert all(
+        not action.capability_args.get(extension_module.LAST_CHANCE_ARG)
+        for action in scan.actions[:-1]
+    )
