@@ -1,0 +1,30 @@
+name: Docker Hub pull-through mirror
+description: >-
+  Make the runner's Docker daemon pull Docker Hub images through mirror.gcr.io, falling back to
+  Docker Hub when the mirror cannot serve an image. Anonymous Docker Hub pulls are rate limited
+  per runner IP; the mirror is not. Run it before any pull and before docker/setup-buildx-action.
+runs:
+  using: composite
+  steps:
+    - name: Add mirror.gcr.io to the Docker daemon's registry mirrors
+      shell: bash
+      run: |
+        set -euo pipefail
+        # dockerd applies registry-mirrors to docker.io pulls for the classic and the containerd
+        # image store, and to its built-in BuildKit (the default `docker` buildx driver). A
+        # docker-container builder needs its own buildkitd mirror configuration.
+        # Pulls are by digest wherever the repository pins one, so the mirror cannot change them.
+        config=/etc/docker/daemon.json
+        current='{}'
+        if sudo test -s "$config"; then current="$(sudo cat "$config")"; fi
+        jq '."registry-mirrors" = ((."registry-mirrors" // []) + ["https://mirror.gcr.io"] | unique)' \
+          <<< "$current" | sudo tee "$config" > /dev/null
+        sudo systemctl restart docker
+        for _ in $(seq 1 30); do
+          if docker info > /dev/null 2>&1; then break; fi
+          sleep 2
+        done
+        docker info --format '{{ json .RegistryConfig.Mirrors }}' | grep -q '"https://mirror.gcr.io/"' || {
+          echo "::error::the Docker daemon did not load the mirror.gcr.io registry mirror"
+          exit 1
+        }

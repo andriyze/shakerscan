@@ -88,6 +88,10 @@ jobs:
           grep -Ec '^[A-Z_]+_IMAGE=shakerscan/[a-z-]+@sha256:[0-9a-f]{64}$' artifacts/candidate/release-image-lock.env | grep -qx 5
           cat artifacts/candidate/release-image-lock.env
 
+      # Docker Hub pulls go through mirror.gcr.io first, so they work without the read token.
+      - name: Pull Docker Hub images through mirror.gcr.io
+        uses: ./.github/actions/docker-hub-mirror
+
       - name: Free runner disk for two release image sets
         shell: bash
         run: |

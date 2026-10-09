@@ -41,6 +41,9 @@ jobs:
         with:
           persist-credentials: false
 
+      # Docker Hub pulls go through mirror.gcr.io first, so they work without the read token.
+      - name: Pull Docker Hub images through mirror.gcr.io
+        uses: ./.github/actions/docker-hub-mirror
       # Authenticated, read-only Docker Hub pulls avoid the anonymous pull rate limit (429
       # toomanyrequests). Skipped, so pulls stay anonymous, when the read secrets are absent.
       - name: Log in to Docker Hub for read-only pulls
