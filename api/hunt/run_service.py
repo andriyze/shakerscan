@@ -50,16 +50,20 @@ except ModuleNotFoundError:  # package import layout
 try:
     from runtime.http_archive_reader import (
         MAX_EXPORT_ROWS,
-        build_export_document,
+        build_export,
         count_transactions,
+        export_admission,
+        export_read_budget,
         read_archive_stats,
         read_transactions,
     )
 except ModuleNotFoundError:  # package import layout
     from ..runtime.http_archive_reader import (
         MAX_EXPORT_ROWS,
-        build_export_document,
+        build_export,
         count_transactions,
+        export_admission,
+        export_read_budget,
         read_archive_stats,
         read_transactions,
     )
@@ -1176,6 +1180,21 @@ class HuntRunService:
 
     async def export_record(self, hunt_id: str) -> dict[str, Any]:
         """Return the complete redacted, explicit Hunt record and its HTTP archive."""
+        async with export_admission():
+            record, archive = await self._export_record(hunt_id)
+            return archive.materialize(record)
+
+    async def export_record_json(self, hunt_id: str) -> bytes:
+        """The record as response bytes; its archive bodies are encoded in the masking workers.
+
+        Taken under an export slot before any row is read (raises ``ExportBusy``), so a record
+        export is bounded like every other archive export.
+        """
+        async with export_admission():
+            record, archive = await self._export_record(hunt_id)
+            return archive.render(record)
+
+    async def _export_record(self, hunt_id: str) -> tuple[dict[str, Any], Any]:
         hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
         async with self._pool().acquire() as connection:
             row = await hunt_run_or_404(connection, hunt_id)
@@ -1207,6 +1226,7 @@ class HuntRunService:
             transactions = await read_transactions(
                 connection, scan_id=None, hunt_run_id=hunt_id,
                 limit=MAX_EXPORT_ROWS, offset=0,
+                external_payload_budget=export_read_budget("redacted"),
             )
             # The full event history, superseded events included, with an explicit
             # bound; the per-Hunt event cap keeps it below MAX_EXPORT_ROWS.
@@ -1222,7 +1242,11 @@ class HuntRunService:
             scrub_text=True,
         )
         notes = _decode_json(_row_dict(row).get("notes"), [])
-        return {
+        archive = await build_export(
+            transactions, export_format="transactions", redaction="redacted",
+            owner={"hunt_id": hunt_id}, total=total, archive_total=total, stats=stats,
+        )
+        record = {
             "schema_version": "hunt-record/v1",
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "trace_policy": {
@@ -1253,11 +1277,9 @@ class HuntRunService:
                 coverage_ledger, redact_strings=True, scrub_text=True,
             ),
             "notes": redact_sensitive(notes, redact_strings=True, scrub_text=True),
-            "http_archive": await build_export_document(
-                transactions, export_format="transactions", redaction="redacted",
-                owner={"hunt_id": hunt_id}, total=total, archive_total=total, stats=stats,
-            ),
+            "http_archive": archive.document,
         }
+        return record, archive
 
     async def list(
         self,
