@@ -167,6 +167,9 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(rf'(?is)(<({_SENSITIVE_TEXT_KEY})(?:\s[^>]*)?>).*?(</\2\s*>)'),
         r"\1***\3",
     ),
+    # The password of a URL's userinfo (``https://ID:SECRET@host``, ``redis://:SECRET@host``).
+    # The user name stays visible: it identifies the account, the password is the credential.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]*):[^@\s/]+@"), r"\1:***@"),
     # Standalone JWTs and common command-line password forms in planner/free-text output.
     (
         re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}(?![A-Za-z0-9_-])"),

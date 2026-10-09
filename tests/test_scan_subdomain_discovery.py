@@ -228,11 +228,14 @@ def test_scan_subdomain_discovery_reserves_before_target_traffic_and_settles(
     connection = _Connection(plan)
     events = []
     store = _ReservationStore(events)
+    # No provider keys configured: all sources, and no provider config argument.
+    monkeypatch.delenv("SHAKERSCAN_SUBFINDER_PROVIDERS", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG", raising=False)
 
     async def run_streaming(argv, **kwargs):
         events.append(("traffic", store.current.record.status))
         assert argv == [
-            "subfinder", "-d", "example.test", "-silent", "-json",
+            "subfinder", "-d", "example.test", "-all", "-silent", "-json",
             "-disable-update-check", "-timeout", "10", "-max-time", "2",
         ]
         assert kwargs["hard_timeout"] == 60.0

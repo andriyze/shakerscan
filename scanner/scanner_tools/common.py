@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import contextvars
 import hashlib
 import os
 import re
@@ -206,6 +208,22 @@ def snapshot_subprocess_receipts() -> list[dict[str, Any]]:
     return [dict(item) for item in _subprocess_receipts]
 
 
+# Set while a subprocess may print a credential to stderr (a keyed subfinder source echoing a
+# request URL): its receipt keeps the exit status and lengths, never the stderr text.
+_STDERR_WITHHELD: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "shakerscan_subprocess_stderr_withheld", default=False,
+)
+
+
+@contextlib.contextmanager
+def stderr_withheld_from_receipts():
+    token = _STDERR_WITHHELD.set(True)
+    try:
+        yield
+    finally:
+        _STDERR_WITHHELD.reset(token)
+
+
 def _record_subprocess_receipt(
     cmd: list[str],
     *,
@@ -226,6 +244,8 @@ def _record_subprocess_receipt(
     now = time.monotonic()
     stdout_text = str(stdout or "")
     stderr_text = str(stderr or error or "")
+    if _STDERR_WITHHELD.get() and stderr_text:
+        stderr_text = "[stderr withheld: provider credentials in use]"
     stdout_preview = _redact_output_text(stdout_text)[:_SUBPROCESS_PREVIEW_BYTES]
     stderr_preview = _redact_output_text(stderr_text)[:_SUBPROCESS_PREVIEW_BYTES]
     stdout_artifact = _output_artifact("stdout", stdout_text)

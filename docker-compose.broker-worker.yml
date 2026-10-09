@@ -19,6 +19,9 @@ services:
       - ARTIFACT_STORAGE_REQUIRED=false
       - RESULTS_DIR=/results
       - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
+      # Optional subfinder provider keys (docs/functionality-reference.md, section 10); never logged.
+      - SHAKERSCAN_SUBFINDER_PROVIDERS=${SHAKERSCAN_SUBFINDER_PROVIDERS:-}
+      - SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG=${SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG:-}
     volumes:
       - ${FLEET_RUNTIME_DIR:-./.shakerscan-fleet}:/run/shakerscan-fleet:ro
       - ${FLEET_RESULTS_DIR:-./results}:/results

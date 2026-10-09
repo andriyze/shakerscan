@@ -167,7 +167,7 @@ async def discover_subdomains(
 
         elif source_name == "subfinder":
             subdomains = source_result.get("subdomains", [])
-            error = source_result.get("error")
+            error = source_result.get("error") or source_result.get("provider_config_error")
             for name, upstream in (source_result.get("sources") or {}).items():
                 accepted = subdomain_of(name, domain)
                 if accepted:

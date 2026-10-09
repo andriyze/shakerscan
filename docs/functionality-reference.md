@@ -742,10 +742,20 @@ digest-pinned physical acceptance and fault matrix. Follow the [operator guide](
 ## 10. Attack-surface management: discovery, CT monitoring, schedules
 
 **Subdomain discovery** (`POST /discovery`, `process_discovery_job`): enumerates subdomains for a root
-domain via Gungnir, Subfinder, and crt.sh, then upserts discovered hosts as targets. Each name is
+domain via Gungnir, Subfinder (all sources, `-all`), and crt.sh, then upserts discovered hosts as
+targets. A name is accepted only when, canonicalised (lower case, no trailing dot or `*.` label,
+IDNA), it ends with `.` + the root on a label boundary: `notexample.com` is never a subdomain of
+`example.com`, on this path, the Scan's own discovery or the Gungnir CT monitor. Each name is
 resolved first (bounded concurrency, short timeout); a name the resolver says has no A/AAAA record
 is not added and is reported in the run's `resolution` (`GET /discovery/{id}`), while a name the
-resolver could not judge is still added. Adding a target (`POST /targets`) or submitting a Scan
+resolver could not judge is still added. Wildcard DNS is detected in the same bounded lookups:
+random 16-hex labels are resolved under the root and under the (at most eight) parents the names
+sit under, and a name whose answer is only a wildcard's addresses or CNAME target is suppressed
+unless a certificate (Gungnir, crt.sh or a CT-backed subfinder source) names it. The run's
+`resolution` lists each wildcard and a note such as `wildcard DNS at *.dev.example.com; 12 names
+suppressed`; a Scan's recorded discovery adds the `wildcard_dns` partial reason.
+
+Adding a target (`POST /targets`) or submitting a Scan
 (`POST /scans`, `/scans/batch`, `/targets/{id}/scan`, `shakerscan scan`) for a name
 with no address record uses its www/apex twin when that twin resolves to an address the destination
 policy admits in the requested target's environment; the response carries `dns_fallback`/`notice`,
@@ -756,6 +766,34 @@ admission checks. Its current standing authorization yields an auditable
 scope receipt for the exact pair, without a second operator confirmation; bounded or unrelated
 receipts are not copied. This also works for multi-label suffixes such as `example.co.uk`. Otherwise
 Scan admission names the non-resolving host.
+
+**Subfinder provider keys**: without keys, subfinder skips every source that needs one
+(SecurityTrails, Shodan, Censys, Chaos, VirusTotal, ...). Set either variable for the workers.
+The Compose files pass both to `worker` (Scan and Targets-page discovery) and `agent-tool-worker`
+(a Hunt's `subdomains.discover` runs there, so Hunt discovery also spends provider quota). Fleet
+nodes receive `SHAKERSCAN_SUBFINDER_PROVIDERS` in their connection bundle, written to the node's
+0600 `worker.env`; a `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` path is not forwarded, so a node that
+should use a mounted file needs its own.
+
+- `SHAKERSCAN_SUBFINDER_PROVIDERS` -- inline in `.env`, `provider=key[,key...]` entries separated by
+  `;`, for example `SHAKERSCAN_SUBFINDER_PROVIDERS=securitytrails=KEY;censys=ID:SECRET;shodan=K1,K2`.
+  A key containing `;`, `,` or `=` escapes it with a backslash (`\;`, `\,`, `\=`; `\\` is a
+  backslash).
+- `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` -- the in-container path of a subfinder
+  `provider-config.yaml` (`provider: [key, ...]`). Mount it read-only with a Compose override,
+  e.g. `- ./secrets/subfinder.yaml:/run/secrets/subfinder.yaml:ro` and
+  `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG=/run/secrets/subfinder.yaml`.
+
+Both sources are merged. For each run the keys are rendered into a fresh 0700 temporary directory
+as a 0600 file, passed with `-pc`, and deleted when the run ends; they never appear in argv,
+receipts, logs or stored errors: a keyed run that fails keeps only `subfinder_exit_<code>`, its
+subprocess receipt withholds stderr, and the generic redactor masks `key=`/`token=`/`secret=`/`auth=`
+query parameters and `ID:SECRET@` URL credentials. Directories a killed worker left behind are
+removed when a worker starts. An invalid configuration is reported as
+`subfinder_provider_config_invalid` (or `_unreadable`), without any value, in the discovery run's
+subfinder source error and the Scan action's errors, and discovery proceeds on the keyless sources. Time bounds are unchanged: `-all` adds
+sources that run concurrently within subfinder's 2-minute `-max-time` and 10 s per-source timeout,
+which the registry's 120 s tool wall already covers.
 
 **Certificate Transparency monitoring (Gungnir)** (`api/gungnir_worker.py`): a long-running worker
 that watches CT logs in real time, discovering new certificates for monitored domains. New subdomains
@@ -1605,6 +1643,8 @@ identity. These routes will be removed after remaining legacy callers migrate.
 - Allocation fallback: `COVERAGE_ALLOCATION_DEFAULT`. Shard ceilings: `SHAKERSCAN_MAX_SHARDS`,
   `SHAKERSCAN_COVERAGE_MAX_SHARDS`, `PARALLEL_SHARD_MAX_PER_PARENT`, etc.
 - Custom dictionaries: `SHAKERSCAN_CUSTOM_WORDLIST`, `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`.
+- Subdomain discovery provider keys: `SHAKERSCAN_SUBFINDER_PROVIDERS` (inline) or
+  `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` (mounted YAML); see §10.
 - Deployment/binding: `SHAKERSCAN_BIND_HOST` (UI/API), `SHAKERSCAN_DATA_BIND_HOST`
   (Redis/Postgres; loopback by default), `SHAKERSCAN_PUBLIC_HOST`, `SHAKERSCAN_REMOTE`.
 - Data-store authentication: `REDIS_PASSWORD`, `POSTGRES_PASSWORD` (`shakerscan start` generates
@@ -1824,8 +1864,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 404 | Python sources + Compose manifests |
-| Internal compatibility scanner modules | 127 | `scanner/scanner_tools/` |
+| Runtime environment keys | 406 | Python sources + Compose manifests |
+| Internal compatibility scanner modules | 129 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
@@ -3001,6 +3041,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |
 | `SHAKERSCAN_STALE_FAIL_AFTER_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_STREAM_SCANNER_LOGS` | `api/worker.py` |
+| `SHAKERSCAN_SUBFINDER_PROVIDERS` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_TRIVY_CACHE_DIR` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_TRIVY_REFRESH_ON_START` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_TRIVY_REFRESH_TIMEOUT_SECONDS` | `scanner/scanner_tools/model_intake_scanners.py` |
@@ -3112,7 +3154,7 @@ Implementation modules below are inventory only. The immutable action graph and 
 capability registry define execution authority; module presence does not advertise a public
 Scan feature or a second orchestration engine.
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `address_classes.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `remediation_kb_devices.py`, `remediation_kb_findings.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `address_classes.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_shell.py`, `device_web.py`, `discovered_names.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `remediation_kb_devices.py`, `remediation_kb_findings.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `subfinder_providers.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
 
 ### Durable Storage Inventory
 

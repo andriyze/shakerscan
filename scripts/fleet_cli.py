@@ -886,6 +886,10 @@ def _connection_bundle(control_ip: str, env: dict[str, str]) -> dict[str, Any]:
         "ARTIFACT_RETENTION_DIAGNOSTIC_DAYS",
         "ARTIFACT_RETENTION_SCREENSHOT_DAYS",
         "ARTIFACT_RETENTION_ATTACHMENT_DAYS",
+        # Subfinder provider keys travel with the other worker secrets, so a node's subdomain
+        # discovery uses the same sources as the control plane. A provider-config file path
+        # names a file on the control-plane host and is not forwarded.
+        "SHAKERSCAN_SUBFINDER_PROVIDERS",
     )
     for key in evidence_keys:
         if env.get(key):
