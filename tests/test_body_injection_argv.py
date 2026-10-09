@@ -73,12 +73,22 @@ def test_staged_sqli_narrows_p_to_one_field_and_keeps_the_whole_body():
     assert sorted(json.loads(args[args.index("--data") + 1])) == ["email", "password"]
     assert args[args.index("-p") + 1] == "password"
     assert agent_tools.sqlmap_injection_fields(opts) == ["email", "password"]
-    for subset in (["token"], [], "password"):
+    for subset in (["token"], [], "password", ["a,b"]):
         try:
             agent_tools._tmpl_sqlmap(URL, {**opts, "injection_fields": subset})
         except ValueError:
             continue
         raise AssertionError(f"a subset outside the tested fields was accepted: {subset!r}")
+
+
+def test_injection_fields_are_declared_for_sqlmap_only():
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+
+    def properties(name):
+        return CAPABILITY_REGISTRY.require(name).input_schema["properties"]
+
+    assert "injection_fields" in properties("sqli.verify")
+    assert "injection_fields" not in properties("xss.verify")
 
 
 def test_a_form_content_type_produces_a_form_body():

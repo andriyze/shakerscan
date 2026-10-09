@@ -461,8 +461,11 @@ _INJECTION_BODY_PROPERTIES: Mapping[str, Any] = {
     "content_type": {"type": "string"},
     "body_field_names": {"type": "array"},
     "injection_field": {"type": "string"},
-    # Staged SQLi verification: the subset of the tested fields one run hands sqlmap (``-p``).
-    "injection_fields": {"type": "array"},
+}
+# Staged SQLi verification only: the subset of the tested fields one run hands sqlmap (``-p``).
+_SQLI_INJECTION_BODY_PROPERTIES: Mapping[str, Any] = {
+    **_INJECTION_BODY_PROPERTIES,
+    "injection_fields": {"type": "array", "items": {"type": "string"}},
 }
 
 
@@ -855,7 +858,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             {"network_reachability": True, "binary": "sqlmap"},
             _http_principal_schema({
                 "path": _SAME_ORIGIN_PATH_PROPERTY,
-                **_INJECTION_BODY_PROPERTIES,
+                **_SQLI_INJECTION_BODY_PROPERTIES,
             }),
             "sqlmap-output/v1", ("sqli_dbms_or_error_proof",),
             "sqlmap", "sqlmap", 300_000, ("--version",), ("/opt/tools/sqlmap",),

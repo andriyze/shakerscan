@@ -496,6 +496,9 @@ def _sqli_fields(
             fields = agent_tools.sqlmap_injection_fields(body_request)
         except ValueError:
             fields = None
+        # sqlmap splits ``-p`` on commas, so a name that contains one cannot be named alone;
+        # it is left out of the per-field units (a whole-body run could not test it either).
+        fields = [name for name in fields or () if "," not in name]
         if fields:
             return tuple(fields), len(fields)
     query = urllib.parse.urlsplit(str(execution_target or "")).query
@@ -522,23 +525,27 @@ def _budget_verdict(
     result: Any, *, candidate_id: str, ceiling: int | None,
     fields: Sequence[str] | None, attempt_floor_wall: int = 0,
 ) -> dict[str, Any] | None:
-    """The inconclusive-for-budget record of a candidate no continuation round can fund.
+    """The inconclusive-for-budget record of a candidate that can no longer reach a negative.
 
-    That is a candidate whose next unit two measurements predict above the round's share, or
-    one whose attempt floor alone exceeds it: the planner never sizes an extension below the
-    floor, so on Fast (375 s share, 420 s body floor) no body candidate is ever extended. A
-    cancelled attempt never gets one: it stopped because it was told to.
+    That is a candidate with a technique two or more rate samples (judged by their minimum)
+    predict above the round's share (``sqli_stages.resume_plan``), or one whose attempt floor
+    alone exceeds the share: the planner never sizes an extension below the floor, so on Fast
+    (375 s share, 420 s body floor) no body candidate is ever extended. A cancelled attempt
+    never gets one: it stopped because it was told to.
     """
     if (
         not ceiling or str(getattr(result, "status", "")) == "cancelled"
         or not getattr(result, "resume_technique", None)
-        or not getattr(result, "resume_wall_seconds", None)
-        or not (
-            getattr(result, "budget_inconclusive", False)
-            or int(attempt_floor_wall) > int(ceiling)
-        )
     ):
         return None
+    floor_bound = (
+        int(attempt_floor_wall) > int(ceiling)
+        and bool(getattr(result, "resume_wall_seconds", None))
+    )
+    if not (getattr(result, "budget_inconclusive", False) or floor_bound):
+        return None
+    need = getattr(result, "resume_wall_seconds", None)
+    positive_only = bool(getattr(result, "positive_only", False)) and not floor_bound
     return budget_inconclusive_record(
         candidate_id=candidate_id,
         finished=getattr(result, "settled_units", ()) or (),
@@ -547,8 +554,14 @@ def _budget_verdict(
         fields=fields,
         field_count=getattr(result, "field_count", 1),
         seconds_per_request=getattr(result, "seconds_per_request", None),
-        predicted_wall_seconds=max(int(result.resume_wall_seconds), int(attempt_floor_wall)),
+        predicted_wall_seconds=(
+            max(int(need), int(attempt_floor_wall)) if need else None
+        ),
         round_wall_ceiling_seconds=int(ceiling),
+        unfundable_techniques=(
+            getattr(result, "unfundable_techniques", ()) or ()
+        ) if not floor_bound else (),
+        positive_only=positive_only,
     )
 
 
@@ -3657,7 +3670,8 @@ class DatabaseNeutralScanActionDispatcher:
                     # rather than leave it looking like a slice that merely ran out of time.
                     attempt_observations = (
                         {**dict(attempt_observations[0]), "verdict": "inconclusive",
-                         "inconclusive_reason": "budget"},
+                         "inconclusive_reason": "budget",
+                         "positive_only": bool(verdict.get("positive_only"))},
                         *attempt_observations[1:],
                         {"url": redact_url(execution_target),
                          "method": body_request.get("method", "GET"), **verdict},
@@ -4018,6 +4032,20 @@ class DatabaseNeutralScanActionDispatcher:
                     stage_need = (
                         candidate_resume.wall_seconds if candidate_resume is not None else None
                     )
+                    if (
+                        candidate_resume is not None and candidate_resume.budget_inconclusive
+                        and stage_need is None
+                    ):
+                        # Already inconclusive for budget, with nothing cheap left that could
+                        # prove an injection: it is not funded again (soak N55).
+                        observations.append({
+                            "kind": "candidate_deferred",
+                            "candidate_id": candidate_id,
+                            "family": family,
+                            "reason": "budget_inconclusive",
+                            "verdict": "inconclusive",
+                        })
+                        continue
                     if stage_need is not None and sub_budget.get("tool_wall_seconds"):
                         # A resumed candidate re-runs its unfinished stage only on a hold
                         # strictly larger than any it ran out of (audit S002). Fund that from
@@ -4034,6 +4062,15 @@ class DatabaseNeutralScanActionDispatcher:
                                 position -= 1
                                 await candidates.wait()
                                 continue
+                            concluded = bool(
+                                round_wall_ceiling and candidate_resume.technique is not None and (
+                                    candidate_resume.budget_inconclusive
+                                    or int(floor.get("tool_wall_seconds", 0)) > round_wall_ceiling
+                                )
+                            )
+                            positive_only = concluded and candidate_resume.positive_only and not (
+                                int(floor.get("tool_wall_seconds", 0)) > round_wall_ceiling
+                            )
                             observations.append({
                                 "kind": "candidate_deferred",
                                 "candidate_id": candidate_id,
@@ -4041,11 +4078,10 @@ class DatabaseNeutralScanActionDispatcher:
                                 "reason": "stage_wall_unfunded",
                                 "resume_wall_seconds": stage_need,
                                 "available_wall_seconds": max(0, available - own_spent),
+                                **({"verdict": "inconclusive", "positive_only": positive_only}
+                                   if concluded else {}),
                             })
-                            if round_wall_ceiling and candidate_resume.technique is not None and (
-                                candidate_resume.budget_inconclusive
-                                or int(floor.get("tool_wall_seconds", 0)) > round_wall_ceiling
-                            ):
+                            if concluded:
                                 observations.append({
                                     "url": redact_url(execution_target),
                                     "method": body_request.get("method", "GET"),
@@ -4059,6 +4095,8 @@ class DatabaseNeutralScanActionDispatcher:
                                         seconds_per_request=candidate_prior.seconds_per_request,
                                         predicted_wall_seconds=stage_need,
                                         round_wall_ceiling_seconds=round_wall_ceiling,
+                                        unfundable_techniques=candidate_resume.unfundable,
+                                        positive_only=positive_only,
                                     ),
                                 })
                             exhausted.add("tool_wall_seconds")
