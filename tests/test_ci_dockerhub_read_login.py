@@ -12,6 +12,12 @@ Job `services:` are pulled before any step runs, so a login step cannot cover th
 ("Unexpected value ''") and the job fails at "Set up job". Services therefore pull Docker Hub's
 official images through Google's pull-through mirror, mirror.gcr.io/library/<image>:<same tag>,
 which served the same index digests as Docker Hub for every tag when this was introduced.
+
+Jobs that pull in steps also route Docker Hub through that mirror, so they pass before the read
+token exists: .github/actions/docker-hub-mirror adds mirror.gcr.io to the daemon's
+registry-mirrors (dockerd falls back to Docker Hub itself), and every docker-container builder
+from docker/setup-buildx-action gets the same mirror in its buildkitd config, which BuildKit and
+`buildx imagetools` read. The read-only login stays for anything the mirror cannot serve.
 """
 import re
 from pathlib import Path
@@ -21,6 +27,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
+MIRROR_ACTION = "./.github/actions/docker-hub-mirror"
+BUILDKIT_MIRROR = '[registry."docker.io"]\n  mirrors = ["mirror.gcr.io"]\n'
 LOGIN_ACTION = "docker/login-action@dbcb813823bdd20940b903addbd779551569679f"
 HAS_DH_READ = "${{ secrets.DOCKERHUB_READ_USERNAME != '' && secrets.DOCKERHUB_READ_TOKEN != '' }}"
 READ_CREDENTIALS = {
@@ -96,6 +104,51 @@ def test_step_pulls_follow_the_read_login(workflow, job_name, pulls):
     logins = [i for i, step in enumerate(steps) if _is_login(step)]
     first_pull = next(i for i, step in enumerate(steps) if pulls(step))
     assert len(logins) == 1 and logins[0] < first_pull, (workflow, job_name)
+
+
+@pytest.mark.parametrize("workflow,job_name,pulls", STEP_PULLERS)
+def test_step_pulls_go_through_the_mirror(workflow, job_name, pulls):
+    _, doc = next((p, d) for p, d in _pr_workflows() if p.name == workflow)
+    steps = doc["jobs"][job_name]["steps"]
+    mirrors = [i for i, step in enumerate(steps) if step.get("uses") == MIRROR_ACTION]
+    first_pull = next(i for i, step in enumerate(steps) if pulls(step))
+    assert len(mirrors) == 1 and mirrors[0] < first_pull, (workflow, job_name)
+    # The daemon restart must not race a step that already uses Docker.
+    assert not any("docker" in step.get("run", "") for step in steps[:mirrors[0]]), (workflow, job_name)
+    if any("docker/setup-buildx-action" in step.get("uses", "") for step in steps):
+        buildx = next(i for i, step in enumerate(steps) if "docker/setup-buildx-action" in step.get("uses", ""))
+        assert mirrors[0] < buildx, (workflow, job_name)
+
+
+def test_every_pr_buildx_builder_uses_the_mirror():
+    builders = 0
+    for path, doc in _pr_workflows():
+        for name, job in doc["jobs"].items():
+            for step in job.get("steps", []):
+                if step.get("uses", "").startswith("docker/setup-buildx-action@"):
+                    builders += 1
+                    assert re.fullmatch(r"docker/setup-buildx-action@[0-9a-f]{40}", step["uses"]), (path.name, name)
+                    assert step["with"]["buildkitd-config-inline"] == BUILDKIT_MIRROR, (path.name, name)
+    assert builders == 2
+
+
+def test_mirror_action_merges_the_daemon_config_and_waits_for_it():
+    action = yaml.safe_load((ROOT / ".github/actions/docker-hub-mirror/action.yml").read_text())
+    run = "\n".join(step["run"] for step in action["runs"]["steps"])
+    # Merges with the runner's existing daemon.json rather than replacing it.
+    assert 'current="$(sudo cat "$config")"' in run
+    assert '."registry-mirrors" = ((."registry-mirrors" // []) + ["https://mirror.gcr.io"] | unique)' in run
+    assert "sudo systemctl restart docker" in run
+    # Fails loudly if the daemon did not pick the mirror up, instead of silently pulling anonymously.
+    assert "RegistryConfig.Mirrors" in run and "exit 1" in run
+
+
+def test_smoke_containerd_switch_keeps_the_mirror():
+    _, doc = next((p, d) for p, d in _pr_workflows() if p.name == "e2e-pr.yml")
+    steps = doc["jobs"]["smoke-shard"]["steps"]
+    switch = next(step for step in steps if step.get("name", "").startswith("Use the containerd image store"))
+    # It edits the same daemon.json after the mirror step, so it must merge, not overwrite.
+    assert "jq '.features = ((.features // {})" in switch["run"] and 'current="$(sudo cat "$config")"' in switch["run"]
 
 
 def test_pr_service_containers_pull_through_the_mirror_without_credentials():

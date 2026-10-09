@@ -136,6 +136,10 @@ jobs:
             mv "$RUNNER_TEMP/browser-toolchain.status.tmp" "$RUNNER_TEMP/browser-toolchain.status"
           ) &
 
+      # Docker Hub pulls go through mirror.gcr.io first, so they work without the read token.
+      - name: Pull Docker Hub images through mirror.gcr.io
+        if: steps.shard.outputs.stack == 'true'
+        uses: ./.github/actions/docker-hub-mirror
       # Authenticated, read-only Docker Hub pulls avoid the anonymous pull rate limit (429
       # toomanyrequests). Skipped, so pulls stay anonymous, when the read secrets are absent.
       - name: Log in to Docker Hub for read-only pulls
