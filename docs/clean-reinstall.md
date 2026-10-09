@@ -23,10 +23,27 @@ default. `--images` also removes first-party image references used by the select
 project's containers, without force-removing images used elsewhere. Previously
 cached images with no project container are retained.
 
-Only the client's `config.json`, `token` and a launcher shim pointing at this
-runtime are removed. Unknown client-directory files and package-manager-owned
-launchers are preserved. `--keep-client` preserves all client state. Client state
-inside the runtime cannot be kept while recursively deleting that runtime.
+Only the client's `config.json`, `token`, its agent-workspace records and a
+launcher shim pointing at this runtime are removed. Unknown client-directory files
+and package-manager-owned launchers are preserved. `--keep-client` preserves all
+client state. Client state inside the runtime cannot be kept while recursively
+deleting that runtime.
+
+The client keeps two more directories, resolved as the client resolves them
+(`SHAKERSCAN_STATE_DIR`/`SHAKERSCAN_DATA_DIR`, then `XDG_STATE_HOME`/`XDG_DATA_HOME`,
+then beside `SHAKERSCAN_CONFIG_DIR` as `<dir>.state`/`<dir>.data`, then the defaults):
+
+- `~/.local/state/shakerscan/workspaces/`: the records `shakerscan agent` keeps of
+  each agent workspace. Plain `*.json` records (and `superseded/*.json`) are removed;
+  links are never followed or removed through, other files stay.
+- `~/.local/share/shakerscan/agent`: the default agent workspace. It may hold your
+  own work, so it is kept unless `--agent-workspace` is given, and then only if it
+  is a plain directory owned by you whose `AGENTS.md` starts with the note
+  `shakerscan agent` writes. The same applies to `~/.config/shakerscan/agent` and
+  `~/.config/shakerscan/workspaces`, where client 0.8.1 kept them.
+
+A state or data directory that is a symlink, a shared directory or not owned by
+you stops the cleanup before anything is removed.
 
 External/unlabeled volumes, remote object storage, backups outside the runtime,
 systemd/WireGuard configuration and host-wide `/etc/shakerscan`, `/opt/shakerscan`
