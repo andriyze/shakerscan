@@ -1895,6 +1895,32 @@ def _is_json_text(text: str) -> bool:
     return text.lstrip()[:1] in {"{", "["} and not _INI_SECTION_RE.match(text)
 
 
+# Every pass is linear, but masking is still CPU work for whoever asks for the masked view, and
+# a masked view never shows what it did not mask. A body longer than this is withheld whole. The
+# ceiling is above the archive's default 10 MB capture limit, so it only meets a body that a
+# deployment chose to capture beyond it.
+MAX_MASKED_BODY_CHARS = 16 * 1024 * 1024
+
+
+def withheld_body_notice(length: int) -> str:
+    """What a masked view shows in place of a body too long to mask."""
+    return (
+        f"[body withheld: {length} characters is over the {MAX_MASKED_BODY_CHARS} character "
+        "limit for masking; a masked view does not show it]"
+    )
+
+
+def archived_body_text(value: Any) -> Any:
+    """One archived body as the text the masking passes read (``None`` and non-text kept)."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", errors="replace")
+    if isinstance(value, (dict, list)):
+        # A body the storage layer decoded as JSON: serialize it once and mask the text, so the
+        # same rules apply to a stored object and to stored text.
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
 def _mask_text_passes(text: str) -> str:
     text = mask_yaml_text(text)
     text = mask_html_fields(text)
@@ -1911,6 +1937,8 @@ def _mask_text_passes(text: str) -> str:
 
 def mask_body_text(text: str, *, _depth: int = 0) -> str:
     """Every masking pass that applies to one body's text."""
+    if len(text) > MAX_MASKED_BODY_CHARS:
+        return withheld_body_notice(len(text))
     text = _mask_known_values(text)
     if _is_json_text(text):
         text = mask_json_text(text, _depth=_depth)
@@ -1930,25 +1958,21 @@ def _mask_nested_text(text: str, depth: int) -> str:
 
 def withhold_body_secrets(value: Any) -> Any:
     """A masked view of one archived body: text, with every secret value withheld."""
-    if value is None:
-        return None
-    if isinstance(value, (bytes, bytearray)):
-        value = bytes(value).decode("utf-8", errors="replace")
-    elif isinstance(value, (dict, list)):
-        # A body the storage layer decoded as JSON: serialize it once and mask the text, so the
-        # same rules apply to a stored object and to stored text.
-        value = json.dumps(value, ensure_ascii=False)
-    elif not isinstance(value, str):
+    value = archived_body_text(value)
+    if not isinstance(value, str):
         return value
     return mask_body_text(value)
 
 
 __all__ = [
     "KnownValueScrubber",
+    "MAX_MASKED_BODY_CHARS",
     "MAX_WITHHELD_VALUES",
+    "archived_body_text",
     "holds_withheld_material",
     "mask_url_secrets",
     "scrub_known_values",
+    "withheld_body_notice",
     "WITHHELD_MARKER_RE",
     "WITHHELD_REF_RE",
     "WithheldValues",

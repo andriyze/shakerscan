@@ -30,7 +30,10 @@ This document records only the current product boundary and genuinely unfinished
   (a different key, or an external file or object that is gone) is listed under the call's
   `payload_unavailable`, and the export reports partial fidelity rather than complete. One read
   loads a bounded number of externally stored bytes; a payload past that bound is listed under
-  `payload_omitted` and the export is likewise partial.
+  `payload_omitted` and the export is likewise partial. Masking is bounded the same way: one
+  masked export masks at most 128 MiB of body text, further bodies are listed under
+  `payload_omitted`, and a single body over 16 Mi characters is replaced by a notice. Neither
+  is ever shown unmasked. Exports are built on a two-thread pool, never on the API event loop.
 - Hunt exposes requests-only export separately from its explicit decision record/debrief. Hidden
   chain-of-thought is never an export product.
 - Content-addressed evidence and external blobs must not be deleted before durable ownership and

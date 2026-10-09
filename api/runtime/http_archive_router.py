@@ -20,8 +20,8 @@ try:
         EXPORT_FORMATS,
         MAX_EXPORT_ROWS,
         REDACTION_MODES,
+        build_export_document,
         count_transactions,
-        export_document,
         purge_transactions,
         read_archive_stats,
         read_transactions,
@@ -31,8 +31,8 @@ except ModuleNotFoundError:  # package import layout
         EXPORT_FORMATS,
         MAX_EXPORT_ROWS,
         REDACTION_MODES,
+        build_export_document,
         count_transactions,
-        export_document,
         purge_transactions,
         read_archive_stats,
         read_transactions,
@@ -229,7 +229,7 @@ async def _export_document(
     owner = {"scan_id": scan_id, "hunt_id": hunt_run_id}
     if scan_ids and len(scan_ids) > 1:
         owner["included_scan_ids"] = list(scan_ids)
-    document = export_document(
+    document = await build_export_document(
         rows, export_format=export_format, redaction=effective_redaction,
         owner=owner, total=total,
         archive_total=archive_total, stats=stats,
