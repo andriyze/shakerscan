@@ -10,13 +10,18 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import contextvars
-import functools
 import hashlib
 import hmac
 import json
+import multiprocessing
 import os
-from concurrent.futures import ThreadPoolExecutor
+import re
+import secrets
+import weakref
+from collections.abc import AsyncIterator
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -30,7 +35,15 @@ try:
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import redact_sensitive
 
-from .archive_body_masking import archived_body_text, withhold_body_secrets
+from .archive_body_masking import MAX_MASKED_BODY_CHARS
+from .archive_export_worker import (
+    MASKING_FAILED,
+    OVER_MASKING_LIMIT,
+    _decoded,
+    encode_body,
+    initialize_worker,
+    stored_body_size,
+)
 from .http_archive import ARCHIVE_SCHEMA, har_document, har_entry
 
 try:
@@ -48,16 +61,20 @@ MAX_EXPORT_ROWS = 10_000
 # budget is reported as omitted from that export, never shown as empty.
 MAX_EXTERNAL_PAYLOAD_BYTES = 64 * 1024 * 1024
 _BODY_FIELDS = ("request_body", "response_body")
-# Masking is linear, but one export can still hold hundreds of megabytes of inline and external
-# bodies. Past this many characters of masked body text, a further body is left out of that
-# export and reported as omitted, as a payload past MAX_EXTERNAL_PAYLOAD_BYTES is: never shown
-# unmasked, never shown as empty.
-MAX_EXPORT_MASKED_CHARS = 128 * 1024 * 1024
-# Building an export (masking every body) is CPU work. It runs on these threads, never on the
-# API's event loop, and at most this many exports are built at once; the pool, not a request's
-# lifetime, holds that bound, so a cancelled request cannot let its work escape it.
+# A masked export holds at most this many bytes of JSON body text (configurable with
+# SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES): bytes as the response carries them, escapes
+# included, so an export of multi-byte or escaped text cannot exceed it. Past it, further bodies
+# are left out and listed under payload_omitted; they are never shown unmasked or as empty.
+DEFAULT_MASKED_EXPORT_BYTES = 32 * 1024 * 1024
+MIN_MASKED_EXPORT_BYTES = 1024 * 1024
+MAX_MASKED_EXPORT_BYTES = 256 * 1024 * 1024
+# At most this many exports are read, masked and rendered at once; a request waits this long for
+# a slot before it is refused (503 with Retry-After) rather than queueing with its rows loaded.
 MAX_CONCURRENT_EXPORT_BUILDS = 2
-_export_pool: ThreadPoolExecutor | None = None
+EXPORT_ADMISSION_WAIT_SECONDS = 2.0
+EXPORT_RETRY_AFTER_SECONDS = 10
+# Worker processes that decode, mask and encode bodies for every export (archive_export_worker).
+MASKING_WORKERS = 2
 _OBJECT_COLUMNS = ("storage_uri", "content_sha256", "size_bytes")
 
 _SELECT = """
@@ -122,26 +139,6 @@ def _json_safe(value: Any) -> Any:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
-
-
-def _decoded(value: Any) -> Any:
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except json.JSONDecodeError:
-            return value
-    return value
-
-
-def _body_text(value: Any) -> str | None:
-    """Project already decoded the storage serialization; strings are wire text."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value).decode("utf-8", errors="replace")
-    return json.dumps(value)
 
 
 async def read_transactions(
@@ -605,37 +602,117 @@ def _unarchived_clauses(stats: Mapping[str, Any], unarchived: list[str]) -> str:
     )
 
 
-class MaskingBudget:
-    """How many characters of body text one export may still mask."""
+# --- Building an export -------------------------------------------------------------------------
+# Every body an export shows is decoded, masked (unless raw) and JSON-encoded by
+# ``archive_export_worker``; the projection around it carries a placeholder that the rendered
+# response replaces with those bytes. ``export_document`` runs the bodies in this process (its
+# callers are synchronous); ``build_export`` runs them in a worker process pool, because the
+# regex engine holds the interpreter lock for a whole pass over a body and an API thread would
+# still stall the event loop (external release audit, 2026-10-09). Both apply the same budget in
+# the same order, so they show the same text and omit the same bodies.
 
-    def __init__(self, chars: int | None = None) -> None:
-        self.remaining = MAX_EXPORT_MASKED_CHARS if chars is None else chars
+EXTERNAL_READ_BUDGET = "external_read_budget"
+MASKING_BUDGET = "masking_budget"
+_OMISSION_DETAIL = {
+    EXTERNAL_READ_BUDGET: "stored externally beyond this export's read budget",
+    MASKING_BUDGET: "beyond this export's masking budget",
+    OVER_MASKING_LIMIT: "over the masking size limit, so only a raw export carries it",
+    MASKING_FAILED: "could not be masked within the masking worker's memory",
+}
+_MASKING_OMISSIONS = frozenset({MASKING_BUDGET, OVER_MASKING_LIMIT, MASKING_FAILED})
 
-    def take(self, chars: int) -> bool:
-        if chars > self.remaining:
+
+def masked_export_budget() -> int:
+    """Bytes of JSON body text one masked export may hold (SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES)."""
+    raw = str(os.environ.get("SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES") or "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_MASKED_EXPORT_BYTES
+    except ValueError:
+        value = DEFAULT_MASKED_EXPORT_BYTES
+    return max(MIN_MASKED_EXPORT_BYTES, min(MAX_MASKED_EXPORT_BYTES, value))
+
+
+def export_read_budget(redaction: str) -> int:
+    """External payload bytes to read for an export: a masked one cannot show more than its budget."""
+    if redaction == "raw":
+        return MAX_EXTERNAL_PAYLOAD_BYTES
+    return min(MAX_EXTERNAL_PAYLOAD_BYTES, masked_export_budget())
+
+
+class _BodyBudget:
+    """The encoded body bytes one masked export may still hold; once one body does not fit,
+    every later body is left out too, so an export is always a prefix plus what follows it."""
+
+    def __init__(self, limit: int | None) -> None:
+        self.remaining = limit
+        self.exhausted = False
+
+    def fits(self, size: int) -> bool:
+        return self.remaining is None or (not self.exhausted and size <= self.remaining)
+
+    def charge(self, size: int, encoded: int) -> bool:
+        if self.remaining is None:
+            return True
+        if not self.fits(size) or encoded > self.remaining:
+            self.exhausted = True
             return False
-        self.remaining -= chars
+        self.remaining -= encoded
         return True
 
 
-def project(
-    row: Mapping[str, Any], *, redaction: str, masking_budget: MaskingBudget | None = None,
-) -> dict[str, Any]:
-    """One archived call, redacted unless the caller explicitly asked for raw."""
+class _BodyJob:
+    __slots__ = ("field", "index", "masked", "size", "value")
+
+    def __init__(self, index: int, field: str, value: Any, masked: bool) -> None:
+        self.index, self.field, self.value, self.masked = index, field, value, masked
+        self.size = stored_body_size(value)
+
+
+def _wants(job: _BodyJob, budget: _BodyBudget) -> bool:
+    """Whether the body is worth encoding now (budget state only ever tightens)."""
+    if job.value is None:
+        return False
+    if not job.masked:
+        return True
+    return job.size <= MAX_MASKED_BODY_CHARS and budget.fits(job.size)
+
+
+Outcome = tuple[bytes | None, str | None]
+
+
+def _settle(job: _BodyJob, budget: _BodyBudget, outcome: Outcome | None) -> Outcome:
+    """The body's final fragment or omission reason, decided in row order."""
+    if job.value is None:
+        return None, None
+    if not job.masked:
+        assert outcome is not None
+        return outcome
+    if job.size > MAX_MASKED_BODY_CHARS:
+        return None, OVER_MASKING_LIMIT
+    if not budget.fits(job.size):
+        budget.exhausted = True
+        return None, MASKING_BUDGET
+    assert outcome is not None
+    fragment, reason = outcome
+    if reason is not None:
+        return None, reason
+    if fragment is not None and not budget.charge(job.size, len(fragment)):
+        return None, MASKING_BUDGET
+    return fragment, None
+
+
+def _project_without_bodies(row: Mapping[str, Any], *, redaction: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One archived call redacted (unless raw), its bodies set aside: ``(item, stored bodies)``."""
     item = dict(row)
-    for key in ("request_headers", "request_body", "response_headers", "response_body"):
+    bodies = {key: item.get(key) for key in _BODY_FIELDS}
+    for key in _BODY_FIELDS:
+        item[key] = None
+    for key in ("request_headers", "response_headers"):
         item[key] = _decoded(item.get(key))
-    omitted = set(item.get("payload_omitted") or ())
     if redaction != "raw":
-        # Bodies first: a value beside a secret-named parameter or nested below a secret-named
-        # key is not under a sensitive dictionary key, and a stored body is text (N39).
-        for key in _BODY_FIELDS:
-            text = archived_body_text(item.get(key))
-            if isinstance(text, str) and masking_budget is not None and not masking_budget.take(len(text)):
-                item[key] = None
-                omitted.add(key)
-                continue
-            item[key] = withhold_body_secrets(text)
+        # Bodies are masked on their own (masked_body_text): a value beside a secret-named
+        # parameter or nested below a secret-named key is not under a sensitive dictionary key,
+        # and a stored body is text (N39).
         item = redact_sensitive(item, redact_strings=True, scrub_text=True)
         # State-changing Hunt bodies can contain low-entropy pairing PINs or newly
         # issued credentials. Key-name redaction and an unsalted body digest are
@@ -645,7 +722,7 @@ def project(
             and item.get("capability_name") == "http.request"
             and str(item.get("method") or "").upper() in {"POST", "PUT", "PATCH", "DELETE"}
         ):
-            item["request_body"] = None
+            bodies["request_body"] = None
             item["request_body_sha256"] = None
         metadata = _decoded(item.get("metadata_json"))
         private_workflow = isinstance(metadata, Mapping) and metadata.get("workflow_values_private") is True
@@ -658,9 +735,25 @@ def project(
             # tokens under any name, including on GET. Keep values and their
             # brute-forceable digests raw-export-only in every public archive view.
             for prefix in ("request", "response"):
-                item[prefix + "_body"] = None
+                bodies[prefix + "_body"] = None
                 item[prefix + "_body_sha256"] = None
                 item[prefix + "_headers"] = {key: "[REDACTED]" for key in (item.get(prefix + "_headers") or {})}
+    return item, bodies
+
+
+def _projection(item: Mapping[str, Any], bodies: Mapping[str, Any], reasons: Mapping[str, str]) -> dict[str, Any]:
+    """The exported shape of one call; ``bodies`` holds what each side shows (a placeholder)."""
+    def side(prefix: str) -> dict[str, Any]:
+        field = prefix + "_body"
+        withheld = reasons.get(field) in _MASKING_OMISSIONS
+        return {
+            "headers": item.get(prefix + "_headers") or {},
+            "body": bodies.get(field),
+            # A body this export left out carries no digest, so nothing reads as present.
+            "sha256": None if withheld else item.get(field + "_sha256"),
+            "bytes": item.get(field + "_bytes"),
+        }
+
     return {
         "schema_version": ARCHIVE_SCHEMA,
         "id": str(item.get("id")),
@@ -674,18 +767,8 @@ def project(
         "url": item.get("url"),
         "http_version": item.get("http_version"),
         "status_code": item.get("status_code"),
-        "request": {
-            "headers": item.get("request_headers") or {},
-            "body": _body_text(item.get("request_body")),
-            "sha256": item.get("request_body_sha256"),
-            "bytes": item.get("request_body_bytes"),
-        },
-        "response": {
-            "headers": item.get("response_headers") or {},
-            "body": _body_text(item.get("response_body")),
-            "sha256": item.get("response_body_sha256"),
-            "bytes": item.get("response_body_bytes"),
-        },
+        "request": side("request"),
+        "response": side("response"),
         "remote_ip": item.get("remote_ip"),
         # Whether this call went to an operator-confirmed origin rather than the target's
         # resolved address. The two are not comparable evidence.
@@ -697,42 +780,154 @@ def project(
         "capture": item.get("metadata_json") or {},
         # Payloads this call recorded but the archive cannot show (see the export fidelity).
         "payload_unavailable": list(item.get("payload_unavailable") or ()),
-        # Payloads the archive holds but this export left out to bound its size.
-        "payload_omitted": sorted(omitted),
+        # Payloads the archive holds but this export left out, and why: never shown unmasked,
+        # never shown as empty.
+        "payload_omitted": sorted(reasons),
+        "payload_omitted_reasons": dict(sorted(reasons.items())),
     }
 
 
-def export_document(
+class EncodedExport:
+    """An export whose body strings are placeholders for already JSON-encoded fragments."""
+
+    def __init__(self, document: dict[str, Any], fragments: dict[str, bytes], token: str) -> None:
+        self.document = document
+        self.fragments = fragments
+        self._placeholder = re.compile(r'"\\u0000archive-body:' + token + r':(\d+)\\u0000"')
+        self._prefix = f"\x00archive-body:{token}:"
+
+    def render(self, document: Any | None = None) -> bytes:
+        """The response bytes for ``document`` (this export by default, or a record holding it).
+
+        Serialized as Starlette's JSONResponse serializes; each placeholder is replaced by its
+        fragment, so no body is encoded in this process.
+        """
+        skeleton = json.dumps(
+            self.document if document is None else document,
+            ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":"),
+        )
+        pieces: list[bytes] = []
+        cursor = 0
+        for match in self._placeholder.finditer(skeleton):
+            pieces.append(skeleton[cursor:match.start()].encode("utf-8"))
+            pieces.append(self.fragments[match.group(1)])
+            cursor = match.end()
+        pieces.append(skeleton[cursor:].encode("utf-8"))
+        return b"".join(pieces)
+
+    def materialize(self, document: Any | None = None) -> Any:
+        """``document`` with every placeholder replaced by its body text."""
+        def walk(value: Any) -> Any:
+            if isinstance(value, str) and value.startswith(self._prefix):
+                return json.loads(self.fragments[value[len(self._prefix):-1]])
+            if isinstance(value, dict):
+                return {key: walk(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [walk(item) for item in value]
+            return value
+
+        return walk(self.document if document is None else document)
+
+
+def _plan(rows: Sequence[Mapping[str, Any]], redaction: str) -> tuple[list[dict[str, Any]], list[_BodyJob]]:
+    items: list[dict[str, Any]] = []
+    jobs: list[_BodyJob] = []
+    for index, row in enumerate(rows):
+        item, bodies = _project_without_bodies(row, redaction=redaction)
+        items.append(item)
+        jobs.extend(_BodyJob(index, field, bodies[field], redaction != "raw") for field in _BODY_FIELDS)
+    return items, jobs
+
+
+def _assemble(
     rows: Sequence[Mapping[str, Any]],
+    items: list[dict[str, Any]],
+    jobs: list[_BodyJob],
+    outcomes: list[Outcome],
     *,
     export_format: str,
     redaction: str,
     owner: Mapping[str, Any],
     total: int,
-    archive_total: int | None = None,
-    stats: Mapping[str, int] | None = None,
-    creator_version: str = "2.0.0",
+    archive_total: int | None,
+    stats: Mapping[str, int] | None,
+    creator_version: str,
+) -> EncodedExport:
+    token = secrets.token_hex(8)
+    fragments: dict[str, bytes] = {}
+    shown: list[dict[str, Any]] = [{} for _ in items]
+    reasons: list[dict[str, str]] = [
+        {field: EXTERNAL_READ_BUDGET for field in (row.get("payload_omitted") or ())} for row in rows
+    ]
+    for job, (fragment, reason) in zip(jobs, outcomes):
+        if reason is not None:
+            reasons[job.index][job.field] = reason
+        elif fragment is not None:
+            key = str(len(fragments))
+            fragments[key] = fragment
+            shown[job.index][job.field] = f"\x00archive-body:{token}:{key}\x00"
+    projected = [_projection(item, body, why) for item, body, why in zip(items, shown, reasons)]
+    document = _envelope(
+        rows, projected, export_format=export_format, redaction=redaction, owner=owner,
+        total=total, archive_total=archive_total, stats=stats, creator_version=creator_version,
+    )
+    return EncodedExport(document, fragments, token)
+
+
+def _omission_notes(projected: Sequence[Mapping[str, Any]]) -> list[str]:
+    counts = {reason: 0 for reason in _OMISSION_DETAIL}
+    for item in projected:
+        for reason in set(item["payload_omitted_reasons"].values()):
+            counts[reason] = counts.get(reason, 0) + 1
+    notes = []
+    if counts[EXTERNAL_READ_BUDGET]:
+        notes.append(f"{counts[EXTERNAL_READ_BUDGET]} recorded call(s) have externally stored payloads "
+                     "omitted from this export to bound its size; export fewer calls at a time to include them")
+    if counts[MASKING_BUDGET]:
+        notes.append(f"{counts[MASKING_BUDGET]} recorded call(s) have bodies left out because this masked "
+                     "export reached its masking budget; export fewer calls at a time to include them")
+    if counts[OVER_MASKING_LIMIT]:
+        notes.append(f"{counts[OVER_MASKING_LIMIT]} recorded call(s) have a body over the "
+                     f"{MAX_MASKED_BODY_CHARS}-character masking limit, withheld from every masked view")
+    if counts[MASKING_FAILED]:
+        notes.append(f"{counts[MASKING_FAILED]} recorded call(s) have a body that could not be masked "
+                     "within the masking worker's memory, withheld from this export")
+    return notes
+
+
+def _har_comment(entry_comment: str, reasons: Mapping[str, str]) -> str:
+    parts = [entry_comment] if entry_comment else []
+    parts.extend(
+        f"{field.replace('_', ' ')} omitted: {_OMISSION_DETAIL.get(reason, reason)}"
+        for field, reason in sorted(reasons.items())
+    )
+    return "; ".join(parts)
+
+
+def _envelope(
+    rows: Sequence[Mapping[str, Any]],
+    projected: list[dict[str, Any]],
+    *,
+    export_format: str,
+    redaction: str,
+    owner: Mapping[str, Any],
+    total: int,
+    archive_total: int | None,
+    stats: Mapping[str, int] | None,
+    creator_version: str,
 ) -> dict[str, Any]:
-    """Build the export envelope, stating what it is and what it is not."""
-    # A masked HAR states that it is masked in its own log comment and creator, so it can never
-    # pass for the verbatim request; verbatim HAR is an explicit, deployment-allowed choice.
-    budget = MaskingBudget() if redaction != "raw" else None
-    projected = [project(row, redaction=redaction, masking_budget=budget) for row in rows]
     fidelity, fidelity_detail = archive_fidelity(
         stats or {}, total=archive_total if archive_total is not None else total,
     )
     # A recorded call whose headers or body could not be archived or decrypted is shown with its
     # metadata, but the archive does not claim it holds that call completely.
     missing = sum(1 for row in rows if row.get("payload_unavailable"))
-    omitted = sum(1 for item in projected if item["payload_omitted"])
     notes = []
     if missing:
         notes.append(f"{missing} recorded call(s) have payloads that are unavailable: archived "
                      "without an encryption key, sealed with a key this install does not have, or "
                      "stored in an external file or object that can no longer be read")
-    if omitted:
-        notes.append(f"{omitted} recorded call(s) have externally stored payloads omitted from "
-                     "this export to bound its size; export fewer calls at a time to include them")
+    notes.extend(_omission_notes(projected))
     for note in notes:
         fidelity, fidelity_detail = (
             ("partial", note) if fidelity == "complete" else (fidelity, f"{fidelity_detail}; {note}")
@@ -748,8 +943,11 @@ def export_document(
         "low-entropy pairing secrets. Other arbitrary target-controlled bodies may still contain secrets."
     )
     if export_format == "har":
-        entries = [
-            har_entry(
+        # A masked HAR states that it is masked in its own log comment and creator, so it can never
+        # pass for the verbatim request; verbatim HAR is an explicit, deployment-allowed choice.
+        entries = []
+        for row, item in zip(rows, projected):
+            entry = har_entry(
                 {**dict(row), **{
                     # The projection is the masked view; the row is what was captured.
                     "url": item["url"],
@@ -759,8 +957,8 @@ def export_document(
                 request_body=item["request"]["body"],
                 response_body=item["response"]["body"],
             )
-            for row, item in zip(rows, projected)
-        ]
+            entry["comment"] = _har_comment(entry["comment"], item["payload_omitted_reasons"])
+            entries.append(entry)
         document = har_document(entries, creator_version=creator_version)
         if redaction != "raw":
             document["log"]["creator"]["name"] = "ShakerScan (masked)"
@@ -799,25 +997,163 @@ def export_document(
     }
 
 
-def _export_builder() -> ThreadPoolExecutor:
-    global _export_pool
-    if _export_pool is None:
-        _export_pool = ThreadPoolExecutor(
-            max_workers=MAX_CONCURRENT_EXPORT_BUILDS, thread_name_prefix="archive-export",
+def _budget_for(redaction: str) -> _BodyBudget:
+    return _BodyBudget(None if redaction == "raw" else masked_export_budget())
+
+
+def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
+    """One archived call, redacted unless the caller explicitly asked for raw."""
+    items, jobs = _plan([row], redaction)
+    budget = _BodyBudget(None)
+    outcomes = [
+        _settle(job, budget, encode_body(job.value, job.masked) if _wants(job, budget) else None)
+        for job in jobs
+    ]
+    reasons = {field: EXTERNAL_READ_BUDGET for field in (row.get("payload_omitted") or ())}
+    shown: dict[str, Any] = {}
+    for job, (fragment, reason) in zip(jobs, outcomes):
+        if reason is not None:
+            reasons[job.field] = reason
+        elif fragment is not None:
+            shown[job.field] = json.loads(fragment)
+    return _projection(items[0], shown, reasons)
+
+
+def export_document(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    export_format: str,
+    redaction: str,
+    owner: Mapping[str, Any],
+    total: int,
+    archive_total: int | None = None,
+    stats: Mapping[str, int] | None = None,
+    creator_version: str = "2.0.0",
+) -> dict[str, Any]:
+    """Build the export envelope in this process, stating what it is and what it is not."""
+    items, jobs = _plan(rows, redaction)
+    budget = _budget_for(redaction)
+    outcomes = [
+        _settle(job, budget, encode_body(job.value, job.masked) if _wants(job, budget) else None)
+        for job in jobs
+    ]
+    encoded = _assemble(
+        rows, items, jobs, outcomes, export_format=export_format, redaction=redaction, owner=owner,
+        total=total, archive_total=archive_total, stats=stats, creator_version=creator_version,
+    )
+    return encoded.materialize()
+
+
+# --- Off the event loop -------------------------------------------------------------------------
+
+
+class ExportBusy(RuntimeError):
+    """Every export slot stayed taken for the admission wait: the caller should retry later."""
+
+
+class ExportUnavailable(RuntimeError):
+    """The masking workers failed; the export is refused rather than shown unmasked."""
+
+
+_admission: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+_body_pool: ProcessPoolExecutor | None = None
+
+
+@asynccontextmanager
+async def export_admission(wait_seconds: float | None = None) -> AsyncIterator[None]:
+    """One of ``MAX_CONCURRENT_EXPORT_BUILDS`` export slots, taken before any row is read.
+
+    Each slot holds an export's rows, fragments and response at once, so the slots, not the
+    request rate, bound the memory exports use. A request that cannot get one within
+    ``EXPORT_ADMISSION_WAIT_SECONDS`` is refused with ``ExportBusy`` instead of queueing with
+    its rows loaded.
+    """
+    loop = asyncio.get_running_loop()
+    semaphore = _admission.get(loop)
+    if semaphore is None:
+        semaphore = _admission[loop] = asyncio.Semaphore(MAX_CONCURRENT_EXPORT_BUILDS)
+    try:
+        await asyncio.wait_for(
+            semaphore.acquire(), EXPORT_ADMISSION_WAIT_SECONDS if wait_seconds is None else wait_seconds,
         )
-    return _export_pool
+    except TimeoutError as exc:
+        raise ExportBusy("every archive export slot is busy") from exc
+    try:
+        yield
+    finally:
+        semaphore.release()
 
 
-async def build_export_document(rows: Sequence[Mapping[str, Any]], **arguments: Any) -> dict[str, Any]:
-    """``export_document`` off the event loop: masking a large or hostile body is CPU work.
+def _workers() -> ProcessPoolExecutor:
+    global _body_pool
+    if _body_pool is None:
+        # Spawned, not forked: the API process runs threads and an event loop.
+        _body_pool = ProcessPoolExecutor(
+            max_workers=MASKING_WORKERS,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=initialize_worker,
+            max_tasks_per_child=256,
+        )
+    return _body_pool
+
+
+def _discard_workers() -> None:
+    global _body_pool
+    pool, _body_pool = _body_pool, None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+async def _encode_in_workers(jobs: list[_BodyJob], budget: _BodyBudget) -> list[Outcome]:
+    """Every body encoded in the worker pool, at most ``MASKING_WORKERS`` ahead, settled in order."""
+    loop = asyncio.get_running_loop()
+    pool = _workers()
+    outcomes: list[Outcome] = []
+    pending: dict[int, asyncio.Future[Outcome]] = {}
+    submitted = 0
+    try:
+        for position, job in enumerate(jobs):
+            while submitted < len(jobs) and submitted - position < MASKING_WORKERS:
+                ahead = jobs[submitted]
+                if _wants(ahead, budget):
+                    pending[submitted] = loop.run_in_executor(pool, encode_body, ahead.value, ahead.masked)
+                submitted += 1
+            future = pending.pop(position, None)
+            outcome = await future if future is not None else None
+            outcomes.append(_settle(job, budget, outcome))
+    except BrokenProcessPool as exc:
+        _discard_workers()
+        raise ExportUnavailable("the archive masking workers stopped") from exc
+    finally:
+        for future in pending.values():
+            future.cancel()
+    return outcomes
+
+
+async def build_export(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    export_format: str,
+    redaction: str,
+    owner: Mapping[str, Any],
+    total: int,
+    archive_total: int | None = None,
+    stats: Mapping[str, int] | None = None,
+    creator_version: str = "2.0.0",
+) -> EncodedExport:
+    """``export_document`` with every body decoded, masked and encoded in the worker pool.
 
     A scanned service chooses what it returns, and the archive keeps it; masking that body
     for a later export must not stall every other request the API is serving (external
-    release audit, 2026-10-09).
+    release audit, 2026-10-09). Call it holding ``export_admission``.
     """
-    context = contextvars.copy_context()
-    work = functools.partial(context.run, export_document, rows, **arguments)
-    return await asyncio.get_running_loop().run_in_executor(_export_builder(), work)
+    items, jobs = _plan(rows, redaction)
+    budget = _budget_for(redaction)
+    outcomes = await _encode_in_workers(jobs, budget)
+    return _assemble(
+        rows, items, jobs, outcomes, export_format=export_format, redaction=redaction, owner=owner,
+        total=total, archive_total=archive_total, stats=stats, creator_version=creator_version,
+    )
 
 
 async def purge_transactions(
@@ -935,11 +1271,17 @@ async def purge_transactions(
 
 __all__ = [
     "EXPORT_FORMATS",
+    "DEFAULT_MASKED_EXPORT_BYTES",
+    "EXPORT_RETRY_AFTER_SECONDS",
+    "EncodedExport",
+    "ExportBusy",
+    "ExportUnavailable",
     "MAX_CONCURRENT_EXPORT_BUILDS",
-    "MAX_EXPORT_MASKED_CHARS",
     "MAX_EXPORT_ROWS",
-    "MaskingBudget",
-    "build_export_document",
+    "build_export",
+    "export_admission",
+    "export_read_budget",
+    "masked_export_budget",
     "REDACTION_MODES",
     "archive_fidelity",
     "count_transactions",
