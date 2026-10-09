@@ -123,6 +123,9 @@ async def _run_command(cmd: list[str], timeout: int = 30) -> tuple[str, str, int
 # ============================================================================
 
 Resolver = Callable[[str], Awaitable[list[str]]]
+# One name lookup per SMTP host, bounded on its own (the system resolver has no deadline).
+RESOLVE_TIMEOUT_SECONDS = 10.0
+NULL_MX_DETAIL = "null MX (RFC 7505): the domain accepts no mail; no SMTP host to test"
 
 
 @dataclass(frozen=True)
@@ -145,10 +148,27 @@ class SmtpDestinationPolicy:
         return self.environment in LAB_ENVIRONMENTS
 
 
-def smtp_destination_policy(environ: Mapping[str, str] | None = None) -> SmtpDestinationPolicy:
-    """The policy of the scan this process runs: the target's environment from the canonical
-    execution envelope (production when absent) and ``SHAKERSCAN_PRIVATE_NETWORK_TARGETS``,
-    read as ``deployment_policy.private_network_targets_policy`` reads it."""
+def _private_network_policy(raw: object) -> str:
+    """``deployment_policy.private_network_targets_policy`` for one value."""
+    value = str(raw or "").strip().lower()
+    return "allow" if not value or value in {"allow", "allowed", "1", "true", "yes", "on"} else "refuse"
+
+
+def smtp_destination_policy(
+    environ: Mapping[str, str] | None = None, *, admitted_policy: object = None,
+) -> SmtpDestinationPolicy:
+    """The policy of the scan this process runs.
+
+    The environment is the target's, from the canonical execution envelope (production when
+    absent). The private-network policy is the stricter of this process's
+    ``SHAKERSCAN_PRIVATE_NETWORK_TARGETS`` and ``admitted_policy`` (the policy the job was
+    admitted under, when the caller has it), as the device plane combines them
+    (``device_posture.effective_private_network_policy``). A process launched for a canonical
+    Scan (the envelope is present) runs on a worker, which may be a fleet or broker worker
+    without the setting: there an empty or missing setting refuses, because the worker cannot
+    know what the admitting deployment chose. Only a direct command-line run reads a missing
+    setting as the OSS default, ``allow``.
+    """
     source = os.environ if environ is None else environ
     environment = "production"
     raw = str(source.get("SHAKERSCAN_CANONICAL_SCAN_EXECUTION") or "")
@@ -160,9 +180,11 @@ def smtp_destination_policy(environ: Mapping[str, str] | None = None) -> SmtpDes
             environment = "production"
     if environment == "unknown":
         environment = "production"
-    value = str(source.get("SHAKERSCAN_PRIVATE_NETWORK_TARGETS") or "").strip().lower()
-    allow_private = not value or value in {"allow", "allowed", "1", "true", "yes", "on"}
-    return SmtpDestinationPolicy(environment=environment, allow_private=allow_private)
+    setting = str(source.get("SHAKERSCAN_PRIVATE_NETWORK_TARGETS") or "").strip()
+    policies = {"refuse" if raw and not setting else _private_network_policy(setting)}
+    if admitted_policy is not None and str(admitted_policy).strip():
+        policies.add(_private_network_policy(admitted_policy))
+    return SmtpDestinationPolicy(environment=environment, allow_private="refuse" not in policies)
 
 
 async def _resolve_host_addresses(host: str) -> list[str]:
@@ -185,18 +207,21 @@ async def resolve_smtp_destination(
     *,
     from_dns: bool,
     resolver: Resolver | None = None,
+    lookup_timeout: float = RESOLVE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Resolve ``host`` once and classify every address under ``policy``.
+    """Resolve ``host`` once (within ``lookup_timeout``) and classify every address under
+    ``policy``.
 
-    Returns ``{"host", "addresses", "refused", "address", "reason", "detail"}``: ``address`` is
-    the one admitted address every connection pins to, or None with a named ``reason``
+    Returns ``{"host", "addresses", "refused", "admitted", "address", "reason", "detail"}``:
+    ``admitted`` lists the admitted addresses in answer order, the ones a caller may try, each
+    pinned; ``address`` is the first of them, or None with a named ``reason``
     (``mx_host_not_fully_qualified``, ``unresolved`` or ``loopback_or_private_range``).
     ``from_dns`` marks a name taken from an MX record: a single-label one (a Docker service
     name such as ``db``) is never a mail exchanger on the internet and is refused unresolved.
     """
     record: dict[str, Any] = {
-        "host": host, "addresses": [], "refused": [], "address": None, "reason": None,
-        "detail": None,
+        "host": host, "addresses": [], "refused": [], "admitted": [], "address": None,
+        "reason": None, "detail": None,
     }
     literal = _literal_address(host)
     if from_dns and literal is None and "." not in host.strip().rstrip("."):
@@ -204,8 +229,10 @@ async def resolve_smtp_destination(
         record["detail"] = f"{host} is a single-label name, not a mail exchanger; not contacted"
         return record
     try:
-        addresses = [literal] if literal else await (resolver or _resolve_host_addresses)(host)
-    except (OSError, UnicodeError, ValueError) as exc:
+        addresses = [literal] if literal else await asyncio.wait_for(
+            (resolver or _resolve_host_addresses)(host), timeout=lookup_timeout,
+        )
+    except (OSError, UnicodeError, ValueError, TimeoutError) as exc:
         record["reason"] = "unresolved"
         record["detail"] = f"{host} could not be resolved ({type(exc).__name__}); not contacted"
         return record
@@ -223,6 +250,7 @@ async def resolve_smtp_destination(
         else:
             record["refused"].append({"address": str(parsed), "reason": reason})
     if admitted:
+        record["admitted"] = admitted
         record["address"] = admitted[0]
     elif not record["addresses"] and not record["refused"]:
         record["reason"] = "unresolved"
@@ -464,7 +492,10 @@ async def _test_starttls(host: str, port: int, timeout: int = 15, *, address: st
     if result["starttls_supported"]:
         cipher_cmd = [
             "nmap", "-Pn", *(["-6"] if ":" in address else []), "--host-timeout", "120s",
-            "--script", "ssl-enum-ciphers", "-p", str(port), address
+            "--script", "ssl-enum-ciphers",
+            # Connecting to the pinned address drops the name nmap would send as SNI.
+            *([] if _literal_address(host) else ["--script-args", f"tls.servername={host}"]),
+            "-p", str(port), address
         ]
         cipher_stdout, _, _ = await _run_command(cipher_cmd, timeout + 10)
 
@@ -740,6 +771,7 @@ async def check_smtp_security(
     *,
     policy: SmtpDestinationPolicy | None = None,
     resolver: Resolver | None = None,
+    admitted_policy: object = None,
 ) -> dict[str, Any]:
     """
     Comprehensive SMTP security assessment.
@@ -751,6 +783,7 @@ async def check_smtp_security(
         safe_mode: If True, only use non-intrusive tests
         policy: The scan's destination policy (``smtp_destination_policy()`` when None)
         resolver: One-shot name resolution (the system resolver when None)
+        admitted_policy: The private-network policy the job was admitted under, if known
 
     Every SMTP host (each MX host, or the domain itself when it has none) is resolved once and
     classified before it is contacted; a refused host is recorded in ``skipped_hosts`` with a
@@ -781,33 +814,42 @@ async def check_smtp_security(
     results["mx_analysis"] = await _analyze_mx_records(domain, timeout)
 
     # Get MX hosts to test
-    mx_hosts = [mx["host"] for mx in results["mx_analysis"].get("mx_records", [])]
+    mx_records = results["mx_analysis"].get("mx_records", [])
+    null_mx = bool(mx_records) and all(not str(mx.get("host") or "").strip(".") for mx in mx_records)
+    mx_hosts = [] if null_mx else [mx["host"] for mx in mx_records]
     from_dns = bool(mx_hosts)
+    if null_mx:
+        results["mx_analysis"]["null_mx"] = True
+        results["skipped_hosts"][domain] = {"reason": "null_mx", "detail": NULL_MX_DETAIL, "addresses": []}
 
     # If no MX records, try the domain directly
-    if not mx_hosts:
+    if not mx_hosts and not null_mx:
         mx_hosts = [domain]
 
     # Limit to first 3 MX hosts
     mx_hosts = mx_hosts[:3]
-    policy = policy or smtp_destination_policy()
+    policy = policy or smtp_destination_policy(admitted_policy=admitted_policy)
 
-    # Step 2: Test each MX host, at the one address it was classified under
+    # Step 2: Test each MX host, at an address it was classified under
     for mx_host in mx_hosts:
         destination = await resolve_smtp_destination(
             mx_host, policy, from_dns=from_dns, resolver=resolver,
         )
         results["smtp_destinations"][mx_host] = destination
-        address = destination["address"]
-        if address is None:
+        if destination["address"] is None:
             results["skipped_hosts"][mx_host] = {
                 "reason": destination["reason"], "detail": destination["detail"],
                 "addresses": destination["addresses"],
             }
             continue
 
-        # Port scan and TLS test
-        port_results = await _scan_smtp_ports(mx_host, timeout, address=address)
+        # Port scan and TLS test, trying the admitted addresses in answer order: the first that
+        # answers on an SMTP port is the one every later probe pins to.
+        for address in destination["admitted"]:
+            port_results = await _scan_smtp_ports(mx_host, timeout, address=address)
+            if port_results.get("open_ports"):
+                break
+        destination["address"] = address
         results["smtp_hosts"][mx_host] = port_results
 
         # Get banner from port 25 or 587
@@ -870,8 +912,12 @@ async def check_smtp_security(
 
     for host, skipped in results["skipped_hosts"].items():
         all_recommendations.append(f"SMTP host {host} was not tested: {skipped['detail']}")
+    # Nothing tested is not a pass: every host skipped (or a null MX) grades N/A.
+    if not results["smtp_hosts"]:
+        worst_grade = "N/A"
 
     results["overall_assessment"]["grade"] = worst_grade
+    results["overall_assessment"]["tested"] = bool(results["smtp_hosts"])
     results["overall_assessment"]["issues"] = list(set(all_issues))[:20]
     results["overall_assessment"]["recommendations"] = list(set(all_recommendations))[:10]
 
@@ -884,6 +930,8 @@ async def check_smtp_security(
         results["overall_assessment"]["risk_level"] = "medium"
     elif worst_grade == "B":
         results["overall_assessment"]["risk_level"] = "low"
+    elif worst_grade == "N/A":
+        results["overall_assessment"]["risk_level"] = "unknown"
     else:
         results["overall_assessment"]["risk_level"] = "info"
 
