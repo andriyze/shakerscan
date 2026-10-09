@@ -3030,3 +3030,73 @@ def test_every_in_process_scan_transport_is_recorded():
             getattr(action_adapter_module.DatabaseNeutralScanActionDispatcher, name)
         )
         assert "self._scan_replay_transport(action, private=True)" in method
+
+
+def test_takeover_action_checks_discovered_names_by_dns_and_fingerprints_only_the_bound_origin(
+    monkeypatch,
+):
+    """Discovered names are not destinations of the Scan: DNS evidence only. The one GET goes
+    to the bound origin, through the bound-request path."""
+    import capabilities.takeover as takeover_module
+
+    discover = _action("discover.subdomains", "subdomains.discover", 0)
+    check = _action(
+        "discover.takeover", "subdomains.takeover_check", 1,
+        dependencies=(discover.action_id,),
+        capability_args={"discovery_ref": "discover.subdomains"},
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(discover, check),
+    )
+    backend = Backend(observations={discover.action_id: (
+        {"kind": "subdomain", "host": "docs.example.test", "root_domain": "example.test"},
+        {"kind": "subdomain", "host": "old.example.test", "root_domain": "example.test"},
+        {"kind": "subdomain", "host": "notexample.test", "root_domain": "example.test"},
+    )})
+    records = {
+        ("app.example.test", "CNAME"): ("answer", ["bucket.s3.amazonaws.com"]),
+        ("bucket.s3.amazonaws.com", "A"): ("answer", ["52.216.1.1"]),
+        ("docs.example.test", "CNAME"): ("answer", ["org.github.io"]),
+        ("org.github.io", "A"): ("answer", ["185.199.108.153"]),
+        ("old.example.test", "CNAME"): ("answer", ["gone.azurewebsites.net"]),
+    }
+    asked = []
+
+    async def query(name, rdtype):
+        asked.append(name)
+        return records.get((name, rdtype), ("nxdomain", []))
+
+    requests = []
+
+    async def bound_request(origin, args, *, target, allow_write, private_response_sink, **_kwargs):
+        requests.append((origin, dict(args), target.digest, allow_write))
+        page = "<style>" + "x" * 5_000 + "</style>The specified bucket does not exist"
+        private_response_sink(type("Private", (), {"body": lambda self: page.encode()})())
+        return {"ok": True, "response": {"status": 404, "body_sample": page[:2_000]}}
+
+    doh_asked = []
+
+    async def independent_nxdomain(name):
+        doh_asked.append(name)
+        return name == "gone.azurewebsites.net"
+
+    monkeypatch.setattr(takeover_module, "dnspython_query", query)
+    monkeypatch.setattr(takeover_module, "doh_nxdomain", independent_nxdomain)
+    monkeypatch.setattr(action_adapter_module, "execute_bound_http_request", bound_request)
+    receipt = asyncio.run(_dispatcher(plan, backend)(check, _lease(plan, check), _noop))
+
+    assert requests == [(
+        "https://app.example.test", {"method": "GET", "path": "/", "follow_redirects": False},
+        TARGET.digest, False,
+    )]
+    assert "notexample.test" not in asked
+    rows = {row["host"]: row for row in receipt.observations if row.get("kind") == "takeover_check"}
+    assert rows["app.example.test"]["outcome"] == "verified"
+    assert rows["docs.example.test"]["outcome"] == "inconclusive_dns_only"
+    # The binding is a .test name on a TEST-NET address, which dns.doh_permitted refuses: no
+    # name of it goes to a third-party resolver, so the dangling Azure CNAME stays suspected.
+    assert doh_asked == []
+    assert rows["old.example.test"]["outcome"] == "suspected"
+    assert rows["old.example.test"]["service"] == "Microsoft Azure"
+    assert receipt.budget_consumed["http_requests"] == 1

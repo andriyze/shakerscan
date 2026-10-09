@@ -1205,6 +1205,27 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_network",
         ),
         CapabilitySpec(
+            "subdomains.takeover_check",
+            "Passive subdomain-takeover check of discovered names under the bound root: "
+            "DNS CNAME/NXDOMAIN evidence for every name, one same-origin GET fingerprint only "
+            "for the bound target host.",
+            "internal", "passive", _NETWORK_TARGETS, "scanner.takeover", "1", None,
+            # One reservation per checked name (HOST_LIMIT discovered names plus the bound
+            # host), and the bound host's single fingerprint GET (an https and http origin).
+            {"hosts_attempted": 51, "http_requests": 2, "tool_wall_seconds": 60},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "query_names_derived_from_binding": True,
+                "http_destinations": "bound_origins_only",
+            },
+            _schema({"discovery_ref": {"type": "string", "pattern": "^discover\\.subdomains(\\.r[0-9]{2})?$"}}),
+            "takeover-check/v1",
+            ("takeover_check_observation", "tool_receipt"),
+            planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
+        ),
+        CapabilitySpec(
             'ssh.connect', 'Authenticate once to a target-bound SSH service with the Hunt-selected stored identity, then close the connection. No commands are executed.',
             'network_tcp','credential',_NETWORK_TARGETS,'paramiko','1','active_testing',
             {'hosts_attempted':1,'tcp_ports_attempted':1,'tool_wall_seconds':120,'device_fragility_points':3},

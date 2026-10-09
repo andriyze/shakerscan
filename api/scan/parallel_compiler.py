@@ -962,7 +962,7 @@ class ParallelActionPlanCompiler:
             "web.spec_ingest",
         ]
         if include_subdomains:
-            names.append("subdomains.discover")
+            names.extend(("subdomains.discover", "subdomains.takeover_check"))
         if include_network:
             names.extend(("ports.discover", "service.fingerprint"))
         totals: dict[str, int] = {}

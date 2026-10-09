@@ -1218,6 +1218,15 @@ def detect_spf(txt_records: list[str]) -> str | None:
 async def subfinder_scan(domain: str) -> dict[str, Any]:
     return await _subfinder_scan_mod(domain)
 
+
+def _canonical_takeover_planned(execution: Any) -> bool:
+    """Whether the canonical plan carries ``discover.takeover`` (subdomain discovery permitted)."""
+    if not isinstance(execution, dict):
+        return False
+    plan = execution.get("execution_plan") if isinstance(execution.get("execution_plan"), dict) else {}
+    policy = plan.get("policy") if isinstance(plan.get("policy"), dict) else {}
+    return policy.get("subdomain_discovery") is True
+
 async def fetch_dmarc(domain: str) -> dict[str, Any]:
     d = f"_dmarc.{domain}"
     out, err, rc = await run(["dig", "+short", "+tries=1", "+time=2", d, "TXT"])
@@ -5834,7 +5843,12 @@ async def build_report(target: str,
                 else "parallel_child_skip_global_checks"
             )
             cors_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(CORS_SHAPE, reason=skip_reason)))
-            takeover_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(SUBDOMAIN_TAKEOVER_SHAPE, reason=skip_reason)))
+            takeover_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(
+                SUBDOMAIN_TAKEOVER_SHAPE,
+                # Canonical Scans run the passive check as its own action after discovery.
+                reason="canonical_capability:subdomains.takeover_check"
+                if _canonical_takeover_planned(canonical_scan_execution) else skip_reason,
+            )))
             exposed_task = asyncio.create_task(_focused_async_value(focused_scope.skipped_result(EXPOSED_FILES_SHAPE, reason=skip_reason)))
         else:
             cors_task = asyncio.create_task(check_cors(base_url))
@@ -6042,6 +6056,8 @@ async def build_report(target: str,
                     "skipped": True,
                     "reason": "canonical_capability_not_registered",
                 })
+            if _canonical_takeover_planned(canonical_scan_execution):
+                subdomain_empty["reason"] = "canonical_capability:subdomains.takeover_check"
         elif focused_manual_active_scope:
             print("[smart] Focused manual active scope: skipping auxiliary API/XXE discovery probes", file=sys.stderr)
             api_sec_empty = focused_scope.skipped_result(api_sec_empty)

@@ -1322,6 +1322,17 @@ class ScanActionPlanCompiler:
                 required=True,
                 supporting=True,
             )
+            # Passive takeover check of what discovery found: DNS evidence for discovered names,
+            # an HTTP fingerprint only for the bound host (capabilities/takeover.py). Optional:
+            # a scan without the budget for it records the gap instead of failing.
+            add(
+                "discover.takeover",
+                "discover_surface",
+                "subdomains.takeover_check",
+                {"discovery_ref": "discover.subdomains"},
+                dependencies=("discover.subdomains",),
+                supporting=True,
+            )
         if scope in {"full", "discovery"} and policy.network_discovery:
             add(
                 "discover.ports",
@@ -1378,7 +1389,8 @@ class ScanActionPlanCompiler:
 
         discovery_dependencies = tuple(
             row.action_id for row in blueprints
-            if row.stage == "discover_surface" and row.capability_name != "subdomains.discover"
+            if row.stage == "discover_surface"
+            and row.capability_name not in {"subdomains.discover", "subdomains.takeover_check"}
         )
         candidate_dependencies = (
             ()
