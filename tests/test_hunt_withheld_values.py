@@ -167,7 +167,7 @@ GIT_SHA = "3f786850e387550fdab836ed7e6dc881de23001b"
 @pytest.mark.parametrize("text", [
     f"id={UUID_VALUE}",
     f"commit {GIT_SHA}",
-    f"INSERT INTO commits VALUES (1,'{GIT_SHA}','{UUID_VALUE}');",
+    f"INSERT INTO commits (id, commit_sha, run_uuid) VALUES (1,'{GIT_SHA}','{UUID_VALUE}');",
     "Primary key: id",
     "Token URL: https://auth.fixture.test/oauth/token",
     "tokenUrl: https://auth.fixture.test/oauth/token",
