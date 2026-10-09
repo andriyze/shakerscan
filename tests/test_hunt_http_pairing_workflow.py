@@ -101,6 +101,13 @@ class Connection(ReplayConnection):
             return row
         return await super().fetchrow(sql, *args)
 
+    async def fetch(self, sql, *args):
+        # N56: a withholding action is seeded with the values this Hunt already sealed.
+        if 'private_http_result IS NOT NULL' in sql:
+            assert str(args[0]) == str(HUNT)
+            return [action for action in self.actions.values() if action.get('private_http_result')]
+        return await super().fetch(sql, *args)
+
     async def execute(self, sql, *args):
         if 'SET private_http_result=$3' in sql:
             assert args[1] == HUNT

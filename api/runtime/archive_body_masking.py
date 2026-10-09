@@ -125,8 +125,8 @@ class WithheldValues:
         for value in values or ():
             text = str(value)
             if len(text) >= _MIN_KNOWN_VALUE_CHARS and text not in self.known:
+                # Numbered only when an echo is actually withheld from this output.
                 self.known.append(text)
-                self.marker(text)
         self._known_scrubber = None
 
     def known_scrubber(self) -> KnownValueScrubber | None:
@@ -220,6 +220,22 @@ def _encodings(value: str) -> set[str]:
     for encoded in (base64.b64encode(raw), base64.urlsafe_b64encode(raw)):
         text = encoded.decode("ascii")
         forms.update({text, text.rstrip("=")})
+    # Encoders that escape only the special characters: Gson's HTML-safe ``\u003d`` for = & < > ',
+    # ESAPI/PHP numeric entities (``&#33;``, ``&#x21;``, ``&#039;``), JSON ``\uXXXX`` for any special.
+    specials = [char for char in dict.fromkeys(value) if not char.isalnum()]
+    if specials:
+        gson = {char: f"\\u{ord(char):04x}" for char in "=&<>'" if char in specials}
+        forms.add("".join(gson.get(char, char) for char in value))
+        for render in (
+            lambda char: f"\\u{ord(char):04x}", lambda char: f"&#{ord(char)};",
+            lambda char: f"&#{ord(char):03d};", lambda char: f"&#x{ord(char):x};",
+            lambda char: f"&#x{ord(char):02x};",
+        ):
+            escaped = {char: render(char) for char in specials}
+            forms.add("".join(escaped.get(char, char) for char in value))
+            # Mixed: an encoder that escapes only what HTML needs and keeps the rest verbatim.
+            html_needs = {char: render(char) for char in specials if char in "&<>\"'/!=`"}
+            forms.add("".join(html_needs.get(char, char) for char in value))
     return {form for form in forms if len(form) >= _MIN_KNOWN_VALUE_CHARS}
 
 
@@ -396,8 +412,6 @@ def is_withheld_key(key: Any) -> bool:
         or normalized.rsplit("_", 1)[-1] in _DESCRIPTIVE_LAST_SEGMENTS
     ):
         return False
-    if _COLLECTOR.get() is not None and is_csrf_name(text):
-        return False  # a Hunt planner needs the page's CSRF token to drive a form
     return is_redactable_key_name(text) or is_sensitive_key(text)
 
 
@@ -408,9 +422,11 @@ _CSRF_NAMES = frozenset({
 
 
 def is_csrf_name(name: Any) -> bool:
-    """A CSRF/XSRF token field: bound to the session and the page, and needed to submit it.
-    Withheld from shared archive views, shown to the Hunt planner."""
+    """A CSRF/XSRF token form field: bound to the session and the page, and needed to submit
+    it. A name that also says ``secret`` (``csrf_secret``) is a server key, not a form token."""
     raw = str(name or "").strip().lower()
+    if "secret" in raw:
+        return False
     if raw in _CSRF_NAMES:
         return True
     return any(
@@ -607,7 +623,7 @@ def mask_json_text(text: str, *, _depth: int = 0) -> str:
                 pieces.append(_withhold_json(_string_value(text[start:end])))
                 cursor = end
                 continue
-            if _names_secret(_string_value(text[start:end])):
+            if _names_row_secret(_string_value(text[start:end])):
                 named_next.add(frame)
         if withheld_in(frame, key) or frame_withheld(frame):
             if text[start] == '"' and is_location_value(key, _string_value(text[start:end])):
@@ -808,7 +824,7 @@ def mask_html_fields(text: str) -> str:
         ]
         if not any(is_withheld_key(name) for name in names):
             return match.group(0)
-        if _COLLECTOR.get() is not None and any(is_csrf_name(name) for name in names):
+        if _planner_form_token(match.group(0)[1:].split(None, 1)[0].rstrip(">/"), names):
             return match.group(0)
         pieces: list[str] = []
         cursor = 0
@@ -952,6 +968,35 @@ def mask_text_assignments(text: str) -> str:
     return "".join(pieces)
 
 
+# --- Secret URL parameters (``Location: /cb?code=...``) -----------------------------------------
+# An OAuth code, a reset token or a signed URL's signature in a redirect is a credential. In
+# model-facing output it becomes a reference the Hunt can still follow.
+
+_URL_SECRET_PARAMS = frozenset({
+    "code", "token", "access_token", "id_token", "refresh_token", "reset", "reset_token", "key",
+    "api_key", "apikey", "sig", "signature", "password", "passwd", "secret", "client_secret",
+    "otp", "session", "sessionid", "x_amz_signature", "x_amz_credential", "x_amz_security_token",
+})
+_URL_PARAM_RE = re.compile(r"([?&#;])([^=&#\s]{1,100})=([^&#\s]{0,2048})")
+
+
+def mask_url_secrets(url: Any) -> Any:
+    """Withhold the values of secret query/fragment parameters in one URL."""
+    if not isinstance(url, str) or "=" not in url:
+        return url
+
+    def replace(match: re.Match[str]) -> str:
+        name = urllib.parse.unquote_plus(match.group(2))
+        if normalized_key_name(name) not in _URL_SECRET_PARAMS and not is_withheld_key(name):
+            return match.group(0)
+        raw = urllib.parse.unquote_plus(match.group(3))
+        if not raw or WITHHELD_MARKER_RE.fullmatch(raw) or raw == MASK:
+            return match.group(0)
+        return f"{match.group(1)}{match.group(2)}={_withhold(raw)}"
+
+    return _URL_PARAM_RE.sub(replace, url)
+
+
 # --- Percent-encoded assignments (``next=%2Fcb%3Faccess_token%3D...``) -------------------------
 
 _ENCODED_ASSIGNMENT_RE = re.compile(
@@ -1067,9 +1112,30 @@ _SHORT_SECRET_NAMES = frozenset({"pw", "db_pw", "user_pw", "passwd_hash"})
 
 def _names_secret(name: str) -> bool:
     """A name that holds a secret, by the narrow configuration contract (not ``Primary key``)."""
-    if not name or (_COLLECTOR.get() is not None and is_csrf_name(name)):
+    if not name:
         return False
     return is_secret_key_name(name, server_side=True) or normalized_key_name(name) in _SHORT_SECRET_NAMES
+
+
+# A settings or session table row names its value: ``("session_id", "...")``.
+_SESSION_ROW_NAMES = frozenset({
+    "session", "session_id", "sessionid", "session_key", "session_token", "sid", "phpsessid",
+    "jsessionid", "aspsessionid", "connect_sid",
+})
+
+
+def _names_row_secret(name: str) -> bool:
+    """The name cell of a name->value row whose value is a secret."""
+    return _names_secret(name) or normalized_key_name(name) in _SESSION_ROW_NAMES
+
+
+def _planner_form_token(tag: str, names: list[str]) -> bool:
+    """A CSRF token in an HTML form input or ``<meta name=csrf-token>``, shown to a Hunt planner
+    (it needs the token to submit the form). Shared archive views still withhold it."""
+    return (
+        _COLLECTOR.get() is not None and tag.lower() in {"input", "meta"}
+        and any(is_csrf_name(name) for name in names)
+    )
 
 
 def mask_markup_pairs(text: str) -> str:
@@ -1082,7 +1148,7 @@ def mask_markup_pairs(text: str) -> str:
             if item.group(1).lower() in _MARKUP_NAME_ATTRIBUTES
         ]
         secret_name = next((name for name in names if _names_secret(name)), None)
-        if secret_name is None:
+        if secret_name is None or _planner_form_token(match.group(0)[1:].split(None, 1)[0].rstrip(">/"), names):
             return match.group(0)
         pieces: list[str] = []
         cursor = 0
@@ -1288,7 +1354,7 @@ def _sql_rows(
             raw = _sql_unquote(value)
             column = columns[index] if index < len(columns) else None
             secret = (named and not _is_id_column(column) and bool(raw)) or _sql_secret_literal(raw, column)
-            named = not secret and _names_secret(raw)
+            named = not secret and _names_row_secret(raw)
             if secret:
                 pieces.append(text[cursor:token.start()])
                 pieces.append(f"{value[0]}{_withhold(raw)}{value[0]}")
@@ -1316,7 +1382,7 @@ def _copy_rows(
             column = columns[index] if index < len(columns) else None
             raw = field.rstrip("\r")
             secret = (named and not _is_id_column(column) and raw not in {"", "\\N"}) or _sql_secret_literal(raw, column)
-            named = not secret and _names_secret(raw)
+            named = not secret and _names_row_secret(raw)
             if secret:
                 pieces.append(text[cursor:field_start])
                 pieces.append(_withhold(raw))
@@ -1455,7 +1521,11 @@ def withhold_body_secrets(value: Any) -> Any:
 
 
 __all__ = [
+    "KnownValueScrubber",
     "MAX_WITHHELD_VALUES",
+    "holds_withheld_material",
+    "mask_url_secrets",
+    "scrub_known_values",
     "WITHHELD_MARKER_RE",
     "WITHHELD_REF_RE",
     "WithheldValues",
