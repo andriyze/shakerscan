@@ -1,8 +1,12 @@
 """Differential check: the shared address classifier against the classifiers it replaced.
 
 ``LEGACY`` below is a frozen copy of the decisions before this change: the web scope guard as
-#357 left it (``_ip_scope_block_reason`` and ``public_unicast_address``) and the device plane's
-``validate_device_destination``. Over a large address set (every special-purpose boundary, a
+#357 left it (``_ip_scope_block_reason`` and ``public_unicast_address``), the device plane's
+``validate_device_destination`` (with its ``SHAKERSCAN_DEVICE_DENY_CIDRS`` and
+``SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS`` handling) and the Hunt direct-origin list as #358
+left it. Every comparison also runs with ``SHAKERSCAN_NAT64_PREFIXES``,
+``SHAKERSCAN_DEVICE_DENY_CIDRS`` and ``SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS`` set, alone and
+together. Over a large address set (every special-purpose boundary, a
 seeded sample of the IPv4 space, and every IPv6 spelling that carries one of them), in production
 with private networks refused, production with them allowed, and Lab, the new classifier must
 refuse everything the old one refused. Where it refuses more, the address must belong to one of
@@ -13,6 +17,10 @@ the deliberate tightenings of this change, and nothing else:
 - an IPv6 zone id no longer hides a cloud-service address;
 - device plane: every embedded spelling is judged as the IPv4 address it carries, and a link-local
   IPv4 address carried inside a translator or tunnel form is refused;
+- a Hunt direct origin is judged by the web scope guard (``action_scope.direct_origin_refusal``):
+  reserved and special-purpose space the old list did not name follows the private setting;
+- an address under a declared ``SHAKERSCAN_NAT64_PREFIXES`` prefix is judged as the address it
+  carries;
 - the cloud-service list gains the EKS Pod Identity agent (169.254.170.23, fd00:ec2::23) and
   Oracle Cloud Classic metadata (192.0.0.192), refused everywhere, and the device plane refuses
   the limited broadcast address 255.255.255.255 in every spelling.
@@ -30,7 +38,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 
 import action_scope  # noqa: E402
 from scanner_tools import device_posture  # noqa: E402
-from scanner_tools.address_classes import embedded_ipv4_addresses as new_embedded  # noqa: E402
+from scanner_tools.address_classes import (  # noqa: E402
+    embedded_ipv4_addresses as new_embedded,
+    judged_addresses as new_judged,
+)
 
 
 # --------------------------------------------------------------------------------------------
@@ -104,7 +115,7 @@ _LEGACY_DEVICE_DENIED = tuple(ipaddress.ip_network(raw) for raw in (
 ))
 
 
-def legacy_device_admits(address, environment, policy):
+def legacy_device_admits(address, environment, policy, *, metadata_allowed=False, deny_cidrs=()):
     try:
         parsed = ipaddress.ip_address(address)
     except ValueError:
@@ -116,7 +127,28 @@ def legacy_device_admits(address, environment, policy):
         metadata = any(judged.version == net.version and judged in net for net in _LEGACY_DEVICE_DENIED)
         if not (judged.is_link_local or metadata) and (judged.is_loopback or judged.is_private or judged.is_reserved):
             return False
-    return not any(parsed.version == net.version and parsed in net for net in _LEGACY_DEVICE_DENIED)
+    if metadata_allowed:
+        return True
+    networks = (*_LEGACY_DEVICE_DENIED, *(ipaddress.ip_network(raw, strict=False) for raw in deny_cidrs))
+    return not any(parsed.version == net.version and parsed in net for net in networks)
+
+
+_LEGACY_ORIGIN_NEVER = tuple(ipaddress.ip_network(raw) for raw in (
+    "0.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4", "::/128", "fe80::/10", "ff00::/8",
+))
+_LEGACY_ORIGIN_PRIVATE = tuple(ipaddress.ip_network(raw) for raw in (
+    "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7",
+))
+
+
+def legacy_direct_origin_refused(address, allow_private):
+    """``start_contract._ip_addresses`` as #358 left it (its decoding was already the shared one)."""
+    parsed = ipaddress.ip_address(address)
+    networks = _LEGACY_ORIGIN_NEVER + (() if allow_private else _LEGACY_ORIGIN_PRIVATE)
+    candidates = new_judged(parsed)
+    return any(str(item) in _LEGACY_CLOUD for item in candidates) or any(
+        item.version == net.version and item in net for item in candidates for net in networks
+    )
 
 
 # --------------------------------------------------------------------------------------------
@@ -169,7 +201,56 @@ def _address_set():
     return sorted(addresses)
 
 
-ADDRESSES = _address_set()
+# Deployment settings every comparison also runs under.
+DECLARED_NAT64 = ("2001:db8:64::/96", "2001:db8:100::/40")
+DENY_CIDRS = ("203.0.113.0/24", "2001:db8:dead::/48")
+SETTINGS = {
+    "defaults": {},
+    "nat64_prefixes": {"SHAKERSCAN_NAT64_PREFIXES": ",".join(DECLARED_NAT64)},
+    "deny_cidrs": {"SHAKERSCAN_DEVICE_DENY_CIDRS": ",".join(DENY_CIDRS)},
+    "allow_metadata": {"SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS": "true"},
+    "all": {
+        "SHAKERSCAN_NAT64_PREFIXES": ",".join(DECLARED_NAT64),
+        "SHAKERSCAN_DEVICE_DENY_CIDRS": ",".join(DENY_CIDRS),
+        "SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS": "true",
+    },
+}
+_SETTING_NAMES = (
+    "SHAKERSCAN_NAT64_PREFIXES", "SHAKERSCAN_DEVICE_DENY_CIDRS", "SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS",
+)
+
+
+def _rfc6052(prefix, ipv4):
+    network = ipaddress.IPv6Network(prefix)
+    body = list(network.network_address.packed[:network.prefixlen // 8]) + list(ipaddress.IPv4Address(ipv4).packed)
+    if network.prefixlen // 8 <= 8 < len(body):
+        body.insert(8, 0)
+    return str(ipaddress.IPv6Address(bytes((body + [0] * 16)[:16])))
+
+
+def _declared_nat64_forms():
+    v4 = set(POINTS_V4)
+    for raw in SPECIAL_V4:
+        network = ipaddress.ip_network(raw)
+        v4.update(str(network[index]) for index in (0, 1, network.num_addresses // 2, -2, -1))
+    return {_rfc6052(prefix, item) for prefix in DECLARED_NAT64 for item in v4}
+
+
+ADDRESSES = sorted({*_address_set(), *_declared_nat64_forms(), "2001:db8:dead::1", "::ffff:203.0.113.7"})
+
+
+def _apply(monkeypatch, settings):
+    for name in _SETTING_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in SETTINGS[settings].items():
+        monkeypatch.setenv(name, value)
+
+
+def _under_declared_nat64(text, settings):
+    if "SHAKERSCAN_NAT64_PREFIXES" not in SETTINGS[settings]:
+        return False
+    address = _plain(text)
+    return any(address in ipaddress.ip_network(prefix) for prefix in DECLARED_NAT64)
 MODES = (("production", False), ("production", True), ("lab", False))
 
 
@@ -208,9 +289,10 @@ def test_the_address_set_is_large_and_covers_every_form():
     assert "::ffff:0:a9fe:a9fe" in ADDRESSES and "64:ff9b::a9fe:a9fe" in ADDRESSES
 
 
+@pytest.mark.parametrize("settings", SETTINGS)
 @pytest.mark.parametrize("environment, allow_private", MODES)
-def test_the_scope_guard_is_never_more_permissive(monkeypatch, environment, allow_private):
-    monkeypatch.delenv("SHAKERSCAN_NAT64_PREFIXES", raising=False)
+def test_the_scope_guard_is_never_more_permissive(monkeypatch, environment, allow_private, settings):
+    _apply(monkeypatch, settings)
     loosened, tightened, unexplained = [], [], []
     for text in ADDRESSES:
         old = legacy_scope_block(text, environment, allow_private)
@@ -219,15 +301,16 @@ def test_the_scope_guard_is_never_more_permissive(monkeypatch, environment, allo
             loosened.append(text)
         elif old is None and new is not None:
             tightened.append(text)
-            if not _deliberate_scope_tightening(text):
+            if not (_deliberate_scope_tightening(text) or _under_declared_nat64(text, settings)):
                 unexplained.append(text)
     assert not loosened, loosened[:20]
     assert not unexplained, unexplained[:20]
     assert tightened, "the deliberate tightenings are exercised"
 
 
-def test_a_hunt_destination_is_never_more_permissive(monkeypatch):
-    monkeypatch.delenv("SHAKERSCAN_NAT64_PREFIXES", raising=False)
+@pytest.mark.parametrize("settings", SETTINGS)
+def test_a_hunt_destination_is_never_more_permissive(monkeypatch, settings):
+    _apply(monkeypatch, settings)
     loosened = [text for text in ADDRESSES
                 if action_scope.public_unicast_address(text) and not legacy_public_unicast(text)]
     assert not loosened, loosened[:20]
@@ -247,15 +330,19 @@ def _deliberate_device_tightening(text, environment, policy):
     return any(item.version == 4 and item in ipaddress.ip_network("100.64.0.0/10") for item in (address,))
 
 
+@pytest.mark.parametrize("settings", SETTINGS)
 @pytest.mark.parametrize("environment, policy", [("production", "refuse"), ("production", "allow"), ("lab", "refuse")])
-def test_the_device_plane_is_never_more_permissive(monkeypatch, environment, policy):
+def test_the_device_plane_is_never_more_permissive(monkeypatch, environment, policy, settings):
     monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", policy)
-    monkeypatch.delenv("SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS", raising=False)
-    monkeypatch.delenv("SHAKERSCAN_DEVICE_DENY_CIDRS", raising=False)
-    monkeypatch.delenv("SHAKERSCAN_NAT64_PREFIXES", raising=False)
+    _apply(monkeypatch, settings)
+    configured = SETTINGS[settings]
     loosened, unexplained = [], []
     for text in ADDRESSES:
-        old = legacy_device_admits(text, environment, policy)
+        old = legacy_device_admits(
+            text, environment, policy,
+            metadata_allowed="SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS" in configured,
+            deny_cidrs=DENY_CIDRS if "SHAKERSCAN_DEVICE_DENY_CIDRS" in configured else (),
+        )
         new = device_posture.device_destination_admitted(text, environment=environment, policy=policy)
         if new and not old:
             loosened.append(text)
@@ -263,3 +350,29 @@ def test_the_device_plane_is_never_more_permissive(monkeypatch, environment, pol
             unexplained.append(text)
     assert not loosened, loosened[:20]
     assert not unexplained, unexplained[:20]
+
+
+@pytest.mark.parametrize("settings", SETTINGS)
+@pytest.mark.parametrize("allow_private", [False, True])
+def test_a_hunt_direct_origin_is_never_more_permissive(monkeypatch, allow_private, settings):
+    """S3 of the #358 review: the direct-origin list now follows the web scope guard. Every
+    address it newly refuses is one that guard refuses under the same private setting."""
+    _apply(monkeypatch, settings)
+    loosened, tightened, unexplained = [], [], []
+    for text in ADDRESSES:
+        old = legacy_direct_origin_refused(text, allow_private)
+        new = action_scope.direct_origin_refusal(text, allow_private_networks=allow_private) is not None
+        if old and not new:
+            loosened.append(text)
+        elif new and not old:
+            tightened.append(text)
+            if action_scope._ip_scope_block_reason(
+                text, "production", allow_private_networks=allow_private,
+            ) is None:
+                unexplained.append(text)
+    assert not loosened, loosened[:20]
+    assert not unexplained, unexplained[:20]
+    assert tightened, "the deliberate tightenings are exercised"
+    for address in ("198.18.0.1", "192.0.0.8", "192.0.2.1", "64:ff9b::c612:1"):
+        assert (address in tightened) is (not allow_private)
+    assert "192.0.0.192" in tightened
