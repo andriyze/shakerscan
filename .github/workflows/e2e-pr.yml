@@ -510,6 +510,13 @@ jobs:
         if: always() && steps.shard.outputs.stack == 'true'
         run: docker compose --profile e2e down -v
 
+      # Why a Docker pull did not use the mirror: dockerd logs each endpoint it falls back from.
+      - name: Show Docker daemon registry fallbacks
+        if: failure()
+        run: |
+          sudo journalctl -u docker --since -15min --no-pager \
+            | grep -iE 'mirror|fallback|next endpoint|toomanyrequests|error' | tail -n 100 || true
+
   # The required status check. It always reports. It passes only when every shard passed, and it
   # validates E2E completeness over the union of the shards' scorecards exactly as the single job
   # validated its own scorecard.

@@ -122,3 +122,9 @@ jobs:
           path: artifacts/installed-upgrade
           if-no-files-found: warn
           retention-days: 14
+      # Why a Docker pull did not use the mirror: dockerd logs each endpoint it falls back from.
+      - name: Show Docker daemon registry fallbacks
+        if: failure()
+        run: |
+          sudo journalctl -u docker --since -15min --no-pager \
+            | grep -iE 'mirror|fallback|next endpoint|toomanyrequests|error' | tail -n 100 || true

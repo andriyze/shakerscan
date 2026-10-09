@@ -108,6 +108,8 @@ jobs:
         with:
           # The docker-container builder ignores the daemon's mirrors; give BuildKit (and
           # `buildx imagetools`, which reads this builder's registry config) the same mirror.
+          # The builder's own image comes from the mirror as well, not through the daemon.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
@@ -141,3 +143,9 @@ jobs:
           path: engine-sbom-expanded/
           if-no-files-found: error
           retention-days: 7
+      # Why a Docker pull did not use the mirror: dockerd logs each endpoint it falls back from.
+      - name: Show Docker daemon registry fallbacks
+        if: failure()
+        run: |
+          sudo journalctl -u docker --since -15min --no-pager \
+            | grep -iE 'mirror|fallback|next endpoint|toomanyrequests|error' | tail -n 100 || true
