@@ -685,6 +685,55 @@ def test_another_host_is_resolved_and_scope_checked_before_a_request_is_raised(e
     assert credential.value.status_code in {403, 422}
 
 
+@pytest.mark.parametrize("spelling", [
+    "https://\uff45\uff56\uff49\uff4c.example.test",      # full-width "evil"
+    "https://EVIL.Example.Test.",                        # case and a trailing dot
+    "https://evil.example.test:443",                     # the explicit default port
+    "https://e\u200bvil.example.test",                  # a zero-width space IDNA maps away
+    "https://\uff25\uff36\uff29\uff2c\uff0eexample.test",  # full-width capitals and dot
+])
+def test_a_denied_destination_is_not_asked_again_under_another_spelling(env, monkeypatch, spelling):
+    """D46 keyed the cooldown on the raw lowercased host, so after a person denied
+    https://evil.example.test the agent could ask again with a full-width or mixed spelling of
+    the same host. The subject, the grant and the cooldown now share the IDNA ASCII form."""
+    async def resolver(url, environment):  # labelled double: no DNS in tests
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(permission_subjects, "resolve_destination_addresses", resolver)
+    hunt = run(env, env.hunt())
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, "idna-0001", values={"method": "GET", "path": "/", "origin": "https://evil.example.test"}))
+    (request,) = run(env, env.requests(hunt))
+    assert json.loads(request["subject_json"])["host"] == "evil.example.test"
+    run(env, env.decide(hunt, request, decision="deny"))
+    with pytest.raises(HTTPException) as again:
+        run(env, env.call(hunt, "idna-0002", values={"method": "GET", "path": "/", "origin": spelling}))
+    assert _detail(again)["reason_code"] == "permission_denied", spelling
+    assert len(run(env, env.requests(hunt))) == 1, "no new request for the person"
+
+
+def test_a_granted_destination_matches_its_other_spellings_and_shows_ascii(env, monkeypatch):
+    """The request raised for a full-width spelling names the ASCII host on the approval
+    screen, and the grant admits every spelling of that host."""
+    async def resolver(url, environment):  # labelled double: no DNS in tests
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(permission_subjects, "resolve_destination_addresses", resolver)
+    hunt = run(env, env.hunt())
+    full_width = "https://\uff41\uff50\uff49.example.test"
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, "idna-grant-0001", values={"method": "GET", "path": "/", "origin": full_width}))
+    (request,) = run(env, env.requests(hunt))
+    assert json.loads(request["subject_json"])["host"] == "api.example.test"
+    from hunt.permission_store import public_request
+
+    shown = json.dumps(public_request(request), ensure_ascii=False)
+    assert "api.example.test" in shown and "\uff41" not in shown
+    run(env, env.decide(hunt, request))
+    for key, origin in (("idna-grant-0001", full_width), ("idna-grant-0002", "https://API.example.test.")):
+        assert run(env, env.call(hunt, key, values={"method": "GET", "path": "/", "origin": origin})) == "admitted"
+
+
 # ---------------------------------------------------------------------------------------------
 # Pre-authorization.
 
