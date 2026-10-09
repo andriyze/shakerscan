@@ -66,8 +66,10 @@ def _raw_host(url: str) -> str:
 
 
 def _host_key(raw: str, locator: str) -> str:
-    return (f"(CASE WHEN ({raw}) ~ '{_NUMERIC_LOOKING}' AND ({raw}) !~ '{_CANONICAL_IPV4}' "
-            f"THEN NULL ELSE ({locator}) END)")
+    # Only a host without ':' can be an IPv4 spelling: an IPv6 literal that embeds IPv4
+    # (::ffff:10.0.0.1, 64:ff9b::192.0.2.1) ends in a dotted quad and is canonicalised by inet.
+    return (f"(CASE WHEN position(':' in ({raw})) = 0 AND ({raw}) ~ '{_NUMERIC_LOOKING}' "
+            f"AND ({raw}) !~ '{_CANONICAL_IPV4}' THEN NULL ELSE ({locator}) END)")
 
 
 def authorized_sql(alias: str) -> str:

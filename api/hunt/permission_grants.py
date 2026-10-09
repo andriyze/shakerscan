@@ -43,7 +43,7 @@ from .permission_store import (
     covering_preauthorization,
     hunt_bounds,
     load_request,
-    offer_reapproval,
+    reconcile_host_encoding,
     public_grant,
     public_request,
     record_event,
@@ -353,9 +353,13 @@ def _approvable_proposal(subject: Mapping[str, Any]) -> Bounds:
     if subject.get("bounds_digest") != bounds.digest():
         changed = legacy_host_changes(allow)
         if changed:
+            # Normally replaced before a person sees it (``supersede_legacy_proposals`` runs when
+            # the request is read); this is the backstop, and reading it again does the replacing.
             raise GrantRefused(409, "preauthorization_reapproval_required", " ".join(
-                item.public()["message"] for item in changed
-            ))
+                item.finding() for item in changed
+            ) + " This proposal names other hosts than the ones it was recorded for, so it was not "
+                "granted. Run shakerscan approve with this request id again: it is replaced by the "
+                "same bounds for the hosts they name, which you approve in one step.")
     return bounds
 
 
@@ -387,9 +391,10 @@ async def try_preauthorized_grant(conn: Any, run: dict[str, Any], request: Mappi
     """Grant a pending request inside the start bounds, in the caller's transaction."""
     if request["kind"] == KIND_PREAUTHORIZATION or request["status"] != "pending":
         return None
+    # Legacy (IDNA 2003) host bounds that no longer match are offered back to the person, and
+    # legacy proposals are replaced, before coverage is read.
+    await reconcile_host_encoding(conn, run)
     _bounds, rows = await hunt_bounds(conn, run["id"])
-    # Legacy (IDNA 2003) host bounds that no longer match are offered back to the person.
-    await offer_reapproval(conn, run, rows)
     choices: dict[str, Any] = {}
 
     def predicate(bounds: Bounds) -> bool:
@@ -456,12 +461,21 @@ async def decide(conn: Any, hunt_id: Any, request_id: Any, body: Mapping[str, An
         )
         if same and request["status"] in {"granted", "denied"}:
             return {"replayed": True, "request": public_request(request)}
+        replaced = _json(request.get("display_json"), {})
+        if request["status"] == "withdrawn" and replaced.get("superseded_reason"):
+            message = (
+                f"{replaced['superseded_reason']} This proposal was replaced"
+                + (f" by request {replaced['superseded_by']}: run shakerscan approve "
+                   f"{replaced['superseded_by']}." if replaced.get("superseded_by") else
+                   " and cannot be granted; start the Hunt again with bounds that spell the host.")
+            )
+        elif request["status"] == "withdrawn":
+            message = "This Hunt has ended; nothing was granted."
+        else:
+            message = f"This request is already {request['status']}; the decision was not applied."
         raise HTTPException(409, {
             "error": f"permission_{request['status']}",
-            "message": (
-                "This Hunt has ended; nothing was granted." if request["status"] == "withdrawn"
-                else f"This request is already {request['status']}; the decision was not applied."
-            ),
+            "message": message,
             "request": public_request(request),
         })
     if str(body.get("subject_digest") or "") != request["subject_digest"]:

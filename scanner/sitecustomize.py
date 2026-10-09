@@ -23,11 +23,6 @@ from typing import Any, Mapping, MutableMapping
 from urllib.parse import urlsplit
 
 try:
-    from scanner_tools.host_names import HostNameError, canonical_host
-except ModuleNotFoundError:  # source-checkout host tests
-    from scanner.scanner_tools.host_names import HostNameError, canonical_host
-
-try:
     from target_address_policy import normalize_frozen_addresses
 except ModuleNotFoundError:  # source-checkout host tests
     from api.target_address_policy import normalize_frozen_addresses
@@ -75,6 +70,29 @@ def _canonical_json_digest(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+_HOST_CANONICALIZER: tuple[Any, type[Exception]] | None = None
+
+
+def _host_canonicalizer() -> tuple[Any, type[Exception]]:
+    """``host_names.canonical_host``, loaded only once a canonical envelope is being installed.
+
+    It needs the ``idna`` package. Importing it at module level ran outside the fail-closed guard:
+    an ImportError there is printed and ignored by the site module, and the scanner continued with
+    no frozen resolver. Raising FrozenResolverError here ends the process instead (exit 78).
+    """
+    global _HOST_CANONICALIZER
+    if _HOST_CANONICALIZER is None:
+        try:
+            try:
+                from scanner_tools.host_names import HostNameError, canonical_host
+            except ModuleNotFoundError:  # source-checkout host tests
+                from scanner.scanner_tools.host_names import HostNameError, canonical_host
+        except ImportError as exc:
+            raise FrozenResolverError(f"host canonicalizer is unavailable: {exc}") from exc
+        _HOST_CANONICALIZER = (canonical_host, HostNameError)
+    return _HOST_CANONICALIZER
+
+
 def _normalized_host(value: Any) -> str:
     if isinstance(value, bytes):
         try:
@@ -84,9 +102,10 @@ def _normalized_host(value: Any) -> str:
     text = str(value or "").strip().rstrip(".")
     if not text or len(text) > 253 or any(ord(ch) < 33 for ch in text):
         return ""
+    canonical_host, host_name_error = _host_canonicalizer()
     try:
         return canonical_host(text)
-    except HostNameError:
+    except host_name_error:
         return ""
 
 

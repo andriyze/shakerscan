@@ -27,6 +27,7 @@ from .permission_store import (
     load_request,
     public_preauthorization,
     public_request,
+    reconcile_host_encoding_if_needed,
 )
 
 router = APIRouter()
@@ -88,6 +89,7 @@ async def list_hunt_permission_requests(hunt_id: str, status: str | None = Query
         await _hunt_exists(conn, hunt_uuid)
         async with conn.transaction():
             await expire_due(conn, hunt_uuid)
+        await reconcile_host_encoding_if_needed(conn, hunt_uuid)
         return {"hunt_id": str(hunt_uuid), "requests": await list_requests(conn, hunt_uuid, status=status)}
 
 
@@ -99,6 +101,9 @@ async def get_hunt_permission_request(
     """One request; with ``wait_seconds`` it returns as soon as a pending request changes."""
     hunt_uuid, request_uuid = _uuid(hunt_id, "hunt id"), _uuid(request_id, "request id")
     deadline = asyncio.get_running_loop().time() + wait_seconds
+    async with _pool().acquire() as conn:
+        # Once, before reading: a legacy proposal is replaced before a person can approve it.
+        await reconcile_host_encoding_if_needed(conn, hunt_uuid)
     while True:
         async with _pool().acquire() as conn:
             async with conn.transaction():
@@ -141,6 +146,8 @@ async def get_hunt_preauthorization(hunt_id: str):
     hunt_uuid = _uuid(hunt_id, "hunt id")
     async with _pool().acquire() as conn:
         await _hunt_exists(conn, hunt_uuid)
+        # The withheld legacy bounds and their re-approval request appear together.
+        await reconcile_host_encoding_if_needed(conn, hunt_uuid)
         rows = await load_preauthorizations(conn, hunt_uuid)
         return {"hunt_id": str(hunt_uuid), "preauthorizations": [public_preauthorization(row) for row in rows]}
 

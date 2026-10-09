@@ -22,7 +22,7 @@ from typing import Any
 import uuid
 
 from .credential_uses import live_credential_grants
-from .permission_bounds import Bounds, bound_hosts, merge, parse_bounds, stored_bounds
+from .permission_bounds import Bounds, bound_hosts, legacy_host_changes, merge, parse_bounds, stored_bounds
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
     KIND_CAPABILITY_ENABLE,
@@ -329,9 +329,9 @@ def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) ->
             title = "Pre-authorize these host bounds again, for the hosts they name"
             explanation = (
                 "These bounds were pre-authorized for this Hunt before hosts were spelled with IDNA "
-                "2008/UTS #46 and were stored under another ASCII name ("
+                "2008/UTS #46, and were stored as "
                 + ", ".join(_label(item, 253) for item in subject.get("previously_stored_as") or ())
-                + "). They are withheld and cover nothing until you approve them again: "
+                + " under IDNA 2003. They are withheld and cover nothing until you approve them again: "
                 + ", ".join(allow) + "."
             )
             effect = (
@@ -343,6 +343,11 @@ def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) ->
             explanation = "The Hunt was started through the agent with these allow bounds: " + ", ".join(
                 allow
             ) + "."
+            if subject.get("supersedes"):
+                explanation += (
+                    f" This replaces request {_label(subject.get('supersedes'), 40)}, recorded before "
+                    "hosts were spelled with IDNA 2008/UTS #46; approve it for the hosts named below."
+                )
             effect = (
                 "Requests inside these bounds are granted as they arise, as if you had started the "
                 "Hunt with them. Hard limits are never covered."
@@ -373,6 +378,24 @@ def public_request(row: Any) -> dict[str, Any]:
     item = dict(row)
     subject = _json(item.get("subject_json"), {})
     display = _json(item.get("display_json"), {})
+    shown = _public_request(item, subject, display)
+    replacement = display.get("superseded_by")
+    if display.get("superseded_reason"):
+        # A proposal recorded under IDNA 2003 that names a host IDNA 2008 spells differently:
+        # withdrawn, and (when its hosts are valid) replaced by the same bounds for the hosts
+        # they name, so the person still approves in one terminal step.
+        shown["superseded_by"] = replacement
+        if replacement:
+            shown["title"] = f"Replaced by request {replacement}: run shakerscan approve {replacement}"
+            shown["approve_command"] = f"shakerscan approve {replacement}"
+        else:
+            shown["title"] = "Withdrawn: these proposed bounds name a host that is not valid"
+            shown["approve_command"] = None
+        shown["explanation"] = f"{shown['explanation']} {display['superseded_reason']}"
+    return shown
+
+
+def _public_request(item: Mapping[str, Any], subject: Mapping[str, Any], display: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": PERMISSION_REQUEST_SCHEMA,
         "id": str(item["id"]),
@@ -436,12 +459,15 @@ def public_preauthorization(row: Any) -> dict[str, Any]:
     bounds = _json(item.get("bounds_json"), {})
     loaded = item.get("_stored")
     legacy = [entry.public() for entry in loaded.legacy] if loaded is not None else []
+    if item.get("_reapproved_by"):
+        legacy = []
     return {
         "id": str(item["id"]),
         "bounds": bounds,
         "bounds_digest": item["bounds_digest"],
         "host_canonicalization": bounds.get("host_canonicalization") or "idna2003-legacy",
         "reapproval_required": legacy,
+        "reapproved_by": item.get("_reapproved_by"),
         "created_by": item["created_by"],
         "proof": item["proof"],
         "created_at": _iso(item.get("created_at")),
@@ -728,11 +754,21 @@ async def load_preauthorizations(conn: Any, hunt_id: Any) -> list[dict[str, Any]
         "SELECT * FROM hunt_preauthorizations WHERE hunt_run_id=$1 ORDER BY created_at, id",
         uuid.UUID(str(hunt_id)),
     )]
+    reapproved: dict[str, str] = {}
     for row in rows:
         value = _json(row["bounds_json"], {})
         legacy = value.get("host_canonicalization") is None
         source = await _approved_allow(conn, row) if legacy else None
         row["_stored"] = stored_bounds(value, source_allow=source)
+        if not legacy and row.get("source_request_id"):
+            request = await conn.fetchrow(
+                "SELECT subject_json FROM hunt_permission_requests WHERE id=$1", row["source_request_id"])
+            original = _json(request["subject_json"], {}).get("reapproval_of") if request is not None else None
+            if original:
+                reapproved[str(original)] = str(row["id"])
+    for row in rows:
+        # The person approved this legacy row's withheld bounds again: nothing is left to re-approve.
+        row["_reapproved_by"] = reapproved.get(str(row["id"]))
     return rows
 
 
@@ -748,8 +784,12 @@ async def offer_reapproval(conn: Any, run: Mapping[str, Any], rows: list[dict[st
     offered: list[dict[str, Any]] = []
     for row in rows:
         loaded = row.get("_stored")
+        if row.get("_reapproved_by"):
+            continue
+        # A changed bound is offered as the person wrote it (now spelled with IDNA 2008/UTS #46);
+        # an unconfirmed one as the ASCII host it was stored as, shown with its Unicode form.
         changed = [item for item in (loaded.legacy if loaded is not None else ())
-                   if item.reason == "encoding_changed"]
+                   if item.reason in {"encoding_changed", "source_unconfirmed"}]
         if not changed:
             continue
         allow = list(dict.fromkeys(item.bound for item in changed))
@@ -773,6 +813,83 @@ async def offer_reapproval(conn: Any, run: Mapping[str, Any], rows: list[dict[st
     return offered
 
 
+async def supersede_legacy_proposals(conn: Any, run: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Replace each pending agent proposal recorded under IDNA 2003 whose hosts IDNA 2008 spells
+    differently. The old request is withdrawn (it names scope the person never saw) and the same
+    ``--allow`` strings are raised again with their IDNA 2008/UTS #46 digest, so the person still
+    approves in one terminal step. A proposal naming a host strict processing refuses is withdrawn
+    with the reason. The caller holds the Hunt row lock."""
+    replaced: list[dict[str, Any]] = []
+    rows = await conn.fetch(
+        """SELECT * FROM hunt_permission_requests
+           WHERE hunt_run_id=$1 AND kind=$2 AND status='pending' ORDER BY created_at, id""",
+        uuid.UUID(str(run["id"])), KIND_PREAUTHORIZATION,
+    )
+    for row in rows:
+        subject = _json(row["subject_json"], {})
+        if subject.get("reapproval_of") or subject.get("supersedes"):
+            continue
+        allow = [str(item) for item in subject.get("allow") or ()]
+        try:
+            bounds: Bounds | None = parse_bounds(allow)
+        except ValueError:
+            bounds = None
+        if bounds is not None and subject.get("bounds_digest") == bounds.digest():
+            continue
+        changed = legacy_host_changes(allow)
+        if bounds is not None and not changed:
+            continue  # recorded under IDNA 2003, but every host encodes alike: the same scope
+        fresh = None
+        if bounds is not None:
+            fresh, _created = await raise_request(
+                conn, run=run, kind=KIND_PREAUTHORIZATION, reason_code="preauthorization_proposed",
+                subject={"allow": allow, "bounds_digest": bounds.digest(), "supersedes": str(row["id"])},
+                actor="system", source="host_encoding_superseded",
+            )
+        reason = " ".join(item.finding() for item in changed) or (
+            "A host these bounds name is not a valid IDNA 2008/UTS #46 name.")
+        display = {**_json(row["display_json"], {}),
+                   "superseded_by": str(fresh["id"]) if fresh is not None else None,
+                   "superseded_reason": reason}
+        await conn.execute(
+            """UPDATE hunt_permission_requests SET status='withdrawn', decided_at=NOW(), display_json=$2::jsonb
+               WHERE id=$1 AND status='pending'""",
+            row["id"], json.dumps(display, sort_keys=True),
+        )
+        await record_event(conn, hunt_id=run["id"], request_id=row["id"], event="withdrawn",
+                           actor="system", source="host_encoding_superseded",
+                           detail={"superseded_by": display["superseded_by"]})
+        if fresh is not None:
+            replaced.append(fresh)
+    return replaced
+
+
+async def reconcile_host_encoding(conn: Any, run: Mapping[str, Any]) -> None:
+    """Offer legacy (IDNA 2003) host bounds back and replace legacy proposals, so the withheld
+    bounds, their re-approval request and any replacement appear together. Hunt row locked."""
+    await offer_reapproval(conn, run, await load_preauthorizations(conn, run["id"]))
+    await supersede_legacy_proposals(conn, run)
+
+
+async def reconcile_host_encoding_if_needed(conn: Any, hunt_id: Any) -> None:
+    """``reconcile_host_encoding`` for a reader, in its own transaction, only when this Hunt has a
+    legacy pre-authorization row or a pending proposal (both rare); otherwise no lock is taken."""
+    hunt_uuid = uuid.UUID(str(hunt_id))
+    needed = await conn.fetchval(
+        """SELECT EXISTS(SELECT 1 FROM hunt_preauthorizations
+                          WHERE hunt_run_id=$1 AND NOT (bounds_json ? 'host_canonicalization'))
+               OR EXISTS(SELECT 1 FROM hunt_permission_requests
+                          WHERE hunt_run_id=$1 AND kind=$2 AND status='pending')""",
+        hunt_uuid, KIND_PREAUTHORIZATION,
+    )
+    if not needed:
+        return
+    async with conn.transaction():
+        run = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", hunt_uuid)
+        if run is not None:
+            await reconcile_host_encoding(conn, dict(run))
+
+
 async def hunt_bounds(conn: Any, hunt_id: Any) -> tuple[Bounds, list[dict[str, Any]]]:
     rows = await load_preauthorizations(conn, hunt_id)
     return merge([row["_stored"].bounds for row in rows]), rows
@@ -792,7 +909,8 @@ __all__ = [
     "MAX_PENDING_PER_HUNT", "PREAUTHORIZATION_PROOFS", "REQUEST_STATUSES", "canonical_digest", "cooldown_identity",
     "covering_preauthorization", "expire_due", "hunt_bounds", "hunt_deadline", "list_events",
     "list_grants", "list_requests", "live_credential_grants", "load_preauthorizations", "load_request",
-    "offer_reapproval", "pending_summary",
+    "offer_reapproval", "pending_summary", "reconcile_host_encoding", "reconcile_host_encoding_if_needed",
+    "supersede_legacy_proposals",
     "public_grant", "public_preauthorization", "public_request", "raise_request", "record_event",
     "recent_denial", "record_preauthorization", "render", "request_expiry", "subject_digest",
 ]

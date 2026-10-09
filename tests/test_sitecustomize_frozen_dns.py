@@ -192,3 +192,25 @@ def test_reinstall_is_idempotent_but_conflicting_authority_is_rejected():
             environ=conflicting,
             socket_module=fake,
         )
+
+
+def test_an_unavailable_host_canonicalizer_ends_the_process_when_an_envelope_is_set(monkeypatch, capsys):
+    """R3 review: the canonicalizer (it needs ``idna``) was imported at module level, outside the
+    fail-closed guard. An ImportError there is printed and ignored by the site module, so a
+    canonical scan ran with no frozen resolver. It now loads inside the guard: exit 78."""
+    monkeypatch.setattr(module, "_HOST_CANONICALIZER", None)
+    monkeypatch.setitem(sys.modules, "scanner_tools.host_names", None)
+    monkeypatch.setitem(sys.modules, "scanner.scanner_tools.host_names", None)
+    monkeypatch.setenv(module._ENV_NAME, _envelope())
+    with pytest.raises(SystemExit) as stopped:
+        module._install_at_interpreter_startup()
+    assert stopped.value.code == 78
+    assert "host canonicalizer is unavailable" in capsys.readouterr().err
+    assert getattr(socket.getaddrinfo, module._MARKER, None) is None, "nothing was half-installed"
+
+
+def test_without_an_envelope_the_canonicalizer_is_never_imported(monkeypatch):
+    monkeypatch.setattr(module, "_HOST_CANONICALIZER", None)
+    monkeypatch.setitem(sys.modules, "scanner_tools.host_names", None)
+    monkeypatch.setitem(sys.modules, "scanner.scanner_tools.host_names", None)
+    assert module.install_frozen_target_resolver(environ={}, socket_module=FakeSocket()) is None
