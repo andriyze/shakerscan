@@ -29,10 +29,12 @@ An extension needs evidence that it can make progress, not just a slower target.
 stage at 13 and 5 s per request: each extension was granted 450 s against a 440 s floor, and
 union-based alone needed 424 and 212 requests there, so both were killed in the same stage
 again -- 900 s, a quarter of the Scan, that also crowded out the extension of the login form's
-XSS slice. Each unfinished SQLi candidate now names the wall its next stage is predicted to
-need at its own measured rate (``sqli_stages.resume_wall_seconds``), and that prediction is the
-extension's floor: a slice whose candidates cannot fit one round's lane share is not extended
-at all, and its receipt records the candidates as inconclusive for budget.
+XSS slice. A body with several fields is now verified one field per run, and each unfinished
+SQLi candidate names the wall its next unit is predicted to need at its own robust rate
+(``sqli_stages.resume_plan``); that prediction is the extension's floor. A unit predicted above
+one round's lane share gets one probe round at the share to measure again; a candidate whose
+next unit two measurements put above the share is not extended, and its receipt records it as
+inconclusive for budget.
 
 Every wall-killed slice of a lane is eligible in the same round, and the lane's wall share is
 divided fairly among them (see ``plan_verification_extensions``): candidates with the fewest

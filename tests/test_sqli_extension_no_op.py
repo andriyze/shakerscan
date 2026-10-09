@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import math
 from types import SimpleNamespace
 import uuid
 
@@ -103,7 +102,7 @@ class _Scan:
         if wall >= TIME_STAGE_SECONDS:
             return CapabilityAdapterResult(
                 status="success",
-                actual_budget={"http_requests": 100, "tool_wall_seconds": TIME_STAGE_SECONDS - 10},
+                actual_budget={"http_requests": 189, "tool_wall_seconds": TIME_STAGE_SECONDS},
                 execution_started=True, parser_version="sqlmap-output/v1",
             )
         # Killed by the wall it was given, having used all of it at the target's rate.
@@ -191,10 +190,10 @@ class _Scan:
         return [technique for seen, technique, _ in self.calls[since:] if seen == path]
 
 
-def _predicted_time_stage_wall(killed_wall):
-    """What the killed time stage's own measurement predicts it needs (sqli_stages)."""
-    sent = int(killed_wall / TIME_STAGE_RATE)
-    return math.ceil(max(189, math.ceil(sent * 1.5)) * killed_wall / sent) + MINIMUM_STAGE_WALL_SECONDS
+# The time stage is killed at 405 s (what the slice has left after three 5 s stages) having
+# sent 127 requests: 3.19 s each. It already sent less than its 189, so it needs 191 requests
+# (1.5 x 127) at that rate -- 610 s -- plus one stage minimum.
+PREDICTED_TIME_STAGE_WALL = 630
 
 
 def test_two_links_that_cannot_both_finish_are_funded_one_at_a_time(monkeypatch):
@@ -212,7 +211,8 @@ def test_two_links_that_cannot_both_finish_are_funded_one_at_a_time(monkeypatch)
     # The floor is the time stage predicted at its own measured rate, not the killed wall
     # plus a few seconds: {450, 450} would buy two links the wall kills again (N55).
     killed_at = max(wall for _, technique, wall in scan.calls if technique == "T")
-    assert resume == [_predicted_time_stage_wall(killed_at)]
+    assert killed_at == 405
+    assert resume == [PREDICTED_TIME_STAGE_WALL]
     assert resume[0] > killed_at + MINIMUM_STAGE_WALL_SECONDS
 
     # The 900 s lane cannot fund two such floors: one link is funded to the share, the other
@@ -244,7 +244,25 @@ def test_an_extension_held_below_its_predicted_stage_wall_is_refused_before_any_
     scan.add("verify.sqli.r01", start=0)
     scan.run({"verify.sqli.r01"})
     killed_at = max(wall for _, technique, wall in scan.calls if technique == "T")
-    need = _predicted_time_stage_wall(killed_at)
+    assert killed_at == 405
+    need = PREDICTED_TIME_STAGE_WALL
+
+    # Control: a link held at exactly the wall its stage was killed at sends nothing either.
+    scan.add(
+        "verify.sqli.r01.ext.r02", start=0, extends="verify.sqli.r01",
+        budget={"http_requests": 800, "tool_wall_seconds": killed_at},
+    )
+    before = len(scan.calls)
+    scan.run({"verify.sqli.r01.ext.r02"})
+    assert scan.calls[before:] == []
+    exact = scan.receipts["verify.sqli.r01.ext.r02"]
+    assert exact.budget_consumed.get("http_requests", 0) == 0
+    assert [
+        (item["reason"], item["resume_wall_seconds"], item["available_wall_seconds"])
+        for item in exact.observations if item.get("kind") == "candidate_deferred"
+    ] == [("stage_wall_unfunded", need, killed_at)]
+    assert scan.status("verify.sqli.r01.ext.r02") == "timed_out"
+    scan.actions.pop()
 
     # Control: a link held at the wall its stage was killed at plus the old 30 s margin -- as
     # the old floor granted -- is refused before any traffic, not dispatched to be killed again.

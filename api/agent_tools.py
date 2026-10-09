@@ -529,9 +529,12 @@ def _injection_body(opts: dict[str, Any]) -> tuple[str, str, list[str]] | None:
     """Return ``(method, body, fields)`` for a body candidate, or None for a query candidate.
 
     The body carries every field the endpoint declares so the request is well-formed, all set to an
-    inert placeholder, and every field is offered as an injection point. The tool tests them in one
-    run and stops at the first vulnerable one, so a candidate covers the whole body for the cost of
-    testing a single field -- measured at 410 requests either way.
+    inert placeholder, and every field is offered as an injection point. The tool tests the fields
+    one after another in one run and stops at the first vulnerable one, so a vulnerable first field
+    costs about one field's test, while a negative verdict costs one field's test per field (soak
+    9de6a910: U 103, B 171, E 286 requests over two fields against 53, 87, 144 for one). The
+    returned ``fields`` are exactly the names the tool is handed (``-p``), after a nested JSON
+    body's leaf-name de-duplication.
     """
     field = str(opts.get("injection_field") or "").strip()
     fields = [str(name) for name in opts.get("body_field_names") or () if str(name).strip()]
@@ -558,10 +561,17 @@ def _injection_body(opts: dict[str, Any]) -> tuple[str, str, list[str]] | None:
         body = "&".join(
             f"{urllib.parse.quote(name, safe='')}={_BODY_PLACEHOLDER_VALUE}" for name in fields
         )
-    # Every declared field is handed to the tool, not just the anchor: the tool tests them in one
-    # run and stops at the first vulnerable one, so restricting to a single field costs a whole run
-    # per field for the coverage of one.
+    # Every declared field is handed to the tool, not just the anchor: one candidate covers the
+    # whole body. Staged SQLi verification may narrow ``-p`` to one field per run (see
+    # ``injection_fields`` in ``_tmpl_sqlmap``), so a wall that cannot finish every field still
+    # settles the fields it reached.
     return method, body, fields
+
+
+def sqlmap_injection_fields(opts: Mapping[str, Any]) -> list[str] | None:
+    """The field names a body candidate hands sqlmap with ``-p``, or None for a query candidate."""
+    injection = _injection_body(dict(opts))
+    return None if injection is None else list(injection[2])
 
 
 def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
@@ -649,8 +659,19 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
             "--user-agent", "shakerscan-sqlmap/1.0"]
     injection = _injection_body(opts)
     if injection is not None:
-        # sqlmap infers POST from --data; -p keeps the test to the one field this candidate is.
+        # sqlmap infers POST from --data; -p names the fields it tests, every declared one by
+        # default. Staged verification narrows it to a subset of them (one field per run) so a
+        # killed run loses one field's progress, not the whole technique's; the request still
+        # carries the whole body.
         _method, body, fields = injection
+        subset = opts.get("injection_fields")
+        if subset is not None:
+            if (
+                not isinstance(subset, (list, tuple)) or not subset
+                or not all(isinstance(item, str) and item in fields for item in subset)
+            ):
+                raise ValueError("injection fields must be a subset of the tested body fields")
+            fields = list(dict.fromkeys(subset))
         args += ["--data", body, "-p", ",".join(fields)]
         # An authentication endpoint answers wrong credentials with 401/403, and sqlmap treats that
         # on its connection test as "not authorized ... skipping to the next target" -- so it
