@@ -70,11 +70,10 @@ SESSION_SECONDS = 30 * 60
 WATCH_POLL_SECONDS = 3.0
 # --watch keys: after a request is shown, keys are discarded for this long before its prompt is
 # written (a key meant for the previous screen never decides the next one); bytes arriving within
-# KEY_BURST_SECONDS of each other are one burst (an escape sequence or a paste), never a key; after
-# such a burst, anything more within KEY_ESCAPE_TAIL_SECONDS is discarded too.
+# KEY_BURST_SECONDS of each other are one burst (an escape sequence or a paste), never a key; and
+# escape sequences are also followed byte by byte, whatever their timing (Terminal._feed).
 KEY_SETTLE_SECONDS = 0.75
 KEY_BURST_SECONDS = 0.03
-KEY_ESCAPE_TAIL_SECONDS = 0.15
 # `hunt permissions wait`: never more than one read of a request per this many seconds (L1).
 WAIT_MIN_POLL_SECONDS = 1.0
 # Ending --watch revokes the approver session as a courtesy (it expires on its own anyway), so the
@@ -288,6 +287,7 @@ class Terminal:
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
         self._key_fd: int | None = None
+        self._escape = "idle"  # the escape-sequence state machine of key()
 
     def require(self, what: str) -> None:
         try:
@@ -363,9 +363,32 @@ class Terminal:
             data += more
         return data
 
+    def _feed(self, data: bytes) -> bool:
+        """Run ``data`` through the escape-sequence state machine; True when it began with the
+        machine idle and it is one byte that is not part of a sequence (a lone key).
+
+        B1: timing alone cannot tell a sequence from keys (ESC, then ``[A`` 0.3 s later over a
+        slow link), so the state is kept across reads and prompts: after ESC the next byte
+        belongs to the sequence; after ``ESC [`` every byte up to a final byte (0x40-0x7E) does;
+        after ``ESC O`` one more byte does."""
+        lone = len(data) == 1 and self._escape == "idle"
+        for byte in data:
+            if self._escape == "idle":
+                if byte == 0x1B:
+                    self._escape = "escape"
+                    lone = False
+            elif self._escape == "escape":
+                self._escape = "csi" if byte == 0x5B else "ss3" if byte == 0x4F else "idle"
+            elif self._escape == "csi":
+                if 0x40 <= byte <= 0x7E:
+                    self._escape = "idle"
+            else:  # ss3: one byte names the key
+                self._escape = "idle"
+        return lone
+
     def drain_keys(self, seconds: float) -> int:
         """Discard every key typed before now and during the next ``seconds`` (keypress mode
-        only); return how many bytes were discarded."""
+        only), still following escape sequences; return how many bytes were discarded."""
         fd = getattr(self, "_key_fd", None)
         if fd is None:
             return 0
@@ -380,6 +403,7 @@ class Terminal:
             chunk = os.read(fd, 1024)
             if not chunk:
                 return dropped
+            self._feed(chunk)
             dropped += len(chunk)
 
     def key(self, prompt: str, choices: str, *, keep_waiting: Callable[[], bool] | None = None,
@@ -387,10 +411,11 @@ class Terminal:
         """One lone keypress from ``choices``; anything else is ignored and the wait goes on.
 
         Before the prompt is written, keys typed until then and for ``settle`` seconds more are
-        discarded (and said so): a key meant for an earlier screen never decides this one. Only
-        a single byte arriving on its own counts. B1: an arrow key (``ESC [ A``), Alt-a
-        (``ESC a``) or a paste arrives as a burst, and the burst is discarded whole; reading it
-        byte by byte made the Up arrow an "a" (allow). While no key arrives,
+        discarded (and said so): a key meant for an earlier screen never decides this one. B1:
+        only one byte arriving on its own, outside any escape sequence, and exactly one of the
+        lowercase ``choices`` decides. An arrow key (``ESC [ A``), Alt-a (``ESC a``) or a paste
+        arrives as a burst and is discarded whole; a sequence split across reads is followed by
+        the state machine (``_feed``); an uppercase letter never decides. While no key arrives,
         ``keep_waiting()`` is asked every ``interval`` seconds; when it answers False the prompt
         is abandoned and None is returned, so a watch never stops polling while it waits.
         Outside keypress mode (no terminal control) a line is read instead."""
@@ -400,7 +425,7 @@ class Terminal:
         self.stdout.write(prompt)
         self.stdout.flush()
         if fd is None:
-            answer = self.stdin.readline()[:1].lower()
+            answer = self.stdin.readline()[:1]
             return answer if answer and answer in choices else ""
         while True:
             if not select.select([fd], [], [], max(0.05, interval))[0]:
@@ -413,13 +438,10 @@ class Terminal:
             if not first:
                 raise ApprovalError("the terminal closed; nothing was decided")
             data = self._burst(fd, first)
-            if len(data) != 1 or data == b"\x1b":
-                # An escape sequence (arrow, function or Alt key) or a paste: nothing is decided,
-                # including from a tail of it that arrives a moment later.
-                self.drain_keys(KEY_ESCAPE_TAIL_SECONDS)
-                continue
-            answer = data.decode("ascii", "replace").lower()
-            if answer in choices:
+            if not self._feed(data):
+                continue  # an escape sequence (arrow, function or Alt key), a part of one, or a paste
+            answer = chr(data[0])
+            if answer in choices:  # exact: no case folding, so an uppercase letter never decides
                 self.stdout.write(answer + "\n")
                 self.stdout.flush()
                 return answer
@@ -708,18 +730,42 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
     """
     terminal.require("shakerscan approve --watch")
     seconds = max(60, min(int(minutes) * 60, SESSION_SECONDS))
-    held: _HeldSecret | None = None
+    opened_session: dict[str, Any] = {}
+    # Installed before the step-up, so no moment leaves an opened approver session unrevoked.
+    restore_signals = _signals_end_the_watch()
+    try:
+        return _watch(send, terminal, enterprise=enterprise, origin=origin, hunt_id=hunt_id, seconds=seconds,
+                      account=account, method=method, poll_seconds=poll_seconds, sleep=sleep, opened=opened_session)
+    except KeyboardInterrupt as exc:
+        if enterprise and not opened_session:
+            with contextlib.suppress(OSError, ValueError):
+                terminal.say("\nstopped; no approver session was opened")
+        else:
+            with contextlib.suppress(OSError, ValueError):
+                terminal.say("\n" + ("approver session ended" if enterprise else "stopped watching for permission requests"))
+        # Ctrl-C is the person ending the watch (0); a signal from elsewhere exits 128+N.
+        return 128 + exc.signum if isinstance(exc, Terminated) else 0
+    finally:
+        restore_signals()
+        if opened_session:
+            _revoke(send, terminal, opened_session["session_id"], opened_session["secret"])
+
+
+def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt_id: str | None, seconds: int,
+           account: str | None, method: str | None, poll_seconds: float, sleep: Callable[[float], None],
+           opened: dict[str, Any]) -> int:
+    """The watch itself; ``opened`` receives the approver session the moment it exists."""
     session: dict[str, Any] | None = None
     if enterprise:
         stepup = StepUp(send, origin, terminal, account=account, method=method)
         challenge, _ = stepup.begin("approver_session", {"session": {"ttl_seconds": seconds}})
-        opened = stepup.finish(challenge, stepup.prove(challenge)).get("session") or {}
-        if not opened.get("session_id") or not opened.get("session_secret"):
+        answer = stepup.finish(challenge, stepup.prove(challenge)).get("session") or {}
+        if not answer.get("session_id") or not answer.get("session_secret"):
             raise ApprovalError("the gateway answered without an approver session; nothing was opened")
-        held = _HeldSecret(str(opened["session_secret"]))
-        session = {"session_id": str(opened["session_id"]), "secret": held}
+        session = {"session_id": str(answer["session_id"]), "secret": _HeldSecret(str(answer["session_secret"]))}
+        opened.update(session)
         account = stepup.account
-        terminal.say(f"approver session open until {opened.get('expires_at') or f'{seconds // 60} minutes from now'} "
+        terminal.say(f"approver session open until {answer.get('expires_at') or f'{seconds // 60} minutes from now'} "
                      "(held in this process only; Ctrl-C ends it)")
     deadline = time.monotonic() + seconds
     seen: set[str] = set()
@@ -752,47 +798,45 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
             return False
         return check
 
-    restore_signals = _signals_end_the_watch()
-    try:
-        with terminal.keypresses():
-            terminal.say(f"watching {where} for permission requests... (Ctrl-C to stop)")
-            while time.monotonic() < deadline:
-                for request in list_pending(send, hunt_id):
-                    if str(request["id"]) in seen:
-                        continue
-                    seen.add(str(request["id"]))
-                    if ended_prompt:
-                        # The switch race: a key meant for the request that just ended must not
-                        # decide this one. Say what changed; key() takes only a fresh key.
-                        terminal.say(f"{ended_prompt.pop()}; now showing request {request['id']} "
-                                     "(press a new key for it)")
-                        ended_prompt.clear()
-                    terminal.say(render_request(request))
-                    remember = "r" if request.get("remember_supported") else ""
-                    choice = terminal.key(
-                        "  [a]llow" + ("  [r]emember for the target" if remember else "") + "  [d]eny  [s]kip  [q]uit: ",
-                        "ads" + remember + "q", keep_waiting=still_pending(request), interval=poll_seconds,
-                    )
-                    if choice == "q":
-                        terminal.say(ended)
-                        return 0
-                    if choice in {"a", "r", "d"}:
-                        decide(send, terminal, [request], "deny" if choice == "d" else "allow",
-                               enterprise=enterprise, origin=origin, remember=choice == "r",
-                               account=account, method=method, session=session, confirmed=not enterprise)
-                    if time.monotonic() >= deadline:
-                        break
-                sleep(poll_seconds)
-        terminal.say(f"{ended} (time limit)")
-        return 0
-    except KeyboardInterrupt:
-        with contextlib.suppress(OSError, ValueError):  # a hung-up terminal cannot be written to
-            terminal.say(f"\n{ended}")
-        return 0
-    finally:
-        restore_signals()
-        if session is not None and held is not None:
-            _revoke(send, terminal, session["session_id"], held)
+    with terminal.keypresses():
+        terminal.say(f"watching {where} for permission requests... (Ctrl-C to stop)")
+        while time.monotonic() < deadline:
+            for request in list_pending(send, hunt_id):
+                if str(request["id"]) in seen:
+                    continue
+                seen.add(str(request["id"]))
+                if ended_prompt:
+                    # The switch race: a key meant for the request that just ended must not
+                    # decide this one. Say what changed; key() takes only a fresh key.
+                    terminal.say(f"{ended_prompt.pop()}; now showing request {request['id']} "
+                                 "(press a new key for it)")
+                    ended_prompt.clear()
+                terminal.say(render_request(request))
+                remember = "r" if request.get("remember_supported") else ""
+                choice = terminal.key(
+                    "  [a]llow" + ("  [r]emember for the target" if remember else "") + "  [d]eny  [s]kip  [q]uit: ",
+                    "ads" + remember + "q", keep_waiting=still_pending(request), interval=poll_seconds,
+                )
+                if choice == "q":
+                    terminal.say(ended)
+                    return 0
+                if choice in {"a", "r", "d"}:
+                    decide(send, terminal, [request], "deny" if choice == "d" else "allow",
+                           enterprise=enterprise, origin=origin, remember=choice == "r",
+                           account=account, method=method, session=session, confirmed=not enterprise)
+                if time.monotonic() >= deadline:
+                    break
+            sleep(poll_seconds)
+    terminal.say(f"{ended} (time limit)")
+    return 0
+
+
+class Terminated(KeyboardInterrupt):
+    """SIGTERM or SIGHUP during --watch: handled as Ctrl-C, and the exit status says which."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
 
 
 def _signals_end_the_watch() -> Callable[[], None]:
@@ -803,7 +847,7 @@ def _signals_end_the_watch() -> Callable[[], None]:
     import signal
 
     def interrupt(signum: int, frame: Any) -> None:
-        raise KeyboardInterrupt
+        raise Terminated(signum)
 
     previous: dict[int, Any] = {}
     for name in ("SIGTERM", "SIGHUP"):

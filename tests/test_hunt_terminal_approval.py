@@ -282,6 +282,11 @@ def test_escape_sequences_and_pastes_never_decide(tmp_path, burst):
         time.sleep(1.0)
         assert stub.request["status"] == "pending", f"{burst!r} decided the request"
         assert not [path for path in stub.routes("POST") if path.endswith("/decision")]
+        if burst == "\x1b":
+            # A lone ESC starts a sequence: the next byte is part of it (Alt-d), not a decision.
+            session.type("d")
+            time.sleep(1.0)
+            assert stub.request["status"] == "pending", "the byte after ESC decided the request"
         session.type("d")
         session.expect(f"denied: {TITLE}", timeout=10)
         session.proc.send_signal(signal.SIGINT)
@@ -289,6 +294,28 @@ def test_escape_sequences_and_pastes_never_decide(tmp_path, burst):
     assert code == 0, (out, err)
     decisions = [body for method, path, body in stub.seen if path.endswith("/decision")]
     assert [body["decision"] for body in decisions] == ["deny"], decisions
+
+
+@pytest.mark.parametrize("pieces", [("\x1b[", "A"), ("\x1b", "a"), ("\x1bO", "A"), ("\x1b[1;5", "D"), ("A",), ("D",)],
+                         ids=["csi-split", "alt-a-split", "ss3-split", "csi-params-split", "uppercase-A", "uppercase-D"])
+def test_a_sequence_split_in_time_or_an_uppercase_key_never_decides(tmp_path, pieces):
+    """B1: timing alone cannot tell keys from a sequence. ESC [ and then A 0.3 s later is still
+    the Up arrow, ESC and then a is still Alt-a; and an uppercase letter is not a choice."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.expect(PROMPT)
+        for piece in pieces:
+            session.type(piece)
+            time.sleep(0.3)
+        time.sleep(0.7)
+        assert stub.request["status"] == "pending", f"{pieces!r} decided the request"
+        session.type("a")
+        session.expect(f"granted: {TITLE}", timeout=10)
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    decisions = [body["decision"] for method, path, body in stub.seen if path.endswith("/decision")]
+    assert decisions == ["allow"], decisions
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP], ids=["SIGTERM", "SIGHUP"])
@@ -307,7 +334,7 @@ def test_a_terminated_watch_restores_the_terminal(tmp_path, signum):
         session.proc.wait(timeout=15)
         after = termios.tcgetattr(session.master)
         code, out, err = session.finish()
-    assert code == 0, (out, err)
+    assert code == 128 + signum, (code, out, err)  # ended by a signal, not by the person
     assert after[3] & termios.ECHO and after[3] & termios.ICANON, "echo and line mode are back"
     assert after[3] == before[3]
     if signum == signal.SIGTERM:
@@ -325,7 +352,7 @@ def test_enterprise_watch_revokes_its_session_on_sigterm(enterprise):
         session.expect(PROMPT)
         session.proc.send_signal(signal.SIGTERM)
         code, out, err = session.finish()
-    assert code == 0, (out, err)
+    assert code == 128 + signal.SIGTERM, (code, out, err)
     assert "approver session ended" in out
     assert "/_enterprise/approvals/session/revoke" in stub.routes("POST"), "the session was revoked"
     assert stub.sessions == {}, "the gateway no longer holds the session"
@@ -346,3 +373,24 @@ def test_watch_keeps_polling_while_the_prompt_waits(tmp_path):
     assert not [body for method, path, body in stub.seen if path.endswith("/decision")], (
         "the watch decided nothing itself"
     )
+
+
+def test_sigterm_during_the_enterprise_step_up_opens_nothing_and_restores_the_terminal(enterprise):
+    """The handlers are installed before the step-up, so a signal there ends the command cleanly
+    (no traceback, echo back) and no approver session is left open."""
+    import termios
+
+    stub, connection, env = enterprise("g1")
+    with stub:
+        session = Session(["approve", *connection, "--watch", "--hunt", HUNT, "--account", "alice",
+                           "--minutes", "1"], env)
+        session.expect("TOTP code for alice")
+        session.proc.send_signal(signal.SIGTERM)
+        session.proc.wait(timeout=15)
+        after = termios.tcgetattr(session.master)
+        code, out, err = session.finish()
+    assert code == 128 + signal.SIGTERM, (code, out, err)
+    assert "stopped; no approver session was opened" in out and "Traceback" not in err, (out, err)
+    assert after[3] & termios.ECHO, "echo is back"
+    assert stub.sessions == {}
+    assert "/_enterprise/approvals/finish" not in stub.routes("POST")
