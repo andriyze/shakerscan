@@ -17,6 +17,10 @@ _FORBIDDEN_HEADERS = frozenset({
     "x-original-url", "x-rewrite-url", "x-http-method-override", "x-http-method", "x-method-override",
 })
 POINTER_SCHEMA = {"type": "string", "maxLength": 512}
+# A withheld value's reference (api/runtime/archive_body_masking.py, WITHHELD_REF_RE).
+WITHHELD_REF_PATTERN = (
+    r"^withheld://hunt/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[1-9][0-9]{0,3}$"
+)
 HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
     "capture": {"type": "array", "maxItems": 16, "items": {
         "type": "object", "additionalProperties": False, "required": ["name"],
@@ -27,6 +31,10 @@ HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
         "type": "object", "additionalProperties": False,
         "properties": {
             "source_action_id": {"type": "string", "maxLength": 36},
+            "withheld_ref": {"type": "string", "maxLength": 80, "pattern": WITHHELD_REF_PATTERN,
+                "description": ("A value this Hunt withheld from a capability output, by its reference "
+                    "(withheld://hunt/<action id>/<n>, from withheld_values[].ref). The worker sends "
+                    "the value; it is never shown.")},
             "capture_name": {"type": "string", "pattern": _NAME},
             "principal": {"type": "string", "enum": ["primary", "secondary", "service"]},
             "profile_id": {"type": "string", "maxLength": 36},
@@ -104,10 +112,15 @@ def validate_exchange_input(values: Mapping[str, Any]) -> None:
             pointer_parts(capture["json_pointer"])
     destinations: set[tuple[str, str]] = set()
     for binding in values.get("request_bindings") or ():
-        sources = sum(key in binding for key in ("source_action_id", "principal", "profile_id"))
+        sources = sum(key in binding for key in ("source_action_id", "principal", "profile_id", "withheld_ref"))
         if sources != 1 or (("body_pointer" in binding) == ("header" in binding)):
             raise ValueError("request binding requires one source and one body/header destination")
-        if "source_action_id" in binding:
+        if "withheld_ref" in binding:
+            if not re.fullmatch(WITHHELD_REF_PATTERN, str(binding["withheld_ref"])):
+                raise ValueError("withheld_ref must be a withheld://hunt/<action id>/<n> reference")
+            if any(k in binding for k in ("capture_name", "credential_field", "profile_version")):
+                raise ValueError("withheld value binding takes only its reference and a destination")
+        elif "source_action_id" in binding:
             uuid.UUID(binding["source_action_id"])
             if not binding.get("capture_name") or any(k in binding for k in ("credential_field", "profile_version")):
                 raise ValueError("response binding requires a capture name, not credential fields")

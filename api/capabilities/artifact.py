@@ -21,6 +21,11 @@ try:
 except ModuleNotFoundError:
     from scanner.redaction import redact_text as _shared_redact_text
 
+try:
+    from runtime.archive_body_masking import active_withheld_values, mask_body_text
+except ModuleNotFoundError:
+    from api.runtime.archive_body_masking import active_withheld_values, mask_body_text
+
 
 MAX_INSPECT_BYTES = 16_384
 MAX_JAVASCRIPT_BYTES = 262_144
@@ -111,8 +116,17 @@ def analyze_javascript_bytes(body: bytes) -> dict[str, Any]:
     }
 
 
+# Masking reads a little past the sample so a value cut by the sample's end is still recognised.
+_MASK_LOOKAHEAD = 1_024
+
+
 def _redacted_text_sample(body: bytes) -> str:
-    text = body.decode("utf-8", errors="replace")[:MAX_PUBLIC_TEXT]
+    # The body masking every masked archive view applies (N56): SQL dump rows, markup key/value
+    # pairs, phpinfo-style table cells, assignments and provider formats. Inside a Hunt worker the
+    # withheld values become ``[withheld:n]`` markers the planner can bind by reference.
+    text = mask_body_text(
+        body[:MAX_PUBLIC_TEXT + _MASK_LOOKAHEAD].decode("utf-8", errors="replace")
+    )[:MAX_PUBLIC_TEXT]
     text = _JWT_RE.sub(
         lambda match: f"<jwt:sha256:{hashlib.sha256(match.group(1).encode()).hexdigest()[:16]}>",
         text,
@@ -208,6 +222,7 @@ async def inspect_target_artifact(
     resource_bytes = _resource_bytes(private)
     terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]
     lowered = body.decode("utf-8", errors="replace").lower()
+    text_sample = _redacted_text_sample(body)
     observation = {
         "kind": "artifact_observation",
         "path": path,
@@ -225,13 +240,18 @@ async def inspect_target_artifact(
         "search_scope": "window",
         "window_sha256": hashlib.sha256(body).hexdigest(),
         "content_type": private.headers().get("content-type"),
-        "text_sample": _redacted_text_sample(body),
+        "text_sample": text_sample,
         "search_matches": [
             {"term": term, "count": lowered.count(term.lower())}
             for term in terms
         ],
         "secret_values_visible": False,
     }
+    withheld = active_withheld_values()
+    if withheld is not None:
+        # References, masked previews and keyed fingerprints for the markers in the sample; the
+        # values stay in the worker (``request_bindings[].withheld_ref`` sends one).
+        observation["withheld_values"] = withheld.entries(text_sample)
     return {
         "ok": True,
         "status": "success",
