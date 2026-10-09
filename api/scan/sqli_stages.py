@@ -32,11 +32,26 @@ paced and bounded exactly like the attempt it is part of; a stage holds whatever
 candidate's sub-budget has left, so no ceiling grows. A stage the wall interrupted is not a
 verdict and the candidate stays unproven-incomplete; a stage that already ran out of wall
 once is not re-run on a hold no larger than the one it ran out of.
+
+A stage's cost is per tested field: sqlmap is handed every declared body field (``-p a,b``) and
+runs the technique over each. Soak scan 9de6a910 (2.8.0, honey ``POST /hub/login`` with two
+fields) measured U 103, B 171 and E 286 requests -- the single-field costs above times two --
+so the guard that sized E at 144 requests started it with 159 s left and the wall killed it at
+90. The same scan sent two JSON chat candidates (8 and 4 fields, 13 and 5 s per request) into
+four slices and extensions, 1,740 s in all, without settling one stage: union-based alone
+needed 424 and 212 requests there, more wall than any one round can grant a lane. So what an
+unfinished candidate's next attempt needs is predicted from its own measurement -- the next
+stage's per-field cost (or, for a stage that already outran it, half again what it sent before
+the wall) at the seconds per request it measured -- and an extension is never sized below that
+prediction (see ``verification_extension``). A candidate whose next stage cannot fit one
+round's share is recorded as inconclusive for budget, with its numbers, instead of being
+extended at a wall it is predicted to outrun.
 """
 
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -55,6 +70,39 @@ _SUCCESS = frozenset({"success", "succeeded", "completed"})
 MINIMUM_STAGE_WALL_SECONDS = 20
 # Matches the minimum delay of the paced batch attempt the worker builds.
 _MINIMUM_DELAY_SECONDS = 0.05
+# A stage the wall killed after it had already sent more than its predicted cost is assumed to
+# need half again what it sent, so a chain that keeps underestimating it grows geometrically
+# instead of being granted a few more seconds each round.
+KILLED_STAGE_GROWTH = 1.5
+INCONCLUSIVE_RECORD_KIND = "sqli_budget_inconclusive"
+
+
+def stage_requests(technique: str, field_count: int | None = 1) -> int:
+    """Requests a negative verdict of ``technique`` costs over ``field_count`` tested fields."""
+    return SQLI_TECHNIQUE_NEGATIVE_COST[technique] * max(1, int(field_count or 1))
+
+
+def predicted_stage_wall_seconds(
+    technique: str,
+    *,
+    field_count: int | None,
+    seconds_per_request: float | None,
+    sent_before_kill: int = 0,
+) -> int | None:
+    """The wall one run of ``technique`` is predicted to need, or None without a measurement.
+
+    ``seconds_per_request`` is the candidate's own measured rate (wall over requests sent,
+    pacing delay included), never another endpoint's: one slow endpoint must not mark a fast
+    one as unaffordable. A stage that the wall already stopped after ``sent_before_kill``
+    requests needs more than that, whatever its nominal cost says.
+    """
+    if seconds_per_request is None or seconds_per_request <= 0:
+        return None
+    requests = max(
+        stage_requests(technique, field_count),
+        math.ceil(max(0, int(sent_before_kill)) * KILLED_STAGE_GROWTH),
+    )
+    return math.ceil(requests * seconds_per_request) + MINIMUM_STAGE_WALL_SECONDS
 
 
 def stage_attempt_id(candidate_attempt_id: str, technique: str) -> str:
@@ -91,6 +139,14 @@ class PriorStages:
     latency_seconds: float | None = None
     # What every stage checkpoint of the candidate consumed, per action that recorded it.
     spent: dict[str, dict[str, int]] = field(default_factory=dict)
+    # The most requests a wall-killed run of each stage had sent when it was stopped.
+    killed_sent: dict[str, int] = field(default_factory=dict)
+    # The candidate's own latest measured wall per request (pacing delay included); None when
+    # none of its stages has run. Unlike ``latency_seconds`` it never falls back to another
+    # candidate's measurement.
+    seconds_per_request: float | None = None
+    # The fields the candidate's stages tested, when a checkpoint recorded it.
+    field_count: int | None = None
 
 
 def prior_stages(
@@ -114,6 +170,7 @@ def prior_stages(
     target_latency: float | None = None
     for source, attempts in sources:
         source_latency: float | None = None
+        source_rate: float | None = None
         source_target_latency: float | None = None
         for item in attempts or ():
             if not isinstance(item, Mapping):
@@ -139,6 +196,9 @@ def prior_stages(
                 spent[str(name)] = spent.get(str(name), 0) + max(0, int(amount or 0))
             if measured is not None:
                 source_latency = measured
+                source_rate = wall / sent
+            if prior.field_count is None and isinstance(record.get("field_count"), int):
+                prior.field_count = max(1, int(record["field_count"]))
             if (
                 _status(item.get("status")) in _SUCCESS
                 and not item.get("timed_out")
@@ -149,8 +209,11 @@ def prior_stages(
                     prior.wall_killed.get(technique, 0),
                     int(consumed.get("tool_wall_seconds") or 0),
                 )
+                prior.killed_sent[technique] = max(prior.killed_sent.get(technique, 0), sent)
         if prior.latency_seconds is None and source_latency is not None:
             prior.latency_seconds = source_latency
+        if prior.seconds_per_request is None and source_rate is not None:
+            prior.seconds_per_request = source_rate
         if target_latency is None and source_target_latency is not None:
             target_latency = source_target_latency
     if prior.latency_seconds is None:
@@ -160,8 +223,18 @@ def prior_stages(
     return prior
 
 
+def next_stage(finished: Iterable[str], *, proven: bool = False) -> str | None:
+    """The first technique stage without a verdict, or None when the candidate is finished."""
+    if proven:
+        return None
+    settled = set(finished)
+    return next((item for item in SQLI_TECHNIQUE_STAGES if item not in settled), None)
+
+
 def resume_wall_seconds(
     finished: Iterable[str], wall_killed: Mapping[str, int], *, proven: bool = False,
+    field_count: int | None = None, seconds_per_request: float | None = None,
+    killed_sent: Mapping[str, int] | None = None,
 ) -> int | None:
     """The least wall a further attempt needs to make progress, or None if nothing is left.
 
@@ -169,22 +242,68 @@ def resume_wall_seconds(
     already ran out of (the stage guard refuses one no larger): the largest wall that stage
     was killed at, plus one stage's minimum. A stage never killed needs that minimum.
     Extensions are sized from this checkpoint, not from the predecessor's hold (audit S002).
+
+    When the candidate measured its own rate, the wall is never below what the stage is
+    predicted to need at that rate (``predicted_stage_wall_seconds``): a hold a few seconds
+    above the one the stage ran out of is not progress when the stage needs ten times that.
     """
-    if proven:
+    technique = next_stage(finished, proven=proven)
+    if technique is None:
         return None
-    settled = set(finished)
-    for technique in SQLI_TECHNIQUE_STAGES:
-        if technique not in settled:
-            return int(wall_killed.get(technique, 0)) + MINIMUM_STAGE_WALL_SECONDS
-    return None
+    floor = int(wall_killed.get(technique, 0)) + MINIMUM_STAGE_WALL_SECONDS
+    predicted = predicted_stage_wall_seconds(
+        technique, field_count=field_count, seconds_per_request=seconds_per_request,
+        sent_before_kill=int((killed_sent or {}).get(technique, 0)),
+    )
+    return max(floor, predicted or 0)
 
 
-def prior_resume_wall_seconds(prior: PriorStages) -> int | None:
+def _prior_proven(prior: PriorStages) -> bool:
+    return any(_proved(item.get("observations")) for _source, item in prior.finished.values())
+
+
+def prior_resume_wall_seconds(
+    prior: PriorStages, *, field_count: int | None = None,
+) -> int | None:
     """``resume_wall_seconds`` for a candidate that has not run in this attempt yet."""
     return resume_wall_seconds(
-        prior.finished, prior.wall_killed,
-        proven=any(_proved(item.get("observations")) for _source, item in prior.finished.values()),
+        prior.finished, prior.wall_killed, proven=_prior_proven(prior),
+        field_count=field_count or prior.field_count,
+        seconds_per_request=prior.seconds_per_request, killed_sent=prior.killed_sent,
     )
+
+
+def budget_inconclusive_record(
+    *,
+    candidate_id: str,
+    finished: Iterable[str],
+    technique: str,
+    field_count: int | None,
+    seconds_per_request: float | None,
+    predicted_wall_seconds: int,
+    round_wall_ceiling_seconds: int,
+) -> dict[str, Any]:
+    """The explicit verdict for a candidate whose next stage no round can fund.
+
+    The candidate is neither proven nor refuted: the techniques it settled were negative, and
+    the next one is predicted to need more wall than one continuation round may grant the
+    lane, so no extension is planned for it.
+    """
+    settled = set(finished)
+    return {
+        "kind": INCONCLUSIVE_RECORD_KIND,
+        "family": "sqli",
+        "candidate_id": candidate_id,
+        "verdict": "inconclusive",
+        "reason": "verdict_exceeds_round_budget",
+        "refuted_techniques": [item for item in SQLI_TECHNIQUE_STAGES if item in settled],
+        "unsettled_techniques": [item for item in SQLI_TECHNIQUE_STAGES if item not in settled],
+        "technique": technique,
+        "field_count": max(1, int(field_count or 1)),
+        "seconds_per_request_ms": round(float(seconds_per_request or 0) * 1_000),
+        "predicted_wall_seconds": int(predicted_wall_seconds),
+        "round_wall_ceiling_seconds": int(round_wall_ceiling_seconds),
+    }
 
 
 @dataclass(frozen=True)
@@ -199,6 +318,10 @@ class StagedAttempt:
     stages: tuple[Mapping[str, Any], ...]
     # The least wall the candidate's next attempt needs to make progress; None when finished.
     resume_wall_seconds: int | None = None
+    # The stage that next attempt starts at, and the measurement its wall was predicted from.
+    resume_technique: str | None = None
+    seconds_per_request: float | None = None
+    field_count: int = 1
 
 
 RunStage = Callable[[str, Mapping[str, int], float], Awaitable[Any]]
@@ -216,12 +339,16 @@ async def run_staged_sqli_attempt(
     checkpoint: Checkpoint,
     cancelled: Callable[[], bool],
     measured: Callable[[float], None] | None = None,
+    field_count: int | None = None,
 ) -> StagedAttempt:
     """Verify one candidate stage by stage from what earlier checkpoints left unsettled.
 
     ``measured`` receives each response time a finished stage measured, so a batch running
     candidates concurrently can size its slots from the target's latency (``sqli_concurrency``).
+    ``field_count`` is how many fields each stage tests (sqlmap's ``-p``); a stage costs its
+    single-field requests once per field.
     """
+    fields = max(1, int(field_count or prior.field_count or 1))
     remaining = {name: max(0, int(amount)) for name, amount in budget.items()}
     consumed: dict[str, int] = {name: 0 for name in budget}
     # Resumed inside the same action (audit L001): the stages it already ran were sent under
@@ -243,6 +370,8 @@ async def run_staged_sqli_attempt(
     ran_here = False
     settled = set(prior.finished)
     wall_killed = dict(prior.wall_killed)
+    killed_sent = dict(prior.killed_sent)
+    rate = prior.seconds_per_request
     for technique in SQLI_TECHNIQUE_STAGES:
         finished = prior.finished.get(technique)
         if finished is not None:
@@ -299,7 +428,7 @@ async def run_staged_sqli_attempt(
             minimum_seconds=_MINIMUM_DELAY_SECONDS, latency_seconds=latency,
         )
         if ran_here and latency > 0 and (
-            SQLI_TECHNIQUE_NEGATIVE_COST[technique] * (latency + delay) > wall
+            stage_requests(technique, fields) * (latency + delay) > wall
         ):
             # This attempt already settled a stage, and the next one cannot reach its verdict
             # in the wall left at the response time just measured: starting it would only be
@@ -326,6 +455,7 @@ async def run_staged_sqli_attempt(
         took = int(spent.get("tool_wall_seconds", 0))
         if sent > 0 and took > 0:
             latency = max(0.0, took / sent - delay)
+            rate = took / sent
             if measured is not None:
                 measured(latency)
         record = {
@@ -333,6 +463,7 @@ async def run_staged_sqli_attempt(
             "timed_out": stage_killed, "budget_consumed": dict(spent),
             "delay_ms": int(round(delay * 1_000)),
             "measured_latency_ms": int(round(latency * 1_000)),
+            "field_count": fields,
         }
         stage_observations = (record, *(
             dict(item) for item in getattr(result, "observations", ()) or ()
@@ -357,6 +488,7 @@ async def run_staged_sqli_attempt(
             settled.add(technique)
         elif stage_killed:
             wall_killed[technique] = max(wall_killed.get(technique, 0), took)
+            killed_sent[technique] = max(killed_sent.get(technique, 0), sent)
         timed_out = timed_out or stage_killed
         if status == "cancelled":
             complete, was_cancelled = False, True
@@ -381,6 +513,12 @@ async def run_staged_sqli_attempt(
         timed_out=timed_out and outcome != "success",
         stages=tuple(stages),
         resume_wall_seconds=(
-            None if outcome == "success" else resume_wall_seconds(settled, wall_killed)
+            None if outcome == "success" else resume_wall_seconds(
+                settled, wall_killed, field_count=fields, seconds_per_request=rate,
+                killed_sent=killed_sent,
+            )
         ),
+        resume_technique=None if outcome == "success" else next_stage(settled),
+        seconds_per_request=rate,
+        field_count=fields,
     )

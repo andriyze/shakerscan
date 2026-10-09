@@ -14,12 +14,20 @@ from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
 from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
+from .sqli_stages import INCONCLUSIVE_RECORD_KIND
 from .verification_extension import superseding_results
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
     root_scan_plan_revision,
 )
+
+# Records that name an endpoint too slow for its checks to settle inside the Scan's budget.
+_SLOW_ENDPOINT_RECORD_KINDS = frozenset({
+    "template_slow_endpoint", "exposure_probe_timeout", INCONCLUSIVE_RECORD_KIND,
+})
+
+
 def _assurance_unavailable_summary(
     options: Mapping[str, Any], *, interrupted_action_count: int = 0,
     health_observations: Sequence[Mapping[str, Any]] = (),
@@ -1867,13 +1875,14 @@ def finalize_scan_report(
         else:
             row["batch_actions"] += 1
             # Endpoints a template batch could not finish inside its wall even on a retry
-            # sized for a slow endpoint (soak N32), and exposure probes no retry got an answer
-            # for (soak N37), named so coverage says which ones.
+            # sized for a slow endpoint (soak N32), exposure probes no retry got an answer
+            # for (soak N37), and SQLi candidates whose next technique no continuation round
+            # can fund at their measured rate (soak N55), named so coverage says which ones.
             row["_slow_endpoints"].extend(
                 str(item.get("url") or item.get("candidate_id") or "")
                 for item in observations.get(action.action_id, ())
                 if isinstance(item, Mapping)
-                and item.get("kind") in {"template_slow_endpoint", "exposure_probe_timeout"}
+                and item.get("kind") in _SLOW_ENDPOINT_RECORD_KINDS
             )
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
