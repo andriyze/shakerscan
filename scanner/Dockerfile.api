@@ -58,6 +58,7 @@ COPY --from=scanner-runtime /app/schedules /app/schedules
 COPY --from=scanner-runtime /app/settings_routes /app/settings_routes
 COPY --from=scanner-runtime /app/targets /app/targets
 COPY --from=scanner-runtime /app/scan /app/scan
+COPY --from=scanner-runtime /app/scope /app/scope
 COPY --from=scanner-runtime /app/worker_handlers /app/worker_handlers
 COPY --from=scanner-runtime /app/scanner_tools /app/scanner_tools
 COPY --from=scanner-runtime /app/wordlists /app/wordlists

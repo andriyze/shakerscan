@@ -405,6 +405,9 @@ async def arsenal_scope_preview(req: ScopePreviewRequest):
         target_id=str(target_uuid) if target_uuid else None,
     )
     payload = receipt_to_dict(receipt)
+    suffix_root = next((check for check in payload["checks"] if check["name"] == "allowed_root_public_suffix"), None)
+    if suffix_root:  # a root such as co.uk or github.io would name every site under it
+        raise HTTPException(status_code=422, detail=suffix_root["message"])
     async with _pool().acquire() as conn:
         await conn.execute(
             """

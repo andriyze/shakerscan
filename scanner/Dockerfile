@@ -286,6 +286,7 @@ COPY api/schedules /app/schedules
 COPY api/settings_routes /app/settings_routes
 COPY api/targets /app/targets
 COPY api/scan /app/scan
+COPY api/scope /app/scope
 COPY api/worker_handlers /app/worker_handlers
 # Hunt methodology is runtime input, not host-only documentation. Prebuilt
 # API images must serve and bind the same catalog as a source checkout even

@@ -190,8 +190,15 @@ repeated bounds:
 Rules for bounds:
 - **Parsing and validation.**
   - Bounds are parsed by the server.
-  - Host patterns are IDNA ASCII and must contain a registrable domain, so `*` and `*.com` are
-    refused.
+  - Host patterns are IDNA ASCII and must name a registrable domain or a name below one, checked
+    against the bundled Public Suffix List including its private section (`api/scope/psl.py`, a
+    pinned snapshot, never fetched at runtime). `*`, `*.com`, `*.co.uk`, `*.github.io`,
+    `*.herokuapp.com` and `co.uk` are refused ("`*.co.uk` is a public suffix; name a domain you
+    control, e.g. `*.example.co.uk`"); `*.example.co.uk` and `*.user.github.io` are accepted. The
+    same rule applies to `credential.use` hosts.
+  - A pre-authorization stored before this check that names a public suffix is shown as stored,
+    with a `refused_bounds` entry explaining why, and covers nothing. It is never reinterpreted
+    as a narrower bound.
   - Every host (bounds, destination subjects, credential home hosts, approval screens) is spelled
     by one strict IDNA 2008/UTS #46 canonicalizer (`scanner_tools/host_names.py`), as the HTTP
     client connects: `straße.example` is `xn--strae-oqa.example`, never `strasse.example`. A host

@@ -1171,6 +1171,7 @@ try:
     from command_arsenal import describe_tools as describe_arsenal_tools
     from command_arsenal import test_local_agent_capability
     from command_arsenal import validate_command_parameters as _validate_command_parameters
+    from action_scope import scope_roots as _scope_roots
 except ModuleNotFoundError as exc:
     if exc.name not in {"command_arsenal", "action_scope"}:
         raise
@@ -1188,6 +1189,7 @@ except ModuleNotFoundError as exc:
     from api.command_arsenal import describe_tools as describe_arsenal_tools
     from api.command_arsenal import test_local_agent_capability
     from api.command_arsenal import validate_command_parameters as _validate_command_parameters
+    from api.action_scope import scope_roots as _scope_roots
 
 
 try:
@@ -14965,11 +14967,11 @@ def _scope_hosts(scope: dict[str, Any]) -> tuple[set[str], set[str]]:
         for item in scope.get("allowed_hosts", [])
         if str(item or "").strip()
     }
-    roots = {
+    roots = set(_scope_roots(  # a public-suffix root covers nothing
         _canonical_receipt_host(item)
         for item in scope.get("allowed_root_domains", [])
         if str(item or "").strip()
-    }
+    ))
     url = str(scope.get("url") or "").strip()
     if url:
         parsed = urllib.parse.urlparse(url if "://" in url else f"https://{url}")
@@ -15049,8 +15051,9 @@ def _host_matches_receipt_scope(host: str, scope: dict[str, Any]) -> bool:
     for allowed in allowed_hosts if isinstance(allowed_hosts, list) else []:
         if candidate == _canonical_receipt_host(allowed):
             return True
-    for root in allowed_roots if isinstance(allowed_roots, list) else []:
-        root_host = _canonical_receipt_host(root)
+    for root_host in _scope_roots(  # a public-suffix root covers nothing
+        _canonical_receipt_host(root) for root in (allowed_roots if isinstance(allowed_roots, list) else [])
+    ):
         if candidate == root_host or candidate.endswith(f".{root_host}"):
             return True
     return False
