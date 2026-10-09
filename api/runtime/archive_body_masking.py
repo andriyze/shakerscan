@@ -37,6 +37,7 @@ is untouched; it is a separate, deployment-gated choice.
 from __future__ import annotations
 
 import base64
+import bisect
 import html
 import json
 import math
@@ -827,6 +828,89 @@ def _masked_line(line: str, offset: int, key: str | None = None) -> str:
     return line[:offset + start] + _withhold(raw) + line[offset + end:]
 
 
+def _is_secret_descriptor(key: str | None, value: str | None) -> bool:
+    return (
+        key is not None and key.lower() in _DESCRIPTOR_NAME_KEYS and value is not None
+        and is_withheld_key(value.strip("\"'"))
+    )
+
+
+def _descriptor_items(
+    lines: list[str], parsed: list[tuple[int, bool, str | None, str | None, int]],
+) -> list[tuple[int, int]]:
+    """The merged line ranges ``[start, end)`` of every item that holds a secret descriptor.
+
+    A descriptor at indent ``I`` owns its item: from its list dash (or the line after the last
+    line shallower than it) to the next line shallower than it or the next list dash at its own
+    level, blank lines ignored. Walking that item once per descriptor is quadratic when an item
+    repeats its descriptor (``name: api_key`` four thousand times took three seconds; external
+    release audit, 2026-10-09), so each boundary comes from one sweep over the lines instead.
+
+    A line ``j`` bounds an item at indent ``I`` exactly when ``limit(j) <= I``, where
+    ``limit(j)`` is the line's indent for a list item and one more than it otherwise. Each sweep
+    keeps only the passed lines that no nearer line dominates (their limits rise toward the
+    nearest), so the nearest bounding line is a binary search away; the ranges are merged with
+    a difference array. The result is the same set of lines the per-descriptor walk visited.
+    """
+    count = len(lines)
+    owners = [
+        index for index, (_indent, _item, key, value, _offset) in enumerate(parsed)
+        if _is_secret_descriptor(key, value)
+    ]
+    if not owners:
+        return []
+    blank = [not line.strip() for line in lines]
+    limits = [indent + (0 if item else 1) for indent, item, _key, _value, _offset in parsed]
+    wanted = set(owners)
+
+    def nearest_bounds(order: range) -> dict[int, int | None]:
+        stack_limits: list[int] = []  # strictly increasing from farthest to nearest
+        stack_lines: list[int] = []
+        found: dict[int, int | None] = {}
+        for index in order:
+            if index in wanted:
+                # Entries with limit <= I form the bottom of the stack; the nearest is its top.
+                position = bisect.bisect_right(stack_limits, parsed[index][0])
+                found[index] = stack_lines[position - 1] if position else None
+            if blank[index]:
+                continue
+            while stack_limits and stack_limits[-1] >= limits[index]:
+                stack_limits.pop()
+                stack_lines.pop()
+            stack_limits.append(limits[index])
+            stack_lines.append(index)
+        return found
+
+    after = nearest_bounds(range(count - 1, -1, -1))
+    before = nearest_bounds(range(count))
+    depth = [0] * (count + 1)
+    for index in owners:
+        indent, item = parsed[index][0], parsed[index][1]
+        start = index
+        if not item:
+            previous = before[index]
+            if previous is None:
+                start = 0
+            elif parsed[previous][1] and parsed[previous][0] == indent:
+                start = previous  # the item's own list dash belongs to it
+            else:
+                start = previous + 1
+        end = after[index]
+        depth[start] += 1
+        depth[count if end is None else end] -= 1
+    ranges: list[tuple[int, int]] = []
+    running = 0
+    opened: int | None = None
+    for index in range(count + 1):
+        running += depth[index]
+        if running and opened is None:
+            opened = index
+        elif not running and opened is not None:
+            ranges.append((opened, index))
+            opened = None
+    return ranges
+
+
 def mask_yaml_text(text: str) -> str:
     """Withhold YAML values under a secret-named key and beside a secret-named descriptor."""
     lines = text.split("\n")
@@ -853,32 +937,10 @@ def mask_yaml_text(text: str) -> str:
 
     # A descriptor (``- name: api_key``) whose name is secret: every non-structural value in
     # the same item, at any depth, is withheld.
-    for index, (indent, item, key, value, _offset) in enumerate(parsed):
-        if not (
-            key is not None and key.lower() in _DESCRIPTOR_NAME_KEYS and value is not None
-            and is_withheld_key(value.strip("\"'"))
-        ):
-            continue
-        # The item starts at its list dash, or after the last line shallower than it.
-        start = index
-        if not item:
-            for previous in range(index - 1, -1, -1):
-                if not lines[previous].strip():
-                    continue
-                if parsed[previous][0] < indent:
-                    break
-                start = previous
-                if parsed[previous][0] == indent and parsed[previous][1]:
-                    break
-        for position in range(start, len(lines)):
-            other_indent, other_item, other_key, other_value, _ = parsed[position]
-            if not lines[position].strip():
-                continue
-            if position > index and (
-                other_indent < indent or (other_item and other_indent == indent)
-            ):
-                break
-            if other_value is None:
+    for start, end in _descriptor_items(lines, parsed):
+        for position in range(start, end):
+            other_key, other_value = parsed[position][2], parsed[position][3]
+            if other_value is None or not lines[position].strip():
                 continue
             if other_key is None or other_key.lower() not in _STRUCTURAL_KEYS:
                 masked[position] = True
