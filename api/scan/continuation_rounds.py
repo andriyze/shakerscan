@@ -365,6 +365,7 @@ def compile_continuation_round(
             stage_remaining_requests=remaining_requests,
             stage_last_chance_walls=last_chance_walls,
             reserved_for_new_work=new_work_reserve(parent_plan, candidates),
+            final_round=revision_number >= MAX_SCAN_CONTINUATION_ROUNDS,
         )
         if revision_number >= 2 and not finalize_only else ()
     )
