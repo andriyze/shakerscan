@@ -214,3 +214,78 @@ def test_verbatim_har_stays_refused_where_the_deployment_disables_it(monkeypatch
             monkeypatch, [_row(SWAGGER_TEXT)], export_format="har", redaction="raw",
         )
     assert refused.value.status_code == 403
+
+
+# --- N39 residue: the swagger "Master key" in an operation description ------------------------
+# Plan-DAST main673 (2026-10-08) found one of 97 honey secrets still raw in the masked archive
+# JSON, the API HAR and the UI "HAR 1.2 (masked)" download: the 27-character master key that
+# honey's ``/swagger.json`` documents in the PROSE of its ``/internal/admin`` operation
+# ``description``. The JSON pass only judged values by their key, and ``description`` is not a
+# secret name, so a labelled value inside a string was never read. The fixture below reproduces
+# the served document's shape with fixture values (the 27-character value keeps the original's
+# lowercase-underscore-digit shape, which no entropy or provider pattern catches).
+
+HONEY_MASTER_KEY = "canary_mkx_honey_shaped_427"
+HONEY_API_KEY = "sk_" + "live_" + "HoneyFixture0123456789abcdefXyZ"
+HONEY_JWT = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJzdWIiOiJmaXh0dXJlIiwibmFtZSI6ImNhbmFyeSJ9."
+    "Zm9vYmFyRml4dHVyZVNpZ25hdHVyZTAxMjM0NTY3ODk"
+)
+HONEY_ADMIN_TOKEN = "admTok_fixture_9Q2x7LkPz4W"
+HONEY_SWAGGER = {
+    "swagger": "2.0",
+    "info": {"title": "Honey API", "version": "1.0"},
+    "host": "honey.example", "basePath": "/", "schemes": ["https"],
+    "securityDefinitions": {
+        "ApiKeyAuth": {
+            "type": "apiKey", "in": "header", "name": "X-API-Key",
+            "description": f"API Key: {HONEY_API_KEY}",
+        },
+        "BearerAuth": {
+            "type": "apiKey", "in": "header", "name": "Authorization",
+            "description": f"Bearer token: {HONEY_JWT}",
+        },
+    },
+    "paths": {
+        "/internal/admin": {"post": {
+            "summary": "Admin endpoint",
+            "description": f"Internal admin endpoint. Master key: {HONEY_MASTER_KEY}",
+            "parameters": [{
+                "name": "admin_token", "in": "header", "required": True, "type": "string",
+                "default": HONEY_ADMIN_TOKEN,
+            }],
+            "responses": {"200": {"description": "Success"}},
+        }},
+    },
+    "definitions": {},
+}
+HONEY_CANARIES = (HONEY_MASTER_KEY, HONEY_API_KEY, HONEY_JWT, HONEY_ADMIN_TOKEN)
+
+
+@pytest.mark.parametrize("indent", [None, 2])
+def test_the_swagger_master_key_is_withheld_from_the_archive_json_and_har(indent):
+    text = json.dumps(HONEY_SWAGGER, indent=indent)
+    item = project(_row(text), redaction="redacted")
+    assert [c for c in HONEY_CANARIES if c in json.dumps(item)] == []
+    document = export_document(
+        [_row(text)], export_format="har", redaction="redacted", owner={"scan_id": "s"},
+        total=1,
+    )
+    assert [c for c in HONEY_CANARIES if c in json.dumps(document)] == []
+    # The prose is kept; only the value is withheld.
+    masked = json.loads(item["response"]["body"])
+    admin = masked["paths"]["/internal/admin"]["post"]
+    assert admin["description"] == "Internal admin endpoint. Master key: ***"
+    assert admin["summary"] == "Admin endpoint"
+    assert admin["parameters"][0]["name"] == "admin_token"
+
+
+@pytest.mark.parametrize("export_format", ["har", "transactions"])
+def test_the_ui_download_route_withholds_the_swagger_master_key(monkeypatch, export_format):
+    rows = [_row(json.dumps(HONEY_SWAGGER)), dict(_row(HONEY_SWAGGER), id="2")]
+    response = _export_with_rows(
+        monkeypatch, rows, export_format=export_format, redaction="redacted",
+    )
+    body = response.body.decode()
+    assert [c for c in HONEY_CANARIES if c in body] == []
