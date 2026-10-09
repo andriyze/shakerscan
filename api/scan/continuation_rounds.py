@@ -43,6 +43,7 @@ from .continuation import (
     merge_scan_action_continuation,
     reconciled_continuation_ceiling,
 )
+from .external_process import batch_attempt_floor
 from .manifest_store import PostgresScanManifestStore
 from .verification_extension import (
     budget_concluded_slices,
@@ -237,6 +238,24 @@ class PreparedContinuation:
     options: dict[str, Any]
 
 
+def new_work_reserve(parent_plan: ScanActionPlan, candidates: Any) -> int:
+    """Tool wall to keep for the verifier slices this round will add for unsliced candidates.
+
+    Candidates beyond the verifier lanes' manifest offsets get their first slice in this or a
+    later round's compile, after the extensions are planned; each body slice holds the attempt
+    floor. Probes and continuations of candidates that cannot reach a full negative are funded
+    only from what this leaves (``plan_verification_extensions``).
+    """
+    offsets = continuation_manifest_offsets(parent_plan)
+    entries = len(getattr(candidates, "entries", ()) or ())
+    reserve = 0
+    for lane, capability in (("verify.sqli", "sqli.verify_batch"), ("verify.xss", "xss.verify_batch")):
+        pending = max(0, entries - int(offsets.get(lane, 0)))
+        floor = int(batch_attempt_floor(capability, body_candidate=True).get("tool_wall_seconds", 0))
+        reserve += pending * floor
+    return reserve
+
+
 def compile_continuation_round(
     *, parent_plan: ScanActionPlan, allocation: ScanContinuationAllocation,
     parent_results: Mapping[str, CapabilityResultReference], execution_plan: Any,
@@ -333,6 +352,7 @@ def compile_continuation_round(
             stage_remaining_walls=remaining_walls,
             stage_remaining_requests=remaining_requests,
             stage_last_chance_walls=last_chance_walls,
+            reserved_for_new_work=new_work_reserve(parent_plan, candidates),
         )
         if revision_number >= 2 and not finalize_only else ()
     )

@@ -326,6 +326,10 @@ def stage_remaining_walls(
     return walls
 
 
+# Techniques judged unfundable at which a candidate's continuation yields to new work.
+_MOSTLY_UNFUNDABLE = 3
+
+
 def budget_concluded_slices(observations: Mapping[str, Any]) -> dict[str, str]:
     """Resumable slices whose every unfinished candidate is inconclusive for budget.
 
@@ -351,6 +355,15 @@ def budget_concluded_slices(observations: Mapping[str, Any]) -> dict[str, str]:
         ):
             # A probe re-measures a rate; it is funded at its floor, never water-filled.
             concluded[str(action_id)] = "probe"
+        elif unfinished and all(
+            len(row.get("inconclusive_techniques") or ()) >= _MOSTLY_UNFUNDABLE
+            or row.get("verdict") == "inconclusive"
+            for row in unfinished
+        ):
+            # Every candidate has at most one technique left that any budget can fund:
+            # continued only after candidates that have not had a first slice yet
+            # (``reserved_for_new_work``).
+            concluded[str(action_id)] = "degraded"
     return concluded
 
 
@@ -505,6 +518,7 @@ def plan_verification_extensions(
     stage_remaining_walls: Mapping[str, int] | None = None,
     stage_remaining_requests: Mapping[str, int] | None = None,
     stage_last_chance_walls: Mapping[str, int] | None = None,
+    reserved_for_new_work: int = 0,
 ) -> tuple[dict[str, Any], ...]:
     """One optional extension per timed-out, latency-starved verifier slice not yet extended.
 
@@ -635,6 +649,8 @@ def plan_verification_extensions(
             "floor_wall": int(math.ceil(held_wall * floor)),
             "held_wall": held_wall,
             "probe": concluded == "probe",
+            # Funded only from what the round's new work leaves (``reserved_for_new_work``).
+            "low": concluded in {"probe", "degraded"},
             "request_need": request_need,
         })
     planned_by_index: dict[int, dict[str, Any]] = {}
@@ -644,15 +660,22 @@ def plan_verification_extensions(
     # what is left in every scaled dimension (its wall part never above its round share); in a
     # second pass every lane may use what the first left, smallest floor first.
     start = {name: max(0, int(remaining.get(name, 0))) for name in _SCALED_DIMENSIONS}
+    # Candidates the Scan has not sliced yet: a first slice is worth more than a probe or the
+    # continuation of a candidate that already cannot reach a full negative, so those are
+    # funded only from what this reserve leaves (soak N55 review, follow-up 4).
+    reserve = min(max(0, int(reserved_for_new_work)), start["tool_wall_seconds"])
     # Each SQLi extension carries its part of the Scan's residual: a technique whose remaining
     # units need more is inconclusive for budget (``sqli_stages.resume_plan``). The residual is
     # divided shortest-remaining-need first, so work that can conclude is funded to its end and
     # a candidate that needs many times what is left (13 s per request over eight fields)
     # keeps only its own hold, and is judged against that.
+    # A slice's demand is the predicted wall of what its candidates have left when it is known
+    # (a request-bound slice's extension is sized in requests, not in what it will take).
     demands = {
-        item["index"]: max(
-            int(item["need_wall"]),
-            int((stage_remaining_walls or {}).get(item["action"].action_id, 0)),
+        item["index"]: (
+            _with_slack(int(stage_remaining_walls[item["action"].action_id]))
+            if item["action"].action_id in (stage_remaining_walls or {})
+            else int(item["need_wall"])
         )
         for items in lanes.values() for item in items
     }
@@ -684,7 +707,7 @@ def plan_verification_extensions(
         eligible = sorted(
             (item for item in lanes[capability_name] if item["index"] not in planned_by_index),
             # Work that can still conclude a candidate first, then probes.
-            key=lambda item: (item["probe"], item["depth"], item["index"]),
+            key=lambda item: (item["low"], item["probe"], item["depth"], item["index"]),
         )
         allowance = max(0, min(
             caps["tool_wall_seconds"], remaining.get("tool_wall_seconds", 0),
@@ -695,6 +718,11 @@ def plan_verification_extensions(
             if wall is None:
                 continue
             scale = wall / item["held_wall"]
+            if item["low"]:
+                scale = min(
+                    scale,
+                    max(0, remaining.get("tool_wall_seconds", 0) - reserve) / item["held_wall"],
+                )
             # The other scaled holds must still fit what earlier extensions left, and in the
             # first pass this lane's equal part of them.
             needs = item["request_need"] or {}
@@ -765,7 +793,7 @@ def plan_verification_extensions(
     # Only when nothing else could be planned: the round is then the Scan's last.
     left_wall = (
         0 if planned_by_index
-        else min(wall_ceiling, max(0, remaining.get("tool_wall_seconds", 0)))
+        else min(wall_ceiling, max(0, remaining.get("tool_wall_seconds", 0) - reserve))
     )
     for item in sorted(last_chance_pool, key=lambda row: (row["last_chance_wall"], row["index"])):
         if (
