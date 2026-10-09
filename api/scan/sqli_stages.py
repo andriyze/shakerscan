@@ -904,17 +904,23 @@ def sqli_budget_outcomes(
     """Every SQLi candidate the Scan left inconclusive for budget, for the report.
 
     ``rows_in_plan_order`` are the observations of every SQLi verifier action in plan order;
-    the latest record of a candidate stands. A candidate with a budget verdict reports it
-    (``verdict_exceeds_budget``); one still waiting for a continuation the Scan could no longer
-    fund -- unfinished, with no verdict -- is inconclusive for ``scan_budget_exhausted``, naming
-    the unit it would have run next. Either way nothing was proved or refuted for the techniques
-    it names.
+    the latest record of a candidate stands. Each outcome separates what was settled from what
+    was not, so no reader takes an untested technique for a refuted one:
+
+    * ``refuted_techniques`` -- every unit settled negative;
+    * ``inconclusive_techniques`` -- judged unfundable (``verdict_exceeds_budget``);
+    * ``unfinished_techniques`` -- fundable, but not reached before the Scan's budget ran out.
+
+    A closed candidate (nothing fundable left) reports ``verdict_exceeds_budget``. One still
+    waiting for a continuation when the Scan ended reports ``scan_budget_exhausted`` with the
+    unit it would have run next, whether or not some of its techniques were judged unfundable.
     """
     latest: dict[str, Mapping[str, Any]] = {}
     verdicts: dict[str, Mapping[str, Any]] = {}
     urls: dict[str, str] = {}
+    settled: dict[str, set[tuple[str, str | None]]] = {}
     for row in rows_in_plan_order:
-        if not isinstance(row, Mapping) or row.get("carried_from"):
+        if not isinstance(row, Mapping):
             continue
         candidate = str(row.get("candidate_id") or "")
         if not candidate:
@@ -922,29 +928,57 @@ def sqli_budget_outcomes(
         kind = row.get("kind")
         if row.get("url"):
             urls.setdefault(candidate, str(row["url"]))
+        if kind == STAGE_RECORD_KIND:
+            if _status(row.get("status")) in _SUCCESS and not row.get("timed_out"):
+                field_name = row.get("field")
+                settled.setdefault(candidate, set()).add(
+                    (str(row.get("technique") or ""), str(field_name) if field_name else None),
+                )
+            continue
+        if row.get("carried_from"):
+            continue
         if kind in {"candidate_attempt", "candidate_deferred"} and row.get("family", "sqli") == "sqli":
             latest[candidate] = row
-            if not row.get("verdict"):
+            if not row.get("verdict") and not row.get("inconclusive_techniques"):
                 verdicts.pop(candidate, None)
         elif kind == INCONCLUSIVE_RECORD_KIND:
             verdicts[candidate] = row
     outcomes: list[dict[str, Any]] = []
     for candidate, row in latest.items():
         verdict = verdicts.get(candidate)
+        unfinished = bool(row.get("resume_wall_seconds")) and str(row.get("status") or "") != "success"
+        if verdict is None and not unfinished:
+            continue
+        field_count = max(1, int(row.get("field_count") or (verdict or {}).get("field_count") or 1))
+        units = settled.get(candidate, set())
+        refuted = [
+            technique for technique in SQLI_TECHNIQUE_STAGES
+            if (technique, None) in units
+            or len({item for name, item in units if name == technique and item}) >= field_count
+        ]
         if verdict is not None:
-            outcomes.append({
-                "candidate_id": candidate, "url": urls.get(candidate, ""),
-                "reason": "verdict_exceeds_budget",
-                "inconclusive_techniques": list(verdict.get("unfundable_techniques") or ()),
-                "closed": bool(verdict.get("closed")),
-            })
-        elif row.get("resume_wall_seconds") and str(row.get("status") or "") != "success":
-            outcomes.append({
-                "candidate_id": candidate, "url": urls.get(candidate, ""),
-                "reason": "scan_budget_exhausted",
-                **({"next_technique": row["resume_technique"]}
-                   if row.get("resume_technique") else {}),
-                **({"next_field": row["resume_field"]} if row.get("resume_field") else {}),
-                "closed": True,
-            })
+            refuted = list(dict.fromkeys([*verdict.get("refuted_techniques", ()), *refuted]))
+        unfundable = [str(item) for item in (verdict or {}).get("unfundable_techniques") or ()]
+        closed = bool((verdict or {}).get("closed")) or row.get("verdict") == "inconclusive"
+        outcome = {
+            "candidate_id": candidate, "url": urls.get(candidate, ""),
+            "reason": (
+                "verdict_exceeds_budget" if closed or not unfinished else "scan_budget_exhausted"
+            ),
+            "refuted_techniques": [item for item in SQLI_TECHNIQUE_STAGES if item in refuted],
+            "inconclusive_techniques": [
+                item for item in SQLI_TECHNIQUE_STAGES if item in unfundable
+            ],
+            "unfinished_techniques": [
+                item for item in SQLI_TECHNIQUE_STAGES
+                if item not in refuted and item not in unfundable
+            ] if not closed else [],
+            "closed": closed,
+        }
+        if unfinished and not closed:
+            if row.get("resume_technique"):
+                outcome["next_technique"] = row["resume_technique"]
+            if row.get("resume_field"):
+                outcome["next_field"] = row["resume_field"]
+        outcomes.append(outcome)
     return outcomes

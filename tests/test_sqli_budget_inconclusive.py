@@ -1077,3 +1077,37 @@ def test_the_scans_last_wall_runs_a_unit_that_can_still_prove_an_injection(monke
         not action.capability_args.get(extension_module.LAST_CHANCE_ARG)
         for action in scan.actions[:-1]
     )
+
+
+def test_a_candidate_still_waiting_at_scan_end_says_what_it_did_not_reach(monkeypatch):
+    """Follow-up 3: a candidate with techniques judged unfundable but others still fundable when
+    the Scan's budget ran out is not "inconclusive for E and T" alone -- that reads as if U and
+    B were refuted. It reports the exhausted budget, the unit it would have run next, and which
+    techniques were refuted, judged unfundable, or simply not reached."""
+    ENDPOINTS["/vuln"] = (8.0, 4)
+    try:
+        scan = _Scan(
+            monkeypatch, ("/vuln", "/chat"), vuln={("/vuln", "B", "field3")}, earlier=1_031,
+        )
+        scan.add("verify.sqli.r01", path="/vuln", budget=SLICE)
+        scan.add("verify.sqli.001.r01", path="/chat", budget=SLICE)
+        scan.run({"verify.sqli.r01", "verify.sqli.001.r01"})
+        scan.drive()
+    finally:
+        ENDPOINTS["/vuln"] = (5.3, 4)
+    outcome = scan.outcomes()[scan.candidate("/vuln")]
+    assert {key: outcome[key] for key in (
+        "reason", "refuted_techniques", "inconclusive_techniques", "unfinished_techniques",
+        "closed", "next_technique", "next_field",
+    )} == {
+        "reason": "scan_budget_exhausted",
+        "refuted_techniques": ["U"],
+        "inconclusive_techniques": ["E", "T"],
+        "unfinished_techniques": ["B"],
+        "closed": False,
+        "next_technique": "B",
+        "next_field": "field0",
+    }
+    chat = scan.outcomes()[scan.candidate("/chat")]
+    assert chat["reason"] == "scan_budget_exhausted"
+    assert chat["refuted_techniques"] == [] and chat["unfinished_techniques"] == ["U", "B", "E", "T"]
