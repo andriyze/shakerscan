@@ -469,6 +469,7 @@ jobs:
           PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser -- \
             acceptance-237.spec.ts authentication-scan-report.spec.ts \
             data-lifecycle.spec.ts findings-triage.spec.ts \
+            http-archive-withheld-bodies.spec.ts \
             hunt-budget-amendments.spec.ts hunt-review-refresh.spec.ts \
             service-intelligence.spec.ts
 

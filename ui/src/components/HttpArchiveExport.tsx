@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Download, Search } from 'lucide-react'
 import { API_URL } from '@/lib/api'
-import { BODY_WITHHELD_LABEL, bodyWithheld } from '@/lib/archiveBodies'
+import { bodyWithheldLabel } from '@/lib/archiveBodies.mjs'
 import { Button, Card, Input, Select, useToast } from '@/components/ui'
 import { collectArchiveExport, exportCapNotice, exportShortfallMessage } from '@/lib/httpArchiveExport.mjs'
 
@@ -26,8 +26,9 @@ interface ArchivedTransaction {
   truncated?: boolean
   request?: { headers?: Record<string, string>; body?: string | null; sha256?: string | null; bytes?: number | null }
   response?: { headers?: Record<string, string>; body?: string | null; sha256?: string | null; bytes?: number | null }
-  /** Bodies this export left out (size or budget limit): withheld, not absent. */
+  /** Bodies this export left out, and why: withheld, not absent. */
   payload_omitted?: string[] | null
+  payload_omitted_reasons?: Record<string, string> | null
 }
 
 interface ArchiveDocument {
@@ -71,6 +72,8 @@ function pretty(value: unknown): string {
 
 function TransactionDetail({ transaction }: { transaction: ArchivedTransaction }) {
   const status = transaction.status_code ?? (transaction.error ? 'error' : '—')
+  const requestWithheld = bodyWithheldLabel(transaction, 'request')
+  const responseWithheld = bodyWithheldLabel(transaction, 'response')
   return (
     <details className="rounded-lg border border-gray-800 bg-gray-950/60">
       <summary className="flex cursor-pointer list-none items-center gap-3 px-3 py-2 text-xs">
@@ -91,7 +94,7 @@ function TransactionDetail({ transaction }: { transaction: ArchivedTransaction }
           </pre>
           <p className="mt-1 break-all text-[10px] text-gray-600">
             {transaction.request?.bytes ?? 0} bytes{transaction.request?.sha256 ? ` · SHA-256 ${transaction.request.sha256}` : ''}
-            {bodyWithheld(transaction, 'request') ? ` · ${BODY_WITHHELD_LABEL}` : ''}
+            {requestWithheld ? ` · ${requestWithheld}` : ''}
           </p>
         </div>
         <div className="min-w-0">
@@ -101,7 +104,7 @@ function TransactionDetail({ transaction }: { transaction: ArchivedTransaction }
           </pre>
           <p className="mt-1 break-all text-[10px] text-gray-600">
             {transaction.response?.bytes ?? 0} bytes{transaction.response?.sha256 ? ` · SHA-256 ${transaction.response.sha256}` : ''}
-            {bodyWithheld(transaction, 'response') ? ` · ${BODY_WITHHELD_LABEL}` : ''}
+            {responseWithheld ? ` · ${responseWithheld}` : ''}
           </p>
         </div>
         <p className="text-[11px] text-gray-500 lg:col-span-2">
