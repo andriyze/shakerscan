@@ -136,6 +136,9 @@ _SENSITIVE_COLON_KEY = (
     r"access[_-]?key|private[_-]?key|client[_-]?secret|credential|session[_-]?token|"
     r"refresh[_-]?token|csrf|xsrf|signature)[a-z0-9_-]*"
 )
+# A Hunt body masking marker (``[withheld:3]``, api/runtime/archive_body_masking.py) already stands
+# in for a withheld value and carries none; masking it again would lose the planner's reference.
+_NOT_WITHHELD_MARKER = r"(?!\[withheld:[1-9][0-9]{0,3}\])"
 _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Authorization: Bearer/Basic/Digest <token>  (\S+ so base64 +/= is covered)
     (re.compile(r"(?i)(authorization:\s*(?:bearer|basic|digest|negotiate))\s+\S+"), r"\1 ***"),
@@ -143,14 +146,14 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Cookie / Set-Cookie / X-API-Key / X-Auth-Token header lines (mask value to EOL)
     (re.compile(r"(?i)\b((?:set-)?cookie|x-api-key|x-auth-token)(\s*:\s*)[^\r\n]+"), r"\1\2***"),
     # key=value (query / env / form) for any sensitive key name (password family included)
-    (re.compile(rf"(?i)\b({_SENSITIVE_TEXT_KEY})\s*=\s*([^&\s,;]+)"), r"\1=***"),
+    (re.compile(rf"(?i)\b({_SENSITIVE_TEXT_KEY})\s*=\s*{_NOT_WITHHELD_MARKER}([^&\s,;]+)"), r"\1=***"),
     # bare key: value (YAML/config), unquoted value of 4+ chars
-    (re.compile(rf"(?i)\b({_SENSITIVE_COLON_KEY})(\s*:\s*)([^\s,;\"']{{4,}})"), r"\1\2***"),
+    (re.compile(rf"(?i)\b({_SENSITIVE_COLON_KEY})(\s*:\s*){_NOT_WITHHELD_MARKER}([^\s,;\"']{{4,}})"), r"\1\2***"),
     # JSON / dict-literal "key": "value". An empty value carries nothing and stays empty, so a
     # display never shows "***" where nothing was declared (N54: a seed's empty password read as
     # if a value had been stored and sent), matching the key=value rule and redact_sensitive.
     (
-        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(["\'])[^"\']+(["\'])'),
+        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(["\']){_NOT_WITHHELD_MARKER}[^"\']+(["\'])'),
         r"\1\2***\3",
     ),
     # JSON numeric/boolean/null secret values.

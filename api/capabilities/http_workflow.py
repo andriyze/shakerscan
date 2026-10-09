@@ -12,6 +12,29 @@ from runtime.hunt_http_exchange import HttpWorkflowExchange, prepare_http_exchan
 from .http import execute_bound_http_request
 
 
+_BOUND_VALUE_MARKER = "[withheld:bound]"
+
+
+def _scrub_bound_values(value: Any, bound: list[str]) -> Any:
+    """Replace every bound value (longest first) in every string of a public response."""
+    secrets = sorted({item for item in bound if item}, key=len, reverse=True)
+    if not secrets:
+        return value
+
+    def scrub(item: Any) -> Any:
+        if isinstance(item, str):
+            for secret in secrets:
+                item = item.replace(secret, _BOUND_VALUE_MARKER)
+            return item
+        if isinstance(item, Mapping):
+            return {scrub(key): scrub(nested) for key, nested in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [scrub(nested) for nested in item]
+        return item
+
+    return scrub(value)
+
+
 async def prepare_http_operation(
     *, pool: Any, run: Mapping[str, Any], context: Mapping[str, Any], policy: Mapping[str, Any],
     action_id: Any, target: Any, target_url: str, inputs: Mapping[str, Any],
@@ -22,6 +45,8 @@ async def prepare_http_operation(
     require_http_request_authority(inputs, policy, requested_budget=requested_budget)
     exchange = HttpWorkflowExchange(str(run['id']), str(action_id), target, tuple(inputs.get('capture') or ()))
     injects_headers = bool(trusted_headers) or any('header' in item for item in inputs.get('request_bindings') or ())
+    bindings = tuple(inputs.get('request_bindings') or ())
+    withheld_only = bool(bindings) and not inputs.get('capture') and all('withheld_ref' in item for item in bindings)
 
     def record(captured: Mapping[str, Any]) -> None:
         recorder({**captured, "workflow_values_private": True} if workflow else captured)
@@ -54,7 +79,12 @@ async def prepare_http_operation(
                 allow_bound_origin_redirects=True, private_response_sink=exchange.capture_response,
                 private_response_headers=exchange.response_headers,
             )
-            if workflow:
+            if workflow and withheld_only:
+                # Only withheld values (N56) were bound, and the worker knows each one exactly, so
+                # the planner keeps the response it needs to judge access, with every bound value
+                # replaced wherever the target echoes it.
+                response = _scrub_bound_values(response, exchange.bound_values)
+            elif workflow:
                 # Pairing values may be short PINs, arbitrary field names, or echoed
                 # back under innocent keys. A heuristic scrubber is insufficient.
                 summary = response.get('response')
@@ -71,5 +101,6 @@ async def prepare_http_operation(
         finally:
             headers.clear()
             wire_input.clear()
+            exchange.bound_values.clear()
 
     return execute, exchange, injects_headers

@@ -22334,6 +22334,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 "secret_values_visible": False,
             })
 
+        from runtime.hunt_http_exchange import settle_private_results, withholding_operation
+        operation, withheld_values = withholding_operation(capability_name, action_id, operation)
         adapter = adapter_type(
             specification=spec,
             operation=operation,
@@ -22414,9 +22416,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     )
                 }
                 await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status)
-                if http_exchange is not None:
-                    await http_exchange.persist(conn, run=locked, status=status)
-                    receipt_result["captures"] = http_exchange.public_result()
+                await settle_private_results(conn, run=locked, status=status, exchange=http_exchange, withheld=withheld_values, action_id=action_id, target=target, observations=observations, receipt_result=receipt_result)
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,
