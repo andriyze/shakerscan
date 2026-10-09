@@ -80,3 +80,93 @@ def test_the_documented_form_produces_body_fields_not_a_path():
     assert (method, url) == ("POST", "https://target.test/api/v1/agent/run")
     assert content_type == "application/json"
     assert fields == ["task"]
+
+
+# --- N54: a form login seed is form-encoded; masking is display-only ---------------------------
+# Plan-DAST main673 seeded ``POST /hub/login username,password`` for honey's HTML sign-in form
+# (``method=post action=/hub/login``). The field list became a JSON body, so the form was probed
+# as a JSON API, and the scan record showed the empty password as ``"***"``. ``form:`` read only a
+# query string: ``form:username,password`` was refused and ``form:username=,password=`` became one
+# field named ``username``.
+
+@pytest.mark.parametrize("line", [
+    "POST /hub/login form:username,password",
+    "POST /hub/login form:username=,password=",
+    "POST /hub/login form:username password",
+    "POST /hub/login form:username=&password=",
+])
+def test_a_form_field_list_is_a_form_body(line):
+    assert normalize_known_endpoint(line) == "POST /hub/login form:username=&password="
+
+
+@pytest.mark.parametrize(("line", "expected"), [
+    ("POST /s form:user=alice, pass=b", "POST /s form:user=alice&pass=b"),
+    ("POST /s form:q=a,b", "POST /s form:q=a,b"),
+    ("POST /s form:q=hello world", "POST /s form:q=hello world"),
+])
+def test_form_values_keep_their_meaning(line, expected):
+    assert normalize_known_endpoint(line) == expected
+
+
+def _sent(line: str):
+    """The request a body candidate built from one submitted seed line actually sends."""
+    import scan.action_adapter as adapter
+
+    stored = ScanPublicCompatibilityOptions(custom_endpoints=[line]).custom_endpoints[0]
+    method, url, content_type, fields = _known_endpoint_url(stored, origin=ORIGIN)
+    resolved = {
+        "method": method, "url": url, "content_type": content_type,
+        "field_name": fields[0], "body_field_names": fields,
+    }
+    original = adapter.execution_request_for_manifest_candidate
+    adapter.execution_request_for_manifest_candidate = lambda *args, **kwargs: resolved
+    try:
+        request = adapter.proof_request_for_candidate(
+            object(), object(), 0, request_id="r", ordinal=0, name="n", headers=(),
+            authenticated=False,
+        )
+    finally:
+        adapter.execution_request_for_manifest_candidate = original
+    return stored, request
+
+
+def test_a_form_login_seed_is_sent_form_encoded_with_its_fields():
+    import urllib.parse as parse
+
+    stored, request = _sent("POST /hub/login form:username,password")
+    assert request.method == "POST"
+    assert request.url == "https://target.test/hub/login"
+    assert ("Content-Type", "application/x-www-form-urlencoded") in request.headers
+    assert [name for name, _ in parse.parse_qsl(request.body.decode())] == [
+        "password", "username",
+    ]
+    assert b"***" not in request.body
+
+
+def test_a_json_seed_still_sends_json():
+    import json
+
+    stored, request = _sent("POST /api/login username,password")
+    assert stored == 'POST /api/login json:{"username":"","password":""}'
+    assert ("Content-Type", "application/json") in request.headers
+    assert set(json.loads(request.body.decode())) == {"username", "password"}
+    assert b"***" not in request.body
+
+
+def test_masking_is_display_only_and_never_invents_a_value():
+    from redaction import redact_scan_options
+
+    stored = ScanPublicCompatibilityOptions(custom_endpoints=[
+        "POST /api/login username,password",
+        "POST /hub/login form:username,password",
+        "POST /api/login username=alice,password=Hunter2x",
+    ]).custom_endpoints
+    # The stored seed keeps what was entered; nothing in it is a mask.
+    assert stored[2] == 'POST /api/login json:{"username":"alice","password":"Hunter2x"}'
+    assert not any("***" in line for line in stored)
+    shown = redact_scan_options({"custom_endpoints": list(stored)})["custom_endpoints"]
+    # An empty password is shown empty, not as a value that was withheld ...
+    assert shown[0] == 'POST /api/login json:{"username":"","password":""}'
+    assert shown[1] == "POST /hub/login form:username=&password="
+    # ... and a real one is withheld from the display only.
+    assert "Hunter2x" not in shown[2] and '"password":"***"' in shown[2]

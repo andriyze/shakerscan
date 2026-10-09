@@ -9,6 +9,15 @@ optional body or parameter spec::
     POST /api/login username=alice      -> POST /api/login json:{"username":"alice"}
     POST /api/search json:{"query":"test"}
     POST /api/login form:user=a&pass=b
+    POST /hub/login form:username,password  -> POST /hub/login form:username=&password=
+    POST /hub/login form:username=,password= -> POST /hub/login form:username=&password=
+
+A bare field list on a body method is a JSON body (kept for compatibility with every stored
+seed). An HTML form posts ``application/x-www-form-urlencoded``, so a form login is declared with
+``form:``, which takes either a query string or the same field list. Before, ``form:`` read only a
+query string: ``form:username,password`` was refused and ``form:username=,password=`` became the
+single field ``username`` with the value ``,password=`` (soak N54, where the documented field list
+probed honey's HTML sign-in form as a JSON API).
 
 The New Scan form documented the field-list form while the Scan surface manifest understood only
 ``json:`` and ``form:``; everything after the path was kept as path text, so
@@ -27,11 +36,14 @@ KNOWN_ENDPOINT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PA
 BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
 MAX_KNOWN_ENDPOINT_LENGTH = 8_192
 KNOWN_ENDPOINT_SYNTAX = (
-    "METHOD /path, optionally followed by field names (a,b), name=value pairs, "
-    "json:{...} or form:a=1&b=2"
+    "METHOD /path, optionally followed by field names (a,b) or name=value pairs (a JSON body "
+    "on POST/PUT/PATCH, a query on GET), json:{...}, or form:a,b / form:a=1&b=2 for an HTML form"
 )
 
 _FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-\[\]]{0,199}$")
+# ``form:a=1,b=2``: a comma (or space) followed by another ``name=`` separates fields. A comma
+# inside one value (``form:q=a,b``) still reads as part of the query string, as before.
+_FORM_FIELD_LIST_SEPARATOR = re.compile(r"[,\s]\s*[A-Za-z_][A-Za-z0-9_.\-\[\]]{0,199}=")
 
 
 class KnownEndpointSyntaxError(ValueError):
@@ -99,6 +111,11 @@ def normalize_known_endpoint(value: object) -> str:
         return f"{method} {path} json:{json.dumps(body, separators=(',', ':'), ensure_ascii=False)}"
     if marker == "form:":
         body_text = spec[5:].strip()
+        if body_text and "&" not in body_text and (
+            "=" not in body_text or _FORM_FIELD_LIST_SEPARATOR.search(body_text)
+        ):
+            # The field-list spelling of a form body: canonicalize it to the query string.
+            body_text = urllib.parse.urlencode(_field_pairs(body_text))
         try:
             pairs = urllib.parse.parse_qsl(
                 body_text, keep_blank_values=True, strict_parsing=True, max_num_fields=128,
