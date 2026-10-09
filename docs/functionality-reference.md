@@ -1614,8 +1614,10 @@ concurrency-limited with per-tool timeouts and a global deadline.
 - **Bounded automation**: passive recon and ASM new-surface tracking can be safe-on by default;
   active exploitation uses small safe batches and requires an explicit Lab/deep policy for deep
   exploit mode. Rate tokens are reserved before active work is queued.
-- **Destination classes**: cloud metadata/platform-service addresses (169.254.169.254 and
-  equivalents), link-local, multicast, unspecified and broadcast addresses are never scanned, under
+- **Destination classes**: cloud metadata/platform-service addresses (instance metadata at
+  169.254.169.254, `fd00:ec2::254`, 100.100.100.200 and 192.0.0.192, AWS container credentials
+  169.254.170.2, the EKS Pod Identity agent 169.254.170.23 and `fd00:ec2::23`, and Azure
+  168.63.129.16; one list, `address_classes.CLOUD_SERVICE_ADDRESSES`), link-local, multicast, unspecified and broadcast addresses are never scanned, under
   any setting or environment. Loopback, private (RFC1918, unique-local), reserved and shared
   (RFC 6598 100.64.0.0/10: carrier-grade NAT and Tailscale node addresses) addresses are
   admitted in Lab environments, and elsewhere only when the deployment admits private-network
@@ -1630,9 +1632,11 @@ concurrency-limited with per-tool timeouts and a global deadline.
   the API refuses a device whose address (or every resolved address) is loopback, private or
   reserved with `422 loopback_or_private_range` before queueing, and the device worker (which now
   receives the setting) re-checks the address it pins under the stricter of the admitting
-  deployment's setting and its own. On this plane link-local (APIPA) devices stay admitted, and
-  cloud metadata addresses are governed by `SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS` and
-  `SHAKERSCAN_DEVICE_DENY_CIDRS`. Registering a device is not checked, so a refused target
+  deployment's setting and its own. On this plane link-local (APIPA) devices stay admitted, except
+  the cloud-service addresses on the shared list, the limited broadcast address 255.255.255.255 is
+  never a device, and cloud metadata addresses are governed by
+  `SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS` (which does not widen the private-network setting for
+  an address added to the list since 2.8.0) and `SHAKERSCAN_DEVICE_DENY_CIDRS`. Registering a device is not checked, so a refused target
   network scan can leave its device profile behind. Shared address space (100.64.0.0/10) is
   private-class on both planes since 2.8.0, a deliberate tightening: before, `ipaddress` called it
   neither private nor reserved, so a deployment that refuses private-network targets admitted a

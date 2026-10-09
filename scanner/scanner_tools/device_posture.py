@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - minimal host test environment
 
 try:
     from .address_classes import (
-        embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
+        CLOUD_SERVICE_ADDRESSES, LIMITED_BROADCAST, embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
         without_scope,
     )
     from .common import run
@@ -55,7 +55,7 @@ try:
     from .ssh_scanner import DEFAULT_SSH_HOST_REVIEW_BUNDLES, full_ssh_scan
 except ImportError:  # pragma: no cover - flat scanner runtime
     from address_classes import (
-        embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
+        CLOUD_SERVICE_ADDRESSES, LIMITED_BROADCAST, embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
         without_scope,
     )
     from common import run
@@ -130,12 +130,12 @@ PRIVATE_NETWORK_TARGETS_ENV = "SHAKERSCAN_PRIVATE_NETWORK_TARGETS"
 PRIVATE_DESTINATION_REASON = "loopback_or_private_range"
 # Must equal api/action_scope.SAFE_LAB_ENVIRONMENTS; a test keeps the two identical.
 DEVICE_LAB_ENVIRONMENTS = frozenset({"development", "dev", "preview", "staging", "lab", "test"})
-DEFAULT_DENIED_DEVICE_DESTINATIONS = (
-    "169.254.169.254/32",  # AWS/GCP/OpenStack metadata
-    "169.254.170.2/32",    # AWS container credentials
-    "100.100.100.200/32",  # Alibaba metadata
-    "168.63.129.16/32",    # Azure host virtual service
-    "fd00:ec2::254/128",   # AWS IPv6 metadata
+# The shared cloud-service list (``address_classes.CLOUD_SERVICE_ADDRESSES``), one host network
+# each: the device plane refuses exactly what the web scope guard refuses, including the
+# link-local ones its APIPA allowance would otherwise admit (169.254.170.23, EKS Pod Identity).
+DEFAULT_DENIED_DEVICE_DESTINATIONS = tuple(
+    f"{address}/{address.max_prefixlen}"
+    for address in sorted(CLOUD_SERVICE_ADDRESSES, key=lambda item: (item.version, int(item)))
 )
 
 
@@ -278,6 +278,19 @@ def effective_private_network_policy(admitted_policy: Any = None) -> str:
     return "refuse" if "refuse" in policies else "allow"
 
 
+# The metadata destinations ``SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS`` has always admitted
+# whatever the private-network policy (a lab's metadata emulator). A cloud-service address added
+# to the list later is admitted by the opt-in only where the private-network policy admits it, so
+# growing the list never widens a refusing deployment.
+_OPT_IN_METADATA_DESTINATIONS = frozenset(ipaddress.ip_address(raw) for raw in (
+    "169.254.169.254", "169.254.170.2", "100.100.100.200", "168.63.129.16", "fd00:ec2::254",
+))
+
+
+def _metadata_targets_allowed() -> bool:
+    return os.environ.get("SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS", "").strip().lower() in {"1", "true", "yes"}
+
+
 def _device_metadata_destination(parsed: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     plain = without_scope(parsed)
     return any(
@@ -313,9 +326,14 @@ def device_private_destination_refusal(address: str, environment: Any, policy: A
     )
     if judged in DEVICE_LAB_ENVIRONMENTS or effective == "allow":
         return None
+    # A metadata address is left to the deny list, which names it. Under the metadata opt-in only
+    # the addresses it has always admitted skip this policy (``_OPT_IN_METADATA_DESTINATIONS``).
+    metadata_denied = not _metadata_targets_allowed()
     refused = next((
         candidate for candidate in judged_addresses(parsed)
-        if not candidate.is_link_local and not _device_metadata_destination(candidate)
+        if not candidate.is_link_local
+        and not (_device_metadata_destination(candidate)
+                 and (metadata_denied or without_scope(candidate) in _OPT_IN_METADATA_DESTINATIONS))
         and private_class(candidate)
     ), None)
     if refused is None:
@@ -359,7 +377,8 @@ def validate_device_destination(
     """
     parsed = ipaddress.ip_address(address)
     candidates = judged_addresses(parsed)
-    if any(candidate.is_unspecified or candidate.is_multicast for candidate in candidates):
+    if any(candidate.is_unspecified or candidate.is_multicast or candidate == LIMITED_BROADCAST
+           for candidate in candidates):
         raise ValueError("device destination is not a unicast host address")
     refusal = device_private_destination_refusal(
         str(parsed), environment, effective_private_network_policy(policy),
@@ -367,7 +386,7 @@ def validate_device_destination(
     if refusal:
         raise ValueError(f"device destination refused ({PRIVATE_DESTINATION_REASON}): {refusal}")
     canonical = canonical_device_address(address)
-    if os.environ.get("SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS", "").strip().lower() in {"1", "true", "yes"}:
+    if _metadata_targets_allowed():
         return canonical
     if getattr(without_scope(parsed), "ipv4_mapped", None) is None and any(
         carried.is_link_local for carried in embedded_ipv4_addresses(without_scope(parsed))
