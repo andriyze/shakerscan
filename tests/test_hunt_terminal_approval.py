@@ -16,9 +16,11 @@ None of these may run from a pipe (an agent's tool shell): the CLI refuses witho
 
 from __future__ import annotations
 
+import contextlib
 import os
 import pty
 import select
+import signal
 import subprocess
 import sys
 import time
@@ -32,15 +34,33 @@ ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SRC = ROOT / "client" / "src"
 
 
+@contextlib.contextmanager
+def _sigint_as_a_shell_leaves_it():
+    """Start the CLI with SIGINT at its default, as a person's interactive shell starts a
+    foreground command. A test run launched in the background (``pytest &``) inherits SIGINT
+    ignored, a child inherits that, and a Python started that way keeps ignoring it: a Ctrl-C sent
+    below would never arrive. A handled signal (unlike an ignored one) is reset by exec."""
+    inherited = signal.getsignal(signal.SIGINT)
+    if inherited is not signal.SIG_IGN:
+        yield
+        return
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, inherited)
+
+
 class Session:
     """The CLI in a pseudo-terminal: stdin is the terminal, stdout/stderr are read here."""
 
     def __init__(self, argv: list[str], env: dict[str, str]) -> None:
         self.master, slave = pty.openpty()
-        self.proc = subprocess.Popen(
-            [sys.executable, "-m", "shakerscan", *argv], stdin=slave, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, env=env, cwd=str(ROOT), start_new_session=True,
-        )
+        with _sigint_as_a_shell_leaves_it():
+            self.proc = subprocess.Popen(
+                [sys.executable, "-m", "shakerscan", *argv], stdin=slave, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=env, cwd=str(ROOT), start_new_session=True,
+            )
         os.close(slave)
         self.out = b""
 
@@ -79,8 +99,8 @@ def enterprise(tmp_path):
     token.write_text(TOKEN + "\n", encoding="utf-8")
     token.chmod(0o600)
 
-    def start(gateway: str):
-        stub = StubInstance(tls=(cert, key), gateway=gateway)
+    def start(gateway: str, **options):
+        stub = StubInstance(tls=(cert, key), gateway=gateway, **options)
         env = _environment(tmp_path, SSL_CERT_FILE=str(cert))
         return stub, ["--url", stub.url, "--token-file", str(token)], env
 
@@ -109,6 +129,27 @@ def test_enterprise_approval_takes_the_persons_totp_and_the_gateway_names_them(e
     assert not [path for path in stub.routes("POST") if path.endswith("/decision")], (
         "an Enterprise connection never calls the engine's decision route itself"
     )
+
+
+def test_ctrl_c_ends_watch_promptly_when_the_gateway_stalls_the_revoke(enterprise):
+    stub, connection, env = enterprise("g1", stall_revoke=True)
+    with stub:
+        session = Session(["approve", *connection, "--watch", "--hunt", HUNT, "--account", "alice",
+                           "--minutes", "1"], env)
+        session.expect("TOTP code for alice")
+        session.type(TOTP + "\n")
+        session.expect("approver session open until")
+        session.expect("[a]llow")
+        started = time.monotonic()
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish(timeout=30)
+        elapsed = time.monotonic() - started
+    assert code == 0, (out, err)
+    assert elapsed < 10, f"Ctrl-C took {elapsed:.1f}s to end --watch"
+    assert "approver session ended\n" in out and "(time limit)" not in out, (out, err)
+    assert "could not revoke the approver session at the gateway; it expires on its own" in out
+    assert "/_enterprise/approvals/session/revoke" in stub.routes("POST"), "the revoke was attempted"
+    assert stub.request["status"] == "pending", "nothing was decided"
 
 
 def test_a_wrong_totp_code_decides_nothing(enterprise):

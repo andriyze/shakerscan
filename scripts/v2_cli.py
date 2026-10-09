@@ -149,9 +149,10 @@ def _approval_send(client: "ApiClient"):
     approval = _approval()
 
     def send(method: str, path: str, payload: Mapping[str, Any] | None = None,
-             headers: Mapping[str, str] | None = None) -> tuple[int, Any]:
+             headers: Mapping[str, str] | None = None, *, timeout: float | None = None) -> tuple[int, Any]:
         try:
-            return 200, client.request(method, path, payload=payload, headers=headers)
+            bound = {} if timeout is None else {"timeout": timeout}
+            return 200, client.request(method, path, payload=payload, headers=headers, **bound)
         except CliError as exc:
             if exc.http_status is None:
                 raise approval.ApprovalError(str(exc)) from exc
@@ -194,7 +195,9 @@ class ApiClient:
         payload: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
         headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> Any:
+        """``timeout`` (seconds) overrides this client's own for one request."""
         body = None
         headers = {"Accept": "application/json", **dict(headers or {}), **self._auth_headers()}
         if payload is not None:
@@ -208,7 +211,7 @@ class ApiClient:
             f"{self.base_url}{path}", data=body, headers=headers, method=method,
         )
         try:
-            with _opener().open(request, timeout=self.timeout) as response:
+            with _opener().open(request, timeout=self.timeout if timeout is None else timeout) as response:
                 raw = response.read(MAX_JSON_BYTES + 1)
         except urllib.error.HTTPError as exc:
             if 300 <= exc.code < 400:

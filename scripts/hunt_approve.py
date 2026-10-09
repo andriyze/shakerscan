@@ -65,6 +65,10 @@ PREAUTHORIZATION_USES = ("agent_launch", "hunt_start")
 OPEN_HUNT_STATUSES = ("active", "awaiting_planner", "budget_exhausted")
 SESSION_SECONDS = 30 * 60
 WATCH_POLL_SECONDS = 3.0
+# Ending --watch revokes the approver session as a courtesy (it expires on its own anyway), so the
+# revoke waits this long at most: Ctrl-C must end the command promptly even when the gateway or
+# the network has stalled, not after the CLI's general per-request timeout.
+REVOKE_TIMEOUT_SECONDS = 5.0
 _TOTP = re.compile(r"^[0-9]{6,8}$")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -79,9 +83,10 @@ class StepUpUnavailable(ApprovalError):
 
 # --- transport ---------------------------------------------------------------------------------
 #
-# ``send(method, path, payload=None, headers=None) -> (status, body)``: ``body`` is the parsed JSON
-# of a success, or the error ``detail`` of a refusal. It raises ApprovalError only when no answer
-# arrived. The product CLI supplies it over its own authenticated, redirect-refusing client.
+# ``send(method, path, payload=None, headers=None, *, timeout=None) -> (status, body)``: ``body`` is
+# the parsed JSON of a success, or the error ``detail`` of a refusal. It raises ApprovalError only
+# when no answer arrived (``timeout`` seconds, else the CLI's own per-request timeout). The product
+# CLI supplies it over its own authenticated, redirect-refusing client.
 
 Send = Callable[..., tuple[int, Any]]
 
@@ -627,14 +632,25 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
         return 0
     finally:
         if session is not None and held is not None:
-            try:
-                send("POST", SESSION_REVOKE_PATH, {
-                    "schema_version": "shakerscan-approval-session-revoke/v1",
-                    "session_id": session["session_id"], "session_secret": held(),
-                })
-            except ApprovalError:
-                terminal.say("could not revoke the approver session at the gateway; it expires on its own")
-            held.wipe()
+            _revoke(send, terminal, session["session_id"], held)
+
+
+def _revoke(send: Send, terminal: Terminal, session_id: str, held: _HeldSecret) -> None:
+    """Best effort, bounded by REVOKE_TIMEOUT_SECONDS; a second Ctrl-C skips it. The secret is
+    wiped whatever happens."""
+    revoked = False
+    try:
+        status, _ = send("POST", SESSION_REVOKE_PATH, {
+            "schema_version": "shakerscan-approval-session-revoke/v1",
+            "session_id": session_id, "session_secret": held(),
+        }, timeout=REVOKE_TIMEOUT_SECONDS)
+        revoked = _ok(status)
+    except (ApprovalError, KeyboardInterrupt):
+        pass
+    finally:
+        held.wipe()
+    if not revoked:
+        terminal.say("could not revoke the approver session at the gateway; it expires on its own")
 
 
 # --- the commands ------------------------------------------------------------------------------
@@ -698,7 +714,7 @@ def add_arguments(parser: Any, command: str) -> None:
 
 __all__ = [
     "APPROVAL_SCHEMA_PREFIX", "ApprovalError", "BEGIN_PATH", "FINISH_PATH", "PREAUTHORIZATION_HEADER",
-    "SESSION_REVOKE_PATH", "StepUp", "StepUpUnavailable", "Terminal", "add_arguments", "assertion_json",
-    "decide", "decision_entry", "expected_challenge", "find_request", "list_pending", "preauthorize",
+    "REVOKE_TIMEOUT_SECONDS", "SESSION_REVOKE_PATH", "StepUp", "StepUpUnavailable", "Terminal", "add_arguments",
+    "assertion_json", "decide", "decision_entry", "expected_challenge", "find_request", "list_pending", "preauthorize",
     "render_request", "run", "set_digest", "set_document", "wait_for", "watch",
 ]
