@@ -10,6 +10,7 @@ import pytest
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "api")]
 from capabilities.browser import browser_capability_adapter
 from capabilities.browser_login_worker import prepare_hunt_browser_action, browser_worker_policy
+from hunt.dispatch_authority import require_dispatchable
 from hunt.target_binding import web_hunt_target
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import ScanPolicy
@@ -71,12 +72,12 @@ async def worker_prepare(name, args, policy=None):
     persisted_policy = dict(POLICY if policy is None else policy)
     persisted_policy["allowed_capabilities"] = [name]
     namespace = {
-        "run": {"target_kind": "device", "target_id": None, "device_target_id": uuid.UUID(int=2),
+        "run": {"status": "active", "target_kind": "device", "target_id": None, "device_target_id": uuid.UUID(int=2),
                 "context_pack": {"target": {"locator": "127.0.0.1"}, "authorized_target_addresses": ["127.0.0.1"]},
                 "policy_json": persisted_policy},
         "capability_name": name, "capability_input": args, "conn": None,
         "_worker_json_object": dict, "_worker_hunt_web_target": web_hunt_target,
-        "_revalidate_hunt_action_authority": revalidate,
+        "_revalidate_hunt_action_authority": revalidate, "require_dispatchable": require_dispatchable,
         "browser_worker_policy": browser_worker_policy,
         "browser_capability_adapter": browser_capability_adapter,
         "prepare_hunt_browser_action": prepare_hunt_browser_action,

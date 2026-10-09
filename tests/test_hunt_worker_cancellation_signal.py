@@ -159,8 +159,11 @@ def test_the_enumeration_finds_every_known_site():
 def test_cancel_signals_and_reports_what_it_reached():
     from tests.api_sources import definition_source
 
+    # The signalling is shared with the startup authority repair, which cancels a Hunt it cannot
+    # rebuild the same way; cancel calls it.
     source = definition_source("cancel")
-    assert "signal_cancelled_jobs(" in source
+    assert "signal_hunt_jobs(" in source
+    assert "signal_cancelled_jobs(" in definition_source("signal_hunt_jobs")
     assert 'payload["cancelled_job_ids"] = signalled' in source
 
 

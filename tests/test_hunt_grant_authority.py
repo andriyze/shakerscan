@@ -125,3 +125,12 @@ def test_coverage_keys_name_what_a_bound_covers():
     assert coverage_key("credential.use", {"profile_id": "p-1"}) == "credential:p-1"
     assert coverage_key("budget.raise", {"dimension": "max_http_requests"}) is None
     assert coverage_key("capability.enable", "[1]") is None
+
+
+def test_withholding_is_by_distinctive_field_not_by_flag_name():
+    from hunt.grant_authority import withheld_flags
+
+    assert withheld_flags(("active_testing", "allow_state_changing_http")) == ["active-replay", "state-changing"]
+    assert withheld_flags(("active_testing", "network_discovery")) == ["tcp-discovery"]
+    assert withheld_flags(("active_testing", "allow_oob_interactions")) == ["oob"]
+    assert withheld_flags(("active_testing",)) == ["active-testing"]

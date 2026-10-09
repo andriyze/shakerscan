@@ -188,7 +188,7 @@ async def reconcile_active_finding_counts(conn: Any) -> None:
     """)
 
 
-async def run_unified_startup(pool: Any, baseline: Any) -> None:
+async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any = None) -> None:
     """Serialize baseline and conversion atomically, including concurrent worker startup."""
     async with pool.acquire() as conn:
         await conn.execute("SELECT pg_advisory_lock(8675309)")
@@ -265,6 +265,6 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                 from hunt.grant_repair import repair_grant_authority
             except ModuleNotFoundError:
                 from api.hunt.grant_repair import repair_grant_authority
-            await repair_grant_authority(conn)
+            await repair_grant_authority(conn, redis_provider=redis_provider)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")

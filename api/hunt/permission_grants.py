@@ -39,9 +39,11 @@ from .budget_amendments import HuntBudgetAmendmentRequest, amendable_dimensions,
 from .grant_authority import (
     MAX_GRANTED_DESTINATIONS,
     authority_diff,
+    capability_withheld_by,
     coverage_key,
     hunt_baseline,
     rebuild_authority,
+    withholding,
 )
 from .permission_bounds import CAPABILITY_FLAGS, Bounds, parse_bounds
 from .permission_reasons import (
@@ -417,23 +419,34 @@ async def try_preauthorized_grant(conn: Any, run: dict[str, Any], request: Mappi
 
 
 async def revoked_coverage(conn: Any, hunt_id: Any, kind: Any, subject: Any) -> dict[str, Any] | None:
-    """The revoked grant of this Hunt that covered what ``kind``/``subject`` would grant, or None.
+    """The revoked grant of this Hunt that withholds what ``kind``/``subject`` would grant, or None.
 
     Read from the grant rows themselves, so it holds across restarts and for grants revoked
-    before this release. It suppresses only that coverage key: the start bounds keep answering
-    for everything else they cover.
+    before this release. A capability is withheld when its flag would turn on a field the revoked
+    grant turned on (other than the shared ``active_testing``; see ``withheld_flags``), so revoked
+    write authority cannot come back through another flag. A destination or credential is
+    withheld by its own scheme, host and port, or profile. The start bounds keep answering for
+    everything else they cover.
     """
+    subject = _json(subject, {})
     key = coverage_key(kind, subject)
     if key is None:
         return None
     rows = await conn.fetch(
-        """SELECT id, subject_json, revoked_at, revoked_by FROM hunt_permission_grants
+        """SELECT id, kind, subject_json, effect_json, revoked_at, revoked_by FROM hunt_permission_grants
            WHERE hunt_run_id=$1 AND kind=$2 AND revoked_at IS NOT NULL ORDER BY revoked_at, id""",
         uuid.UUID(str(hunt_id)), str(kind),
     )
     for row in rows:
-        if coverage_key(kind, row["subject_json"]) == key:
-            return {"coverage": key, "revoked_grant_id": str(row["id"]),
+        found: dict[str, Any] | None = None
+        if kind == KIND_CAPABILITY_ENABLE:
+            fields = capability_withheld_by(dict(row), str(subject.get("flag") or ""))
+            if fields:
+                found = {"coverage": coverage_key(kind, row["subject_json"]), "fields": fields}
+        elif coverage_key(kind, row["subject_json"]) == key:
+            found = {"coverage": key}
+        if found is not None:
+            return {**found, "revoked_grant_id": str(row["id"]),
                     "revoked_at": row["revoked_at"].isoformat() if row["revoked_at"] else None,
                     "revoked_by": row["revoked_by"]}
     return None
@@ -560,10 +573,10 @@ async def revoke_grant(conn: Any, hunt_id: Any, grant_id: Any, *, revoked_by: st
         policy = await rebuild_authority(conn, run)
         await _write_policy(conn, run, policy)
         detail = {"authority": authority_diff(before, policy)}
-    coverage = coverage_key(grant["kind"], grant["subject_json"])
-    if coverage is not None:
+    withheld = withholding(grant)
+    if withheld is not None:
         # From now on the Hunt's start bounds no longer grant this automatically.
-        detail["auto_grant_withheld"] = coverage
+        detail["auto_grant_withheld"] = withheld
     await record_event(conn, hunt_id=run["id"], request_id=grant["request_id"], grant_id=grant["id"],
                        event="revoked", actor=str(revoked_by)[:200] or "local-operator", source="revoke",
                        detail=detail)

@@ -136,7 +136,11 @@ def test_worker_rebuilds_authority_starts_heartbeats_and_settles_atomically():
 
     assert 'SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE' in handler
     assert 'context = _worker_json_object(run["context_pack"])' in handler
-    assert 'hunt_policy = _worker_json_object(run["policy_json"])' in handler
+    # The policy is re-read from the locked row by the shared dispatch check, which also refuses
+    # a withdrawn allowlist or an ended Hunt as a dispatch refusal that releases the hold.
+    assert 'hunt_policy = require_dispatchable(' in handler
+    dispatch = (Path(__file__).resolve().parents[1] / "api" / "hunt" / "dispatch_authority.py").read_text()
+    assert 'policy = _json(run.get("policy_json"))' in dispatch
     assert "raw_target" not in handler
     assert "raw_policy" not in handler
     assert "hunt_capability_action_digest(" in handler

@@ -539,11 +539,24 @@ Where the engine (PR E2) differs from, or makes concrete, the design above:
   raise (an amendment) and the pre-authorization bounds cannot be revoked. Revoking never undoes
   a remembered record.
   - **Start bounds.** After a person revokes a grant, the bounds no longer grant what it covered
-    for the rest of the Hunt: the capability flag, the destination's scheme, host and port, or
-    the credential profile. A later refusal for it is parked as `awaiting_permission` with a
-    request that a person allows with `shakerscan approve`. The request shows
-    `auto_grant_withheld` (the coverage and the revoked grant). The grant list and the `revoked`
-    event show what was withheld. The bounds still grant everything else they cover.
+    for the rest of the Hunt. A later refusal for it is parked as `awaiting_permission` with a
+    request that a person allows with `shakerscan approve`. The bounds still grant everything
+    else they cover. What is withheld:
+    - **Capabilities, by field.** Capability flags overlap: `state-changing` and
+      `active-replay` both turn on state-changing HTTP. So the bounds stop granting every flag
+      that would turn on a policy field the revoked grant turned on, other than the shared
+      `active_testing` base. Revoking `state-changing` withholds `active-replay` too, so the
+      revoked write authority cannot come back through another flag. `tcp-discovery` and `oob`
+      each withhold only themselves. A grant that turned on only `active_testing` withholds
+      only `active-testing`.
+    - **Destinations** by scheme, host and port, and **credentials** by profile.
+    - **Where it shows.** The request shows `auto_grant_withheld`: the revoked grant, when it was
+      revoked and by whom, and the shared fields. `shakerscan approve` and
+      `hunt permissions show` print it. The grant list and the `revoked` event show what is
+      withheld.
+    - **Remaining case.** An `oob` or `tcp-discovery` grant from the bounds still turns
+      `active_testing` on after an `active-testing` grant was revoked, because every capability
+      flag needs it. It gives back no write, discovery or out-of-band authority that was revoked.
   - **Target authorization is separate.** A capability grant may bind the target's standing
     approval receipt (`approval_receipt_id`, `scope_receipt_id`, `authorization_confirmed`).
     Revoking grants does not undo it: it is a separate decision, withdrawn by revoking the
@@ -553,8 +566,9 @@ Where the engine (PR E2) differs from, or makes concrete, the design above:
   - **Upgrade from 2.8.0.** 2.8.0 restored a snapshot of the whole policy on revocation (R1,
     external release audit, 2026-10-09). On startup, every unfinished Hunt with grants and no
     baseline is rebuilt once from its grant rows, each in its own transaction. A Hunt that cannot
-    be rebuilt is ended `failed` (`permission_authority_unrepaired`) and logged by id, and startup
-    continues.
+    be rebuilt is cancelled exactly as a person's cancel would be, with stop reason
+    `permission_authority_unrepaired`. Its withheld private HTTP results are dropped, its scans
+    and queued jobs are cancelled, and it is logged by id. Startup continues.
 - **MCP.** The `awaiting_permission` outcome and `shakerscan_hunt_permission_wait` ship in E2;
   a capability outside the manifest is sent to the engine, which answers with its code (D31).
 - **UI.** The Hunt page lists pending requests read-only with the `shakerscan approve` command;

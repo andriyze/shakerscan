@@ -195,7 +195,13 @@ def stack(monkeypatch):
         async def run():
             for hook in before_worker:
                 await hook(payload)
-            await worker.process_canonical_http_capability_job(payload)
+            # The production job types, each to its own processor (as worker.process_job does).
+            processor = {
+                "canonical_scanner_capability": worker.process_canonical_scanner_capability_job,
+                "canonical_browser_capability": worker.process_canonical_browser_capability_job,
+                "canonical_network_capability": worker.process_canonical_network_capability_job,
+            }.get(payload.get("type"), worker.process_canonical_http_capability_job)
+            await processor(payload)
 
         workers.append(asyncio.get_running_loop().create_task(run()))
 
@@ -627,5 +633,86 @@ def test_a_write_admitted_before_its_grant_was_revoked_is_refused_at_dispatch(st
         assert "allow_state_changing_http" in summary["message"]
         assert reservation["status"] == "released"  # the hold is released at once, not by stale recovery
         assert answer["action_result"]["status"] == "blocked", answer["result"]
+
+    stack.loop.run_until_complete(scenario())
+
+
+@pytest.mark.parametrize("name, values, flag, withdraw", [
+    ("xss.verify", {"path": "/?q=1"}, "active-testing", "revoke"),  # scanner: allowlist withdrawn
+    ("ports.discover", {"ports": [443]}, "tcp-discovery", "revoke"),  # network: allowlist withdrawn
+    ("browser.navigate", {"path": "/"}, None, "cancel"),  # browser: the Hunt is no longer executable
+    ("http.request", {"method": "GET", "path": "/"}, None, "cancel"),  # HTTP: the Hunt is no longer executable
+])
+def test_a_queued_action_whose_authority_is_withdrawn_is_refused_at_dispatch_on_every_path(
+        stack, monkeypatch, name, values, flag, withdraw):
+    """R1 review: the scanner, browser, network and HTTP workers refused a queued action whose
+    capability had left the allowlist (its grant revoked) or whose Hunt had ended with a plain
+    error, which left the reservation held until stale recovery. Each is now a dispatch refusal
+    that settles the action blocked and releases its hold at once."""
+    from fastapi import HTTPException
+    from hunt import permission_grants
+
+    async def standing_lookup(conn, target_id):  # the real standing authorization row
+        from target_authorization import current_target_authorization
+        return await current_target_authorization(conn, target_id)
+
+    monkeypatch.setattr(permission_grants, "standing_authorization", standing_lookup)
+    receipts: dict = {}
+
+    async def approval(*_args, **_kwargs):  # labelled double: the composition root's receipt validator
+        return {"scope_receipt_id": receipts["scope_receipt_id"]}
+
+    monkeypatch.setitem(stack.router._deps, "_validate_approval_receipt_for_action", lambda: approval)
+
+    async def call(hunt, key):
+        request = stack.router.HuntCapabilityRequest(idempotency_key=key, input=dict(values))
+        try:
+            return await stack.router.execute_hunt_capability(str(hunt["id"]), name, request)
+        except HTTPException as exc:
+            return exc
+        finally:
+            if stack.workers:
+                await asyncio.gather(*stack.workers)
+                stack.workers.clear()
+
+    async def scenario():
+        hunt, standing = await _hunt(stack.pool, budget_overrides={
+            "max_active_actions": 5, "max_tcp_ports": 50, "max_hosts": 2, "max_browser_actions": 5})
+        receipts.update(standing)
+        grant_id = None
+        if flag is not None:
+            refused = await call(hunt, f"r1-{name}-01")
+            assert getattr(refused, "status_code", None) == 409, getattr(refused, "detail", refused)
+            assert refused.detail["permission_request"]["kind"] == "capability.enable"
+            decided = await _decide(stack.pool, hunt, refused.detail["permission_request"]["id"])
+            grant_id = decided["grant"]["id"]
+        else:
+            async with stack.pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE hunt_runs SET policy_json = jsonb_set(policy_json, '{allowed_capabilities}',
+                              (policy_json->'allowed_capabilities') || to_jsonb($2::text)) WHERE id=$1""",
+                    hunt["id"], name)
+
+        async def withdraw_authority(_payload):
+            async with stack.pool.acquire() as conn, conn.transaction():
+                if withdraw == "revoke":
+                    from hunt.permission_grants import revoke_grant
+                    await revoke_grant(conn, hunt["id"], uuid.UUID(grant_id), revoked_by="alice@example.test")
+                else:
+                    from hunt.run_service import cancel_hunt_rows
+                    await cancel_hunt_rows(conn, hunt["id"])
+
+        stack.before_worker.append(withdraw_authority)
+        answer = await call(hunt, f"r1-{name}-01")
+        assert not isinstance(answer, Exception), getattr(answer, "detail", answer)
+        action, reservation, _used = await _action(stack.pool, hunt, f"r1-{name}-01")
+        assert stack.wire == [], "a refused dispatch sends nothing"
+        summary = _summary(action)
+        assert action["status"] == "blocked", (action["status"], summary)
+        assert summary["reason_code"] == "dispatch_authority_rejected", summary
+        assert summary["refusal_stage"] == "dispatch" and summary["execution_started"] is False
+        expected = "outside the persisted Hunt allowlist" if withdraw == "revoke" else "no longer executable"
+        assert expected in summary["message"], summary["message"]
+        assert reservation["status"] == "released"  # at once, not by stale recovery
 
     stack.loop.run_until_complete(scenario())

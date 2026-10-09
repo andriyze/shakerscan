@@ -139,7 +139,7 @@ def test_schema_migration_retries_a_transient_postgres_deadlock(monkeypatch):
 
     calls = 0
 
-    async def migrate_once(_pool):
+    async def migrate_once(_pool, _redis_provider=None):
         nonlocal calls
         calls += 1
         if calls == 1:

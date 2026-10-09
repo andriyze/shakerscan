@@ -2289,7 +2289,7 @@ def synthesize_degraded_result(
 
 async def ensure_verification_schema(pool: asyncpg.Pool):
     """Ensure verification schema exists for upgraded installations."""
-    await run_schema_migrations(pool)
+    await run_schema_migrations(pool, redis_provider=get_redis)
 
 
 async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.UUID, findings: list):

@@ -521,12 +521,15 @@ def test_a_revoked_pre_authorized_grant_is_not_granted_again_by_the_start_bounds
 
     shown = public_request(request)  # what `shakerscan hunt permissions list|show` prints
     assert shown["auto_grant_withheld"]["coverage"] == "capability:state-changing"
+    assert shown["auto_grant_withheld"]["fields"] == ["allow_state_changing_http"]
     assert shown["auto_grant_withheld"]["revoked_grant_id"] == str(auto["id"])
+    withheld = {"coverage": "capability:state-changing", "fields": ["allow_state_changing_http"],
+                "flags": ["active-replay", "state-changing"]}
     (listed,) = run(env, list_grants(env.conn, hunt["id"]))
-    assert listed["auto_grant_withheld"] == "capability:state-changing"
+    assert listed["auto_grant_withheld"] == withheld
     revoked_event = run(env, env.conn.fetchval(
         "SELECT detail_json FROM hunt_permission_events WHERE grant_id=$1 AND event='revoked'", auto["id"]))
-    assert json.loads(revoked_event)["auto_grant_withheld"] == "capability:state-changing"
+    assert json.loads(revoked_event)["auto_grant_withheld"] == withheld
 
     # One approval in the terminal allows it again, and the same key is admitted.
     approved = run(env, env.decide(hunt, request, key="terminal-approve-0001"))
@@ -563,6 +566,60 @@ def test_the_withheld_coverage_holds_across_a_restart_and_for_other_capabilities
         run(env, _raise_or_auto(env, hunt, "collections.replay_active", "state-changing"))
     assert _detail_of(parked.value)["code"] == "permission_required"
     assert policy(env, hunt)["allow_state_changing_http"] is False
+
+
+def test_revoked_write_authority_does_not_come_back_through_another_flag(env, standing):
+    """Round-2 review: state-changing and active-replay both turn on allow_state_changing_http.
+    After the person revokes the auto-granted write, the bounds must not grant active-replay
+    either, or a plain POST would be admitted again."""
+    hunt = run(env, env.hunt(budget=ROOMY))
+    _preauthorize(env, hunt, ["capability:state-changing", "capability:active-replay"])
+    assert write_admitted(env, hunt, "cross-write-0001")
+    (auto,) = run(env, env.conn.fetch(
+        "SELECT id FROM hunt_permission_grants WHERE hunt_run_id=$1 AND kind='capability.enable'", hunt["id"]))
+    revoke(env, hunt, auto["id"])
+    assert not write_admitted(env, hunt, "cross-write-0002")
+    with pytest.raises(HTTPException) as parked:
+        run(env, _raise_or_auto(env, hunt, "collections.replay_active", "active-replay"))
+    assert _detail_of(parked.value)["code"] == "permission_required"
+    assert flags(env, hunt) == PASSIVE
+    assert not write_admitted(env, hunt, "cross-write-0003")
+    (replay,) = [item for item in run(env, env.requests(hunt))
+                 if item["status"] == "pending" and json.loads(item["subject_json"])["flag"] == "active-replay"]
+    shown = json.loads(replay["display_json"])["auto_grant_withheld"]
+    assert shown["revoked_grant_id"] == str(auto["id"]) and shown["fields"] == ["allow_state_changing_http"]
+    assert run(env, env.conn.fetchval(
+        "SELECT COUNT(*) FROM hunt_permission_grants WHERE hunt_run_id=$1 AND revoked_at IS NULL", hunt["id"])) == 0
+
+
+def test_revoking_one_flag_withholds_only_the_flags_that_share_its_own_fields(env, standing):
+    hunt = run(env, env.hunt(budget=ROOMY))
+    _preauthorize(env, hunt, ["capability:active-testing", "capability:tcp-discovery", "capability:oob",
+                              "capability:state-changing"])
+    run(env, _raise_or_auto(env, hunt, "service.snmp.inspect", "tcp-discovery"))
+    (discovery,) = run(env, env.conn.fetch(
+        "SELECT id FROM hunt_permission_grants WHERE hunt_run_id=$1 AND revoked_at IS NULL", hunt["id"]))
+    revoke(env, hunt, discovery["id"])
+    with pytest.raises(HTTPException):  # tcp-discovery itself is withheld
+        run(env, _raise_or_auto(env, hunt, "ports.discover", "tcp-discovery"))
+    # oob and state-changing share only the active_testing base with it: still granted.
+    run(env, _raise_or_auto(env, hunt, "xss.verify", "oob"))
+    assert write_admitted(env, hunt, "only-own-0001")
+    current = policy(env, hunt)
+    assert current["allow_oob_interactions"] is True and current["network_discovery"] is False
+
+    # A grant whose only field is active_testing withholds active-testing alone, not every flag.
+    second = run(env, env.hunt(budget=ROOMY))
+    _preauthorize(env, second, ["capability:active-testing", "capability:oob"])
+    run(env, _raise_or_auto(env, second, "xss.verify", "active-testing"))
+    (base,) = run(env, env.conn.fetch(
+        "SELECT id FROM hunt_permission_grants WHERE hunt_run_id=$1 AND revoked_at IS NULL", second["id"]))
+    revoke(env, second, base["id"])
+    with pytest.raises(HTTPException):
+        run(env, _raise_or_auto(env, second, "sqli.verify", "active-testing"))
+    # Documented remaining case: oob is still granted, and it turns active_testing on again.
+    run(env, _raise_or_auto(env, second, "xss.verify", "oob"))
+    assert policy(env, second)["active_testing"] is True
 
 
 # ---------------------------------------------------------------------------------------------
@@ -669,24 +726,77 @@ def test_a_destination_past_the_cap_is_refused_with_a_reason_and_nothing_is_drop
 # ---------------------------------------------------------------------------------------------
 # Startup repair is per Hunt and fails closed for that Hunt only.
 
-def test_a_hunt_whose_repair_fails_is_ended_and_the_others_are_repaired(env, standing, caplog):
+class _Redis:
+    """Labelled double: the part of Redis job cancellation signalling uses."""
+
+    def __init__(self) -> None:
+        self.keys: dict[str, str] = {}
+
+    def smembers(self, _key):
+        return set()
+
+    def set(self, key, value, ex=None):
+        self.keys[key] = value
+        return True
+
+
+def test_a_hunt_whose_repair_fails_is_cancelled_like_a_cancellation_and_the_others_are_repaired(
+        env, standing, caplog):
     from hunt.grant_repair import REPAIR_FAILED_STOP_REASON, repair_grant_authority
 
+    # The tables a cancellation reaches beyond the Hunt's own (their production DDL, trimmed).
+    run(env, env.conn.execute("""
+        CREATE TABLE scans(id UUID PRIMARY KEY, status TEXT, run_kind TEXT, options JSONB, error_message TEXT,
+                           completed_at TIMESTAMPTZ, progress INT, current_phase TEXT, parent_scan_id UUID);
+        CREATE TABLE hunt_cancellable_jobs(
+            hunt_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE, job_id UUID NOT NULL,
+            signal_state TEXT NOT NULL DEFAULT 'pending', cancel_requested_at TIMESTAMPTZ,
+            signalled_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (hunt_id, job_id))"""))
     good, _a, _b = _legacy_audit_state(env, standing, revoked=True)
     broken, write, _d = _legacy_audit_state(env, standing, revoked=True)
     # A stored effect that is not an object (a corrupt row): rebuilding this Hunt raises.
     run(env, env.conn.execute("UPDATE hunt_permission_grants SET effect_json='[1]'::jsonb WHERE id=$1", write))
     assert write_admitted(env, broken, "broken-before-0001")
+    action, scan, job = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    run(env, env.conn.execute(
+        """INSERT INTO hunt_actions(id, hunt_run_id, capability_name, status, input_summary, result_summary,
+                                    private_http_result)
+           VALUES($1,$2,'http.request','completed','{}'::jsonb,'{}'::jsonb,'enc:fernet:withheld')""",
+        action, broken["id"]))
+    run(env, env.conn.execute(
+        """INSERT INTO scans(id, status, run_kind, options) VALUES($1,'queued','web',$2::jsonb)""",
+        scan, json.dumps({"hunt_dispatch": {"hunt_id": str(broken["id"])}})))
+    run(env, env.conn.execute("INSERT INTO hunt_cancellable_jobs(hunt_id, job_id) VALUES($1,$2)", broken["id"], job))
+    redis = _Redis()
     with caplog.at_level("ERROR"):
-        repaired = run(env, repair_grant_authority(env.conn))
+        repaired = run(env, repair_grant_authority(env.conn, redis_provider=lambda: redis))
     assert repaired == [str(good["id"])]
     assert flags(env, good) == PASSIVE
     row = run(env, env.run(broken))
-    assert row["status"] == "failed" and row["stop_reason"] == REPAIR_FAILED_STOP_REASON
+    assert row["status"] == "cancelled" and row["stop_reason"] == REPAIR_FAILED_STOP_REASON
     assert row["completed_at"] is not None
+    # Everything a cancellation does: the withheld values go, scans and queued jobs are stopped.
+    assert run(env, env.conn.fetchval("SELECT private_http_result FROM hunt_actions WHERE id=$1", action)) is None
+    assert run(env, env.conn.fetchval("SELECT status FROM scans WHERE id=$1", scan)) == "cancelled"
+    jobs = run(env, env.conn.fetchrow("SELECT * FROM hunt_cancellable_jobs WHERE job_id=$1", job))
+    assert jobs["cancel_requested_at"] is not None and jobs["signal_state"] == "signalled"
+    assert f"agent_tool_cancel:{job}" in redis.keys
     assert not write_admitted(env, broken, "broken-after-0002")
     assert any(str(broken["id"]) in record.getMessage() for record in caplog.records)
     assert not any("policy_before" in record.getMessage() for record in caplog.records)
+
+
+def test_a_failed_repair_still_stops_the_hunt_when_its_queued_work_cannot_be_reached(env, standing, caplog):
+    """No scans table here: cancelling the queued work fails, and the Hunt is stopped anyway."""
+    from hunt.grant_repair import REPAIR_FAILED_STOP_REASON, repair_grant_authority
+
+    broken, write, _d = _legacy_audit_state(env, standing, revoked=True)
+    run(env, env.conn.execute("UPDATE hunt_permission_grants SET effect_json='[1]'::jsonb WHERE id=$1", write))
+    with caplog.at_level("ERROR"):
+        run(env, repair_grant_authority(env.conn))
+    row = run(env, env.run(broken))
+    assert (row["status"], row["stop_reason"]) == ("cancelled", REPAIR_FAILED_STOP_REASON)
 
 
 def test_concurrent_repairs_settle_on_the_same_authority(env, standing):
