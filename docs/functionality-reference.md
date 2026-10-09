@@ -754,7 +754,11 @@ Scan admission names the non-resolving host.
 **Certificate Transparency monitoring (Gungnir)** (`api/gungnir_worker.py`): a long-running worker
 that watches CT logs in real time, discovering new certificates for monitored domains. New subdomains
 are auto-added as targets (`discovery_source = gungnir-monitor`); if the root domain has ASM enabled,
-discovered surface inherits the ASM policy. Controlled via `./scanner.sh gungnir start|stop|status`
+discovered surface inherits the ASM policy. A root that is a public suffix is never monitored, a name
+must be a valid host under a monitored root on a label boundary (a leading `*.` names its parent), and
+each apex gains at most `SHAKERSCAN_CT_MONITOR_DAILY_CAP` new targets per UTC day (default 100); names
+over the cap are counted per apex and day in Redis `gungnir:suppressed` and the status's
+`suppressed_over_daily_cap`, not added. Controlled via `./scanner.sh gungnir start|stop|status`
 and `/gungnir/*` endpoints.
 
 **Schedules** (`schedule_runner`, `/schedules`): recurring daily/weekly actions with timezone and
@@ -1818,7 +1822,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 408 | Python sources + Compose manifests |
+| Runtime environment keys | 409 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 130 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2924,6 +2928,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CRAWLER_MEMORY_LIMIT_MB` | `api/deployment_policy.py` |
 | `SHAKERSCAN_CREDENTIAL_TMP_DIR` | `api/runtime/credential_resolver.py` |
+| `SHAKERSCAN_CT_MONITOR_DAILY_CAP` | `api/gungnir_worker.py` |
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
 | `SHAKERSCAN_DATA_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
