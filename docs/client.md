@@ -269,9 +269,17 @@ write), and the next launch lists under `changed:` exactly what changed in betwe
 hidden); nothing is blocked. When the record of a workspace prepared before is missing or not
 valid, the launch says that changes since the last launch could not be checked. A record that
 would sit inside the workspace (`--here` from your home directory) is not used, and a workspace
-that contains the client's configuration directory (it holds the token) is warned about. With
-`SHAKERSCAN_CONFIG_DIR` set, state and data sit beside it (`<dir>.state`, `<dir>.data`), so an
-isolated profile stays isolated. Kit files and hook entries the kit no longer ships are removed (a kit file you changed
+that contains the client's configuration directory (it holds the token) is warned about.
+
+Where the client keeps its state (workspace records) and data (the default agent workspace),
+first match wins: `SHAKERSCAN_STATE_DIR` / `SHAKERSCAN_DATA_DIR`; `$XDG_STATE_HOME/shakerscan`
+/ `$XDG_DATA_HOME/shakerscan`; beside `SHAKERSCAN_CONFIG_DIR` when it is set (`<dir>.state`,
+`<dir>.data`, so an isolated profile stays isolated); `~/.local/state/shakerscan` /
+`~/.local/share/shakerscan` (macOS too). Every path must be absolute (a relative XDG value is
+ignored, as the XDG specification says). A directory that cannot be created or written, or a
+`SHAKERSCAN_CONFIG_DIR` without a usable sibling (such as `/`), stops `shakerscan agent` with an
+error naming the variable to set. `scripts/clean-shakerscan.sh` removes the records, and the
+default agent workspace only with `--agent-workspace` (docs/clean-reinstall.md). Kit files and hook entries the kit no longer ships are removed (a kit file you changed
 is kept and named); your own files stay. `opencode.json` with comments or trailing commas is read
 and written back as plain JSON, its original kept beside it; a file that is not JSON or JSONC is
 moved aside (`.shakerscan-unreadable-*.bak`) with the reason. The client never writes through a

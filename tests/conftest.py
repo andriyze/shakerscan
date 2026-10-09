@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import re
 import socket
 import sys
 from pathlib import Path
@@ -35,9 +34,6 @@ def _hermetic_target_resolution(monkeypatch):
 
 # Read once, before any test can move HOME: the home the guard below protects.
 REAL_HOME = Path(os.path.expanduser("~"))
-_CLIENT_TEST_FILES = re.compile(
-    r"^test_(client_|shakerscan_client|agent_|hunt_approve|hunt_terminal_approval|mcp_|read_only_mcp)"
-)
 _CLIENT_HOME_DIRECTORIES = (".config/shakerscan", ".local/state/shakerscan", ".local/share/shakerscan")
 
 
@@ -57,19 +53,25 @@ def client_home_snapshot(home: Path | None = None) -> dict[str, tuple[int, int]]
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_client_home(request, monkeypatch, tmp_path_factory):
-    """Client and agent tests get their own configuration, state and data directories, and fail
-    if they write under the real home's ShakerScan directories anyway. A test once wrote five
-    workspace records into a developer's ~/.local/state/shakerscan."""
-    if not _CLIENT_TEST_FILES.match(Path(str(request.node.fspath)).name):
-        yield
-        return
+def _hermetic_client_home(monkeypatch, tmp_path_factory):
+    """Every test gets its own client configuration, state and data directories, so nothing a
+    test runs (the client, scanner.sh, an installer) writes into the developer's home. A test
+    once wrote five workspace records into a developer's ~/.local/state/shakerscan. Tests of
+    the directory rules themselves change these variables with their own monkeypatch."""
     base = tmp_path_factory.mktemp("client-home")
     monkeypatch.setenv("SHAKERSCAN_CONFIG_DIR", str(base / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(base / "state"))
     monkeypatch.setenv("XDG_DATA_HOME", str(base / "data"))
+    for name in ("SHAKERSCAN_STATE_DIR", "SHAKERSCAN_DATA_DIR"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _real_home_guard():
+    """Fail the run if any test wrote under the real home's ShakerScan client directories
+    (checked once for the whole session; running the real client meanwhile also trips it)."""
     before = client_home_snapshot()
     yield
     after = client_home_snapshot()
     changed = sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
-    assert not changed, f"this test wrote under the real home: {changed[:10]}"
+    assert not changed, f"tests wrote under the real home: {changed[:10]}"

@@ -86,31 +86,72 @@ def config_dir(environ: Mapping[str, str] | None = None) -> Path:
     return Path(environ.get(ENV_CONFIG_DIR) or (Path.home() / ".config" / "shakerscan"))
 
 
-def _xdg(variable: str, fallback: tuple[str, ...], environ: Mapping[str, str] | None = None) -> Path:
-    """``$<variable>/shakerscan`` when it is an absolute path (the XDG rule), else
-    ``~/<fallback>/shakerscan``; the same on macOS as elsewhere, like ``config_dir``.
+ENV_STATE_DIR = "SHAKERSCAN_STATE_DIR"
+ENV_DATA_DIR = "SHAKERSCAN_DATA_DIR"
 
-    With ``$SHAKERSCAN_CONFIG_DIR`` set (an isolated profile) the directory sits beside it
-    instead, ``<config dir>.state`` or ``<config dir>.data``: the profile stays isolated, and the
-    agent workspace is still outside the directory that holds the token."""
+
+def _client_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path:
+    """The client's ``state`` or ``data`` directory, first match wins:
+
+    1. ``$SHAKERSCAN_STATE_DIR`` / ``$SHAKERSCAN_DATA_DIR`` (must be absolute);
+    2. ``$XDG_STATE_HOME/shakerscan`` / ``$XDG_DATA_HOME/shakerscan`` (ignored unless absolute,
+       as the XDG specification says);
+    3. with ``$SHAKERSCAN_CONFIG_DIR`` set (an isolated profile), beside it:
+       ``<config dir>.state`` / ``<config dir>.data``, so the profile stays isolated and the agent
+       workspace stays outside the directory that holds the token;
+    4. ``~/.local/state/shakerscan`` / ``~/.local/share/shakerscan`` (macOS too, as for
+       ``config_dir``).
+    A value that cannot be used is a ClientError naming the variable to set."""
     environ = os.environ if environ is None else environ
+    explicit, xdg, fallback = {
+        "state": (ENV_STATE_DIR, "XDG_STATE_HOME", (".local", "state")),
+        "data": (ENV_DATA_DIR, "XDG_DATA_HOME", (".local", "share")),
+    }[kind]
+    value = environ.get(explicit) or ""
+    if value:
+        if not Path(value).is_absolute():
+            raise ClientError(f"{explicit} must be an absolute path, not {value!r}")
+        return Path(value)
+    value = environ.get(xdg) or ""
+    if value and Path(value).is_absolute():
+        return Path(value) / "shakerscan"
     if environ.get(ENV_CONFIG_DIR):
         isolated = config_dir(environ)
-        return isolated.with_name(isolated.name + (".state" if variable == "XDG_STATE_HOME" else ".data"))
-    value = environ.get(variable) or ""
-    base = Path(value) if value and Path(value).is_absolute() else Path.home().joinpath(*fallback)
-    return base / "shakerscan"
+        if not isolated.is_absolute() or not isolated.name or isolated.name in {".", ".."}:
+            raise ClientError(
+                f"{ENV_CONFIG_DIR}={environ[ENV_CONFIG_DIR]} has no usable sibling for the client's {kind} "
+                f"directory; set {explicit} to an absolute directory"
+            )
+        return isolated.with_name(f"{isolated.name}.{kind}")
+    return Path.home().joinpath(*fallback) / "shakerscan"
+
+
+def ensure_client_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path:
+    """The client's ``state`` or ``data`` directory, created (owner-only) if needed; one that
+    cannot be created or written is a ClientError naming the variable to set."""
+    path = _client_dir(kind, environ)
+    variable = ENV_STATE_DIR if kind == "state" else ENV_DATA_DIR
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not os.access(path, os.W_OK | os.X_OK):
+            raise PermissionError(13, "Permission denied")
+    except OSError as exc:
+        raise ClientError(
+            f"cannot use {path} for the client's {kind} ({exc.strerror or exc}); set {variable} to a writable "
+            "absolute directory"
+        ) from exc
+    return path
 
 
 def state_dir(environ: Mapping[str, str] | None = None) -> Path:
-    """``${XDG_STATE_HOME:-~/.local/state}/shakerscan``: the client's records of agent workspaces,
-    kept apart from the workspaces themselves and from the saved connection."""
-    return _xdg("XDG_STATE_HOME", (".local", "state"), environ)
+    """The client's records of agent workspaces (see ``_client_dir``), kept apart from the
+    workspaces themselves and from the saved connection."""
+    return _client_dir("state", environ)
 
 
 def data_dir(environ: Mapping[str, str] | None = None) -> Path:
-    """``${XDG_DATA_HOME:-~/.local/share}/shakerscan``: the default agent workspace lives here."""
-    return _xdg("XDG_DATA_HOME", (".local", "share"), environ)
+    """Where the default agent workspace lives (see ``_client_dir``)."""
+    return _client_dir("data", environ)
 
 
 def default_workspace(environ: Mapping[str, str] | None = None) -> Path:
@@ -758,14 +799,15 @@ def cmd_agent(args: argparse.Namespace) -> int:
         raise ClientError(f"{agent} is not on this PATH; install it, or pass --no-launch to prepare the "
                           "workspace. Nothing was pre-authorized and no agent was started.")
     allowed = launch_preauthorization(args, url, token_file)
-    notes: list[str] = _workspace.migrate_records(config_dir() / "workspaces", state_dir() / "workspaces")
+    records = ensure_client_dir("state") / "workspaces"
+    notes: list[str] = _workspace.migrate_records(config_dir() / "workspaces", records)
     if args.workspace:
         workspace = Path(args.workspace).expanduser().resolve()
     elif args.here:
         workspace = Path.cwd()
     else:
-        workspace = default_workspace()
-        notes += _workspace.migrate_default_workspace(config_dir() / "agent", workspace, state_dir() / "workspaces")
+        workspace = ensure_client_dir("data") / "agent"
+        notes += _workspace.migrate_default_workspace(config_dir() / "agent", workspace, records)
     executable = client_executable()
     written = prepare_workspace(workspace, url, who, executable, authenticated=authenticated, mcp_env=allowed,
                                 notes=notes)
