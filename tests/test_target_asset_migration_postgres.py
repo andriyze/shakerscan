@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import os
 from pathlib import Path
+import sys
 import uuid
 
 import pytest
@@ -14,9 +15,24 @@ from targets.asset_migration import host_url, locator_from_url, migrate_target_a
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _real_asyncpg():
+    """The installed asyncpg, even when another test module stubbed ``sys.modules["asyncpg"]`` at
+    import time (``sys.modules.setdefault("asyncpg", SimpleNamespace(Pool=object))``). The stub is
+    put back afterwards, so this neither depends on nor changes collection order."""
+    loaded = sys.modules.get("asyncpg")
+    if loaded is not None and hasattr(loaded, "connect"):
+        return loaded
+    stub = sys.modules.pop("asyncpg", None)
+    try:
+        return pytest.importorskip("asyncpg")
+    finally:
+        if stub is not None:
+            sys.modules["asyncpg"] = stub
+
+
 @asynccontextmanager
 async def database():
-    asyncpg = pytest.importorskip("asyncpg")
+    asyncpg = _real_asyncpg()
     dsn = os.environ.get("TARGET_ASSET_TEST_DATABASE_URL")
     if not dsn:
         pytest.skip("TARGET_ASSET_TEST_DATABASE_URL is not configured")
