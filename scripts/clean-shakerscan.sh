@@ -6,7 +6,7 @@ INSTALL_DIR="${SHAKERSCAN_HOME-$HOME/.shakerscan}"
 CONFIG_DIR="${SHAKERSCAN_CONFIG_DIR-$HOME/.config/shakerscan}"
 BIN_DIR="${SHAKERSCAN_BIN_DIR-$HOME/.local/bin}"
 PROJECT="${COMPOSE_PROJECT_NAME-shakerscan}"
-YES=0 DRY_RUN=0 PURGE_CLIENT=1 PURGE_IMAGES=0 SUDO_DOCKER=0
+YES=0 DRY_RUN=0 PURGE_CLIENT=1 PURGE_IMAGES=0 SUDO_DOCKER=0 PURGE_AGENT=0
 PHASE=preflight
 
 usage() {
@@ -19,7 +19,8 @@ macOS and Linux are supported. Preview with --dry-run before deleting data.
 Options:
   --home PATH       Runtime directory (default: ~/.shakerscan)
   --project NAME    Compose project (default: shakerscan or COMPOSE_PROJECT_NAME)
-  --keep-client     Keep the saved client profile and launcher
+  --keep-client     Keep the saved client profile, its records and launcher
+  --agent-workspace Also remove the default agent workspace (it may hold your work)
   --images          Also remove first-party image references used by this project
   --sudo-docker     Use sudo for Docker only, on the same local Docker socket
   --dry-run         Validate and display the plan without deleting anything
@@ -28,8 +29,10 @@ Options:
 
 Deletes project containers, labeled volumes (including PostgreSQL/Redis/MinIO),
 networks, and the verified runtime, including its evidence, secrets and backups.
-Client cleanup removes only config.json, token and this runtime's launcher;
-other client-directory files and package-manager-owned commands are retained.
+Client cleanup removes only config.json, token, the client's agent-workspace
+records (*.json under its state directory) and this runtime's launcher; other
+client-directory files and package-manager-owned commands are retained. The
+default agent workspace is kept unless --agent-workspace is given.
 External storage, external volumes, host-wide /etc, /opt, /var/lib integrations,
 systemd/WireGuard configuration and backups outside the runtime are NOT removed.
 Run as the installation owner. Docker must be reachable; a failed inventory is
@@ -57,6 +60,7 @@ while [ "$#" -gt 0 ]; do
       if [ "$1" = --home ]; then INSTALL_DIR=$2; else PROJECT=$2; fi
       shift 2 ;;
     --keep-client) PURGE_CLIENT=0; shift ;;
+    --agent-workspace) PURGE_AGENT=1; shift ;;
     --images) PURGE_IMAGES=1; shift ;;
     --sudo-docker) SUDO_DOCKER=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -104,11 +108,62 @@ safe_dir() {
   done
 }
 
-RAW_INSTALL=$INSTALL_DIR RAW_CONFIG=$CONFIG_DIR RAW_BIN=$BIN_DIR
+# The client's state (workspace records) and data (default agent workspace) directories, resolved
+# as the client resolves them: SHAKERSCAN_STATE_DIR/SHAKERSCAN_DATA_DIR, then XDG_STATE_HOME/
+# XDG_DATA_HOME (absolute only), then beside SHAKERSCAN_CONFIG_DIR (<dir>.state, <dir>.data),
+# then ~/.local/state/shakerscan and ~/.local/share/shakerscan.
+client_dir() {
+  local explicit=$1 xdg=$2 suffix=$3 fallback=$4 value config
+  value=${!explicit-}
+  if [ -n "$value" ]; then
+    case "$value" in /*) printf '%s\n' "$value"; return 0 ;; esac
+    die "$explicit must be an absolute path"
+  fi
+  value=${!xdg-}
+  case "$value" in /*) printf '%s/shakerscan\n' "${value%/}"; return 0 ;; esac
+  if [ -n "${SHAKERSCAN_CONFIG_DIR-}" ]; then
+    config=$SHAKERSCAN_CONFIG_DIR
+    while [ "${config%/}" != "$config" ]; do config=${config%/}; done
+    case "$config" in /?*) ;; *) die "SHAKERSCAN_CONFIG_DIR has no usable sibling; set $explicit" ;; esac
+    printf '%s.%s\n' "$config" "$suffix"; return 0
+  fi
+  printf '%s/%s\n' "$HOME" "$fallback"
+}
+STATE_DIR=$(client_dir SHAKERSCAN_STATE_DIR XDG_STATE_HOME state .local/state/shakerscan)
+DATA_DIR=$(client_dir SHAKERSCAN_DATA_DIR XDG_DATA_HOME data .local/share/shakerscan)
+
+RAW_INSTALL=$INSTALL_DIR RAW_CONFIG=$CONFIG_DIR RAW_BIN=$BIN_DIR RAW_STATE=$STATE_DIR RAW_DATA=$DATA_DIR
 INSTALL_DIR=$(canonical_dir "$RAW_INSTALL")
 safe_dir "$INSTALL_DIR"
 CONFIG_DIR=$(canonical_dir "$RAW_CONFIG")
 BIN_DIR=$(canonical_dir "$RAW_BIN")
+STATE_DIR=$(canonical_dir "$RAW_STATE")
+DATA_DIR=$(canonical_dir "$RAW_DATA")
+# The default agent workspace now, and where client 0.8.1 kept it (inside the configuration).
+AGENT_DIRS=("$DATA_DIR/agent" "$CONFIG_DIR/agent")
+RECORD_DIRS=("$STATE_DIR/workspaces" "$CONFIG_DIR/workspaces")
+
+# A client directory the cleanup reads or removes from: never a link, never shared, never the
+# runtime's parent, owned by the current user.
+check_client_dir() {
+  local raw=$1 canon=$2 what=$3
+  [ "$(canonical_dir "$raw")" = "$canon" ] || die "$what path changed during cleanup"
+  while [ "$raw" != / ] && [ "${raw%/}" != "$raw" ]; do raw=${raw%/}; done
+  [ ! -L "$raw" ] || die "$what directory must not be a symlink: $raw"
+  safe_dir "$canon"
+  case "$INSTALL_DIR/" in "$canon/"*) die "$what directory must not contain the runtime" ;; esac
+  if [ -d "$canon" ]; then [ -O "$canon" ] || die "$what directory is not owned by the current user"; fi
+}
+
+check_agent_workspace() {
+  local dir=$1
+  [ -e "$dir" ] || [ -L "$dir" ] || return 0
+  [ ! -L "$dir" ] && [ -d "$dir" ] || die "Agent workspace is not a plain directory: $dir"
+  [ -O "$dir" ] || die "Agent workspace is not owned by the current user: $dir"
+  [ -f "$dir/AGENTS.md" ] && [ ! -L "$dir/AGENTS.md" ] &&
+    head -n 1 "$dir/AGENTS.md" | grep -Eq '^# (Connected ShakerScan instance|Remote ShakerScan engine)$' ||
+    die "Not a recognized ShakerScan agent workspace: $dir (drop --agent-workspace to keep it)"
+}
 
 validate_paths() {
   local compose candidate
@@ -145,6 +200,11 @@ validate_paths() {
         die 'Cannot attribute token without config.json; use --keep-client'
       fi
       [ ! -d "$CONFIG_DIR/token" ] || die 'Client token is a directory; refusing removal'
+    fi
+    check_client_dir "$RAW_STATE" "$STATE_DIR" 'Client state'
+    check_client_dir "$RAW_DATA" "$DATA_DIR" 'Client data'
+    if [ "$PURGE_AGENT" -eq 1 ]; then
+      for dir in "${AGENT_DIRS[@]}"; do check_agent_workspace "$dir"; done
     fi
   else
     case "$CONFIG_DIR/" in "$INSTALL_DIR/"*) die '--keep-client cannot preserve a client directory inside the deleted runtime' ;; esac
@@ -199,6 +259,12 @@ printf 'ShakerScan cleanup plan\n  Runtime: %s\n  Docker: %s\n  Compose project:
 printf '  Containers:\n%s\n  Volumes:\n%s\n  Networks:\n%s\n' "${CONTAINERS:-(none)}" "${VOLUMES:-(none)}" "${NETWORKS:-(none)}"
 if [ "$PURGE_CLIENT" -eq 1 ]; then
   printf '  Client files: %s/{config.json,token}\n  Owned launcher only: %s/shakerscan\n' "$CONFIG_DIR" "$BIN_DIR"
+  printf '  Agent workspace records: %s/*.json, %s/*.json\n' "${RECORD_DIRS[0]}" "${RECORD_DIRS[1]}"
+  if [ "$PURGE_AGENT" -eq 1 ]; then
+    printf '  Agent workspaces (recursively): %s, %s\n' "${AGENT_DIRS[0]}" "${AGENT_DIRS[1]}"
+  else
+    printf '  Agent workspaces: kept (%s; --agent-workspace removes them)\n' "${AGENT_DIRS[0]}"
+  fi
 else echo '  Client files and launcher: kept'; fi
 if [ "$PURGE_IMAGES" -eq 1 ]; then printf '  Project first-party image references:\n%s\n' "${IMAGES:-(none)}"; else echo '  Docker images: kept'; fi
 echo 'Host-wide integrations, external volumes/storage and backups outside the runtime are retained.'
@@ -238,6 +304,33 @@ validate_paths
 PHASE=local
 # Client config is deliberately NOT recursively removed. Unknown files survive.
 if [ "$PURGE_CLIENT" -eq 1 ]; then
+  # Records: plain *.json files only (a link is never followed or removed through), then the
+  # directories if they are empty.
+  for dir in "${RECORD_DIRS[@]}"; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    for sub in "$dir/superseded" "$dir"; do
+      [ -d "$sub" ] && [ ! -L "$sub" ] || continue
+      for record in "$sub"/*.json; do
+        if [ -f "$record" ] && [ ! -L "$record" ]; then
+          rm -f -- "$record" || die "Cannot remove workspace record: $record"
+        fi
+      done
+      if ! rmdir -- "$sub"; then echo "Retained record directory (other files or permissions): $sub"; fi
+    done
+  done
+  for dir in "${AGENT_DIRS[@]}"; do
+    [ -e "$dir" ] || [ -L "$dir" ] || continue
+    if [ "$PURGE_AGENT" -eq 1 ] && [ -d "$dir" ] && [ ! -L "$dir" ]; then
+      rm -rf -- "$dir" || die "Cannot remove agent workspace: $dir"
+    else
+      echo "Kept agent workspace (it may hold your work; --agent-workspace removes it): $dir"
+    fi
+  done
+  for dir in "$STATE_DIR" "$DATA_DIR"; do
+    if [ -d "$dir" ] && [ ! -L "$dir" ] && ! rmdir -- "$dir"; then
+      echo "Retained client directory (other files or permissions): $dir"
+    fi
+  done
   for name in config.json token; do
     rm -f -- "$CONFIG_DIR/$name" || die "Cannot remove client file: $name"
   done
