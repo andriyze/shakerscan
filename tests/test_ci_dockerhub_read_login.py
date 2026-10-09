@@ -112,7 +112,12 @@ def test_step_pulls_follow_the_read_login(workflow, job_name, pulls):
     assert len(logins) == 1 and logins[0] < first_pull, (workflow, job_name)
 
 
-@pytest.mark.parametrize("workflow,job_name,pulls", STEP_PULLERS)
+# installed-upgrade pulls mostly shakerscan/* release images; mirror.gcr.io served their manifests
+# but not every blob ("unknown blob"), which failed the pull instead of falling back to Docker Hub.
+NO_MIRROR = {("installed-upgrade.yml", "installed-upgrade")}
+
+
+@pytest.mark.parametrize("workflow,job_name,pulls", [p for p in STEP_PULLERS if p[:2] not in NO_MIRROR])
 def test_step_pulls_go_through_the_mirror(workflow, job_name, pulls):
     _, doc = next((p, d) for p, d in _pr_workflows() if p.name == workflow)
     steps = doc["jobs"][job_name]["steps"]
@@ -200,3 +205,12 @@ def test_ci_only_commands_name_the_mirror_directly():
     dockerfile = (ROOT / "scanner/Dockerfile.model-intake").read_text()
     builder = re.search(r"^ARG MODEL_INTAKE_GO_BUILDER=(\S+)$", dockerfile, re.MULTILINE).group(1)
     assert re.fullmatch(r"[a-z0-9._-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}", builder)
+
+
+@pytest.mark.parametrize("workflow,job_name", sorted(NO_MIRROR))
+def test_release_image_jobs_do_not_use_the_mirror(workflow, job_name):
+    _, doc = next((p, d) for p, d in _pr_workflows() if p.name == workflow)
+    steps = doc["jobs"][job_name]["steps"]
+    assert not any(step.get("uses") == MIRROR_ACTION for step in steps)
+    diagnostics = [step for step in steps if step.get("name") == "Show Docker daemon registry fallbacks"]
+    assert len(diagnostics) == 1 and diagnostics[0]["if"] == "failure()"
