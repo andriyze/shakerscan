@@ -30,16 +30,20 @@ This document records only the current product boundary and genuinely unfinished
   (a different key, or an external file or object that is gone) is listed under the call's
   `payload_unavailable`, and the export reports partial fidelity rather than complete. One read
   loads a bounded number of externally stored bytes; a payload past that bound is listed under
-  `payload_omitted` and the export is likewise partial. Masking is bounded the same way: a
-  masked export holds at most 32 MiB of encoded body text (`SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES`,
-  1-256 MiB), reads external payloads only up to that budget, and lists every further body
-  under `payload_omitted`; a single body over 16 Mi characters is left out too. Each call says
-  why in `payload_omitted_reasons` (`external_read_budget`, `masking_budget`,
-  `over_masking_limit`, `masking_failed`), a body left out by masking carries no digest, the
-  fidelity is partial, and a masked HAR states it in the entry's comment. No such body is ever
-  shown unmasked. Bodies are masked and encoded in two worker processes, never on the API
-  event loop, and at most two exports (archive or Hunt record) run at once: a third waits two
-  seconds for a slot, then gets 503 with `Retry-After` before any row is read.
+  `payload_omitted` and the export is likewise partial. Masking is bounded the same way: an
+  export reads its rows' headers and metadata first and their bodies afterwards, at most 8 MiB
+  of stored body at a time, and a masked export stops reading bodies once it holds 32 MiB of
+  encoded body text (`SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES`, 1-256 MiB); every further
+  body is listed under `payload_omitted`, and a single body over 16 Mi characters is left out
+  too. Each call says why in `payload_omitted_reasons` (`external_read_budget`,
+  `masking_budget`, `over_masking_limit`, or `masking_failed` for a body that could not be
+  masked safely), a body left out by masking carries no digest, the fidelity is partial, and a
+  masked HAR states it in the entry's comment. No such body is ever shown unmasked, and an
+  export is always strict UTF-8 JSON (a lone surrogate becomes U+FFFD). Bodies are masked and
+  encoded in two worker processes that import only the masking code, never on the API event
+  loop. At most two exports (archive or Hunt record) run at once, one per caller (the socket
+  peer, or behind the trusted gateway its forwarded address): a request without a free slot
+  waits two seconds, then gets 503 with `Retry-After` before any row is read.
 - Hunt exposes requests-only export separately from its explicit decision record/debrief. Hidden
   chain-of-thought is never an export product.
 - Content-addressed evidence and external blobs must not be deleted before durable ownership and
