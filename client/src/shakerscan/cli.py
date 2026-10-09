@@ -32,6 +32,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from . import __version__
+from . import _workspace
 from ._vendored import kit_sources, load
 
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
@@ -503,169 +504,44 @@ def _retire_legacy_agent_guide(workspace: Path) -> None:
         raise
 
 
-# L3: re-running `shakerscan agent` rewrote the agents' workspace configuration from scratch and
-# dropped what the person had added (OpenCode's `permission` block with their bash deny-list, a
-# Claude Code `permissions` list, other MCP servers). The client now owns only these parts of each
-# file and merges them into what is there; every other key is the person's and is kept, and the
-# command says so. Codex keeps its MCP servers in its own configuration (`codex mcp add`, which
-# replaces only the `shakerscan` entry), and Pi is given flags, not a file.
-HUNT_SKILL_INSTRUCTION = "skills/hunt/SKILL.md"
-OPENCODE_SCHEMA = "https://opencode.ai/config.json"
-
-
-def _set_aside(path: Path, label: str) -> Path:
-    """Move an unreadable configuration out of the way (never deleted, links moved, not followed)."""
-    fd, name = tempfile.mkstemp(prefix=f".shakerscan-unreadable-{label}-", suffix=".bak", dir=path.parent)
-    os.close(fd)
-    backup = Path(name)
-    path.replace(backup)
-    return backup
-
-
-def _read_config(path: Path, label: str, notes: list[str]) -> dict:
-    """The JSON object in ``path`` ({} when there is none). A file that is not a JSON object is
-    set aside and said so, never silently overwritten."""
-    if not path.exists() and not path.is_symlink():
-        return {}
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError):
-        loaded = None
-    if isinstance(loaded, dict):
-        return loaded
-    backup = _set_aside(path, label)
-    notes.append(f"{label}: not a JSON object, so it was moved to {backup.name} and written afresh")
-    return {}
-
-
-def _write_config(path: Path, config: Mapping) -> None:
-    """Replace ``path`` atomically (a symbolic link is replaced, its target never written)."""
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(config, indent=2) + "\n")
-        os.replace(name, path)
-    except BaseException:
-        Path(name).unlink(missing_ok=True)
-        raise
-
-
-def _kept_note(label: str, kept: Sequence[str], managed: str) -> str | None:
-    if not kept:
-        return None
-    return f"{label}: kept your {', '.join(kept)}; the client updates only {managed}"
-
-
-def merge_opencode_config(existing: Mapping, server: Mapping) -> tuple[dict, list[str]]:
-    """OpenCode's ``opencode.json``: the client owns ``mcp.shakerscan``, the Hunt skill in
-    ``instructions`` and a missing ``$schema``; everything else is kept. Returns (config, kept)."""
-    config = dict(existing)
-    kept = [str(key) for key in config if key not in {"$schema", "instructions", "mcp"}]
-    config.setdefault("$schema", OPENCODE_SCHEMA)
-    instructions = config.get("instructions")
-    if isinstance(instructions, str):
-        instructions = [instructions]
-    if isinstance(instructions, list):
-        if any(item != HUNT_SKILL_INSTRUCTION for item in instructions):
-            kept.append("instructions")
-        config["instructions"] = [*instructions] + (
-            [] if HUNT_SKILL_INSTRUCTION in instructions else [HUNT_SKILL_INSTRUCTION])
-    else:
-        # OpenCode loads AGENTS.md on its own; the Hunt skill is loaded with it so the permission,
-        # budget and view rules are in every session that drives a Hunt.
-        config["instructions"] = [HUNT_SKILL_INSTRUCTION]
-    servers = config.get("mcp") if isinstance(config.get("mcp"), Mapping) else {}
-    others = [str(name) for name in servers if name != "shakerscan"]
-    if others:
-        kept.append("MCP servers " + ", ".join(others))
-    config["mcp"] = {**servers, "shakerscan": dict(server)}
-    return config, kept
-
-
-def merge_mcp_json(existing: Mapping, server: Mapping) -> tuple[dict, list[str]]:
-    """Claude Code's ``.mcp.json``: the client owns ``mcpServers.shakerscan`` only."""
-    config = dict(existing)
-    kept = [str(key) for key in config if key != "mcpServers"]
-    servers = config.get("mcpServers") if isinstance(config.get("mcpServers"), Mapping) else {}
-    others = [str(name) for name in servers if name != "shakerscan"]
-    if others:
-        kept.append("MCP servers " + ", ".join(others))
-    config["mcpServers"] = {**servers, "shakerscan": dict(server)}
-    return config, kept
-
-
-def merge_claude_settings(existing: Mapping, kit: Mapping) -> tuple[dict, list[str]]:
-    """Claude Code's ``.claude/settings.json``: the kit's hook entries are added where missing;
-    the person's permissions, other hooks and every other key are kept."""
-    config = dict(existing)
-    kept = [str(key) for key in config if key != "hooks"]
-    hooks = dict(config["hooks"]) if isinstance(config.get("hooks"), Mapping) else {}
-    kit_hooks = kit.get("hooks") if isinstance(kit.get("hooks"), Mapping) else {}
-    if any(event not in kit_hooks or any(group not in (kit_hooks.get(event) or ()) for group in groups or ())
-           for event, groups in hooks.items() if isinstance(groups, list)):
-        kept.append("hooks")
-    for event, groups in kit_hooks.items():
-        current = list(hooks.get(event) or []) if isinstance(hooks.get(event), list) else []
-        current += [group for group in groups if group not in current]
-        hooks[event] = current
-    config["hooks"] = hooks
-    for key, value in kit.items():
-        if key != "hooks":
-            config.setdefault(key, value)
-    return config, kept
-
-
-def _refresh_claude_dir(source: Path, target: Path, notes: list[str]) -> None:
-    """Copy the kit's ``.claude`` over the workspace's: the kit's files are refreshed, files that
-    are not the kit's (``settings.local.json``, the person's own commands) stay, and
-    ``settings.json`` is merged rather than replaced."""
-    if target.is_symlink():
-        raise ClientError(f"{target} is a symbolic link; the agent kit is not written through it")
-    settings = target / "settings.json"
-    existing = _read_config(settings, ".claude/settings.json", notes)
-    theirs = sorted(
-        path.relative_to(target).as_posix() for path in target.rglob("*")
-        if (path.is_file() or path.is_symlink()) and path != settings
-        and not (source / path.relative_to(target)).exists()
-    ) if target.is_dir() else []
-    shutil.copytree(source, target, dirs_exist_ok=True, ignore=lambda folder, names: (
-        ["settings.json"] if Path(folder) == source else []))
-    kit = json.loads((source / "settings.json").read_text(encoding="utf-8")) if (source / "settings.json").is_file() else {}
-    merged, kept = merge_claude_settings(existing, kit)
-    if merged:
-        _write_config(settings, merged)
-    note = _kept_note(".claude/settings.json", kept, "the kit's hooks")
-    if note:
-        notes.append(note)
-    if theirs:
-        shown = ", ".join(theirs[:5]) + (f" and {len(theirs) - 5} more" if len(theirs) > 5 else "")
-        notes.append(f".claude/: kept {len(theirs)} file(s) that are not part of the kit ({shown})")
-
-
 def prepare_workspace(
     workspace: Path, url: str, who: str, executable: str, *, authenticated: bool = True,
     mcp_env: Mapping[str, str] | None = None, notes: list[str] | None = None,
 ) -> list[str]:
     """Materialize the agent kit against the instance; return what was written.
 
-    The agents' configuration files are merged, not rewritten: the person's own keys are kept
-    and each one kept is described in ``notes`` (L3).
+    The agents' configuration files are merged, not rewritten, and never written through a link
+    (``_workspace``). ``notes`` receives one printable line per thing the person should know:
+    what was kept, what changed since the last launch without the client, what was set aside.
 
     ``authenticated`` is the saved Enterprise connection (token in its file, per-person
     identity). Otherwise the workspace addresses an open-source engine by URL: the MCP
     registrations carry ``--url`` so the agent's own subprocesses reach it without any
     environment, and the note says what that means.
     """
+    notes = notes if notes is not None else []
     sources = kit_sources()
     mcp_args = ["mcp"] if authenticated else ["mcp", "--url", url]
     workspace.mkdir(parents=True, exist_ok=True)
+    try:
+        _workspace.refuse_links(workspace)
+    except _workspace.WorkspaceError as exc:
+        raise ClientError(str(exc)) from exc
+    state = _workspace.load_state(workspace)
+    before = _workspace.fingerprint(_workspace.security_view(_workspace.quiet_configs(workspace)))
+    if isinstance(state.get("security"), Mapping):
+        changed = _workspace.changes(state["security"], before)
+        if changed:
+            notes.append("changed:   since the last `shakerscan agent`, something other than shakerscan changed "
+                         "these agent settings (check that you made them):")
+            notes += [f"           {line}" for line in changed]
     written: list[str] = []
     _copy_tree(sources["skills"], workspace / "skills")
     written.append("skills/")
-    notes = notes if notes is not None else []
-    _refresh_claude_dir(sources[".claude"], workspace / ".claude", notes)
+    kit_state = _workspace.refresh_claude_dir(sources[".claude"], workspace / ".claude", notes, state)
     for hook in (workspace / ".claude" / "hooks").glob("*.sh"):
-        hook.chmod(hook.stat().st_mode | 0o111)
+        if hook.is_file() and not hook.is_symlink():  # never chmod through a link
+            hook.chmod(hook.stat().st_mode | 0o111)
     written.append(".claude/")
     # The release the kit was built from (the repository VERSION, vendored as _kit/VERSION),
     # and the client carrying it.
@@ -683,22 +559,24 @@ def prepare_workspace(
     # reduced environment. Rewritten on every launch, so a launch without --allow clears them.
     env = dict(mcp_env or {})
     mcp_json = workspace / ".mcp.json"
-    config, kept = merge_mcp_json(_read_config(mcp_json, ".mcp.json", notes), {
+    config, kept = _workspace.merge_mcp_json(_workspace.read_config(mcp_json, ".mcp.json", notes), {
         "command": executable, "args": mcp_args, **({"env": env} if env else {}),
     })
-    _write_config(mcp_json, config)
-    notes += filter(None, [_kept_note(".mcp.json", kept, "mcpServers.shakerscan")])
+    _workspace.write_config(mcp_json, config)
+    notes += filter(None, [_workspace.kept_note(".mcp.json", kept, "mcpServers.shakerscan")])
     written.append(".mcp.json")
     opencode = workspace / "opencode.json"
-    config, kept = merge_opencode_config(_read_config(opencode, "opencode.json", notes), {
+    config, kept = _workspace.merge_opencode_config(_workspace.read_config(opencode, "opencode.json", notes), {
         "type": "local", "command": [executable, *mcp_args], "enabled": True,
         **({"environment": env} if env else {}),
     })
-    _write_config(opencode, config)
-    notes += filter(None, [_kept_note(
-        "opencode.json", kept, f"mcp.shakerscan and the {HUNT_SKILL_INSTRUCTION} instruction")])
+    _workspace.write_config(opencode, config)
+    notes += filter(None, [_workspace.kept_note(
+        "opencode.json", kept, f"mcp.shakerscan and the {_workspace.HUNT_SKILL_INSTRUCTION} instruction")])
     written.append("opencode.json")
     _retire_legacy_agent_guide(workspace)
+    after = _workspace.fingerprint(_workspace.security_view(_workspace.quiet_configs(workspace)))
+    _workspace.save_state(workspace, {**kit_state, "security": after})
     return written
 
 
@@ -839,7 +717,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
                                 notes=notes)
     print(f"workspace: {workspace} ({', '.join(written)})\ninstance:  {url} ({who})")
     for note in notes:
-        print(f"kept:      {note}")
+        print(note)
     if agent is None:
         # D18: with nothing installed, naming codex as the launch command sent people to an
         # agent they did not have.

@@ -259,8 +259,16 @@ its own parts (`mcp.shakerscan` and the Hunt skill instruction in `opencode.json
 `mcpServers.shakerscan` in `.mcp.json`, the kit's hooks in `.claude/settings.json`) and keeps
 everything else, such as an OpenCode `permission` block with a bash deny-list, Claude Code
 `permissions`, other MCP servers and `.claude/settings.local.json`; each `kept:` line says what
-was kept. A file that is not a JSON object is moved aside (`.shakerscan-unreadable-*.bak`), never
-silently overwritten. The
+was kept, hook command lines included. Because an agent can write these files too, each launch
+records a fingerprint of the settings that change what an agent may do (permissions, plugins,
+providers, other MCP servers, instructions, hooks) in `.shakerscan/workspace.json`, and the next
+launch lists under `changed:` exactly what changed in between (secret values hidden); nothing is
+blocked. Kit files and hook entries the kit no longer ships are removed (a kit file you changed
+is kept and named); your own files stay. `opencode.json` with comments or trailing commas is read
+and written back as plain JSON, its original kept beside it; a file that is not JSON or JSONC is
+moved aside (`.shakerscan-unreadable-*.bak`) with the reason. The client never writes through a
+symbolic link: if any path it writes, or anything under `.claude/`, is a link, it refuses and
+writes nothing. The
 kit's API calls go through `shakerscan api`, so the same commands work locally and remotely.
 
 `shakerscan api METHOD PATH [JSON]` calls the instance directly (`shakerscan api GET
@@ -325,9 +333,14 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   one step-up; its secret is held only in that process's memory (see
   `docs/hunt-permission-requests.md` for what that does and does not protect against).
 - **Open-source engine (no token).** A `y/N` at the prompt, sent to the engine's decision route.
-  `--watch` says which Hunts it watches, decides on a single key, ignores (and says so) a key
-  pressed before a request was on the screen, keeps polling while it waits for your key, and ends
-  with "stopped watching for permission requests".
+  `--watch` says which Hunts it watches and ends with "stopped watching for permission
+  requests".
+- `--watch` (both): each request's prompt appears about 0.75 s after the request, and keys pressed
+  before it are ignored (and said so), so a key meant for an earlier request never decides the
+  next one; when a request ends elsewhere while its prompt waits, the switch to the next one is
+  announced. Only a single key pressed on its own decides: arrow and Alt keys and pastes are
+  ignored. It keeps polling while it waits, and SIGTERM or a closed terminal ends it like
+  Ctrl-C (terminal restored, Enterprise approver session revoked).
   The engine has no accounts: anyone who can reach its API could decide, and the command says so.
 - Neither runs without an interactive terminal, so an agent cannot run it in its own shell. Never
   type a code into an agent's chat.
