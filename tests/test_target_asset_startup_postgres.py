@@ -284,7 +284,7 @@ def test_startup_rebuilds_hunt_authority_2_8_0_left_after_a_revocation_and_ends_
             assert await conn.fetchval(
                 "SELECT source FROM hunt_permission_baselines WHERE hunt_run_id=$1", bad) == 'reconstructed'
             row = await conn.fetchrow("SELECT status, stop_reason FROM hunt_runs WHERE id=$1", broken)
-            assert (row['status'], row['stop_reason']) == ('failed', 'permission_authority_unrepaired')
+            assert (row['status'], row['stop_reason']) == ('cancelled', 'permission_authority_unrepaired')
             assert await conn.fetchval("SELECT COUNT(*) FROM hunt_permission_baselines WHERE hunt_run_id=$1",
                                        broken) == 0
             await module.run_schema_migrations(BoundConnectionPool(conn))  # idempotent

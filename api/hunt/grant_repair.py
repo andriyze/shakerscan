@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
 from .grant_authority import POLICY_GRANT_KINDS, authority_diff, rebuild_authority
-from .permission_grants import FINISHED_STATUSES, settle_for_ended_hunt
+from .permission_grants import FINISHED_STATUSES
+from .run_service import (
+    cancel_hunt_rows,
+    cancel_hunt_scans,
+    request_hunt_job_cancellation,
+    signal_hunt_jobs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,24 +54,49 @@ async def _repair_one(conn: Any, hunt_id: Any) -> bool:
 REPAIR_FAILED_STOP_REASON = "permission_authority_unrepaired"
 
 
-async def _fail_closed(conn: Any, hunt_id: Any) -> None:
-    """End a Hunt whose authority could not be rebuilt: it never runs on unrepaired authority."""
+class _BoundPool:
+    """The startup connection, as the pool the shared cancellation helpers expect."""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self._conn
+
+
+async def _fail_closed(conn: Any, hunt_id: Any, redis_provider: Any) -> None:
+    """End a Hunt whose authority could not be rebuilt exactly as a cancellation does: it stops
+    (in-flight work watches for ``cancelled``), its withheld private HTTP results are dropped,
+    its permission requests are settled, its scans are cancelled and its queued jobs are told
+    to stop. It never runs on unrepaired authority.
+
+    The stop itself commits first, on its own; cancelling scans and jobs follows, so a failure
+    there (logged) never leaves the Hunt running."""
     async with conn.transaction():
-        await conn.execute(
-            """UPDATE hunt_runs SET status='failed', stop_reason=$2, completed_at=COALESCE(completed_at, NOW()),
-                      updated_at=NOW() WHERE id=$1""",
-            hunt_id, REPAIR_FAILED_STOP_REASON,
-        )
-        await settle_for_ended_hunt(conn, hunt_id, actor="startup", source="authority_repair_failed")
+        row = await cancel_hunt_rows(conn, hunt_id, stop_reason=REPAIR_FAILED_STOP_REASON,
+                                     source="authority_repair_failed")
+    if row is None:
+        return
+    durable_job_ids: list[str] = []
+    try:
+        async with conn.transaction():
+            await cancel_hunt_scans(conn, hunt_id)
+            durable_job_ids = await request_hunt_job_cancellation(conn, hunt_id)
+        pool = _BoundPool(conn)
+        await signal_hunt_jobs(lambda: pool, redis_provider, hunt_id, durable_job_ids)
+    except Exception as exc:  # noqa: BLE001 - the Hunt is already stopped; workers see `cancelled`
+        logger.error("Hunt %s: its queued work could not all be cancelled (%s)", hunt_id, type(exc).__name__)
 
 
-async def repair_grant_authority(conn: Any) -> list[str]:
+async def repair_grant_authority(conn: Any, *, redis_provider: Any = None) -> list[str]:
     """Rebuild the authority of every unfinished Hunt granted something before baselines existed.
 
     Run outside any transaction: each Hunt is repaired in its own short transaction, so no row
     stays locked for the rest of startup. A Hunt whose repair fails is logged (its id and the
-    error class only) and ended ``failed`` so it cannot run on unrepaired authority; the other
-    Hunts and the API start normally. Idempotent: a Hunt is repaired once, when its baseline is
+    error class only) and cancelled with stop reason ``permission_authority_unrepaired`` (as
+    ``HuntRunService.cancel`` would, signalling its queued jobs through ``redis_provider`` when
+    given), so it cannot run on unrepaired authority; the other Hunts and the API start normally. Idempotent: a Hunt is repaired once, when its baseline is
     recorded. Returns the Hunts whose stored policy changed.
     """
     candidates = await conn.fetch(
@@ -85,7 +117,7 @@ async def repair_grant_authority(conn: Any) -> list[str]:
             logger.error("Hunt %s: permission authority could not be rebuilt (%s); the Hunt is ended",
                          hunt_id, type(exc).__name__)
             try:
-                await _fail_closed(conn, hunt_id)
+                await _fail_closed(conn, hunt_id, redis_provider)
             except Exception as failure:  # noqa: BLE001
                 logger.error("Hunt %s: could not be ended after a failed authority repair (%s)",
                              hunt_id, type(failure).__name__)

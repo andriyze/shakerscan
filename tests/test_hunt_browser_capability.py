@@ -679,7 +679,11 @@ def test_browser_queue_and_worker_rebuild_authority_and_settle_atomically():
     )
     worker = worker_source[worker_start:worker_end]
     assert 'context = _worker_json_object(run["context_pack"])' in worker
-    assert 'hunt_policy = _worker_json_object(run["policy_json"])' in worker
+    # The policy is re-read from the locked row by the shared dispatch check, which also refuses
+    # a withdrawn allowlist or an ended Hunt as a dispatch refusal that releases the hold.
+    assert 'hunt_policy = require_dispatchable(' in worker
+    dispatch = (Path(__file__).resolve().parents[1] / "api" / "hunt" / "dispatch_authority.py").read_text()
+    assert 'policy = _json(run.get("policy_json"))' in dispatch
     assert "browser_capability_adapter(capability_name)" in worker
     assert "hunt_capability_action_digest(" in worker
     assert worker.index("stored.record.start(") < worker.index(

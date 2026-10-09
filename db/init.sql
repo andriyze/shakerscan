@@ -1151,12 +1151,19 @@ CREATE TABLE IF NOT EXISTS hunt_permission_baselines (
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE OR REPLACE FUNCTION hunt_permission_baselines_immutable() RETURNS trigger AS $baselines$
+DECLARE
+    hunt_exists BOOLEAN;
 BEGIN
     -- Only the Hunt's own deletion removes its baseline: the foreign-key cascade runs after the
     -- hunt_runs row is gone, and any other delete (from a statement or another trigger) finds
-    -- the Hunt still there and is refused.
-    IF TG_OP = 'DELETE' AND NOT EXISTS (SELECT 1 FROM hunt_runs WHERE id = OLD.hunt_run_id) THEN
-        RETURN OLD;
+    -- the Hunt still there and is refused. hunt_runs is read from this table's own schema, never
+    -- through the caller's search_path.
+    IF TG_OP = 'DELETE' THEN
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I.hunt_runs WHERE id = $1)', TG_TABLE_SCHEMA)
+            INTO hunt_exists USING OLD.hunt_run_id;
+        IF NOT hunt_exists THEN
+            RETURN OLD;
+        END IF;
     END IF;
     RAISE EXCEPTION 'hunt_permission_baselines is immutable';
 END

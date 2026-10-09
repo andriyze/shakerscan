@@ -18,7 +18,13 @@ SERVICE = Path("api/hunt/run_service.py")
 
 
 def _cancel_source() -> str:
-    return definition_source("cancel")
+    # ``cancel`` composes helpers it shares with the startup authority repair (which cancels a
+    # Hunt it cannot rebuild the same way); read them in the order cancel runs them.
+    assert "cancel_hunt_rows(" in definition_source("cancel")
+    assert "cancel_hunt_scans(" in definition_source("cancel")
+    return "\n".join(definition_source(name) for name in (
+        "cancel_hunt_rows", "cancel", "cancel_hunt_scans", "request_hunt_job_cancellation", "signal_hunt_jobs",
+    ))
 
 
 def test_cancel_targets_scans_owned_by_this_hunt():

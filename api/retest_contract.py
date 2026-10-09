@@ -1063,18 +1063,18 @@ async def _migrate_evidence_scan_identity(conn) -> None:
     )
 
 
-async def _run_unified_schema_migrations_once(pool) -> None:
+async def _run_unified_schema_migrations_once(pool, redis_provider=None) -> None:
     from targets.asset_migration import run_unified_startup
-    await run_unified_startup(pool, _run_schema_migrations_once)
+    await run_unified_startup(pool, _run_schema_migrations_once, redis_provider=redis_provider)
 
 
-async def run_schema_migrations(pool) -> None:
+async def run_schema_migrations(pool, redis_provider=None) -> None:
     """Run startup DDL, retrying PostgreSQL's transient DDL deadlock."""
     async with pool.acquire() as conn:
         await assert_base_schema(conn)
     for attempt in range(3):
         try:
-            await _run_unified_schema_migrations_once(pool)
+            await _run_unified_schema_migrations_once(pool, redis_provider)
             return
         except Exception as exc:
             if exc.__class__.__name__ != "DeadlockDetectedError" or attempt >= 2:

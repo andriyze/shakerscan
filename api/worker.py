@@ -2367,7 +2367,7 @@ async def init_db():
         max_size=db_pool_max,
         init=_init_conn,
     )
-    await run_schema_migrations(db_pool)
+    await run_schema_migrations(db_pool, redis_provider=get_redis)
 
 
 def _scanner_process_kwargs() -> dict[str, Any]:
@@ -19904,7 +19904,7 @@ def _worker_terminal_network_result(
 
 
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
-from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_scope_binding, settle_rejected_dispatch
+from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_scope_binding, require_dispatchable, settle_rejected_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
 from hunt.host_accounting import bound_distinct_hosts, record_attempted_hosts
 
@@ -20270,32 +20270,10 @@ async def process_canonical_scanner_capability_job(
                     raise ReservationConflict(
                         "scanner action is not dispatchable"
                     )
-                if str(run["status"]) not in {
-                    "active",
-                    "awaiting_planner",
-                    "budget_exhausted",
-                }:
-                    raise agent_tools.AgentToolError(
-                        "Hunt is no longer executable"
-                    )
-
                 context = _worker_json_object(run["context_pack"])
-                hunt_policy = _worker_json_object(run["policy_json"])
-                allowed = {
-                    str(item)
-                    for item in hunt_policy.get("allowed_capabilities") or []
-                }
-                if capability_name not in allowed:
-                    raise agent_tools.AgentToolError(
-                        "scanner capability is outside the persisted Hunt allowlist"
-                    )
-                if spec.requires_active_approval and not (
-                    hunt_policy.get("active_testing")
-                    and hunt_policy.get("approval_receipt_id")
-                ):
-                    raise agent_tools.AgentToolError(
-                        "scanner capability no longer has active approval"
-                    )
+                hunt_policy = require_dispatchable(
+                    run, capability_name, "scanner", requires_active_approval=spec.requires_active_approval,
+                )
                 target, registered_target = _worker_hunt_web_target(run, context, hunt_policy)
                 # A scanner capability may be pointed at another service port on
                 # the same authorized host. Resolve it the same way http.request
@@ -20869,23 +20847,8 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                     raise ReservationConflict(
                         "browser action is not dispatchable"
                     )
-                if str(run["status"]) not in {
-                    "active", "awaiting_planner", "budget_exhausted",
-                }:
-                    raise BrowserCapabilityInputError(
-                        "Hunt is no longer executable"
-                    )
-
                 context = _worker_json_object(run["context_pack"])
-                hunt_policy = _worker_json_object(run["policy_json"])
-                allowed = {
-                    str(item)
-                    for item in hunt_policy.get("allowed_capabilities") or []
-                }
-                if capability_name not in allowed:
-                    raise BrowserCapabilityInputError(
-                        "browser capability is outside the persisted Hunt allowlist"
-                    )
+                hunt_policy = require_dispatchable(run, capability_name, "browser")
                 target, target_url = _worker_hunt_web_target(run, context, hunt_policy)
                 browser_adapter = browser_capability_adapter(capability_name)
                 prepared = prepare_hunt_browser_action(capability_name,
@@ -21335,20 +21298,8 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     return
                 if stored.record.status != "reserved" or str(action["status"]) != "reserved":
                     raise ReservationConflict("network action is not dispatchable")
-                if str(run["status"]) not in {
-                    "active", "awaiting_planner", "budget_exhausted"
-                }:
-                    raise CapabilityInputError("Hunt is no longer executable")
-
                 context = _worker_json_object(run["context_pack"])
-                hunt_policy = _worker_json_object(run["policy_json"])
-                allowed = {
-                    str(item) for item in hunt_policy.get("allowed_capabilities") or []
-                }
-                if capability_name not in allowed:
-                    raise CapabilityInputError(
-                        "network capability is outside the persisted Hunt allowlist"
-                    )
+                hunt_policy = require_dispatchable(run, capability_name, "network")
                 target, target_url = _worker_hunt_web_target(run, context, hunt_policy)
                 policy = ScanPolicy(
                     active_testing=bool(hunt_policy.get("active_testing")),
@@ -21826,21 +21777,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     return
                 if stored.record.status != "reserved" or str(action["status"]) != "reserved":
                     raise ReservationConflict("HTTP action is not dispatchable")
-                if str(run["status"]) not in {
-                    "active", "awaiting_planner", "budget_exhausted",
-                }:
-                    raise CapabilityInputError("Hunt is no longer executable")
-
                 context = _worker_json_object(run["context_pack"])
-                hunt_policy = _worker_json_object(run["policy_json"])
-                allowed = {
-                    str(item)
-                    for item in hunt_policy.get("allowed_capabilities") or ()
-                }
-                if capability_name not in allowed:
-                    raise CapabilityInputError(
-                        "HTTP capability is outside the persisted Hunt allowlist"
-                    )
+                hunt_policy = require_dispatchable(run, capability_name, "HTTP")
                 target, target_url = _worker_hunt_web_target(
                     run, context, hunt_policy,
                 )

@@ -87,10 +87,11 @@ def grant_fields(grant: Mapping[str, Any]) -> tuple[str, ...]:
 def coverage_key(kind: Any, subject: Any) -> str | None:
     """What a grant of ``kind`` for ``subject`` covers, as a pre-authorization bound sees it.
 
-    A person who revokes a grant covering this key has said no to it: the Hunt's start bounds no
+    A person who revokes a grant has said no to what it covered: the Hunt's start bounds no
     longer grant it automatically (``permission_grants.try_preauthorized_grant``); a person can
-    still allow it again. Capability grants are keyed by their flag (the bound is
-    ``capability:<flag>``), destinations by scheme, host and port, credentials by profile.
+    still allow it again. Destinations are keyed by scheme, host and port and credentials by
+    profile. A capability grant is named by its flag here, but what it withholds is decided by
+    the policy fields it turned on (``withheld_flags``), since flags overlap.
     """
     subject = _json(subject, {})
     if not isinstance(subject, Mapping):
@@ -103,6 +104,46 @@ def coverage_key(kind: Any, subject: Any) -> str | None:
     if kind == KIND_CREDENTIAL_USE and subject.get("profile_id"):
         return f"credential:{subject['profile_id']}"
     return None
+
+
+# Every capability flag turns ``active_testing`` on; it is the shared base, not what tells flags
+# apart. A revocation withholds by the fields that are distinctive to the revoked grant.
+BASE_FIELD = "active_testing"
+
+
+def distinctive_fields(fields: Iterable[str]) -> frozenset[str]:
+    """The fields that identify a grant's authority: its fields other than ``active_testing``,
+    or ``active_testing`` alone for a grant that turns on nothing else."""
+    fields = frozenset(str(field) for field in fields)
+    return (fields - {BASE_FIELD}) or (fields & {BASE_FIELD})
+
+
+def withheld_flags(revoked_fields: Iterable[str]) -> list[str]:
+    """Every capability flag the start bounds stop granting after a grant with these fields is
+    revoked: each flag that would turn on any of its distinctive fields. Revoking
+    ``state-changing`` withholds ``active-replay`` too (both turn on state-changing HTTP);
+    ``tcp-discovery`` and ``oob`` withhold only themselves; ``active-testing`` only itself."""
+    revoked = distinctive_fields(revoked_fields)
+    return sorted(flag for flag, fields in CAPABILITY_FLAGS.items() if distinctive_fields(fields) & revoked)
+
+
+def withholding(grant: Mapping[str, Any]) -> dict[str, Any] | None:
+    """What a revoked grant stops the start bounds from granting, for display and audit."""
+    kind = grant.get("kind")
+    key = coverage_key(kind, grant.get("subject_json"))
+    if key is None:
+        return None
+    if kind != KIND_CAPABILITY_ENABLE:
+        return {"coverage": key}
+    fields = grant_fields(grant)
+    return {"coverage": key, "fields": sorted(distinctive_fields(fields)), "flags": withheld_flags(fields)}
+
+
+def capability_withheld_by(revoked_grant: Mapping[str, Any], requested_flag: str) -> list[str]:
+    """The distinctive fields a requested flag shares with a revoked capability grant (empty: the
+    revoked grant does not withhold it)."""
+    requested = distinctive_fields(CAPABILITY_FLAGS.get(str(requested_flag), ()))
+    return sorted(distinctive_fields(grant_fields(revoked_grant)) & requested)
 
 
 def baseline_from_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
@@ -232,6 +273,19 @@ async def rebuild_authority(
 
 
 __all__ = [
-    "AUTHORITY_FLAGS", "MAX_GRANTED_DESTINATIONS", "authority_diff", "baseline_from_policy", "coverage_key",
-    "effective_policy", "grant_fields", "hunt_baseline", "rebuild_authority", "reconstruct_baseline",
+    "AUTHORITY_FLAGS",
+    "BASE_FIELD",
+    "MAX_GRANTED_DESTINATIONS",
+    "authority_diff",
+    "baseline_from_policy",
+    "capability_withheld_by",
+    "coverage_key",
+    "distinctive_fields",
+    "effective_policy",
+    "grant_fields",
+    "hunt_baseline",
+    "rebuild_authority",
+    "reconstruct_baseline",
+    "withheld_flags",
+    "withholding",
 ]

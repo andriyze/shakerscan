@@ -22,7 +22,7 @@ from typing import Any
 import uuid
 
 from .credential_uses import live_credential_grants
-from .grant_authority import coverage_key
+from .grant_authority import withholding
 from .permission_bounds import Bounds, bounds_from_public, merge
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
@@ -128,12 +128,19 @@ CREATE TABLE IF NOT EXISTS hunt_permission_baselines (
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE OR REPLACE FUNCTION hunt_permission_baselines_immutable() RETURNS trigger AS $baselines$
+DECLARE
+    hunt_exists BOOLEAN;
 BEGIN
     -- Only the Hunt's own deletion removes its baseline: the foreign-key cascade runs after the
     -- hunt_runs row is gone, and any other delete (from a statement or another trigger) finds
-    -- the Hunt still there and is refused.
-    IF TG_OP = 'DELETE' AND NOT EXISTS (SELECT 1 FROM hunt_runs WHERE id = OLD.hunt_run_id) THEN
-        RETURN OLD;
+    -- the Hunt still there and is refused. hunt_runs is read from this table's own schema, never
+    -- through the caller's search_path.
+    IF TG_OP = 'DELETE' THEN
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I.hunt_runs WHERE id = $1)', TG_TABLE_SCHEMA)
+            INTO hunt_exists USING OLD.hunt_run_id;
+        IF NOT hunt_exists THEN
+            RETURN OLD;
+        END IF;
     END IF;
     RAISE EXCEPTION 'hunt_permission_baselines is immutable';
 END
@@ -386,9 +393,7 @@ def public_grant(row: Any) -> dict[str, Any]:
         "revoked_at": _iso(item.get("revoked_at")),
         "revoked_by": item.get("revoked_by"),
         # Once revoked, the Hunt's start bounds no longer grant this automatically.
-        "auto_grant_withheld": (
-            coverage_key(item["kind"], item.get("subject_json")) if item.get("revoked_at") else None
-        ),
+        "auto_grant_withheld": withholding(item) if item.get("revoked_at") else None,
     }
 
 

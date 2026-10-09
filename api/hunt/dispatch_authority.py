@@ -149,6 +149,37 @@ async def granted_destination_recheck(pool: Any, hunt_id: Any, origin: Any) -> s
             "destinations are never allowed, whoever authorized the host.")
 
 
+EXECUTABLE_HUNT_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
+
+
+def require_dispatchable(
+    run: Mapping[str, Any], capability_name: str, label: str, *, requires_active_approval: bool = False,
+) -> dict[str, Any]:
+    """The Hunt's current policy, if this queued action may still run; otherwise a dispatch
+    refusal, which settles the action blocked and releases its hold at once.
+
+    Admission accepted the action; between then and the worker the Hunt may have ended or been
+    cancelled, or the grant that put the capability on its allowlist (or gave it active approval)
+    may have been revoked. Those are refusals of withdrawn authority, not worker faults, and
+    used to strand the hold until stale recovery (R1 review).
+    """
+    status = str(run.get("status") or "")
+    if status not in EXECUTABLE_HUNT_STATUSES:
+        raise HuntDispatchRejected(
+            f"Hunt action authority rejected at dispatch: the Hunt is {status} and no longer executable"
+        )
+    policy = _json(run.get("policy_json"))
+    if capability_name not in {str(item) for item in policy.get("allowed_capabilities") or ()}:
+        raise HuntDispatchRejected(
+            f"Hunt action authority rejected at dispatch: {label} capability is outside the persisted Hunt allowlist"
+        )
+    if requires_active_approval and not (policy.get("active_testing") and policy.get("approval_receipt_id")):
+        raise HuntDispatchRejected(
+            f"Hunt action authority rejected at dispatch: {label} capability no longer has active approval"
+        )
+    return policy
+
+
 def dispatch_http_request_authority(
     capability_input: Mapping[str, Any], policy: Mapping[str, Any], *, requested_budget: Mapping[str, Any],
 ) -> bool:
@@ -296,7 +327,16 @@ async def _settle_rejected_dispatch(
 
 
 __all__ = [
-    "DISPATCH_REJECTED", "GrantedDestinationRecheck", "HuntDispatchRejected", "destination_hard_limit",
-    "dispatch_http_request_authority", "dispatch_http_target",
-    "dispatch_scope_binding", "granted_destination_recheck", "public_address", "settle_rejected_dispatch",
+    "DISPATCH_REJECTED",
+    "EXECUTABLE_HUNT_STATUSES",
+    "GrantedDestinationRecheck",
+    "HuntDispatchRejected",
+    "destination_hard_limit",
+    "dispatch_http_request_authority",
+    "dispatch_http_target",
+    "dispatch_scope_binding",
+    "granted_destination_recheck",
+    "public_address",
+    "require_dispatchable",
+    "settle_rejected_dispatch",
 ]
