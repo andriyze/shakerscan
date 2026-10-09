@@ -13,7 +13,6 @@ It never widens a Scan: the names become targets for their own, separately autho
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Mapping, Sequence
 import uuid
 
@@ -22,9 +21,13 @@ try:  # Preserve one module identity under api.scan.* host imports.
 except (ImportError, ModuleNotFoundError):  # top-level scan.* worker imports
     import target_resolution
 
+try:
+    from scanner_tools.discovered_names import canonical_name, filter_subdomains
+except ModuleNotFoundError:  # package import (api.scan.subdomain_targets)
+    from scanner.scanner_tools.discovered_names import canonical_name, filter_subdomains
+
 
 DISCOVERY_SOURCE = "subfinder"
-_DNS_NAME = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 # The whole DNS check of one scan's names, not each lookup. Recording runs between finalization
 # and the saved result; with a dead resolver every name used to cost its full lookup timeout --
 # about a minute for a full window -- before the finished scan was stored.
@@ -140,21 +143,20 @@ async def record_scan_subdomain_discovery(
     section = discovery.get("subdomains") if isinstance(discovery, Mapping) else None
     if not isinstance(section, dict) or not section.get("hosts"):
         return None
-    root_domain = str(section.get("root_domain") or "").strip().lower().rstrip(".")
+    root_domain = canonical_name(section.get("root_domain")) or ""
     if not root_domain:
         outcome = {"status": "not_recorded", "reason": "ambiguous_root_domain"}
         section["targets"] = outcome
         return outcome
-    bound = {
-        str(item or "").strip().lower().rstrip(".") for item in (allowed_root_domains or ())
-    }
+    bound = {canonical_name(item) for item in (allowed_root_domains or ())} - {None}
     if root_domain not in bound:
         outcome = {"status": "not_recorded", "reason": "root_domain_not_bound"}
         section["targets"] = outcome
         return outcome
-    suffix = "." + root_domain
-    listed = [str(host or "").strip().lower().rstrip(".") for host in section.get("hosts") or ()]
-    hosts = [host for host in listed if host.endswith(suffix) and _DNS_NAME.fullmatch(host)]
+    listed = list(section.get("hosts") or ())
+    # The report may come from a fleet node: only canonical names strictly below the bound
+    # root, on a label boundary, are recorded (``notexample.com`` is not under ``example.com``).
+    hosts, _refused = filter_subdomains(listed, root_domain)
     if not hosts:
         outcome = {"status": "not_recorded", "reason": "no_names_under_root_domain"}
         section["targets"] = outcome

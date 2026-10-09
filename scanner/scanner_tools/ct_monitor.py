@@ -32,6 +32,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from .discovered_names import subdomain_of
+
 # ============================================================================
 # CRT.SH API CLIENT
 # ============================================================================
@@ -337,12 +339,9 @@ def _discover_subdomains_from_ct(certs: list[dict[str, Any]], domain: str) -> di
 
     for cert in certs:
         # Check common_name
-        cn = cert.get("common_name", "").lower()
-        if cn and cn.endswith(domain_lower):
-            # Remove wildcard prefix if present
-            cn_clean = cn.replace("*.", "")
-            if cn_clean != domain_lower:
-                subdomains.add(cn_clean)
+        cn_clean = subdomain_of(cert.get("common_name", ""), domain_lower)
+        if cn_clean:
+            subdomains.add(cn_clean)
 
         # Check name_value (can contain multiple SANs)
         name_value = cert.get("name_value", "")
@@ -350,8 +349,8 @@ def _discover_subdomains_from_ct(certs: list[dict[str, Any]], domain: str) -> di
             # Split by newline (crt.sh format) or comma
             names = re.split(r'[\n,]', name_value)
             for name in names:
-                name = name.strip().lower().replace("*.", "")
-                if name and name.endswith(domain_lower) and name != domain_lower:
+                name = subdomain_of(name, domain_lower)
+                if name:
                     subdomains.add(name)
 
     # Sort subdomains

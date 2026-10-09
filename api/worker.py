@@ -14004,7 +14004,7 @@ async def process_discovery_job(job_data: dict):
 
     completed_at = utc_now()
     error = result.get('error')
-    dns_plan = None if error else await target_resolution.plan_discovered_targets(result.get('subdomains', []))
+    dns_plan = None if error else await target_resolution.plan_discovered_targets(result.get('subdomains', []), root_domain=root_domain)
 
     # Update database
     async with db_pool.acquire() as conn:

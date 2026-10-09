@@ -37,6 +37,11 @@ try:
 except ModuleNotFoundError:  # package-native import layout
     from api import action_scope, target_authorization
 
+try:
+    from scanner_tools.discovered_names import filter_subdomains, subdomain_of
+except ModuleNotFoundError:  # package-native import layout
+    from scanner.scanner_tools.discovered_names import filter_subdomains, subdomain_of
+
 RESOLVES = "resolves"
 NO_ADDRESS = "no_address"
 UNKNOWN = "unknown"
@@ -308,6 +313,7 @@ async def classify_hosts(
 async def plan_discovered_targets(
     names: Iterable[str],
     *,
+    root_domain: str | None = None,
     lookup: Lookup | None = None,
     resolve_limit: int = DISCOVERY_RESOLVE_LIMIT,
     deadline_seconds: float | None = None,
@@ -320,8 +326,14 @@ async def plan_discovered_targets(
     explains a name that does not resolve. Runs before a database connection is taken, so a slow
     resolver never holds one. A name an overall deadline left unjudged is treated the same way
     and listed under ``not_checked``; names beyond ``resolve_limit`` are counted, not resolved.
+
+    With ``root_domain``, only canonical names strictly below it (on a label boundary) are
+    planned; the rest are counted under ``outside_root_count`` and never resolved.
     """
     submitted = list(names or [])
+    outside_root = 0
+    if root_domain is not None:
+        submitted, outside_root = filter_subdomains(submitted, root_domain)
     candidates = submitted[: max(0, int(resolve_limit))]
     classified = await classify_hosts(candidates, lookup=lookup, deadline_seconds=deadline_seconds)
     return {
@@ -331,6 +343,7 @@ async def plan_discovered_targets(
         "not_checked": [name for name, status in classified if status == NOT_CHECKED],
         "submitted_count": len(submitted),
         "resolve_limit": max(0, int(resolve_limit)),
+        "outside_root_count": outside_root,
     }
 
 
@@ -342,8 +355,14 @@ async def store_discovered_targets(
     source: str = "subfinder",
     target_limit: int = DISCOVERY_TARGET_LIMIT,
 ) -> dict[str, Any]:
-    """Insert the plan's scannable names; return the run's content-free DNS outcome."""
-    scannable = list(plan.get("scannable") or [])
+    """Insert the plan's scannable names; return the run's content-free DNS outcome.
+
+    The last gate before a row exists: a name that is not strictly below ``root_domain`` on a
+    label boundary is never inserted, whichever planner produced the plan.
+    """
+    planned = list(plan.get("scannable") or [])
+    scannable = [name for name in planned if subdomain_of(name, root_domain)]
+    outside_root = int(plan.get("outside_root_count") or 0) + len(planned) - len(scannable)
     unresolved = list(plan.get("unresolved") or [])
     added = 0
     failed = 0
@@ -370,6 +389,7 @@ async def store_discovered_targets(
         "unresolved": unresolved[:_REPORTED_NAME_LIMIT],
         "unknown_count": len(plan.get("unknown") or []),
         "insert_failed": failed,
+        "outside_root_count": outside_root,
     }
 
 

@@ -1,6 +1,7 @@
 from typing import Any
 
 from .common import run
+from .discovered_names import subdomain_of
 
 
 async def subfinder_scan(domain: str) -> dict[str, Any]:
@@ -14,8 +15,8 @@ async def subfinder_scan(domain: str) -> dict[str, Any]:
         if rc == 0 and stdout.strip():
             subdomains: list[str] = []
             for line in stdout.strip().splitlines():
-                sub = line.strip()
-                if sub and sub != domain:
+                sub = subdomain_of(line, domain)
+                if sub:
                     subdomains.append(sub)
             unique = sorted(list(set(subdomains)))
             result["subdomains"] = unique

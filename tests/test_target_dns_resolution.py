@@ -220,6 +220,7 @@ def test_discovery_skips_names_without_an_address_record():
         "unresolved": ["www.example.net", "mail.example.net"],
         "unknown_count": 1,
         "insert_failed": 0,
+        "outside_root_count": 0,
     }
 
 
