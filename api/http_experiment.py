@@ -12,6 +12,11 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+try:
+    from runtime.archive_body_masking import active_withheld_values, mask_body_text
+except ModuleNotFoundError:  # package import layout
+    from api.runtime.archive_body_masking import active_withheld_values, mask_body_text
+
 
 HTTP_EXPERIMENT_VERSION = "http-experiment-2026-07-12.v4"
 ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
@@ -325,7 +330,10 @@ def normalize_experiment(target_url: str, raw: Any) -> dict[str, Any]:
 
 
 def _scrub_sample(value: str) -> str:
-    text = value[:MAX_RESPONSE_SAMPLE]
+    # The masked-archive body masking first (N56: SQL dump rows, markup pairs, table cells,
+    # assignments, provider formats), read a little past the sample so a value the cut would
+    # split is still recognised; inside a Hunt worker withheld values become references.
+    text = mask_body_text(value[:MAX_RESPONSE_SAMPLE + 1_024])[:MAX_RESPONSE_SAMPLE]
     text = re.sub(r"(?i)(bearer\s+)[a-z0-9._~+/=-]+", r"\1<redacted>", text)
     text = re.sub(r'(?i)("?(?:token|secret|password|api[_-]?key)"?\s*[:=]\s*")[^"]+"', r'\1<redacted>"', text)
     return text
@@ -376,7 +384,8 @@ def response_summary(
         name: str(response.headers.get(name) or "")[:1000]
         for name in selected_headers or []
     }
-    return {
+    body_sample = _scrub_sample(text)
+    summary = {
         "status": response.status_code,
         "content_type": str(response.headers.get("content-type") or "")[:200],
         "content_length": len(bounded),
@@ -384,7 +393,7 @@ def response_summary(
         "bytes_observed": len(body),
         "body_sha256": hashlib.sha256(bounded).hexdigest(),
         "body_digest_scope": "prefix" if truncated else "complete",
-        "body_sample": _scrub_sample(text),
+        "body_sample": body_sample,
         "json_type": type(parsed_json).__name__ if parsed_json is not None else None,
         "json_keys": json_keys,
         "content_semantically_populated": (
@@ -398,6 +407,12 @@ def response_summary(
         "selected_json": selected_json,
         "selected_headers": selected_response_headers,
     }
+    withheld = active_withheld_values()
+    if withheld is not None:
+        entries = withheld.entries(body_sample)
+        if entries:
+            summary["withheld_values"] = entries
+    return summary
 
 
 def compare_summaries(control: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
