@@ -18,7 +18,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, groupScanFindings, isProvenFinding, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, isProvenFinding, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 const SCAN_REPORT_TABS = ['findings', 'posture', 'coverage', 'release', 'activity']
@@ -331,7 +331,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
               </div>
               <p className="mt-2 text-xs leading-5 text-gray-500">
                 {carried.complete
-                  ? 'Found by earlier scans and still open; this run did not observe them. They count toward the release decision.'
+                  ? `${carriedSourceText(carried)} and still open; this run did not observe them. They count toward the release decision.`
                   : 'Target history is incomplete: not every active finding could be loaded, so this is a lower bound and not an all-clear.'}
               </p>
             </>
@@ -482,7 +482,8 @@ function DeploymentDecisionCard({
   const verdict = String(decision?.decision || decision?.deploy_decision || 'unknown').toLowerCase()
   const blockingFindings = Array.isArray(decision?.blocking_findings) ? decision.blocking_findings : []
   const blockingCount = blockingFindings.length
-  const targetActiveCount = blockingFindings.filter((f) => f?.from_target_active).length
+  const scanId = String(decision?.scan_id || '')
+  const provenanceText = blockerProvenanceText(blockingFindings, scanId)
   const appliedExceptions = Array.isArray(decision?.applied_exceptions)
     ? decision.applied_exceptions
     : Array.isArray(decision?.exceptions_applied)
@@ -591,15 +592,15 @@ function DeploymentDecisionCard({
         <details className="mt-3 border-t border-gray-800 pt-3">
           <summary className="cursor-pointer text-xs text-gray-300 hover:text-white">
             {blockingCount} blocking finding{blockingCount === 1 ? '' : 's'}
-            {targetActiveCount > 0 && (
+            {provenanceText && (
               <span className="text-gray-500">
-                {' '}· {blockingCount - targetActiveCount} from this scan · {targetActiveCount} unresolved on this target from earlier scans
+                {' '}· {provenanceText}
               </span>
             )}
           </summary>
-          {targetActiveCount > 0 && (
+          {provenanceText && (
             <p className="mt-2 text-xs text-amber-300/90">
-              Findings marked "on target" were not necessarily detected by this scan. Resolve them or add a policy exception to unblock deploy.
+              Findings marked "Hunt" or "on target" were not detected by this scan. Resolve them or add a policy exception to unblock deploy.
             </p>
           )}
           <ul className="mt-2 space-y-1">
@@ -618,14 +619,28 @@ function DeploymentDecisionCard({
                 ) : (
                   <span className="text-gray-300 break-all">{f.title || 'Untitled finding'}</span>
                 )}
-                {f.from_target_active && (
+                {blockerOrigin(f, scanId) === 'hunt' ? (
+                  <span
+                    className="shrink-0 rounded-sm bg-purple-900/40 px-1.5 py-0.5 text-purple-300"
+                    title="Found by a Hunt on this target, not by this scan"
+                  >
+                    Hunt
+                  </span>
+                ) : blockerOrigin(f, scanId) === 'other' ? (
+                  <span
+                    className="shrink-0 rounded-sm bg-gray-800 px-1.5 py-0.5 text-gray-300"
+                    title="Recorded on this target outside a scan or Hunt (manual entry, AI session or device import)"
+                  >
+                    other record
+                  </span>
+                ) : blockerOrigin(f, scanId) === 'earlier_scan' ? (
                   <span
                     className="shrink-0 rounded-sm bg-amber-900/40 px-1.5 py-0.5 text-amber-300"
                     title="Unresolved on this target from another scan"
                   >
                     on target
                   </span>
-                )}
+                ) : null}
               </li>
               )
             })}

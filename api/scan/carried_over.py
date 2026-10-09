@@ -25,7 +25,7 @@ TARGET_HISTORY_COUNT_SQL = """
     WHERE target_id = ANY($1::uuid[]) AND status = 'active'
 """
 TARGET_HISTORY_SQL = """
-    SELECT id, fingerprint, severity, scan_id, last_seen_scan_id
+    SELECT id, fingerprint, severity, scan_id, last_seen_scan_id, hunt_run_id
     FROM findings
     WHERE target_id = ANY($1::uuid[]) AND status = 'active'
     ORDER BY created_at DESC, id
@@ -33,20 +33,55 @@ TARGET_HISTORY_SQL = """
 """
 
 
+def is_hunt_finding(row: Mapping[str, Any]) -> bool:
+    """A row a Hunt created. A Hunt that later re-proves a scan's row also stamps its
+    hunt_run_id there, so a row some scan wrote stays a scan finding."""
+    return bool(row.get("hunt_run_id")) and not row.get("scan_id")
+
+
+def finding_origin(row: Mapping[str, Any]) -> str:
+    """Who recorded a row this run did not observe: a Hunt, an earlier scan, or something
+    else (a manual entry, an AI session, a device import) that has neither a scan nor a Hunt
+    behind it and must not be called an earlier scan."""
+    if is_hunt_finding(row):
+        return "hunt"
+    return "earlier_scan" if row.get("scan_id") else "other"
+
+
 def gate_findings_from_rows(rows: Any) -> list[dict[str, Any]]:
     """The target's active blocking rows in the shape the deployment gate merges."""
     findings: list[dict[str, Any]] = []
     for row in rows or []:
-        findings.append({
-            "id": str(row["id"]),
-            "fingerprint": row["fingerprint"],
-            "title": row["title"],
-            "severity": row["severity"],
-            "tool": row["tool"],
-            "url": row["url"],
+        item = dict(row) if not isinstance(row, dict) else row
+        finding = {
+            "id": str(item["id"]),
+            "fingerprint": item["fingerprint"],
+            "title": item["title"],
+            "severity": item["severity"],
+            "tool": item["tool"],
+            "url": item["url"],
             "source": "target_active",
-        })
+        }
+        if item.get("scan_id"):
+            finding["scan_id"] = str(item["scan_id"])
+        if item.get("hunt_run_id"):
+            finding["hunt_run_id"] = str(item["hunt_run_id"])
+        findings.append(finding)
     return findings
+
+
+def attach_persisted_ids(blocking: list[dict[str, Any]], ids_by_fingerprint: Mapping[str, Any]) -> None:
+    """Give a report row the id of its persisted row when the active set did not supply it
+    (the row is no longer active, or past the active-set bound). A report row's own ``id`` is
+    the scanner's identifier, not a row id, so it is replaced. A blocker the page cannot link
+    to is not evidence a reader can act on."""
+    persisted_ids = {str(value) for value in ids_by_fingerprint.values()}
+    for finding in blocking:
+        if finding.get("from_target_active") or str(finding.get("id") or "") in persisted_ids:
+            continue
+        persisted = ids_by_fingerprint.get(str(finding.get("fingerprint") or ""))
+        if persisted:
+            finding["id"] = str(persisted)
 
 
 async def load_target_history(conn: Any, target_ids: Sequence[Any], *, cap: int = HISTORY_ROW_CAP) -> dict[str, Any]:
@@ -90,6 +125,10 @@ def summarize_carried_over(
     complete = bool(source.get("complete", True))
     return {
         "count": len(carried),
+        # Of those, the rows a Hunt created rather than an earlier scan.
+        "from_hunts": sum(1 for row in carried if finding_origin(row) == "hunt"),
+        # Rows with neither a scan nor a Hunt behind them (manual, AI session, device).
+        "from_other": sum(1 for row in carried if finding_origin(row) == "other"),
         "material": sum(1 for level in severities if level in MATERIAL_SEVERITIES),
         "highest": highest,
         "complete": complete,
@@ -139,6 +178,11 @@ def merge_target_active_blockers(
         merged = dict(extra)
         if fid not in observed_ids:
             merged["from_target_active"] = True
+            # Who found it: an earlier scan, or a Hunt. A Hunt's row is not "from an
+            # earlier scan", and the page must not say so.
+            merged["origin"] = finding_origin(extra)
+        else:
+            merged["origin"] = "this_scan"
         blocking.append(merged)
         for value in (fid, fingerprint):
             if value:
@@ -148,6 +192,9 @@ def merge_target_active_blockers(
 
 __all__ = [
     "HISTORY_ROW_CAP",
+    "attach_persisted_ids",
+    "finding_origin",
+    "is_hunt_finding",
     "gate_findings_from_rows",
     "load_target_history",
     "merge_target_active_blockers",

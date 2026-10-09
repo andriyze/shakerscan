@@ -128,6 +128,9 @@ test('finding rows show a route, a proof label, and survive narrow screens', () 
 test('the release decision labels its chips and folds the blocking list', () => {
   assert.match(detail, /<span className="text-gray-500">profile<\/span>/)
   assert.match(detail, /<span className="text-gray-500">policy<\/span>/)
-  assert.match(detail, /unresolved on this target from earlier scans/)
+  // The provenance clause (this scan, Hunts, earlier scans) is built by blockerProvenanceText,
+  // whose wording is tested in scanDetailPresentation.test.mjs; the page renders it.
+  assert.match(detail, /blockerProvenanceText\(blockingFindings, scanId\)/)
+  assert.match(detail, /\{' '\}· \{provenanceText\}/)
   assert.match(detail, /<details className="mt-3 border-t border-gray-800 pt-3">/)
 })

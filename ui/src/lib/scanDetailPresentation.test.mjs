@@ -2,6 +2,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  blockerOrigin,
+  blockerProvenance,
+  blockerProvenanceText,
+  carriedSourceText,
   carriedOverFromDecision,
   carriedOverSummary,
   domainRatePresentation,
@@ -322,7 +326,7 @@ test('carried over counts only active rows this run neither wrote, last saw, nor
     { severity: 'info', status: 'active', scan_id: 'scan-2', last_seen_scan_id: 'scan-2', title: 'Seen here', url: 'http://app/z', tool: 't' },
   ]
   const summary = carriedOverSummary(scan, rows)
-  assert.deepEqual(summary, { state: 'ready', count: 1, material: 1, highest: 'high', complete: true })
+  assert.deepEqual(summary, { state: 'ready', count: 1, material: 1, fromHunts: 0, fromOther: 0, highest: 'high', complete: true })
   assert.equal(carriedOverSummary(scan, [], 'loading').state, 'loading')
   assert.equal(carriedOverSummary(scan, [], 'error').count, 0)
 })
@@ -413,7 +417,7 @@ test('a parallel child prefix stays visible as the entry origin instead of being
 test('the server summary from the decision wins over the client fallback', () => {
   assert.deepEqual(
     carriedOverFromDecision({ carried_over: { count: 3, material: 2, highest: 'High', complete: true } }),
-    { state: 'ready', count: 3, material: 2, highest: 'high', complete: true, source: 'server' },
+    { state: 'ready', count: 3, material: 2, fromHunts: 0, fromOther: 0, highest: 'high', complete: true, source: 'server' },
   )
   const partial = carriedOverFromDecision({ carried_over: { count: 0, complete: false, unloaded_active: 40 } })
   assert.equal(partial.state, 'partial')
@@ -609,4 +613,42 @@ test('slow endpoints are counted and named, and an empty family selection is exp
       + 'https://honey.example/api/v1/chat, https://honey.example/api/v1/rag/documents?q=1',
     'The scan policy selected no check family, so only the baseline probes ran',
   ])
+})
+
+test('release-gate blockers found by a Hunt are not labelled as earlier scans', () => {
+  const blockers = [
+    ...Array.from({ length: 22 }, (_, i) => ({ id: `scan-row-${i}`, origin: 'this_scan' })),
+    ...Array.from({ length: 6 }, (_, i) => ({ id: `hunt-row-${i}`, origin: 'hunt', from_target_active: true, hunt_run_id: 'h1' })),
+  ]
+  assert.deepEqual(blockerProvenance(blockers, 'scan-2'), { thisScan: 22, hunts: 6, earlierScans: 0, other: 0 })
+  const text = blockerProvenanceText(blockers, 'scan-2')
+  assert.equal(text, '22 from this scan · 6 found by Hunts on this target')
+  assert.doesNotMatch(text, /earlier scans/)
+
+  const huntOnly = releaseLine({ decision: 'block', blocking_findings: blockers.slice(22) }, 'scan-2', 0)
+  assert.match(huntOnly.text, /6 unresolved findings from Hunts that this run did not re-examine/)
+
+  // An older API that only marks carried rows still reads as earlier scans.
+  assert.equal(blockerOrigin({ from_target_active: true, scan_id: 'scan-1' }, 'scan-2'), 'earlier_scan')
+  assert.equal(blockerProvenanceText([{ id: 'a' }], 'scan-2'), '')
+  assert.equal(carriedOverFromDecision({ carried_over: { count: 6, from_hunts: 6 } }).fromHunts, 6)
+  const fallback = carriedOverSummary({ id: 'scan-2', result: { findings: [] } }, [
+    { id: 'h', hunt_run_id: 'h1', scan_id: null, severity: 'high' },
+    { id: 'r', hunt_run_id: 'h1', scan_id: 'scan-1', severity: 'high' },
+  ])
+  assert.equal(fallback.count, 2)
+  assert.equal(fallback.fromHunts, 1)
+})
+
+test('rows with neither a scan nor a Hunt behind them are labelled honestly', () => {
+  const blockers = [{ id: 'a', origin: 'this_scan' }, { id: 'm', origin: 'other', from_target_active: true }]
+  assert.deepEqual(blockerProvenance(blockers, 's'), { thisScan: 1, hunts: 0, earlierScans: 0, other: 1 })
+  assert.equal(blockerProvenanceText(blockers, 's'), '1 from this scan · 1 recorded on this target outside a scan or Hunt')
+  const otherOnly = releaseLine({ decision: 'block', blocking_findings: blockers.slice(1) }, 's', 0)
+  assert.match(otherOnly.text, /from other records that this run did not re-examine/)
+  assert.doesNotMatch(otherOnly.text, /earlier scans/)
+  assert.equal(carriedSourceText({ fromHunts: 0, fromOther: 0 }), 'Found by earlier scans')
+  assert.equal(carriedSourceText({ fromHunts: 2, fromOther: 1 }), 'Found by earlier scans or other sources (2 by Hunts, 1 recorded outside a scan or Hunt)')
+  const fallback = carriedOverSummary({ id: 's', result: { findings: [] } }, [{ id: 'm', scan_id: null, hunt_run_id: null, severity: 'high' }])
+  assert.equal(fallback.fromOther, 1)
 })
