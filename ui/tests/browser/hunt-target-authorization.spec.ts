@@ -147,3 +147,34 @@ test('invalid Hunt limits do not record authorization before validation', async 
   await expect(page.getByRole('alert').filter({ hasText: 'Maximum duration must be a positive whole number' }).first()).toBeVisible()
   expect(state.writes).toEqual([])
 })
+
+test('a saved run page does not issue the launcher authorization and credential reads', async ({ page }) => {
+  // Opening a run selects its target for a later "New Hunt", but the launcher is not shown.
+  // Its reads were still issued, and a viewer role is refused both (Enterprise soak D14).
+  const launcherReads: string[] = []
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
+    const request = route.request(), path = new URL(request.url()).pathname
+    if (path === `/targets/${id}/authorization` || path === '/credential-profiles') launcherReads.push(path)
+    if (path === `/hunts/${runId}`) return route.fulfill({ json: run })
+    if (path === `/hunts/${runId}/http-transactions`) return route.fulfill({ json: { transactions: [], total: 0, archive_total: 0, fidelity: 'complete' } })
+    if (path === `/hunts/${runId}/query`) return route.fulfill({ json: { hunt_id: runId, rows: [], has_more: false, supported: true } })
+    if (path === '/targets/inventory') return route.fulfill({ json: { targets: [target], total: 1, offset: 0, limit: 500 } })
+    if (path === `/targets/${id}/authorization`) return route.fulfill({ json: { target_id: id, authorization: standing } })
+    if (path === '/credential-profiles') return route.fulfill({ json: { profiles: [] } })
+    return route.fulfill({ json: { status: 'healthy', rows: [], profiles: [], collections: [], requests: [], total: 0, has_more: false, revision: 0, skill: null, operator_skill: null, knowledge: null } })
+  })
+  const inventory = page.waitForRequest(request => new URL(request.url()).pathname === '/targets/inventory')
+  await page.goto(`/hunt?run=${runId}`)
+  await inventory
+  await expect(page.getByText('Investigate TV ports').first()).toBeVisible()
+  // Give the selection effects a render after the target list resolves.
+  await page.waitForTimeout(500)
+  expect(launcherReads).toEqual([])
+  // The launcher itself still reads both for the same target.
+  await page.goto(`/hunt?target=${id}`)
+  await expect.poll(() => launcherReads.slice().sort()).toEqual(['/credential-profiles', `/targets/${id}/authorization`])
+  expect(errors).toEqual([])
+})

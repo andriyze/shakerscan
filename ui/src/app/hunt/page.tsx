@@ -178,6 +178,11 @@ function HuntContent() {
       detail: target.url,
     })), [assets])
   const selectedChoice = choices.find((choice) => choice.id === targetId)
+  // Opening a run also selects its target, but the launcher is not on screen then. Its target
+  // authorization and credential reads are launcher state: issuing them on a run page cost two
+  // calls the run view never used, and a viewer role is refused both.
+  const launcherVisible = launcherOpen && !hunt && !legacyDeviceRun && !searchParams.get('run')
+  const launcherChoice = launcherVisible ? selectedChoice : undefined
   // The run detail carries no target name. Inactive targets are not launch choices, so read those directly.
   const [runTargetRecord, setRunTargetRecord] = useState<{ id: string; name?: string; url?: string } | null>(null)
   const runTargetId = hunt?.target_id
@@ -205,24 +210,24 @@ function HuntContent() {
     setApprovalReceipt('')
     setScopeReceipt('')
     setAuthorizationError(null)
-    setAuthorizationLoading(Boolean(selectedChoice))
-    if (selectedChoice) getTargetAuthorization(selectedChoice.id)
-      .then(authorization => { if (!cancelled && authorization?.standing) setAuthorizedTargetId(selectedChoice.id) })
+    setAuthorizationLoading(Boolean(launcherChoice))
+    if (launcherChoice) getTargetAuthorization(launcherChoice.id)
+      .then(authorization => { if (!cancelled && authorization?.standing) setAuthorizedTargetId(launcherChoice.id) })
       .catch(cause => { if (!cancelled) setAuthorizationError(cause instanceof Error ? cause.message : 'Failed to read target authorization') })
       .finally(() => { if (!cancelled) setAuthorizationLoading(false) })
     return () => {cancelled = true}
-  }, [selectedChoice?.id, authorizationRetry])
+  }, [launcherChoice?.id, authorizationRetry])
 
   useEffect(() => {
     let cancelled = false
     setCredentialIds({ primary: '', secondary: '', service: '', ssh: '' })
     setCredentialProfiles([])
     setCredentialError(null)
-    if (!selectedChoice) return () => { cancelled = true }
+    if (!launcherChoice) return () => { cancelled = true }
     setCredentialsLoading(true)
     listCredentialProfiles({
       target_kind: targetKind,
-      target_id: selectedChoice.id,
+      target_id: launcherChoice.id,
     })
       .then(({ profiles }) => {
         if (!cancelled) {
@@ -241,7 +246,7 @@ function HuntContent() {
       })
       .finally(() => { if (!cancelled) setCredentialsLoading(false) })
     return () => { cancelled = true }
-  }, [selectedChoice?.id, targetKind])
+  }, [launcherChoice?.id, targetKind])
 
   const selectedCredentialCount = Object.values(credentialIds).filter(Boolean).length
   const privileged = activeTesting || networkDiscovery || allowStateChanging || allowOobInteractions || selectedCredentialCount > 0
