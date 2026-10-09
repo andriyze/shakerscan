@@ -34,10 +34,12 @@ from typing import Any
 import uuid
 
 try:
-    from scanner_tools.host_names import HOST_CANONICALIZATION, HostNameError, canonical_host, display_host
+    from scanner_tools.host_names import (
+        HOST_CANONICALIZATION, HostNameError, canonical_host, display_host, host_forms,
+    )
 except ModuleNotFoundError:  # package import (api.hunt.permission_bounds)
     from scanner.scanner_tools.host_names import (
-        HOST_CANONICALIZATION, HostNameError, canonical_host, display_host,
+        HOST_CANONICALIZATION, HostNameError, canonical_host, display_host, host_forms,
     )
 
 from .permission_reasons import (
@@ -279,9 +281,10 @@ def bounds_from_public(value: Mapping[str, Any]) -> Bounds:
     return stored_bounds(value).bounds
 
 
-def _host_parts(values: Iterable[Any]) -> list[tuple[str, str, str]]:
-    """(kind, bound text, host spelling) for every host the ``--allow`` strings name."""
-    parts: list[tuple[str, str, str]] = []
+def _host_parts(values: Iterable[Any]) -> list[tuple[str, str, str, str, str]]:
+    """(kind, bound text, host spelling, ``*.`` prefix, ``:port`` suffix) for every host the
+    ``--allow`` strings name. The prefix and suffix are spelled as ``HostPattern.text()`` does."""
+    parts: list[tuple[str, str, str, str, str]] = []
     for item in values:
         kind, _sep, value = str(item or "").strip().partition(":")
         if kind not in {KIND_TARGET_AUTHORIZE, KIND_CREDENTIAL_USE}:
@@ -296,11 +299,28 @@ def _host_parts(values: Iterable[Any]) -> list[tuple[str, str, str]]:
                     continue
                 except ValueError:
                     pass
-            text = part
+            text, suffix = part, ""
             if ":" in text and not text.startswith("["):
-                text = text.rpartition(":")[0]
-            parts.append((kind, f"{kind}:{part}", text[2:] if text.startswith("*.") else text))
+                text, _, port_text = text.rpartition(":")
+                suffix = f":{int(port_text)}" if port_text.isdigit() and int(port_text) else ""
+            prefix = "*." if text.startswith("*.") else ""
+            parts.append((kind, f"{kind}:{part}", text[len(prefix):], prefix, suffix))
     return parts
+
+
+def _display_pattern(text: str | None) -> str:
+    """``*.xn--strae-oqa.example:443 (Unicode: *.straße.example:443)``: a pattern's canonical ASCII
+    form with its Unicode form beside it."""
+    text = str(text or "")
+    prefix = "*." if text.startswith("*.") else ""
+    host, suffix = text[len(prefix):], ""
+    if ":" in host:
+        host, _, port = host.rpartition(":")
+        suffix = f":{port}"
+    shown = host_forms(host)
+    if shown["unicode"] == shown["ascii"]:
+        return text
+    return f"{prefix}{shown['ascii']}{suffix} (Unicode: {prefix}{shown['unicode']}{suffix})"
 
 
 @dataclass(frozen=True)
@@ -311,26 +331,26 @@ class LegacyHostBound:
     canonical: str | None
     reason: str
 
-    def public(self) -> dict[str, Any]:
+    def finding(self) -> str:
+        """What changed, in one sentence."""
         if self.reason == "encoding_changed":
-            message = (
-                f"The pre-authorized bound {self.bound!r} was stored as {self.stored_as!r} (IDNA 2003), "
-                f"but the host the client connects to is {display_host(self.canonical)} (IDNA 2008/UTS #46). "
-                "It no longer covers any request. Approve the re-approval request this Hunt raises "
-                "(shakerscan approve) to cover the intended host; your other bounds and grants are unchanged."
-            )
-        elif self.reason == "host_invalid":
-            message = (
-                f"The pre-authorized bound {self.bound!r} was stored as {self.stored_as!r} (IDNA 2003), "
-                "but the host is not a valid IDNA 2008/UTS #46 name. It no longer covers any request; "
-                "approve a bound that spells the host you mean."
-            )
+            return (f"The bound {self.bound!r} was stored as {self.stored_as!r} (IDNA 2003), but the host "
+                    f"the client connects to is {_display_pattern(self.canonical)} (IDNA 2008/UTS #46).")
+        if self.reason == "host_invalid":
+            return (f"The bound {self.bound!r} was stored as {self.stored_as!r} (IDNA 2003), but the host "
+                    "is not a valid IDNA 2008/UTS #46 name.")
+        return (f"The bound {self.bound!r} was stored before hosts were spelled with IDNA 2008/UTS #46, "
+                "and the string that was approved could not be confirmed.")
+
+    def public(self) -> dict[str, Any]:
+        if self.reason == "host_invalid":
+            action = ("It no longer covers any request. Start the Hunt again with a bound that spells "
+                      "the host you mean; your other bounds and grants are unchanged.")
         else:
-            message = (
-                "These host bounds were stored before hosts were spelled with IDNA 2008/UTS #46 and the "
-                "strings that were approved could not be confirmed. They no longer cover any request; "
-                "approve them again."
-            )
+            action = ("It no longer covers any request. Approve the re-approval request this Hunt "
+                      "raises (shakerscan approve) to cover the host shown; your other bounds and "
+                      "grants are unchanged.")
+        message = f"{self.finding()} {action}"
         return {"bound": self.bound, "stored_as": self.stored_as, "canonical": self.canonical,
                 "reason": self.reason, "reapproval_required": True, "message": message}
 
@@ -370,7 +390,7 @@ def _encoding_review(values: Iterable[Any]) -> tuple[set[tuple[str, str]], list[
     (``(kind, host)``) and those they do not (withheld, ``LegacyHostBound``)."""
     stable: set[tuple[str, str]] = set()
     legacy: list[LegacyHostBound] = []
-    for kind, bound, host in _host_parts(values):
+    for kind, bound, host, prefix, suffix in _host_parts(values):
         try:
             old: str | None = _legacy_idna2003(host)
         except BoundError:
@@ -380,10 +400,13 @@ def _encoding_review(values: Iterable[Any]) -> tuple[set[tuple[str, str]], list[
         except HostNameError:
             new = None
         if new is not None and new == old:
-            stable.add((kind, new))
+            # Keyed by the whole pattern ([*.]host[:port]) as stored: a stable bound keeps exactly
+            # its own wildcard and port, never those of a changed bound with the same IDNA 2003 host.
+            stable.add((kind, prefix + new + suffix))
         else:
             legacy.append(LegacyHostBound(
-                bound=bound, stored_as=old, canonical=new,
+                bound=bound, stored_as=prefix + old + suffix if old else None,
+                canonical=prefix + new + suffix if new else None,
                 reason="encoding_changed" if new else "host_invalid",
             ))
     return stable, legacy
@@ -427,17 +450,13 @@ def stored_bounds(value: Mapping[str, Any], *, source_allow: Sequence[Any] | Non
         reproduced = None
     if reproduced is None or _without_marker(reproduced.public()) != _without_marker(value):
         withheld = tuple(
-            LegacyHostBound(bound=item, stored_as=item, canonical=None, reason="source_unconfirmed")
-            for item in (*patterns, *host_credentials)
+            LegacyHostBound(bound=f"{kind}:{item}", stored_as=item, canonical=item, reason="source_unconfirmed")
+            for kind, item in (*((KIND_TARGET_AUTHORIZE, item) for item in patterns),
+                               *((KIND_CREDENTIAL_USE, item) for item in host_credentials))
         )
         return StoredBounds(_rebuilt(value, target_patterns=(), credential_targets=id_credentials), withheld)
     stable, legacy = _encoding_review(source_allow or ())
-
-    def pattern_host(text: str) -> str:
-        host = text.rpartition(":")[0] if ":" in text else text
-        return host[2:] if host.startswith("*.") else host
-
-    kept_patterns = [item for item in patterns if (KIND_TARGET_AUTHORIZE, pattern_host(item)) in stable]
+    kept_patterns = [item for item in patterns if (KIND_TARGET_AUTHORIZE, item) in stable]
     kept_hosts = [item for item in host_credentials if (KIND_CREDENTIAL_USE, item) in stable]
     kept_credentials = [item for item in credentials if item in id_credentials or item in kept_hosts]
     return StoredBounds(
@@ -465,7 +484,7 @@ def bound_hosts(values: Iterable[Any]) -> list[dict[str, str]]:
     approval screen: ``{"bound", "ascii", "display"}``. A host strict processing refuses is
     reported with an empty ``ascii``."""
     shown: list[dict[str, str]] = []
-    for _kind, bound, host in _host_parts(values):
+    for _kind, bound, host, _prefix, _suffix in _host_parts(values):
         try:
             ascii_host = canonical_host(host)
         except HostNameError:

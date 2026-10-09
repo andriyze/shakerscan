@@ -29,7 +29,8 @@ from hunt.credential_uses import HUNT_CREDENTIAL_USES_SCHEMA_SQL, admit_action_c
 from hunt.permission_grants import decide, revoke_grant, settle_for_ended_hunt
 from hunt.permission_store import (
     HUNT_PERMISSION_SCHEMA_SQL, canonical_digest, expire_due, hunt_bounds, list_events,
-    load_preauthorizations, public_preauthorization, public_request, request_expiry,
+    load_preauthorizations, public_preauthorization, public_request, raise_request,
+    reconcile_host_encoding_if_needed, request_expiry,
 )
 from hunt.permission_bounds import parse_bounds
 from hunt.start_contract import HUNT_BUDGET_PROFILES, normalize_hunt_start_payload
@@ -876,6 +877,84 @@ def test_a_legacy_idna2003_bound_fails_closed_and_is_offered_back_in_one_step(en
         run(env, env.call(hunt, "legacy-dest-0002",
                           values={"method": "GET", "path": "/", "origin": "https://strasse.example"}))
     assert [row["kind"] for row in run(env, env.requests(hunt))].count("preauthorization") == 1
+    # The old row has nothing left to re-approve, and says which row covers it now.
+    listed = {item["host_canonicalization"]: item for item in
+              (public_preauthorization(row) for row in run(env, load_preauthorizations(env.conn, hunt["id"])))}
+    assert listed["idna2003-legacy"]["reapproval_required"] == []
+    assert listed["idna2003-legacy"]["reapproved_by"] == listed["idna2008-uts46"]["id"]
+
+
+def _seed_legacy_row(env, hunt, allow, row):
+    run(env, env.conn.execute(
+        """UPDATE hunt_runs SET context_pack = jsonb_set(context_pack, '{hunt_start_contract,allow}', $2::jsonb)
+           WHERE id=$1""", hunt["id"], json.dumps(allow)))
+    run(env, env.conn.execute(
+        """INSERT INTO hunt_preauthorizations(hunt_run_id, bounds_json, bounds_digest, created_by, proof)
+           VALUES ($1,$2::jsonb,$3,'alice@example.test','stepup')""",
+        hunt["id"], json.dumps(row), canonical_digest(row)))
+
+
+def test_a_legacy_row_is_offered_back_when_read_before_any_request(env):
+    """R3 review: the withheld bounds and their re-approval request appear together, on the first
+    read of the Hunt's pre-authorizations, not only after an action is refused."""
+    hunt = run(env, env.hunt())
+    _seed_legacy_row(env, hunt, ["target.authorize:straße.example"], {
+        "budget_multiplier": None, "budget_totals": {}, "credential_targets": [],
+        "target_patterns": ["strasse.example"], "capability_flags": [], "ssh_host_trust_first_contact": False})
+    assert run(env, env.requests(hunt)) == []
+    run(env, reconcile_host_encoding_if_needed(env.conn, hunt["id"]))
+    run(env, reconcile_host_encoding_if_needed(env.conn, hunt["id"]))  # idempotent
+    (offer,) = run(env, env.requests(hunt))
+    assert offer["reason_code"] == "preauthorization_reapproval" and offer["status"] == "pending"
+
+
+def test_a_legacy_proposal_is_replaced_by_the_same_bounds_for_the_hosts_they_name(env):
+    """R3 review: a proposal digested under IDNA 2003 was refused with 409 telling the person to
+    approve a request that was never raised. It is now withdrawn and raised again with its IDNA
+    2008/UTS #46 digest when read, so approving stays one terminal step."""
+    hunt = run(env, env.hunt())
+    allow = ["target.authorize:straße.example", "budget.raise:2x"]
+    legacy = {"budget_multiplier": 2.0, "budget_totals": {}, "credential_targets": [],
+              "target_patterns": ["strasse.example"], "capability_flags": [], "ssh_host_trust_first_contact": False}
+
+    async def proposed():
+        async with env.pool.acquire() as conn:
+            async with conn.transaction():
+                locked = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", hunt["id"]))
+                request, _ = await raise_request(
+                    conn, run=locked, kind="preauthorization", reason_code="preauthorization_proposed",
+                    subject={"allow": allow, "bounds_digest": canonical_digest(legacy)},
+                    actor="agent", source="proposed_allow")
+                return request
+
+    old = run(env, proposed())
+    # Deciding it directly (no read first) is refused with an accurate, actionable message.
+    with pytest.raises(HTTPException) as refused:
+        run(env, env.decide(hunt, old, key="decision-legacy-1"))
+    assert _detail(refused)["error"] == "preauthorization_reapproval_required"
+    assert "xn--strae-oqa.example" in _detail(refused)["message"]
+    assert "shakerscan approve" in _detail(refused)["message"]
+
+    run(env, reconcile_host_encoding_if_needed(env.conn, hunt["id"]))
+    by_id = {str(row["id"]): row for row in run(env, env.requests(hunt))}
+    old_row = by_id.pop(str(old["id"]))
+    (fresh,) = by_id.values()
+    assert old_row["status"] == "withdrawn" and fresh["status"] == "pending"
+    assert json.loads(fresh["subject_json"])["bounds_digest"] == parse_bounds(allow).digest()
+    shown_old = public_request(old_row)
+    assert shown_old["superseded_by"] == str(fresh["id"])
+    assert shown_old["approve_command"] == f"shakerscan approve {fresh['id']}"
+    assert "covers xn--strae-oqa.example (Unicode: straße.example)" in public_request(fresh)["explanation"]
+    with pytest.raises(HTTPException) as again:
+        run(env, env.decide(hunt, old_row, key="decision-legacy-2"))
+    assert f"shakerscan approve {fresh['id']}" in _detail(again)["message"]
+
+    run(env, env.decide(hunt, fresh, key="decision-fresh"))
+    bounds, _rows = run(env, hunt_bounds(env.conn, hunt["id"]))
+    assert bounds.covers_target(host="xn--strae-oqa.example", port=443)
+    assert not bounds.covers_target(host="strasse.example", port=443)
+    run(env, reconcile_host_encoding_if_needed(env.conn, hunt["id"]))
+    assert len(run(env, env.requests(hunt))) == 2, "nothing is raised again"
 
 
 def test_bound_grammar_refuses_wildcards_and_normalizes_idna():

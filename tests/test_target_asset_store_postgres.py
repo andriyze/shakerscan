@@ -2,6 +2,8 @@
 import asyncio
 import uuid
 
+import pytest
+
 from targets.asset_migration import migrate_target_assets
 from targets.asset_inputs_migration import migrate_asset_inputs
 from targets.asset_store import list_assets, asset_detail, asset_history
@@ -305,6 +307,30 @@ def test_a_leading_zero_ipv4_target_is_never_authorized_in_the_list(monkeypatch)
                        for item in row.get('origins') or ()}
             assert origins[str(proper)]['authorized'] is True
             assert origins[str(legacy)]['authorized'] is False, "the list agrees with the scan path"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('url', ['https://[::ffff:10.0.0.1]/', 'https://[64:ff9b::c000:201]/'])
+def test_an_ipv6_address_embedding_ipv4_is_authorized_in_the_list_as_the_scan_path_reads_it(url, monkeypatch):
+    """R3 review: the numeric-spelling check read ::ffff:10.0.0.1 and 64:ff9b::192.0.2.1 as IPv4
+    text and compared them as NULL, so the scan path authorized the target and the list did not."""
+    encryption(monkeypatch)
+    monkeypatch.setenv('SHAKERSCAN_PRIVATE_NETWORK_TARGETS', 'allow')
+    async def run():
+        async with database() as conn:
+            await prepare(conn)
+            async with conn.transaction():
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
+            import target_authorization
+            from targets.router import normalize_target_url
+            normalized, _note = normalize_target_url(url)
+            target = await conn.fetchval("INSERT INTO targets(url) VALUES($1) RETURNING id", normalized)
+            await target_authorization.authorize_target(conn, target, approved_by='operator')
+            assert await target_authorization.current_target_authorization(conn, target) is not None
+            origins = {str(item['id']): item for row in (await list_assets(conn))['targets']
+                       for item in row.get('origins') or ()}
+            assert origins[str(target)]['authorized'] is True
     asyncio.run(run())
 
 

@@ -5029,6 +5029,15 @@ async def _run_schema_migrations_once(pool) -> None:
                 from targets.asset_inputs_migration import migrate_asset_inputs
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
+
+            # Targets whose stored host the one canonicalizer now refuses: rewrite a numeric
+            # spelling with one reading, flag the rest (targets/host_canonical_repair.py).
+            async with conn.transaction():
+                try:
+                    from targets.host_canonical_repair import repair_target_host_spellings
+                except ModuleNotFoundError:
+                    from api.targets.host_canonical_repair import repair_target_host_spellings
+                await repair_target_host_spellings(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 
