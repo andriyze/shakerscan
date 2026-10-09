@@ -1,7 +1,8 @@
-"""Public Suffix List boundaries on real PostgreSQL: legacy roots, Targets list grouping and
-domain deletion never span registrants (run by the target-assets job)."""
+"""Public Suffix List boundaries on real PostgreSQL: discovery admission, legacy roots, Targets
+list grouping and domain deletion never span registrants (run by the target-assets job)."""
 import asyncio
 
+from operations import discovery
 from scope.roots import recompute_spanning_target_roots
 from targets.asset_migration import migrate_target_assets
 from targets.asset_inputs_migration import migrate_asset_inputs
@@ -9,11 +10,58 @@ from targets.asset_store import list_assets
 from tests.test_target_asset_migration_postgres import database
 from tests.test_target_asset_inputs_postgres import prepare, encryption
 
+RECEIPT_SQL = """INSERT INTO scope_receipts (id, target_id, input_scope, normalized_scope, verdict,
+    blocked_by, warnings, checks, environment, allowed_hosts, allowed_root_domains, redirect_destinations)
+    VALUES ($1, $2, '{}', '{}', 'allowed', '[]', '[]', '[]', 'production', '[]', $3::jsonb, '[]')"""
+
+
 async def _converted(conn):
     await prepare(conn)
     async with conn.transaction():
         await migrate_target_assets(conn)
         await migrate_asset_inputs(conn)
+
+
+def test_discovery_counts_only_targets_a_person_added(monkeypatch):
+    encryption(monkeypatch)
+    monkeypatch.setenv(discovery.MAX_ACTIVE_ENV, "20")
+
+    async def run():
+        async with database() as conn:
+            await _converted(conn)
+            app = await conn.fetchval(
+                "INSERT INTO targets(url, name) VALUES ('https://app.example.co.uk', 'app') RETURNING id")
+            await conn.execute(
+                "INSERT INTO targets(url, name, discovery_source) VALUES ('https://x.other.test', 'x', 'subfinder')")
+            await conn.execute(
+                "INSERT INTO targets(url, name, discovery_source) VALUES ('https://chat.ai.test', 'c', 'ai_session')")
+            # An archived discovered row: the host row the asset model made for it stays active,
+            # but it is not a person's declaration.
+            await conn.execute("""INSERT INTO targets(url, name, discovery_source, is_active)
+                VALUES ('https://old.archived.test', 'o', 'subfinder', false)""")
+            # A host a person added on its own counts.
+            await conn.execute("""INSERT INTO targets(url, name, discovery_source)
+                VALUES ('host://db.hostonly.test', 'db', 'host')""")
+            await conn.execute(RECEIPT_SQL, "unbound", None, '["scoped.test"]')
+            await conn.execute(RECEIPT_SQL, "bound", app, '["bound.test"]')
+            first = await discovery.admit_discovery(conn, "example.co.uk", requested_by=discovery.requester())
+            outcomes = {}
+            for name in ("dev.example.co.uk", "other.test", "unknown.test", "ai.test", "archived.test",
+                         "hostonly.test", "scoped.test", "bound.test"):
+                try:
+                    await discovery.admit_discovery(conn, name, requested_by=discovery.requester())
+                    outcomes[name] = 200
+                except discovery.DiscoveryRefused as exc:
+                    outcomes[name] = exc.status_code
+            run_row = await conn.fetchrow("SELECT * FROM discovery_runs WHERE id=$1", first)
+            return outcomes, dict(run_row)
+
+    outcomes, run_row = asyncio.run(run())
+    assert outcomes == {
+        "dev.example.co.uk": 409, "other.test": 403, "unknown.test": 403, "ai.test": 403,
+        "archived.test": 403, "hostonly.test": 200, "scoped.test": 403, "bound.test": 200,
+    }
+    assert run_row["requested_by"] == "local-operator" and run_row["root_domain"] == "example.co.uk"
 
 
 def test_legacy_public_suffix_roots_are_recomputed_once(monkeypatch):
