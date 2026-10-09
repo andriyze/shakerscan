@@ -18,9 +18,22 @@ test('production scan UI submits canonical V2 Scan contract', async ({ page, req
   await page.getByLabel('Target URL or hostname').fill(FIXTURE_TARGET)
   await page.getByRole('button', { name: /Fast/ }).click()
 
+  // A registered target's credentials are preselected once they load, and a credentialed
+  // Scan needs the authorization checkbox, so Run Scan stays disabled. Certification's DAST
+  // benchmark registers credentials on this target first. Wait for that state to settle and
+  // choose an anonymous Scan explicitly instead of racing the credential load.
+  await page.waitForLoadState('networkidle')
+  const credentialDefaults = page.getByTestId('credential-defaults')
+  if (await credentialDefaults.isVisible()) {
+    await credentialDefaults.getByRole('button', { name: 'Scan anonymously' }).click()
+  }
+  await expect(credentialDefaults).toBeHidden()
+  const runScan = page.getByRole('button', { name: 'Run Scan' })
+  await expect(runScan).toBeEnabled()
+
   const [response] = await Promise.all([
     page.waitForResponse((candidate) => isApiResponse(candidate, API_URL, '/scans')),
-    page.getByRole('button', { name: 'Run Scan' }).click(),
+    runScan.click(),
   ])
   expect(response.ok()).toBeTruthy()
   const payload = response.request().postDataJSON()
