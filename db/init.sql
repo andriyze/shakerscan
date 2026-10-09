@@ -1143,6 +1143,25 @@ CREATE TABLE IF NOT EXISTS hunt_permission_grants (
 );
 CREATE INDEX IF NOT EXISTS idx_hunt_permission_grants_live
     ON hunt_permission_grants(hunt_run_id, kind) WHERE revoked_at IS NULL;
+CREATE TABLE IF NOT EXISTS hunt_permission_baselines (
+    -- A Hunt's authority before its first grant; effective authority is this plus live grants.
+    hunt_run_id UUID PRIMARY KEY REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    policy_json JSONB NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('first_grant','reconstructed')),
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE OR REPLACE FUNCTION hunt_permission_baselines_immutable() RETURNS trigger AS $baselines$
+BEGIN
+    IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'hunt_permission_baselines is immutable';
+END
+$baselines$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS hunt_permission_baselines_immutable ON hunt_permission_baselines;
+CREATE TRIGGER hunt_permission_baselines_immutable
+    BEFORE UPDATE OR DELETE ON hunt_permission_baselines
+    FOR EACH ROW EXECUTE FUNCTION hunt_permission_baselines_immutable();
 CREATE TABLE IF NOT EXISTS hunt_permission_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,

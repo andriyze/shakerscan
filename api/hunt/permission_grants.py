@@ -15,6 +15,11 @@ A grant reuses the mechanism that already owns its authority; it never adds a pa
   credential grant applies, without creating a binding. Remember creates the normal credential
   grant (``granted_by="permission-request:<id>"``), which joins the one attached list.
 
+A capability or destination grant never writes a copy of the policy: the authority fields are
+rebuilt from the Hunt's baseline plus every live grant, under the Hunt row lock, whenever a grant
+is applied or revoked (``grant_authority``). Revoking one grant therefore neither removes what
+another live grant holds nor restores what a revoked one held.
+
 A grant changes what admission allows; it never skips admission. Decisions lock the Hunt row and
 then the request row, require the pending state and the exact subject digest, and are
 replay-safe: the same decision again returns the recorded one, a different one is refused.
@@ -31,6 +36,7 @@ import uuid
 from fastapi import HTTPException
 
 from .budget_amendments import HuntBudgetAmendmentRequest, amendable_dimensions, apply_budget_amendment
+from .grant_authority import authority_diff, hunt_baseline, rebuild_authority
 from .permission_bounds import CAPABILITY_FLAGS, Bounds, parse_bounds
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
@@ -196,22 +202,21 @@ async def _apply_budget(conn, run, request, choice, actor) -> dict[str, Any]:
 async def _apply_capability(conn, run, request, actor) -> dict[str, Any]:
     subject = _json(request["subject_json"], {})
     policy = _json(run.get("policy_json"), {})
-    before = {key: policy.get(key) for key in (
-        "active_testing", "allow_state_changing_http", "allow_oob_interactions", "network_discovery",
-        "mutation_allowed", "approval_receipt_id", "scope_receipt_id", "authorization_confirmed",
-    )}
+    # The baseline is read (or recorded) before this grant changes anything.
+    await hunt_baseline(conn, run)
     receipt_bound = await _ensure_receipt(conn, run, policy)
     flag = str(subject.get("flag") or "")
-    for field in CAPABILITY_FLAGS.get(flag, ()):
-        policy[field] = True
-    if policy.get("allow_state_changing_http"):
-        policy["mutation_allowed"] = True
     capability = str(subject["capability"])
-    allowed = list(policy.get("allowed_capabilities") or [])
-    added = capability not in allowed
-    if added:
-        allowed.append(capability)
-    policy["allowed_capabilities"] = allowed
+    effect = {
+        "flag": flag, "fields_enabled": list(CAPABILITY_FLAGS.get(flag, ())), "capability": capability,
+        "capability_added": capability not in (policy.get("allowed_capabilities") or ()),
+        "receipt_bound": receipt_bound,
+    }
+    # Its own fields and capability on top of the baseline and the other live grants, never a
+    # copy of the whole policy (R1): revoking it later rebuilds the same way without it.
+    policy = await rebuild_authority(conn, {**run, "policy_json": policy}, pending=[
+        {"kind": KIND_CAPABILITY_ENABLE, "subject_json": subject, "effect_json": effect},
+    ])
     await _write_policy(conn, run, policy)
     profile = HUNT_BUDGET_PROFILES.get(str(run.get("budget_profile") or "balanced"), HUNT_BUDGET_PROFILES["balanced"])
     budget = _json(run.get("budget_json"), {})
@@ -221,20 +226,17 @@ async def _apply_capability(conn, run, request, actor) -> dict[str, Any]:
         if key in permitted and int(budget.get(key) or 0) == 0 and int(getattr(profile, key)) > 0
     }
     amendment = await _amend(conn, run, request_id=request["id"], limits=raises, actor=actor, suffix=":dimensions")
-    return {"policy_before": before, "flag": flag, "capability": capability, "capability_added": added,
-            "receipt_bound": receipt_bound, "dimensions_set": raises,
+    return {**effect, "dimensions_set": raises,
             "amendment_id": (amendment or {}).get("amendment", {}).get("amendment_id")}
 
 
 async def _apply_target(conn, run, request, actor) -> dict[str, Any]:
     subject = _json(request["subject_json"], {})
-    policy = _json(run.get("policy_json"), {})
-    destinations = [dict(item) for item in policy.get("granted_destinations") or () if isinstance(item, Mapping)]
     entry = {key: subject.get(key) for key in ("host", "port", "scheme", "origin", "addresses", "same_host")}
     entry["request_id"] = str(request["id"])
-    if not any(item.get("origin") == entry["origin"] for item in destinations):
-        destinations.append(entry)
-    policy["granted_destinations"] = destinations[-64:]
+    policy = await rebuild_authority(conn, run, pending=[
+        {"kind": KIND_TARGET_AUTHORIZE, "subject_json": subject, "effect_json": {"destination": entry}},
+    ])
     await _write_policy(conn, run, policy)
     return {"destination": entry}
 
@@ -491,30 +493,23 @@ async def revoke_grant(conn: Any, hunt_id: Any, grant_id: Any, *, revoked_by: st
             "A budget raise is an amendment in the Hunt's history and pre-authorization bounds are "
             "frozen with the start; neither is revoked."
         )})
-    effect = _json(grant["effect_json"], {})
-    policy = _json(run.get("policy_json"), {})
-    if grant["kind"] == KIND_TARGET_AUTHORIZE:
-        origin = (effect.get("destination") or {}).get("origin")
-        policy["granted_destinations"] = [
-            item for item in policy.get("granted_destinations") or () if item.get("origin") != origin
-        ]
-        await _write_policy(conn, run, policy)
-    elif grant["kind"] == KIND_CAPABILITY_ENABLE:
-        for key, value in (effect.get("policy_before") or {}).items():
-            if key in {"approval_receipt_id", "scope_receipt_id", "authorization_confirmed"}:
-                continue
-            policy[key] = value
-        if effect.get("capability_added"):
-            policy["allowed_capabilities"] = [
-                name for name in policy.get("allowed_capabilities") or () if name != effect.get("capability")
-            ]
-        await _write_policy(conn, run, policy)
+    # Baseline first (a 2.8.0 Hunt reconstructs it from its grant rows), then mark the grant
+    # revoked, then rebuild from what is still live. Never a restored snapshot: another grant
+    # may hold the same field, and a field this grant found on may since have been revoked (R1).
+    await hunt_baseline(conn, run)
     updated = await conn.fetchrow(
         "UPDATE hunt_permission_grants SET revoked_at=NOW(), revoked_by=$2 WHERE id=$1 RETURNING *",
         grant["id"], str(revoked_by)[:200] or "local-operator",
     )
+    detail: dict[str, Any] = {}
+    if grant["kind"] in {KIND_TARGET_AUTHORIZE, KIND_CAPABILITY_ENABLE}:
+        before = _json(run.get("policy_json"), {})
+        policy = await rebuild_authority(conn, run)
+        await _write_policy(conn, run, policy)
+        detail = {"authority": authority_diff(before, policy)}
     await record_event(conn, hunt_id=run["id"], request_id=grant["request_id"], grant_id=grant["id"],
-                       event="revoked", actor=str(revoked_by)[:200] or "local-operator", source="revoke")
+                       event="revoked", actor=str(revoked_by)[:200] or "local-operator", source="revoke",
+                       detail=detail)
     return {"replayed": False, "grant": public_grant(updated)}
 
 

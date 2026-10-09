@@ -171,8 +171,8 @@ class Env:
                 })
 
 
-@pytest.fixture
-def env(monkeypatch):
+def permission_environment(monkeypatch):
+    """The ``env`` fixture's body, shared with test_hunt_grant_revocation_postgres."""
     import asyncpg
 
     assert urlsplit(DSN).hostname in {"localhost", "127.0.0.1", "::1", "postgres"}
@@ -206,6 +206,11 @@ def env(monkeypatch):
     loop.close()
 
 
+@pytest.fixture
+def env(monkeypatch):
+    yield from permission_environment(monkeypatch)
+
+
 def run(env, coro):
     return env.loop.run_until_complete(coro)
 
@@ -233,7 +238,8 @@ def test_fresh_install_and_upgrade_define_the_same_permission_schema_and_status_
                         """SELECT table_name, column_name, data_type, is_nullable, column_default
                            FROM information_schema.columns WHERE table_schema=$1
                              AND table_name IN ('hunt_permission_requests','hunt_permission_grants',
-                                                'hunt_permission_events','hunt_preauthorizations')
+                                                'hunt_permission_events','hunt_preauthorizations',
+                                                'hunt_permission_baselines')
                            ORDER BY 1, 2""", schema)],
                     "constraints": sorted(
                         row["d"] for row in await conn.fetch(
