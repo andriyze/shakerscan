@@ -210,6 +210,35 @@ def test_an_explicit_ascii_bound_beside_a_changed_one_stands():
     assert [item.bound for item in loaded.legacy] == ["target.authorize:straße.example"]
 
 
+@pytest.mark.parametrize("source, stored, kept, granted, refused", [
+    # The changed bound covered strasse.example on every port; the stable one only on 8443.
+    (["target.authorize:straße.example", "target.authorize:strasse.example:8443"],
+     ["strasse.example", "strasse.example:8443"], ["strasse.example:8443"],
+     [("strasse.example", 8443)], [("strasse.example", 443), ("strasse.example", None)]),
+    # The changed wildcard covered every subdomain; the stable bound is the apex only.
+    (["target.authorize:*.straße.example", "target.authorize:strasse.example"],
+     ["*.strasse.example", "strasse.example"], ["strasse.example"],
+     [("strasse.example", 443)], [("api.strasse.example", 443), ("api.xn--strae-oqa.example", 443)]),
+    # The changed bound named one port on the apex; the stable wildcard never covers the apex.
+    (["target.authorize:straße.example:443", "target.authorize:*.strasse.example"],
+     ["strasse.example:443", "*.strasse.example"], ["*.strasse.example"],
+     [("api.strasse.example", 443)], [("strasse.example", 443), ("xn--strae-oqa.example", 443)]),
+])
+def test_a_stable_bound_keeps_only_its_own_wildcard_and_port(source, stored, kept, granted, refused):
+    """R3 review B1: re-derivation keyed stable hosts without their wildcard and port, so a
+    withheld IDNA 2003 bound still granted through a stable one with the same host -- sometimes
+    more than either. Each stored pattern now stands only as its exact stable self."""
+    loaded = stored_bounds(_v280_row(target_patterns=stored), source_allow=source)
+    assert [pattern.text() for pattern in loaded.bounds.target_patterns] == kept
+    for host, port in granted:
+        assert loaded.bounds.covers_target(host=host, port=port), (host, port)
+    for host, port in refused:
+        assert not loaded.bounds.covers_target(host=host, port=port), (host, port)
+    (withheld,) = loaded.legacy
+    assert withheld.reason == "encoding_changed" and "xn--strae-oqa.example" in withheld.canonical
+    assert withheld.public()["stored_as"] in stored
+
+
 @pytest.mark.parametrize("source", [None, [], ["target.authorize:other.example"]])
 def test_a_legacy_row_its_source_does_not_reproduce_fails_closed(source):
     row = _v280_row(target_patterns=["api.example.com"], capability_flags=["oob"])
@@ -336,3 +365,50 @@ def test_target_authorization_compares_hosts_with_the_one_canonicalizer():
     assert _host_key("Straße.Example.") == _host_key("xn--strae-oqa.example")
     assert _host_key("strasse.example") != _host_key("straße.example")
     assert _host_key("010.000.000.001") == "", "refused: matches no scope host"
+
+
+@pytest.mark.parametrize("spelling", [
+    "a%41.example", "a@b.example", "a/b.example", "a\\b.example", "a b.example", "a*b.example",
+    "*.example", "a|b.example", "a^b.example", "a<b.example", "a?b.example", "a#b.example",
+    "fe80::1%eth0", "[fe80::1%25eth0]",
+])
+def test_hosts_a_browser_refuses_are_refused(spelling):
+    """R3 review: the ASCII path passed WHATWG forbidden host code points and IPv6 zone ids, so
+    the one canonicalizer could name a host no browser or HTTP client would."""
+    with pytest.raises(HostNameError):
+        canonical_host(spelling)
+
+
+def test_a_bound_wildcard_is_only_a_leading_label():
+    assert parse_bounds(["target.authorize:*.api.example.com"]).target_patterns[0].wildcard
+    for bad in ("target.authorize:api.*.example.com", "target.authorize:a*.example.com",
+                "target.authorize:a@b.example.com", "credential.use:a%2eb.example.com"):
+        with pytest.raises(BoundError):
+            parse_bounds([bad])
+
+
+def test_underscores_and_plain_hosts_stay_valid():
+    assert canonical_host("_dmarc.Example.COM.") == "_dmarc.example.com"
+    assert canonical_host("under_score.example") == "under_score.example"
+
+
+@pytest.mark.parametrize("url, code, words", [
+    ("https://010.000.000.001/", "malformed_url", "canonical IPv4"),
+    ("https://2852039166/", "malformed_url", "canonical IPv4"),
+    ("https://a‍b.example/", "unicode_or_punycode_confusion", "IDNA 2008"),
+])
+def test_the_scope_refusal_names_the_real_reason(url, code, words):
+    from action_scope import evaluate_scope, receipt_to_dict
+
+    receipt = receipt_to_dict(evaluate_scope(url, environment="production"))
+    assert receipt["verdict"] == "blocked" and code in receipt["blocked_by"]
+    (check,) = [item for item in receipt["checks"] if item["name"] == code]
+    assert check["status"] == "blocked" and words in check["message"]
+
+
+@pytest.mark.parametrize("spelling", [" ~.example", " x.example", " a.example", "x.example　"])
+def test_unicode_spaces_around_a_host_are_not_trimmed_away(spelling):
+    """R3 review fuzz: str.strip() dropped Unicode spaces that UTS #46 refuses, so the
+    canonicalizer accepted hosts the idna reference (and browsers) refuse."""
+    with pytest.raises(HostNameError):
+        canonical_host(spelling)

@@ -27,6 +27,12 @@ _MAX_HOST = 253
 _MAX_LABEL = 63
 
 
+# WHATWG URL forbidden domain code points (C0 controls, space, # % / : < > ? @ [ \ ] ^ | DEL),
+# plus "*": a bound's leading "*." is removed by its parser before a host gets here. A browser
+# refuses these in a host, so this canonicalizer does too and never names a host a browser can't.
+_FORBIDDEN = frozenset(chr(code) for code in range(0x21)) | frozenset('#%/:<>?@[\\]^|*\x7f')
+
+
 class HostNameError(ValueError):
     """A host that is not a valid DNS name under strict IDNA 2008 / UTS #46."""
 
@@ -48,6 +54,9 @@ def _ip_literal(host: str) -> str | None:
     scope check or bound compared.
     """
     if ":" in host:
+        if "%" in host:
+            # A zone id (fe80::1%eth0) names an interface on this machine, not a host.
+            raise HostNameError(f"host {host!r} has an IPv6 zone id, which a URL host cannot carry")
         try:
             return str(ipaddress.IPv6Address(host))
         except ValueError as exc:
@@ -81,7 +90,9 @@ def canonical_host(value: object) -> str:
     empty host, a non-canonical IPv4 spelling, or one that strict IDNA 2008 / UTS #46 processing
     refuses.
     """
-    host = str(value or "").strip()
+    # Only ASCII whitespace around the value is trimmed: str.strip() would also drop Unicode spaces
+    # (U+2002, U+205F, ...) that UTS #46 refuses, accepting a host no browser would.
+    host = str(value or "").strip(" \t\r\n\f\v")
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
     if host.isascii():
@@ -106,6 +117,9 @@ def canonical_host(value: object) -> str:
         literal = _ip_literal(ascii_host)  # a full-width spelling of an address
         if literal is not None:
             return literal
+    forbidden = sorted(set(ascii_host) & _FORBIDDEN)
+    if forbidden:
+        raise HostNameError(f"host {host!r} contains a character no URL host may hold: {''.join(forbidden)!r}")
     if not ascii_host or len(ascii_host) > _MAX_HOST:
         raise HostNameError(f"host {host!r} is empty or longer than {_MAX_HOST} characters")
     for label in ascii_host.split("."):

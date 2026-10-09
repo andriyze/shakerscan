@@ -206,7 +206,17 @@ Rules for bounds:
     whose IDNA 2003 and 2008 encodings are identical stands; one that differs, or whose source
     cannot be confirmed, is withheld (it covers nothing) and listed under `reapproval_required`.
     The row's other bounds stand, and the withheld bounds are offered back once as a pending
-    `preauthorization_reapproval` request the person grants with `shakerscan approve <id>`.
+    `preauthorization_reapproval` request the person grants with `shakerscan approve <id>`. The
+    offer is made when the Hunt's requests or pre-authorizations are read, so the withheld bounds
+    and the request appear together, and once it is granted the old row lists nothing under
+    `reapproval_required` and names the new row in `reapproved_by`. A stable bound is matched as
+    its whole stored pattern (`[*.]host[:port]`), so it never lends its host to a withheld one.
+  - A pending agent proposal recorded under IDNA 2003 that names a host IDNA 2008 spells
+    differently is withdrawn when read, and the same `--allow` strings are raised again with their
+    IDNA 2008 digest. The old request's `approve_command` and `superseded_by` name the replacement,
+    so approving stays one step.
+  - Hosts containing a character no URL host may hold (WHATWG forbidden code points such as `%`,
+    `@`, `/`, `\`, space, or `*` outside a bound's leading `*.`) and IPv6 zone ids are refused.
   - A bound never covers a hard limit, and kind rules still apply to each credential.
 - **When a request falls inside the bounds,** it is created and granted in the same transaction
   (`decision_via=preauthorization`) and audited as pre-authorized by the starting person. The

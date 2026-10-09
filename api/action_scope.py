@@ -23,7 +23,8 @@ try:
         embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
     )
     from scanner_tools.host_names import (
-        HOST_CANONICALIZATION, HostNameError, canonical_host, display_host, host_forms, unicode_host,
+        HostNameError, canonical_host,
+        host_forms,  # noqa: F401 - re-exported: approval screens show a host's two forms
     )
 except ModuleNotFoundError:  # package import (api.action_scope)
     from scanner.scanner_tools.address_classes import (
@@ -31,7 +32,8 @@ except ModuleNotFoundError:  # package import (api.action_scope)
         embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
     )
     from scanner.scanner_tools.host_names import (
-        HOST_CANONICALIZATION, HostNameError, canonical_host, display_host, host_forms, unicode_host,
+        HostNameError, canonical_host,
+        host_forms,  # noqa: F401 - re-exported: approval screens show a host's two forms
     )
 
 
@@ -415,9 +417,19 @@ def evaluate_scope(
                 _add_check(checks, "trailing_dot_host", "passed", "No trailing-dot hostname.")
 
             if host_raw and not host:
-                blocked.append("unicode_or_punycode_confusion")
-                _add_check(checks, "unicode_or_punycode_confusion", "blocked",
-                           "Hostname is not a valid IDNA 2008 / UTS #46 name and is refused.")
+                # The canonicalizer's own reason: an ASCII spelling it refuses (a non-canonical
+                # IPv4 such as 010.0.0.1, an IPv6 zone id, a forbidden character) is a malformed
+                # host; a Unicode or xn-- spelling it refuses is an IDNA failure.
+                try:
+                    canonical_host(host_raw)
+                    reason = "Hostname is refused."
+                except HostNameError as exc:
+                    reason = f"Hostname is refused: {exc}."
+                code = ("malformed_url" if host_raw.isascii() and "xn--" not in host_raw.lower()
+                        else "unicode_or_punycode_confusion")
+                blocked.append(code)
+                checks[:] = [check for check in checks if check.name != code]  # one verdict per check
+                _add_check(checks, code, "blocked", reason)
             # An IP literal's canonical text (2001:db8::0001 is 2001:db8::1) is not a confusion.
             elif host_raw and (not host_raw.isascii() or host.startswith("xn--") or ".xn--" in host):
                 blocked.append("unicode_or_punycode_confusion")
