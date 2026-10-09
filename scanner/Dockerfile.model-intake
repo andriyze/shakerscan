@@ -7,7 +7,7 @@
 # scanner image. Only this image carries the ~2GB toolchain; build-only packaging machinery is
 # removed after installation so it cannot require a runtime vulnerability waiver.
 ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
-ARG MODEL_INTAKE_GO_BUILDER=golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36
+ARG MODEL_INTAKE_GO_BUILDER=golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c
 FROM ${MODEL_INTAKE_GO_BUILDER} AS model-intake-go-tools
 ARG TRIVY_VERSION=0.74.0
 ARG OSV_SCANNER_VERSION=2.5.1
@@ -30,7 +30,7 @@ RUN set -eux; \
 # Match metadata fields, not a shell-quoted backslash-t (which is not a tab).
 RUN set -eu; \
     for tool in trivy osv-scanner; do \
-      go version "/out/$tool" | grep -F 'go1.26.6'; \
+      go version "/out/$tool" | grep -F 'go1.26.9'; \
       go version -m "/out/$tool" > "/out/$tool.buildinfo"; \
     done; \
     check_dep() { awk -v module="$2" -v version="$3" '$1 == "dep" && $2 == module && $3 == version { found=1 } END { exit !found }' "/out/$1.buildinfo"; }; \
