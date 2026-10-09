@@ -704,20 +704,14 @@ def _private_networks_allowed() -> bool:
         return False
 
 
-def _judged_addresses(address: Any) -> tuple[Any, ...]:
+def _direct_origin_refusal(address: str) -> str | None:
     try:
-        from scanner_tools.address_classes import judged_addresses
+        import action_scope
     except ModuleNotFoundError:
-        from scanner.scanner_tools.address_classes import judged_addresses
-    return judged_addresses(address)
-
-
-def _cloud_service_address(address: Any) -> bool:
-    try:
-        from scanner_tools.address_classes import cloud_service_address, judged_addresses
-    except ModuleNotFoundError:
-        from scanner.scanner_tools.address_classes import cloud_service_address, judged_addresses
-    return any(cloud_service_address(item) for item in judged_addresses(address))
+        from .. import action_scope  # type: ignore[no-redef]
+    return action_scope.direct_origin_refusal(
+        address, allow_private_networks=_private_networks_allowed(),
+    )
 
 
 def _ip_addresses(value: Any, field: str) -> tuple[str, ...]:
@@ -734,23 +728,14 @@ def _ip_addresses(value: Any, field: str) -> tuple[str, ...]:
             f"{MAX_DIRECT_ORIGIN_ADDRESSES} IP addresses"
         )
     addresses: list[str] = []
-    # Private and loopback ranges follow the deployment's own target policy. This list
-    # used to be hardcoded here, so an install that admitted 192.168.1.50 as a target
-    # refused the same address as a direct origin -- on a LAN install, which is the
-    # normal self-hosted case, the field could not be used at all.
-    forbidden_networks = tuple(ipaddress.ip_network(network) for network in (
-        # Never routable to a real origin, under any deployment policy.
-        "0.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4",
-        "::/128", "fe80::/10", "ff00::/8",
-        *(
-            ()
-            if _private_networks_allowed()
-            else (
-                "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "172.16.0.0/12",
-                "192.168.0.0/16", "::1/128", "fc00::/7",
-            )
-        ),
-    ))
+    # Private and loopback ranges follow the deployment's own target policy, so a LAN install
+    # that admits 192.168.1.50 as a target can name it as a direct origin. The classification
+    # is the web scope guard's (``action_scope.direct_origin_refusal``): every embedded spelling
+    # (mapped, SIIT, NAT64, 6to4, Teredo) is judged as the IPv4 address it carries, reserved and
+    # special-purpose space (198.18.0.0/15, 192.0.0.0/24, documentation ranges) is private-class,
+    # and a cloud metadata or platform-service address is never an origin. A list of its own here
+    # used to admit 198.18.0.1, 192.0.0.8, 192.0.2.1 and 192.0.0.192 with private networks
+    # refused.
     for item in value:
         try:
             parsed = ipaddress.ip_address(str(item).strip())
@@ -758,14 +743,7 @@ def _ip_addresses(value: Any, field: str) -> tuple[str, ...]:
             raise HuntStartContractError(
                 f"{field} must contain literal IP addresses"
             ) from exc
-        # The shared classifier's decoding (``address_classes.judged_addresses``): NAT64, SIIT,
-        # 6to4 and Teredo spellings are judged as the IPv4 address they reach, not only the
-        # IPv4-mapped one, and a cloud metadata or platform-service address is never an origin.
-        if _cloud_service_address(parsed) or any(
-            candidate.version == network.version and candidate in network
-            for candidate in _judged_addresses(parsed)
-            for network in forbidden_networks
-        ):
+        if _direct_origin_refusal(str(parsed)) is not None:
             raise HuntStartContractError(
                 f"{field} cannot contain private, local, or non-routable addresses"
             )
