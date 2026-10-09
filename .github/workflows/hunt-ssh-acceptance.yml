@@ -18,12 +18,9 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:18
-        # Read-only Docker Hub credentials for the pull. Empty secrets (forks, Dependabot) make
-        # the runner skip the login and pull anonymously, as before.
-        credentials:
-          username: ${{ secrets.DOCKERHUB_READ_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
+        # Docker Hub's official image through Google's pull-through mirror: services are pulled
+        # before any step can log in, and anonymous Docker Hub pulls hit the rate limit.
+        image: mirror.gcr.io/library/postgres:18
         env:
           POSTGRES_PASSWORD: ssh-ci-only
           POSTGRES_DB: hunt_ssh_test
@@ -32,12 +29,9 @@ jobs:
           --health-cmd "pg_isready -U postgres -d hunt_ssh_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
-        image: redis:7-alpine
-        # Read-only Docker Hub credentials for the pull. Empty secrets (forks, Dependabot) make
-        # the runner skip the login and pull anonymously, as before.
-        credentials:
-          username: ${{ secrets.DOCKERHUB_READ_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
+        # Docker Hub's official image through Google's pull-through mirror: services are pulled
+        # before any step can log in, and anonymous Docker Hub pulls hit the rate limit.
+        image: mirror.gcr.io/library/redis:7-alpine
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s

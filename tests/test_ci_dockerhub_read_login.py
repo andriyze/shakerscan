@@ -7,9 +7,11 @@ login is a no-op when those secrets are absent, as for forks and Dependabot, so 
 anonymously exactly as before. The release push secrets DOCKERHUB_USERNAME / DOCKERHUB_TOKEN must
 never reach a pull-request path.
 
-Job `services:` are pulled before any step runs, so they carry `credentials:` instead of a login
-step; the runner skips the registry login when either credential is empty
-(actions/runner ContainerOperationProvider.ContainerRegistryLogin).
+Job `services:` are pulled before any step runs, so a login step cannot cover them. Service
+`credentials:` were tried and refused: with the secrets absent GitHub rejects the template
+("Unexpected value ''") and the job fails at "Set up job". Services therefore pull Docker Hub's
+official images through Google's pull-through mirror, mirror.gcr.io/library/<image>:<same tag>,
+which served the same index digests as Docker Hub for every tag when this was introduced.
 """
 import re
 from pathlib import Path
@@ -96,12 +98,16 @@ def test_step_pulls_follow_the_read_login(workflow, job_name, pulls):
     assert len(logins) == 1 and logins[0] < first_pull, (workflow, job_name)
 
 
-def test_pr_service_containers_pull_with_read_credentials():
+def test_pr_service_containers_pull_through_the_mirror_without_credentials():
     services = 0
     for path, doc in _pr_workflows():
         for name, job in doc["jobs"].items():
             for service_name, service in (job.get("services") or {}).items():
                 services += 1
-                assert service.get("credentials") == READ_CREDENTIALS, (path.name, name, service_name)
+                where = (path.name, name, service_name)
+                # Same official image and tag, not Docker Hub's anonymous rate limit.
+                assert re.fullmatch(r"mirror\.gcr\.io/library/(postgres|redis):[\w.-]+", service["image"]), where
+                # Empty credentials (no secrets, forks, Dependabot) make the job template invalid.
+                assert "credentials" not in service, where
             assert "container" not in job, (path.name, name)
-    assert services >= 10
+    assert services >= 11
