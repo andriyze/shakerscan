@@ -303,6 +303,9 @@ def test_the_field_count_is_what_sqlmap_is_handed_after_leaf_deduplication():
 
 
 # Fixture endpoints: seconds per request and tested body fields.
+# Fixture: per-run slowdown factors of endpoints whose rate drifts upward.
+DRIFT: dict[str, float] = {}
+
 ENDPOINTS = {
     "/vuln": (5.3, 4),
     "/fast5": (0.08, 5),
@@ -378,6 +381,9 @@ class _Scan:
         wall = int(context.requested_budget["tool_wall_seconds"])
         self.calls.append((path, technique, tested, wall))
         rate, _fields = ENDPOINTS[path]
+        # Fixture drift: some endpoints answer slower with every run (a loaded target).
+        runs = sum(1 for call in self.calls if call[0] == path) - 1
+        rate *= DRIFT.get(path, 1.0) ** runs
         hit = [item for item in tested if (path, technique, item) in self.vuln]
         if hit:
             # sqlmap tests the fields in order and stops at the vulnerable one: the fields
@@ -656,7 +662,8 @@ def test_the_fast_login_form_refutes_three_techniques_and_judges_time_based_alon
         ("U", "field0"), ("U", "field1"), ("B", "field0"),
     ]
     rounds = scan.drive()
-    assert [wall for added in rounds for _, wall in added] == [375, 375, 308]
+    # The last extension is E on field 1's 308 s with the cap's 20% of slack.
+    assert [wall for added in rounds for _, wall in added] == [375, 375, 370]
     assert scan.settled("/fastlogin") == {(t, f) for t in "UBE" for f in ("field0", "field1")}
     [verdict] = scan.records(rounds[-1][0][0], INCONCLUSIVE_RECORD_KIND)
     assert verdict["unfundable_techniques"] == ["T"] and verdict["closed"] is True
@@ -978,3 +985,48 @@ def test_a_field_name_with_a_comma_is_never_a_unit_of_its_own():
         },
     )
     assert fields == ("user", "pass") and count == 2
+
+
+def test_extension_caps_have_slack_for_a_mispredicted_rate(monkeypatch):
+    """Follow-up 2: an extension capped at exactly the predicted wall of the units left is cut
+    short by a target that answers slightly slower each run, and the remainder costs another of
+    the Scan's eight continuation rounds."""
+    import scan.verification_extension as extension_module
+
+    def rounds_needed(slack):
+        if not slack:
+            monkeypatch.setattr(extension_module, "_with_slack", lambda wall: int(wall))
+        ENDPOINTS["/drift"] = (1.0, 2)
+        DRIFT["/drift"] = 1.04  # fixture: 4% slower each run
+        try:
+            scan = _Scan(monkeypatch, ("/drift",), earlier=540)
+            scan.add("verify.sqli.r01", path="/drift", budget=SLICE)
+            scan.run({"verify.sqli.r01"})
+            rounds = scan.drive()
+            assert scan.settled("/drift") == {(t, f) for t in "UBET" for f in ("field0", "field1")}
+            return [[wall for _, wall in added] for added in rounds]
+        finally:
+            DRIFT.clear()
+            monkeypatch.undo()
+
+    # Control: without slack the 746 s cap leaves the last time-based unit for a 2nd round.
+    assert rounds_needed(False) == [[746], [260]]
+    assert rounds_needed(True) == [[854]]
+
+
+def test_a_slice_sized_for_its_units_is_extended_although_it_spent_most_requests(monkeypatch):
+    """Follow-up 2 (found while measuring the slack): an extension's request holds are sized
+    for its remaining units, so spending most of them is no sign it was not starved of wall.
+    Refusing it abandoned the candidate one unit short with most of the residual left."""
+    ENDPOINTS["/drift"] = (1.0, 2)
+    DRIFT["/drift"] = 1.05
+    try:
+        scan = _Scan(monkeypatch, ("/drift",), earlier=540)
+        scan.add("verify.sqli.r01", path="/drift", budget=SLICE)
+        scan.run({"verify.sqli.r01"})
+        scan.drive()
+        assert scan.settled("/drift") == {(t, f) for t in "UBET" for f in ("field0", "field1")}
+        assert scan.outcomes() == {}
+    finally:
+        DRIFT.clear()
+
