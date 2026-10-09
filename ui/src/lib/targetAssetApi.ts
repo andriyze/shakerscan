@@ -30,7 +30,10 @@ export interface TargetAsset {
   severity_counts?: Partial<Record<'critical' | 'high' | 'medium' | 'low' | 'info', number>>
   last_scanned_at?: string | null
   scanning?: boolean
+  /** The host asset's own standing authorization, which its linked web apps inherit. */
   authorized?: boolean
+  /** Active linked web apps the scan path treats as authorized (inherited or their own receipt). */
+  authorized_origin_count?: number
   created_at: string
   updated_at: string
 }
@@ -44,6 +47,8 @@ export interface InventoryOrigin {
   last_grade?: string | null
   last_score?: number | null
   active_findings_count?: number | null
+  /** Whether a scan of this web app runs under a standing authorization. */
+  authorized?: boolean
 }
 
 /** Counts for each filter value over the current search, before the other filters apply. */
@@ -62,6 +67,7 @@ export interface AssetOrigin {
   name: string | null
   is_active: boolean
   current_membership: boolean
+  authorized?: boolean
   last_scanned_at?: string | null
   last_score?: number | null
   last_grade?: string | null

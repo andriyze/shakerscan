@@ -17,6 +17,7 @@ old authorization no longer matches and the target is authorized again). The dan
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import urllib.parse
 import uuid
@@ -49,6 +50,17 @@ class TargetAuthorizationError(ValueError):
 def _host(url: str) -> str:
     parsed = urllib.parse.urlparse(str(url or "").strip())
     return (parsed.hostname or "").lower().strip("[]")
+
+
+def _host_key(value: Any) -> str:
+    """One spelling per host for comparing a target with its scope: lower case, no brackets or
+    trailing dot, and an IP literal in its canonical form. `2001:DB8::0001` and `2001:db8::1`
+    are one host; the inventory's SQL (target_asset_locator) compares the same way."""
+    text = str(value or "").strip().lower().strip("[]").rstrip(".")
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return text
 
 
 def _row(value: Any) -> dict[str, Any]:
@@ -199,7 +211,7 @@ async def _current_exact_target_authorization(conn: Any, target_id: Any) -> dict
         list(STANDING_RISK_TIERS),
         STANDING_ACTION_NAME,
     )
-    host = _host(target.get("url", ""))
+    host = _host_key(_host(target.get("url", "")))
     for raw in rows:
         row = _row(raw)
         if str(row.get("scope_verdict") or "") == "blocked":
@@ -207,7 +219,7 @@ async def _current_exact_target_authorization(conn: Any, target_id: Any) -> dict
         allowed = _json(row.get("scope_allowed_hosts")) or []
         normalized = _json(row.get("scope_normalized")) or {}
         scope_host = str((normalized or {}).get("host") or "").lower() if isinstance(normalized, dict) else ""
-        hosts = {str(item).lower() for item in allowed if str(item).strip()} | ({scope_host} if scope_host else set())
+        hosts = {_host_key(item) for item in allowed if str(item).strip()} | ({_host_key(scope_host)} if scope_host else set())
         if host and host not in hosts:
             continue
         scope = {"id": row.get("scope_id"), "verdict": row.get("scope_verdict")}
