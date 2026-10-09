@@ -10,10 +10,14 @@ Grammar (one bound per string, at most ``MAX_BOUNDS``)::
                                          | active-replay
     ssh.host_trust:first-contact         recorded; SSH requests are not raised in this release
 
-The server parses bounds; nothing here is trusted from the agent. A host pattern must contain a
-registrable domain, so ``*`` and ``*.com`` are refused. A bound never covers a hard limit:
-requests are only ever raised for refusals on the allowable list, and every grant still passes
-the same scope, kind and admission checks as before.
+The server parses bounds; nothing here is trusted from the agent. A host pattern must sit at or
+below a registrable domain under the bundled Public Suffix List (``public_suffix``, including its
+private section), so ``*``, ``*.com``, ``*.co.uk``, ``*.github.io`` and ``co.uk`` are refused while
+``*.example.co.uk`` and ``*.user.github.io`` are accepted. A stored bound that names a public
+suffix (accepted before this check) is kept as stored but covers nothing (``HostPattern.refused``,
+``refused_bounds``). A bound never covers a hard limit: requests are only ever raised for
+refusals on the allowable list, and every grant still passes the same scope, kind and admission
+checks as before.
 
 Hosts are spelled by the one canonicalizer every destination subject uses
 (``host_names.canonical_host``: strict IDNA 2008 with UTS #46), so a bound names the host the HTTP
@@ -41,6 +45,10 @@ except ModuleNotFoundError:  # package import (api.hunt.permission_bounds)
     from scanner.scanner_tools.host_names import (
         HOST_CANONICALIZATION, HostNameError, canonical_host, display_host, host_forms,
     )
+try:
+    from scope.psl import public_suffix_refusal
+except ModuleNotFoundError:  # package import (api.hunt.permission_bounds)
+    from ..scope.psl import public_suffix_refusal
 
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
@@ -78,13 +86,25 @@ def _host_or_none(host: Any) -> str | None:
         return None
 
 
+class PublicSuffixBoundError(BoundError):
+    """A host pattern that would cover a whole public suffix; carries the parsed pattern."""
+
+    def __init__(self, message: str, pattern: "HostPattern") -> None:
+        super().__init__(message)
+        self.pattern = pattern
+
+
 @dataclass(frozen=True)
 class HostPattern:
     host: str  # IDNA 2008/UTS #46 ASCII, lower case, without "*."
     wildcard: bool
     port: int | None
+    # Set only when a stored bound names a public suffix: it is kept as stored and covers nothing.
+    refused: str | None = field(default=None, compare=False)
 
     def covers(self, host: str, port: int | None) -> bool:
+        if self.refused:
+            return False
         host = _host_or_none(host)
         if host is None:
             return False
@@ -137,10 +157,56 @@ def parse_host_pattern(raw: str, *, _encode: Any = _canonical) -> HostPattern:
     labels = host.split(".")
     if "*" in host or not all(_LABEL.fullmatch(label) for label in labels):
         raise BoundError(f"target.authorize pattern {raw!r} is not a host name or *.domain")
-    # A registrable domain needs at least two labels under the wildcard: "*" and "*.com" refused.
-    if len(labels) < 2:
-        raise BoundError(f"target.authorize pattern {raw!r} must name a registrable domain")
+    # The host must be at or below a registrable domain (eTLD+1, Public Suffix List with its
+    # private section): "*", "*.com", "*.co.uk", "*.github.io" and "co.uk" are refused.
+    refusal = public_suffix_refusal(host, wildcard=wildcard, port=port)
+    if refusal:
+        raise PublicSuffixBoundError(refusal, HostPattern(host, wildcard, port, refused=refusal))
     return HostPattern(host, wildcard, port)
+
+
+def _stored_host_pattern(raw: str) -> HostPattern:
+    """A stored ``target.authorize`` pattern. One naming a public suffix (accepted before the
+    Public Suffix List check) is not reinterpreted or dropped silently: it keeps its stored text
+    and covers nothing, with the reason in ``refused``."""
+    try:
+        return parse_host_pattern(raw)
+    except PublicSuffixBoundError as exc:
+        return exc.pattern
+
+
+def _stored_credential_target(raw: str) -> str | None:
+    """A stored ``credential.use`` entry, or None when it names a public suffix as a host."""
+    try:
+        uuid.UUID(raw)
+        return raw
+    except ValueError:
+        pass
+    try:
+        parse_host_pattern(raw)
+    except PublicSuffixBoundError:
+        return None
+    except BoundError:
+        return raw
+    return raw
+
+
+def refused_bounds(value: Mapping[str, Any]) -> list[dict[str, str]]:
+    """The stored host bounds that name a public suffix and therefore cover nothing."""
+    refused: list[dict[str, str]] = []
+    for item in value.get("target_patterns") or ():
+        pattern = _stored_host_pattern(str(item))
+        if pattern.refused:
+            refused.append({"bound": f"{KIND_TARGET_AUTHORIZE}:{item}", "message": (
+                f"{pattern.refused}. This pre-authorization was stored before public suffixes were "
+                "refused; it no longer covers any host. Start the Hunt with a bound you control."
+            )})
+    for item in value.get("credential_targets") or ():
+        if _stored_credential_target(str(item)) is None:
+            refused.append({"bound": f"{KIND_CREDENTIAL_USE}:{item}", "message": (
+                f"{item} is a public suffix; this credential bound no longer covers any host."
+            )})
+    return refused
 
 
 @dataclass(frozen=True)
@@ -370,8 +436,12 @@ def _rebuilt(value: Mapping[str, Any], *, target_patterns: Iterable[str],
     return Bounds(
         budget_multiplier=value.get("budget_multiplier"),
         budget_totals={str(k): int(v) for k, v in dict(value.get("budget_totals") or {}).items()},
-        credential_targets=tuple(str(item) for item in credential_targets),
-        target_patterns=tuple(parse_host_pattern(item) for item in target_patterns),
+        # Stored patterns: one naming a public suffix is kept as stored and covers nothing.
+        credential_targets=tuple(
+            item for item in (str(raw) for raw in credential_targets)
+            if _stored_credential_target(item) is not None
+        ),
+        target_patterns=tuple(_stored_host_pattern(str(item)) for item in target_patterns),
         capability_flags=tuple(str(item) for item in value.get("capability_flags") or ()),
         ssh_first_contact=bool(value.get("ssh_host_trust_first_contact")),
     )
@@ -514,6 +584,6 @@ def bound_hosts(values: Iterable[Any]) -> list[dict[str, str]]:
 
 __all__ = [
     "Bounds", "BoundError", "CAPABILITY_FLAGS", "HostPattern", "LegacyHostBound", "MAX_BOUNDS",
-    "StoredBounds", "bound_hosts", "bounds_from_public", "legacy_host_changes", "merge", "parse_bounds",
-    "parse_host_pattern", "stored_bounds",
+    "PublicSuffixBoundError", "StoredBounds", "bound_hosts", "bounds_from_public", "legacy_host_changes",
+    "merge", "parse_bounds", "parse_host_pattern", "refused_bounds", "stored_bounds",
 ]

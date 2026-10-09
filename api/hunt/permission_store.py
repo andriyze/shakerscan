@@ -24,7 +24,7 @@ import uuid
 from .credential_uses import live_credential_grants
 from .grant_authority import withholding
 from .permission_bounds import (
-    BoundError, Bounds, bound_hosts, legacy_host_changes, merge, parse_bounds, stored_bounds,
+    BoundError, Bounds, bound_hosts, legacy_host_changes, merge, parse_bounds, refused_bounds, stored_bounds,
 )
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
@@ -516,7 +516,7 @@ def public_preauthorization(row: Any) -> dict[str, Any]:
     legacy = [entry.public() for entry in loaded.legacy] if loaded is not None else []
     if item.get("_reapproved_by"):
         legacy = []
-    return {
+    public = {
         "id": str(item["id"]),
         "bounds": bounds,
         "bounds_digest": item["bounds_digest"],
@@ -527,6 +527,11 @@ def public_preauthorization(row: Any) -> dict[str, Any]:
         "proof": item["proof"],
         "created_at": _iso(item.get("created_at")),
     }
+    refused = refused_bounds(bounds)
+    if refused:
+        # Stored before public suffixes were refused: shown as stored, matched as nothing.
+        public["refused_bounds"] = refused
+    return public
 
 
 # ---------------------------------------------------------------------------------------------

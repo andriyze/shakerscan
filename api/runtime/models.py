@@ -9,6 +9,11 @@ import json
 from typing import Any, Mapping
 import urllib.parse
 
+try:
+    from scope.psl import is_public_suffix
+except ModuleNotFoundError:  # package import
+    from ..scope.psl import is_public_suffix
+
 
 WEB_ASSET_KINDS = frozenset({"web", "api", "network"})
 PHYSICAL_ASSET_KINDS = WEB_ASSET_KINDS | {"device"}
@@ -118,9 +123,11 @@ class TargetBinding:
         ):
             raise ValueError("inferred origins must be frozen target origins")
         object.__setattr__(self, "inferred_origins", inferred)
+        # A public-suffix root (co.uk, github.io) would cover every site under it: dropped, so
+        # a binding persisted with one fails closed to its exact host and origins.
         roots = tuple(dict.fromkeys(
-            str(root).strip().lower().rstrip(".") for root in self.allowed_root_domains
-            if str(root).strip()
+            root for root in (str(item).strip().lower().rstrip(".") for item in self.allowed_root_domains)
+            if root and not is_public_suffix(root)
         ))
         object.__setattr__(self, "allowed_root_domains", roots)
         if kind in {"web", "api", "device"} and not host:

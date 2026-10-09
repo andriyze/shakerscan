@@ -1,0 +1,6 @@
+# Public Suffix List snapshot pin, written by scripts/update_psl.py. Never fetched at runtime.
+# source: https://github.com/publicsuffix/list/blob/3929462652695bad04f0a27afb600974014a3c8b/public_suffix_list.dat
+# commit: 3929462652695bad04f0a27afb600974014a3c8b
+# date: 2026-10-07
+# licence: MPL-2.0 (the snapshot is unmodified and keeps its notice)
+2919eb9803c91a3f73a507cc6fedc934de005543c22c4016f72e3343de5dd6e7  public_suffix_list.dat
