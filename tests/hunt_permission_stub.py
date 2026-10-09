@@ -9,7 +9,9 @@ the routes the approve CLI and the MCP adapter use for one Hunt with one parked 
   already ran;
 * gateway (``gateway="g1"``): ``/_enterprise/approvals/begin|finish|session/revoke`` as specified in
   docs/hunt-permission-requests.md, with the set digest recomputed here from the request body;
-* gateway without G1 (``gateway="pre-g1"``): the beta gateway's named 403 for an unknown route.
+* gateway without G1 (``gateway="pre-g1"``): the beta gateway's named 403 for an unknown route;
+* ``stall_revoke=True``: the session revoke route never answers (until the stub stops), as a
+  stalled gateway or network would.
 
 Every request is recorded in ``seen`` so tests can assert which routes were (never) called.
 """
@@ -84,8 +86,11 @@ def approval_set_digest(body: dict[str, Any], origin: str) -> str:
 
 
 class StubInstance:
-    def __init__(self, *, tls: tuple[Path, Path] | None = None, gateway: str | None = None) -> None:
+    def __init__(self, *, tls: tuple[Path, Path] | None = None, gateway: str | None = None,
+                 stall_revoke: bool = False) -> None:
         self.gateway = gateway  # None (open-source engine), "g1" or "pre-g1"
+        self.stall_revoke = stall_revoke
+        self.stopping = threading.Event()
         self.lock = threading.Lock()
         self.seen: list[tuple[str, str, Any]] = []
         self.request = {
@@ -146,6 +151,7 @@ class StubInstance:
         return self
 
     def __exit__(self, *exc: Any) -> None:
+        self.stopping.set()
         self.server.shutdown()
         self.server.server_close()
 
@@ -275,6 +281,9 @@ class StubInstance:
             if self.gateway != "g1":
                 status = 403 if self.gateway == "pre-g1" else 404
                 return handler._send(status, {"detail": f"operator tokens cannot use {method} {path}"})
+            if path == "/_enterprise/approvals/session/revoke" and self.stall_revoke:
+                self.stopping.wait(120)
+                return None
             route = {
                 "/_enterprise/approvals/begin": self._begin,
                 "/_enterprise/approvals/finish": self._finish,

@@ -78,9 +78,11 @@ class Gateway:
         self.sent = []
         self.begun = {}
         self.sessions = {}
+        self.timeouts = {}
 
-    def __call__(self, method, path, payload=None, headers=None):
+    def __call__(self, method, path, payload=None, headers=None, *, timeout=None):
         self.sent.append((method, path, payload))
+        self.timeouts[path] = timeout
         if path.startswith(f"/hunts/{HUNT}/permission-requests?status=pending"):
             return 200, {"requests": [item for item in self.requests.values() if item["status"] == "pending"]}
         if path.startswith("/hunts?status="):
@@ -177,6 +179,8 @@ def test_the_approver_session_lives_in_memory_only_and_is_revoked(tmp_path, monk
     assert finishes[1]["proof"]["method"] == "approver_session", "the keypress decided through the session"
     assert gateway.requests[REQUEST]["status"] == "granted"
     assert gateway.sent[-1][1] == approval.SESSION_REVOKE_PATH, "the session ends at the gateway too"
+    assert gateway.timeouts[approval.SESSION_REVOKE_PATH] == approval.REVOKE_TIMEOUT_SECONDS
+    assert "could not revoke" not in terminal.text
     assert dict(os.environ) == before, "nothing went into the environment"
     assert not any("the-session-secret" in path.read_text(errors="ignore")
                    for path in tmp_path.rglob("*") if path.is_file()), "nothing went to disk"
@@ -185,6 +189,30 @@ def test_the_approver_session_lives_in_memory_only_and_is_revoked(tmp_path, monk
     assert "value" not in repr(held)
     held.wipe()
     assert held() == ""
+
+
+@pytest.mark.parametrize("failure", [approval.ApprovalError("the ShakerScan API did not answer in time"),
+                                     KeyboardInterrupt(), (503, {"detail": "unavailable"})])
+def test_a_revoke_that_fails_or_is_interrupted_still_ends_watch_and_wipes_the_secret(failure, monkeypatch):
+    gateway = Gateway(_request())
+    original = gateway.__call__
+    wiped = []
+    monkeypatch.setattr(approval._HeldSecret, "wipe", lambda self: wiped.append(True))
+
+    def revoke_fails(method, path, payload=None, headers=None, *, timeout=None):
+        if path == approval.SESSION_REVOKE_PATH:
+            gateway.sent.append((method, path, payload))
+            if isinstance(failure, tuple):
+                return failure
+            raise failure  # no answer in time, or a second Ctrl-C while waiting for one
+        return original(method, path, payload, headers, timeout=timeout)
+
+    terminal = Terminal(TOTP, keys=[])
+    assert approval.watch(revoke_fails, terminal, enterprise=True, origin=ORIGIN, hunt_id=HUNT, account="alice",
+                          sleep=_ctrl_c) == 0
+    assert gateway.sent[-1][1] == approval.SESSION_REVOKE_PATH
+    assert "could not revoke the approver session at the gateway; it expires on its own" in terminal.text
+    assert wiped == [True]
 
 
 def test_a_local_watch_decides_on_the_keypress():
