@@ -114,7 +114,11 @@ def test_worker_reloads_every_authority_before_session_or_http_execution():
     assert "execute_bound_http_request(" in workflow
     assert "allow_write=inputs['method'] in {'POST', 'PUT', 'PATCH', 'DELETE'}" in workflow
     assert "await revalidate(conn)" in workflow
-    assert "require_http_request_authority(" in handler
+    # The write authority is re-read at dispatch through the dispatch wrapper, which turns a
+    # withdrawn authority (a grant revoked after admission) into a refusal that releases the hold.
+    assert "dispatch_http_request_authority(" in handler
+    dispatch = (ROOT / "api/hunt/dispatch_authority.py").read_text()
+    assert "return require_http_request_authority(capability_input, policy, requested_budget=requested_budget)" in dispatch
     assert "requested_budget=requested_budget" in handler
     assert "capability_input=capability_input" in handler
     assert "worker_session.close()" in handler

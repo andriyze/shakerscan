@@ -40,12 +40,20 @@ try:
     from capabilities.http import granted_destination, resolve_hunt_http_origin
     from capabilities.network import CapabilityInputError
     from runtime.budgets import BUDGET_DIMENSIONS
+    from runtime.hunt_http_contract import (
+        HttpAuthorityWithdrawn,
+        require_http_request_authority,
+    )
     from runtime.models import TargetBinding
     from runtime.reservation_store import PostgresBudgetReservationStore
 except ModuleNotFoundError:
     from ..capabilities.http import granted_destination, resolve_hunt_http_origin
     from ..capabilities.network import CapabilityInputError
     from ..runtime.budgets import BUDGET_DIMENSIONS
+    from ..runtime.hunt_http_contract import (
+        HttpAuthorityWithdrawn,
+        require_http_request_authority,
+    )
     from ..runtime.models import TargetBinding
     from ..runtime.reservation_store import PostgresBudgetReservationStore
 
@@ -139,6 +147,18 @@ async def granted_destination_recheck(pool: Any, hunt_id: Any, origin: Any) -> s
         return None
     return (f"{host} cannot be reached: {reason}. Private, loopback, link-local, metadata and reserved "
             "destinations are never allowed, whoever authorized the host.")
+
+
+def dispatch_http_request_authority(
+    capability_input: Mapping[str, Any], policy: Mapping[str, Any], *, requested_budget: Mapping[str, Any],
+) -> bool:
+    """``require_http_request_authority`` at dispatch, on the Hunt's current policy: a write
+    admission accepted whose authority was withdrawn since (its grant revoked, R1) is a dispatch
+    refusal that releases the hold at once, not a worker fault left to stale recovery."""
+    try:
+        return require_http_request_authority(capability_input, policy, requested_budget=requested_budget)
+    except HttpAuthorityWithdrawn as exc:
+        raise HuntDispatchRejected(f"Hunt action authority rejected at dispatch: {exc}") from exc
 
 
 def dispatch_http_target(target: TargetBinding, origin: Any, policy: Mapping[str, Any]) -> TargetBinding:
@@ -276,6 +296,7 @@ async def _settle_rejected_dispatch(
 
 
 __all__ = [
-    "DISPATCH_REJECTED", "GrantedDestinationRecheck", "HuntDispatchRejected", "destination_hard_limit", "dispatch_http_target",
+    "DISPATCH_REJECTED", "GrantedDestinationRecheck", "HuntDispatchRejected", "destination_hard_limit",
+    "dispatch_http_request_authority", "dispatch_http_target",
     "dispatch_scope_binding", "granted_destination_recheck", "public_address", "settle_rejected_dispatch",
 ]

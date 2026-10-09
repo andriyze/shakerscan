@@ -221,13 +221,6 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                 except ModuleNotFoundError:
                     from api.hunt.permission_store import HUNT_PERMISSION_SCHEMA_SQL
                 await conn.execute(HUNT_PERMISSION_SCHEMA_SQL)
-                # Hunts granted something by 2.8.0 have no recorded baseline; rebuild their
-                # authority from their live grants once (R1: a revocation restored a snapshot).
-                try:
-                    from hunt.grant_authority import repair_grant_authority
-                except ModuleNotFoundError:
-                    from api.hunt.grant_authority import repair_grant_authority
-                await repair_grant_authority(conn)
                 try:
                     from hunt.finding_verifications import FINDING_HUNT_VERIFICATIONS_SCHEMA_SQL
                 except ModuleNotFoundError:
@@ -264,5 +257,14 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                     from api.runtime.credential_migration import migrate_legacy_web_credentials
                 await migrate_legacy_web_credentials(conn)
                 await reconcile_active_finding_counts(conn)
+            # After the schema commits, still under the startup lock: Hunts granted something by
+            # 2.8.0 have no recorded baseline, so their authority is rebuilt from their live
+            # grants once (R1), each Hunt in its own short transaction. A Hunt that cannot be
+            # repaired is ended; it never stops startup.
+            try:
+                from hunt.grant_repair import repair_grant_authority
+            except ModuleNotFoundError:
+                from api.hunt.grant_repair import repair_grant_authority
+            await repair_grant_authority(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")

@@ -44,7 +44,8 @@ from runtime.reservation_store import ReservationConflict, ReservationStoreError
 from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
 # The worker functions exec here resolve these by name, as api/worker.py imports them.
 from hunt.dispatch_authority import (  # noqa: F401
-    HuntDispatchRejected, dispatch_http_target, dispatch_scope_binding, settle_rejected_dispatch,
+    HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_scope_binding,
+    settle_rejected_dispatch,
 )
 from tests.test_hunt_authz_verification_limit import admission, Lifecycle, HUNT, TARGET
 from tests.test_hunt_replay_worker_lifecycle import Connection as ReplayConnection, noop

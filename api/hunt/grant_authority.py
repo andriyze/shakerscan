@@ -15,11 +15,15 @@ and every revocation rebuilds the authority fields from two sources, under the H
 A field is on when the baseline has it or a live grant turns it on, so revoking one grant never
 removes another live grant's authority and never brings back a revoked grant's. Budget
 amendments and the target's approval receipt are separate sources with their own semantics and
-are not touched here.
+are not touched here: revoking every grant leaves the approval receipt a grant bound
+(``approval_receipt_id``, ``scope_receipt_id``, ``authorization_confirmed``) in place, because
+that is the target's standing authorization, a separate decision with its own revocation
+(``target_authorization``), not authority any grant gave.
 
 Hunts that were granted something before the baseline table existed (2.8.0) have no baseline
 row; it is reconstructed once, deterministically, from their grant rows (``reconstruct_baseline``)
-and then recorded, and ``repair_grant_authority`` does that for every unfinished Hunt at startup.
+and then recorded, and ``grant_repair.repair_grant_authority`` does that for every unfinished Hunt at
+startup.
 """
 from __future__ import annotations
 
@@ -30,7 +34,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from .permission_bounds import CAPABILITY_FLAGS
-from .permission_reasons import KIND_CAPABILITY_ENABLE, KIND_TARGET_AUTHORIZE
+from .permission_reasons import (
+    KIND_CAPABILITY_ENABLE,
+    KIND_CREDENTIAL_USE,
+    KIND_TARGET_AUTHORIZE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +49,10 @@ AUTHORITY_FLAGS: tuple[str, ...] = (
     "mutation_allowed",
 )
 POLICY_GRANT_KINDS = (KIND_CAPABILITY_ENABLE, KIND_TARGET_AUTHORIZE)
+# A grant that would take a Hunt past this many authorized destinations is refused with a reason;
+# a rebuild never drops a destination the baseline or a live grant holds.
 MAX_GRANTED_DESTINATIONS = 64
 BASELINE_SCHEMA_VERSION = "hunt-permission-baseline/v1"
-_FINISHED = ("completed", "cancelled", "failed")
 
 
 def _json(value: Any, default: Any) -> Any:
@@ -75,6 +84,27 @@ def grant_fields(grant: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(CAPABILITY_FLAGS.get(flag, ()))
 
 
+def coverage_key(kind: Any, subject: Any) -> str | None:
+    """What a grant of ``kind`` for ``subject`` covers, as a pre-authorization bound sees it.
+
+    A person who revokes a grant covering this key has said no to it: the Hunt's start bounds no
+    longer grant it automatically (``permission_grants.try_preauthorized_grant``); a person can
+    still allow it again. Capability grants are keyed by their flag (the bound is
+    ``capability:<flag>``), destinations by scheme, host and port, credentials by profile.
+    """
+    subject = _json(subject, {})
+    if not isinstance(subject, Mapping):
+        return None
+    if kind == KIND_CAPABILITY_ENABLE and subject.get("flag"):
+        return f"capability:{subject['flag']}"
+    if kind == KIND_TARGET_AUTHORIZE and subject.get("host"):
+        host = str(subject["host"]).lower().rstrip(".")
+        return f"target:{str(subject.get('scheme') or '').lower()}://{host}:{subject.get('port')}"
+    if kind == KIND_CREDENTIAL_USE and subject.get("profile_id"):
+        return f"credential:{subject['profile_id']}"
+    return None
+
+
 def baseline_from_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
     """The baseline of a Hunt that has no grant yet: its current authority, as it is."""
     return {
@@ -90,27 +120,29 @@ def reconstruct_baseline(policy: Mapping[str, Any], grants: Sequence[Mapping[str
 
     Only grants changed these fields after start, so:
 
-    * the flags are the ``policy_before`` the Hunt's first capability grant recorded under the
-      row lock (nothing had changed them before it), or the current flags without such a grant;
+    * the flags are the intersection of every ``policy_before`` the capability grants recorded
+      under the row lock, or the current flags without such a grant. Every state the policy was
+      ever in held the baseline (grants only added to it, and 2.8.0 revocation only restored
+      earlier states), so the intersection is the baseline and needs no creation order, which
+      ``created_at`` (the transaction time) and a random id cannot give;
     * the capabilities are the current list without every capability a grant ever added (a
       capability a grant added was not in the list then, and revocation removed only those);
     * the destinations are the current ones without any a destination grant added.
     """
-    ordered = sorted(grants, key=lambda row: (str(row.get("created_at") or ""), str(row.get("id") or "")))
-    capability_grants = [row for row in ordered if row.get("kind") == KIND_CAPABILITY_ENABLE]
+    capability_grants = [row for row in grants if row.get("kind") == KIND_CAPABILITY_ENABLE]
     baseline = baseline_from_policy(policy)
-    first = next((
+    snapshots = [
         _json(row.get("effect_json"), {}).get("policy_before") for row in capability_grants
         if isinstance(_json(row.get("effect_json"), {}).get("policy_before"), Mapping)
-    ), None)
-    if first is not None:
-        baseline["flags"] = {key: first.get(key) is True for key in AUTHORITY_FLAGS}
+    ]
+    if snapshots:
+        baseline["flags"] = {key: all(item.get(key) is True for item in snapshots) for key in AUTHORITY_FLAGS}
     added = {
         str(_json(row.get("effect_json"), {}).get("capability")) for row in capability_grants
         if _json(row.get("effect_json"), {}).get("capability_added")
     }
     baseline["allowed_capabilities"] = [name for name in baseline["allowed_capabilities"] if name not in added]
-    granted_requests = {str(row.get("request_id")) for row in ordered if row.get("kind") == KIND_TARGET_AUTHORIZE}
+    granted_requests = {str(row.get("request_id")) for row in grants if row.get("kind") == KIND_TARGET_AUTHORIZE}
     baseline["granted_destinations"] = [
         item for item in baseline["granted_destinations"] if str(item.get("request_id")) not in granted_requests
     ]
@@ -142,7 +174,7 @@ def effective_policy(
     result = dict(policy)
     result.update(flags)
     result["allowed_capabilities"] = capabilities
-    result["granted_destinations"] = destinations[-MAX_GRANTED_DESTINATIONS:]
+    result["granted_destinations"] = destinations
     return result
 
 
@@ -199,44 +231,7 @@ async def rebuild_authority(
     return effective_policy(_json(run.get("policy_json"), {}), baseline, [*live, *pending])
 
 
-async def repair_grant_authority(conn: Any) -> list[str]:
-    """Rebuild the authority of every unfinished Hunt granted something before baselines existed.
-
-    Idempotent: a Hunt is repaired once, when its baseline is recorded. Returns the Hunts whose
-    stored policy changed (a 2.8.0 revocation had left authority that no live grant holds, or
-    removed authority one still held).
-    """
-    candidates = await conn.fetch(
-        """SELECT DISTINCT g.hunt_run_id FROM hunt_permission_grants g
-           JOIN hunt_runs r ON r.id = g.hunt_run_id
-           WHERE g.kind = ANY($1::text[]) AND r.completed_at IS NULL AND r.status <> ALL($2::text[])
-             AND NOT EXISTS (SELECT 1 FROM hunt_permission_baselines b WHERE b.hunt_run_id = g.hunt_run_id)""",
-        list(POLICY_GRANT_KINDS), list(_FINISHED),
-    )
-    changed: list[str] = []
-    for candidate in candidates:
-        async with conn.transaction():
-            row = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", candidate["hunt_run_id"])
-            if row is None:
-                continue
-            run = dict(row)
-            before = _json(run.get("policy_json"), {})
-            after = await rebuild_authority(conn, run)
-            if after == before:
-                continue
-            context = _json(run.get("context_pack"), {})
-            context["allowed_capabilities"] = list(after.get("allowed_capabilities") or [])
-            await conn.execute(
-                "UPDATE hunt_runs SET policy_json=$2::jsonb, context_pack=$3::jsonb, updated_at=NOW() WHERE id=$1",
-                run["id"], json.dumps(after), json.dumps(context, default=str),
-            )
-            changed.append(str(run["id"]))
-            logger.warning("Hunt %s: permission authority rebuilt from its live grants (%s)",
-                           run["id"], json.dumps(authority_diff(before, after), sort_keys=True))
-    return changed
-
-
 __all__ = [
-    "AUTHORITY_FLAGS", "authority_diff", "baseline_from_policy", "effective_policy", "grant_fields",
-    "hunt_baseline", "rebuild_authority", "reconstruct_baseline", "repair_grant_authority",
+    "AUTHORITY_FLAGS", "MAX_GRANTED_DESTINATIONS", "authority_diff", "baseline_from_policy", "coverage_key",
+    "effective_policy", "grant_fields", "hunt_baseline", "rebuild_authority", "reconstruct_baseline",
 ]

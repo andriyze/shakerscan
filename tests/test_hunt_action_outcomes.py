@@ -273,7 +273,7 @@ def test_unified_startup_installs_the_candidate_schema_on_converted_instances(mo
         ("runtime.ai_template_secrets", "encrypt_stored_templates"),
         ("runtime.archive_blob_secrets", "encrypt_stored_blobs"),
         ("runtime.credential_migration", "migrate_legacy_web_credentials"),
-        ("hunt.grant_authority", "repair_grant_authority"),
+        ("hunt.grant_repair", "repair_grant_authority"),
     ):
         monkeypatch.setattr(importlib.import_module(module), name, noop)
     asyncio.run(asset_migration.run_unified_startup(Pool(), baseline))

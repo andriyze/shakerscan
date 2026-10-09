@@ -323,7 +323,7 @@ def _legacy_audit_state(env, standing, *, revoked):
 
 
 def test_startup_repairs_a_hunt_2_8_0_left_with_a_revoked_grants_write_authority(env, standing):
-    from hunt.grant_authority import repair_grant_authority
+    from hunt.grant_repair import repair_grant_authority
 
     hunt, _write, _discovery = _legacy_audit_state(env, standing, revoked=True)
     assert flags(env, hunt)["allow_state_changing_http"] is True  # the bad state
@@ -352,7 +352,7 @@ def test_grants_2_8_0_persisted_revoke_correctly_after_the_upgrade(env, standing
 
 
 def test_startup_leaves_finished_hunts_and_hunts_without_grants_alone(env, standing):
-    from hunt.grant_authority import repair_grant_authority
+    from hunt.grant_repair import repair_grant_authority
 
     finished, _a, _b = _legacy_audit_state(env, standing, revoked=True)
     run(env, env.conn.execute("UPDATE hunt_runs SET status='completed', completed_at=NOW() WHERE id=$1",
@@ -390,29 +390,36 @@ def expected_authority(start, live):
     return fields, sorted(capabilities)
 
 
-@pytest.mark.parametrize("seed", range(6))
+ROOMY = {"max_capability_calls": 500, "max_http_requests": 500, "max_state_changing_requests": 500,
+         "max_active_actions": 500}
+
+
+@pytest.mark.parametrize("seed", range(8))
 def test_authority_is_the_start_plus_the_live_grants_after_every_grant_and_revocation(env, standing, seed):
+    """Subjects repeat (a subject may be granted again while an earlier grant of it is live, or
+    after it was revoked), and after every step both the stored authority and a real write
+    through admission agree with the start plus the union of the live grants."""
     import random
 
     rng = random.Random(seed)
     start_flags = {"active_testing": seed % 3 == 0, "network_discovery": seed % 2 == 0}
-    hunt = run(env, env.hunt(policy=start_flags))
+    hunt = run(env, env.hunt(policy=start_flags, budget=ROOMY))  # budget is never what refuses here
     start = policy(env, hunt)
     live: dict[str, tuple[str, str]] = {}
     revoked: list[str] = []
     denied: set[tuple[str, str]] = set()
-    for step in range(10):
+    for step in range(12):
         roll = rng.random()
-        unused = [subject for subject in SUBJECTS if subject not in live.values() and subject not in denied]
-        if live and (roll < 0.4 or not unused):
+        askable = [subject for subject in SUBJECTS if subject not in denied]
+        if live and roll < 0.35:
             grant_id = rng.choice(sorted(live))
             revoke(env, hunt, grant_id)
             revoked.append(grant_id)
             del live[grant_id]
-        elif roll < 0.5 and revoked:
+        elif roll < 0.45 and revoked:
             revoke(env, hunt, rng.choice(revoked))  # a repeated revocation changes nothing
-        elif roll < 0.6 and unused:
-            capability, flag = rng.choice(unused)
+        elif roll < 0.55 and askable:
+            capability, flag = rng.choice(askable)
             request = run(env, _raise(env, hunt, capability, flag))
             run(env, env.decide(hunt, request, decision="deny", key=f"deny-{seed}-{step}"))
             denied.add((capability, flag))
@@ -424,8 +431,9 @@ def test_authority_is_the_start_plus_the_live_grants_after_every_grant_and_revoc
                                             subject={"capability": capability, "flag": flag})))
             assert run(env, env.conn.fetchval(
                 "SELECT status FROM hunt_permission_requests WHERE id=$1", request["id"])) == "denied"
-        else:
-            capability, flag = rng.choice(unused)
+        elif askable:
+            # Repeats on purpose: the same subject may already be live or have been revoked.
+            capability, flag = rng.choice(askable)
             live[grant(env, hunt, capability, flag, f"grant-{seed}-{step}")] = (capability, flag)
         fields, capabilities = expected_authority(start, live.values())
         current = policy(env, hunt)
@@ -437,9 +445,10 @@ def test_authority_is_the_start_plus_the_live_grants_after_every_grant_and_revoc
         assert sorted(json.loads(run(env, env.run(hunt))["context_pack"])["allowed_capabilities"]) == capabilities
         if live or revoked:  # the receipt the first grant bound is its own source, never revoked
             assert current["approval_receipt_id"] == standing
-    # Admission agrees with the stored authority: writes run exactly while some grant allows them.
-    fields, _capabilities = expected_authority(start, live.values())
-    assert write_admitted(env, hunt, f"write-final-{seed:04d}") is fields["allow_state_changing_http"]
+        # Admission agrees at every step: a write runs exactly while the start or a live grant
+        # allows it.
+        assert write_admitted(env, hunt, f"write-{seed:02d}-{step:04d}") is fields["allow_state_changing_http"], (
+            seed, step, live)
     for grant_id in sorted(live):
         revoke(env, hunt, grant_id)
     fields, capabilities = expected_authority(start, ())
@@ -456,3 +465,287 @@ def test_granting_is_unchanged_a_grant_takes_effect_at_once_and_admits_the_write
     (request,) = run(env, env.requests(hunt))
     run(env, env.decide(hunt, request))
     assert run(env, env.call(hunt, "write-asked-0001", values=POST)) == "admitted"  # the same key, re-admitted
+
+
+def test_the_same_subject_granted_twice_stays_until_both_are_revoked(env, standing):
+    hunt = run(env, env.hunt())
+    first = grant(env, hunt, "xss.verify", "active-testing", "decide-first")
+    second = grant(env, hunt, "xss.verify", "active-testing", "decide-second")  # a new request, same subject
+    assert first != second
+    revoke(env, hunt, first)
+    assert policy(env, hunt)["active_testing"] is True and "xss.verify" in policy(env, hunt)["allowed_capabilities"]
+    revoke(env, hunt, second)
+    assert flags(env, hunt) == PASSIVE and "xss.verify" not in policy(env, hunt)["allowed_capabilities"]
+
+
+# ---------------------------------------------------------------------------------------------
+# Pre-authorized grants: a person's revocation sticks (owner principle: Hunt obeys the user).
+
+def _preauthorize(env, hunt, allow):
+    from hunt.start_contract import normalize_hunt_start_payload
+    from hunt.start_permissions import record_start_permissions
+
+    async def record():
+        contract = normalize_hunt_start_payload({
+            "target_id": str(hunt["target_id"]), "target_kind": "web", "policy": {}, "allow": list(allow),
+            "allow_asserted_by": {"person": "alice@example.test", "proof": "stepup"},
+        })
+        async with env.pool.acquire() as conn:
+            await record_start_permissions(conn, hunt, contract, [])
+
+    run(env, record())
+
+
+def test_a_revoked_pre_authorized_grant_is_not_granted_again_by_the_start_bounds(env, standing):
+    hunt = run(env, env.hunt(budget=ROOMY))
+    _preauthorize(env, hunt, ["capability:state-changing", "capability:tcp-discovery"])
+    assert write_admitted(env, hunt, "pre-write-0001")  # auto-granted from the start bounds
+    (auto,) = run(env, env.conn.fetch(
+        "SELECT * FROM hunt_permission_grants WHERE hunt_run_id=$1 AND kind='capability.enable'", hunt["id"]))
+    assert auto["preauthorization_id"] is not None
+    revoke(env, hunt, auto["id"])
+    assert flags(env, hunt) == PASSIVE
+
+    # The next write is a question for a person, not a silent re-grant.
+    with pytest.raises(HTTPException) as parked:
+        run(env, env.call(hunt, "pre-write-0002", values=POST))
+    detail = _detail_of(parked.value)
+    assert parked.value.status_code == 409 and detail["code"] == "permission_required"
+    assert run(env, env.action(hunt, "pre-write-0002"))["status"] == "awaiting_permission"
+    assert run(env, env.conn.fetchval(
+        """SELECT COUNT(*) FROM hunt_permission_grants WHERE hunt_run_id=$1 AND kind='capability.enable'
+           AND revoked_at IS NULL""", hunt["id"])) == 0
+    pending = [item for item in run(env, env.requests(hunt)) if item["status"] == "pending"]
+    (request,) = pending
+    from hunt.permission_store import list_grants, public_request
+
+    shown = public_request(request)  # what `shakerscan hunt permissions list|show` prints
+    assert shown["auto_grant_withheld"]["coverage"] == "capability:state-changing"
+    assert shown["auto_grant_withheld"]["revoked_grant_id"] == str(auto["id"])
+    (listed,) = run(env, list_grants(env.conn, hunt["id"]))
+    assert listed["auto_grant_withheld"] == "capability:state-changing"
+    revoked_event = run(env, env.conn.fetchval(
+        "SELECT detail_json FROM hunt_permission_events WHERE grant_id=$1 AND event='revoked'", auto["id"]))
+    assert json.loads(revoked_event)["auto_grant_withheld"] == "capability:state-changing"
+
+    # One approval in the terminal allows it again, and the same key is admitted.
+    approved = run(env, env.decide(hunt, request, key="terminal-approve-0001"))
+    assert approved["request"]["decision_via"] == "terminal_stepup"
+    assert run(env, env.call(hunt, "pre-write-0002", values=POST)) == "admitted"
+
+    # Everything else the start bounds cover is still granted automatically.
+    run(env, _raise_or_auto(env, hunt, "service.snmp.inspect", "tcp-discovery"))
+    assert policy(env, hunt)["network_discovery"] is True
+    assert "service.snmp.inspect" in policy(env, hunt)["allowed_capabilities"]
+
+
+async def _raise_or_auto(env, hunt, capability, flag):
+    """A refusal inside the start bounds is granted in the same transaction (no exception)."""
+    return await settle_refusal(env.pool, hunt_id=hunt["id"], action_id=uuid.uuid4(), name=capability,
+                                input_summary={}, input_digest="d" * 64, refusal=HuntRefusal(
+                                    "capability_requires_active_testing", "withheld",
+                                    subject={"capability": capability, "flag": flag}))
+
+
+def test_the_withheld_coverage_holds_across_a_restart_and_for_other_capabilities_of_that_flag(env, standing):
+    hunt = run(env, env.hunt(budget=ROOMY))
+    _preauthorize(env, hunt, ["capability:state-changing"])
+    assert write_admitted(env, hunt, "pre-write-0001")
+    (auto,) = run(env, env.conn.fetch("SELECT id FROM hunt_permission_grants WHERE hunt_run_id=$1", hunt["id"]))
+    revoke(env, hunt, auto["id"])
+    # Nothing is held in memory: a fresh read of the rows answers the same (an API restart).
+    from hunt.permission_grants import revoked_coverage
+
+    withheld = run(env, revoked_coverage(env.conn, hunt["id"], "capability.enable",
+                                         {"capability": "collections.replay_active", "flag": "state-changing"}))
+    assert withheld["revoked_grant_id"] == str(auto["id"])
+    with pytest.raises(HTTPException) as parked:
+        run(env, _raise_or_auto(env, hunt, "collections.replay_active", "state-changing"))
+    assert _detail_of(parked.value)["code"] == "permission_required"
+    assert policy(env, hunt)["allow_state_changing_http"] is False
+
+
+# ---------------------------------------------------------------------------------------------
+# Destinations.
+
+@pytest.fixture
+def resolver(monkeypatch):
+    from hunt import permission_subjects
+
+    answers = ["93.184.216.34"]
+
+    async def resolve(_url, _environment):  # labelled double: DNS answers a public address
+        return list(answers)
+
+    monkeypatch.setattr(permission_subjects, "resolve_destination_addresses", resolve)
+    return answers
+
+
+OTHER = "https://api.example.test"
+
+
+def _get_admitted(env, hunt, origin, key):
+    try:
+        return run(env, env.call(hunt, key, values={"method": "GET", "path": "/", "origin": origin})) == "admitted"
+    except HTTPException:
+        return False
+
+
+def _destination_request(env, hunt, origin, key):
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, key, values={"method": "GET", "path": "/", "origin": origin}))
+    (request,) = [item for item in run(env, env.requests(hunt))
+                  if item["status"] == "pending" and item["kind"] == "target.authorize"]
+    return request
+
+
+def test_destination_and_capability_grants_interleave(env, standing, resolver):
+    hunt = run(env, env.hunt())
+    first = run(env, env.decide(hunt, _destination_request(env, hunt, OTHER, "dst-a-0001"), key="d-a"))
+    write = grant(env, hunt, "http.request", "state-changing", "decide-w")
+    second = run(env, env.decide(hunt, _destination_request(env, hunt, "https://other.example.test", "dst-b-0001"),
+                                 key="d-b"))
+    assert _get_admitted(env, hunt, OTHER, "ok-a-0001")
+    revoke(env, hunt, first["grant"]["id"])
+    assert not _get_admitted(env, hunt, OTHER, "ok-a-0002")
+    assert _get_admitted(env, hunt, "https://other.example.test", "ok-b-0001")
+    assert flags(env, hunt)["allow_state_changing_http"]
+    revoke(env, hunt, write)
+    assert flags(env, hunt) == PASSIVE
+    assert len(policy(env, hunt)["granted_destinations"]) == 1
+    revoke(env, hunt, second["grant"]["id"])
+    assert policy(env, hunt)["granted_destinations"] == []
+
+
+def test_two_live_grants_for_one_origin_keep_it_until_both_are_revoked(env, standing, resolver):
+    hunt = run(env, env.hunt())
+    first = run(env, env.decide(hunt, _destination_request(env, hunt, OTHER, "dst-one-0001"), key="d-one"))
+    # The same origin asked again under another resolution: a second request, a second grant.
+    resolver[:] = ["93.184.216.35"]
+
+    async def ask_again():
+        with pytest.raises(HTTPException):
+            await settle_refusal(env.pool, hunt_id=hunt["id"], action_id=uuid.uuid4(), name="http.request",
+                                 input_summary={}, input_digest="d" * 64, refusal=HuntRefusal(
+                                     "scope_other_host", "another host", subject={
+                                         "host": "api.example.test", "port": 443, "scheme": "https",
+                                         "origin": "https://api.example.test:443", "same_host": False,
+                                         "target_id": str(hunt["target_id"])}))
+        return [item for item in await env.requests(hunt) if item["status"] == "pending"]
+
+    (again,) = run(env, ask_again())
+    second = run(env, env.decide(hunt, again, key="d-two"))
+    assert first["grant"]["id"] != second["grant"]["id"]
+    held = policy(env, hunt)["granted_destinations"]
+    assert [item["request_id"] for item in held] == [first["request"]["id"]]
+    revoke(env, hunt, first["grant"]["id"])
+    held = policy(env, hunt)["granted_destinations"]
+    # The entry now names the live grant, which is what dispatch re-checks.
+    assert [item["request_id"] for item in held] == [second["request"]["id"]]
+    assert _get_admitted(env, hunt, OTHER, "dst-ok-0001")
+    revoke(env, hunt, second["grant"]["id"])
+    assert policy(env, hunt)["granted_destinations"] == []
+    assert not _get_admitted(env, hunt, OTHER, "dst-gone-0002")
+
+
+def test_a_destination_past_the_cap_is_refused_with_a_reason_and_nothing_is_dropped(env, standing):
+    from hunt.grant_authority import MAX_GRANTED_DESTINATIONS
+
+    held = [{"host": f"h{index}.example.test", "port": 443, "scheme": "https",
+             "origin": f"https://h{index}.example.test:443", "addresses": ["93.184.216.34"],
+             "same_host": False, "request_id": str(uuid.uuid4())} for index in range(MAX_GRANTED_DESTINATIONS)]
+    hunt = run(env, env.hunt(policy={"granted_destinations": held}))
+    values = {"method": "GET", "path": "/", "origin": "https://app.example.test:8443"}
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, "port-cap-0001", values=values))
+    (request,) = run(env, env.requests(hunt))
+    with pytest.raises(HTTPException) as refused:
+        run(env, env.decide(hunt, request))
+    assert refused.value.status_code == 409 and refused.value.detail["error"] == "destination_limit_reached"
+    assert run(env, env.requests(hunt))[0]["status"] == "pending"  # nothing granted
+    assert policy(env, hunt)["granted_destinations"] == held  # nothing dropped
+
+
+# ---------------------------------------------------------------------------------------------
+# Startup repair is per Hunt and fails closed for that Hunt only.
+
+def test_a_hunt_whose_repair_fails_is_ended_and_the_others_are_repaired(env, standing, caplog):
+    from hunt.grant_repair import REPAIR_FAILED_STOP_REASON, repair_grant_authority
+
+    good, _a, _b = _legacy_audit_state(env, standing, revoked=True)
+    broken, write, _d = _legacy_audit_state(env, standing, revoked=True)
+    # A stored effect that is not an object (a corrupt row): rebuilding this Hunt raises.
+    run(env, env.conn.execute("UPDATE hunt_permission_grants SET effect_json='[1]'::jsonb WHERE id=$1", write))
+    assert write_admitted(env, broken, "broken-before-0001")
+    with caplog.at_level("ERROR"):
+        repaired = run(env, repair_grant_authority(env.conn))
+    assert repaired == [str(good["id"])]
+    assert flags(env, good) == PASSIVE
+    row = run(env, env.run(broken))
+    assert row["status"] == "failed" and row["stop_reason"] == REPAIR_FAILED_STOP_REASON
+    assert row["completed_at"] is not None
+    assert not write_admitted(env, broken, "broken-after-0002")
+    assert any(str(broken["id"]) in record.getMessage() for record in caplog.records)
+    assert not any("policy_before" in record.getMessage() for record in caplog.records)
+
+
+def test_concurrent_repairs_settle_on_the_same_authority(env, standing):
+    from hunt.grant_repair import repair_grant_authority
+
+    hunt, _w, _d = _legacy_audit_state(env, standing, revoked=True)
+
+    async def both():
+        async def one():
+            async with env.pool.acquire() as conn:
+                return await repair_grant_authority(conn)
+        return await asyncio.gather(one(), one(), return_exceptions=True)
+
+    results = run(env, both())
+    assert not [item for item in results if isinstance(item, BaseException)], results
+    assert sorted(len(item) for item in results) == [0, 1]
+    assert flags(env, hunt) == PASSIVE
+
+
+def test_after_the_upgrade_a_revoked_2_8_0_grant_and_a_new_grant_revoke_cleanly(env, standing):
+    hunt = run(env, env.hunt(policy={"approval_receipt_id": standing, "authorization_confirmed": True}))
+    start = policy(env, hunt)
+    run(env, _legacy_grant(env, hunt, "xss.verify", "oob", start, added=True, revoked=True))
+    new = grant(env, hunt, "http.request", "state-changing", "decide-b")
+    assert flags(env, hunt)["allow_state_changing_http"] and not flags(env, hunt)["allow_oob_interactions"]
+    revoke(env, hunt, new)
+    assert flags(env, hunt) == PASSIVE and "xss.verify" not in policy(env, hunt)["allowed_capabilities"]
+
+
+def test_repair_restores_a_capability_2_8_0_removed_while_a_live_grant_held_it(env, standing):
+    from hunt.grant_repair import repair_grant_authority
+
+    hunt = run(env, env.hunt(policy={"approval_receipt_id": standing, "authorization_confirmed": True}))
+    start = policy(env, hunt)
+    run(env, _legacy_grant(env, hunt, "xss.verify", "active-testing", start, added=True, revoked=True))
+    run(env, _legacy_grant(env, hunt, "xss.verify", "oob", {**start, "active_testing": True}, added=False))
+    # 2.8.0 revoked A by restoring the start and removed xss.verify, though B was live.
+    run(env, _set_policy(env, hunt, active_testing=False, allow_oob_interactions=True))
+    assert run(env, repair_grant_authority(env.conn)) == [str(hunt["id"])]
+    current = policy(env, hunt)
+    assert "xss.verify" in current["allowed_capabilities"]
+    assert current["active_testing"] is True and current["allow_oob_interactions"] is True
+
+
+def test_only_the_hunts_own_deletion_removes_its_baseline(env):
+    import asyncpg
+
+    hunt = run(env, env.hunt())
+    run(env, env.conn.execute(
+        "INSERT INTO hunt_permission_baselines(hunt_run_id, policy_json, source) VALUES($1,'{}'::jsonb,'first_grant')",
+        hunt["id"]))
+    with pytest.raises(asyncpg.RaiseError):  # a delete from another trigger is refused too
+        run(env, env.conn.execute("""
+            CREATE TABLE probe_t(x int);
+            CREATE FUNCTION probe_f() RETURNS trigger AS $$
+            BEGIN DELETE FROM hunt_permission_baselines; RETURN NEW; END $$ LANGUAGE plpgsql;
+            CREATE TRIGGER probe_tr AFTER INSERT ON probe_t FOR EACH ROW EXECUTE FUNCTION probe_f();
+            INSERT INTO probe_t VALUES (1);
+        """))
+    assert run(env, env.conn.fetchval("SELECT COUNT(*) FROM hunt_permission_baselines")) == 1
+    run(env, env.conn.execute("DELETE FROM hunt_runs WHERE id=$1", hunt["id"]))
+    assert run(env, env.conn.fetchval("SELECT COUNT(*) FROM hunt_permission_baselines")) == 0

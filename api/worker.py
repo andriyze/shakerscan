@@ -19911,7 +19911,7 @@ def _worker_terminal_network_result(
 
 
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
-from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_target, dispatch_scope_binding, settle_rejected_dispatch
+from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_scope_binding, settle_rejected_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
 from hunt.host_accounting import bound_distinct_hosts, record_attempted_hosts
 
@@ -21779,7 +21779,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             capability_name, dict(job_data.get("capability_input") or {}),
         )
         spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
-        from runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
+        from runtime.hunt_http_contract import redact_http_request_body
         worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
 
         async with db_pool.acquire() as conn:
@@ -21869,7 +21869,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 requested_budget = dict(stored.record.requested)
                 writes_http = False
                 if capability_name == "http.request":
-                    writes_http = require_http_request_authority(
+                    writes_http = dispatch_http_request_authority(
                         capability_input, hunt_policy, requested_budget=requested_budget,
                     )
                 if expected_budget != requested_budget:

@@ -14,6 +14,13 @@ WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 BODY_FIELDS = ("json_body", "form_body")
 
 
+class HttpAuthorityWithdrawn(ValueError):
+    """The Hunt's saved authority does not allow this request (input itself is valid).
+
+    At dispatch this means the authority changed after admission, e.g. a grant was revoked.
+    """
+
+
 def uses_http_workflow(values: Mapping[str, Any]) -> bool:
     return bool(values.get("capture") or values.get("request_bindings"))
 
@@ -67,7 +74,7 @@ def require_http_request_authority(
     writes = values["method"] in WRITE_METHODS
     if uses_http_workflow(values):
         if policy.get("active_testing") is not True:
-            raise ValueError("HTTP workflow bindings require this Hunt's active_testing permission")
+            raise HttpAuthorityWithdrawn("HTTP workflow bindings require this Hunt's active_testing permission")
         if requested_budget is not None:
             amount = requested_budget.get("active_actions")
             if type(amount) is not int or amount < 1:
@@ -75,7 +82,7 @@ def require_http_request_authority(
     if not writes:
         return False
     if policy.get("active_testing") is not True or policy.get("allow_state_changing_http") is not True:
-        raise ValueError(
+        raise HttpAuthorityWithdrawn(
             "http.request write requires this Hunt's active_testing and "
             "allow_state_changing_http permissions; reuse standing target authorization"
         )

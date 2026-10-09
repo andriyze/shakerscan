@@ -36,7 +36,13 @@ import uuid
 from fastapi import HTTPException
 
 from .budget_amendments import HuntBudgetAmendmentRequest, amendable_dimensions, apply_budget_amendment
-from .grant_authority import authority_diff, hunt_baseline, rebuild_authority
+from .grant_authority import (
+    MAX_GRANTED_DESTINATIONS,
+    authority_diff,
+    coverage_key,
+    hunt_baseline,
+    rebuild_authority,
+)
 from .permission_bounds import CAPABILITY_FLAGS, Bounds, parse_bounds
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
@@ -234,6 +240,13 @@ async def _apply_target(conn, run, request, actor) -> dict[str, Any]:
     subject = _json(request["subject_json"], {})
     entry = {key: subject.get(key) for key in ("host", "port", "scheme", "origin", "addresses", "same_host")}
     entry["request_id"] = str(request["id"])
+    current = await rebuild_authority(conn, run)
+    held = current.get("granted_destinations") or []
+    if not any(item.get("origin") == entry["origin"] for item in held) and len(held) >= MAX_GRANTED_DESTINATIONS:
+        raise GrantRefused(409, "destination_limit_reached", (
+            f"This Hunt already has {len(held)} authorized destinations, the most one Hunt can hold. "
+            "Revoke one it no longer needs, then allow this request again; nothing was granted."
+        ))
     policy = await rebuild_authority(conn, run, pending=[
         {"kind": KIND_TARGET_AUTHORIZE, "subject_json": subject, "effect_json": {"destination": entry}},
     ])
@@ -375,6 +388,16 @@ async def try_preauthorized_grant(conn: Any, run: dict[str, Any], request: Mappi
     preauth = covering_preauthorization(rows, predicate)
     if preauth is None:
         return None
+    withheld = await revoked_coverage(conn, run["id"], request["kind"], request["subject_json"])
+    if withheld is not None:
+        # A person revoked a grant covering this: the start bounds no longer answer for them.
+        # The request stays pending for a person (one `shakerscan approve` allows it again).
+        await conn.execute(
+            """UPDATE hunt_permission_requests
+               SET display_json = COALESCE(display_json, '{}'::jsonb) || $2::jsonb WHERE id=$1""",
+            request["id"], json.dumps({"auto_grant_withheld": withheld}),
+        )
+        return None
     try:
         # A savepoint: a grant that cannot be applied leaves nothing behind, and the request
         # stays pending for a person.
@@ -391,6 +414,29 @@ async def try_preauthorized_grant(conn: Any, run: dict[str, Any], request: Mappi
         source="preauthorization", detail={"preauthorization_id": str(preauth["id"])},
     )
     return grant
+
+
+async def revoked_coverage(conn: Any, hunt_id: Any, kind: Any, subject: Any) -> dict[str, Any] | None:
+    """The revoked grant of this Hunt that covered what ``kind``/``subject`` would grant, or None.
+
+    Read from the grant rows themselves, so it holds across restarts and for grants revoked
+    before this release. It suppresses only that coverage key: the start bounds keep answering
+    for everything else they cover.
+    """
+    key = coverage_key(kind, subject)
+    if key is None:
+        return None
+    rows = await conn.fetch(
+        """SELECT id, subject_json, revoked_at, revoked_by FROM hunt_permission_grants
+           WHERE hunt_run_id=$1 AND kind=$2 AND revoked_at IS NOT NULL ORDER BY revoked_at, id""",
+        uuid.UUID(str(hunt_id)), str(kind),
+    )
+    for row in rows:
+        if coverage_key(kind, row["subject_json"]) == key:
+            return {"coverage": key, "revoked_grant_id": str(row["id"]),
+                    "revoked_at": row["revoked_at"].isoformat() if row["revoked_at"] else None,
+                    "revoked_by": row["revoked_by"]}
+    return None
 
 
 # ---------------------------------------------------------------------------------------------
@@ -477,7 +523,14 @@ async def decide(conn: Any, hunt_id: Any, request_id: Any, body: Mapping[str, An
 
 
 async def revoke_grant(conn: Any, hunt_id: Any, grant_id: Any, *, revoked_by: str) -> dict[str, Any]:
-    """Revoke a live grant for the rest of this Hunt. A remembered record is not undone here."""
+    """Revoke a live grant for the rest of this Hunt. A remembered record is not undone here.
+
+    Takes back exactly what this grant gave: the Hunt's authority is rebuilt from its baseline and
+    the grants still live. The Hunt's start bounds stop granting what this grant covered
+    (``revoked_coverage``); a person can allow it again. Target authorization is a separate
+    decision: the approval receipt a capability grant bound stays bound after every grant is
+    revoked, and is withdrawn by revoking the target's standing authorization.
+    """
     run = await _lock_run(conn, hunt_id)
     row = await conn.fetchrow(
         "SELECT * FROM hunt_permission_grants WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE",
@@ -507,6 +560,10 @@ async def revoke_grant(conn: Any, hunt_id: Any, grant_id: Any, *, revoked_by: st
         policy = await rebuild_authority(conn, run)
         await _write_policy(conn, run, policy)
         detail = {"authority": authority_diff(before, policy)}
+    coverage = coverage_key(grant["kind"], grant["subject_json"])
+    if coverage is not None:
+        # From now on the Hunt's start bounds no longer grant this automatically.
+        detail["auto_grant_withheld"] = coverage
     await record_event(conn, hunt_id=run["id"], request_id=grant["request_id"], grant_id=grant["id"],
                        event="revoked", actor=str(revoked_by)[:200] or "local-operator", source="revoke",
                        detail=detail)
@@ -568,5 +625,6 @@ async def settle_for_ended_hunt(conn: Any, hunt_id: Any, *, actor: str, source: 
 
 __all__ = [
     "GrantRefused", "LEDGER_TO_BUDGET", "PARKED_ENDINGS", "apply_grant", "decide", "hunt_finished", "revoke_grant",
-    "settle_for_ended_hunt", "standing_authorization", "try_preauthorized_grant", "withdraw_request",
+    "revoked_coverage", "settle_for_ended_hunt", "standing_authorization", "try_preauthorized_grant",
+    "withdraw_request",
 ]

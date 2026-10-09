@@ -228,3 +228,64 @@ def test_restart_mirrors_an_unmirrored_legacy_web_credential_on_a_converted_data
                 "SELECT count(*) FROM app_schema_migrations WHERE name='v2_target_credentials_to_generic_v1'"
             ) == 1
     asyncio.run(run())
+
+
+def test_startup_rebuilds_hunt_authority_2_8_0_left_after_a_revocation_and_ends_an_unrepairable_hunt():
+    """R1 (external release audit, 2026-10-09): 2.8.0 revocation restored whole-policy snapshots.
+    The real startup rebuilds each such Hunt from its baseline and live grants, in its own
+    transaction, and ends a Hunt it cannot rebuild instead of failing startup. The grant rows
+    are written as 2.8.0 stored them (fixture rows, not produced by 2.8.0 code)."""
+    import json
+
+    flags = ("active_testing", "allow_state_changing_http", "allow_oob_interactions", "network_discovery",
+             "mutation_allowed")
+    start = {key: False for key in flags}
+    after_a = {**start, "active_testing": True, "allow_state_changing_http": True, "mutation_allowed": True}
+
+    async def legacy_hunt(conn, *, corrupt):
+        target = await conn.fetchval("INSERT INTO targets(url) VALUES($1) RETURNING id",
+                                     f"https://r1-{uuid.uuid4().hex[:8]}.test")
+        policy = {**after_a, "allowed_capabilities": ["http.request", "web.probe"], "approval_receipt_id": None}
+        hunt = await conn.fetchval(
+            """INSERT INTO hunt_runs(target_kind,target_id,objective,status,budget_profile,policy_json,budget_json,
+                                     budget_used_json,context_pack,created_by)
+               VALUES('web',$1,'r1','active','fast',$2::jsonb,'{}'::jsonb,'{}'::jsonb,
+                      '{"allowed_capabilities":["http.request","web.probe","service.snmp.inspect"]}'::jsonb,
+                      'fixture') RETURNING id""", target, json.dumps(policy))
+        for capability, flag, before, added in (("http.request", "state-changing", start, False),
+                                                 ("service.snmp.inspect", "tcp-discovery", after_a, True)):
+            subject = json.dumps({"capability": capability, "flag": flag})
+            digest = uuid.uuid4().hex * 2
+            request = await conn.fetchval(
+                """INSERT INTO hunt_permission_requests(hunt_run_id,kind,reason_code,subject_json,subject_digest,
+                                                        status,expires_at,decided_at)
+                   VALUES($1,'capability.enable','capability_requires_active_testing',$2::jsonb,$3,'granted',
+                          NOW()+interval '1 hour',NOW()) RETURNING id""", hunt, subject, digest)
+            effect = "[1]" if corrupt and added else json.dumps({
+                "policy_before": before, "flag": flag, "capability": capability, "capability_added": added})
+            await conn.execute(
+                """INSERT INTO hunt_permission_grants(hunt_run_id,request_id,kind,subject_json,subject_digest,scope,
+                                                      effect_json,created_by,revoked_at,revoked_by)
+                   VALUES($1,$2,'capability.enable',$3::jsonb,$4,'hunt',$5::jsonb,'alice',NOW(),'alice')""",
+                hunt, request, subject, digest, effect)
+        return hunt
+
+    async def run():
+        async with startup_database() as conn:
+            module = importlib.import_module('retest_contract')
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            bad = await legacy_hunt(conn, corrupt=False)
+            broken = await legacy_hunt(conn, corrupt=True)
+            await module.run_schema_migrations(BoundConnectionPool(conn))  # a restart on the upgrade
+            policy = json.loads(await conn.fetchval("SELECT policy_json FROM hunt_runs WHERE id=$1", bad))
+            assert {key: policy[key] for key in flags} == start
+            context = json.loads(await conn.fetchval("SELECT context_pack FROM hunt_runs WHERE id=$1", bad))
+            assert "service.snmp.inspect" not in context["allowed_capabilities"]
+            assert await conn.fetchval(
+                "SELECT source FROM hunt_permission_baselines WHERE hunt_run_id=$1", bad) == 'reconstructed'
+            row = await conn.fetchrow("SELECT status, stop_reason FROM hunt_runs WHERE id=$1", broken)
+            assert (row['status'], row['stop_reason']) == ('failed', 'permission_authority_unrepaired')
+            assert await conn.fetchval("SELECT COUNT(*) FROM hunt_permission_baselines WHERE hunt_run_id=$1",
+                                       broken) == 0
+            await module.run_schema_migrations(BoundConnectionPool(conn))  # idempotent
+    asyncio.run(run())
