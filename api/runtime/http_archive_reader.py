@@ -8,17 +8,15 @@ transactions at all -- reporting that as an empty list would read as "it sent no
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import hashlib
 import hmac
 import json
-import multiprocessing
 import os
 import re
 import secrets
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import asynccontextmanager
@@ -40,9 +38,13 @@ from .archive_export_worker import (
     MASKING_FAILED,
     OVER_MASKING_LIMIT,
     _decoded,
+    encode_bodies,
     encode_body,
     initialize_worker,
+    legacy_body,
     stored_body_size,
+    utf8,
+    worker_context,
 )
 from .http_archive import ARCHIVE_SCHEMA, har_document, har_entry
 
@@ -75,6 +77,15 @@ EXPORT_ADMISSION_WAIT_SECONDS = 2.0
 EXPORT_RETRY_AFTER_SECONDS = 10
 # Worker processes that decode, mask and encode bodies for every export (archive_export_worker).
 MASKING_WORKERS = 2
+# Bodies are read from the archive a batch at a time: at most this many stored bytes (one body
+# at least) and this many bodies per batch.
+EXPORT_BATCH_BYTES = 8 * 1024 * 1024
+EXPORT_BATCH_BODIES = 256
+# Bodies go to a worker in chunks: at most this many stored bytes (one body at least) and bodies
+# per round trip, and at most this many chunks are out at once.
+WORKER_CHUNK_BYTES = 1024 * 1024
+WORKER_CHUNK_BODIES = 64
+WORKER_CHUNKS_IN_FLIGHT = 2 * MASKING_WORKERS
 _OBJECT_COLUMNS = ("storage_uri", "content_sha256", "size_bytes")
 
 _SELECT = """
@@ -99,6 +110,30 @@ LEFT JOIN evidence_objects rb ON rb.id = t.request_body_object_id
 LEFT JOIN evidence_objects sh ON sh.id = t.response_headers_object_id
 LEFT JOIN evidence_objects sb ON sb.id = t.response_body_object_id
 """
+# The same rows without body content: which bodies are stored, and how large, instead.
+_SELECT_WITHOUT_BODIES = (
+    _SELECT.replace("rb.content AS request_body", "NULL AS request_body")
+    .replace("sb.content AS response_body", "NULL AS response_body")
+    .replace(
+        "\nFROM http_transactions t\n",
+        ",\n       (rb.id IS NOT NULL) AS request_body_stored, (sb.id IS NOT NULL) AS response_body_stored"
+        "\nFROM http_transactions t\n",
+    )
+)
+_SELECT_BODIES = """
+SELECT t.id, t.request_body_sha256, t.response_body_sha256,
+       rb.content AS request_body, sb.content AS response_body,
+       rb.storage_uri AS request_body_storage_uri, rb.content_sha256 AS request_body_content_sha256,
+       rb.size_bytes AS request_body_size_bytes,
+       sb.storage_uri AS response_body_storage_uri, sb.content_sha256 AS response_body_content_sha256,
+       sb.size_bytes AS response_body_size_bytes
+FROM http_transactions t
+LEFT JOIN evidence_objects rb ON rb.id = t.request_body_object_id
+LEFT JOIN evidence_objects sb ON sb.id = t.response_body_object_id
+WHERE t.id = ANY($1::uuid[])
+"""
+# A row read without its bodies carries {field: stored size} here.
+LAZY_BODIES = "_stored_bodies"
 
 
 def _scan_ids(scan_id: str | None, scan_ids: Sequence[str] | None) -> tuple[str, ...]:
@@ -154,7 +189,11 @@ async def read_transactions(
     offset: int = 0,
     results_dir: Path | None = None,
     external_payload_budget: int = MAX_EXTERNAL_PAYLOAD_BYTES,
+    bodies: bool = True,
 ) -> list[dict[str, Any]]:
+    """The matching transactions. With ``bodies=False`` a row says which bodies the archive holds
+    (``LAZY_BODIES``: field -> stored size) instead of carrying them, so an export can read them
+    in batches within its budget (``read_transaction_bodies``)."""
     clauses: list[str] = []
     params: list[Any] = []
     owners = _append_scan_clause(
@@ -181,17 +220,18 @@ async def read_transactions(
     where = " WHERE " + " AND ".join(clauses)
     params.extend([min(int(limit), MAX_EXPORT_ROWS), max(0, int(offset))])
     rows = await conn.fetch(
-        f"{_SELECT}{where} ORDER BY t.started_at, t.sequence, t.id"
+        f"{_SELECT if bodies else _SELECT_WITHOUT_BODIES}{where} ORDER BY t.started_at, t.sequence, t.id"
         f" LIMIT ${len(params) - 1} OFFSET ${len(params)}",
         *params,
     )
     try:
-        from runtime.archive_blob_secrets import PAYLOAD_FIELDS, reveal_payload
+        from runtime.archive_blob_secrets import PAYLOAD_FIELDS
     except ModuleNotFoundError:  # package import layout
-        from .archive_blob_secrets import PAYLOAD_FIELDS, reveal_payload
+        from .archive_blob_secrets import PAYLOAD_FIELDS
     rows = [dict(row) for row in rows]
-    loaded, omitted = await _load_external_payloads(
-        rows, PAYLOAD_FIELDS,
+    fields = PAYLOAD_FIELDS if bodies else tuple(key for key in PAYLOAD_FIELDS if key not in _BODY_FIELDS)
+    loaded, omitted, _used = await _load_external_payloads(
+        rows, fields,
         results_dir=results_dir or Path(os.environ.get("RESULTS_DIR") or "/results"),
         budget=external_payload_budget,
     )
@@ -199,35 +239,81 @@ async def read_transactions(
     for row in rows:
         metadata = _decoded(row.get("metadata_json")) or {}
         unavailable = set(metadata.get("payloads_unavailable") or ()) if isinstance(metadata, dict) else set()
-        omitted_fields: set[str] = set()
-        for key in PAYLOAD_FIELDS:
-            storage_uri = row.pop(f"{key}_storage_uri", None)
-            content_sha256 = row.pop(f"{key}_content_sha256", None)
-            row.pop(f"{key}_size_bytes", None)
-            value, external = row.get(key), False
-            if value is None and _is_external(storage_uri):
-                if storage_uri in omitted:
-                    omitted_fields.add(key)
-                    continue
-                value, external = loaded.get(storage_uri), True
-                if value is None:
-                    unavailable.add(key)  # the file or object is gone or unreadable
-                    continue
-            value, lost = reveal_payload(value)
-            if external and not lost and not _names_plaintext(value, content_sha256):
-                value, lost = None, True  # not the payload this row recorded
-            if key in _BODY_FIELDS:
-                value = _legacy_bytes_repr(value, recorded_sha256=row.get(f"{key}_sha256"))
-                value = _legacy_json_string(value, recorded_sha256=row.get(f"{key}_sha256"))
-            row[key] = value
-            if lost:
-                unavailable.add(key)
+        if not bodies:
+            # Which bodies the archive holds, and their stored size, without their content:
+            # ``read_transaction_bodies`` fetches them later, a batch at a time.
+            stored: dict[str, int] = {}
+            for key in _BODY_FIELDS:
+                size = row.pop(f"{key}_size_bytes", None)
+                if row.pop(f"{key}_stored", False):
+                    stored[key] = int(size or 0)
+                row.pop(f"{key}_storage_uri", None)
+                row.pop(f"{key}_content_sha256", None)
+            row[LAZY_BODIES] = stored
+        omitted_fields = _reveal_payloads(row, fields, loaded, omitted, unavailable)
         if unavailable:
             row["payload_unavailable"] = sorted(unavailable)
         if omitted_fields:
             row["payload_omitted"] = sorted(omitted_fields)
         revealed.append(row)
     return revealed
+
+
+def _reveal_payloads(
+    row: dict[str, Any], fields: Sequence[str], loaded: Mapping[str, str | None], omitted: set[str],
+    unavailable: set[str], *, legacy: bool = True,
+) -> set[str]:
+    """Decrypt each payload of ``row`` in place; the fields left out by the read budget."""
+    try:
+        from runtime.archive_blob_secrets import reveal_payload
+    except ModuleNotFoundError:  # package import layout
+        from .archive_blob_secrets import reveal_payload
+    omitted_fields: set[str] = set()
+    for key in fields:
+        storage_uri = row.pop(f"{key}_storage_uri", None)
+        content_sha256 = row.pop(f"{key}_content_sha256", None)
+        row.pop(f"{key}_size_bytes", None)
+        value, external = row.get(key), False
+        if value is None and _is_external(storage_uri):
+            if storage_uri in omitted:
+                omitted_fields.add(key)
+                continue
+            value, external = loaded.get(storage_uri), True
+            if value is None:
+                unavailable.add(key)  # the file or object is gone or unreadable
+                continue
+        value, lost = reveal_payload(value)
+        if external and not lost and not _names_plaintext(value, content_sha256):
+            value, lost = None, True  # not the payload this row recorded
+        if legacy and key in _BODY_FIELDS:
+            value = legacy_body(value, recorded_sha256=row.get(f"{key}_sha256"))
+        row[key] = value
+        if lost:
+            unavailable.add(key)
+    return omitted_fields
+
+
+async def read_transaction_bodies(
+    conn, ids: Sequence[Any], *, external_payload_budget: int, results_dir: Path | None = None,
+) -> tuple[dict[str, dict[str, Any]], int]:
+    """The bodies of these transactions, decrypted but not legacy-decoded (the masking worker
+    does that), with what could not be shown: ``({id: {field, "unavailable", "omitted"}}, bytes
+    of external payload read)``."""
+    rows = [dict(row) for row in await conn.fetch(_SELECT_BODIES, list(ids))]
+    loaded, omitted, used = await _load_external_payloads(
+        rows, _BODY_FIELDS,
+        results_dir=results_dir or Path(os.environ.get("RESULTS_DIR") or "/results"),
+        budget=external_payload_budget,
+    )
+    found: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        unavailable: set[str] = set()
+        omitted_fields = _reveal_payloads(row, _BODY_FIELDS, loaded, omitted, unavailable, legacy=False)
+        found[str(row["id"])] = {
+            **{key: row.get(key) for key in _BODY_FIELDS},
+            "unavailable": unavailable, "omitted": omitted_fields,
+        }
+    return found, used
 
 
 def _is_external(storage_uri: Any) -> bool:
@@ -237,7 +323,7 @@ def _is_external(storage_uri: Any) -> bool:
 
 def _read_external_payloads(
     storage_uris: Sequence[str], *, results_dir: Path, budget: int,
-) -> tuple[dict[str, str | None], set[str]]:
+) -> tuple[dict[str, str | None], set[str], int]:
     """The stored text of each externalized payload, None where it cannot be read.
 
     Reads through the evidence store, so local paths stay contained under the results
@@ -247,7 +333,7 @@ def _read_external_payloads(
     """
     loaded: dict[str, str | None] = {}
     omitted: set[str] = set()
-    remaining = max(0, int(budget))
+    remaining = start = max(0, int(budget))
     for storage_uri in storage_uris:
         if not remaining:
             omitted.add(storage_uri)
@@ -264,12 +350,12 @@ def _read_external_payloads(
         except Exception:  # noqa: BLE001 - one unreadable object must not fail the export
             content = None
         loaded[storage_uri] = content if isinstance(content, str) else None
-    return loaded, omitted
+    return loaded, omitted, start - remaining
 
 
 async def _load_external_payloads(
     rows: Sequence[Mapping[str, Any]], fields: Sequence[str], *, results_dir: Path, budget: int,
-) -> tuple[dict[str, str | None], set[str]]:
+) -> tuple[dict[str, str | None], set[str], int]:
     """Load the external payloads these rows reference, each once, within the byte budget."""
     wanted: dict[str, None] = {}
     for row in rows:
@@ -278,30 +364,11 @@ async def _load_external_payloads(
             if row.get(key) is None and _is_external(storage_uri):
                 wanted.setdefault(storage_uri, None)
     if not wanted:
-        return {}, set()
+        return {}, set(), 0
     # File and S3 reads block; keep them off the event loop.
     return await asyncio.to_thread(
         _read_external_payloads, tuple(wanted), results_dir=results_dir, budget=budget,
     )
-
-
-def _legacy_json_string(value: Any, *, recorded_sha256: Any) -> Any:
-    """Unwrap an old extra JSON encoding only when the wire digest proves it.
-
-    A valid JSON string body (including its quotes/whitespace) otherwise looks identical
-    to double-encoded legacy text. Missing provenance must not guess away wire bytes.
-    """
-    text = _decoded(value)
-    if not isinstance(text, str) or not recorded_sha256:
-        return value
-    if hmac.compare_digest(hashlib.sha256(text.encode()).hexdigest(), str(recorded_sha256)):
-        return value
-    unwrapped = _decoded(text)
-    if isinstance(unwrapped, str) and hmac.compare_digest(
-        hashlib.sha256(unwrapped.encode()).hexdigest(), str(recorded_sha256),
-    ):
-        return json.dumps(unwrapped)
-    return value
 
 
 def _names_plaintext(value: Any, content_sha256: Any) -> bool:
@@ -312,34 +379,6 @@ def _names_plaintext(value: Any, content_sha256: Any) -> bool:
         return False
     actual = hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()
     return hmac.compare_digest(actual, str(content_sha256))
-
-
-def _legacy_bytes_repr(value: Any, *, recorded_sha256: Any) -> Any:
-    """Compatibility for bodies archived before the batch writer decoded bytes.
-
-    That writer serialized the bytes object itself, so a body was stored as its Python repr
-    ("b'...'") instead of its text. Such a body is decoded here as the writer now stores it
-    (UTF-8, undecodable bytes replaced). Text that merely looks like a bytes literal is kept
-    when the recorded body digest shows it is the body verbatim, and text that is not
-    entirely one bytes literal is never touched.
-    """
-    if not isinstance(value, str):
-        return value
-    text = _decoded(value)
-    if (not isinstance(text, str) or len(text) < 3
-            or text[:2] not in ("b'", 'b"') or text[-1] != text[1]):
-        return value
-    if recorded_sha256 and hmac.compare_digest(
-        hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest(), str(recorded_sha256),
-    ):
-        return value
-    try:
-        literal = ast.literal_eval(text)
-    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
-        return value
-    if not isinstance(literal, bytes):
-        return value
-    return json.dumps(literal.decode("utf-8", errors="replace"))
 
 
 async def count_transactions(
@@ -661,16 +700,24 @@ class _BodyBudget:
 
 
 class _BodyJob:
-    __slots__ = ("field", "index", "masked", "size", "value")
+    """One body of one call: in hand (``value``) or still in the archive (``stored``)."""
 
-    def __init__(self, index: int, field: str, value: Any, masked: bool) -> None:
-        self.index, self.field, self.value, self.masked = index, field, value, masked
-        self.size = stored_body_size(value)
+    __slots__ = ("field", "index", "legacy", "masked", "present", "reason", "size", "value")
+
+    def __init__(
+        self, index: int, field: str, value: Any, masked: bool, *,
+        stored_size: int | None = None, legacy: tuple[Any] | None = None,
+    ) -> None:
+        self.index, self.field, self.value, self.masked, self.legacy = index, field, value, masked, legacy
+        # A body read later (``stored_size`` known) is present before it is in hand.
+        self.present = value is not None or stored_size is not None
+        self.size = stored_body_size(value) if stored_size is None else stored_size
+        self.reason: str | None = None  # set when the read could not deliver it
 
 
 def _wants(job: _BodyJob, budget: _BodyBudget) -> bool:
-    """Whether the body is worth encoding now (budget state only ever tightens)."""
-    if job.value is None:
+    """Whether the body is worth reading and encoding now (budget state only ever tightens)."""
+    if not job.present or job.reason is not None:
         return False
     if not job.masked:
         return True
@@ -682,7 +729,9 @@ Outcome = tuple[bytes | None, str | None]
 
 def _settle(job: _BodyJob, budget: _BodyBudget, outcome: Outcome | None) -> Outcome:
     """The body's final fragment or omission reason, decided in row order."""
-    if job.value is None:
+    if job.reason is not None:
+        return None, job.reason
+    if not job.present:
         return None, None
     if not job.masked:
         assert outcome is not None
@@ -701,10 +750,11 @@ def _settle(job: _BodyJob, budget: _BodyBudget, outcome: Outcome | None) -> Outc
     return fragment, None
 
 
-def _project_without_bodies(row: Mapping[str, Any], *, redaction: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """One archived call redacted (unless raw), its bodies set aside: ``(item, stored bodies)``."""
+def _project_without_bodies(row: Mapping[str, Any], *, redaction: str) -> tuple[dict[str, Any], dict[str, bool]]:
+    """One archived call redacted (unless raw), its bodies set aside: ``(item, body allowed)``."""
     item = dict(row)
-    bodies = {key: item.get(key) for key in _BODY_FIELDS}
+    bodies = {key: True for key in _BODY_FIELDS}
+    item.pop(LAZY_BODIES, None)
     for key in _BODY_FIELDS:
         item[key] = None
     for key in ("request_headers", "response_headers"):
@@ -722,7 +772,7 @@ def _project_without_bodies(row: Mapping[str, Any], *, redaction: str) -> tuple[
             and item.get("capability_name") == "http.request"
             and str(item.get("method") or "").upper() in {"POST", "PUT", "PATCH", "DELETE"}
         ):
-            bodies["request_body"] = None
+            bodies["request_body"] = False
             item["request_body_sha256"] = None
         metadata = _decoded(item.get("metadata_json"))
         private_workflow = isinstance(metadata, Mapping) and metadata.get("workflow_values_private") is True
@@ -735,7 +785,7 @@ def _project_without_bodies(row: Mapping[str, Any], *, redaction: str) -> tuple[
             # tokens under any name, including on GET. Keep values and their
             # brute-forceable digests raw-export-only in every public archive view.
             for prefix in ("request", "response"):
-                bodies[prefix + "_body"] = None
+                bodies[prefix + "_body"] = False
                 item[prefix + "_body_sha256"] = None
                 item[prefix + "_headers"] = {key: "[REDACTED]" for key in (item.get(prefix + "_headers") or {})}
     return item, bodies
@@ -809,10 +859,10 @@ class EncodedExport:
         pieces: list[bytes] = []
         cursor = 0
         for match in self._placeholder.finditer(skeleton):
-            pieces.append(skeleton[cursor:match.start()].encode("utf-8"))
+            pieces.append(utf8(skeleton[cursor:match.start()]))
             pieces.append(self.fragments[match.group(1)])
             cursor = match.end()
-        pieces.append(skeleton[cursor:].encode("utf-8"))
+        pieces.append(utf8(skeleton[cursor:]))
         return b"".join(pieces)
 
     def materialize(self, document: Any | None = None) -> Any:
@@ -832,10 +882,21 @@ class EncodedExport:
 def _plan(rows: Sequence[Mapping[str, Any]], redaction: str) -> tuple[list[dict[str, Any]], list[_BodyJob]]:
     items: list[dict[str, Any]] = []
     jobs: list[_BodyJob] = []
+    masked = redaction != "raw"
     for index, row in enumerate(rows):
-        item, bodies = _project_without_bodies(row, redaction=redaction)
+        item, allowed = _project_without_bodies(row, redaction=redaction)
         items.append(item)
-        jobs.extend(_BodyJob(index, field, bodies[field], redaction != "raw") for field in _BODY_FIELDS)
+        stored = row.get(LAZY_BODIES)
+        for field in _BODY_FIELDS:
+            if stored is None:
+                jobs.append(_BodyJob(index, field, row.get(field) if allowed[field] else None, masked))
+            elif allowed[field] and field in stored:
+                jobs.append(_BodyJob(
+                    index, field, None, masked, stored_size=stored[field],
+                    legacy=(row.get(f"{field}_sha256"),),
+                ))
+            else:
+                jobs.append(_BodyJob(index, field, None, masked))
     return items, jobs
 
 
@@ -921,7 +982,7 @@ def _envelope(
     )
     # A recorded call whose headers or body could not be archived or decrypted is shown with its
     # metadata, but the archive does not claim it holds that call completely.
-    missing = sum(1 for row in rows if row.get("payload_unavailable"))
+    missing = sum(1 for item in projected if item["payload_unavailable"])
     notes = []
     if missing:
         notes.append(f"{missing} recorded call(s) have payloads that are unavailable: archived "
@@ -1006,7 +1067,7 @@ def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
     items, jobs = _plan([row], redaction)
     budget = _BodyBudget(None)
     outcomes = [
-        _settle(job, budget, encode_body(job.value, job.masked) if _wants(job, budget) else None)
+        _settle(job, budget, encode_body(job.value, job.masked, job.legacy) if _wants(job, budget) else None)
         for job in jobs
     ]
     reasons = {field: EXTERNAL_READ_BUDGET for field in (row.get("payload_omitted") or ())}
@@ -1034,7 +1095,7 @@ def export_document(
     items, jobs = _plan(rows, redaction)
     budget = _budget_for(redaction)
     outcomes = [
-        _settle(job, budget, encode_body(job.value, job.masked) if _wants(job, budget) else None)
+        _settle(job, budget, encode_body(job.value, job.masked, job.legacy) if _wants(job, budget) else None)
         for job in jobs
     ]
     encoded = _assemble(
@@ -1048,51 +1109,96 @@ def export_document(
 
 
 class ExportBusy(RuntimeError):
-    """Every export slot stayed taken for the admission wait: the caller should retry later."""
+    """No export slot came free for this caller within the admission wait: retry later."""
 
 
 class ExportUnavailable(RuntimeError):
     """The masking workers failed; the export is refused rather than shown unmasked."""
 
 
-_admission: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+class _ExportSlots:
+    """``MAX_CONCURRENT_EXPORT_BUILDS`` export slots, at most one per caller.
+
+    Each slot holds one export's rows, a batch of bodies, fragments and response at once, so the
+    slots, not the request rate, bound the memory exports use; one caller cannot take them all.
+    """
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.callers: dict[str, int] = {}
+        self.waiters: list[asyncio.Future[None]] = []
+
+    def _free_for(self, caller: str | None) -> bool:
+        return self.active < MAX_CONCURRENT_EXPORT_BUILDS and not (caller and self.callers.get(caller))
+
+    async def acquire(self, caller: str | None, wait_seconds: float) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_seconds
+        while not self._free_for(caller):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise ExportBusy("no archive export slot is free for this caller")
+            waiter = loop.create_future()
+            self.waiters.append(waiter)
+            try:
+                await asyncio.wait_for(waiter, remaining)
+            except TimeoutError as exc:
+                raise ExportBusy("no archive export slot is free for this caller") from exc
+            finally:
+                if waiter in self.waiters:
+                    self.waiters.remove(waiter)
+        self.active += 1
+        if caller:
+            self.callers[caller] = self.callers.get(caller, 0) + 1
+
+    def release(self, caller: str | None) -> None:
+        self.active -= 1
+        if caller:
+            left = self.callers.get(caller, 1) - 1
+            if left > 0:
+                self.callers[caller] = left
+            else:
+                self.callers.pop(caller, None)
+        waiters, self.waiters = self.waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+
+_admission: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _ExportSlots] = weakref.WeakKeyDictionary()
 _body_pool: ProcessPoolExecutor | None = None
 
 
 @asynccontextmanager
-async def export_admission(wait_seconds: float | None = None) -> AsyncIterator[None]:
-    """One of ``MAX_CONCURRENT_EXPORT_BUILDS`` export slots, taken before any row is read.
+async def export_admission(
+    caller: str | None = None, wait_seconds: float | None = None,
+) -> AsyncIterator[None]:
+    """An export slot, taken before any row is read; at most one per ``caller`` at a time.
 
-    Each slot holds an export's rows, fragments and response at once, so the slots, not the
-    request rate, bound the memory exports use. A request that cannot get one within
-    ``EXPORT_ADMISSION_WAIT_SECONDS`` is refused with ``ExportBusy`` instead of queueing with
-    its rows loaded.
+    A request that cannot get one within ``EXPORT_ADMISSION_WAIT_SECONDS`` is refused with
+    ``ExportBusy`` instead of queueing with its rows loaded.
     """
     loop = asyncio.get_running_loop()
-    semaphore = _admission.get(loop)
-    if semaphore is None:
-        semaphore = _admission[loop] = asyncio.Semaphore(MAX_CONCURRENT_EXPORT_BUILDS)
-    try:
-        await asyncio.wait_for(
-            semaphore.acquire(), EXPORT_ADMISSION_WAIT_SECONDS if wait_seconds is None else wait_seconds,
-        )
-    except TimeoutError as exc:
-        raise ExportBusy("every archive export slot is busy") from exc
+    slots = _admission.get(loop)
+    if slots is None:
+        slots = _admission[loop] = _ExportSlots()
+    await slots.acquire(caller, EXPORT_ADMISSION_WAIT_SECONDS if wait_seconds is None else wait_seconds)
     try:
         yield
     finally:
-        semaphore.release()
+        slots.release(caller)
 
 
 def _workers() -> ProcessPoolExecutor:
+    """The masking worker pool, started on the first export.
+
+    Its processes import only the masking modules (``worker_context``) and are not recycled:
+    a recycled worker paid a fresh interpreter start for every few hundred bodies.
+    """
     global _body_pool
     if _body_pool is None:
-        # Spawned, not forked: the API process runs threads and an event loop.
         _body_pool = ProcessPoolExecutor(
-            max_workers=MASKING_WORKERS,
-            mp_context=multiprocessing.get_context("spawn"),
-            initializer=initialize_worker,
-            max_tasks_per_child=256,
+            max_workers=MASKING_WORKERS, mp_context=worker_context(), initializer=initialize_worker,
         )
     return _body_pool
 
@@ -1105,28 +1211,109 @@ def _discard_workers() -> None:
 
 
 async def _encode_in_workers(jobs: list[_BodyJob], budget: _BodyBudget) -> list[Outcome]:
-    """Every body encoded in the worker pool, at most ``MASKING_WORKERS`` ahead, settled in order."""
+    """Every body encoded in the worker pool and settled in order.
+
+    Consecutive bodies travel in chunks of at most ``WORKER_CHUNK_BYTES`` (one body at least)
+    and ``WORKER_CHUNK_BODIES``, at most ``WORKER_CHUNKS_IN_FLIGHT`` chunks ahead: one round
+    trip per body cost more than masking a small one.
+    """
     loop = asyncio.get_running_loop()
     pool = _workers()
     outcomes: list[Outcome] = []
-    pending: dict[int, asyncio.Future[Outcome]] = {}
+    chunk_of: dict[int, tuple[asyncio.Future[list[Outcome]], int]] = {}
+    in_flight: list[asyncio.Future[list[Outcome]]] = []
     submitted = 0
+
+    def submit_chunk() -> None:
+        nonlocal submitted
+        members: list[int] = []
+        size = 0
+        while submitted < len(jobs):
+            job = jobs[submitted]
+            if not (_wants(job, budget) and job.value is not None):
+                submitted += 1
+                continue
+            if members and (size + job.size > WORKER_CHUNK_BYTES or len(members) >= WORKER_CHUNK_BODIES):
+                break
+            members.append(submitted)
+            size += job.size
+            submitted += 1
+        if members:
+            future = loop.run_in_executor(
+                pool, encode_bodies, [(jobs[i].value, jobs[i].masked, jobs[i].legacy) for i in members],
+            )
+            in_flight.append(future)
+            for offset, index in enumerate(members):
+                chunk_of[index] = (future, offset)
+
     try:
         for position, job in enumerate(jobs):
-            while submitted < len(jobs) and submitted - position < MASKING_WORKERS:
-                ahead = jobs[submitted]
-                if _wants(ahead, budget):
-                    pending[submitted] = loop.run_in_executor(pool, encode_body, ahead.value, ahead.masked)
-                submitted += 1
-            future = pending.pop(position, None)
-            outcome = await future if future is not None else None
+            in_flight[:] = [future for future in in_flight if not future.done()]
+            while submitted < len(jobs) and len(in_flight) < WORKER_CHUNKS_IN_FLIGHT:
+                before = submitted
+                submit_chunk()
+                if submitted == before:
+                    break
+            entry = chunk_of.pop(position, None)
+            outcome = (await entry[0])[entry[1]] if entry is not None else None
             outcomes.append(_settle(job, budget, outcome))
+            job.value = None  # the fragment, if any, is all this export keeps
     except BrokenProcessPool as exc:
         _discard_workers()
         raise ExportUnavailable("the archive masking workers stopped") from exc
     finally:
-        for future in pending.values():
+        for future in in_flight:
             future.cancel()
+    return outcomes
+
+
+BodyReader = Callable[[Sequence[Any], int], Awaitable[tuple[dict[str, dict[str, Any]], int]]]
+
+
+def _batches(jobs: list[_BodyJob]) -> Iterator[list[_BodyJob]]:
+    """Consecutive jobs holding at most ``EXPORT_BATCH_BYTES`` of stored body (one body at least)."""
+    batch: list[_BodyJob] = []
+    size = 0
+    for job in jobs:
+        if batch and (size + job.size > EXPORT_BATCH_BYTES or len(batch) >= EXPORT_BATCH_BODIES):
+            yield batch
+            batch, size = [], 0
+        batch.append(job)
+        size += job.size
+    if batch:
+        yield batch
+
+
+async def _encode_read_lazily(
+    rows: Sequence[Mapping[str, Any]], items: list[dict[str, Any]], jobs: list[_BodyJob],
+    budget: _BodyBudget, read_bodies: BodyReader, read_budget: int,
+) -> list[Outcome]:
+    """Read bodies a batch at a time, only those the budget can still take, and encode them.
+
+    The rows came without their bodies (``read_transactions(bodies=False)``), so an export holds
+    one batch of stored bodies at a time, never every body it lists.
+    """
+    outcomes: list[Outcome] = []
+    for batch in _batches(jobs):
+        wanted = [job for job in batch if job.value is None and _wants(job, budget)]
+        if wanted:
+            ids = list(dict.fromkeys(rows[job.index]["id"] for job in wanted))
+            found, used = await read_bodies(ids, read_budget)
+            read_budget = max(0, read_budget - used)
+            for job in wanted:
+                bodies = found.get(str(rows[job.index]["id"]))
+                if bodies is None or job.field in bodies["unavailable"]:
+                    job.present = False  # purged since, or unreadable: the call says so
+                    unavailable = items[job.index].setdefault("payload_unavailable", [])
+                    if job.field not in unavailable:
+                        unavailable.append(job.field)
+                elif job.field in bodies["omitted"]:
+                    job.reason = EXTERNAL_READ_BUDGET
+                else:
+                    job.value = bodies[job.field]
+                    job.present = job.value is not None
+            del found
+        outcomes.extend(await _encode_in_workers(batch, budget))
     return outcomes
 
 
@@ -1140,16 +1327,23 @@ async def build_export(
     archive_total: int | None = None,
     stats: Mapping[str, int] | None = None,
     creator_version: str = "2.0.0",
+    read_bodies: BodyReader | None = None,
 ) -> EncodedExport:
     """``export_document`` with every body decoded, masked and encoded in the worker pool.
 
     A scanned service chooses what it returns, and the archive keeps it; masking that body
     for a later export must not stall every other request the API is serving (external
-    release audit, 2026-10-09). Call it holding ``export_admission``.
+    release audit, 2026-10-09). Rows read without bodies get them from ``read_bodies`` a batch
+    at a time. Call it holding ``export_admission``.
     """
     items, jobs = _plan(rows, redaction)
     budget = _budget_for(redaction)
-    outcomes = await _encode_in_workers(jobs, budget)
+    if read_bodies is None:
+        outcomes = await _encode_in_workers(jobs, budget)
+    else:
+        outcomes = await _encode_read_lazily(
+            rows, items, jobs, budget, read_bodies, export_read_budget(redaction),
+        )
     return _assemble(
         rows, items, jobs, outcomes, export_format=export_format, redaction=redaction, owner=owner,
         total=total, archive_total=archive_total, stats=stats, creator_version=creator_version,
@@ -1274,6 +1468,7 @@ __all__ = [
     "DEFAULT_MASKED_EXPORT_BYTES",
     "EXPORT_RETRY_AFTER_SECONDS",
     "EncodedExport",
+    "LAZY_BODIES",
     "ExportBusy",
     "ExportUnavailable",
     "MAX_CONCURRENT_EXPORT_BUILDS",
@@ -1289,5 +1484,6 @@ __all__ = [
     "export_document",
     "project",
     "purge_transactions",
+    "read_transaction_bodies",
     "read_transactions",
 ]

@@ -8,12 +8,20 @@ JSON text of what the masked (or raw) view shows; the API process only splices t
 into the export. The functions here are also what the in-process ``export_document`` runs, so
 both paths produce the same text.
 
-This module stays light (masking, redaction, json): a spawned worker imports only it.
+This module stays light (masking, redaction, json): a worker imports only it, never the API
+(see ``worker_context``).
 """
 
 from __future__ import annotations
 
+import ast
+import hashlib
+import hmac
 import json
+import types
+from multiprocessing import context as _mp_context
+from multiprocessing import popen_spawn_posix as _popen_spawn_posix
+from multiprocessing import spawn as _spawn
 from typing import Any
 
 from .archive_body_masking import (
@@ -37,10 +45,11 @@ MASKING_FAILED = "masking_failed"
 
 
 def _decoded(value: Any) -> Any:
+    """The storage serialization decoded; text that is not JSON (or nests too deeply) as is."""
     if isinstance(value, str):
         try:
             return json.loads(value)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             return value
     return value
 
@@ -54,6 +63,59 @@ def _body_text(value: Any) -> str | None:
     if isinstance(value, (bytes, bytearray)):
         return bytes(value).decode("utf-8", errors="replace")
     return json.dumps(value)
+
+
+def legacy_json_string(value: Any, *, recorded_sha256: Any) -> Any:
+    """Unwrap an old extra JSON encoding only when the wire digest proves it.
+
+    A valid JSON string body (including its quotes/whitespace) otherwise looks identical
+    to double-encoded legacy text. Missing provenance must not guess away wire bytes.
+    """
+    text = _decoded(value)
+    if not isinstance(text, str) or not recorded_sha256:
+        return value
+    if hmac.compare_digest(hashlib.sha256(text.encode()).hexdigest(), str(recorded_sha256)):
+        return value
+    unwrapped = _decoded(text)
+    if isinstance(unwrapped, str) and hmac.compare_digest(
+        hashlib.sha256(unwrapped.encode()).hexdigest(), str(recorded_sha256),
+    ):
+        return json.dumps(unwrapped)
+    return value
+
+
+def legacy_bytes_repr(value: Any, *, recorded_sha256: Any) -> Any:
+    """Compatibility for bodies archived before the batch writer decoded bytes.
+
+    That writer serialized the bytes object itself, so a body was stored as its Python repr
+    ("b'...'") instead of its text. Such a body is decoded here as the writer now stores it
+    (UTF-8, undecodable bytes replaced). Text that merely looks like a bytes literal is kept
+    when the recorded body digest shows it is the body verbatim, and text that is not
+    entirely one bytes literal is never touched.
+    """
+    if not isinstance(value, str):
+        return value
+    text = _decoded(value)
+    if (not isinstance(text, str) or len(text) < 3
+            or text[:2] not in ("b'", 'b"') or text[-1] != text[1]):
+        return value
+    if recorded_sha256 and hmac.compare_digest(
+        hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest(), str(recorded_sha256),
+    ):
+        return value
+    try:
+        literal = ast.literal_eval(text)
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return value
+    if not isinstance(literal, bytes):
+        return value
+    return json.dumps(literal.decode("utf-8", errors="replace"))
+
+
+def legacy_body(value: Any, *, recorded_sha256: Any) -> Any:
+    """A stored body with both legacy storage encodings undone, as ``read_transactions`` does."""
+    value = legacy_bytes_repr(value, recorded_sha256=recorded_sha256)
+    return legacy_json_string(value, recorded_sha256=recorded_sha256)
 
 
 def stored_body_size(value: Any) -> int:
@@ -83,22 +145,54 @@ def raw_body_text(value: Any) -> str | None:
     return _body_text(_decoded(value))
 
 
+def well_formed(text: str) -> str:
+    """``text`` with every lone surrogate replaced by U+FFFD, so it encodes as strict UTF-8.
+
+    A captured body can decode to a lone surrogate (``"\\ud800"`` in JSON); written with
+    ``surrogatepass`` it made the export invalid UTF-8, which strict clients reject.
+    """
+    return text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
+def utf8(text: str) -> bytes:
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        return well_formed(text).encode("utf-8")
+
+
 def encode_text(text: str | None) -> bytes | None:
-    """The JSON text of one body string, as the export response serializes it."""
+    """The JSON text of one body string, as the export response serializes it (strict UTF-8)."""
     if text is None:
         return None
-    return json.dumps(text, ensure_ascii=False).encode("utf-8", errors="surrogatepass")
-
-
-def encode_body(value: Any, masked: bool) -> tuple[bytes | None, str | None]:
-    """Worker entry point: ``(JSON fragment or None, omission reason or None)``."""
-    if not masked:
-        return encode_text(raw_body_text(value)), None
     try:
+        return json.dumps(text, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(well_formed(text), ensure_ascii=False).encode("utf-8")
+
+
+def encode_body(value: Any, masked: bool, legacy: tuple[Any] | None = None) -> tuple[bytes | None, str | None]:
+    """Worker entry point: ``(JSON fragment or None, omission reason or None)``.
+
+    ``legacy`` carries the recorded body digest when the stored value still needs the legacy
+    decoding ``read_transactions`` applies. Any failure on one body withholds that body
+    (``masking_failed``) rather than failing the export or showing it unmasked; nothing about
+    the body is logged or raised, since an exception message can quote it.
+    """
+    try:
+        if legacy is not None:
+            value = legacy_body(value, recorded_sha256=legacy[0])
+        if not masked:
+            return encode_text(raw_body_text(value)), None
         text, reason = masked_body_text(value)
-    except MemoryError:
+        return encode_text(text), reason
+    except Exception:  # noqa: BLE001 - one hostile body must not fail the export
         return None, MASKING_FAILED
-    return encode_text(text), reason
+
+
+def encode_bodies(work: list[tuple[Any, bool, tuple[Any] | None]]) -> list[tuple[bytes | None, str | None]]:
+    """``encode_body`` for several consecutive bodies in one round trip to the worker."""
+    return [encode_body(value, masked, legacy) for value, masked, legacy in work]
 
 
 def initialize_worker() -> None:
@@ -114,3 +208,56 @@ def initialize_worker() -> None:
             resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
     except (ValueError, OSError):
         pass  # not enforced here (macOS); the size limits still bound each body
+
+
+# --- Worker processes that never re-run the API ---------------------------------------------------
+# A spawned child is told to re-run the parent's ``__main__`` before it unpickles its work. The
+# API service runs ``python3 /app/api.py``, so every masking worker imported the whole API (about
+# 1.8 s and 140 MB each; review of R2). The masking worker needs none of it: its work is
+# ``encode_body`` above, importable by name. These classes are the standard spawn start method
+# with that one instruction left out of the child's preparation data. The launch code itself is
+# the standard library's own (``popen_spawn_posix.Popen._launch``), read through a ``spawn``
+# module whose ``get_preparation_data`` drops the main-module entries.
+
+
+class _SpawnWithoutMain:
+    """``multiprocessing.spawn``, except the child is not told to re-run the parent's main."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_spawn, name)
+
+    @staticmethod
+    def get_preparation_data(name: str) -> dict[str, Any]:
+        data = _spawn.get_preparation_data(name)
+        data.pop("init_main_from_name", None)
+        data.pop("init_main_from_path", None)
+        return data
+
+
+_STANDARD_LAUNCH = _popen_spawn_posix.Popen._launch
+_launch_without_main = types.FunctionType(
+    _STANDARD_LAUNCH.__code__,
+    {**vars(_popen_spawn_posix), "spawn": _SpawnWithoutMain()},
+    _STANDARD_LAUNCH.__name__,
+    _STANDARD_LAUNCH.__defaults__,
+    _STANDARD_LAUNCH.__closure__,
+)
+
+
+class _WorkerPopen(_popen_spawn_posix.Popen):
+    _launch = _launch_without_main
+
+
+class _WorkerProcess(_mp_context.SpawnProcess):
+    @staticmethod
+    def _Popen(process_obj: Any) -> _WorkerPopen:
+        return _WorkerPopen(process_obj)
+
+
+class _WorkerContext(_mp_context.SpawnContext):
+    Process = _WorkerProcess
+
+
+def worker_context() -> _mp_context.SpawnContext:
+    """A spawn context whose children import only what their work needs."""
+    return _WorkerContext()

@@ -2729,7 +2729,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_EDGE_MODE` | `api/api.py` |
 | `FLEET_EXPECTED_WORKER_IMAGE_DIGEST` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_GATEWAY_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_GATEWAY_PROXY_SECRET` | `api/fleet_routes/router.py`, `api/host_guard.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_GATEWAY_PROXY_SECRET` | `api/fleet_routes/router.py`, `api/host_guard.py`, `api/runtime/http_archive_router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_HEARTBEAT_TIMEOUT_MINUTES` | `api/fleet_routes/router.py`, `api/operations/router.py` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_JOIN_RATE_LIMIT_PER_MINUTE` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |

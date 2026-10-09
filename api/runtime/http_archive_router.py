@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import secrets
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +30,7 @@ try:
         export_read_budget,
         purge_transactions,
         read_archive_stats,
+        read_transaction_bodies,
         read_transactions,
     )
 except ModuleNotFoundError:  # package import layout
@@ -45,6 +47,7 @@ except ModuleNotFoundError:  # package import layout
         export_read_budget,
         purge_transactions,
         read_archive_stats,
+        read_transaction_bodies,
         read_transactions,
     )
 
@@ -171,6 +174,23 @@ async def _scan_archive_ids(conn, scan_id: str) -> tuple[str, ...]:
     return values or (scan_id,)
 
 
+def export_caller(request: Any) -> str:
+    """Who is asking, for the one-export-slot-per-caller rule: the socket peer, or behind the
+    trusted gateway (FLEET_GATEWAY_PROXY_SECRET) the right-most X-Forwarded-For address, as the
+    fleet enrollment rate limit reads it. Earlier forwarded entries are caller-supplied."""
+    peer = str(getattr(getattr(request, "client", None), "host", None) or "unknown")
+    headers = getattr(request, "headers", None) or {}
+    configured = os.environ.get("FLEET_GATEWAY_PROXY_SECRET", "").strip()
+    presented = str(headers.get("x-shakerscan-gateway-secret", "") or "").strip()
+    if configured and presented and secrets.compare_digest(configured.encode(), presented.encode()):
+        forwarded = str(headers.get("x-forwarded-for", "") or "").rsplit(",", 1)[-1].strip()
+        try:
+            peer = str(ipaddress.ip_address(forwarded))
+        except ValueError:
+            pass
+    return peer
+
+
 def _raw_har_header() -> dict[str, str]:
     return {"x-shakerscan-raw-har": "available" if raw_har_enabled() else "disabled"}
 
@@ -222,7 +242,7 @@ async def _export_document(
     raw_har = raw_har_availability()
     try:
         # The slot is taken before any row is read: a refused request holds no rows.
-        async with export_admission():
+        async with export_admission(export_caller(request)):
             content, total = await _build_export_bytes(
                 scan_id=scan_id, hunt_run_id=hunt_run_id, export_format=export_format,
                 redaction=effective_redaction, method=method, status_code=status_code,
@@ -272,18 +292,24 @@ async def _build_export_bytes(
         stats = await read_archive_stats(
             conn, scan_id=scan_id, scan_ids=scan_ids, hunt_run_id=hunt_run_id,
         )
+        # Headers and metadata now; bodies a batch at a time while they are masked.
         rows = await read_transactions(
             conn, scan_id=scan_id, scan_ids=scan_ids, hunt_run_id=hunt_run_id, method=method,
             status_code=status_code, search=search, limit=limit, offset=offset,
-            external_payload_budget=export_read_budget(redaction),
+            external_payload_budget=export_read_budget(redaction), bodies=False,
         )
+
+    async def read_bodies(ids, budget: int):
+        async with _pool().acquire() as conn:
+            return await read_transaction_bodies(conn, ids, external_payload_budget=budget)
+
     owner = {"scan_id": scan_id, "hunt_id": hunt_run_id}
     if scan_ids and len(scan_ids) > 1:
         owner["included_scan_ids"] = list(scan_ids)
     encoded = await build_export(
         rows, export_format=export_format, redaction=redaction,
         owner=owner, total=total,
-        archive_total=archive_total, stats=stats,
+        archive_total=archive_total, stats=stats, read_bodies=read_bodies,
     )
     del rows
     if export_format == "transactions":
