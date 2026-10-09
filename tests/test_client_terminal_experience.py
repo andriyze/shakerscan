@@ -53,13 +53,22 @@ def test_the_client_version_is_bumped_past_the_release_that_lacked_terminal_appr
     assert (major, minor) >= (0, 8), "0.7.5 had no approve/deny/--allow; D15 asked for a visible bump"
 
 
+def _git_head(path: Path) -> str | None:
+    result = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
 def test_a_built_client_names_the_commit_it_was_built_from(tmp_path, monkeypatch, capsys):
     """D15: `git+…@cec4cadd` and `@732b9c15` both said 0.7.5."""
+    head = _git_head(ROOT)
+    if head is None:
+        # The release candidate runs the suite in the image, whose /src has no .git; the
+        # no-checkout behaviour is covered by the next test.
+        pytest.skip("needs a git checkout to compare the stamped commit with HEAD")
     plan = hatch_build.plan_build_info("wheel", CLIENT, tmp_path)
     source, target = next(iter(plan.items()))
     assert target == "shakerscan/_build.json"
     commit = json.loads(Path(source).read_text(encoding="utf-8"))["source_commit"]
-    head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     assert commit == head
     assert hatch_build.plan_build_info("sdist", CLIENT, tmp_path)[str(tmp_path / "_build.json")] == "src/shakerscan/_build.json"
     # The packaged client reads it back.
@@ -73,6 +82,24 @@ def test_a_built_client_names_the_commit_it_was_built_from(tmp_path, monkeypatch
     assert result.stdout.strip() == f"{__version__} (source {commit[:12]})", result.stderr
     # A checkout (no stamp) keeps the plain version.
     assert cli.client_version() == __version__
+
+
+def test_a_client_built_from_a_source_tree_without_git_carries_no_stamp(tmp_path):
+    """A repository tree with no .git (an exported source, the candidate image's /src) stamps
+    nothing rather than failing the build or inventing a commit."""
+    repo = tmp_path / "repo"
+    (repo / "client").mkdir(parents=True)
+    (repo / "scripts").mkdir()
+    for marker in hatch_build.REPOSITORY_MARKERS:
+        (repo / marker).parent.mkdir(parents=True, exist_ok=True)
+        (repo / marker).write_text("", encoding="utf-8")
+    assert hatch_build.repository_scripts(repo / "client") == repo / "scripts"
+    assert _git_head(repo) is None
+    out = tmp_path / "out"
+    out.mkdir()
+    assert hatch_build.plan_build_info("wheel", repo / "client", out) == {}
+    assert hatch_build.plan_build_info("sdist", repo / "client", out) == {}
+    assert not (out / "_build.json").exists()
 
 
 def _instance(monkeypatch, tmp_path, *, health):
