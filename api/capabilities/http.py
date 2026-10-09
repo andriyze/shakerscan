@@ -13,6 +13,7 @@ import time
 from typing import Any, Callable, Mapping, Sequence
 import urllib.parse
 
+import action_scope
 import agent_tools
 from http_experiment import (
     MAX_BODY_BYTES,
@@ -453,6 +454,14 @@ async def execute_bound_http_request(
         return {
             "ok": False,
             "error": "scope: via_address is not an operator-confirmed direct origin",
+        }
+    # Classified again at connect: the confirmed list was judged at Hunt start, under the
+    # deployment policy and cloud-service list of that moment.
+    via_refusal = action_scope.direct_origin_refusal(via_address) if via_address else None
+    if via_refusal is not None:
+        return {
+            "ok": False,
+            "error": f"scope: via_address is refused as a direct origin ({via_refusal})",
         }
     frozen_addresses = (via_address,) if via_address else target.allowed_addresses
     if not frozen_addresses:

@@ -149,7 +149,9 @@ class TestDirectOriginAddressPolicy:
 
     def test_a_public_address_is_admitted_under_every_policy(self, monkeypatch):
         monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
-        assert self.addresses("203.0.113.9") == ("203.0.113.9",)
+        # 203.0.113.0/24 is documentation space, private-class to the shared scope guard (S3 of
+        # the #358 review), so the public address here is a globally routable one.
+        assert self.addresses("93.184.216.34") == ("93.184.216.34",)
 
     def test_hostnames_are_still_refused(self, monkeypatch):
         monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")

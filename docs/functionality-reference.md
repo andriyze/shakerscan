@@ -1642,7 +1642,10 @@ concurrency-limited with per-tool timeouts and a global deadline.
   neither private nor reserved, so a deployment that refuses private-network targets admitted a
   CGNAT or Tailscale address as public. A deployment that scans over Tailscale sets
   `SHAKERSCAN_PRIVATE_NETWORK_TARGETS=allow` (or uses a Lab environment); a Hunt never authorizes
-  such a destination. Every check (the web scope guard, Hunt destinations, and device, network
+  such a destination. A Hunt's operator-confirmed direct-origin addresses are judged by the
+  same classes (as production, under the deployment's private-network setting; "this network"
+  0.0.0.0/8 and 240.0.0.0/4 are never an origin), at Hunt start and again when a request connects
+  through one. Every check (the web scope guard, Hunt destinations, and device, network
   and SSH destinations) judges an IPv6 address as each IPv4 address it carries as well: mapped
   (`::ffff:a.b.c.d`), SIIT (`::ffff:0:a.b.c.d`), IPv4-compatible, NAT64 (`64:ff9b::/96`,
   `64:ff9b:1::/48`), 6to4 and Teredo. A NAT64 gateway on a network-specific prefix cannot be

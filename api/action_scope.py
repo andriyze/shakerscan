@@ -165,6 +165,37 @@ def _ip_scope_block_reason(
     return None
 
 
+# Never routable to a real origin, whatever the deployment admits: "this network" and the
+# reserved 240.0.0.0/4 (the private setting would otherwise admit them as reserved space).
+_NEVER_AN_ORIGIN = tuple(ipaddress.ip_network(raw) for raw in ("0.0.0.0/8", "240.0.0.0/4"))
+
+
+def direct_origin_refusal(
+    value: object, *, allow_private_networks: bool | None = None,
+) -> str | None:
+    """Why an operator-confirmed Hunt direct-origin address is refused, or None.
+
+    The web scope guard's classification (``_ip_scope_block_reason`` under ``production``: a
+    target's Lab label never widens a direct origin), with the cloud metadata and platform-service
+    addresses refused in every spelling, and "this network" and 240.0.0.0/4 never an origin. The
+    Hunt start contract applies it to every confirmed address and the HTTP capability applies it
+    again to the one it connects to. A hostname is refused: the operator names the machine.
+    """
+    try:
+        address = ipaddress.ip_address(str(value).strip().strip("[]"))
+    except ValueError:
+        return "not_a_literal_address"
+    candidates = judged_addresses(address)
+    if any(cloud_service_address(item) for item in candidates):
+        return "cloud_service_address"
+    if any(item.version == network.version and item in network
+           for item in candidates for network in _NEVER_AN_ORIGIN):
+        return "non_routable_address"
+    return _ip_scope_block_reason(
+        str(address), "production", allow_private_networks=allow_private_networks,
+    )
+
+
 def public_unicast_address(value: object) -> bool:
     """A globally routable unicast address no deployment setting is needed to reach.
 
