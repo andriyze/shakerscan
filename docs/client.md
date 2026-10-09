@@ -240,7 +240,9 @@ the workspace note says so, and the MCP registrations carry the address. Without
 saved `shakerscan connect` instance is used, then `SHAKERSCAN_API_URL`.
 
 It materializes that kit (vendored into the package at build time) into a workspace
-(`~/.config/shakerscan/agent`, or `--here` for the current directory, or `--workspace DIR`),
+(`${XDG_DATA_HOME:-~/.local/share}/shakerscan/agent`, or `--here` for the current directory, or
+`--workspace DIR`; a default workspace left at `~/.config/shakerscan/agent` by client 0.8.1 is
+moved there once, with its record, and the move is reported),
 prepends a note naming the connected instance, the kit's release and client version, and the
 rules of a remote session (no local engine, use `shakerscan api`/`scan`/`hunt` and the MCP
 tools, refusals name what is missing),
@@ -261,10 +263,11 @@ everything else, such as an OpenCode `permission` block with a bash deny-list, C
 `permissions`, other MCP servers and `.claude/settings.local.json`; each `kept:` line says what
 was kept, hook command lines included. Because an agent can write these files too, each launch
 records a fingerprint of the settings that change what an agent may do (permissions, plugins,
-providers, other MCP servers, instructions, hooks) in the client's configuration directory
-(`~/.config/shakerscan/workspaces/`, never in the workspace an agent can write), and the next
-launch lists under `changed:` exactly what changed in between (secret values hidden); nothing is
-blocked. Kit files and hook entries the kit no longer ships are removed (a kit file you changed
+providers, other MCP servers, instructions, hooks) in the client's state directory
+(`${XDG_STATE_HOME:-~/.local/state}/shakerscan/workspaces/`, never in the workspace an agent can
+write), and the next launch lists under `changed:` exactly what changed in between (secret values
+hidden); nothing is blocked. When the record of a workspace prepared before is missing or not
+valid, the launch says that changes since the last launch could not be checked. Kit files and hook entries the kit no longer ships are removed (a kit file you changed
 is kept and named); your own files stay. `opencode.json` with comments or trailing commas is read
 and written back as plain JSON, its original kept beside it; a file that is not JSON or JSONC is
 moved aside (`.shakerscan-unreadable-*.bak`) with the reason. The client never writes through a
@@ -341,7 +344,8 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   before it are ignored (and said so), so a key meant for an earlier request never decides the
   next one; when a request ends elsewhere while its prompt waits, the switch to the next one is
   announced. Only a single lowercase key pressed on its own decides: arrow, function and Alt
-  keys (however slowly their bytes arrive), uppercase letters and pastes are ignored. It keeps
+  keys (however slowly their bytes arrive), terminal control strings (OSC, DCS, APC, PM, SOS,
+  up to their BEL or ST), 8-bit CSI, uppercase letters and pastes are ignored. It keeps
   polling while it waits, and SIGTERM or a closed terminal ends it like Ctrl-C (terminal
   restored, Enterprise approver session revoked, also during the step-up), with exit status
   128 + the signal number.

@@ -86,6 +86,30 @@ def config_dir(environ: Mapping[str, str] | None = None) -> Path:
     return Path(environ.get(ENV_CONFIG_DIR) or (Path.home() / ".config" / "shakerscan"))
 
 
+def _xdg(variable: str, fallback: tuple[str, ...], environ: Mapping[str, str] | None = None) -> Path:
+    """``$<variable>/shakerscan`` when it is an absolute path (the XDG rule), else
+    ``~/<fallback>/shakerscan``; the same on macOS as elsewhere, like ``config_dir``."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(variable) or ""
+    base = Path(value) if value and Path(value).is_absolute() else Path.home().joinpath(*fallback)
+    return base / "shakerscan"
+
+
+def state_dir(environ: Mapping[str, str] | None = None) -> Path:
+    """``${XDG_STATE_HOME:-~/.local/state}/shakerscan``: the client's records of agent workspaces,
+    kept apart from the workspaces themselves and from the saved connection."""
+    return _xdg("XDG_STATE_HOME", (".local", "state"), environ)
+
+
+def data_dir(environ: Mapping[str, str] | None = None) -> Path:
+    """``${XDG_DATA_HOME:-~/.local/share}/shakerscan``: the default agent workspace lives here."""
+    return _xdg("XDG_DATA_HOME", (".local", "share"), environ)
+
+
+def default_workspace(environ: Mapping[str, str] | None = None) -> Path:
+    return data_dir(environ) / "agent"
+
+
 def profile(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """The saved instance (``url``, ``token_file``), written by ``shakerscan connect``."""
     try:
@@ -523,7 +547,7 @@ def prepare_workspace(
     workspace.mkdir(parents=True, exist_ok=True)
     workspace = workspace.resolve()
     root = _workspace.Root(workspace)
-    record = _workspace.state_path(state_directory or config_dir() / "workspaces", workspace)
+    record = _workspace.state_path(state_directory or state_dir() / "workspaces", workspace)
     try:
         _workspace.refuse_links(workspace)
         state = _workspace.load_state(record, workspace, notes)
@@ -708,9 +732,15 @@ def cmd_agent(args: argparse.Namespace) -> int:
         raise ClientError(f"{agent} is not on this PATH; install it, or pass --no-launch to prepare the "
                           "workspace. Nothing was pre-authorized and no agent was started.")
     allowed = launch_preauthorization(args, url, token_file)
-    workspace = Path(args.workspace).expanduser().resolve() if args.workspace else (Path.cwd() if args.here else config_dir() / "agent")
+    notes: list[str] = _workspace.migrate_records(config_dir() / "workspaces", state_dir() / "workspaces")
+    if args.workspace:
+        workspace = Path(args.workspace).expanduser().resolve()
+    elif args.here:
+        workspace = Path.cwd()
+    else:
+        workspace = default_workspace()
+        notes += _workspace.migrate_default_workspace(config_dir() / "agent", workspace, state_dir() / "workspaces")
     executable = client_executable()
-    notes: list[str] = []
     written = prepare_workspace(workspace, url, who, executable, authenticated=authenticated, mcp_env=allowed,
                                 notes=notes)
     print(f"workspace: {workspace} ({', '.join(written)})\ninstance:  {url} ({who})")
@@ -1330,7 +1360,7 @@ def build_parser() -> argparse.ArgumentParser:
             "no token and no per-person identity, so only on a trusted network"
         ),
     )
-    agent.add_argument("--workspace", help="workspace directory (default: ~/.config/shakerscan/agent)")
+    agent.add_argument("--workspace", help="workspace directory (default: ~/.local/share/shakerscan/agent)")
     agent.add_argument("--here", action="store_true", help="use the current directory as the workspace")
     agent.add_argument("--no-launch", action="store_true", help="prepare the workspace and print how to start")
     agent.add_argument(
