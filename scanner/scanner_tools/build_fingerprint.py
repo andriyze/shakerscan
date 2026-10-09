@@ -59,6 +59,7 @@ V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
     "runtime",
     "scan",
     "schedules",
+    "scope",
     "settings_routes",
     "targets",
     "worker_handlers",

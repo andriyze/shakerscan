@@ -22,7 +22,7 @@ from typing import Any
 import uuid
 
 from .credential_uses import live_credential_grants
-from .permission_bounds import Bounds, bounds_from_public, merge
+from .permission_bounds import Bounds, bounds_from_public, merge, refused_bounds
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
     KIND_CAPABILITY_ENABLE,
@@ -366,14 +366,20 @@ def public_grant(row: Any) -> dict[str, Any]:
 
 def public_preauthorization(row: Any) -> dict[str, Any]:
     item = dict(row)
-    return {
+    bounds = _json(item.get("bounds_json"), {})
+    public = {
         "id": str(item["id"]),
-        "bounds": _json(item.get("bounds_json"), {}),
+        "bounds": bounds,
         "bounds_digest": item["bounds_digest"],
         "created_by": item["created_by"],
         "proof": item["proof"],
         "created_at": _iso(item.get("created_at")),
     }
+    refused = refused_bounds(bounds)
+    if refused:
+        # Stored before public suffixes were refused: shown as stored, matched as nothing.
+        public["refused_bounds"] = refused
+    return public
 
 
 # ---------------------------------------------------------------------------------------------

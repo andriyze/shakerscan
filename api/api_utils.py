@@ -217,11 +217,15 @@ def extract_root_domain(url: str) -> str:
             return host.strip("[]")
         except ValueError:
             pass
-        # Get root domain (last 2 parts)
-        parts = host.split('.')
-        if len(parts) >= 2:
-            return '.'.join(parts[-2:])
-        return host
+        # The registrable domain (eTLD+1) under the bundled Public Suffix List, so
+        # shop.example.co.uk is example.co.uk (not co.uk) and user.github.io is itself. A
+        # public suffix or single label is returned as is; scope matching never lets one widen.
+        try:
+            from scope.psl import registrable_domain
+        except ModuleNotFoundError:  # package import in host-side tests
+            from api.scope.psl import registrable_domain
+        host = host.lower().rstrip('.')
+        return registrable_domain(host) or host
     except Exception:
         return url
 def _graph_get(container: dict[str, Any], *path: str) -> Any:

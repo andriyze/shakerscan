@@ -29,6 +29,10 @@ except ModuleNotFoundError:  # package import (api.action_scope)
         IPAddress, always_refused, cloud_service_address, destination_block_reason,
         embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
     )
+try:
+    from scope.psl import is_public_suffix, public_suffix_refusal
+except ModuleNotFoundError:  # package import (api.action_scope)
+    from api.scope.psl import is_public_suffix, public_suffix_refusal
 
 
 SAFE_LAB_ENVIRONMENTS = {"development", "dev", "preview", "staging", "lab", "test"}
@@ -109,6 +113,17 @@ def approval_context_mismatch(
         key for key, value in expected.items()
         if not approval_context_value_matches(key, actual.get(key), value)
     ), None)
+
+
+def scope_roots(roots: Any) -> tuple[str, ...]:
+    """The ``allowed_root_domains`` that may widen scope: a root that is itself a public suffix
+    (``co.uk``, ``github.io``, ``com``; Public Suffix List with its private section) would cover
+    every site under it, so it covers nothing. Persisted receipts and guards that carry one fail
+    closed through this filter rather than being reinterpreted."""
+    return tuple(
+        root for root in (str(item or "").strip().lower().rstrip(".") for item in roots or ())
+        if root and not is_public_suffix(root)
+    )
 
 
 def _host_matches(host: str, allowed_hosts: tuple[str, ...], allowed_root_domains: tuple[str, ...]) -> bool:
@@ -375,6 +390,15 @@ def evaluate_scope(
         "target_id": target_id,
     }
 
+    # A public-suffix root (co.uk, github.io) never widens scope; a host only it would admit is
+    # refused with that reason, and the receipt never stores it.
+    suffix_roots = tuple(root for root in allow_roots if root not in scope_roots((root,)))
+    if suffix_roots:
+        allow_roots = tuple(root for root in allow_roots if root not in suffix_roots)
+        _add_check(checks, "allowed_root_public_suffix", "ignored", " ".join(
+            f"{public_suffix_refusal(root, wildcard=True)}; it covers nothing." for root in suffix_roots
+        ))
+
     for reason in _cidr_block_reasons(raw):
         blocked.append(reason)
         _add_check(checks, reason, "blocked", "Broad CIDR scope is not allowed in command receipts.")
@@ -433,9 +457,11 @@ def evaluate_scope(
             else:
                 _add_check(checks, "loopback_or_private_range", "passed", "No blocked private network scope.")
 
-            if allow_hosts or allow_roots:
+            if allow_hosts or allow_roots or suffix_roots:
                 if not _host_matches(host, allow_hosts, allow_roots):
                     blocked.append("host_out_of_allowed_scope")
+                    if _host_matches(host, (), suffix_roots):
+                        blocked.append("allowed_root_public_suffix")
                     _add_check(checks, "host_out_of_allowed_scope", "blocked", "Host is outside the provided allowed scope.")
                 else:
                     _add_check(checks, "host_out_of_allowed_scope", "passed", "Host matches allowed scope.")
@@ -453,7 +479,7 @@ def evaluate_scope(
             redirect_results.append({"url": dest_raw, "verdict": "blocked", "reason": "malformed_redirect_url"})
             continue
         dest_host = _canonical_host(dest_parsed.hostname or "")
-        if allow_hosts or allow_roots:
+        if allow_hosts or allow_roots or suffix_roots:
             dest_allowed = _host_matches(dest_host, allow_hosts, allow_roots)
         else:
             dest_allowed = bool(base_host and dest_host == base_host)
