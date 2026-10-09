@@ -31,10 +31,13 @@ permissions. Historical mode names are translated only at the compatibility boun
 select a second engine or module registry. Phases are ordered where later work depends on earlier
 discovery, while individual capabilities may apply their own bounded concurrency.
 
-Fast does not continue slow request-body SQLi candidates; use Balanced, Thorough or Hunt. On any
-ceiling, a SQLi candidate whose remaining techniques cannot fit one continuation round is reported
-as inconclusive for budget, naming what it settled and what could not be funded, and the
-continuation residual is shared between the verifier lanes rather than taken by SQLi first.
+Fast does not continue slow request-body SQLi candidates beyond what one 375-second round can
+fund: a technique whose next unit needs more is reported inconclusive for budget. Use Balanced,
+Thorough or Hunt for slow request bodies. On every ceiling, SQLi verdicts are per technique: a
+technique that no round, or the candidate's part of the Scan's residual, can fund is reported
+inconclusive for budget while the candidate's other techniques still run, and a candidate still
+waiting when the Scan ends is reported inconclusive for an exhausted budget. The continuation
+residual is shared between the verifier lanes rather than taken by SQLi first.
 
 ### Parent, plan, shard, merge
 

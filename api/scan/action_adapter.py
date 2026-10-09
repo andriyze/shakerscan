@@ -202,7 +202,12 @@ from .sqli_stages import (
     prior_stages,
     run_staged_sqli_attempt,
 )
-from .verification_extension import EXTENDS_ARG, extension_lineage, lane_round_wall_ceiling
+from .verification_extension import (
+    EXTENDS_ARG,
+    SCAN_WALL_SHARE_ARG,
+    extension_lineage,
+    lane_round_wall_ceiling,
+)
 from .batch_carry import (
     admission_template_source, carried_records, finished_attempts, proof_signal_sources,
 )
@@ -518,51 +523,78 @@ def _staged_resume_fields(result: Any) -> dict[str, Any]:
         "field_count": int(getattr(result, "field_count", 1) or 1),
         **({"seconds_per_request_ms": round(float(rate) * 1_000)} if rate else {}),
         **({"resume_probe": True} if getattr(result, "resume_probe", False) else {}),
+        **({"resume_unconfirmed": True} if getattr(result, "resume_unconfirmed", False) else {}),
+        **(
+            {"remaining_requests": int(result.remaining_requests)}
+            if getattr(result, "remaining_requests", None) else {}
+        ),
+        **(
+            {"remaining_wall_seconds": int(result.remaining_wall_seconds)}
+            if getattr(result, "remaining_wall_seconds", None) else {}
+        ),
     }
 
 
 def _budget_verdict(
     result: Any, *, candidate_id: str, ceiling: int | None,
-    fields: Sequence[str] | None, attempt_floor_wall: int = 0,
+    fields: Sequence[str] | None,
+    scan_wall_share: int | None = None,
 ) -> dict[str, Any] | None:
-    """The inconclusive-for-budget record of a candidate that can no longer reach a negative.
+    """The per-technique budget verdict of a candidate, or None when it has none.
 
-    That is a candidate with a technique two or more rate samples (judged by their minimum)
-    predict above the round's share (``sqli_stages.resume_plan``), or one whose attempt floor
-    alone exceeds the share: the planner never sizes an extension below the floor, so on Fast
-    (375 s share, 420 s body floor) no body candidate is ever extended. A cancelled attempt
-    never gets one: it stopped because it was told to.
+    A technique is inconclusive for budget when ``sqli_stages.resume_plan`` judges it
+    unfundable (two or more rate samples, judged by their minimum, put it above the round's
+    share or the candidate's fair part of the Scan's residual). A cancelled attempt never gets
+    a verdict: it stopped because it was told to.
     """
-    if (
-        not ceiling or str(getattr(result, "status", "")) == "cancelled"
-        or not getattr(result, "resume_technique", None)
-    ):
+    if not ceiling or str(getattr(result, "status", "")) == "cancelled":
         return None
-    floor_bound = (
-        int(attempt_floor_wall) > int(ceiling)
-        and bool(getattr(result, "resume_wall_seconds", None))
-    )
-    if not (getattr(result, "budget_inconclusive", False) or floor_bound):
+    unfundable = tuple(getattr(result, "unfundable_techniques", ()) or ())
+    closed = bool(getattr(result, "budget_inconclusive", False))
+    settled = tuple(getattr(result, "settled_units", ()) or ())
+    if not unfundable:
         return None
-    need = getattr(result, "resume_wall_seconds", None)
-    positive_only = bool(getattr(result, "positive_only", False)) and not floor_bound
     return budget_inconclusive_record(
         candidate_id=candidate_id,
-        finished=getattr(result, "settled_units", ()) or (),
-        technique=str(result.resume_technique),
-        field_name=getattr(result, "resume_field", None),
+        finished=settled,
+        unfundable_techniques=unfundable,
         fields=fields,
         field_count=getattr(result, "field_count", 1),
         seconds_per_request=getattr(result, "seconds_per_request", None),
-        predicted_wall_seconds=(
-            max(int(need), int(attempt_floor_wall)) if need else None
-        ),
         round_wall_ceiling_seconds=int(ceiling),
-        unfundable_techniques=(
-            getattr(result, "unfundable_techniques", ()) or ()
-        ) if not floor_bound else (),
-        positive_only=positive_only,
+        scan_wall_share_seconds=scan_wall_share,
+        closed=closed,
+        next_technique=getattr(result, "resume_technique", None),
+        next_field=getattr(result, "resume_field", None),
     )
+
+
+def _deferred_budget_verdict(
+    resume: Any, prior: Any, *, closed: bool, candidate_id: str,
+    fields: Sequence[str] | None, field_count: int, ceiling: int | None,
+    scan_wall_share: int | None, execution_target: str, method: str,
+) -> list[dict[str, Any]]:
+    """The budget verdict of a SQLi candidate deferred before any traffic, if it has one."""
+    unfundable = tuple(getattr(resume, "unfundable", ()) or ())
+    if not ceiling or not unfundable:
+        return []
+    return [{
+        "url": redact_url(execution_target),
+        "method": method,
+        **budget_inconclusive_record(
+            candidate_id=candidate_id,
+            finished=prior.finished,
+            unfundable_techniques=unfundable,
+            fields=fields,
+            field_count=field_count,
+            seconds_per_request=prior.seconds_per_request,
+            round_wall_ceiling_seconds=int(ceiling),
+            scan_wall_share_seconds=scan_wall_share,
+            closed=closed or bool(getattr(resume, "budget_inconclusive", False)),
+            next_technique=getattr(resume, "technique", None),
+            next_field=getattr(resume, "field_name", None),
+        ),
+    }]
 
 
 def _no_tool_output(observations: Any) -> bool:
@@ -658,7 +690,8 @@ def batch_stop_reason(
             return BUDGET_EXHAUSTION_REASONS[dimension].value
     if "tool_wall_seconds" in spent:
         return CapabilityResultReason.TIMED_OUT.value
-    if unattempted:
+    if unattempted or CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value in lowered:
+        # A SQLi candidate closed for budget names it (soak N55).
         return CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
     return CapabilityResultReason.ADAPTER_FAILED.value
 
@@ -3480,6 +3513,13 @@ class DatabaseNeutralScanActionDispatcher:
             lane_round_wall_ceiling(self.options.get("scan_execution_plan"))
             if tool == "sqlmap" else None
         )
+        # A continuation round names each extension's fair part of what the Scan has left; a
+        # technique whose remaining units need more is inconclusive for budget (soak N55).
+        raw_share = action.capability_args.get(SCAN_WALL_SHARE_ARG)
+        scan_wall_share = (
+            int(raw_share) if isinstance(raw_share, int) and not isinstance(raw_share, bool)
+            and raw_share > 0 and tool == "sqlmap" else None
+        )
         # A passive continuation slice carries the routes the required admission pack
         # already examined (the frozen origin and admitted seeds) instead of re-sending
         # the pack to them. The manifests differ, so route identity is the key.
@@ -3647,11 +3687,14 @@ class DatabaseNeutralScanActionDispatcher:
                     # An unfinished SQLi candidate names the least wall its next attempt needs:
                     # its unfinished stage's checkpoint, never less than the attempt floor. The
                     # extension planner sizes the next round from this (audit S002).
+                    # A measured SQLi candidate names its next unit's own wall (sqli_stages).
                     **({"resume_wall_seconds": max(
                         int(result.resume_wall_seconds),
-                        int(batch_attempt_floor(
-                            action.capability_name, body_candidate=bool(body_request),
-                        ).get("tool_wall_seconds", 0)),
+                        0 if getattr(result, "seconds_per_request", None) else int(
+                            batch_attempt_floor(
+                                action.capability_name, body_candidate=bool(body_request),
+                            ).get("tool_wall_seconds", 0)
+                        ),
                     )} if getattr(result, "resume_wall_seconds", None) else {}),
                     **(_staged_resume_fields(result) if tool == "sqlmap" else {}),
                 },
@@ -3661,17 +3704,19 @@ class DatabaseNeutralScanActionDispatcher:
                 verdict = _budget_verdict(
                     result, candidate_id=candidate_id, ceiling=round_wall_ceiling,
                     fields=row.get("sqli_fields"),
-                    attempt_floor_wall=int(batch_attempt_floor(
-                        action.capability_name, body_candidate=bool(body_request),
-                    ).get("tool_wall_seconds", 0)),
+                    scan_wall_share=scan_wall_share,
                 )
                 if verdict is not None:
-                    # No round can fund the next stage: say so on the candidate's record
-                    # rather than leave it looking like a slice that merely ran out of time.
+                    # Techniques no budget can fund are named on the candidate's record, so it
+                    # does not read as a slice that merely ran out of time. The candidate is
+                    # inconclusive overall only once nothing fundable is left.
+                    head = dict(attempt_observations[0])
+                    head["inconclusive_techniques"] = list(verdict["unfundable_techniques"])
+                    if verdict["closed"]:
+                        head.update({"verdict": "inconclusive", "inconclusive_reason": "budget"})
+                        head.pop("resume_wall_seconds", None)
                     attempt_observations = (
-                        {**dict(attempt_observations[0]), "verdict": "inconclusive",
-                         "inconclusive_reason": "budget",
-                         "positive_only": bool(verdict.get("positive_only"))},
+                        head,
                         *attempt_observations[1:],
                         {"url": redact_url(execution_target),
                          "method": body_request.get("method", "GET"), **verdict},
@@ -3939,6 +3984,21 @@ class DatabaseNeutralScanActionDispatcher:
                     floor = batch_attempt_floor(
                         action.capability_name, body_candidate=bool(body_request),
                     )
+                    if tool == "sqlmap" and staged_sources:
+                        # A resumed SQLi candidate runs one unit at a time; once its rate is
+                        # measured, its wall floor is what its next unit needs, not the
+                        # whole-candidate attempt floor (soak N55 review).
+                        early_fields, early_count = _sqli_fields(execution_target, body_request)
+                        early_prior = prior_stages(staged_sources, attempt_id, fields=early_fields)
+                        early = prior_resume(
+                            early_prior, fields=early_fields, field_count=early_count,
+                            round_wall_ceiling=round_wall_ceiling,
+                            scan_wall_share=scan_wall_share,
+                        )
+                        if early_prior.rate_samples and early.wall_seconds:
+                            floor["tool_wall_seconds"] = min(
+                                int(floor.get("tool_wall_seconds", 0)), int(early.wall_seconds),
+                            )
                     # Check the floor against what is actually left before building the
                     # slice: a dimension that has run out is absent from the slice
                     # entirely, so testing only the dimensions present would let an
@@ -4026,6 +4086,7 @@ class DatabaseNeutralScanActionDispatcher:
                         prior_resume(
                             candidate_prior, fields=sqli_fields, field_count=field_count,
                             round_wall_ceiling=round_wall_ceiling,
+                            scan_wall_share=scan_wall_share,
                         )
                         if candidate_prior is not None else None
                     )
@@ -4036,8 +4097,8 @@ class DatabaseNeutralScanActionDispatcher:
                         candidate_resume is not None and candidate_resume.budget_inconclusive
                         and stage_need is None
                     ):
-                        # Already inconclusive for budget, with nothing cheap left that could
-                        # prove an injection: it is not funded again (soak N55).
+                        # Nothing it still has to run is fundable: inconclusive for budget, and
+                        # not funded again (soak N55).
                         observations.append({
                             "kind": "candidate_deferred",
                             "candidate_id": candidate_id,
@@ -4045,6 +4106,13 @@ class DatabaseNeutralScanActionDispatcher:
                             "reason": "budget_inconclusive",
                             "verdict": "inconclusive",
                         })
+                        observations.extend(_deferred_budget_verdict(
+                            candidate_resume, candidate_prior, closed=True,
+                            candidate_id=candidate_id, fields=sqli_fields,
+                            field_count=field_count, ceiling=round_wall_ceiling,
+                            scan_wall_share=scan_wall_share, execution_target=execution_target,
+                            method=body_request.get("method", "GET"),
+                        ))
                         continue
                     if stage_need is not None and sub_budget.get("tool_wall_seconds"):
                         # A resumed candidate re-runs its unfinished stage only on a hold
@@ -4062,43 +4130,25 @@ class DatabaseNeutralScanActionDispatcher:
                                 position -= 1
                                 await candidates.wait()
                                 continue
-                            concluded = bool(
-                                round_wall_ceiling and candidate_resume.technique is not None and (
-                                    candidate_resume.budget_inconclusive
-                                    or int(floor.get("tool_wall_seconds", 0)) > round_wall_ceiling
-                                )
+                            verdicts = _deferred_budget_verdict(
+                                candidate_resume, candidate_prior, closed=False,
+                                candidate_id=candidate_id, fields=sqli_fields,
+                                field_count=field_count, ceiling=round_wall_ceiling,
+                                scan_wall_share=scan_wall_share,
+                                execution_target=execution_target,
+                                method=body_request.get("method", "GET"),
                             )
-                            positive_only = concluded and candidate_resume.positive_only and not (
-                                int(floor.get("tool_wall_seconds", 0)) > round_wall_ceiling
-                            )
+                            closed = any(item.get("closed") for item in verdicts)
                             observations.append({
                                 "kind": "candidate_deferred",
                                 "candidate_id": candidate_id,
                                 "family": family,
                                 "reason": "stage_wall_unfunded",
-                                "resume_wall_seconds": stage_need,
+                                **({} if closed else {"resume_wall_seconds": stage_need}),
                                 "available_wall_seconds": max(0, available - own_spent),
-                                **({"verdict": "inconclusive", "positive_only": positive_only}
-                                   if concluded else {}),
+                                **({"verdict": "inconclusive"} if closed else {}),
                             })
-                            if concluded:
-                                observations.append({
-                                    "url": redact_url(execution_target),
-                                    "method": body_request.get("method", "GET"),
-                                    **budget_inconclusive_record(
-                                        candidate_id=candidate_id,
-                                        finished=candidate_prior.finished,
-                                        technique=candidate_resume.technique,
-                                        field_name=candidate_resume.field_name,
-                                        fields=sqli_fields,
-                                        field_count=field_count,
-                                        seconds_per_request=candidate_prior.seconds_per_request,
-                                        predicted_wall_seconds=stage_need,
-                                        round_wall_ceiling_seconds=round_wall_ceiling,
-                                        unfundable_techniques=candidate_resume.unfundable,
-                                        positive_only=positive_only,
-                                    ),
-                                })
+                            observations.extend(verdicts)
                             exhausted.add("tool_wall_seconds")
                             continue
                         sub_budget["tool_wall_seconds"] = max(
@@ -4240,6 +4290,7 @@ class DatabaseNeutralScanActionDispatcher:
                             field_count=field_count,
                             fields=sqli_fields,
                             round_wall_ceiling=round_wall_ceiling,
+                            scan_wall_share=scan_wall_share,
                         )
                     else:
                         run_attempt = functools.partial(

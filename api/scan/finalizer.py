@@ -14,7 +14,7 @@ from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
 from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
-from .sqli_stages import INCONCLUSIVE_RECORD_KIND
+from .sqli_stages import INCONCLUSIVE_RECORD_KIND, sqli_budget_outcomes
 from .verification_extension import superseding_results
 from .continuation import (
     ScanContinuationError,
@@ -1922,6 +1922,18 @@ def finalize_scan_report(
     for family, row in family_coverage.items():
         statuses = row.pop("_statuses")
         batch_reasons = row.pop("_reasons")
+        if family == "sqli":
+            # Every SQLi candidate the Scan left inconclusive for budget, including one still
+            # waiting for a continuation no round could fund when the Scan ended (soak N55).
+            outcomes = sqli_budget_outcomes(
+                item
+                for action in expected_actions
+                if action.capability_name == "sqli.verify_batch"
+                for item in observations.get(action.action_id, ())
+            )
+            if outcomes:
+                row["budget_inconclusive_candidates"] = outcomes
+                row["_slow_endpoints"].extend(item["url"] for item in outcomes)
         slow_endpoints = sorted(set(filter(None, row.pop("_slow_endpoints"))))
         if slow_endpoints:
             row["slow_endpoints"] = slow_endpoints

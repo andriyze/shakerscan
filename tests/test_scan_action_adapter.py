@@ -86,7 +86,7 @@ def _action(
             else {"report_only": True} if action_id == "finalize.report" else {}
         ),
         target_binding_digest=target.digest,
-        input_binding_digest=str(ordinal + 1) * 64,
+        input_binding_digest=f"{ordinal + 1:064x}",
         requested_budget=dict(spec.budget_cost),
         placement={
             "schema_version": "scan-action-placement/v1",

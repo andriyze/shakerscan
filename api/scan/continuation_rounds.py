@@ -48,6 +48,7 @@ from .verification_extension import (
     budget_concluded_slices,
     plan_verification_extensions,
     resume_observation_action_ids,
+    stage_remaining_walls,
     stage_resume_walls,
 )
 from .work_manifests import (
@@ -266,6 +267,8 @@ def compile_continuation_round(
     }
     resume_walls = stage_resume_walls(resume_observations)
     concluded = budget_concluded_slices(resume_observations)
+    remaining_walls = stage_remaining_walls(resume_observations)
+    remaining_requests = stage_remaining_walls(resume_observations, key="remaining_requests")
     observations = {key: observations.get(key, ()) for key in allocation.parent_action_ids}
     endpoints, candidates = build_discovery_continuation_manifests(
         allocation=allocation,
@@ -325,6 +328,8 @@ def compile_continuation_round(
             residual=residual,
             stage_resume_walls=resume_walls,
             budget_concluded=concluded,
+            stage_remaining_walls=remaining_walls,
+            stage_remaining_requests=remaining_requests,
         )
         if revision_number >= 2 and not finalize_only else ()
     )
