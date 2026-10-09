@@ -143,3 +143,25 @@ export function callArguments(input, maxValue = 160) {
       return { key, value: text.length > maxValue ? `${text.slice(0, maxValue - 1)}…` : text, full: text }
     })
 }
+
+// Stop reasons a person should read as a sentence, not a code.
+const STOP_REASON_TEXT = {
+  permission_authority_unrepaired:
+    'Stopped on upgrade: this Hunt\'s granted permissions could not be rebuilt after a revocation, so it was ' +
+    'cancelled rather than left running on permissions nobody granted. Start a new Hunt to continue.',
+}
+
+const STOP_REASON_LABEL = {
+  permission_authority_unrepaired: 'cancelled on upgrade: permissions could not be rebuilt',
+}
+
+export function huntStopReasonText(reason) {
+  const code = String(reason || '')
+  return STOP_REASON_TEXT[code] || code.replaceAll('_', ' ')
+}
+
+// The short form, for a list row.
+export function huntStopReasonLabel(reason) {
+  const code = String(reason || '')
+  return STOP_REASON_LABEL[code] || code.replaceAll('_', ' ')
+}

@@ -347,6 +347,22 @@ def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) ->
     }
 
 
+def withheld_note(withheld: Any) -> str | None:
+    """The server's sentence for a request the start bounds no longer answer (a revoked grant)."""
+    if not isinstance(withheld, Mapping):
+        return None
+    covered = str(withheld.get("coverage") or "").split(":", 1)[-1] or "its permission"
+    when = f" at {withheld['revoked_at']}" if withheld.get("revoked_at") else ""
+    who = f" by {withheld['revoked_by']}" if withheld.get("revoked_by") else ""
+    fields = ", ".join(str(item) for item in withheld.get("fields") or ())
+    return (
+        f"Asked again because grant {withheld.get('revoked_grant_id')} ({covered}) was revoked{when}{who}. "
+        "The Hunt's start bounds no longer allow this automatically"
+        + (f" (it would turn on {fields} again)" if fields else "")
+        + "; allowing it now is a new decision."
+    )
+
+
 def public_request(row: Any) -> dict[str, Any]:
     item = dict(row)
     subject = _json(item.get("subject_json"), {})
@@ -362,6 +378,8 @@ def public_request(row: Any) -> dict[str, Any]:
         "subject_digest": item["subject_digest"],
         **{key: value for key, value in display.items()
            if key in {"needed_total", "proposed_total", "auto_grant_withheld"}},
+        **({"auto_grant_withheld_note": withheld_note(display["auto_grant_withheld"])}
+           if display.get("auto_grant_withheld") else {}),
         **render(str(item["kind"]), subject, display),
         "action_id": str(item["action_id"]) if item.get("action_id") else None,
         "capability_name": item.get("capability_name"),

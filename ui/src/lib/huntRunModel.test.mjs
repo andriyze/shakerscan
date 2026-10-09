@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { agentHandoff, budgetUsage, defaultRunTab, huntIsLive, pendingDecisions, requestsByAction } from './huntRunModel.mjs'
+import { agentHandoff, budgetUsage, defaultRunTab, huntIsLive, huntStopReasonLabel, huntStopReasonText, pendingDecisions, requestsByAction } from './huntRunModel.mjs'
 
 test('a live run opens on its requests, a finished one on its results, and a hash wins', () => {
   assert.equal(defaultRunTab({ status: 'active' }), 'requests')
@@ -84,4 +84,14 @@ test('an exhausted stop reason names the limit to extend', async () => {
   assert.equal(exhaustedDimension({ stop_reason: 'budget_exhausted:max_tcp_ports' }), 'max_tcp_ports')
   assert.equal(exhaustedDimension({ stop_reason: 'budget_exhausted:tool_wall_seconds', budget: {} }), null)
   assert.equal(exhaustedDimension({ stop_reason: 'completed' }), null)
+})
+
+test('a Hunt the upgrade could not rebuild explains itself instead of showing its code', () => {
+  const text = huntStopReasonText('permission_authority_unrepaired')
+  assert.match(text, /could not be rebuilt after a revocation/)
+  assert.doesNotMatch(text, /permission_authority_unrepaired/)
+  assert.equal(huntStopReasonText('budget_exhausted'), 'budget exhausted')
+  assert.equal(huntStopReasonText(null), '')
+  assert.equal(huntStopReasonLabel('permission_authority_unrepaired'), 'cancelled on upgrade: permissions could not be rebuilt')
+  assert.equal(huntStopReasonLabel('cancelled'), 'cancelled')
 })

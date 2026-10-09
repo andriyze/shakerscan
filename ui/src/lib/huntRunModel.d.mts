@@ -26,3 +26,5 @@ export interface ActionOutcome { input: Record<string, unknown> | null; errors: 
 export function actionOutcomes(record: { decision_trace?: unknown[] } | null | undefined): Map<string, ActionOutcome>
 export function callArguments(input: Record<string, unknown> | null | undefined, maxValue?: number): Array<{ key: string; value: string; full: string }>
 export function exhaustedDimension(hunt: { stop_reason?: string | null; budget?: Record<string, number | undefined> } | null | undefined): string | null
+export function huntStopReasonText(reason: string | null | undefined): string
+export function huntStopReasonLabel(reason: string | null | undefined): string
