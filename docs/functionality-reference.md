@@ -1813,7 +1813,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 406 | Python sources + Compose manifests |
+| Runtime environment keys | 407 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 130 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2938,6 +2938,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_HOST_PLATFORM` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HTTP_ARCHIVE` | `api/runtime/http_archive.py` |
 | `SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW` | `api/runtime/http_archive_router.py` |
+| `SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES` | `api/runtime/http_archive_reader.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR` | `api/runtime/http_archive_router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS` | `scripts/v2_cli.py` |
 | `SHAKERSCAN_HUNT_ALLOW` | `scripts/v2_cli.py` |

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 
 try:
     from operator_auth import _require_model_intake_operator as _require_operator
@@ -18,10 +18,15 @@ except ModuleNotFoundError:  # package import layout
 try:
     from runtime.http_archive_reader import (
         EXPORT_FORMATS,
+        EXPORT_RETRY_AFTER_SECONDS,
         MAX_EXPORT_ROWS,
         REDACTION_MODES,
-        build_export_document,
+        ExportBusy,
+        ExportUnavailable,
+        build_export,
         count_transactions,
+        export_admission,
+        export_read_budget,
         purge_transactions,
         read_archive_stats,
         read_transactions,
@@ -29,10 +34,15 @@ try:
 except ModuleNotFoundError:  # package import layout
     from .http_archive_reader import (
         EXPORT_FORMATS,
+        EXPORT_RETRY_AFTER_SECONDS,
         MAX_EXPORT_ROWS,
         REDACTION_MODES,
-        build_export_document,
+        ExportBusy,
+        ExportUnavailable,
+        build_export,
         count_transactions,
+        export_admission,
+        export_read_budget,
         purge_transactions,
         read_archive_stats,
         read_transactions,
@@ -210,6 +220,46 @@ async def _export_document(
                         "An API published beyond loopback needs SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1"),
             )
     raw_har = raw_har_availability()
+    try:
+        # The slot is taken before any row is read: a refused request holds no rows.
+        async with export_admission():
+            content, total = await _build_export_bytes(
+                scan_id=scan_id, hunt_run_id=hunt_run_id, export_format=export_format,
+                redaction=effective_redaction, method=method, status_code=status_code,
+                search=search, limit=limit, offset=offset, raw_har=raw_har,
+            )
+    except ExportBusy as exc:
+        raise HTTPException(
+            status_code=503, detail="archive exports are busy; retry shortly",
+            headers={"Retry-After": str(EXPORT_RETRY_AFTER_SECONDS)},
+        ) from exc
+    except ExportUnavailable as exc:
+        raise HTTPException(
+            status_code=503, detail="the archive masking workers are unavailable; retry shortly",
+            headers={"Retry-After": str(EXPORT_RETRY_AFTER_SECONDS)},
+        ) from exc
+    name = scan_id or hunt_run_id or "export"
+    suffix = ("RAW.har" if effective_redaction == "raw" else "masked.har") if export_format == "har" else "json"
+    return Response(
+        content,
+        media_type="application/json",
+        headers={
+            "content-disposition": f'attachment; filename="shakerscan-{name}.{suffix}"',
+            "x-shakerscan-archive-total": str(total),
+            "x-shakerscan-archive-redaction": effective_redaction,
+            "x-shakerscan-archive-sensitive": (
+                "true" if effective_redaction == "raw" else "possibly"
+            ),
+            **_raw_har_header(),
+        },
+    )
+
+
+async def _build_export_bytes(
+    *, scan_id: str | None, hunt_run_id: str | None, export_format: str, redaction: str,
+    method: str | None, status_code: int | None, search: str | None, limit: int, offset: int,
+    raw_har: Any,
+) -> tuple[bytes, int]:
     async with _pool().acquire() as conn:
         scan_ids = await _scan_archive_ids(conn, scan_id) if scan_id else None
         archive_total = await count_transactions(
@@ -225,33 +275,22 @@ async def _export_document(
         rows = await read_transactions(
             conn, scan_id=scan_id, scan_ids=scan_ids, hunt_run_id=hunt_run_id, method=method,
             status_code=status_code, search=search, limit=limit, offset=offset,
+            external_payload_budget=export_read_budget(redaction),
         )
     owner = {"scan_id": scan_id, "hunt_id": hunt_run_id}
     if scan_ids and len(scan_ids) > 1:
         owner["included_scan_ids"] = list(scan_ids)
-    document = await build_export_document(
-        rows, export_format=export_format, redaction=effective_redaction,
+    encoded = await build_export(
+        rows, export_format=export_format, redaction=redaction,
         owner=owner, total=total,
         archive_total=archive_total, stats=stats,
     )
+    del rows
     if export_format == "transactions":
         # A HAR document has a fixed shape; the ShakerScan envelope says what this deployment
         # will export so the raw option is never offered only to be refused.
-        document["raw_har"] = raw_har
-    name = scan_id or hunt_run_id or "export"
-    suffix = ("RAW.har" if effective_redaction == "raw" else "masked.har") if export_format == "har" else "json"
-    return JSONResponse(
-        document,
-        headers={
-            "content-disposition": f'attachment; filename="shakerscan-{name}.{suffix}"',
-            "x-shakerscan-archive-total": str(total),
-            "x-shakerscan-archive-redaction": effective_redaction,
-            "x-shakerscan-archive-sensitive": (
-                "true" if effective_redaction == "raw" else "possibly"
-            ),
-            **_raw_har_header(),
-        },
-    )
+        encoded.document["raw_har"] = raw_har
+    return encoded.render(), total
 
 
 @router.get("/scans/{scan_id}/http-transactions", tags=["Scan"])

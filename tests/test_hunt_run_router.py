@@ -529,6 +529,11 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
     assert "coverage_events" in record["trace_policy"]["includes"]
     assert record["coverage_ledger"]["schema_version"] == "hunt-coverage-history/v1"
     assert record["coverage_ledger"]["events_truncated"] is False
+    # The route serves the same record as bytes rendered from the masking workers' output.
+    rendered = json.loads(asyncio.run(service.export_record_json(hunt_id)))
+    assert rendered.keys() == record.keys()
+    assert rendered["http_archive"] == json.loads(json.dumps(record["http_archive"]))
+    assert rendered["trace_policy"] == record["trace_policy"]
 
 
 def test_hunt_run_service_lists_without_context_or_capability_expansion():
