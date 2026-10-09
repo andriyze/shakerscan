@@ -73,6 +73,8 @@ WATCH_POLL_SECONDS = 3.0
 # KEY_BURST_SECONDS of each other are one burst (an escape sequence or a paste), never a key; and
 # escape sequences are also followed byte by byte, whatever their timing (Terminal._feed).
 KEY_SETTLE_SECONDS = 0.75
+# ESC ] (OSC), ESC P (DCS), ESC _ (APC), ESC ^ (PM), ESC X (SOS): strings ended only by BEL or ST.
+_STRING_INTRODUCERS = frozenset(b"]P_^X")
 KEY_BURST_SECONDS = 0.03
 # `hunt permissions wait`: never more than one read of a request per this many seconds (L1).
 WAIT_MIN_POLL_SECONDS = 1.0
@@ -288,6 +290,7 @@ class Terminal:
         self.stdout = stdout or sys.stdout
         self._key_fd: int | None = None
         self._escape = "idle"  # the escape-sequence state machine of key()
+        self._utf8_left = 0  # continuation bytes still due for a UTF-8 character
 
     def require(self, what: str) -> None:
         try:
@@ -369,19 +372,41 @@ class Terminal:
 
         B1: timing alone cannot tell a sequence from keys (ESC, then ``[A`` 0.3 s later over a
         slow link), so the state is kept across reads and prompts: after ESC the next byte
-        belongs to the sequence; after ``ESC [`` every byte up to a final byte (0x40-0x7E) does;
-        after ``ESC O`` one more byte does."""
-        lone = len(data) == 1 and self._escape == "idle"
+        belongs to the sequence; after ``ESC [`` (or the 8-bit CSI 0x9B) every byte up to a final
+        byte (0x40-0x7E) does; after ``ESC O`` one more byte does. ``ESC ]`` (OSC), ``ESC P``
+        (DCS), ``ESC _`` (APC), ``ESC ^`` (PM) and ``ESC X`` (SOS) open a string that only BEL or
+        ST (``ESC \\``) ends, so a terminal's reply or a pasted control string never decides. A
+        byte of 0x80 or above decides nothing: it is part of a UTF-8 character (followed through
+        its continuation bytes) or is ignored, except a 0x9B outside UTF-8, which is CSI."""
+        lone = len(data) == 1 and self._escape == "idle" and not self._utf8_left
         for byte in data:
-            if self._escape == "idle":
+            state = self._escape
+            if state == "idle":
+                if self._utf8_left and 0x80 <= byte <= 0xBF:
+                    self._utf8_left -= 1
+                    continue
+                self._utf8_left = 0
                 if byte == 0x1B:
                     self._escape = "escape"
+                elif byte == 0x9B:
+                    self._escape = "csi"
+                elif 0xC2 <= byte <= 0xF4:
+                    self._utf8_left = 1 if byte < 0xE0 else 2 if byte < 0xF0 else 3
+                if byte >= 0x80 or byte == 0x1B:
                     lone = False
-            elif self._escape == "escape":
-                self._escape = "csi" if byte == 0x5B else "ss3" if byte == 0x4F else "idle"
-            elif self._escape == "csi":
+            elif state == "escape":
+                self._escape = ("csi" if byte == 0x5B else "ss3" if byte == 0x4F
+                                else "string" if byte in _STRING_INTRODUCERS else "idle")
+            elif state == "csi":
                 if 0x40 <= byte <= 0x7E:
                     self._escape = "idle"
+            elif state == "string":
+                if byte == 0x07:
+                    self._escape = "idle"
+                elif byte == 0x1B:
+                    self._escape = "string-escape"
+            elif state == "string-escape":
+                self._escape = "idle" if byte == 0x5C else "string-escape" if byte == 0x1B else "string"
             else:  # ss3: one byte names the key
                 self._escape = "idle"
         return lone
