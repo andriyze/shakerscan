@@ -278,10 +278,14 @@ def effective_private_network_policy(admitted_policy: Any = None) -> str:
     return "refuse" if "refuse" in policies else "allow"
 
 
-# The metadata destinations ``SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS`` has always admitted
-# whatever the private-network policy (a lab's metadata emulator). A cloud-service address added
-# to the list later is admitted by the opt-in only where the private-network policy admits it, so
-# growing the list never widens a refusing deployment.
+# ``validate_device_destination`` applies the private-network policy first and only then returns
+# early for ``SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS``, skipping the deny list and
+# ``SHAKERSCAN_DEVICE_DENY_CIDRS``. Without the opt-in, every cloud-service address is exempt from
+# the private-network check so the deny list refuses it by name. With the opt-in, only these five
+# (the list before 2.8.0) keep that exemption, as before; an address added to the list later is
+# judged by the private-network policy like any other, so growing the list never widens a
+# refusing deployment. Link-local addresses are outside that policy on this plane, so
+# 169.254.170.23 is admitted under the opt-in, as it was before it was listed.
 _OPT_IN_METADATA_DESTINATIONS = frozenset(ipaddress.ip_address(raw) for raw in (
     "169.254.169.254", "169.254.170.2", "100.100.100.200", "168.63.129.16", "fd00:ec2::254",
 ))
