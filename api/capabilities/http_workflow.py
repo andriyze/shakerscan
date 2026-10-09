@@ -42,6 +42,24 @@ def _scrub_bound_values(value: Any, bound: list[str]) -> Any:
     return scrub(value)
 
 
+def _withhold_url_secrets(response: dict[str, Any]) -> None:
+    """Model-facing URLs carry no raw OAuth code, reset token or signature: inside a Hunt each
+    becomes a ``[withheld:n]`` reference the planner can still follow (N56)."""
+    from runtime.archive_body_masking import mask_url_secrets
+    summary = response.get("response")
+    if isinstance(summary, dict):
+        if summary.get("location"):
+            summary["location"] = mask_url_secrets(summary["location"])
+        selected = summary.get("selected_headers")
+        if isinstance(selected, dict) and selected.get("location"):
+            selected["location"] = mask_url_secrets(selected["location"])
+    if response.get("final_url"):
+        response["final_url"] = mask_url_secrets(response["final_url"])
+    for hop in response.get("redirect_chain") or ():
+        if isinstance(hop, dict) and hop.get("location"):
+            hop["location"] = mask_url_secrets(hop["location"])
+
+
 async def prepare_http_operation(
     *, pool: Any, run: Mapping[str, Any], context: Mapping[str, Any], policy: Mapping[str, Any],
     action_id: Any, target: Any, target_url: str, inputs: Mapping[str, Any],
@@ -90,6 +108,7 @@ async def prepare_http_operation(
                 allow_bound_origin_redirects=True, private_response_sink=exchange.capture_response,
                 private_response_headers=exchange.response_headers,
             )
+            _withhold_url_secrets(response)
             if workflow and withheld_only:
                 # Only withheld values (N56) were bound, and the worker knows each one exactly, so
                 # the planner keeps the response it needs to judge access, with every bound value

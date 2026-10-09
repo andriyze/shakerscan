@@ -22,9 +22,15 @@ except ModuleNotFoundError:
     from scanner.redaction import redact_text as _shared_redact_text
 
 try:
-    from runtime.archive_body_masking import active_withheld_values, holds_withheld_material, mask_body_text
+    from runtime.archive_body_masking import (
+        MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
+        holds_withheld_material, mask_body_text, scrub_known_values,
+    )
 except ModuleNotFoundError:
-    from api.runtime.archive_body_masking import active_withheld_values, holds_withheld_material, mask_body_text
+    from api.runtime.archive_body_masking import (
+        MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
+        holds_withheld_material, mask_body_text, scrub_known_values,
+    )
 try:
     from capabilities.secret_material import keyed_body_digest
 except ModuleNotFoundError:
@@ -137,14 +143,37 @@ def _jwt_replacement(match: re.Match[str]) -> str:
     return f"<jwt:sha256:{hashlib.sha256(token.encode()).hexdigest()[:16]}>"
 
 
-def _masked_window_text(body: bytes) -> str:
+# A window read at an offset is masked with up to this much of what precedes it: a dump's column
+# names, a ``DB_PASSWORD=`` label or a ``value="`` cut just before the window (N56 review).
+CONTEXT_BYTES = 65_536
+_CONTEXT_COLLECTOR_ID = "00000000-0000-4000-8000-000000000000"
+
+
+def _context_secrets(context: bytes, body: bytes) -> list[str]:
+    """Every value the masking withholds from the context and window read as one span."""
+    probe = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=4_096)
+    with collecting_withheld_values(probe):
+        mask_body_text((context + body).decode("utf-8", errors="replace"))
+    return probe.values
+
+
+def _masked_window_text(body: bytes, context: bytes = b"") -> str:
     """The whole window, masked before anything is cut from it.
 
     The body masking every masked archive view applies (N56): SQL dump rows, markup key/value
     pairs, phpinfo-style table cells, assignments and provider formats. Inside a Hunt worker the
-    withheld values become ``[withheld:n]`` markers the planner can bind by reference.
+    withheld values become ``[withheld:n]`` markers the planner can bind by reference. With
+    ``context`` (the bytes before an offset window) the secrets of the whole span are withheld
+    from the window too, whole or cut by its start.
     """
-    text = mask_body_text(body.decode("utf-8", errors="replace"))
+    text = body.decode("utf-8", errors="replace")
+    known = _context_secrets(context, body) if context else []
+    collector = active_withheld_values()
+    if known and collector is not None:
+        collector.bind_known(known)
+    elif known:
+        text = scrub_known_values(text, known, MASK)
+    text = mask_body_text(text)
     text = _JWT_RE.sub(_jwt_replacement, text)
     text = re.sub(r"(?i)(bearer\s+)(?!\[withheld:)[a-z0-9._~+/=-]+", r"\1<redacted>", text)
     return str(_shared_redact_text(text))
@@ -155,6 +184,12 @@ def _redacted_text_sample(body: bytes) -> str:
 
 
 _CONTENT_RANGE_TOTAL = re.compile(r"\s*bytes\s+\d+-\d+/(\d+)\s*", re.IGNORECASE)
+_CONTENT_RANGE_START = re.compile(r"\s*bytes\s+(\d+)-", re.IGNORECASE)
+
+
+def _range_start(private: WorkerPrivateHTTPResponse) -> int | None:
+    match = _CONTENT_RANGE_START.match(private.headers().get("content-range") or "")
+    return int(match.group(1)) if match else None
 
 
 def _resource_bytes(private: WorkerPrivateHTTPResponse) -> int | None:
@@ -209,8 +244,11 @@ async def inspect_target_artifact(
     path = str(args.get("path") or "")
     offset = max(0, int(args.get("offset") or 0))
     length = max(1, min(MAX_INSPECT_BYTES, int(args.get("max_bytes") or MAX_PUBLIC_TEXT)))
+    # One range from up to CONTEXT_BYTES before the window: the context masks, the window shows.
+    context_start = max(0, offset - CONTEXT_BYTES)
+    lead = offset - context_start
     result, private = await _fetch_artifact(
-        target_url, path=path, target=target, offset=offset, length=length,
+        target_url, path=path, target=target, offset=context_start, length=lead + length,
         transaction_recorder=transaction_recorder,
     )
     if not result.get("ok") or private is None:
@@ -234,12 +272,20 @@ async def inspect_target_artifact(
             "error": "artifact_range_not_supported",
             "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
         }
-    received = private.body()
+    if context_start and _range_start(private) != context_start:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": "artifact_range_mismatch",
+            "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
+        }
+    context = private.body()[:lead]
+    received = private.body()[lead:]
     body = received[:length]
     resource_bytes = _resource_bytes(private)
     terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]
     raw_text = body.decode("utf-8", errors="replace")
-    masked_text = _masked_window_text(body)
+    masked_text = _masked_window_text(body, context)
     text_sample = masked_text[:MAX_PUBLIC_TEXT]
     # Counted over the masked window: a count over raw bytes recovers a withheld value one
     # guessed character at a time.

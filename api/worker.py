@@ -22269,8 +22269,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 "secret_values_visible": False,
             })
 
-        from runtime.hunt_http_exchange import settle_private_results, withholding_operation
-        operation, withheld_values = withholding_operation(capability_name, action_id, operation)
+        from runtime.hunt_http_exchange import known_values_seed, settle_private_results, withholding_operation
+        operation, withheld_values = withholding_operation(capability_name, action_id, operation, known_values_seed(db_pool, hunt_id, target))
         adapter = adapter_type(
             specification=spec,
             operation=operation,
