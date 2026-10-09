@@ -438,6 +438,10 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.read"
       },
       "description": "Read the current saved instructions for this target. They are context, not testing authority.",
+      "input": {
+        "fields": [],
+        "required": []
+      },
       "name": "targets.skill.read",
       "required_approval": null,
       "target_kinds": [
@@ -459,6 +463,13 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.read"
       },
       "description": "Read named saved actions. Optional action_id and typed parameters resolve steps; execute each through the Hunt capability runtime.",
+      "input": {
+        "fields": [
+          "action_id",
+          "parameters"
+        ],
+        "required": []
+      },
       "name": "targets.actions.read",
       "required_approval": null,
       "target_kinds": [
@@ -480,6 +491,21 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.create"
       },
       "description": "Save a named reusable action for this target using canonical capabilities and opaque references.",
+      "input": {
+        "fields": [
+          "name",
+          "instructions",
+          "expected_revision",
+          "steps",
+          "parameters",
+          "operator_confirmed"
+        ],
+        "required": [
+          "name",
+          "steps",
+          "expected_revision"
+        ]
+      },
       "name": "targets.actions.create",
       "required_approval": null,
       "target_kinds": [
@@ -501,6 +527,23 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.update"
       },
       "description": "Edit a saved action on this exact target with a revision check. Future Hunts load the change.",
+      "input": {
+        "fields": [
+          "name",
+          "instructions",
+          "expected_revision",
+          "steps",
+          "parameters",
+          "action_id",
+          "operator_confirmed"
+        ],
+        "required": [
+          "action_id",
+          "name",
+          "steps",
+          "expected_revision"
+        ]
+      },
       "name": "targets.actions.update",
       "required_approval": null,
       "target_kinds": [
@@ -522,6 +565,17 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.delete"
       },
       "description": "Delete a saved action on this exact target with a revision check.",
+      "input": {
+        "fields": [
+          "action_id",
+          "expected_revision",
+          "operator_confirmed"
+        ],
+        "required": [
+          "action_id",
+          "expected_revision"
+        ]
+      },
       "name": "targets.actions.delete",
       "required_approval": null,
       "target_kinds": [
@@ -543,6 +597,19 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.create"
       },
       "description": "Create instructions for this target, used automatically by future Hunts. Does not grant testing authority.",
+      "input": {
+        "fields": [
+          "title",
+          "methodology",
+          "expected_revision",
+          "purpose",
+          "operator_confirmed"
+        ],
+        "required": [
+          "methodology",
+          "expected_revision"
+        ]
+      },
       "name": "targets.skill.create",
       "required_approval": null,
       "target_kinds": [
@@ -564,6 +631,19 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.update"
       },
       "description": "Update this target’s saved instructions with a revision check. This Hunt’s startup snapshot is unchanged.",
+      "input": {
+        "fields": [
+          "title",
+          "methodology",
+          "expected_revision",
+          "purpose",
+          "operator_confirmed"
+        ],
+        "required": [
+          "methodology",
+          "expected_revision"
+        ]
+      },
       "name": "targets.skill.update",
       "required_approval": null,
       "target_kinds": [
@@ -585,6 +665,16 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.delete"
       },
       "description": "Delete this target’s saved instructions with a revision check. Existing Hunt snapshots are retained.",
+      "input": {
+        "fields": [
+          "expected_revision",
+          "purpose",
+          "operator_confirmed"
+        ],
+        "required": [
+          "expected_revision"
+        ]
+      },
       "name": "targets.skill.delete",
       "required_approval": null,
       "target_kinds": [
@@ -606,6 +696,18 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/targets.create"
       },
       "description": "Register a hostname or IP as a canonical target without testing it.",
+      "input": {
+        "fields": [
+          "locator",
+          "name",
+          "environment",
+          "port_hints",
+          "operator_confirmed"
+        ],
+        "required": [
+          "locator"
+        ]
+      },
       "name": "targets.create",
       "required_approval": null,
       "target_kinds": [
@@ -627,6 +729,16 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/targets.update"
       },
       "description": "Rename this target or a current service view without changing frozen scope.",
+      "input": {
+        "fields": [
+          "target_id",
+          "name",
+          "operator_confirmed"
+        ],
+        "required": [
+          "name"
+        ]
+      },
       "name": "targets.update",
       "required_approval": null,
       "target_kinds": [
@@ -648,6 +760,16 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/credentials.grant"
       },
       "description": "Explicitly grant an existing encrypted profile to this Hunt target. Receiving-target approval is revalidated; no secret is returned.",
+      "input": {
+        "fields": [
+          "profile_id",
+          "approval_receipt_id",
+          "operator_confirmed"
+        ],
+        "required": [
+          "profile_id"
+        ]
+      },
       "name": "credentials.grant",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -669,6 +791,18 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/collections.bind"
       },
       "description": "Bind an existing collection to this Hunt target and exact selected HTTP origins, including an explicitly authorized cross-asset share.",
+      "input": {
+        "fields": [
+          "collection_id",
+          "allowed_origins",
+          "environment_id",
+          "operator_confirmed"
+        ],
+        "required": [
+          "collection_id",
+          "allowed_origins"
+        ]
+      },
       "name": "collections.bind",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -690,6 +824,19 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/ssh.exec"
       },
       "description": "Execute an operator-delegated command directly on the bound SSH target. Requires an explicit ssh.exec credential grant; ssh.connect alone grants no commands. Returns an opaque reusable session and output; never launches device inventory.",
+      "input": {
+        "fields": [
+          "port",
+          "session_id",
+          "command",
+          "cwd",
+          "timeout_seconds",
+          "max_output_bytes"
+        ],
+        "required": [
+          "command"
+        ]
+      },
       "name": "ssh.exec",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -711,6 +858,15 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/ssh.close"
       },
       "description": "Close this Hunt's reusable SSH transport without executing a command.",
+      "input": {
+        "fields": [
+          "port",
+          "session_id"
+        ],
+        "required": [
+          "session_id"
+        ]
+      },
       "name": "ssh.close",
       "required_approval": null,
       "target_kinds": [
@@ -732,6 +888,22 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/browser.workflow"
       },
       "description": "Run an authorized sequence of non-secret fills and clicks, including forms and test-object cleanup, on one pinned HTTP service.",
+      "input": {
+        "fields": [
+          "origin",
+          "path",
+          "session_ref",
+          "steps",
+          "timeout_ms",
+          "max_requests",
+          "max_state_changing_requests",
+          "settle_ms",
+          "wait_until"
+        ],
+        "required": [
+          "steps"
+        ]
+      },
       "name": "browser.workflow",
       "required_approval": "state_changing_http",
       "target_kinds": [
@@ -753,6 +925,12 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/service.snmp.inspect"
       },
       "description": "Inspect SNMPv3 engine information without community strings, credential guesses, OID walks or SET operations.",
+      "input": {
+        "fields": [
+          "port"
+        ],
+        "required": []
+      },
       "name": "service.snmp.inspect",
       "required_approval": "network_discovery",
       "target_kinds": [
@@ -774,6 +952,14 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/web.probe"
       },
       "description": "Passive HTTP fingerprint of a target-bound URL.",
+      "input": {
+        "fields": [
+          "origin",
+          "as_principal",
+          "principal_binding_digest"
+        ],
+        "required": []
+      },
       "name": "web.probe",
       "required_approval": null,
       "target_kinds": [
@@ -795,6 +981,17 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/templates.scan"
       },
       "description": "Target-bound Nuclei template scan; non-GET templates run only when state-changing HTTP is authorized.",
+      "input": {
+        "fields": [
+          "path",
+          "severity",
+          "tags",
+          "origin",
+          "as_principal",
+          "principal_binding_digest"
+        ],
+        "required": []
+      },
       "name": "templates.scan",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -816,6 +1013,14 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/web.crawl"
       },
       "description": "Bounded same-host crawl and JavaScript endpoint discovery.",
+      "input": {
+        "fields": [
+          "origin",
+          "as_principal",
+          "principal_binding_digest"
+        ],
+        "required": []
+      },
       "name": "web.crawl",
       "required_approval": null,
       "target_kinds": [
@@ -837,6 +1042,14 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/web.browser_crawl"
       },
       "description": "Bounded same-host headless browse that observes the application's own runtime requests.",
+      "input": {
+        "fields": [
+          "origin",
+          "as_principal",
+          "principal_binding_digest"
+        ],
+        "required": []
+      },
       "name": "web.browser_crawl",
       "required_approval": null,
       "target_kinds": [
@@ -858,6 +1071,15 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/web.content_discover"
       },
       "description": "Bounded content discovery using a bundled wordlist.",
+      "input": {
+        "fields": [
+          "wordlist",
+          "origin",
+          "as_principal",
+          "principal_binding_digest"
+        ],
+        "required": []
+      },
       "name": "web.content_discover",
       "required_approval": null,
       "target_kinds": [
@@ -879,6 +1101,17 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/xss.verify"
       },
       "description": "Bounded target-bound Dalfox XSS verification.",
+      "input": {
+        "fields": [
+          "path",
+          "severity",
+          "deep_domxss",
+          "origin",
+          "as_principal",
+          "principal_binding_digest"
+        ],
+        "required": []
+      },
       "name": "xss.verify",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -902,6 +1135,15 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/sqli.verify"
       },
       "description": "Bounded target-bound SQL injection verification.",
+      "input": {
+        "fields": [
+          "path",
+          "origin",
+          "as_principal",
+          "principal_binding_digest"
+        ],
+        "required": []
+      },
       "name": "sqli.verify",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -923,6 +1165,15 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/service.fingerprint"
       },
       "description": "Bounded connection-based service/version fingerprint.",
+      "input": {
+        "fields": [
+          "ports",
+          "profile"
+        ],
+        "required": [
+          "ports"
+        ]
+      },
       "name": "service.fingerprint",
       "required_approval": "network_discovery",
       "target_kinds": [
@@ -944,6 +1195,16 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/service.nse_check"
       },
       "description": "Run up to three reviewed, low-impact Nmap NSE service checks on up to four bound TCP ports; results are observations, not vulnerability proof.",
+      "input": {
+        "fields": [
+          "ports",
+          "scripts"
+        ],
+        "required": [
+          "ports",
+          "scripts"
+        ]
+      },
       "name": "service.nse_check",
       "required_approval": "network_discovery",
       "target_kinds": [
@@ -965,6 +1226,14 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/ports.discover"
       },
       "description": "Run built-in Naabu for bounded connection-based TCP port discovery.",
+      "input": {
+        "fields": [
+          "profile",
+          "ports",
+          "port_range"
+        ],
+        "required": []
+      },
       "name": "ports.discover",
       "required_approval": "network_discovery",
       "target_kinds": [
@@ -986,6 +1255,12 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/subdomains.discover"
       },
       "description": "Passive target-root-bound subdomain discovery.",
+      "input": {
+        "fields": [
+          "root_domain"
+        ],
+        "required": []
+      },
       "name": "subdomains.discover",
       "required_approval": null,
       "target_kinds": [
@@ -1007,6 +1282,13 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/ssh.connect"
       },
       "description": "Authenticate once to a target-bound SSH service with the Hunt-selected stored identity, then close the connection. No commands are executed.",
+      "input": {
+        "fields": [
+          "port",
+          "host_key_fingerprint"
+        ],
+        "required": []
+      },
       "name": "ssh.connect",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -1028,6 +1310,28 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/http.request"
       },
       "description": "Send one target-pinned request, optionally as a managed principal. POST/PUT/PATCH/DELETE require the Hunt's existing state-changing authority; GET/HEAD/OPTIONS remain available without it.",
+      "input": {
+        "fields": [
+          "method",
+          "capture",
+          "request_bindings",
+          "json_body",
+          "form_body",
+          "origin",
+          "path",
+          "query",
+          "headers",
+          "follow_redirects",
+          "session_ref",
+          "via_address",
+          "as_principal",
+          "principal_binding_digest"
+        ],
+        "required": [
+          "method",
+          "path"
+        ]
+      },
       "name": "http.request",
       "required_approval": null,
       "target_kinds": [
@@ -1049,6 +1353,17 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/artifact.inspect"
       },
       "description": "Read one small redacted byte window from a target-bound public client artifact.",
+      "input": {
+        "fields": [
+          "path",
+          "offset",
+          "max_bytes",
+          "search_terms"
+        ],
+        "required": [
+          "path"
+        ]
+      },
       "name": "artifact.inspect",
       "required_approval": null,
       "target_kinds": [
@@ -1070,6 +1385,15 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/javascript.analyze"
       },
       "description": "Statically analyze one bounded target JavaScript artifact for routes, source maps, client sinks, and decoded JWT claims without exposing token values.",
+      "input": {
+        "fields": [
+          "path",
+          "max_bytes"
+        ],
+        "required": [
+          "path"
+        ]
+      },
       "name": "javascript.analyze",
       "required_approval": null,
       "target_kinds": [
@@ -1091,6 +1415,15 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/auth.session.establish"
       },
       "description": "Establish one target-bound worker-private form or OAuth HTTP session.",
+      "input": {
+        "fields": [
+          "origin",
+          "as_principal"
+        ],
+        "required": [
+          "as_principal"
+        ]
+      },
       "name": "auth.session.establish",
       "required_approval": "credential_use",
       "target_kinds": [
@@ -1112,6 +1445,14 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/auth.session.refresh"
       },
       "description": "Refresh one opaque target-bound session using its current managed profile.",
+      "input": {
+        "fields": [
+          "session_ref"
+        ],
+        "required": [
+          "session_ref"
+        ]
+      },
       "name": "auth.session.refresh",
       "required_approval": "credential_use",
       "target_kinds": [
@@ -1133,6 +1474,14 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/auth.session.revoke"
       },
       "description": "Revoke one opaque target-bound session and destroy its sealed identity.",
+      "input": {
+        "fields": [
+          "session_ref"
+        ],
+        "required": [
+          "session_ref"
+        ]
+      },
       "name": "auth.session.revoke",
       "required_approval": "credential_use",
       "target_kinds": [
@@ -1154,6 +1503,20 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/authz.verify"
       },
       "description": "Compare object ownership or a repeated anonymous/primary/secondary function-access matrix using deterministic evidence.",
+      "input": {
+        "fields": [
+          "mode",
+          "origin",
+          "primary_principal",
+          "secondary_principal",
+          "primary_session_ref",
+          "secondary_session_ref",
+          "routes"
+        ],
+        "required": [
+          "routes"
+        ]
+      },
       "name": "authz.verify",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -1175,6 +1538,12 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/tls.inspect"
       },
       "description": "Inspect TLS configuration for a target-bound origin.",
+      "input": {
+        "fields": [
+          "origin"
+        ],
+        "required": []
+      },
       "name": "tls.inspect",
       "required_approval": null,
       "target_kinds": [
@@ -1196,6 +1565,15 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/browser.login_check"
       },
       "description": "Run the operator-saved managed-profile login and fixed read-only QA checks; return sanitized verification results, never a browser session or vulnerability proof.",
+      "input": {
+        "fields": [
+          "as_principal",
+          "origin"
+        ],
+        "required": [
+          "as_principal"
+        ]
+      },
       "name": "browser.login_check",
       "required_approval": "credential_use",
       "target_kinds": [
@@ -1217,6 +1595,17 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/browser.navigate"
       },
       "description": "Inspect a target-bound page or SPA route; optionally use a managed session. Returns a redacted actionable surface.",
+      "input": {
+        "fields": [
+          "path",
+          "session_ref",
+          "origin",
+          "wait_until",
+          "timeout_ms",
+          "max_requests"
+        ],
+        "required": []
+      },
       "name": "browser.navigate",
       "required_approval": null,
       "target_kinds": [
@@ -1238,6 +1627,20 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/browser.interact"
       },
       "description": "Replay up to eight read-only clicks or non-secret field fills in one target-bound browser context; no writes or form submission.",
+      "input": {
+        "fields": [
+          "path",
+          "origin",
+          "selector",
+          "session_ref",
+          "steps",
+          "wait_until",
+          "timeout_ms",
+          "max_requests",
+          "settle_ms"
+        ],
+        "required": []
+      },
       "name": "browser.interact",
       "required_approval": null,
       "target_kinds": [
@@ -1259,6 +1662,10 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/device.inspect"
       },
       "description": "Inspect the registered device, services, scans, and posture evidence.",
+      "input": {
+        "fields": [],
+        "required": []
+      },
       "name": "device.inspect",
       "required_approval": null,
       "target_kinds": [
@@ -1277,6 +1684,10 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/device.capabilities.inspect"
       },
       "description": "Inspect device-class protocol and application capabilities.",
+      "input": {
+        "fields": [],
+        "required": []
+      },
       "name": "device.capabilities.inspect",
       "required_approval": null,
       "target_kinds": [
@@ -1295,6 +1706,10 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/collections.inspect"
       },
       "description": "Inspect redacted request collections bound to this Hunt.",
+      "input": {
+        "fields": [],
+        "required": []
+      },
       "name": "collections.inspect",
       "required_approval": null,
       "target_kinds": [
@@ -1316,6 +1731,24 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/findings.create"
       },
       "description": "Create one evidence-linked, explicitly unverified finding owned by this Hunt.",
+      "input": {
+        "fields": [
+          "title",
+          "description",
+          "severity",
+          "path",
+          "evidence_summary",
+          "evidence_action_ids",
+          "notes"
+        ],
+        "required": [
+          "title",
+          "description",
+          "severity",
+          "evidence_summary",
+          "evidence_action_ids"
+        ]
+      },
       "name": "findings.create",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -1337,6 +1770,21 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/findings.update"
       },
       "description": "Update metadata or triage state on a finding created by this Hunt without changing proof state.",
+      "input": {
+        "fields": [
+          "finding_id",
+          "title",
+          "description",
+          "severity",
+          "status",
+          "notes",
+          "evidence_action_ids"
+        ],
+        "required": [
+          "finding_id",
+          "evidence_action_ids"
+        ]
+      },
       "name": "findings.update",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -1358,6 +1806,18 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/findings.delete"
       },
       "description": "Delete one finding created by this Hunt after an explicit confirmation flag.",
+      "input": {
+        "fields": [
+          "finding_id",
+          "confirm_delete",
+          "evidence_action_ids"
+        ],
+        "required": [
+          "finding_id",
+          "confirm_delete",
+          "evidence_action_ids"
+        ]
+      },
       "name": "findings.delete",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -1379,6 +1839,14 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/candidate.verify"
       },
       "description": "Run one server-owned deterministic verifier for a candidate produced by this Hunt.",
+      "input": {
+        "fields": [
+          "candidate_id"
+        ],
+        "required": [
+          "candidate_id"
+        ]
+      },
       "name": "candidate.verify",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -1400,6 +1868,18 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/collections.select"
       },
       "description": "Select a bounded redacted request subset from a bound collection.",
+      "input": {
+        "fields": [
+          "collection_id",
+          "request_ids",
+          "methods",
+          "path_regex",
+          "limit"
+        ],
+        "required": [
+          "collection_id"
+        ]
+      },
       "name": "collections.select",
       "required_approval": null,
       "target_kinds": [
@@ -1421,6 +1901,19 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/collections.replay_safe"
       },
       "description": "Replay up to 25 safe-method requests from a bound collection.",
+      "input": {
+        "fields": [
+          "collection_id",
+          "request_ids",
+          "methods",
+          "path_regex",
+          "limit",
+          "as_principal"
+        ],
+        "required": [
+          "collection_id"
+        ]
+      },
       "name": "collections.replay_safe",
       "required_approval": null,
       "target_kinds": [
@@ -1442,6 +1935,20 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/collections.replay_active"
       },
       "description": "Replay an exact approved state-changing request selection from a bound collection.",
+      "input": {
+        "fields": [
+          "collection_id",
+          "selection_id",
+          "request_ids",
+          "methods",
+          "path_regex",
+          "limit",
+          "as_principal"
+        ],
+        "required": [
+          "collection_id"
+        ]
+      },
       "name": "collections.replay_active",
       "required_approval": "state_changing_http",
       "target_kinds": [
@@ -1463,6 +1970,16 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/device.http.probe"
       },
       "description": "Send one target-pinned read-only request to a confirmed device web origin.",
+      "input": {
+        "fields": [
+          "path",
+          "method",
+          "origin_port"
+        ],
+        "required": [
+          "path"
+        ]
+      },
       "name": "device.http.probe",
       "required_approval": null,
       "target_kinds": [
@@ -1481,6 +1998,20 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/device.scan"
       },
       "description": "Queue one bounded device posture scan through the canonical scanner pipeline.",
+      "input": {
+        "fields": [
+          "coverage_profile",
+          "include_web_dast",
+          "web_budget_profile",
+          "include_imported_requests",
+          "reason",
+          "capability_ids"
+        ],
+        "required": [
+          "coverage_profile",
+          "reason"
+        ]
+      },
       "name": "device.scan",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -1499,6 +2030,20 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/device.service.verify"
       },
       "description": "Queue a typed, fixed-port service-state verifier.",
+      "input": {
+        "fields": [
+          "transport",
+          "port",
+          "expected_state",
+          "reason"
+        ],
+        "required": [
+          "transport",
+          "port",
+          "expected_state",
+          "reason"
+        ]
+      },
       "name": "device.service.verify",
       "required_approval": "active_testing",
       "target_kinds": [
@@ -1517,6 +2062,21 @@ export const HUNT_START_CONTRACT = {
         "url_template": "/hunts/{hunt_id}/capabilities/device.ssh.propose"
       },
       "description": "Propose an immutable command plan for a bound, host-key-pinned SSH service; this does not execute it.",
+      "input": {
+        "fields": [
+          "port",
+          "commands",
+          "timeout_seconds",
+          "purpose",
+          "risk_summary"
+        ],
+        "required": [
+          "port",
+          "commands",
+          "purpose",
+          "risk_summary"
+        ]
+      },
       "name": "device.ssh.propose",
       "required_approval": "active_testing",
       "target_kinds": [

@@ -162,6 +162,14 @@ class HuntStartContractError(ValueError):
         self.code = code
 
 
+def _input_summary(schema: Any) -> dict[str, list[str]]:
+    """A capability's input fields by name: the required ones, then every one it accepts."""
+    schema = schema if isinstance(schema, dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+    return {"required": [str(name) for name in required], "fields": [str(name) for name in properties]}
+
+
 def hunt_start_public_contract() -> dict[str, Any]:
     """Return the API/UI contract generated from the server's authority constants."""
     try:
@@ -232,6 +240,9 @@ def hunt_start_public_contract() -> dict[str, Any]:
              "tool": spec.planner_contract()["tool"],
              "target_kinds": sorted(spec.target_kinds),
              "required_approval": spec.required_approval,
+             # D50: the fields of the call's ``input``, so an MCP client can describe them
+             # before a Hunt exists; the Hunt manifest keeps the full input schema.
+             "input": _input_summary(spec.planner_contract()["input_schema"]),
              "call": {"method":"POST", "url_template":f"/hunts/{{hunt_id}}/capabilities/{spec.name}"}}
             for spec in CAPABILITY_REGISTRY.list() if spec.planner_visible
         ],

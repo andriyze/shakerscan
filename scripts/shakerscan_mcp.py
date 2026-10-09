@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, BinaryIO, Mapping
+from typing import Any, BinaryIO, Mapping, Sequence
 
 
 SERVER_NAME = "shakerscan"
@@ -369,6 +369,23 @@ TOOLS: tuple[MCPTool, ...] = (
 
 TOOL_BY_NAME = {tool.name: tool for tool in TOOLS}
 
+# D50: weaker models (GLM in OpenCode) sent shakerscan_hunt_capability with input {} or with the
+# capability's fields at the top level, because input was an untyped object. The tool now says
+# where the fields go, lists each capability's fields when the engine's contract carries them,
+# and a refused call names the missing fields with an example call. Validation is unchanged.
+CAPABILITY_CALL_EXAMPLE = (
+    '{"hunt_id": "<hunt_id from shakerscan_hunt_start>", "capability_name": "http.request", '
+    '"input": {"method": "GET", "path": "/login"}}'
+)
+CAPABILITY_INPUT_DESCRIPTION = (
+    "The capability's own arguments, as an object. Do not send {} for a capability that has "
+    "required fields. Examples: http.request {\"method\": \"GET\", \"path\": \"/login\"}; "
+    "artifact.inspect {\"path\": \"/.env\"}; candidate.verify {\"candidate_id\": \"<uuid>\"}. "
+    "Each capability's fields are in shakerscan_hunt_get (capabilities[].input) and its full "
+    "schema in shakerscan_hunt_get with capability=<name>."
+)
+
+
 HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
     HuntMCPTool(
         "shakerscan_hunt_start", "POST", "/hunts",
@@ -482,17 +499,21 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
     ),
     HuntMCPTool(
         "shakerscan_hunt_capability", "POST", "/hunts/{hunt_id}/capabilities/{capability_name}",
-        "Execute one capability from the Hunt's server-returned manifest. A long capability "
+        "Execute one capability from the Hunt's server-returned manifest. Always send hunt_id, "
+        "capability_name and input, with the capability's own fields inside input (never at the "
+        "top level). Example: " + CAPABILITY_CALL_EXAMPLE + ". A long capability "
         "(content discovery, port discovery) may answer outcome=running with mcp_idempotency_key: "
         "call again with the same idempotency_key and unchanged input to collect the result; the "
         "server replays the recorded action and never runs it twice.",
         {
-            "hunt_id": {"type": "string", "format": "uuid"},
+            "hunt_id": {"type": "string", "format": "uuid",
+                        "description": "The hunt_id shakerscan_hunt_start returned."},
             "capability_name": {
                 "type": "string", "minLength": 1, "maxLength": 128,
                 "pattern": DEFAULT_CAPABILITY_PATTERN,
+                "description": "One capability name from the Hunt's manifest, such as http.request.",
             },
-            "input": {"type": "object"},
+            "input": {"type": "object", "description": CAPABILITY_INPUT_DESCRIPTION},
             # Exactly the engine's request body (HuntCapabilityRequest: idempotency_key, input).
             # D43: an advertised experiment_key was refused by the engine with 422.
             "idempotency_key": {
@@ -569,7 +590,9 @@ _ssh_capability = HUNT_TOOL_BY_NAME["shakerscan_hunt_capability"]
 HUNT_TOOLS += (
     HuntMCPTool("shakerscan_hunt_ssh_exec","POST","/hunts/{hunt_id}/ssh/exec",
         "Execute a direct SSH command with incremental output via MCP progress. Uses the selected SSH identity and canonical ssh.exec authority; no inventory scan or automatic retry.",
-        {key:value for key,value in _ssh_capability.properties.items() if key != "capability_name"},
+        {**{key:value for key,value in _ssh_capability.properties.items() if key != "capability_name"},
+         "input":{"type":"object","description":"ssh.exec's input, such as {\"command\": \"id\"}; its full "
+                  "schema is in shakerscan_hunt_get with capability=ssh.exec."}},
         ("hunt_id","input"), open_world=True),
     HuntMCPTool("shakerscan_hunt_ssh_output","GET","/hunts/{hunt_id}/ssh/actions/{action_id}/output",
         "Read current bounded untrusted stdout/stderr and status for this Hunt's SSH action.",
@@ -1083,11 +1106,94 @@ def _hunt_candidate_tool(contract: Mapping[str, Any]) -> HuntMCPTool:
     ))
 
 
+def _capability_inputs_text(contract: Mapping[str, Any]) -> str:
+    """Each capability's input fields from the contract (``tool_calls[].input``, D50), as one
+    line per capability: ``http.request: method, path (also: query, headers)``. Empty when the
+    engine's contract predates the field."""
+    lines = []
+    for call in contract.get("tool_calls") or ():
+        if not isinstance(call, Mapping) or not isinstance(call.get("input"), Mapping) or not call.get("name"):
+            continue
+        required = [str(item) for item in call["input"].get("required") or ()]
+        optional = [str(item) for item in call["input"].get("fields") or () if str(item) not in required]
+        text = ", ".join(required) if required else "no required fields ({} is valid)"
+        if optional:
+            text += f" (optional: {', '.join(optional)})"
+        lines.append(f"{call['name']}: {text}")
+    return "\n".join(lines)
+
+
+def _capability_call_hint(unknown: Sequence[str]) -> str:
+    """D50: what a refused shakerscan_hunt_capability call should have looked like."""
+    where = (f" {', '.join(unknown)} belong inside input, not at the top level." if unknown else "")
+    return (f".{where} shakerscan_hunt_capability takes hunt_id (from shakerscan_hunt_start), "
+            "capability_name (from the Hunt's manifest) and input (that capability's own fields; "
+            "shakerscan_hunt_get lists them). Example call: " + CAPABILITY_CALL_EXAMPLE)
+
+
+def _example_value(name: str, schema: Any) -> Any:
+    """A value of the right shape for an example call (the schema's own example when it has one)."""
+    schema = schema if isinstance(schema, Mapping) else {}
+    for key in ("examples", "enum"):
+        if isinstance(schema.get(key), list) and schema[key]:
+            return schema[key][0]
+    if "default" in schema and schema["default"] is not None:
+        return schema["default"]
+    kind = schema.get("type")
+    if kind == "integer":
+        return schema.get("minimum", 1)
+    if kind == "number":
+        return schema.get("minimum", 1)
+    if kind == "boolean":
+        return False
+    if kind == "array":
+        return []
+    if kind == "object":
+        return {}
+    if schema.get("format") == "uuid" or name.endswith("_id"):
+        return f"<{name}>"
+    return "/" if name == "path" else f"<{name}>"
+
+
+def _capability_input_error(exc: MCPError, hunt_id: str, capability_name: str, schema: Mapping[str, Any]) -> MCPError:
+    """D50: a refused input names the capability's fields and gives a call that has them."""
+    properties = schema.get("properties") if isinstance(schema.get("properties"), Mapping) else {}
+    required = [str(item) for item in schema.get("required") or () if isinstance(item, str)]
+    optional = [str(item) for item in properties if str(item) not in required]
+    example = {
+        "hunt_id": hunt_id, "capability_name": capability_name,
+        "input": {field: _example_value(field, properties.get(field)) for field in required},
+    }
+    fields = {str(key): _field_hint(value) for key, value in properties.items()}
+    text = (
+        f"{exc.message}. {capability_name} input: "
+        + (f"required {', '.join(f'{field} ({fields.get(field, 'any')})' for field in required)}"
+           if required else "no required fields")
+        + (f"; optional {', '.join(optional)}" if optional else "")
+        + ". Example call (replace the placeholder values): "
+        + json.dumps(example, separators=(", ", ": "))
+    )
+    return MCPError(exc.code, text, {
+        "capability_name": capability_name, "input_required": required, "input_fields": fields,
+        "example_call": example,
+    })
+
+
+def _hunt_capability_tool(contract: Mapping[str, Any]) -> HuntMCPTool:
+    tool = HUNT_TOOL_BY_NAME["shakerscan_hunt_capability"]
+    inputs = _capability_inputs_text(contract)
+    if not inputs:
+        return tool
+    described = {**tool.properties["input"], "description": (
+        CAPABILITY_INPUT_DESCRIPTION + " Required input fields by capability (a Hunt offers the "
+        "capabilities its manifest lists):\n" + inputs
+    )}
+    return replace(tool, properties={**tool.properties, "input": described})
+
+
 def _hunt_tools(contract: dict[str, Any]) -> tuple[HuntMCPTool, ...]:
-    candidate = _hunt_candidate_tool(contract)
-    return (_hunt_start_tool(contract), *(
-        candidate if tool.name == candidate.name else tool for tool in HUNT_TOOLS[1:]
-    ))
+    generated = {tool.name: tool for tool in (_hunt_candidate_tool(contract), _hunt_capability_tool(contract))}
+    return (_hunt_start_tool(contract), *(generated.get(tool.name, tool) for tool in HUNT_TOOLS[1:]))
 
 
 class MCPError(Exception):
@@ -1437,16 +1543,23 @@ class ArsenalClient:
         deadline = time.monotonic() + max(0.0, min(budget, self.call_seconds - 2.0))
         with _heartbeat(_KEEPALIVE.get(), "permission request"):
             while True:
-                remaining = int(max(0.0, deadline - time.monotonic()))
-                step = min(25, remaining)
+                # L1: hold for the time left rounded up (wait_seconds=0 only for a call that asked
+                # for no wait), and at most one read per second when an answer comes back early.
+                started = time.monotonic()
+                left = deadline - started
+                step = min(25, max(1, math.ceil(left))) if left > 0 else 0
                 override = _REQUEST_TIMEOUT.set(max(self.timeout_seconds, step + 10.0))
                 try:
                     request = self.request_json("GET", f"{path}?wait_seconds={step}")
                 finally:
                     _REQUEST_TIMEOUT.reset(override)
                 status = str(request.get("status") or "")
-                if status != "pending" or time.monotonic() >= deadline - 1:
+                now = time.monotonic()
+                if status != "pending" or now >= deadline - 1:
                     break
+                pause = 1.0 - (now - started)
+                if pause > 0:
+                    time.sleep(min(pause, deadline - now))
         outcome = status if status in {"granted", "denied", "expired", "withdrawn"} else "still_pending"
         next_step = {
             "granted": "Call the refused capability again with the same idempotency_key and unchanged input.",
@@ -1730,10 +1843,11 @@ class ArsenalClient:
                 hunt_tool = _hunt_start_tool(self.hunt_contract())
             unknown = sorted(set(arguments) - set(hunt_tool.properties))
             missing = sorted(set(hunt_tool.required) - set(arguments))
+            hint = _capability_call_hint(unknown) if name == "shakerscan_hunt_capability" and not streaming_ssh else ""
             if unknown:
-                raise MCPError(-32602, f"Unknown tool arguments: {', '.join(unknown)}")
+                raise MCPError(-32602, f"Unknown tool arguments: {', '.join(unknown)}{hint}")
             if missing:
-                raise MCPError(-32602, f"Missing required tool arguments: {', '.join(missing)}")
+                raise MCPError(-32602, f"Missing required tool arguments: {', '.join(missing)}{hint}")
             for key, value in arguments.items():
                 self._validate_argument(key, value, hunt_tool.properties[key])
             payload = dict(arguments)
@@ -1834,7 +1948,10 @@ class ArsenalClient:
                     input_schema = capability.get("input_schema")
                     if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
                         raise MCPError(-32005, "Hunt capability manifest has an invalid input schema")
-                    self._validate_argument("input", capability_input, input_schema)
+                    try:
+                        self._validate_argument("input", capability_input, input_schema)
+                    except MCPError as exc:
+                        raise _capability_input_error(exc, hunt_id, capability_name, input_schema) from None
                 idempotency_key = str(payload.get("idempotency_key") or "").strip()
                 if not idempotency_key:
                     idempotency_key = f"mcp-{uuid.uuid4().hex}"
