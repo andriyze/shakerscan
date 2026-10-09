@@ -52,6 +52,7 @@ _REASON_LABELS = {
     "placement_unavailable": "No eligible worker placement was available",
     "authorization_expired": "Testing approval expired before execution",
     "authorization_revoked": "Testing approval was revoked",
+    "authorization_unverified": "Testing approval could not be confirmed because the database was unreachable; the action stopped without treating the approval as revoked",
     "authentication_uncertain": "Credential authority could not be confirmed; review the identity and approval before starting new work",
     "scope_invalid": "Target scope no longer matched the approved scope",
     "cancelled": "The scan was cancelled",

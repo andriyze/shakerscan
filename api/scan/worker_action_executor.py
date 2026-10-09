@@ -43,9 +43,12 @@ class ActionAuthority(Protocol):
     async def poll(self, action: ScanAction) -> str | None: ...
 
 
-# A poll that cannot reach the database is uncertain, not a revoke: one is tolerated, the
-# second consecutive one interrupts. The check before dispatch tolerates none.
-AUTHORITY_POLL_FAILURES_TOLERATED = 1
+# A check that cannot reach the database is unverified, never a revoke. While an action runs,
+# polls may fail for this long without interruption (a database blip must not kill a healthy
+# action); a longer continuous outage interrupts it as authorization_unverified. Before
+# dispatch the check is retried after each delay below and then fails closed, unverified.
+AUTHORITY_UNVERIFIED_AFTER_SECONDS = 10.0
+AUTHORITY_CHECK_RETRY_DELAYS = (0.5, 1.0, 2.0)
 
 
 class ReceiptScanActionExecutor:
@@ -120,10 +123,14 @@ class ReceiptScanActionExecutor:
                 except asyncio.TimeoutError:
                     await check_authority()
 
+        unverified = CapabilityResultReason.AUTHORIZATION_UNVERIFIED.value
+
         async def observe_authorization():
             nonlocal authority_interruption
             assert authority is not None
-            failures = 0
+            tolerance = float(getattr(authority, "unverified_after_seconds", AUTHORITY_UNVERIFIED_AFTER_SECONDS))
+            failing_since: float | None = None
+            loop = asyncio.get_running_loop()
             while not stop_heartbeats.is_set() and signal.reason is None:
                 try:
                     await asyncio.wait_for(stop_heartbeats.wait(), timeout=authority.poll_seconds)
@@ -132,12 +139,12 @@ class ReceiptScanActionExecutor:
                     pass
                 try:
                     reason = await authority.poll(action)
-                    failures = 0
+                    failing_since = None
                 except Exception:
-                    failures += 1
-                    if failures <= AUTHORITY_POLL_FAILURES_TOLERATED:
+                    failing_since = loop.time() if failing_since is None else failing_since
+                    if loop.time() - failing_since < tolerance:
                         continue
-                    reason = CapabilityResultReason.AUTHORIZATION_REVOKED.value
+                    reason = unverified
                 if reason is not None and signal.reason is None:
                     authority_interruption = CapabilityResultReason(reason).value
                     signal.record(authority_interruption)
@@ -145,12 +152,18 @@ class ReceiptScanActionExecutor:
         try:
             denial = None
             if authority is not None:
-                try:
-                    denial = await authority.check(action)
-                    denial = CapabilityResultReason(denial).value if denial is not None else None
-                except Exception:
-                    # Fail closed before any traffic: an unverifiable authority blocks the action.
-                    denial = CapabilityResultReason.AUTHORIZATION_REVOKED.value
+                delays = tuple(getattr(authority, "check_retry_delays", AUTHORITY_CHECK_RETRY_DELAYS))
+                for attempt in range(len(delays) + 1):
+                    try:
+                        denial = await authority.check(action)
+                        denial = CapabilityResultReason(denial).value if denial is not None else None
+                        break
+                    except Exception:
+                        # Fail closed before any traffic, but say what is known: the approval
+                        # could not be read, which is not a revoke.
+                        denial = unverified
+                        if attempt < len(delays):
+                            await asyncio.sleep(delays[attempt])
             if denial is None and check is not None:
                 denial = await check_authority()
             if denial is not None:

@@ -18,6 +18,7 @@ import { gradeTextColor } from '@/components/ui'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { AlertTriangle, CheckCircle2, Download } from 'lucide-react'
 import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
+import { authorizationStopNotice } from '@/lib/authorizationStop'
 import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { buildFindingLinkageIndex, linkedPersistedFinding, observedReportFinding } from '@/lib/findingLinkage'
 import ScanCoverageSection, { type ScanCoverage } from '@/components/report/ScanCoverageSection'
@@ -717,6 +718,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const kubernetes_exposure = scanData.kubernetes_exposure || {}
   const container_registry = scanData.container_registry || {}
   const scan_metadata = scanData.scan_metadata || {}
+  const authorizationStop = authorizationStopNotice(scan_metadata)
   const scanCompletionStatus = scanData.scan_completion_status || scan_metadata.scan_completion_status || {}
   const completionSkippedModules = Array.isArray(scanCompletionStatus.skipped_modules)
     ? scanCompletionStatus.skipped_modules
@@ -1198,6 +1200,34 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       </div>}
+
+      {authorizationStop && (
+        <div className="mb-8 rounded-lg border border-red-500/50 bg-red-950/30 p-4" data-testid="authorization-stop-banner">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-300" />
+            <div className="min-w-0 flex-1">
+              <h2 className="text-base font-semibold text-white">{authorizationStop.title}</h2>
+              <p className="mt-1 text-sm text-gray-300">{authorizationStop.detail}</p>
+              {authorizationStop.interruptedActions.length > 0 && (
+                <p className="mt-2 text-sm text-gray-300">
+                  Interrupted: <span className="font-mono text-gray-100">{authorizationStop.interruptedActions.join(', ')}</span>
+                </p>
+              )}
+              {authorizationStop.notRunActions.length > 0 && (
+                <div className="mt-2 text-sm text-gray-300">
+                  Did not run:
+                  <ul className="mt-1 list-disc pl-5 font-mono text-gray-100">
+                    {authorizationStop.notRunActions.map((action) => <li key={action}>{action}</li>)}
+                  </ul>
+                </div>
+              )}
+              {authorizationStop.observedAt && (
+                <p className="mt-2 text-xs text-gray-500">Observed at {authorizationStop.observedAt}</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {show('findings') && isDeviceScan && devicePosture && (
         <section className="mb-8 rounded-lg border border-gray-700 bg-gray-800/50 p-5">

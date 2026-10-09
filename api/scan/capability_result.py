@@ -46,6 +46,9 @@ class CapabilityResultReason(str, Enum):
     PLACEMENT_UNAVAILABLE = "placement_unavailable"
     AUTHORIZATION_EXPIRED = "authorization_expired"
     AUTHORIZATION_REVOKED = "authorization_revoked"
+    # The approval could not be read (the database was unreachable), so it was neither
+    # confirmed nor found revoked. Work stops fail-closed without claiming a revoke.
+    AUTHORIZATION_UNVERIFIED = "authorization_unverified"
     AUTHENTICATION_UNCERTAIN = "authentication_uncertain"
     SCOPE_INVALID = "scope_invalid"
     CANCELLED = "cancelled"

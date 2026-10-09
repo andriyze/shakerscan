@@ -279,6 +279,10 @@ def test_a_revoke_between_actions_stops_the_next_action_with_its_reason(template
             assert report["scan_metadata"]["stop_reason"] == AUTHORIZATION_WITHDRAWN
             assert stop["not_run_actions"] == ["templates.active", "templates.followup"]
             assert report["coverage"] == {"status": "partial", "reasons": [AUTHORIZATION_WITHDRAWN]}
+            metadata = report["scan_metadata"]
+            assert metadata["status"] == "partial" and metadata["partial"] is True
+            assert metadata["grade_reliable"] is False
+            assert AUTHORIZATION_WITHDRAWN in metadata["grade_reliability_reasons"]
     asyncio.run(run())
 
 
@@ -534,3 +538,69 @@ def test_an_origin_inheriting_its_host_authorization_runs_until_the_origin_is_re
             # decision calls that scope_invalid, as it does for Hunt and broker actions.
             assert (await scan.actions())["templates.followup"] == ("blocked", "scope_invalid")
     asyncio.run(run())
+
+
+class FlakyPool:
+    """Fixture pool whose ``acquire`` fails while ``down`` (a database blip for the guard only)."""
+
+    def __init__(self, pool):
+        self._pool, self.down, self.failed = pool, False, 0
+
+    def acquire(self):
+        if self.down:
+            self.failed += 1
+            raise OSError("fixture: database unreachable")
+        return self._pool.acquire()
+
+
+def test_a_database_blip_under_the_tolerance_does_not_stop_a_healthy_scan(template_database):
+    """S3: two failed polls (about 4 s) with the approval still active: nothing is stopped."""
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            flaky = FlakyPool(pool)
+            dispatcher = FixtureToolDispatcher(str(scan.target_id), str(scan.scan_id),
+                                               after={"templates.active": _outage(flaky, 4.0, settle=2.5)})
+            guard = scan.guard()  # production 2 s poll and 10 s tolerance
+            guard.pool = flaky
+            await scan.run(dispatcher, guard)
+            assert flaky.failed >= 2
+            actions = await scan.actions()
+            assert {status for status, _reason in actions.values()} == {"success"}
+            assert dispatcher.dispatched == [action.action_id for action in scan.plan.actions]
+            assert not guard.withdrawn and not scan.events
+    asyncio.run(run())
+
+
+def test_a_longer_outage_interrupts_the_action_as_unverified_never_as_revoked(template_database):
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            flaky = FlakyPool(pool)
+            dispatcher = FixtureToolDispatcher(str(scan.target_id), str(scan.scan_id),
+                                               long_actions=frozenset({"templates.active"}),
+                                               during={"templates.active": _outage(flaky, 3.0)})
+            guard = scan.guard(poll_seconds=0.3, unverified_after_seconds=1.5)
+            guard.pool = flaky
+            await scan.run(dispatcher, guard)
+            actions = await scan.actions()
+            assert actions["templates.active"] == ("partial", "authorization_unverified")
+            # The approval was never revoked: the guard is not withdrawn, nothing claims a revoke,
+            # and once the database is back the next action is checked and runs.
+            assert not guard.withdrawn and "approval_revocation" not in scan.events
+            assert actions["templates.followup"][0] == "success"
+            assert not any(reason == "authorization_revoked" for _status, reason in actions.values())
+            report = {"coverage": {"status": "complete", "reasons": []}}
+            assert await guard.annotate(dict(report), scan_id=str(scan.scan_id)) == report
+            assert await scan.held_reservations() == 0
+    asyncio.run(run())
+
+
+def _outage(flaky, seconds, *, settle=0.0):
+    async def outage():
+        await asyncio.sleep(0.3)
+        flaky.down = True
+        await asyncio.sleep(seconds)
+        flaky.down = False
+        await asyncio.sleep(settle)
+    return outage
