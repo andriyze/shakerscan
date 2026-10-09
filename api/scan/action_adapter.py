@@ -25,9 +25,10 @@ try:
         authz_route_inventory_digest,
         verify_target_bound_object_authorization,
     )
-    from capabilities.dns import inspect_dns_posture
+    from capabilities.dns import doh_permitted, inspect_dns_posture
     from capabilities.infrastructure import inspect_infrastructure_intelligence
     from capabilities.http import execute_bound_http_request
+    from capabilities.takeover import bound_takeover_hosts, check_takeovers
     from capabilities.replay import RecordedReplayTransport
     from capabilities.inline import (
         AuthSessionExecutionAdapter,
@@ -36,6 +37,7 @@ try:
         HttpRequestExecutionAdapter,
         InfrastructureInspectionExecutionAdapter,
         ScanOriginSelectionExecutionAdapter,
+        TakeoverCheckExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
     from capabilities.network import NetworkExecutionAdapter, network_capability_adapter
@@ -96,9 +98,10 @@ except (ImportError, ModuleNotFoundError):
         authz_route_inventory_digest,
         verify_target_bound_object_authorization,
     )
-    from ..capabilities.dns import inspect_dns_posture
+    from ..capabilities.dns import doh_permitted, inspect_dns_posture
     from ..capabilities.infrastructure import inspect_infrastructure_intelligence
     from ..capabilities.http import execute_bound_http_request
+    from ..capabilities.takeover import bound_takeover_hosts, check_takeovers
     from ..capabilities.replay import RecordedReplayTransport
     from ..capabilities.inline import (
         AuthSessionExecutionAdapter,
@@ -107,6 +110,7 @@ except (ImportError, ModuleNotFoundError):
         HttpRequestExecutionAdapter,
         InfrastructureInspectionExecutionAdapter,
         ScanOriginSelectionExecutionAdapter,
+        TakeoverCheckExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
     from ..capabilities.network import NetworkExecutionAdapter, network_capability_adapter
@@ -1367,6 +1371,48 @@ class DatabaseNeutralScanActionDispatcher:
 
         adapter = self._prepared_inline(
             action, {}, operation, InfrastructureInspectionExecutionAdapter,
+        )
+        return await self._execute_adapter(action, adapter, heartbeat)
+
+    async def _takeover(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
+        """Passive takeover check of the names discovery found under the bound root.
+
+        Discovered names are not destinations of this Scan, so they get DNS evidence only; the
+        one HTTP request goes to the bound origin, through the bound-request path.
+        """
+        discovered: tuple[Mapping[str, Any], ...] = ()
+        for dependency in action.dependencies:
+            discovered = (*discovered, *(await self._observations(dependency)))
+        hosts = bound_takeover_hosts(discovered, canonical_host=self.target.canonical_host)
+
+        async def http_get(origin: str) -> Mapping[str, Any]:
+            # The fingerprint is matched against the bounded body the worker read, which stays
+            # in the worker; the receipt keeps only the usual redacted response view.
+            private: list[Any] = []
+            result = dict(await execute_bound_http_request(
+                origin, {"method": "GET", "path": "/", "follow_redirects": False},
+                target=self.target, allow_write=False,
+                transaction_recorder=self._scan_call_recorder(action),
+                timeout_seconds=10, private_response_sink=private.append,
+            ))
+            if private:
+                result["body"] = private[-1].body()
+            return result
+
+        async def operation() -> Mapping[str, Any]:
+            return await check_takeovers(
+                hosts=hosts,
+                root_domains=self.target.allowed_root_domains,
+                authorized_origins=self.target.allowed_origins,
+                http_get=http_get,
+                deadline_seconds=max(1, int(action.requested_budget.get("tool_wall_seconds") or 1)),
+                host_limit=max(0, int(action.requested_budget.get("hosts_attempted") or 0)),
+                request_limit=max(0, int(action.requested_budget.get("http_requests") or 0)),
+                independent_confirmation=doh_permitted(self.target),
+            )
+
+        adapter = self._prepared_inline(
+            action, dict(action.capability_args), operation, TakeoverCheckExecutionAdapter,
         )
         return await self._execute_adapter(action, adapter, heartbeat)
 
@@ -4596,6 +4642,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._dns(action, heartbeat)
         if action.capability_name == "infrastructure.inspect":
             return await self._infrastructure(action, heartbeat)
+        if action.capability_name == "subdomains.takeover_check":
+            return await self._takeover(action, heartbeat)
         if action.capability_name == "tls.inspect":
             return await self._tls(action, heartbeat)
         if action.capability_name == "web.spec_ingest":

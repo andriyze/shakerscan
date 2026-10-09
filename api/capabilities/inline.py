@@ -242,6 +242,10 @@ class InfrastructureInspectionExecutionAdapter(_MeasuredObservationExecutionAdap
     """Normalize bounded registration and network context observations."""
 
 
+class TakeoverCheckExecutionAdapter(_MeasuredObservationExecutionAdapter):
+    """Normalize a passive takeover check: DNS evidence, bound-origin fingerprint only."""
+
+
 class ArtifactInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
     """Normalize one bounded target-pinned artifact read or static analysis."""
 

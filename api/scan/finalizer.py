@@ -479,6 +479,83 @@ def canonical_authz_findings(
     return findings
 
 
+def _takeover_finding(
+    item: Mapping[str, Any], *, capability_name: str, receipt: Any,
+) -> dict[str, Any] | None:
+    """A subdomain-takeover finding from one passive ``takeover_check`` observation.
+
+    Verified only on a deterministic signature of a service can-i-take-over-xyz rates
+    vulnerable: an NXDOMAIN-signature terminal confirmed by an independent resolver, or, for the
+    bound host alone, the service's unclaimed-resource page in the bounded same-origin body.
+    Edge-case services and other non-existent terminals are suspected. DNS-only inconclusive
+    outcomes stay in the discovery section, never as findings.
+    """
+    outcome = item.get("outcome")
+    if outcome not in {"verified", "suspected"}:
+        return None
+    host = str(item.get("host") or "")
+    service = item.get("service")
+    chain = [str(name) for name in item.get("cname_chain") or ()][:10]
+    verified = outcome == "verified"
+    if verified:
+        title = f"Subdomain takeover: {host} points to an unclaimed {service} resource"
+    else:
+        title = f"Dangling CNAME: {host} points to a name that does not exist"
+    finding = _base_finding(
+        tool="subdomain_takeover",
+        title=title[:300],
+        severity="high" if verified else "medium",
+        cwe="CWE-284",
+        url=f"https://{host}" if host else None,
+        evidence={
+            "check": "subdomain_takeover" if verified else "dangling_cname",
+            "host": host,
+            "cname_chain": chain,
+            "terminal": item.get("terminal"),
+            "terminal_status": item.get("terminal_status"),
+            "terminal_nxdomain_confirmed": item.get("terminal_nxdomain_confirmed"),
+            "service": service,
+            "service_signature": item.get("service_signature"),
+            "evidence_basis": item.get("evidence_basis"),
+            "authorized_destination": item.get("authorized_destination") is True,
+            **({"http": dict(item["http"])} if isinstance(item.get("http"), Mapping) else {}),
+            "passive": True,
+            "canonical_capability": capability_name,
+            "capability_receipt": receipt,
+        },
+    )
+    if verified:
+        finding.update({
+            "verified": True,
+            "suspected": False,
+            "needs_verification": False,
+            "proof_state": "verified",
+            "proof_contract_v2": _canonical_proof_contract_v2(
+                capability_name=capability_name, kind="takeover_check", receipt=receipt,
+            ),
+            "verification_reason": (
+                "CNAME to an unclaimed service resource: "
+                + (
+                    "the service's HTTP signature on the bound origin"
+                    if item.get("evidence_basis") == "dns_cname_and_http_fingerprint"
+                    else "the service's NXDOMAIN signature, confirmed by an independent resolver"
+                )
+            ),
+        })
+    else:
+        finding.update({
+            "verified": False,
+            "suspected": True,
+            "needs_verification": True,
+            "proof_state": "candidate",
+            "verification_reason": (
+                "The CNAME target does not exist; whether it can be claimed depends on who can "
+                "register it"
+            ),
+        })
+    return finding
+
+
 def _findings_for_action(
     result: CapabilityResultReference,
     observations: Sequence[Mapping[str, Any]],
@@ -511,6 +588,7 @@ def _findings_for_action(
         "templates.active_batch": {"candidate_attempt", "template_match"},
         "templates.passive_batch": {"candidate_attempt", "template_match"},
         "tls.inspect": {"tls_protocol"},
+        "subdomains.takeover_check": {"takeover_check"},
     }.get(result.capability_name, set())
     for raw in observations:
         item = dict(raw)
@@ -1017,6 +1095,10 @@ def _findings_for_action(
             findings.append(finding)
         elif kind == "authz_differential":
             findings.extend(canonical_authz_findings([item], receipt=receipt))
+        elif kind == "takeover_check":
+            finding = _takeover_finding(item, capability_name=result.capability_name, receipt=receipt)
+            if finding is not None:
+                findings.append(finding)
         elif kind == "tls_protocol":
             # Each issue names its check: several share a CWE, and the finding identity
             # keeps them apart only by the check.
@@ -1374,6 +1456,8 @@ def _posture_sections(
     subdomain_hosts: dict[str, str] = {}
     subdomain_seen: set[str] = set()
     subdomain_sources: dict[str, set[str]] = {}
+    takeover_summary: dict[str, Any] = {}
+    takeover_outcomes: dict[str, list[str]] = {}
 
     for action_id, rows in observations.items():
         for row in rows or ():
@@ -1482,6 +1566,17 @@ def _posture_sections(
                     tls_section = candidate
             elif kind == "dns_posture":
                 dns_section = _dns_section(row)
+            elif kind == "takeover_summary":
+                takeover_summary = {
+                    key: row.get(key) for key in (
+                        "hosts_considered", "hosts_checked", "hosts_beyond_limit",
+                        "hosts_deadline_skipped", "hosts_with_cname", "authorization",
+                    )
+                }
+            elif kind == "takeover_check" and row.get("host"):
+                takeover_outcomes.setdefault(str(row.get("outcome") or "unknown"), []).append(
+                    str(row["host"])[:253]
+                )
             elif kind == "subdomain":
                 host = str(row.get("host") or "").lower().rstrip(".")
                 if host:
@@ -1606,6 +1701,16 @@ def _posture_sections(
                 "source": "subfinder",
                 "scope": "discovered_names_not_scanned_by_this_scan",
             }
+            if takeover_summary:
+                # Inconclusive names had a CNAME to a service whose takeover signature is an
+                # HTTP page; this Scan may not send that request to a discovered name.
+                discovery["subdomains"]["takeover"] = {
+                    **takeover_summary,
+                    "outcomes": {
+                        outcome: sorted(hosts)[:200]
+                        for outcome, hosts in sorted(takeover_outcomes.items())
+                    },
+                }
             if subdomain_sources:
                 # The upstream sources that named each host: a certificate source keeps a name
                 # that a wildcard DNS answer would otherwise explain away when it is recorded.

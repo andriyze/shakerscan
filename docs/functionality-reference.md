@@ -257,6 +257,23 @@ The canonical graph uses `web.probe`, `web.crawl`, `web.content_discover`, `subd
 family controls additional crawl/content breadth, and network/subdomain actions require their
 separate policy permission. Output is normalized into one content-addressed endpoint manifest.
 
+**Subdomain takeover** (`subdomains.takeover_check`, planned after `subdomains.discover` whenever
+subdomain discovery is permitted): a passive check of the bound host plus at most 50 discovered
+names under the bound root. Discovered names are not destinations of the Scan, so they get DNS
+evidence only: the CNAME chain and whether its terminal exists. The service catalogue follows
+can-i-take-over-xyz: a terminal that does not exist and belongs to a "vulnerable" NXDOMAIN-signature
+service (Azure, Elastic Beanstalk), confirmed by an independent resolver (the configured
+`SHAKERSCAN_DNS_DOH_RESOLVERS`, not the system resolver's negative cache), is a verified high
+finding. Only such a catalogue service name is ever sent to the DoH resolvers, never a name under
+an internal suffix, and only for a binding `dns.inspect` would also let use DoH; otherwise the
+finding stays suspected; any other non-existent terminal is a suspected dangling CNAME (medium). A first hop at a
+service whose signature is an HTTP page (S3, Bitbucket, WordPress.com, ...) is listed as
+`inconclusive_dns_only` in `report.discovery.subdomains.takeover`. Only the bound host, through the
+bound-request path and within the reserved request budget, gets one `GET /` whose bounded body is
+matched against that service's unclaimed-resource page: verified for a "vulnerable" service,
+suspected for an "edge case" one (GitHub Pages, Heroku, Shopify, Tumblr). Nothing is claimed,
+registered or changed.
+
 **Declared surface** (`web.spec_ingest`): besides the conventional OpenAPI/Swagger locations, the
 same action fetches `robots.txt` and `llms.txt` from the origin root. `Disallow`/`Allow` rules and
 Markdown links become `discovered_route` observations, origin-bound (another host's link is never
@@ -771,14 +788,18 @@ Scan admission names the non-resolving host.
 (SecurityTrails, Shodan, Censys, Chaos, VirusTotal, ...). Set either variable for the workers.
 The Compose files pass both to `worker` (Scan and Targets-page discovery) and `agent-tool-worker`
 (a Hunt's `subdomains.discover` runs there, so Hunt discovery also spends provider quota). Fleet
-nodes receive `SHAKERSCAN_SUBFINDER_PROVIDERS` in their connection bundle, written to the node's
-0600 `worker.env`; a `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` path is not forwarded, so a node that
+nodes receive `SHAKERSCAN_SUBFINDER_PROVIDERS` once, in the connection bundle captured at
+`fleet init` and written to the node's 0600 `worker.env`: after rotating a key, re-enroll the node
+(or edit `SHAKERSCAN_SUBFINDER_PROVIDERS` in its `worker.env` and restart its worker). Only the
+inline variable is forwarded; a `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` path is not, so a node that
 should use a mounted file needs its own.
 
 - `SHAKERSCAN_SUBFINDER_PROVIDERS` -- inline in `.env`, `provider=key[,key...]` entries separated by
   `;`, for example `SHAKERSCAN_SUBFINDER_PROVIDERS=securitytrails=KEY;censys=ID:SECRET;shodan=K1,K2`.
   A key containing `;`, `,` or `=` escapes it with a backslash (`\;`, `\,`, `\=`; `\\` is a
-  backslash).
+  backslash). Compose strips one layer of surrounding quotes from a `.env` value; anywhere else
+  (a shell export, a fleet `worker.env`) the parser keeps quote characters literally as part of
+  the provider name or key, so write the value unquoted.
 - `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` -- the in-container path of a subfinder
   `provider-config.yaml` (`provider: [key, ...]`). Mount it read-only with a Compose override,
   e.g. `- ./secrets/subfinder.yaml:/run/secrets/subfinder.yaml:ro` and
@@ -786,10 +807,11 @@ should use a mounted file needs its own.
 
 Both sources are merged. For each run the keys are rendered into a fresh 0700 temporary directory
 as a 0600 file, passed with `-pc`, and deleted when the run ends; they never appear in argv,
-receipts, logs or stored errors: a keyed run that fails keeps only `subfinder_exit_<code>`, its
-subprocess receipt withholds stderr, and the generic redactor masks `key=`/`token=`/`secret=`/`auth=`
-query parameters and `ID:SECRET@` URL credentials. Directories a killed worker left behind are
-removed when a worker starts. An invalid configuration is reported as
+receipts, logs or stored errors: a keyed run that fails keeps only `subfinder_exit_<code>`, and
+its subprocess receipt withholds stderr (a source error can echo a URL with the key in its query).
+The generic redactor also masks a URL userinfo password with an empty user name
+(`redis://:***@redis`). Directories a killed run left behind are removed by the first render in
+each process. An invalid configuration is reported as
 `subfinder_provider_config_invalid` (or `_unreadable`), without any value, in the discovery run's
 subfinder source error and the Scan action's errors, and discovery proceeds on the keyless sources. Time bounds are unchanged: `-all` adds
 sources that run concurrently within subfinder's 2-minute `-max-time` and 10 s per-source timeout,

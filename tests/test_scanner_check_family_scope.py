@@ -2376,3 +2376,13 @@ def test_emit_config_findings_is_the_host_posture_funnel():
     titles = [f.get("title", "") for f in report["findings"]]
     assert any("CSP header missing" in t for t in titles)
     assert any("HSTS header missing" in t for t in titles)
+
+
+@pytest.mark.parametrize(("execution", "planned"), [
+    ({"execution_plan": {"policy": {"subdomain_discovery": True}}}, True),
+    ({"execution_plan": {"policy": {"subdomain_discovery": False}}}, False),
+    ({"execution_plan": {}}, False),
+    (None, False),
+])
+def test_legacy_takeover_names_the_canonical_capability_only_when_it_is_planned(execution, planned):
+    assert scanner_mod._canonical_takeover_planned(execution) is planned
