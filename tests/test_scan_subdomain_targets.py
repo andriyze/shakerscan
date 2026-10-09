@@ -248,6 +248,7 @@ def test_a_dead_resolver_cannot_hold_the_finished_scan_beyond_the_dns_deadline(m
         return []
 
     monkeypatch.setattr(subdomain_targets.target_resolution, "system_lookup", hangs)
+    monkeypatch.setattr(subdomain_targets.target_resolution, "system_answer", hangs)
     monkeypatch.setattr(subdomain_targets, "DNS_DEADLINE_SECONDS", 0.2)
     hosts = tuple(f"h{index:02d}.shakerscan.com" for index in range(40))
     conn = _FakeConn()

@@ -29,6 +29,8 @@ def _hermetic_target_resolution(monkeypatch):
     for name, module in list(sys.modules.items()):
         if name.rsplit(".", 1)[-1] == "target_resolution" and hasattr(module, "system_lookup"):
             monkeypatch.setattr(module, "system_lookup", _resolver_unavailable)
+            if hasattr(module, "system_answer"):
+                monkeypatch.setattr(module, "system_answer", _resolver_unavailable)
 
 
 # --- the client's files stay out of the real home ------------------------------------------------

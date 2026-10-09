@@ -34,9 +34,12 @@ DISCOVERY_SOURCE = "subfinder"
 DNS_DEADLINE_SECONDS = 10.0
 
 
-async def _plan_with_deadline(hosts: list[str]) -> dict[str, Any]:
+async def _plan_with_deadline(
+    hosts: list[str], *, root_domain: str | None = None,
+    evidence: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, Any]:
     return await target_resolution.plan_discovered_targets(
-        hosts, deadline_seconds=DNS_DEADLINE_SECONDS,
+        hosts, root_domain=root_domain, evidence=evidence, deadline_seconds=DNS_DEADLINE_SECONDS,
     )
 
 
@@ -51,7 +54,10 @@ def _plan_accounting(
     plan: Mapping[str, Any], *, found: int, considered: int, rejected: int = 0,
 ) -> dict[str, Any]:
     """What the DNS plan left out and why, kept with the run's DNS outcome."""
-    classified = len(plan.get("scannable") or ()) + len(plan.get("unresolved") or ())
+    classified = (
+        len(plan.get("scannable") or ()) + len(plan.get("unresolved") or ())
+        + len(plan.get("wildcard_suppressed") or ())
+    )
     not_checked = len(plan.get("not_checked") or ())
     scannable = len(plan.get("scannable") or ())
     target_limit = int(target_resolution.DISCOVERY_TARGET_LIMIT)
@@ -90,6 +96,7 @@ def _recorded_outcome(
     beyond_window = _count(resolution.get("beyond_resolve_limit"))
     over_target_limit = _count(resolution.get("over_target_limit"))
     insert_failed = _count(resolution.get("insert_failed"))
+    wildcard_suppressed = _count(resolution.get("wildcard_suppressed_count"))
     reasons = [
         reason for reason, applies in (
             ("report_list_limit", found > considered + rejected),
@@ -98,6 +105,7 @@ def _recorded_outcome(
             ("dns_deadline", deadline_skipped > 0),
             ("target_limit", over_target_limit > 0),
             ("insert_failed", insert_failed > 0),
+            ("wildcard_dns", wildcard_suppressed > 0),
         ) if applies
     ]
     return {
@@ -115,6 +123,11 @@ def _recorded_outcome(
         "target_limit": resolution.get("target_limit"),
         "over_target_limit": over_target_limit,
         "insert_failed": insert_failed,
+        "wildcard_suppressed": wildcard_suppressed,
+        # Suppressed names stay visible: a wildcard verdict is a judgement, not a deletion.
+        "wildcard_suppressed_names": list(resolution.get("wildcard_suppressed") or ())[:100],
+        "wildcards": list(resolution.get("wildcards") or ()),
+        "notes": list(resolution.get("notes") or ()),
         "partial": bool(reasons),
         "partial_reasons": reasons,
     }
@@ -162,7 +175,16 @@ async def record_scan_subdomain_discovery(
         section["targets"] = outcome
         return outcome
     found = max(len(listed), _count(section.get("total"), len(listed)))
-    planner = plan_targets or _plan_with_deadline
+    # Which sources named each host (a certificate keeps a name a wildcard would otherwise
+    # explain away). Absent in reports finalized before sources were listed.
+    sources = section.get("sources") if isinstance(section.get("sources"), Mapping) else {}
+    evidence = {
+        name: [f"{DISCOVERY_SOURCE}:{item}" for item in sources.get(name) or ()]
+        for name in hosts
+    }
+    planner = plan_targets or (
+        lambda names: _plan_with_deadline(names, root_domain=root_domain, evidence=evidence)
+    )
     try:
         async with pool.acquire() as conn:
             existing = await conn.fetchrow(

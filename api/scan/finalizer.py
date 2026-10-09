@@ -1373,6 +1373,7 @@ def _posture_sections(
     infrastructure_observation: dict[str, Any] = {}
     subdomain_hosts: dict[str, str] = {}
     subdomain_seen: set[str] = set()
+    subdomain_sources: dict[str, set[str]] = {}
 
     for action_id, rows in observations.items():
         for row in rows or ():
@@ -1487,6 +1488,8 @@ def _posture_sections(
                     subdomain_seen.add(host)
                 if host and len(subdomain_hosts) < _REPORTED_SUBDOMAIN_LIMIT:
                     subdomain_hosts.setdefault(host, str(row.get("root_domain") or ""))
+                if host in subdomain_hosts and isinstance(row.get("source"), str):
+                    subdomain_sources.setdefault(host, set()).add(row["source"][:64])
             elif kind == "infrastructure_intelligence":
                 infrastructure_observation = dict(row)
             elif kind == "http_fingerprint":
@@ -1603,6 +1606,12 @@ def _posture_sections(
                 "source": "subfinder",
                 "scope": "discovered_names_not_scanned_by_this_scan",
             }
+            if subdomain_sources:
+                # The upstream sources that named each host: a certificate source keeps a name
+                # that a wildcard DNS answer would otherwise explain away when it is recorded.
+                discovery["subdomains"]["sources"] = {
+                    host: sorted(sources) for host, sources in sorted(subdomain_sources.items())
+                }
         sections["discovery"] = discovery
     return sections
 

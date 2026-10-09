@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import importlib.util
+import socket
 from pathlib import Path
 import sys
 import types
@@ -175,7 +176,10 @@ def _pool(conn):
     return types.SimpleNamespace(acquire=acquire)
 
 
-async def _resolves(_name):
+async def _resolves(name):
+    # Real names resolve; the planner's random wildcard probes (16 hex labels) do not.
+    if len(name.split(".", 1)[0]) == 16:
+        raise socket.gaierror(socket.EAI_NONAME, "no such name")
     return ["203.0.113.10"]
 
 
@@ -286,3 +290,17 @@ def test_the_ct_monitor_worker_stores_canonical_names(gungnir_worker, monkeypatc
 
     asyncio.run(run())
     assert stored == [("api.example.com", APEX)]
+
+
+def test_storing_inserts_the_canonical_name_and_root_it_validated():
+    inserted: list[tuple] = []
+
+    class Conn:
+        async def execute(self, query, *args):
+            inserted.append(args)
+            return "INSERT 0 1"
+
+    asyncio.run(target_resolution.store_discovered_targets(
+        Conn(), {"scannable": ["API.Example.com.", "api.example.com"]}, "Example.COM.",
+    ))
+    assert inserted == [("https://api.example.com", "example.com", "subfinder")]

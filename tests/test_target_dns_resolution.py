@@ -52,6 +52,17 @@ def _lookup(table):
     return lookup
 
 
+def _answer(table):
+    """``_lookup`` as the discovery resolver: addresses and no CNAME target."""
+    lookup = _lookup(table)
+
+    async def answer(hostname):
+        return await lookup(hostname), None
+
+    answer.seen = lookup.seen
+    return answer
+
+
 # ------------------------------------------------------------------------------ the classifier
 
 
@@ -221,6 +232,10 @@ def test_discovery_skips_names_without_an_address_record():
         "unknown_count": 1,
         "insert_failed": 0,
         "outside_root_count": 0,
+        "wildcard_suppressed_count": 0,
+        "wildcard_suppressed": [],
+        "wildcards": [],
+        "notes": [],
     }
 
 
@@ -375,9 +390,10 @@ def test_the_discovery_job_inserts_only_resolving_names_and_records_the_rest(mon
     monkeypatch.setattr(worker, "db_pool", Pool())
     monkeypatch.setattr(worker, "get_redis", lambda: Redis())
     monkeypatch.setattr(worker, "run_discovery", run_discovery)
-    monkeypatch.setattr(
-        target_resolution, "system_lookup", _lookup({"shop.example.net": ["203.0.113.20"]}),
-    )
+    table = {"shop.example.net": ["203.0.113.20"]}
+    monkeypatch.setattr(target_resolution, "system_lookup", _lookup(table))
+    # Discovery asks the resolver for addresses and the CNAME target in one call.
+    monkeypatch.setattr(target_resolution, "system_answer", _answer(table))
 
     discovery_id = str(uuid.uuid4())
     asyncio.run(worker.process_discovery_job({
