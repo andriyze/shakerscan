@@ -862,3 +862,52 @@ def test_only_the_hunts_own_deletion_removes_its_baseline(env):
     assert run(env, env.conn.fetchval("SELECT COUNT(*) FROM hunt_permission_baselines")) == 1
     run(env, env.conn.execute("DELETE FROM hunt_runs WHERE id=$1", hunt["id"]))
     assert run(env, env.conn.fetchval("SELECT COUNT(*) FROM hunt_permission_baselines")) == 0
+
+
+class _StalledRedis(_Redis):
+    """Labelled double: a Redis that accepts the connection and then never answers in time."""
+
+    def set(self, key, value, ex=None):
+        import time
+
+        time.sleep(2)
+        return super().set(key, value, ex=ex)
+
+
+@pytest.mark.parametrize("redis_provider", ["stalled", "unreachable"])
+def test_an_unreachable_or_stalled_redis_cannot_stall_the_repair(env, standing, monkeypatch, caplog, redis_provider):
+    """R1 review: the cancel signal ran synchronously on the event loop at startup; an
+    unreachable Redis held startup (and, behind the lock, every other process). It now runs off
+    the loop, bounded, and the Hunt is cancelled with its durable cancel request either way."""
+    import time
+
+    from hunt import grant_repair
+    from hunt.grant_repair import REPAIR_FAILED_STOP_REASON, repair_grant_authority
+
+    monkeypatch.setattr(grant_repair, "REDIS_SIGNAL_TIMEOUT_SECONDS", 0.3)
+    run(env, env.conn.execute("""
+        CREATE TABLE scans(id UUID PRIMARY KEY, status TEXT, run_kind TEXT, options JSONB, error_message TEXT,
+                           completed_at TIMESTAMPTZ, progress INT, current_phase TEXT, parent_scan_id UUID);
+        CREATE TABLE hunt_cancellable_jobs(
+            hunt_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE, job_id UUID NOT NULL,
+            signal_state TEXT NOT NULL DEFAULT 'pending', cancel_requested_at TIMESTAMPTZ,
+            signalled_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (hunt_id, job_id))"""))
+    broken, write, _d = _legacy_audit_state(env, standing, revoked=True)
+    run(env, env.conn.execute("UPDATE hunt_permission_grants SET effect_json='[1]'::jsonb WHERE id=$1", write))
+    job = uuid.uuid4()
+    run(env, env.conn.execute("INSERT INTO hunt_cancellable_jobs(hunt_id, job_id) VALUES($1,$2)", broken["id"], job))
+
+    def unreachable():
+        raise ConnectionError("Redis is unreachable")
+
+    provider = (lambda: _StalledRedis()) if redis_provider == "stalled" else unreachable
+    started = time.monotonic()
+    with caplog.at_level("ERROR"):
+        run(env, repair_grant_authority(env.conn, redis_provider=provider))
+    assert time.monotonic() - started < 1.5
+    row = run(env, env.run(broken))
+    assert (row["status"], row["stop_reason"]) == ("cancelled", REPAIR_FAILED_STOP_REASON)
+    jobs = run(env, env.conn.fetchrow("SELECT * FROM hunt_cancellable_jobs WHERE job_id=$1", job))
+    assert jobs["cancel_requested_at"] is not None and jobs["signal_state"] == "pending"
+    assert any("could not be signalled" in record.getMessage() for record in caplog.records)

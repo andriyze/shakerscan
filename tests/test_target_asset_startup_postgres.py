@@ -276,7 +276,37 @@ def test_startup_rebuilds_hunt_authority_2_8_0_left_after_a_revocation_and_ends_
             await module.run_schema_migrations(BoundConnectionPool(conn))
             bad = await legacy_hunt(conn, corrupt=False)
             broken = await legacy_hunt(conn, corrupt=True)
-            await module.run_schema_migrations(BoundConnectionPool(conn))  # a restart on the upgrade
+            job = uuid.uuid4()
+            await conn.execute("INSERT INTO hunt_cancellable_jobs(hunt_id, job_id) VALUES($1,$2)", broken, job)
+            # Redis is signalled only after the startup lock is released, off the event loop.
+            import asyncpg
+            loop = asyncio.get_running_loop()
+            observer = await asyncpg.connect(os.environ['TARGET_ASSET_TEST_DATABASE_URL'],
+                                             database=await conn.fetchval('SELECT current_database()'))
+            seen = {}
+
+            class Redis:  # labelled double: records the cancel keys and whether the lock was held
+                def smembers(self, _key):
+                    return set()
+
+                def set(self, key, value, ex=None):
+                    seen[key] = value
+                    return True
+
+            def provider():
+                held = asyncio.run_coroutine_threadsafe(observer.fetchval(
+                    "SELECT COUNT(*) FROM pg_locks WHERE locktype='advisory' AND objid=8675309 AND granted"),
+                    loop).result(timeout=5)
+                seen['lock_held_while_signalling'] = held
+                return Redis()
+
+            try:
+                await module.run_schema_migrations(BoundConnectionPool(conn), redis_provider=provider)  # a restart
+            finally:
+                await observer.close()
+            assert seen['lock_held_while_signalling'] == 0
+            assert seen[f'agent_tool_cancel:{job}'] == '1'
+            assert await conn.fetchval("SELECT signal_state FROM hunt_cancellable_jobs WHERE job_id=$1", job) == 'signalled'
             policy = json.loads(await conn.fetchval("SELECT policy_json FROM hunt_runs WHERE id=$1", bad))
             assert {key: policy[key] for key in flags} == start
             context = json.loads(await conn.fetchval("SELECT context_pack FROM hunt_runs WHERE id=$1", bad))

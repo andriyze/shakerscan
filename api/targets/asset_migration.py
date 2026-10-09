@@ -260,11 +260,20 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
             # After the schema commits, still under the startup lock: Hunts granted something by
             # 2.8.0 have no recorded baseline, so their authority is rebuilt from their live
             # grants once (R1), each Hunt in its own short transaction. A Hunt that cannot be
-            # repaired is ended; it never stops startup.
+            # repaired is cancelled; it never stops startup.
             try:
-                from hunt.grant_repair import repair_grant_authority
+                from hunt.grant_repair import (
+                    rebuild_or_cancel,
+                    signal_repair_cancellations,
+                )
             except ModuleNotFoundError:
-                from api.hunt.grant_repair import repair_grant_authority
-            await repair_grant_authority(conn, redis_provider=redis_provider)
+                from api.hunt.grant_repair import (
+                    rebuild_or_cancel,
+                    signal_repair_cancellations,
+                )
+            _changed, cancelled = await rebuild_or_cancel(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
+        # Redis only after the lock is released, off the event loop and bounded: an unreachable
+        # Redis must never hold every other process's startup behind the lock.
+        await signal_repair_cancellations(conn, redis_provider, cancelled)

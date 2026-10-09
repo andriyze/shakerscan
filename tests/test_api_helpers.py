@@ -22848,3 +22848,19 @@ def test_a_concurrent_insert_of_the_same_finding_does_not_abort_the_partial_save
         api_module.reconcile_legacy_finding_row = original
     assert saved == 2
     assert api_module.generate_finding_fingerprint(second) in stored
+
+
+def test_the_api_redis_client_fails_within_timeouts_instead_of_hanging(monkeypatch):
+    """R1 review: an unreachable Redis hung any API call without a timeout, startup's cancel
+    signals included. The API's client now carries the worker's connect and socket timeouts."""
+    seen = {}
+
+    def from_url(url, **kwargs):  # labelled double: records how the client is built
+        seen.update(kwargs, url=url)
+        return object()
+
+    monkeypatch.setattr(api_module.redis, "from_url", from_url)
+    api_module.get_redis()
+    assert seen["socket_connect_timeout"] == 10
+    assert seen["socket_timeout"] == 35  # above the longest blocking read (fleet lease: 30 s)
+    assert seen["decode_responses"] is True

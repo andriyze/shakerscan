@@ -19187,7 +19187,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             r"[0-9a-f]{64}", expected_environment_sha256
         ):
             raise ReplayExecutionError("replay job environment digest is invalid")
-        from capabilities.replay import require_hunt_replay_authority, revalidate_hunt_replay_authority, REPLAY_CAPABILITIES
+        from capabilities.replay import revalidate_hunt_replay_authority, REPLAY_CAPABILITIES
         capability_name = str(job_data.get("capability_name") or "collections.replay_safe")
         if capability_name not in REPLAY_CAPABILITIES:
             raise ReplayExecutionError("unknown replay capability")
@@ -19319,7 +19319,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     raise ReplayExecutionError("request collection selection changed")
                 context = _worker_json_object(run["context_pack"])
                 hunt_policy = _worker_json_object(run["policy_json"])
-                require_hunt_replay_authority(capability_name, hunt_policy, replay_policy=replay_policy)
+                dispatch_replay_authority(capability_name, hunt_policy, replay_policy=replay_policy)
                 if active_replay:
                     initial_target, initial_url = _worker_hunt_web_target(run, context, hunt_policy)
                     await revalidate_hunt_replay_authority(conn, run=run, target=initial_target,
@@ -19805,6 +19805,10 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
         }
     except asyncio.CancelledError:
         raise
+    except HuntDispatchRejected as exc:  # refused before any hold or traffic: settled blocked
+        result = await settle_rejected_replay_dispatch(
+            db_pool, job_data, exc, job_id=job_id, store=PostgresBudgetReservationStore(),
+        )
     except (
         ReplayExecutionError,
         RequestReplayError,
@@ -19904,7 +19908,7 @@ def _worker_terminal_network_result(
 
 
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
-from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_scope_binding, require_dispatchable, settle_rejected_dispatch
+from hunt.dispatch_authority import HuntDispatchRejected, dispatch_http_request_authority, dispatch_http_target, dispatch_replay_authority, dispatch_scope_binding, require_dispatchable, settle_rejected_dispatch, settle_rejected_replay_dispatch
 from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
 from hunt.host_accounting import bound_distinct_hosts, record_attempted_hosts
 

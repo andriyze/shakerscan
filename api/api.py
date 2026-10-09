@@ -1464,8 +1464,9 @@ def _attach_parallel_shard_rollup(result: dict[str, Any], shards: list[dict[str,
 
 
 def get_redis():
-    """Get Redis connection."""
-    return redis.from_url(REDIS_URL, decode_responses=True)
+    """Get Redis connection. Like the worker's client it carries connect and socket timeouts, so
+    an unreachable Redis fails a call instead of hanging it (e.g. startup cancel signals)."""
+    return redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=10, socket_timeout=35)
 
 
 def _redis_text(value: Any) -> str:
