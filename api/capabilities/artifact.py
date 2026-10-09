@@ -22,9 +22,13 @@ except ModuleNotFoundError:
     from scanner.redaction import redact_text as _shared_redact_text
 
 try:
-    from runtime.archive_body_masking import active_withheld_values, mask_body_text
+    from runtime.archive_body_masking import active_withheld_values, holds_withheld_material, mask_body_text
 except ModuleNotFoundError:
-    from api.runtime.archive_body_masking import active_withheld_values, mask_body_text
+    from api.runtime.archive_body_masking import active_withheld_values, holds_withheld_material, mask_body_text
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:
+    from api.capabilities.secret_material import keyed_body_digest
 
 
 MAX_INSPECT_BYTES = 16_384
@@ -81,7 +85,14 @@ def analyze_javascript_bytes(body: bytes) -> dict[str, Any]:
             else "privileged" if role in {"service_role", "service", "admin", "administrator"}
             else "unknown"
         )
+        collector = active_withheld_values()
+        reference: dict[str, Any] = {}
+        if collector is not None:
+            marker = collector.marker(token)
+            if marker.startswith("[withheld:"):
+                reference = {"withheld_ref": collector.reference(int(marker[10:-1])), "marker": marker}
         jwt_observations.append({
+            **reference,
             "token_sha256": digest,
             "offset": match.start(),
             "algorithm": str(header.get("alg") or "")[:80] or None,
@@ -104,10 +115,11 @@ def analyze_javascript_bytes(body: bytes) -> dict[str, Any]:
         "new Function", "postMessage", "localStorage", "sessionStorage",
     )
     sinks = [name.rstrip("(") for name in sink_names if name in text]
+    withheld = bool(jwt_observations) or holds_withheld_material(text)
     return {
         "schema_version": "javascript-static-analysis/v1",
         "bytes_analyzed": len(body),
-        "content_sha256": hashlib.sha256(body).hexdigest(),
+        "content_sha256": keyed_body_digest(body) if withheld else hashlib.sha256(body).hexdigest(),
         "routes": routes,
         "jwt_observations": jwt_observations,
         "supabase_origins": supabase_origins,
@@ -116,25 +128,30 @@ def analyze_javascript_bytes(body: bytes) -> dict[str, Any]:
     }
 
 
-# Masking reads a little past the sample so a value cut by the sample's end is still recognised.
-_MASK_LOOKAHEAD = 1_024
+def _jwt_replacement(match: re.Match[str]) -> str:
+    """Inside a Hunt worker a found JWT is a usable reference; elsewhere a bare hash."""
+    token = match.group(1)
+    collector = active_withheld_values()
+    if collector is not None:
+        return collector.marker(token)
+    return f"<jwt:sha256:{hashlib.sha256(token.encode()).hexdigest()[:16]}>"
+
+
+def _masked_window_text(body: bytes) -> str:
+    """The whole window, masked before anything is cut from it.
+
+    The body masking every masked archive view applies (N56): SQL dump rows, markup key/value
+    pairs, phpinfo-style table cells, assignments and provider formats. Inside a Hunt worker the
+    withheld values become ``[withheld:n]`` markers the planner can bind by reference.
+    """
+    text = mask_body_text(body.decode("utf-8", errors="replace"))
+    text = _JWT_RE.sub(_jwt_replacement, text)
+    text = re.sub(r"(?i)(bearer\s+)(?!\[withheld:)[a-z0-9._~+/=-]+", r"\1<redacted>", text)
+    return str(_shared_redact_text(text))
 
 
 def _redacted_text_sample(body: bytes) -> str:
-    # The body masking every masked archive view applies (N56): SQL dump rows, markup key/value
-    # pairs, phpinfo-style table cells, assignments and provider formats. Inside a Hunt worker the
-    # withheld values become ``[withheld:n]`` markers the planner can bind by reference.
-    text = mask_body_text(
-        body[:MAX_PUBLIC_TEXT + _MASK_LOOKAHEAD].decode("utf-8", errors="replace")
-    )[:MAX_PUBLIC_TEXT]
-    text = _JWT_RE.sub(
-        lambda match: f"<jwt:sha256:{hashlib.sha256(match.group(1).encode()).hexdigest()[:16]}>",
-        text,
-    )
-    text = re.sub(
-        r"(?i)(bearer\s+)[a-z0-9._~+/=-]+", r"\1<redacted>", text,
-    )
-    return str(_shared_redact_text(text))
+    return _masked_window_text(body)[:MAX_PUBLIC_TEXT]
 
 
 _CONTENT_RANGE_TOTAL = re.compile(r"\s*bytes\s+\d+-\d+/(\d+)\s*", re.IGNORECASE)
@@ -221,8 +238,13 @@ async def inspect_target_artifact(
     body = received[:length]
     resource_bytes = _resource_bytes(private)
     terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]
-    lowered = body.decode("utf-8", errors="replace").lower()
-    text_sample = _redacted_text_sample(body)
+    raw_text = body.decode("utf-8", errors="replace")
+    masked_text = _masked_window_text(body)
+    text_sample = masked_text[:MAX_PUBLIC_TEXT]
+    # Counted over the masked window: a count over raw bytes recovers a withheld value one
+    # guessed character at a time.
+    lowered = masked_text.lower()
+    withheld = masked_text != raw_text
     observation = {
         "kind": "artifact_observation",
         "path": path,
@@ -238,7 +260,8 @@ async def inspect_target_artifact(
         ),
         # search_matches counts the returned window only, never the rest of the resource.
         "search_scope": "window",
-        "window_sha256": hashlib.sha256(body).hexdigest(),
+        # A plain digest of a window that held a secret is an offline guessing oracle for it.
+        "window_sha256": keyed_body_digest(body) if withheld else hashlib.sha256(body).hexdigest(),
         "content_type": private.headers().get("content-type"),
         "text_sample": text_sample,
         "search_matches": [
@@ -283,6 +306,9 @@ async def analyze_target_javascript(
         }
     body = private.body()[:length]
     analysis = analyze_javascript_bytes(body)
+    collector = active_withheld_values()
+    if collector is not None:
+        analysis["withheld_values"] = collector.entries(json.dumps(analysis["jwt_observations"]))
     analysis.update({
         "kind": "javascript_analysis",
         "path": path,

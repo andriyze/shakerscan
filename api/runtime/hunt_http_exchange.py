@@ -147,7 +147,17 @@ async def _captured_value(conn: Any, *, run_id: str, target: TargetBinding, bind
 # active-testing authority, budget and scope as any other workflow binding (N56).
 
 WITHHELD_SCHEMA_KEY = "withheld"
+WITHHELD_EXPIRES_KEY = "withheld_expires_at"
 _MAX_WITHHELD_PAYLOAD_BYTES = 65_536
+# A withheld value lives as long as its Hunt does (finish and cancel clear it, a Hunt that is no
+# longer live refuses it), and never longer than this: a leaked credential found early in a long
+# Hunt must still be usable late in it.
+WITHHELD_TTL_SECONDS = 24 * 3_600
+_LIVE_HUNT_STATUSES = frozenset({"active", "awaiting_planner", "budget_exhausted"})
+
+
+def _hunt_is_live(run: Mapping[str, Any]) -> bool:
+    return run.get("status") in _LIVE_HUNT_STATUSES and not run.get("completed_at")
 
 
 def _private_payload(run_id: str, action_id: str, target: TargetBinding) -> dict[str, Any]:
@@ -157,8 +167,8 @@ def _private_payload(run_id: str, action_id: str, target: TargetBinding) -> dict
         "expires_at": (now + timedelta(seconds=CAPTURE_TTL_SECONDS)).isoformat(), "values": {}}
 
 
-# Capabilities whose planner-facing output carries a sample of the target's response body.
-WITHHOLDING_CAPABILITIES = frozenset({"artifact.inspect", "http.request"})
+# Capabilities whose planner-facing output carries target response content.
+WITHHOLDING_CAPABILITIES = frozenset({"artifact.inspect", "javascript.analyze", "http.request"})
 
 
 def withholding_operation(capability_name: str, action_id: Any, operation: Callable[[], Awaitable[Any]]):
@@ -182,36 +192,44 @@ def withholding_operation(capability_name: str, action_id: Any, operation: Calla
 async def persist_withheld_values(
     conn: Any, *, run: Mapping[str, Any], action_id: Any, target: TargetBinding,
     values: Any, status: str, observations: Any = None,
-) -> int:
-    """Seal the values an action's output withheld; returns how many are referenceable.
+) -> dict[str, Any]:
+    """Seal the values an action's output withheld: ``{"sealed": n, "status": ...}``.
 
     ``values`` is ``{number: value}`` or the action's collector, of which only the values whose
     markers reached ``observations`` (the planner's view) are sealed: a workflow response reduced
     to its status shows none. Merged into the action's private result, beside any response
-    capture. Values past the payload bound are dropped, so their references refuse rather than
-    send something else.
+    capture. A prior private result that cannot be read is kept, never overwritten, and the
+    status says so. Values past the payload bound are dropped, so their references refuse
+    rather than send something else.
     """
     if values is None:
-        return 0
+        return {"sealed": 0, "status": "none"}
     if not isinstance(values, Mapping):
         collector = values
         values = collector.shown_values(json.dumps(observations, default=str))
         collector.values.clear()
-    if not values or status != "success" or run["status"] not in {
-            "active", "awaiting_planner", "budget_exhausted"} or run.get("completed_at"):
-        return 0
+    if not values:
+        return {"sealed": 0, "status": "none"}
+    if status != "success" or not _hunt_is_live(run):
+        return {"sealed": 0, "status": "action_or_hunt_not_live"}
     run_id, source_id = str(run["id"]), str(uuid.UUID(str(action_id)))
     row = await conn.fetchrow("SELECT private_http_result FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2",
         uuid.UUID(source_id), uuid.UUID(run_id))
     payload = _private_payload(run_id, source_id, target)
     existing = str(row["private_http_result"] or "") if row else ""
-    if existing.startswith("enc:fernet:"):
+    if existing:
         try:
-            prior = json.loads(decrypt_secret(existing))
-            if prior.get("hunt_id") == run_id and prior.get("source_action_id") == source_id:
-                payload = prior
+            prior = json.loads(decrypt_secret(existing)) if existing.startswith("enc:fernet:") else None
         except Exception:
-            payload = _private_payload(run_id, source_id, target)
+            prior = None
+        if not (isinstance(prior, dict) and prior.get("hunt_id") == run_id
+                and prior.get("source_action_id") == source_id):
+            # Keep the response capture this action already sealed; its withheld values stay
+            # withheld (shown, unreferenceable), and the planner is told why.
+            return {"sealed": 0, "status": "prior_private_result_unreadable"}
+        payload = prior
+    payload[WITHHELD_EXPIRES_KEY] = (
+        datetime.now(timezone.utc) + timedelta(seconds=WITHHELD_TTL_SECONDS)).isoformat()
     kept: dict[str, str] = {}
     for number, value in sorted(values.items()):
         payload[WITHHELD_SCHEMA_KEY] = {**kept, str(int(number)): str(value)}
@@ -226,10 +244,10 @@ async def persist_withheld_values(
     finally:
         payload.clear()
     if not str(sealed or "").startswith("enc:fernet:"):
-        return 0  # never store a withheld value in clear
+        return {"sealed": 0, "status": "encryption_unavailable"}  # never stored in clear
     await conn.execute("UPDATE hunt_actions SET private_http_result=$3 WHERE id=$1 AND hunt_run_id=$2",
         uuid.UUID(source_id), uuid.UUID(run_id), sealed)
-    return len(kept)
+    return {"sealed": len(kept), "status": "sealed" if len(kept) == len(values) else "partially_sealed"}
 
 
 async def settle_private_results(
@@ -241,15 +259,22 @@ async def settle_private_results(
     if exchange is not None:
         await exchange.persist(conn, run=run, status=status)
         receipt_result["captures"] = exchange.public_result()
-    await persist_withheld_values(conn, run=run, action_id=action_id, target=target,
+    sealing = await persist_withheld_values(conn, run=run, action_id=action_id, target=target,
         values=withheld, status=status, observations=observations)
+    if sealing["status"] != "none":
+        receipt_result["withheld_values_sealing"] = sealing
 
 
-async def _withheld_value(conn: Any, *, run_id: str, target: TargetBinding, reference: str) -> str:
+async def _withheld_value(
+    conn: Any, *, run: Mapping[str, Any], target: TargetBinding, reference: str,
+) -> str:
     from .archive_body_masking import WITHHELD_REF_RE
     match = WITHHELD_REF_RE.fullmatch(str(reference))
     if match is None:
         raise ValueError("withheld value reference is invalid")
+    if not _hunt_is_live(run):
+        raise ValueError("withheld value reference belongs to a Hunt that is no longer live")
+    run_id = str(run["id"])
     source_id, number = match.group(1), int(match.group(2))
     row = await conn.fetchrow("""SELECT private_http_result FROM hunt_actions
         WHERE id=$1 AND hunt_run_id=$2 AND status='completed'""", uuid.UUID(source_id), uuid.UUID(run_id))
@@ -258,7 +283,7 @@ async def _withheld_value(conn: Any, *, run_id: str, target: TargetBinding, refe
         raise ValueError("withheld value reference is unavailable in this Hunt")
     try:
         private = json.loads(decrypt_secret(ciphertext))
-        expires_at = datetime.fromisoformat(private["expires_at"])
+        expires_at = datetime.fromisoformat(private.get(WITHHELD_EXPIRES_KEY) or private["expires_at"])
         if (private["schema_version"] != SCHEMA or private["hunt_id"] != run_id
                 or private["source_action_id"] != source_id
                 or private["target_digest"] != _target_digest(target)
@@ -287,7 +312,7 @@ async def prepare_http_exchange(
     headers = dict(trusted_headers)
     for binding in values.get("request_bindings") or ():
         if "withheld_ref" in binding:
-            value = await _withheld_value(conn, run_id=run_id, target=target, reference=binding["withheld_ref"])
+            value = await _withheld_value(conn, run=run, target=target, reference=binding["withheld_ref"])
             exchange.bound_values.append(str(value))
         elif "source_action_id" in binding:
             value = await _captured_value(conn, run_id=run_id, target=target, binding=binding)

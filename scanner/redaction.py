@@ -138,7 +138,10 @@ _SENSITIVE_COLON_KEY = (
 )
 # A Hunt body masking marker (``[withheld:3]``, api/runtime/archive_body_masking.py) already stands
 # in for a withheld value and carries none; masking it again would lose the planner's reference.
-_NOT_WITHHELD_MARKER = r"(?!\[withheld:[1-9][0-9]{0,3}\])"
+# Anchored: only a whole value that is a marker is spared (``password=[withheld:1]Hunter2pass``
+# is still a value to mask).
+_NOT_WITHHELD_MARKER = r"(?!\[withheld:[1-9][0-9]{0,3}\](?=$|[&\s,;]))"
+_NOT_WITHHELD_QUOTED = r"(?!\[withheld:[1-9][0-9]{0,3}\][\"'])"
 _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Authorization: Bearer/Basic/Digest <token>  (\S+ so base64 +/= is covered)
     (re.compile(r"(?i)(authorization:\s*(?:bearer|basic|digest|negotiate))\s+\S+"), r"\1 ***"),
@@ -153,7 +156,7 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # display never shows "***" where nothing was declared (N54: a seed's empty password read as
     # if a value had been stored and sent), matching the key=value rule and redact_sensitive.
     (
-        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(["\']){_NOT_WITHHELD_MARKER}[^"\']+(["\'])'),
+        re.compile(rf'(?i)(["\']{_SENSITIVE_TEXT_KEY}["\']\s*:\s*)(["\']){_NOT_WITHHELD_QUOTED}[^"\']+(["\'])'),
         r"\1\2***\3",
     ),
     # JSON numeric/boolean/null secret values.
@@ -167,7 +170,7 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         r"\1***",
     ),
     (
-        re.compile(rf'(?is)(<({_SENSITIVE_TEXT_KEY})(?:\s[^>]*)?>).*?(</\2\s*>)'),
+        re.compile(rf'(?is)(<({_SENSITIVE_TEXT_KEY})(?:\s[^>]*)?>)(?!\[withheld:[1-9][0-9]{{0,3}}\]</).*?(</\2\s*>)'),
         r"\1***\3",
     ),
     # The password of a URL's userinfo (``https://ID:SECRET@host``, ``redis://:SECRET@host``).
@@ -187,7 +190,7 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     # connection strings  scheme://user:password@host
     (
-        re.compile(r"(?i)\b((?:postgres(?:ql)?|mysql|mongodb|redis|amqp|https?|ftp)://[^\s:@/]+:)([^\s@/]+)(@)"),
+        re.compile(r"(?i)\b((?:postgres(?:ql)?|mysql|mongodb|redis|amqp|https?|ftp)://[^\s:@/]+:)(?!\[withheld:[1-9][0-9]{0,3}\]@)([^\s@/]+)(@)"),
         r"\1***\3",
     ),
 )
