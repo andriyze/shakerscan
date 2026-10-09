@@ -171,11 +171,49 @@ def _private_payload(run_id: str, action_id: str, target: TargetBinding) -> dict
 WITHHOLDING_CAPABILITIES = frozenset({"artifact.inspect", "javascript.analyze", "http.request"})
 
 
-def withholding_operation(capability_name: str, action_id: Any, operation: Callable[[], Awaitable[Any]]):
+_MAX_SEEDED_VALUES = 512
+# Shorter values (a pairing PIN) would match ordinary text everywhere; their outputs are reduced.
+_MIN_SEEDED_CHARS = 6
+
+
+async def sealed_hunt_values(conn: Any, *, run_id: Any, target: TargetBinding) -> list[str]:
+    """Every value this Hunt has sealed for this target (withheld values and response captures),
+    still unexpired. Worker-private: used only to withhold their later echoes."""
+    rows = await conn.fetch("""SELECT private_http_result FROM hunt_actions
+        WHERE hunt_run_id=$1 AND private_http_result IS NOT NULL""", uuid.UUID(str(run_id)))
+    digest, now, found = _target_digest(target), datetime.now(timezone.utc), []
+    for row in rows or ():
+        try:
+            private = json.loads(decrypt_secret(str(row["private_http_result"])))
+            expires_at = datetime.fromisoformat(private.get(WITHHELD_EXPIRES_KEY) or private["expires_at"])
+            if private.get("hunt_id") != str(run_id) or private.get("target_digest") != digest or expires_at <= now:
+                continue
+            values = [*(private.get(WITHHELD_SCHEMA_KEY) or {}).values(), *(private.get("values") or {}).values()]
+        except Exception:
+            continue  # an unreadable row seeds nothing; its own references refuse
+        found.extend(str(value) for value in values if isinstance(value, str) and len(value) >= _MIN_SEEDED_CHARS)
+        if len(found) >= _MAX_SEEDED_VALUES:
+            break
+    return list(dict.fromkeys(found))[:_MAX_SEEDED_VALUES]
+
+
+def known_values_seed(pool: Any, run_id: Any, target: TargetBinding) -> Callable[[], Awaitable[list[str]]]:
+    async def seed() -> list[str]:
+        async with pool.acquire() as conn:
+            return await sealed_hunt_values(conn, run_id=run_id, target=target)
+    return seed
+
+
+def withholding_operation(
+    capability_name: str, action_id: Any, operation: Callable[[], Awaitable[Any]],
+    seed: Callable[[], Awaitable[list[str]]] | None = None,
+):
     """``(operation, collector)``: run a body-sampling capability with a withheld-value collector.
 
     Inside it, every value the body masking withholds becomes a ``[withheld:n]`` marker and stays
-    in the collector; other capabilities run unchanged with no collector.
+    in the collector; other capabilities run unchanged with no collector. ``seed`` gives the
+    values this Hunt already sealed for the target: a re-read, a window split elsewhere, or a
+    later echo of any of them is withheld too, whatever surrounds it.
     """
     if capability_name not in WITHHOLDING_CAPABILITIES:
         return operation, None
@@ -183,6 +221,8 @@ def withholding_operation(capability_name: str, action_id: Any, operation: Calla
     collector = WithheldValues(str(action_id))
 
     async def collecting() -> Any:
+        if seed is not None:
+            collector.bind_known(await seed())
         with collecting_withheld_values(collector):
             return await operation()
 

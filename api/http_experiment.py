@@ -13,9 +13,9 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 try:
-    from runtime.archive_body_masking import active_withheld_values, mask_body_text
+    from runtime.archive_body_masking import active_withheld_values, holds_withheld_material, mask_body_text
 except ModuleNotFoundError:  # package import layout
-    from api.runtime.archive_body_masking import active_withheld_values, mask_body_text
+    from api.runtime.archive_body_masking import active_withheld_values, holds_withheld_material, mask_body_text
 
 
 HTTP_EXPERIMENT_VERSION = "http-experiment-2026-07-12.v4"
@@ -666,7 +666,13 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                     "response": summary,
                     "extracted": {
                         name: {
-                            "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+                            # Keyed when the response held a secret: a plain digest of an
+                            # extracted token is an offline guessing oracle for it.
+                            "sha256": _body_digest(
+                                value.encode("utf-8"),
+                                withheld=str(summary.get("body_sha256") or "").startswith("hmac-")
+                                or holds_withheld_material(value),
+                            ),
                             "length": len(value),
                         }
                         for name, value in extracted.items()

@@ -70,8 +70,10 @@ def test_artifact_window_redacts_jwt_and_reports_range_decision(monkeypatch):
         kwargs["private_response_sink"](WorkerPrivateHTTPResponse(
             status_code=206,
             final_url="https://app.example.test/assets/app.js",
-            _body=f'const token="{token}";'.encode(),
-            _headers={"content-type": "application/javascript", "content-range": "bytes 10-99/100"},
+            # The range now starts at the resource's head: the 10 bytes before the window are the
+            # masking context (N56), the window follows them.
+            _body=b"/*ctx*/   " + f'const token="{token}";'.encode(),
+            _headers={"content-type": "application/javascript", "content-range": "bytes 0-99/100"},
             _cookies={},
         ))
         return {"ok": True, "response": {"status": 206}}
@@ -90,7 +92,7 @@ def test_artifact_window_redacts_jwt_and_reports_range_decision(monkeypatch):
         target=binding,
     ))
 
-    assert seen["headers"] == {"Range": "bytes=10-99"}
+    assert seen["headers"] == {"Range": "bytes=0-99"}  # window 10-99 plus its preceding context
     assert result["ok"] is True
     sample = result["observation"]["text_sample"]
     assert "***" in sample

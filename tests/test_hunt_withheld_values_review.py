@@ -15,6 +15,7 @@ import sys
 import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -362,10 +363,12 @@ def test_identifiers_in_sql_rows_stay_visible(body):
     assert mask_body_text(body) == body
 
 
-def test_sql_rows_without_columns_mask_only_secret_prefixes():
-    body = "INSERT INTO t VALUES (1,'ak_9f3c9e1a7b2d84c60e5a9f1b3d7c2e8a4','Mixed9Case8Identifier7Abc');"
+def test_sql_rows_without_columns_withhold_issued_key_prefixes():
+    # Without column names a row withholds what its own shape proves; the column context of a
+    # window read at an offset is restored by artifact.inspect (see the pagination tests).
+    body = "INSERT INTO t VALUES (1,'ak_9f3c9e1a7b2d84c60e5a9f1b3d7c2e8a4','SKU-2024-0042');"
     masked = mask_body_text(body)
-    assert "ak_9f3c" not in masked and "Mixed9Case8Identifier7Abc" in masked
+    assert "ak_9f3c" not in masked and "SKU-2024-0042" in masked
 
 
 # --- Freedom: JWTs are usable references -----------------------------------------------------
@@ -406,3 +409,188 @@ def test_skill_documents_the_reference_workflow():
     from pathlib import Path
     skill = (Path(__file__).resolve().parents[1] / "skills" / "hunt" / "SKILL.md").read_text()
     assert "withheld_values" in skill and "withheld_ref" in skill and "withheld://hunt/" in skill
+
+
+# --- Round 2 blocker: a window read at an offset keeps its masking context ------------------
+
+def _range_server(monkeypatch, document: bytes, seen: list):
+    async def fake_execute(_target_url, args, **kwargs):
+        start, end = (int(part) for part in args["headers"]["Range"].split("=")[1].split("-"))
+        seen.append((start, end))
+        chunk = document[start:end + 1]
+        kwargs["private_response_sink"](WorkerPrivateHTTPResponse(
+            status_code=206, final_url="https://honey.fixture.test/backup.sql", _body=chunk,
+            _headers={"content-type": "text/plain",
+                      "content-range": f"bytes {start}-{start + len(chunk) - 1}/{len(document)}"},
+            _cookies={},
+        ))
+        return {"ok": True, "response": {"status": 206}}
+
+    monkeypatch.setattr(artifact_capability, "execute_bound_http_request", fake_execute)
+
+
+def _inspect_at(monkeypatch, document: bytes, offset: int, length: int, collector=None):
+    seen: list = []
+    _range_server(monkeypatch, document, seen)
+    args = {"path": "/backup.sql", "offset": offset, "max_bytes": length}
+
+    async def run():
+        if collector is None:
+            return await artifact_capability.inspect_target_artifact("https://honey.fixture.test", args, target=TARGET)
+        with masking.collecting_withheld_values(collector):
+            return await artifact_capability.inspect_target_artifact("https://honey.fixture.test", args, target=TARGET)
+
+    return asyncio.run(run()), seen
+
+
+_DUMP_HEAD = "CREATE TABLE `users` (\n `id` int,\n `email` varchar(100),\n `password` varchar(255)\n);\n"
+PAGINATED_DUMPS = {
+    "per_row_inserts": _DUMP_HEAD + "".join(
+        f"INSERT INTO `users` VALUES ({i},'u{i}@fixture.test','Fx{i}Pass!q');\n" for i in range(800)),
+    "extended_insert": _DUMP_HEAD + "INSERT INTO `users` VALUES " + ",".join(
+        f"({i},'u{i}@fixture.test','Fx{i}Pass!q')" for i in range(800)) + ";\n",
+}
+
+
+@pytest.mark.parametrize("style", sorted(PAGINATED_DUMPS))
+@pytest.mark.parametrize("hunt", [True, False])
+def test_paginated_dump_windows_withhold_every_password(monkeypatch, style, hunt):
+    document = PAGINATED_DUMPS[style].encode()
+    leaked = 0
+    for offset in range(0, len(document), 16_384):
+        collector = masking.WithheldValues(ACTION) if hunt else None
+        result, seen = _inspect_at(monkeypatch, document, offset, 16_384, collector)
+        text = json.dumps(result)
+        leaked += text.count("Pass!q")
+        if offset:
+            assert seen[-1][0] == max(0, offset - artifact_capability.CONTEXT_BYTES)
+        assert "@fixture.test" in result["observation"]["text_sample"]
+    assert leaked == 0
+
+
+@pytest.mark.parametrize(("document", "cut_before", "secret"), [
+    ("APP_ENV=prod\nDB_PASSWORD=Hunter2passFx\nAPP_KEY=x\n", "Hunter2passFx", "Hunter2passFx"),
+    ('<appSettings>\n<add key="ApiKey" value="abc123xyzSECRETFx"/>\n<add key="X" value="y"/>',
+     "abc123xyzSECRETFx", "abc123xyzSECRETFx"),
+    ("APP_ENV=prod\nDB_PASSWORD=Hunter2passFx\nAPP_KEY=x\n", "2passFx", "Hunter2passFx"),
+])
+def test_a_deliberate_offset_cut_does_not_reveal_the_value(monkeypatch, document, cut_before, secret):
+    data = document.encode()
+    offset = data.index(cut_before.encode())
+    collector = masking.WithheldValues(ACTION)
+    result, _seen = _inspect_at(monkeypatch, data, offset, 64, collector)
+    sample = result["observation"]["text_sample"]
+    assert cut_before not in sample and secret not in json.dumps(result)
+    assert "[withheld:" in sample
+
+
+def test_sealed_values_seed_every_later_output(encryption_key):
+    """A value sealed earlier in the Hunt is withheld from any later output, whatever surrounds it."""
+    from runtime.hunt_http_exchange import sealed_hunt_values, withholding_operation
+
+    class Rows(_ActionRows):
+        async def fetch(self, sql, *args):
+            return [row for row in self.rows.values() if row["private_http_result"]]
+
+    conn = Rows()
+    asyncio.run(persist_withheld_values(
+        conn, run=RUN, action_id=ACTION, target=TARGET, values={1: "FxSeededSecret01"}, status="success",
+    ))
+    assert asyncio.run(sealed_hunt_values(conn, run_id=HUNT, target=TARGET)) == ["FxSeededSecret01"]
+
+    async def seed():
+        return await sealed_hunt_values(conn, run_id=HUNT, target=TARGET)
+
+    async def later_output():
+        return mask_body_text("plain text mentions FxSeededSecret01 and fxseededsecret01 again")
+
+    operation, collector = withholding_operation("http.request", str(uuid.UUID(int=699)), later_output, seed)
+    masked = asyncio.run(operation())
+    assert "seededsecret01" not in masked.lower() and "[withheld:1]" in masked
+    other_target = TargetBinding(**{**TARGET.__dict__, "canonical_host": "other.fixture.test"})
+    assert asyncio.run(sealed_hunt_values(conn, run_id=HUNT, target=other_target)) == []
+
+
+# --- Round 2 should-fix: encoders that escape only the specials ------------------------------
+
+@pytest.mark.parametrize(("value", "echo"), [
+    ("aB3dE5fG7hJ9kL1m==", "aB3dE5fG7hJ9kL1m\\u003d\\u003d"),
+    ("Win<ter>&Fx=2024", "Win\\u003cter\\u003e\\u0026Fx\\u003d2024"),
+    ("Winter2024!x/Q", "Winter2024&#33;x&#47;Q"),
+    ("Winter2024!x/Q", "Winter2024&#x21;x&#x2f;Q"),
+    ("it's-Secret99", "it&#039;s-Secret99"),
+    ("it's-Secret99", "it\\u0027s-Secret99"),
+])
+def test_specials_only_encoder_echoes_are_withheld(value, echo):
+    out = masking.scrub_known_values(f"pre {echo} post", [value], "[B]")
+    assert out == "pre [B] post", out
+
+
+# --- Round 2 should-fix: the CSRF exemption is HTML-form only -------------------------------
+
+@pytest.mark.parametrize("body", [
+    '{"csrf_token": "FxCsrfJson0123456"}',
+    '{"_token": "FxCsrfJson0123456"}',
+    "csrf_token=FxCsrfConfig0123456",
+    "csrf_secret=FxCsrfSecret0123456",
+    '<input type="hidden" name="csrf_secret" value="FxCsrfSecret0123456">',
+])
+def test_csrf_named_secrets_outside_html_forms_stay_withheld(body):
+    masked, _collector = _collect(body)
+    assert "FxCsrf" not in masked
+
+
+def test_session_name_value_rows_are_withheld():
+    masked, collector = _collect(json.dumps({"rows": [["session_id", "FxSessionRow0123"], ["token_count", "5"]]}))
+    assert "FxSessionRow0123" not in masked and '"5"' in masked
+    sql, _collector = _collect("INSERT INTO kv VALUES ('PHPSESSID','FxPhpSess0123456');")
+    assert "FxPhpSess0123456" not in sql
+
+
+# --- Round 2 should-fix: secret URL parameters become references -----------------------------
+
+def test_redirect_urls_withhold_secret_parameters_as_references():
+    from capabilities.http_workflow import _withhold_url_secrets
+
+    response = {
+        "response": {"location": "/cb?code=FxAuthCode998877&state=xyz", "selected_headers": {
+            "location": "/cb?code=FxAuthCode998877&state=xyz"}},
+        "final_url": "https://honey.fixture.test/reset?reset_token=FxReset0123&lang=en",
+        "redirect_chain": [{"location": "/s3?X-Amz-Signature=FxSig0123abcd&x=1"},
+                           {"location": "/app#access_token=FxImplicit0123&token_type=bearer"}],
+    }
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        _withhold_url_secrets(response)
+    text = json.dumps(response)
+    for secret in ("FxAuthCode998877", "FxReset0123", "FxSig0123abcd", "FxImplicit0123"):
+        assert secret not in text and secret in collector.values
+    assert "state=xyz" in text and "lang=en" in text and "token_type=bearer" in text
+    assert "code=[withheld:1]" in response["response"]["location"]
+
+
+# --- Round 2 should-fix: experiment extract digests ------------------------------------------
+
+def test_experiment_extract_digest_is_keyed_when_the_response_held_a_secret(monkeypatch):
+    import api.http_experiment as experiment
+
+    keyed = experiment._body_digest(b"FxExtractedToken0123", withheld=True)
+    assert keyed.startswith("hmac-sha256-")
+    assert keyed != hashlib.sha256(b"FxExtractedToken0123").hexdigest()
+    source = (Path(experiment.__file__)).read_text()
+    assert '"sha256": hashlib.sha256(value.encode("utf-8")).hexdigest()' not in source
+
+
+# --- Round 2 should-fix: the SKILL example is a valid http.request ---------------------------
+
+def test_skill_withheld_ref_example_validates_against_the_registry():
+    import re as _re
+
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+    from runtime.hunt_http_contract import require_http_request_authority
+
+    skill = (Path(__file__).resolve().parents[1] / "skills" / "hunt" / "SKILL.md").read_text()
+    block = next(item for item in _re.findall(r"```\n(\{.*?\})\n```", skill, _re.DOTALL) if "withheld_ref" in item)
+    example = json.loads(block.replace("<action id>", ACTION))
+    CAPABILITY_REGISTRY.validate_hunt_input("http.request", example)
+    assert require_http_request_authority(example, {"active_testing": True}) is False
