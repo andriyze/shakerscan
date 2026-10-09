@@ -430,7 +430,7 @@ def test_skill_documents_the_reference_workflow():
 
 # --- Round 2 blocker: a window read at an offset keeps its masking context ------------------
 
-def _range_server(monkeypatch, document: bytes, seen: list):
+def _range_server(monkeypatch, document: bytes, seen: list, headers: dict | None = None):
     async def fake_execute(_target_url, args, **kwargs):
         start, end = (int(part) for part in args["headers"]["Range"].split("=")[1].split("-"))
         seen.append((start, end))
@@ -438,7 +438,8 @@ def _range_server(monkeypatch, document: bytes, seen: list):
         kwargs["private_response_sink"](WorkerPrivateHTTPResponse(
             status_code=206, final_url="https://honey.fixture.test/backup.sql", _body=chunk,
             _headers={"content-type": "text/plain",
-                      "content-range": f"bytes {start}-{start + len(chunk) - 1}/{len(document)}"},
+                      "content-range": f"bytes {start}-{start + len(chunk) - 1}/{len(document)}",
+                      **(headers or {})},
             _cookies={},
         ))
         return {"ok": True, "response": {"status": 206}}
@@ -809,10 +810,12 @@ def test_copy_rows_far_from_their_header_never_leak(monkeypatch, encryption_key,
     document = _copy_dump()
     assert len(document) > 3_000_000
     conn = _KnowledgeRows()
+    # A download URL that is not named like a dump says what it serves in its response headers.
+    headers = {"content-disposition": 'attachment; filename="backup.sql"'} if "download" in path else None
     if head_first:
-        _hunt_inspect_path(monkeypatch, document, path, 0, conn)
+        _hunt_inspect_path(monkeypatch, document, path, 0, conn, headers)
     for offset in (200_000, 1_300_000, 3_000_000):
-        result, _seen = _hunt_inspect_path(monkeypatch, document, path, offset, conn)
+        result, _seen = _hunt_inspect_path(monkeypatch, document, path, offset, conn, headers)
         text = json.dumps(result)
         assert "Pass\\\\\\\\t!q" not in text and "Pass\\\\t!q" not in text, (path, head_first, offset)
         sample = result["observation"]["text_sample"]
@@ -837,12 +840,12 @@ def test_multiple_copy_blocks_use_only_the_open_one(monkeypatch, encryption_key)
         assert "!q1" not in json.dumps(result).replace("!q1\\\\t", "")
 
 
-def _hunt_inspect_path(monkeypatch, document, path, offset, conn):
+def _hunt_inspect_path(monkeypatch, document, path, offset, conn, headers=None):
     from runtime.hunt_http_exchange import sealed_hunt_knowledge, withholding_operation
 
     action = str(uuid.uuid4())
     seen: list = []
-    _range_server(monkeypatch, document, seen)
+    _range_server(monkeypatch, document, seen, headers)
 
     async def operation():
         return await artifact_capability.inspect_target_artifact(
@@ -933,3 +936,48 @@ def test_the_archive_keeps_the_window_not_the_context(monkeypatch):
     assert archived["response_body"] == document[1_100_000:1_100_000 + 16_384]
     assert archived["response_body_bytes"] == 16_384 and archived["fidelity"] == "wire_request_window"
     assert seen[0][0] == 1_100_000 - artifact_capability.SQL_CONTEXT_BYTES
+
+
+
+# --- Round 5: tab-separated text that is not a dump keeps its fields -------------------------
+
+TAB_TEXTS = {
+    "/export.tsv": "id\tname\tcreated\tstatus\n" + "".join(
+        f"{i}\tAlice Smith {i}\t2024-01-0{1 + i % 9}\tactive\n" for i in range(20_000)),
+    "/logs/access.tsv": "".join(
+        f"2024-01-01T00:00:{i % 60:02d}\tINFO\tuser{i}\tGET /api/orders/{1000 + i}\tOrdAbC{i}xyz\n"
+        for i in range(20_000)),
+    "/Makefile": "all:\n" + "".join(f"target{i}:\n\tgcc -o out{i} src{i}.c\n" for i in range(20_000)),
+}
+
+
+@pytest.mark.parametrize("path", sorted(TAB_TEXTS))
+@pytest.mark.parametrize("offset", [0, 1_000, 70_000, 300_000])
+def test_tab_separated_text_that_is_not_a_dump_keeps_its_fields(monkeypatch, encryption_key, path, offset):
+    document = TAB_TEXTS[path].encode()
+    result, _seen = _hunt_inspect_path(monkeypatch, document, path, offset, _KnowledgeRows())
+    sample = result["observation"]["text_sample"]
+    assert "[withheld:" not in sample and "***" not in sample, sample[:200]
+
+
+def test_copy_rows_with_dump_evidence_only_in_the_response_headers(monkeypatch, encryption_key):
+    document = _copy_dump()
+    for headers in ({"content-type": "application/sql"},
+                    {"content-disposition": "attachment; filename*=UTF-8''db-backup.sql"}):
+        result, _seen = _hunt_inspect_path(monkeypatch, document, "/files/7", 2_000_000, _KnowledgeRows(), headers)
+        assert "!q0" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(("url", "withheld"), [
+    ("/r?token=qwxzkjhgfdsplmnbvcxz", "qwxzkjhgfdsplmnbvcxz"),
+    ("/v?code=lowercasesecretvalue", "lowercasesecretvalue"),
+    ("/p?key=blue", None),
+    ("/p?key=user_settings", None),
+    ("/r?reset=abcdef", None),
+])
+def test_long_lowercase_runs_are_tokens_not_enums(url, withheld):
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = masking.mask_url_secrets(url)
+    assert (masked == url and collector.values == []) if withheld is None else (
+        withheld not in masked and collector.values == [withheld])

@@ -161,6 +161,23 @@ _CONTEXT_COLLECTOR_ID = "00000000-0000-4000-8000-000000000000"
 HUNT_CONTEXT_BUDGET_BYTES = 64 * 1_048_576
 
 
+_DUMP_CONTENT_TYPES = frozenset({
+    "application/sql", "application/x-sql", "text/x-sql", "application/x-postgresql",
+    "application/x-pgdump", "application/x-mysql",
+})
+_DISPOSITION_FILENAME_RE = re.compile(r"(?i)filename\*?=(?:UTF-8'')?[\"']?([^\"';]{1,512})")
+
+
+def _served_as_dump(headers: dict[str, str]) -> bool:
+    """The response says it is a database dump: an SQL media type, or a download named like one
+    (``/download?id=7`` with ``Content-Disposition: attachment; filename="backup.sql"``)."""
+    media = str(headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if media in _DUMP_CONTENT_TYPES:
+        return True
+    match = _DISPOSITION_FILENAME_RE.search(str(headers.get("content-disposition") or ""))
+    return bool(match and _SQL_DUMP_PATH_RE.search("/" + urllib.parse.unquote(match.group(1)).strip()))
+
+
 def _resource_path(path: str) -> str:
     """A resource's identity for carried column knowledge: path *and* query
     (``/download?id=1`` and ``?id=2`` are different dumps)."""
@@ -222,10 +239,12 @@ def _context_secrets(context: bytes, body: bytes) -> list[str]:
     if len(context) > _NEAR_CONTEXT_BYTES:
         learner = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=0)
         learner.sql_tables, learner.sql_path = shared
+        learner.sql_dump_like = bool(collector and collector.sql_dump_like)
         with collecting_withheld_values(learner):
             mask_sql_values(context.decode("utf-8", errors="replace"))
     probe = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=16_384)
     probe.sql_tables, probe.sql_path = shared
+    probe.sql_dump_like = bool(collector and collector.sql_dump_like)
     with collecting_withheld_values(probe):
         mask_body_text((context[-_NEAR_CONTEXT_BYTES:] + body).decode("utf-8", errors="replace"))
     return probe.values
@@ -322,6 +341,7 @@ async def inspect_target_artifact(
     collector = active_withheld_values()
     if collector is not None:
         collector.sql_path = _resource_path(path)
+        collector.sql_dump_like = bool(_SQL_DUMP_PATH_RE.search(urllib.parse.urlsplit(path).path or path))
     context_start = max(0, offset - _context_bytes(path))
     lead = offset - context_start
     result, private = await _fetch_artifact(
@@ -359,6 +379,8 @@ async def inspect_target_artifact(
             "error": "artifact_range_mismatch",
             "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
         }
+    if collector is not None and _served_as_dump(private.headers()):
+        collector.sql_dump_like = True
     context = private.body()[:lead]
     received = private.body()[lead:]
     body = received[:length]
