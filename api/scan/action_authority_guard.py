@@ -7,11 +7,13 @@ not stop an anonymous scan already running on the single host. This guard gives 
 the same decision, from the same function:
 
 * before an action is dispatched, a full re-check (``scan_action_authority_reason``), which is
-  fail-closed: an error blocks the action;
+  fail-closed: an error is retried briefly and then blocks the action as
+  ``authorization_unverified``;
 * while it runs, a cheap poll every ``poll_seconds``: one round trip that reads the rows the
   decision depends on, by primary key. When any of them changed, the approval reached its
   expiry, or ``full_recheck_seconds`` passed, the full check runs again. A poll that fails is
-  reported to the caller, which interrupts only after consecutive failures;
+  reported to the caller, which interrupts only after ``unverified_after_seconds`` of
+  continuous failure, as ``authorization_unverified`` (never as a revoke);
 * once authority is withdrawn the guard stays withdrawn for the rest of the Scan: every later
   action is blocked without traffic and the report says why (``annotate``).
 
@@ -123,6 +125,11 @@ class ScanAuthorityGuard:
     record_event: Callable[[str], Any] | None = None
     poll_seconds: float = 2.0
     full_recheck_seconds: float = 30.0
+    # How long polls may keep failing (database unreachable) before the running action is
+    # interrupted as authorization_unverified, and the retries before a pre-dispatch check
+    # fails closed. Read by ReceiptScanActionExecutor.
+    unverified_after_seconds: float = 10.0
+    check_retry_delays: tuple[float, ...] = (0.5, 1.0, 2.0)
     reason: str | None = None
     withdrawn_at: str | None = None
     interrupted_actions: list[str] = field(default_factory=list)
@@ -130,7 +137,6 @@ class ScanAuthorityGuard:
     full_checks: int = 0
     polls: int = 0
     _fingerprint: tuple[Any, ...] | None = None
-    _expires_at: datetime | None = None
     _last_full: float = 0.0
     _scope_owner: uuid.UUID | None = None
 
@@ -197,7 +203,7 @@ class ScanAuthorityGuard:
             self._scope_owner = _uuid(await conn.fetchval(
                 "SELECT target_id FROM scope_receipts WHERE id=$1", str(self.scope_receipt_id),
             ))
-        fingerprint, expires_at = await self._read_fingerprint(conn)
+        fingerprint, _expires_at = await self._read_fingerprint(conn)
         reason, decision = await scan_action_authority_reason(
             conn,
             action=action,
@@ -208,7 +214,7 @@ class ScanAuthorityGuard:
         self.full_checks += 1
         self._last_full = time.monotonic()
         if reason is None:
-            self._fingerprint, self._expires_at = fingerprint, expires_at
+            self._fingerprint = fingerprint
             return
         self.reason, self.withdrawn_at = reason, _now().isoformat()
         event = _EVENTS.get(decision) if decision is not None else None
@@ -244,15 +250,28 @@ class ScanAuthorityGuard:
             "interrupted_actions": list(dict.fromkeys(self.interrupted_actions)),
             "not_run_actions": not_run,
         }
-        metadata = report.get("scan_metadata") if isinstance(report.get("scan_metadata"), dict) else {}
-        report["scan_metadata"] = {**metadata, "stop_reason": AUTHORIZATION_WITHDRAWN, "authority_stop": stop}
         coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
         reasons = [str(item) for item in coverage.get("reasons") or () if str(item).strip()]
         status = str(coverage.get("status") or "").strip().lower()
+        # Never a complete clean scan: a scan that claimed completeness becomes partial; a
+        # worse status (failed, cancelled) is kept.
+        status = "partial" if status in {"", "complete", "completed"} else status
         report["coverage"] = {
             **coverage,
-            # Never a complete clean scan: the grade is read with partial coverage.
-            "status": "partial" if status in {"", "complete", "completed"} else coverage.get("status"),
+            "status": status,
             "reasons": [*reasons, *([] if AUTHORIZATION_WITHDRAWN in reasons else [AUTHORIZATION_WITHDRAWN])],
+        }
+        metadata = report.get("scan_metadata") if isinstance(report.get("scan_metadata"), dict) else {}
+        reliability = [str(item) for item in metadata.get("grade_reliability_reasons") or () if str(item).strip()]
+        report["scan_metadata"] = {
+            **metadata,
+            # The same projection the finalizer writes, kept consistent with the coverage.
+            "status": status,
+            "partial": status == "partial",
+            "grade_reliable": False,
+            "grade_reliability_reasons": [*reliability, *([] if AUTHORIZATION_WITHDRAWN in reliability
+                                                          else [AUTHORIZATION_WITHDRAWN])],
+            "stop_reason": AUTHORIZATION_WITHDRAWN,
+            "authority_stop": stop,
         }
         return report

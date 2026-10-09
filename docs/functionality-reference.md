@@ -118,11 +118,18 @@ offline deterministic finalizer ── findings / coverage / grade reliability
 - **Workers** (`api/worker.py`, `api/broker_worker.py`): lease only admitted jobs/actions by leasing
   Redis Stream messages. They resolve secrets late, revalidate scope and approval immediately before
   privileged work, reserve typed budget, execute one registered capability adapter, and settle a
-  content-safe receipt. A local Scan re-checks the target's authorization before every action and
-  about every 2 s while one runs: a revoked or expired authorization, or a deactivated target, stops
-  the running tool, blocks every later action without traffic and releases its budget; the report
-  keeps what was found, reads partial and names `stop_reason: authorization_withdrawn` and the actions
-  that did not run. Broker actions are re-checked when each one is leased.
+  content-safe receipt. A canonical web DAST Scan executed on the local worker
+  (`_execute_reserved_deterministic_scan`, including its parallel shards) re-checks the target's
+  authorization before each action and about every 2 s while one runs: a revoked or expired
+  authorization, or a deactivated target, stops the running tool, blocks every later action without
+  traffic and releases its budget; the report keeps what was found, reads partial and names
+  `stop_reason: authorization_withdrawn` and the actions that did not run. When the database cannot
+  be reached the check is retried; an outage longer than about 10 s stops the action as
+  `authorization_unverified`, which is not reported as a revoke. Broker actions are re-checked when
+  each one is leased, not while running on a node. Not yet re-checked while running: device
+  posture, probe and web-DAST runs and AI scans (the `run_scan` path), device web children, finding
+  retests, and broker actions already running on a node; these rely on the authorization checked
+  when they were admitted or started.
 - **Compatibility scanner** (`scanner/scanner.py`, `scanner/scanner_tools/`): supplies migrated detector
   implementations behind registered adapters. Its historical phase waterfall and mode flags are not
   V2 orchestration authority and must not be used to add a new Scan engine.

@@ -21,18 +21,22 @@ from tests.test_worker_action_executor import _lease, _receipt
 class FixtureAuthority:
     """Fixture authority: scripted answers for ``check`` and ``poll``."""
 
-    def __init__(self, *, check=None, polls=(), poll_seconds=0.02):
+    def __init__(self, *, check=None, polls=(), poll_seconds=0.02, unverified_after_seconds=0.2,
+                 check_retry_delays=(0.01, 0.01)):
         self.poll_seconds = poll_seconds
-        self._check = check
+        self.unverified_after_seconds = unverified_after_seconds
+        self.check_retry_delays = check_retry_delays
+        self._check = list(check) if isinstance(check, list) else check
         self._polls = list(polls)
         self.checked: list[str] = []
         self.polled: list[str] = []
 
     async def check(self, action):
         self.checked.append(action.action_id)
-        if isinstance(self._check, BaseException):
-            raise self._check
-        return self._check
+        answer = self._check.pop(0) if isinstance(self._check, list) else self._check
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
 
     async def poll(self, action):
         self.polled.append(action.action_id)
@@ -75,7 +79,7 @@ def test_a_withdrawn_authority_blocks_before_dispatch_without_charging_budget():
     assert receipt.redacted_execution["execution_started"] is False
 
 
-def test_a_check_that_cannot_decide_fails_closed():
+def test_a_check_that_cannot_reach_the_database_retries_then_blocks_as_unverified():
     plan = _plan()
     action = plan.actions[0]
     calls = []
@@ -83,7 +87,19 @@ def test_a_check_that_cannot_decide_fails_closed():
     receipt = asyncio.run(_executor(_long_dispatch(calls), authority).execute(
         action, _lease(plan, action), lambda: asyncio.sleep(0)))
     assert calls == [] and receipt.status == "blocked"
-    assert receipt.errors == ("authorization_revoked",)
+    # Unverified, never reported as a revoke that did not happen.
+    assert receipt.errors == ("authorization_unverified",)
+    assert len(authority.checked) == 3  # the first try and both retries
+
+
+def test_a_check_that_recovers_within_its_retries_dispatches_normally():
+    plan = _plan()
+    action = plan.actions[0]
+    calls = []
+    authority = FixtureAuthority(check=[OSError("blip"), None])
+    receipt = asyncio.run(_executor(_long_dispatch(calls, seconds=0.01), authority).execute(
+        action, _lease(plan, action), lambda: asyncio.sleep(0)))
+    assert calls == [action.action_id] and receipt.status == "success"
 
 
 def test_a_revoke_while_the_action_runs_interrupts_it_and_keeps_partial_output():
@@ -113,19 +129,35 @@ def test_expiry_while_the_action_runs_is_reported_as_expired():
     assert receipt.status == "partial" and receipt.errors == ("authorization_expired",)
 
 
-def test_one_failed_poll_is_tolerated_and_two_consecutive_interrupt():
+def test_a_database_blip_shorter_than_the_tolerance_does_not_stop_a_healthy_action():
     plan = _plan()
     action = plan.actions[0]
-    tolerated = FixtureAuthority(polls=(OSError("blip"), None, OSError("blip"), None))
-    receipt = asyncio.run(_executor(_long_dispatch([], seconds=0.3), tolerated).execute(
+    # Several consecutive failed polls (about 0.1 s of outage) inside a 0.2 s tolerance.
+    blip = FixtureAuthority(polls=(OSError("blip"),) * 5 + (None,))
+    receipt = asyncio.run(_executor(_long_dispatch([], seconds=0.5), blip).execute(
         action, _lease(plan, action), lambda: asyncio.sleep(0)))
-    assert receipt.status == "success" and len(tolerated.polled) >= 4
+    assert receipt.status == "success" and receipt.errors == ()
+    assert len(blip.polled) >= 6
 
-    failing = FixtureAuthority(polls=(None, OSError("down"), OSError("down")))
-    receipt = asyncio.run(_executor(_long_dispatch([]), failing).execute(
+
+def test_a_longer_outage_interrupts_as_unverified_not_revoked():
+    plan = _plan()
+    action = plan.actions[0]
+    outage = FixtureAuthority(polls=(None,) + (OSError("down"),) * 200)
+    started = time.monotonic()
+    receipt = asyncio.run(_executor(_long_dispatch([]), outage).execute(
         action, _lease(plan, action), lambda: asyncio.sleep(0)))
-    assert receipt.status == "partial" and receipt.errors == ("authorization_revoked",)
-    assert len(failing.polled) == 3
+    assert time.monotonic() - started < 1.5
+    assert receipt.status == "partial" and receipt.errors == ("authorization_unverified",)
+    assert receipt.redacted_execution["target_authority_interruption"]["reason_code"] == "authorization_unverified"
+
+
+def test_the_production_tolerance_is_time_based():
+    from api.scan.worker_action_executor import AUTHORITY_UNVERIFIED_AFTER_SECONDS
+    from api.scan.action_authority_guard import ScanAuthorityGuard
+    assert AUTHORITY_UNVERIFIED_AFTER_SECONDS == 10.0
+    guard = ScanAuthorityGuard(pool=None, target_binding=None, scope_receipt_id=None, approval_receipt_id=None)
+    assert guard.unverified_after_seconds == 10.0 and guard.poll_seconds == 2.0
 
 
 def test_the_report_finalizer_is_exempt():
@@ -196,3 +228,4 @@ def test_an_unknown_reason_from_the_check_fails_closed(reason):
     receipt = asyncio.run(_executor(_long_dispatch(calls), FixtureAuthority(check=reason)).execute(
         action, _lease(plan, action), lambda: asyncio.sleep(0)))
     assert calls == [] and receipt.status == "blocked"
+    assert receipt.errors == ("authorization_unverified",)
