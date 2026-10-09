@@ -399,46 +399,93 @@ def save_state(path: Path, workspace: Path, state: Mapping) -> None:
 # --- moving to the XDG locations ---------------------------------------------------------------
 
 
-def _rewrite_record(source: Path, target: Path, workspace: Path) -> bool:
-    """Move one record to ``target``, naming ``workspace``; False when it is not a plain file."""
+def _move_exclusive(source: Path, target: Path) -> str:
+    """Move the plain file ``source`` to ``target`` without ever replacing ``target``:
+    ``moved``, ``exists`` (``target`` was there, it wins) or ``gone`` (another launch took
+    ``source`` first). A hard link to the new name, then the old name removed; where links do
+    not work (another file system), an exclusive copy."""
+    try:
+        try:
+            os.link(source, target, follow_symlinks=False)
+        except (NotImplementedError, TypeError):
+            os.link(source, target)
+    except FileExistsError:
+        return "exists"
+    except FileNotFoundError:
+        return "gone"
+    except OSError:
+        try:
+            data = source.read_bytes()
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
+        except FileExistsError:
+            return "exists"
+        except FileNotFoundError:
+            return "gone"
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+    if not stat.S_ISREG(target.lstat().st_mode):  # source was swapped for a link in between
+        target.unlink()
+        return "gone"
+    with contextlib.suppress(FileNotFoundError):
+        source.unlink()
+    return "moved"
+
+
+def _rewrite_record(source: Path, target: Path, workspace: Path, notes: list[str]) -> bool:
+    """Move one record to ``target``, naming ``workspace``; False when it is not a plain file,
+    is gone, or ``target`` already holds a (newer) record."""
     try:
         info = source.lstat()
-    except FileNotFoundError:
-        return False
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
-        return False
-    try:
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1 or target.exists():
+            return False
         state = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
     if not isinstance(state, dict):
         return False
     state["workspace"] = str(workspace)
-    save_state(target, workspace, {key: value for key, value in state.items()
-                                   if key not in {"schema_version", "workspace"}})
-    source.unlink()
+    try:
+        save_state(target, workspace, {key: value for key, value in state.items()
+                                       if key not in {"schema_version", "workspace"}})
+    except OSError as exc:
+        notes.append(f"note:      the workspace moved, but its record could not be written to {target} "
+                     f"({exc.strerror or exc}); changes since the last launch cannot be checked this once")
+        return False
+    with contextlib.suppress(FileNotFoundError):
+        source.unlink()
     return True
 
 
 def migrate_records(old: Path, new: Path) -> list[str]:
     """Move the client's workspace records from ``old`` (its configuration directory, where
     0.8.1 kept them) to ``new`` (its state directory). Links and anything that is not a plain
-    record file are left where they are; a record already at ``new`` wins."""
+    record file are left where they are; a record already at ``new`` wins, and another launch
+    moving the same records at the same time is no error."""
     if old.is_symlink() or not old.is_dir():
         return []
     moved, left = 0, []
-    for source in sorted(old.iterdir()):
-        target = new / source.name
-        info = source.lstat()
-        if source.suffix != ".json" or not stat.S_ISREG(info.st_mode) or info.st_nlink > 1 or target.exists():
+    try:
+        entries = sorted(old.iterdir())
+    except FileNotFoundError:
+        return []
+    for source in entries:
+        try:
+            info = source.lstat()
+        except FileNotFoundError:
+            continue  # another launch moved it
+        if source.suffix != ".json" or not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
             left.append(source.name)
             continue
         new.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.replace(source, target)  # renames the entry itself; a link is never followed
-        moved += 1
+        outcome = _move_exclusive(source, new / source.name)
+        if outcome == "moved":
+            moved += 1
+        elif outcome == "exists" and (source.exists() or source.is_symlink()):
+            left.append(source.name)
     notes = [f"moved:     {moved} workspace record(s) from {old} to {new}"] if moved else []
     if left:
-        notes.append(f"note:      left in {old}: {', '.join(left[:5])} (not plain record files, or already moved)")
+        notes.append(f"note:      left in {old}: {', '.join(left[:5])} (not plain record files, or a newer "
+                     f"record is already in {new})")
     else:
         with contextlib.suppress(OSError):
             old.rmdir()
@@ -463,11 +510,15 @@ def migrate_default_workspace(old: Path, new: Path, records: Path) -> list[str]:
     try:
         os.rename(old, new)
     except OSError as exc:
+        if not old.exists() and not old.is_symlink() and new.is_dir():
+            return [f"note:      the default agent workspace was moved to {new} by another launch"]
         return [(f"note:      could not move the old default workspace {old} to {new} ({exc.strerror or exc}); "
                  f"it was left in place, and the default workspace is now {new}")]
-    moved_record = _rewrite_record(state_path(records, old_real), state_path(records, new.resolve()), new.resolve())
+    notes: list[str] = []
+    moved_record = _rewrite_record(state_path(records, old_real), state_path(records, new.resolve()),
+                                   new.resolve(), notes)
     return [f"moved:     the default agent workspace from {old} to {new}"
-            + (" (and its record)" if moved_record else "")]
+            + (" (and its record)" if moved_record else ""), *notes]
 
 
 # --- merging -----------------------------------------------------------------------------------

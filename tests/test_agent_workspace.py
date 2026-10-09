@@ -43,7 +43,8 @@ def _json(path):
 
 
 def _record(tmp_path, workspace):
-    return _workspace.state_path(tmp_path / "state" / "shakerscan" / "workspaces", workspace)
+    # With SHAKERSCAN_CONFIG_DIR set (an isolated profile), state sits beside it.
+    return _workspace.state_path(tmp_path / "cfg.state" / "workspaces", workspace)
 
 
 # --- L3: merged, not rewritten -----------------------------------------------------------------
@@ -385,10 +386,14 @@ def test_the_record_lives_in_the_state_directory_and_the_default_workspace_in_th
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
     assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
     out = capsys.readouterr().out
-    workspace = tmp_path / "data" / "shakerscan" / "agent"
+    workspace = tmp_path / "cfg.data" / "agent"  # an isolated profile keeps its own state and data
     assert f"workspace: {workspace} (" in out
     assert _record(tmp_path, workspace).is_file()
     assert not (tmp_path / "cfg" / "agent").exists() and not (tmp_path / "cfg" / "workspaces").exists()
+    # Without an isolated profile: the XDG directories, with the XDG fallbacks.
+    monkeypatch.delenv(cli.ENV_CONFIG_DIR)
+    assert cli.state_dir() == tmp_path / "state" / "shakerscan"
+    assert cli.default_workspace() == tmp_path / "data" / "shakerscan" / "agent"
     monkeypatch.delenv("XDG_STATE_HOME")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert cli.state_dir() == tmp_path / "home" / ".local" / "state" / "shakerscan"
@@ -412,7 +417,7 @@ def test_an_existing_default_workspace_and_its_record_move_once(tmp_path, monkey
 
     assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
     out = capsys.readouterr().out
-    new = tmp_path / "data" / "shakerscan" / "agent"
+    new = tmp_path / "cfg.data" / "agent"
     assert f"moved:     the default agent workspace from {old} to {new} (and its record)" in out, out
     assert "moved:     2 workspace record(s) from" in out
     assert not old.exists() and _json(new / "opencode.json")["permission"] == {"bash": {"env": "deny"}}
@@ -440,7 +445,7 @@ def test_an_old_default_workspace_that_is_a_link_is_not_moved(tmp_path, monkeypa
 def test_an_old_default_workspace_is_not_moved_over_a_new_one(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
     (tmp_path / "cfg" / "agent").mkdir(parents=True)
-    (tmp_path / "data" / "shakerscan" / "agent").mkdir(parents=True)
+    (tmp_path / "cfg.data" / "agent").mkdir(parents=True)
     assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
     assert "an old default workspace remains at" in capsys.readouterr().out
     assert (tmp_path / "cfg" / "agent").is_dir()
@@ -463,3 +468,123 @@ def test_a_prepared_workspace_without_its_record_says_so_plainly(tmp_path):
     notes = _rerun(workspace)
     assert any(note.startswith("note:      changes since the last launch could not be checked (record missing")
                for note in notes), notes
+
+
+# --- concurrent launches, records inside the workspace -------------------------------------------
+
+
+def _old_records(tmp_path, *names):
+    old = tmp_path / "cfg" / "workspaces"
+    old.mkdir(parents=True)
+    for name in names:
+        (old / name).write_text('{"from": "old"}', encoding="utf-8")
+    return old, tmp_path / "cfg.state" / "workspaces"
+
+
+def test_records_another_launch_moves_first_are_no_error(tmp_path, monkeypatch):
+    old, new = _old_records(tmp_path, "a.json", "b.json")
+    real_link = os.link
+
+    def raced(source, target, **kwargs):
+        if Path(source).name == "a.json":  # the other launch takes it between listing and link
+            Path(source).unlink()
+            raise FileNotFoundError(source)
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "link", raced)
+    notes = _workspace.migrate_records(old, new)
+    assert notes == [f"moved:     1 workspace record(s) from {old} to {new}"], notes
+    assert (new / "b.json").is_file() and not old.exists()
+
+
+def test_a_record_that_vanishes_before_it_is_examined_is_skipped(tmp_path, monkeypatch):
+    old, new = _old_records(tmp_path, "a.json")
+    real_iterdir = Path.iterdir
+    monkeypatch.setattr(Path, "iterdir", lambda self: iter([*real_iterdir(self), self / "ghost.json"]))
+    assert _workspace.migrate_records(old, new) == [f"moved:     1 workspace record(s) from {old} to {new}"]
+
+
+def test_a_newer_record_written_meanwhile_is_never_overwritten(tmp_path, monkeypatch):
+    old, new = _old_records(tmp_path, "a.json")
+    real_link = os.link
+
+    def raced(source, target, **kwargs):
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text('{"from": "newer launch"}', encoding="utf-8")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "link", raced)
+    notes = _workspace.migrate_records(old, new)
+    assert (new / "a.json").read_text(encoding="utf-8") == '{"from": "newer launch"}'
+    assert (old / "a.json").is_file() and any("left in" in note for note in notes), notes
+
+
+def test_the_loser_of_a_concurrent_default_workspace_move_says_it_moved(tmp_path, monkeypatch):
+    old, new = tmp_path / "cfg" / "agent", tmp_path / "cfg.data" / "agent"
+    old.mkdir(parents=True)
+    real_rename = os.rename
+
+    def raced(source, target, **kwargs):
+        real_rename(source, target, **kwargs)  # the other launch wins
+        raise FileNotFoundError(source)
+
+    monkeypatch.setattr(os, "rename", raced)
+    notes = _workspace.migrate_default_workspace(old, new, tmp_path / "cfg.state" / "workspaces")
+    assert notes == [f"note:      the default agent workspace was moved to {new} by another launch"], notes
+
+
+def test_a_record_that_cannot_be_written_after_the_move_is_a_note(tmp_path, monkeypatch):
+    old, new = tmp_path / "cfg" / "agent", tmp_path / "cfg.data" / "agent"
+    records = tmp_path / "cfg.state" / "workspaces"
+    cli.prepare_workspace(old, URL, "operator", "shakerscan", authenticated=False, state_directory=records)
+
+    def full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(_workspace, "save_state", full)
+    notes = _workspace.migrate_default_workspace(old, new, records)
+    assert notes[0] == f"moved:     the default agent workspace from {old} to {new}"
+    assert "its record could not be written" in notes[1] and "No space left on device" in notes[1], notes
+    assert new.is_dir()
+
+
+def test_a_record_that_would_sit_inside_the_workspace_is_not_used(tmp_path):
+    """`shakerscan agent --here` from $HOME: ~/.local/state is inside the workspace, where the
+    agent could edit the record. It is not used, and the launch says so."""
+    home = tmp_path / "home"
+    notes = []
+    cli.prepare_workspace(home, URL, "operator", "shakerscan", authenticated=False, notes=notes,
+                          state_directory=home / ".local" / "state" / "shakerscan" / "workspaces")
+    assert any(note.startswith("warning:   the client's record of this workspace") and "not used" in note
+               for note in notes), notes
+    assert not (home / ".local" / "state").exists(), "no record was written inside the workspace"
+
+
+def test_a_workspace_holding_the_token_directory_is_warned_about(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(home / ".config" / "shakerscan"))
+    notes = []
+    cli.prepare_workspace(home, URL, "operator", "shakerscan", authenticated=False, notes=notes,
+                          state_directory=tmp_path / "records")
+    assert any(note.startswith("warning:   this workspace contains the client's configuration directory")
+               and "token" in note for note in notes), notes
+
+
+# --- the guard that keeps tests out of the real home ----------------------------------------------
+
+
+def test_client_tests_run_with_their_own_directories():
+    from tests.conftest import REAL_HOME
+
+    for directory in (cli.config_dir(), cli.state_dir(), cli.data_dir()):
+        assert REAL_HOME not in directory.resolve().parents, directory
+
+
+def test_the_real_home_guard_notices_a_write(tmp_path):
+    from tests.conftest import client_home_snapshot
+
+    home = tmp_path / "home"
+    (home / ".local" / "state" / "shakerscan").mkdir(parents=True)
+    before = client_home_snapshot(home)
+    (home / ".local" / "state" / "shakerscan" / "leak.json").write_text("{}", encoding="utf-8")
+    assert client_home_snapshot(home) != before
