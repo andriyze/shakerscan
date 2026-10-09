@@ -1152,7 +1152,10 @@ CREATE TABLE IF NOT EXISTS hunt_permission_baselines (
 );
 CREATE OR REPLACE FUNCTION hunt_permission_baselines_immutable() RETURNS trigger AS $baselines$
 BEGIN
-    IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+    -- Only the Hunt's own deletion removes its baseline: the foreign-key cascade runs after the
+    -- hunt_runs row is gone, and any other delete (from a statement or another trigger) finds
+    -- the Hunt still there and is refused.
+    IF TG_OP = 'DELETE' AND NOT EXISTS (SELECT 1 FROM hunt_runs WHERE id = OLD.hunt_run_id) THEN
         RETURN OLD;
     END IF;
     RAISE EXCEPTION 'hunt_permission_baselines is immutable';

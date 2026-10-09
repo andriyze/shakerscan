@@ -566,3 +566,66 @@ def test_a_granted_destination_is_held_to_the_hard_limits_at_dispatch():
     assert destination_hard_limit({**granted, "addresses": []}, "production")
     # The host's own scope evaluation still applies (a metadata address literal is blocked).
     assert "scope is blocked" in destination_hard_limit({**granted, "host": "169.254.169.254"}, "production")
+
+
+def test_a_write_admitted_before_its_grant_was_revoked_is_refused_at_dispatch(stack, monkeypatch):
+    """R1 (external release audit, 2026-10-09): the worker re-reads the Hunt's rebuilt authority.
+    A state-changing request admitted under a live grant, whose grant the person revoked before
+    the worker ran, is refused at dispatch and sends nothing."""
+    from fastapi import HTTPException
+    from hunt import permission_grants
+
+    async def standing_lookup(conn, target_id):  # the real standing authorization row
+        from target_authorization import current_target_authorization
+        return await current_target_authorization(conn, target_id)
+
+    monkeypatch.setattr(permission_grants, "standing_authorization", standing_lookup)
+
+    async def approval(*_args, **_kwargs):  # labelled double: the composition root's receipt validator
+        return {"scope_receipt_id": _standing["scope_receipt_id"]}
+
+    monkeypatch.setitem(stack.router._deps, "_validate_approval_receipt_for_action", lambda: approval)
+
+    _standing: dict = {}
+
+    async def write(hunt, key):
+        request = stack.router.HuntCapabilityRequest(
+            idempotency_key=key, input={"method": "POST", "path": "/api/items", "origin": TARGET_URL},
+        )
+        try:
+            return await stack.router.execute_hunt_capability(str(hunt["id"]), "http.request", request)
+        except HTTPException as exc:
+            return exc
+        finally:
+            if stack.workers:
+                await asyncio.gather(*stack.workers)
+
+    async def scenario():
+        nonlocal _standing
+        hunt, _standing = await _hunt(stack.pool, budget_overrides={
+            "max_state_changing_requests": 5, "max_active_actions": 5})
+        refused = await write(hunt, "r1-write-01")
+        assert getattr(refused, "status_code", None) == 409, refused
+        assert refused.detail["permission_request"]["kind"] == "capability.enable"
+        decided = await _decide(stack.pool, hunt, refused.detail["permission_request"]["id"])
+
+        async def revoke(_payload):
+            from hunt.permission_grants import revoke_grant
+
+            async with stack.pool.acquire() as conn, conn.transaction():
+                await revoke_grant(conn, hunt["id"], uuid.UUID(decided["grant"]["id"]),
+                                   revoked_by="alice@example.test")
+
+        stack.before_worker.append(revoke)
+        answer = await write(hunt, "r1-write-01")
+        action, reservation, _used = await _action(stack.pool, hunt, "r1-write-01")
+        assert stack.wire == [], "a refused dispatch sends nothing"
+        assert action["status"] == "blocked", (action["status"], _summary(action))
+        summary = _summary(action)
+        assert summary["reason_code"] == "dispatch_authority_rejected"
+        assert summary["refusal_stage"] == "dispatch" and summary["execution_started"] is False
+        assert "allow_state_changing_http" in summary["message"]
+        assert reservation["status"] == "released"  # the hold is released at once, not by stale recovery
+        assert answer["action_result"]["status"] == "blocked", answer["result"]
+
+    stack.loop.run_until_complete(scenario())

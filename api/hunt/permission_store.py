@@ -22,6 +22,7 @@ from typing import Any
 import uuid
 
 from .credential_uses import live_credential_grants
+from .grant_authority import coverage_key
 from .permission_bounds import Bounds, bounds_from_public, merge
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
@@ -128,7 +129,10 @@ CREATE TABLE IF NOT EXISTS hunt_permission_baselines (
 );
 CREATE OR REPLACE FUNCTION hunt_permission_baselines_immutable() RETURNS trigger AS $baselines$
 BEGIN
-    IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+    -- Only the Hunt's own deletion removes its baseline: the foreign-key cascade runs after the
+    -- hunt_runs row is gone, and any other delete (from a statement or another trigger) finds
+    -- the Hunt still there and is refused.
+    IF TG_OP = 'DELETE' AND NOT EXISTS (SELECT 1 FROM hunt_runs WHERE id = OLD.hunt_run_id) THEN
         RETURN OLD;
     END IF;
     RAISE EXCEPTION 'hunt_permission_baselines is immutable';
@@ -349,7 +353,8 @@ def public_request(row: Any) -> dict[str, Any]:
         "status": item["status"],
         "subject": subject,
         "subject_digest": item["subject_digest"],
-        **{key: value for key, value in display.items() if key in {"needed_total", "proposed_total"}},
+        **{key: value for key, value in display.items()
+           if key in {"needed_total", "proposed_total", "auto_grant_withheld"}},
         **render(str(item["kind"]), subject, display),
         "action_id": str(item["action_id"]) if item.get("action_id") else None,
         "capability_name": item.get("capability_name"),
@@ -380,6 +385,10 @@ def public_grant(row: Any) -> dict[str, Any]:
         "created_at": _iso(item.get("created_at")),
         "revoked_at": _iso(item.get("revoked_at")),
         "revoked_by": item.get("revoked_by"),
+        # Once revoked, the Hunt's start bounds no longer grant this automatically.
+        "auto_grant_withheld": (
+            coverage_key(item["kind"], item.get("subject_json")) if item.get("revoked_at") else None
+        ),
     }
 
 

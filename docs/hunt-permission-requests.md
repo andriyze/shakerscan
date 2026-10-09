@@ -305,7 +305,9 @@ title and fixed recovery text:
 The agent re-sends the same key and the same input. If the request is granted, the parked row is
 re-admitted under the same action id through the full admission pipeline: scope, budget
 reservation and credential resolution. A grant changes what admission allows but never skips
-it. A grant that was revoked or went stale in the meantime produces a fresh request.
+it. A grant that was revoked or went stale in the meantime produces a fresh request. That
+request goes to a person even when the start bounds cover it: once a person revokes a grant,
+the bounds stop granting what it covered (see Revocation).
 
 Budget-shortage rows become `awaiting_permission` instead of `failed`, which fixes the
 cached-refusal replay. Work that already ran is never re-dispatched.
@@ -527,9 +529,32 @@ Where the engine (PR E2) differs from, or makes concrete, the design above:
 - **Routes.** Besides the routes above: `GET /hunts/{id}/permission-events` (the audit). The
   planner ingress delegates the reads only. On OSS the decision and revoke routes are protected by
   the engine's existing API authentication alone: the trust boundary is the host.
-- **Revocation.** A `target.authorize` or `capability.enable` grant is reverted in the Hunt's
-  policy; a `credential.use` grant stops working at once; a budget raise (an amendment) and
-  pre-authorization bounds are not revocable. Revoking never undoes a remembered record.
+- **Revocation.** Revoking takes back exactly what that grant gave. The Hunt's authority
+  (its five policy flags, the allowed capabilities and the authorized destinations) is rebuilt
+  under the Hunt row lock from its baseline (`hunt_permission_baselines`: the authority before
+  its first grant, which cannot be changed) and the grants that are still live. Revoking one grant
+  never takes away what the start or another live grant gives, and never restores what a revoked
+  grant gave. A grant that is admitted but not yet dispatched is refused at dispatch if its
+  authority was revoked in between. A `credential.use` grant stops working at once. A budget
+  raise (an amendment) and the pre-authorization bounds cannot be revoked. Revoking never undoes
+  a remembered record.
+  - **Start bounds.** After a person revokes a grant, the bounds no longer grant what it covered
+    for the rest of the Hunt: the capability flag, the destination's scheme, host and port, or
+    the credential profile. A later refusal for it is parked as `awaiting_permission` with a
+    request that a person allows with `shakerscan approve`. The request shows
+    `auto_grant_withheld` (the coverage and the revoked grant). The grant list and the `revoked`
+    event show what was withheld. The bounds still grant everything else they cover.
+  - **Target authorization is separate.** A capability grant may bind the target's standing
+    approval receipt (`approval_receipt_id`, `scope_receipt_id`, `authorization_confirmed`).
+    Revoking grants does not undo it: it is a separate decision, withdrawn by revoking the
+    target's standing authorization.
+  - **Limit.** A Hunt holds at most 64 authorized destinations. A grant past that is refused
+    with `destination_limit_reached`, and no destination is dropped.
+  - **Upgrade from 2.8.0.** 2.8.0 restored a snapshot of the whole policy on revocation (R1,
+    external release audit, 2026-10-09). On startup, every unfinished Hunt with grants and no
+    baseline is rebuilt once from its grant rows, each in its own transaction. A Hunt that cannot
+    be rebuilt is ended `failed` (`permission_authority_unrepaired`) and logged by id, and startup
+    continues.
 - **MCP.** The `awaiting_permission` outcome and `shakerscan_hunt_permission_wait` ship in E2;
   a capability outside the manifest is sent to the engine, which answers with its code (D31).
 - **UI.** The Hunt page lists pending requests read-only with the `shakerscan approve` command;

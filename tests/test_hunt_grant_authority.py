@@ -97,3 +97,31 @@ def test_the_diff_names_fields_capabilities_and_origins_only():
     assert diff == {"flags_on": [], "flags_off": ["active_testing", "allow_oob_interactions"],
                     "capabilities_added": [], "capabilities_removed": ["xss.verify"],
                     "destinations_added": [], "destinations_removed": ["https://a.example.test"]}
+
+
+def test_the_reconstructed_flags_do_not_depend_on_grant_order():
+    """Two 2.8.0 grants in one transaction share ``created_at`` and their ids are random; the
+    baseline is the intersection of every recorded ``policy_before``, whatever the order."""
+    start = {key: False for key in ("active_testing", "allow_state_changing_http", "allow_oob_interactions",
+                                     "network_discovery", "mutation_allowed")}
+    later = {**start, "active_testing": True, "network_discovery": True}
+    grants = [
+        capability("xss.verify", "active-testing", created="t", policy_before=start, capability_added=True),
+        capability("service.snmp.inspect", "tcp-discovery", created="t", policy_before=later, capability_added=True),
+    ]
+    forward = reconstruct_baseline({**START, **later}, grants)
+    backward = reconstruct_baseline({**START, **later}, list(reversed(grants)))
+    assert forward == backward
+    assert not any(forward["flags"].values())
+
+
+def test_coverage_keys_name_what_a_bound_covers():
+    from hunt.grant_authority import coverage_key
+
+    assert coverage_key("capability.enable", {"capability": "http.request", "flag": "state-changing"}) == \
+        "capability:state-changing"
+    assert coverage_key("target.authorize", json.dumps({"host": "API.example.test.", "port": 443,
+                                                        "scheme": "https"})) == "target:https://api.example.test:443"
+    assert coverage_key("credential.use", {"profile_id": "p-1"}) == "credential:p-1"
+    assert coverage_key("budget.raise", {"dimension": "max_http_requests"}) is None
+    assert coverage_key("capability.enable", "[1]") is None
