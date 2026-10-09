@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowUpDown, ChevronDown, ChevronRight, Search, X } from 'lucide-react'
 import { API_URL } from '@/lib/api'
+import { BODY_WITHHELD_LABEL, bodyWithheld } from '@/lib/archiveBodies'
 import { Button, Card, ErrorState } from '@/components/ui'
 import { MethodBadge } from '@/components/collections/CollectionViewer'
 
@@ -22,6 +23,8 @@ export interface HuntTransaction {
   hunt_action_id?: string | null
   request?: Message
   response?: Message
+  /** Bodies this export left out (size or budget limit): withheld, not absent. */
+  payload_omitted?: string[] | null
 }
 interface Archive { fidelity: string; fidelity_detail: string; total: number; transactions: HuntTransaction[] }
 
@@ -57,7 +60,7 @@ function prettyBody(body?: string | null): string {
   try { return JSON.stringify(JSON.parse(body), null, 2) } catch { return body }
 }
 
-function MessageView({ title, message }: { title: string; message?: Message }) {
+function MessageView({ title, message, withheld = false }: { title: string; message?: Message; withheld?: boolean }) {
   const headers = Object.entries(message?.headers || {})
   const body = prettyBody(message?.body)
   return <div className="min-w-0">
@@ -66,7 +69,7 @@ function MessageView({ title, message }: { title: string; message?: Message }) {
     {headers.length > 0 && <dl className="mb-2 grid grid-cols-[minmax(0,10rem)_minmax(0,1fr)] gap-x-3 gap-y-0.5 rounded-md bg-black/30 p-2 font-mono text-[11px]">
       {headers.map(([key, value]) => <Fragment key={key}><dt className="truncate text-gray-500">{key}</dt><dd className="break-all text-gray-300">{value}</dd></Fragment>)}
     </dl>}
-    <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-md bg-black/30 p-2 font-mono text-[11px] text-gray-300">{body || <span className="text-gray-600">No body recorded</span>}</pre>
+    <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-md bg-black/30 p-2 font-mono text-[11px] text-gray-300">{body || <span className="text-gray-600">{withheld ? BODY_WITHHELD_LABEL : 'No body recorded'}</span>}</pre>
   </div>
 }
 
@@ -163,8 +166,8 @@ export function RequestRow({ row, index, expanded, onToggle, showCapability = tr
     </button>
     {expanded && <div className="grid gap-4 border-t border-gray-800/70 bg-gray-950/40 px-4 py-3 lg:grid-cols-2">
       <p className="select-all break-all rounded-md bg-black/30 px-2 py-1.5 font-mono text-xs text-gray-200 lg:col-span-2">{(row.method || 'GET').toUpperCase()} {row.url || 'URL unavailable'}</p>
-      <MessageView title={`#${index + 1} request`} message={row.request} />
-      <MessageView title="Response" message={row.response} />
+      <MessageView title={`#${index + 1} request`} message={row.request} withheld={bodyWithheld(row, 'request')} />
+      <MessageView title="Response" message={row.response} withheld={bodyWithheld(row, 'response')} />
       <p className="text-[11px] text-gray-500 lg:col-span-2">
         {row.capability_name || row.adapter || 'Unattributed'}{row.principal_slot ? ` · ${row.principal_slot} principal` : ''}
         {row.started_at ? ` · ${new Date(row.started_at).toLocaleString()}` : ''}
