@@ -474,7 +474,15 @@ def resume_plan(
         need, technique, field_name, seconds_per_request=rate, unfundable=tuple(unfundable),
         remaining_wall=remaining_wall if rate is not None else None, unconfirmed=unconfirmed,
         remaining_requests=remaining_requests,
-        last_chance_wall=last_chance_wall_seconds(rate),
+        # A last chance must hold more than the unit was ever killed at, or it would only be
+        # refused by the stage guard (and, without it, killed the same way).
+        last_chance_wall=(
+            max(
+                last_chance_wall_seconds(rate) or 0,
+                int(wall_killed.get(unit_key(technique, field_name), 0))
+                + MINIMUM_STAGE_WALL_SECONDS,
+            ) if rate else None
+        ),
     )
 
 
@@ -657,8 +665,9 @@ async def run_staged_sqli_attempt(
     ``round_wall_ceiling`` and ``scan_wall_share`` bound what is funded (``resume_plan``): a
     unit of a technique that cannot be funded is not run, and the attempt moves on to the
     next technique that can. ``last_chance`` is the Scan's final attempt at the next unit: its
-    hold cannot fund the unit's negative verdict but can a positive, so the unit is started
-    even on a hold no larger than one it already ran out of.
+    hold cannot fund the unit's negative verdict but can a positive. The stage guard still
+    refuses a hold no larger than one the unit already ran out of (the planner sizes a last
+    chance above it).
     """
     fields = tuple(dict.fromkeys(str(item) for item in fields or ())) or None
     count = max(1, int(field_count or (len(fields) if fields else 1)))
@@ -754,7 +763,7 @@ async def run_staged_sqli_attempt(
             stages.append({**label, "outcome": "wall_exhausted"})
             errors.append("timeout")
             break
-        if prior.wall_killed.get(key, 0) >= wall and not (last_chance and not ran_here):
+        if prior.wall_killed.get(key, 0) >= wall:
             # The same unit already ran out of a hold at least this large: re-running it
             # would send the same requests and stop the same way. The candidate stays
             # incomplete for want of wall, and nothing new was interrupted, so this does

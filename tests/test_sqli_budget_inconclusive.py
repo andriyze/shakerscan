@@ -1232,3 +1232,18 @@ def test_an_unsliceable_pending_candidate_does_not_cost_the_last_chance(monkeypa
     assert scan.found == {("/vuln", "B", "field3")}
     assert scan.residual()["tool_wall_seconds"] == 137
 
+
+def test_a_last_chance_is_never_sized_at_or_below_the_wall_its_unit_was_killed_at():
+    """Follow-up review: a last chance for a unit already wall-killed at a hold at least as
+    large would be refused by the stage guard -- or, without it, killed the same way."""
+    # The chat's union-based unit on field 0 was killed at 420 s (32 requests at 13.1 s).
+    plan = resume_plan(
+        [], {"U:field0": 420}, fields=tuple(f"field{i}" for i in range(8)),
+        rate_samples=[("U:field0", 420 / 32)], killed_sent={"U:field0": 32},
+    )
+    # The probe minimum at 13.1 s is 217 s; the unit needs more than its killed 420 s.
+    assert plan.last_chance_wall == 440
+    # A unit never killed needs only the probe minimum.
+    fresh = resume_plan(["U:field0"], {}, fields=("field0", "field1"), rate_samples=[("U:field0", 4.0)])
+    assert fresh.last_chance_wall == 80
+
