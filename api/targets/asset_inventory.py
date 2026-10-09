@@ -6,14 +6,15 @@ Domain grouping pages complete groups and never creates asset membership.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from fastapi import HTTPException
 
 try:
-    from scanner_tools.vendor_risk import MULTI_PART_TLDS
+    from scope.psl import PublicSuffixError, parse_domain, registrable_domain
 except ModuleNotFoundError:
-    from scanner.scanner_tools.vendor_risk import MULTI_PART_TLDS
+    from ..scope.psl import PublicSuffixError, parse_domain, registrable_domain
 
 
 ROOT_COLUMNS = """t.id,t.name,t.url,t.is_active,t.created_at,t.updated_at,t.asset_owner_id,
@@ -141,14 +142,29 @@ SORTS = {
     'recent': (f"COALESCE(extract(epoch FROM {LAST_SCANNED}),0)", 'max', 'DESC'),
     'created': ('extract(epoch FROM t.created_at)', 'max', 'DESC'),
 }
-GROUP_DOMAIN = r"""CASE
-    WHEN locator LIKE '%:%' OR locator ~ '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
-         OR locator='localhost' OR locator ~ '\.(local|internal|localhost)$'
-         OR locator NOT LIKE '%.%' THEN locator
-    WHEN substring(locator from '[^.]+\.[^.]+$')=ANY({tlds}::text[])
-        THEN COALESCE(substring(locator from '[^.]+\.[^.]+\.[^.]+$'),locator)
-    ELSE COALESCE(substring(locator from '[^.]+\.[^.]+$'),locator)
-END"""
+_NETWORK_LOCATOR = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
+
+
+def group_domain(locator: str) -> str:
+    """The Targets list's domain group for an asset locator: its registrable domain under the
+    bundled Public Suffix List (PRIVATE section included), so ``victim.github.io`` and
+    ``attacker.github.io`` are two groups and ``shop.example.co.uk`` belongs to
+    ``example.co.uk``. Addresses, single labels and .local/.internal/.localhost names, and a host
+    that is itself a public suffix, are their own group. A group never spans registrants."""
+    locator = str(locator or "").split("#", 1)[0].strip().lower().rstrip(".")
+    if (":" in locator or _NETWORK_LOCATOR.fullmatch(locator) or "." not in locator
+            or locator == "localhost" or locator.endswith((".local", ".internal", ".localhost"))):
+        return locator
+    return registrable_domain(locator) or locator
+
+
+def discoverable(group: str) -> bool:
+    """Whether subdomain discovery can run for a domain group (POST /discovery would accept it)."""
+    try:
+        parse_domain(group)
+    except PublicSuffixError:
+        return False
+    return True
 
 
 def public_asset(row: Any) -> dict[str, Any]:
@@ -230,37 +246,54 @@ async def list_assets(conn: Any, *, search: str = '', connected_only: bool = Fal
 
 
 async def _list_domain_groups(conn: Any, query: _Query, *, sort: str, limit: int, offset: int) -> dict[str, Any]:
+    """Page complete domain groups, rather than cutting a root and its subdomains across pages.
+
+    Grouping uses the Public Suffix List (``group_domain``), which SQL cannot apply, so the
+    matching assets' ids, locators and sort keys are read first, grouped and paged here, and only
+    the page's assets are read in full.
+    """
     order, aggregate, direction = SORTS[sort]
-    tlds = query.bind(sorted(MULTI_PART_TLDS))
-    # Page complete groups, rather than cutting a root and its subdomains across asset pages.
-    grouped = f"""WITH matching AS (
-        SELECT t.id,target_asset_locator(t.url) AS locator,{order} AS sort_key
-        FROM {ROOT_FROM} WHERE {query.where}
-    ), grouped AS (SELECT id,sort_key,{GROUP_DOMAIN.format(tlds=tlds)} AS group_domain FROM matching)"""
-    counts = await conn.fetchrow(f"""{grouped}
-        SELECT count(*) AS total,count(DISTINCT group_domain) AS total_groups FROM grouped""", *query.parameters)
-    page_limit, page_offset = query.bind(limit), query.bind(offset)
-    # Alphabetical inventories order groups by the domain itself, not by member display names.
-    group_key = 'min(group_domain)' if sort == 'name' else f'{aggregate}(sort_key)'
-    rows = await conn.fetch(f"""{grouped}, page AS (
-        SELECT group_domain,{group_key} AS group_key FROM grouped GROUP BY group_domain
-        ORDER BY group_key {direction},group_domain LIMIT {page_limit} OFFSET {page_offset}
-    )
-    SELECT {ROOT_COLUMNS},{DETAIL_COLUMNS},grouped.group_domain
-    FROM {ROOT_FROM} JOIN grouped ON grouped.id=t.id JOIN page USING(group_domain)
-    ORDER BY page.group_key {direction},group_domain,(target_asset_locator(t.url)=group_domain) DESC,
-        grouped.sort_key {direction},target_asset_locator(t.url),t.id
-    """, *query.parameters)
-    groups: dict[str, dict[str, Any]] = {}
+    matching = await conn.fetch(f"""SELECT t.id,target_asset_locator(t.url) AS locator,{order} AS sort_key
+        FROM {ROOT_FROM} WHERE {query.where}""", *query.parameters)
+    members: dict[str, list[Any]] = {}
+    for row in matching:
+        members.setdefault(group_domain(row['locator'] or ''), []).append(row)
+    descending = direction == 'DESC'
+
+    def present(value: Any) -> tuple[int, Any]:
+        # PostgreSQL puts NULL last ascending and first descending.
+        return (1, 0) if value is None else (0, value)
+
+    def group_key(item: tuple[str, list[Any]]) -> Any:
+        domain, rows = item
+        if sort == 'name':
+            return domain
+        values = [row['sort_key'] for row in rows if row['sort_key'] is not None]
+        return present((max if aggregate == 'max' else min)(values) if values else None)
+
+    ordered = sorted(members.items(), key=lambda item: item[0])
+    ordered.sort(key=group_key, reverse=descending)
+    page = ordered[offset:offset + limit]
+    ids = [row['id'] for _domain, rows in page for row in rows]
+    detail = {row['id']: row for row in await conn.fetch(f"""SELECT {ROOT_COLUMNS},{DETAIL_COLUMNS}
+        FROM {ROOT_FROM} WHERE t.id = ANY($2::uuid[])""", query.parameters[0], ids)} if ids else {}
+    groups: list[dict[str, Any]] = []
     targets = []
-    for row in rows:
-        asset = public_asset(row)
-        domain = asset.pop('group_domain')
-        asset['root_domain'] = domain
-        targets.append(asset)
-        groups.setdefault(domain, {'root_domain': domain, 'targets': []})['targets'].append(asset)
-    return {'targets': targets, 'groups': list(groups.values()), 'total': int(counts['total']),
-            'total_groups': int(counts['total_groups']), 'limit': limit, 'offset': offset,
+    for domain, rows in page:
+        rows = sorted(rows, key=lambda row: (str(row['locator'] or ''), str(row['id'])))
+        rows.sort(key=lambda row: present(row['sort_key']), reverse=descending)
+        rows.sort(key=lambda row: str(row['locator'] or '') != domain)
+        group = {'root_domain': domain, 'discoverable': discoverable(domain), 'targets': []}
+        for row in rows:
+            if row['id'] not in detail:
+                continue  # removed between the two reads
+            asset = public_asset(detail[row['id']])
+            asset['root_domain'] = domain
+            targets.append(asset)
+            group['targets'].append(asset)
+        groups.append(group)
+    return {'targets': targets, 'groups': groups, 'total': len(matching),
+            'total_groups': len(members), 'limit': limit, 'offset': offset,
             'inventory_kind': 'assets', 'group_by': 'domain'}
 
 

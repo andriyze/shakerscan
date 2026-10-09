@@ -19,7 +19,7 @@ test('HIERARCHY-001 root domains expand to subdomains while IPv4 and IPv6 stay i
       const matching = targets.filter(target => !search || target.locator.includes(search))
       const domains = [...new Set(matching.map(target => target.root_domain))]
       return route.fulfill({json:{targets:matching,total:matching.length,total_groups:domains.length,
-        groups:domains.map(root_domain => ({root_domain,targets:matching.filter(target => target.root_domain===root_domain)}))}})
+        groups:domains.map(root_domain => ({root_domain,discoverable:root_domain==='example.test',targets:matching.filter(target => target.root_domain===root_domain)}))}})
     }
     return route.fulfill({json:{status:'healthy',skill:null,revision:0,targets:[],total:0}})
   })
@@ -104,7 +104,7 @@ test('HIERARCHY-003 root-domain discovery tracks completion and reveals new cano
     }
     if (url.pathname === '/targets/inventory') {
       const members = completed ? [targets[0],targets[1],found] : [targets[0],targets[1]]
-      return route.fulfill({json:{targets:members,groups:[{root_domain:'example.test',targets:members}],total:members.length,total_groups:1}})
+      return route.fulfill({json:{targets:members,groups:[{root_domain:'example.test',discoverable:true,targets:members}],total:members.length,total_groups:1}})
     }
     return route.fulfill({json:{status:'healthy',skill:null,revision:0,targets:[],total:0}})
   })
@@ -124,7 +124,7 @@ test('HIERARCHY-004 discovery refusal reports the server reason and re-enables t
   await page.route(`${MOCK_API_ORIGIN}/**`,async route => {
     const url=new URL(route.request().url())
     if (url.pathname === '/discovery') return route.fulfill({status:403,json:{detail:'Discovery is disabled by the operator'}})
-    if (url.pathname === '/targets/inventory') return route.fulfill({json:{targets:[targets[0]],groups:[{root_domain:'example.test',targets:[targets[0]]}],total:1,total_groups:1}})
+    if (url.pathname === '/targets/inventory') return route.fulfill({json:{targets:[targets[0]],groups:[{root_domain:'example.test',discoverable:true,targets:[targets[0]]}],total:1,total_groups:1}})
     return route.fulfill({json:{status:'healthy',skill:null,revision:0,targets:[],total:0}})
   })
   await page.goto('/targets')
@@ -135,4 +135,27 @@ test('HIERARCHY-004 discovery refusal reports the server reason and re-enables t
   await expect(page.getByText('Discovery is disabled by the operator',{exact:true})).toBeVisible()
   await menu.click()
   await expect(page.getByRole('menuitem',{name:'Discover subdomains of example.test',exact:true})).toBeEnabled()
+})
+
+test('HIERARCHY-005 Discover is offered only for domain groups discovery accepts', async ({page}) => {
+  await pinMockApiOrigin(page)
+  const asset = (id: string, locator: string) => ({ id, asset_id: id, name: locator, locator, url: `host://${locator}`,
+    is_active: true, environment: 'lab', connected_device: false, origin_count: 0, service_count: 0, active_findings_count: 0 })
+  const pages = asset('00000000-0000-4000-8000-000000000501', 'github.io')
+  const victim = asset('00000000-0000-4000-8000-000000000502', 'victim.github.io')
+  const victimApi = asset('00000000-0000-4000-8000-000000000503', 'api.victim.github.io')
+  await page.route(`${MOCK_API_ORIGIN}/**`,async route => {
+    const url=new URL(route.request().url())
+    // The engine groups by the Public Suffix List: github.io tenants are separate groups, and a
+    // group that is itself a public suffix is not discoverable.
+    if (url.pathname === '/targets/inventory') return route.fulfill({json:{targets:[pages,victim,victimApi],total:3,total_groups:2,
+      groups:[{root_domain:'github.io',discoverable:false,targets:[pages]},
+              {root_domain:'victim.github.io',discoverable:true,targets:[victim,victimApi]}]}})
+    return route.fulfill({json:{status:'healthy',skill:null,revision:0,targets:[],total:0}})
+  })
+  await page.goto('/targets')
+  await expect(page.getByRole('button',{name:'Discover subdomains of victim.github.io',exact:true})).toBeVisible()
+  await page.getByRole('button',{name:'More actions for github.io'}).click()
+  await expect(page.getByRole('menuitem',{name:'Discover subdomains of github.io',exact:true})).toHaveCount(0)
+  await expect(page.getByRole('button',{name:'Discover subdomains of github.io',exact:true})).toHaveCount(0)
 })

@@ -20,7 +20,7 @@ test('TARGET-FILTERS-001 server filters select Web and IP/network without losing
       expect(url.searchParams.get('offset')).toBe('0')
       const matching=kind==='web' ? [targets[0]] : kind==='network' ? [targets[1]] : targets
       return route.fulfill({json:{targets:matching,total:matching.length,total_groups:matching.length,
-        groups:matching.map(target=>({root_domain:target.locator,targets:[target]}))}})
+        groups:matching.map(target=>({root_domain:target.locator,discoverable:/[a-z]/.test(target.locator.split('.').pop()||''),targets:[target]}))}})
     }
     return route.fulfill({json:{skill:null,revision:0}})
   })

@@ -218,14 +218,14 @@ def extract_root_domain(url: str) -> str:
         except ValueError:
             pass
         # The registrable domain (eTLD+1) under the bundled Public Suffix List, so
-        # shop.example.co.uk is example.co.uk (not co.uk) and user.github.io is itself. A
-        # public suffix or single label is returned as is; scope matching never lets one widen.
+        # shop.example.co.uk is example.co.uk (not co.uk) and user.github.io is itself. When that
+        # name would span other registrants (a public suffix, or amazonaws.com with
+        # s3.amazonaws.com below it) the host itself is the root, so a root never widens scope.
         try:
-            from scope.psl import registrable_domain
+            from scope.roots import root_for_host
         except ModuleNotFoundError:  # package import in host-side tests
-            from api.scope.psl import registrable_domain
-        host = host.lower().rstrip('.')
-        return registrable_domain(host) or host
+            from api.scope.roots import root_for_host
+        return root_for_host(host)
     except Exception:
         return url
 def _graph_get(container: dict[str, Any], *path: str) -> Any:

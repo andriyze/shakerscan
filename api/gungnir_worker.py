@@ -34,9 +34,11 @@ try:
 except ModuleNotFoundError:  # source checkout / package import
     from scanner.scanner_tools.discovered_names import canonical_name, subdomain_of
 try:
-    from scope.psl import is_public_suffix, registrable_domain
+    from scope.psl import registrable_domain, spans_public_suffix
+    from scope.roots import monitored_root
 except ModuleNotFoundError:  # package import (api.gungnir_worker)
-    from .scope.psl import is_public_suffix, registrable_domain
+    from .scope.psl import registrable_domain, spans_public_suffix
+    from .scope.roots import monitored_root
 
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
@@ -89,8 +91,8 @@ def monitored_roots(roots: list[str]) -> list[str]:
         name = str(root or "").strip().lower().rstrip(".")
         if not name or name in kept:
             continue
-        if is_public_suffix(name):
-            print(f"[gungnir] Not monitoring {name}: it is a public suffix", flush=True)
+        if spans_public_suffix(name):
+            print(f"[gungnir] Not monitoring {name}: it is or covers a public suffix", flush=True)
             continue
         kept.append(name)
     return kept
@@ -137,13 +139,26 @@ async def init_db():
 
 
 async def get_monitored_domains() -> list[str]:
-    """Get unique root_domains from targets table."""
+    """Unique roots to watch. A legacy spanning root (co.uk, stored before 2.8.1 and not yet
+    recomputed by the startup migration) is replaced by the root each of its targets has now
+    (example.co.uk), so monitoring continues for the customer and never covers the suffix."""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT DISTINCT root_domain FROM targets
             WHERE root_domain IS NOT NULL AND is_active = true
         """)
-        return [r['root_domain'] for r in rows if r['root_domain']]
+        stored = [r['root_domain'] for r in rows if r['root_domain']]
+        legacy = [root for root in stored if spans_public_suffix(root)]
+        roots = [root for root in stored if root not in legacy]
+        if legacy:
+            for row in await conn.fetch("""
+                SELECT root_domain, url FROM targets
+                WHERE root_domain = ANY($1::text[]) AND is_active = true
+            """, legacy):
+                root = monitored_root(row['root_domain'], row['url'])
+                if root:
+                    roots.append(root)
+        return list(dict.fromkeys(roots))
 
 
 async def count_added_today(apex: str, day) -> int:

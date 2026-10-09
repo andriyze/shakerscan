@@ -165,6 +165,7 @@ from runtime.scan_credentials import (
     scan_credential_resolution_capability,
 )
 from operations.discovery import discovery_domain, queued_domain_refusal
+from scope.roots import binding_roots
 from scan.collection_replay import (
     EXECUTABLE_REPLAY_POLICIES,
     ScanCollectionReplayContractError,
@@ -1924,11 +1925,8 @@ async def _hydrate_generic_scan_credentials(
             dict(hydrated.get("runtime_scope_guard") or {})
             if isinstance(hydrated.get("runtime_scope_guard"), Mapping) else {}
         )
-        roots = tuple(
-            str(item).strip().lower().rstrip(".")
-            for item in guard.get("allowed_root_domains") or ()
-            if str(item).strip()
-        ) or (str(row["root_domain"] or parsed.hostname).lower().rstrip("."),)
+        # A legacy spanning root (co.uk) is recomputed from the host, never kept or widened.
+        roots = binding_roots(guard.get("allowed_root_domains"), row["root_domain"], parsed.hostname)
         target = TargetBinding(
             target_id=str(row["target_id"]),
             target_kind=target_kind,
@@ -2190,11 +2188,7 @@ def _ai_gate_target_binding(
         if isinstance(hydrated.get("runtime_scope_guard"), Mapping)
         else {}
     )
-    roots = tuple(
-        str(item).strip().lower().rstrip(".")
-        for item in guard.get("allowed_root_domains") or ()
-        if str(item).strip()
-    ) or (parsed.hostname.lower().rstrip("."),)
+    roots = binding_roots(guard.get("allowed_root_domains"), None, parsed.hostname)
     origins = tuple(
         str(item).strip().lower().rstrip("/")
         for item in guard.get("allowed_origins") or ()
@@ -12427,11 +12421,7 @@ async def _execute_scan_request_collections(
         raise ScanCollectionReplayContractError(
             "Scan replay requires frozen origins and target addresses"
         )
-    roots = tuple(
-        str(item).strip().lower().rstrip(".")
-        for item in guard.get("allowed_root_domains") or ()
-        if str(item).strip()
-    ) or (str(row["root_domain"] or canonical_host).lower().rstrip("."),)
+    roots = binding_roots(guard.get("allowed_root_domains"), row["root_domain"], canonical_host)
     store = PostgresBudgetReservationStore()
     worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
 

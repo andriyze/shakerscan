@@ -131,3 +131,39 @@ def test_the_cap_counts_targets_already_added_today_and_resets_the_next_day(gung
 def test_daily_cap_is_configurable(gungnir, monkeypatch, raw, cap):
     monkeypatch.setenv("SHAKERSCAN_CT_MONITOR_DAILY_CAP", raw)
     assert gungnir.daily_cap() == cap
+
+
+def test_a_legacy_public_suffix_root_keeps_monitoring_under_the_customers_domain(gungnir):
+    # targets.root_domain still holds the pre-2.8.1 two-label root (the startup migration has not
+    # run yet): monitoring continues for example.co.uk and never covers co.uk.
+    class Conn:
+        async def fetch(self, query, *args):
+            if "DISTINCT root_domain" in query:
+                return [{"root_domain": "co.uk"}, {"root_domain": "example.com"}, {"root_domain": "github.io"}]
+            assert sorted(args[0]) == ["co.uk", "github.io"]
+            return [{"root_domain": "co.uk", "url": "https://shop.example.co.uk"},
+                    {"root_domain": "co.uk", "url": "https://example.co.uk"},
+                    {"root_domain": "github.io", "url": "https://victim.github.io"},
+                    {"root_domain": "co.uk", "url": "https://co.uk"}]
+
+    class Pool:
+        def acquire(self):
+            class Acquire:
+                async def __aenter__(self):
+                    return Conn()
+
+                async def __aexit__(self, *exc):
+                    return False
+
+            return Acquire()
+
+    gungnir.db_pool = Pool()
+    roots = gungnir.monitored_roots(asyncio.run(gungnir.get_monitored_domains()))
+    assert roots == ["example.com", "example.co.uk", "victim.github.io"]
+    assert gungnir.match_root_domain("new.example.co.uk", roots) == "example.co.uk"
+    assert gungnir.match_root_domain("shop.other.co.uk", roots) is None
+
+
+@pytest.mark.parametrize("root", ["amazonaws.com", "kawasaki.jp", "crm.dev"])
+def test_roots_with_public_suffixes_below_are_not_monitored(gungnir, root):
+    assert gungnir.monitored_roots([root, "example.com"]) == ["example.com"]
