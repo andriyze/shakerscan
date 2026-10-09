@@ -47,6 +47,9 @@ try:
     from schedules.router import SCHEDULE_HEALTH_LOOKBACK_DAYS, _schedule_health_map_for_schedules
     from scan.compatibility import record_compatibility_call
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
+    from operations.discovery import (
+        DEFAULT_REQUESTER, DiscoveryRefused, admit_discovery, discovery_domain, requester,
+    )
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_control_requirements import AI_CONTROL_REQUIREMENTS
     from ..api_utils import (
@@ -61,6 +64,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..schedules.router import SCHEDULE_HEALTH_LOOKBACK_DAYS, _schedule_health_map_for_schedules
     from ..scan.compatibility import record_compatibility_call
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
+    from .discovery import (
+        DEFAULT_REQUESTER, DiscoveryRefused, admit_discovery, discovery_domain, requester,
+    )
 
 
 router = APIRouter()
@@ -366,32 +372,49 @@ async def list_cli_v1_findings(
 
 
 @router.post("/discovery")
-async def start_discovery(root_domain: str):
-    """Start subdomain discovery for a domain."""
+async def start_discovery(
+    root_domain: str = Query(..., max_length=1012),
+    requested_by: str = Query(DEFAULT_REQUESTER, max_length=200),
+):
+    """Start passive subdomain discovery for a domain under a declared target.
+
+    Refused with 400 for anything but a bare domain at or below a registrable domain, 403 when
+    no target under its apex was added, 409 while one runs under the same apex and 429 at the
+    engine-wide limit (``operations/discovery.py``).
+    """
+    try:
+        domain = discovery_domain(root_domain)
+        async with _pool().acquire() as conn:
+            discovery_uuid = await admit_discovery(conn, domain, requested_by=requester(requested_by))
+    except DiscoveryRefused as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     r = get_redis()
     job_id = str(uuid.uuid4())
-    discovery_id = str(uuid.uuid4())
+    discovery_id = str(discovery_uuid)
 
-    async with _pool().acquire() as conn:
-        await conn.execute("""
-            INSERT INTO discovery_runs (id, root_domain, status)
-            VALUES ($1, $2, 'pending')
-        """, uuid.UUID(discovery_id), root_domain)
-
-    # Queue the discovery job
+    # Queue the discovery job with the normalized domain only.
     job_data = {
         'job_id': job_id,
         'discovery_id': discovery_id,
         'type': 'discovery',
-        'root_domain': root_domain,
+        'root_domain': domain,
         'submitted_at': utc_now_iso()
     }
-    enqueue_job(r, QUEUE_NAME, job_data)
+    try:
+        enqueue_job(r, QUEUE_NAME, job_data)
+    except Exception:
+        # Not queued: release the apex rather than hold it until the run goes stale.
+        async with _pool().acquire() as conn:
+            await conn.execute(
+                "UPDATE discovery_runs SET status = 'failed', error_message = $2, completed_at = NOW() "
+                "WHERE id = $1", discovery_uuid, "the discovery job could not be queued",
+            )
+        raise
 
     return {
         'discovery_id': discovery_id,
         'job_id': job_id,
-        'root_domain': root_domain,
+        'root_domain': domain,
         'status': 'queued'
     }
 

@@ -731,7 +731,12 @@ digest-pinned physical acceptance and fault matrix. Follow the [operator guide](
 ## 10. Attack-surface management: discovery, CT monitoring, schedules
 
 **Subdomain discovery** (`POST /discovery`, `process_discovery_job`): enumerates subdomains for a root
-domain via Gungnir, Subfinder, and crt.sh, then upserts discovered hosts as targets. Each name is
+domain via Gungnir, Subfinder, and crt.sh, then upserts discovered hosts as targets. The domain must
+be a bare host name at or below a registrable domain under the bundled Public Suffix List (400 for a
+URL, port, wildcard, address or public suffix such as `co.uk`), its apex must hold a target a person
+added or a scope receipt root (403), and only one run per apex (409) and
+`SHAKERSCAN_DISCOVERY_MAX_ACTIVE` runs engine-wide (default 2, 429) may be queued or running; the run
+records `requested_by`, and the worker re-validates the queued domain before running. Each name is
 resolved first (bounded concurrency, short timeout); a name the resolver says has no A/AAAA record
 is not added and is reported in the run's `resolution` (`GET /discovery/{id}`), while a name the
 resolver could not judge is still added. Adding a target (`POST /targets`) or submitting a Scan
@@ -1813,7 +1818,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 404 | Python sources + Compose manifests |
+| Runtime environment keys | 405 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 127 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2927,6 +2932,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DISABLE_DISCOVERY_RECOVERY` | `scanner/manifests.py` |
+| `SHAKERSCAN_DISCOVERY_MAX_ACTIVE` | `api/operations/discovery.py` |
 | `SHAKERSCAN_DNS_DOH_RESOLVERS` | `api/capabilities/dns.py`, `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DOCKER_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
