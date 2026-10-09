@@ -67,3 +67,15 @@ test('raw HAR is disabled with the deployment reason and a refused export is sho
   assert.match(source, /setExportError\(message\)/)
   assert.match(source, /role="alert"[^>]*>\{exportError\}/)
 })
+
+test('Requests JSON exports every matching call and says so when it cannot', () => {
+  // The browse page size (25) was sent as the export limit, so a 92-call scan saved 25.
+  assert.match(source, /collectArchiveExport\(async \(pageOffset, limit\)/)
+  assert.match(source, /archiveUrl\('transactions', pageOffset, 'redacted', limit\)/)
+  assert.match(source, /exportShortfallMessage\(exported\)/)
+  assert.match(source, /setExportError\(shortfall\)/)
+  // A capped export is announced before the download, and the file is compact JSON.
+  assert.match(source, /exportCapNotice\(archive\.total\)/)
+  assert.match(source, /JSON\.stringify\(exported\)/)
+  assert.match(source, /cause instanceof RangeError/)
+})
