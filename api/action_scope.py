@@ -418,7 +418,8 @@ def evaluate_scope(
                 blocked.append("unicode_or_punycode_confusion")
                 _add_check(checks, "unicode_or_punycode_confusion", "blocked",
                            "Hostname is not a valid IDNA 2008 / UTS #46 name and is refused.")
-            elif host_raw and (host_raw.lower() != host or host.startswith("xn--") or ".xn--" in host):
+            # An IP literal's canonical text (2001:db8::0001 is 2001:db8::1) is not a confusion.
+            elif host_raw and (not host_raw.isascii() or host.startswith("xn--") or ".xn--" in host):
                 blocked.append("unicode_or_punycode_confusion")
                 _add_check(checks, "unicode_or_punycode_confusion", "blocked", "Unicode/punycode hostnames require explicit review.")
             else:

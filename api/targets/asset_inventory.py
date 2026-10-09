@@ -49,7 +49,31 @@ SCANNING = f"""EXISTS(SELECT 1 FROM scans sc WHERE sc.status IN ('pending','queu
 # resolved through current same-host membership. ``alias`` names the targets row it is asked for.
 # Both the target and each scope host go through target_asset_locator, so an IP literal is
 # compared in one canonical spelling (2001:DB8::0001 is 2001:db8::1), as the Python reader does.
+# A host the Python canonicalizer (host_names.canonical_host) refuses compares as NULL, so it
+# matches nothing: a numeric-looking spelling that is not canonical dotted-quad IPv4. PostgreSQL
+# inet reads 010.000.000.001 as 10.0.0.1 while resolvers may read it as octal, and the Python
+# reader refuses it; without this the list could call a target "Authorized" that the scan path
+# does not authorize.
+_IPV4_OCTET = "(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])"
+_NUMERIC_LOOKING = r"(^|\.)([0-9]+|0x[0-9a-f]*)$"
+_CANONICAL_IPV4 = f"^{_IPV4_OCTET}(\\.{_IPV4_OCTET}){{3}}$"
+
+
+def _raw_host(url: str) -> str:
+    """The host text of a stored URL before any inet canonicalization (IPv6 is not numeric-looking)."""
+    return (f"lower(rtrim(split_part(split_part(split_part(split_part(regexp_replace({url}, '^[A-Za-z]+://', ''), "
+            f"'/', 1), '?', 1), '#', 1), ':', 1), '.'))")
+
+
+def _host_key(raw: str, locator: str) -> str:
+    return (f"(CASE WHEN ({raw}) ~ '{_NUMERIC_LOOKING}' AND ({raw}) !~ '{_CANONICAL_IPV4}' "
+            f"THEN NULL ELSE ({locator}) END)")
+
+
 def authorized_sql(alias: str) -> str:
+    target_key = _host_key(_raw_host("authority.url"), "target_asset_locator(authority.url)")
+    scope_raw = "lower(rtrim(trim(both '[]' FROM scope_host), '.'))"
+    scope_key = _host_key(scope_raw, "target_asset_locator(target_asset_url(lower(trim(both '[]' FROM scope_host))))")
     return f"""EXISTS(SELECT 1 FROM targets authority
     JOIN scope_receipts s ON s.target_id=authority.id
     JOIN approval_receipts a ON a.scope_receipt_id=s.id
@@ -58,8 +82,8 @@ def authorized_sql(alias: str) -> str:
       AND a.risk_tier IN ('active','intrusive') AND a.action_name='target.authorization'
       AND (a.expires_at IS NULL OR a.expires_at > NOW())
       AND COALESCE(s.verdict,'') <> 'blocked'
-      AND target_asset_locator(authority.url) IN (
-          SELECT target_asset_locator(target_asset_url(lower(trim(both '[]' FROM scope_host))))
+      AND {target_key} IN (
+          SELECT {scope_key}
           FROM (SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(s.allowed_hosts)='array' THEN s.allowed_hosts ELSE '[]'::jsonb END)
                 UNION ALL SELECT s.normalized_scope->>'host') hosts(scope_host)
           WHERE COALESCE(scope_host,'') <> ''))"""

@@ -6056,9 +6056,7 @@ def normalize_target_url(target: str) -> tuple[str, str | None]:
         try:
             host = canonical_host(host) + ('.' if host.endswith('.') else '')
         except HostNameError as exc:
-            raise TargetNormalizationError(
-                "Invalid target URL: hostname is not a valid IDNA 2008/UTS #46 name"
-            ) from exc
+            raise TargetNormalizationError(f"Invalid target URL: {exc}") from exc
     # DNS names are bounded to 253 visible characters. Apart from producing an
     # unusable target, accepting an unbounded host lets one historical row turn
     # lightweight domain-filter responses into multi-megabyte UI payloads.

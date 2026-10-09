@@ -17,7 +17,6 @@ old authorization no longer matches and the target is authorized again). The dan
 """
 from __future__ import annotations
 
-import ipaddress
 import json
 import urllib.parse
 import uuid
@@ -28,6 +27,11 @@ try:
     from action_scope import evaluate_scope, receipt_to_dict
 except ModuleNotFoundError:  # package-native import layout
     from api.action_scope import evaluate_scope, receipt_to_dict
+
+try:
+    from scanner_tools.host_names import HostNameError, canonical_host
+except ModuleNotFoundError:  # package-native import layout
+    from scanner.scanner_tools.host_names import HostNameError, canonical_host
 
 try:
     from runtime.approval_policy import STANDING_ACTION_NAME, STANDING_RISK_TIERS
@@ -53,14 +57,16 @@ def _host(url: str) -> str:
 
 
 def _host_key(value: Any) -> str:
-    """One spelling per host for comparing a target with its scope: lower case, no brackets or
-    trailing dot, and an IP literal in its canonical form. `2001:DB8::0001` and `2001:db8::1`
-    are one host; the inventory's SQL (target_asset_locator) compares the same way."""
-    text = str(value or "").strip().lower().strip("[]").rstrip(".")
+    """One spelling per host for comparing a target with its scope: the single canonicalizer
+    (``host_names.canonical_host``: lower case, no brackets or trailing dot, IDNA 2008/UTS #46,
+    an IP literal in its canonical form). `2001:DB8::0001` and `2001:db8::1` are one host; the
+    inventory's SQL (target_asset_locator) compares the same way. "" for a host it refuses
+    (a non-canonical IPv4 spelling such as `010.000.000.001`, an invalid IDN), which matches
+    nothing."""
     try:
-        return str(ipaddress.ip_address(text))
-    except ValueError:
-        return text
+        return canonical_host(value)
+    except HostNameError:
+        return ""
 
 
 def _row(value: Any) -> dict[str, Any]:
@@ -230,7 +236,11 @@ async def _current_exact_target_authorization(
         STANDING_ACTION_NAME,
         approval_receipt_id,
     )
-    host = _host_key(_host(target.get("url", "")))
+    raw_host = _host(target.get("url", ""))
+    host = _host_key(raw_host)
+    if raw_host and not host:
+        # A target host the canonicalizer refuses is never reported authorized.
+        return None
     for raw in rows:
         row = _row(raw)
         if str(row.get("scope_verdict") or "") == "blocked":
@@ -238,7 +248,8 @@ async def _current_exact_target_authorization(
         allowed = _json(row.get("scope_allowed_hosts")) or []
         normalized = _json(row.get("scope_normalized")) or {}
         scope_host = str((normalized or {}).get("host") or "").lower() if isinstance(normalized, dict) else ""
-        hosts = {_host_key(item) for item in allowed if str(item).strip()} | ({_host_key(scope_host)} if scope_host else set())
+        hosts = ({_host_key(item) for item in allowed if str(item).strip()}
+                 | ({_host_key(scope_host)} if scope_host else set())) - {""}
         if host and host not in hosts:
             continue
         scope = {"id": row.get("scope_id"), "verdict": row.get("scope_verdict")}

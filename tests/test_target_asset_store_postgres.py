@@ -1,5 +1,6 @@
 """One asset count and history across network scans and distinct web origins."""
 import asyncio
+import uuid
 
 from targets.asset_migration import migrate_target_assets
 from targets.asset_inputs_migration import migrate_asset_inputs
@@ -254,6 +255,59 @@ def test_inventory_authorization_follows_the_authority_the_scan_path_resolves(mo
     asyncio.run(run())
 
 
+def test_a_leading_zero_ipv4_target_is_never_authorized_in_the_list(monkeypatch):
+    """R3 follow-up: PostgreSQL inet reads 010.000.000.001 as 10.0.0.1 (resolvers may read it as
+    octal 8.0.0.1). A target stored with that spelling before normalisation refused it must not
+    show "Authorized" from a receipt for 10.0.0.1, which the scan path does not honour."""
+    encryption(monkeypatch)
+    monkeypatch.setenv('SHAKERSCAN_PRIVATE_NETWORK_TARGETS', 'allow')
+    async def run():
+        async with database() as conn:
+            await prepare(conn)
+            async with conn.transaction():
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
+            import target_authorization
+            from targets.router import TargetNormalizationError, normalize_target_url
+            for spelling in ('https://010.000.000.001/', 'https://10.1/', 'https://0x0a.0.0.1/'):
+                try:
+                    normalize_target_url(spelling)
+                except TargetNormalizationError:
+                    pass
+                else:
+                    raise AssertionError(f"{spelling} must be refused at normalisation")
+            proper = await conn.fetchval("INSERT INTO targets(url) VALUES('https://10.0.0.1/') RETURNING id")
+            await target_authorization.authorize_target(conn, proper, approved_by='operator')
+            legacy = await conn.fetchval("INSERT INTO targets(url) VALUES('https://010.000.000.001:8443/') RETURNING id")
+            # A standing receipt on the legacy row whose scope names 10.0.0.1 (copied from the
+            # proper target's): inet reads the row's host as 10.0.0.1, so before the fix the
+            # list called it "Authorized" while the scan path refused it.
+            async def copy(table, old_id, **changes):
+                columns = [row['column_name'] for row in await conn.fetch(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name=$1 "
+                    "AND table_schema=current_schema() ORDER BY ordinal_position", table)]
+                select = ", ".join(
+                    f"${list(changes).index(name) + 2}" if name in changes else name for name in columns)
+                await conn.execute(
+                    f"INSERT INTO {table}({', '.join(columns)}) SELECT {select} FROM {table} WHERE id=$1",
+                    old_id, *changes.values())
+            scope = await conn.fetchrow("SELECT id FROM scope_receipts WHERE target_id=$1", proper)
+            approval = await conn.fetchrow("SELECT id FROM approval_receipts WHERE scope_receipt_id=$1", scope['id'])
+            new_scope = 'scope-legacy-octal' if isinstance(scope['id'], str) else uuid.uuid4()
+            new_approval = 'approval-legacy-octal' if isinstance(approval['id'], str) else uuid.uuid4()
+            await copy('scope_receipts', scope['id'], id=new_scope, target_id=legacy)
+            await copy('approval_receipts', approval['id'], id=new_approval, scope_receipt_id=new_scope)
+            assert await target_authorization.current_target_authorization(conn, proper) is not None
+            assert await target_authorization.current_target_authorization(conn, legacy) is None
+            authorized = [row['locator'] for row in (await list_assets(conn, authorization='authorized'))['targets']]
+            assert '10.0.0.1' in authorized
+            origins = {str(item['id']): item for row in (await list_assets(conn))['targets']
+                       for item in row.get('origins') or ()}
+            assert origins[str(proper)]['authorized'] is True
+            assert origins[str(legacy)]['authorized'] is False, "the list agrees with the scan path"
+    asyncio.run(run())
+
+
 def test_an_ipv6_web_address_is_authorized_in_the_list_as_the_scan_path_reads_it(monkeypatch):
     """The scope stores the address as written (2001:db8::0001); the locator canonicalises it
     (2001:db8::1). Python authorized the scan while the list said "Not authorized"."""
@@ -270,7 +324,14 @@ def test_an_ipv6_web_address_is_authorized_in_the_list_as_the_scan_path_reads_it
             await target_authorization.authorize_target(conn, origin, approved_by='operator')
             scope_hosts = await conn.fetchval(
                 'SELECT s.allowed_hosts FROM scope_receipts s WHERE s.target_id=$1 ORDER BY s.created_at DESC LIMIT 1', origin)
-            assert '0001' in str(scope_hosts), scope_hosts  # the drift this test exists for
+            # A new receipt records the one canonical spelling (host_names.canonical_host).
+            assert '2001:db8::1' in str(scope_hosts) and '0001' not in str(scope_hosts), scope_hosts
+            # A receipt recorded before that kept the address as written: the drift this test
+            # exists for, which both readers must still resolve to one host.
+            await conn.execute(
+                """UPDATE scope_receipts SET allowed_hosts='["2001:db8::0001"]'::jsonb,
+                       normalized_scope=jsonb_set(normalized_scope, '{host}', '"2001:db8::0001"')
+                   WHERE target_id=$1""", origin)
 
             assert await target_authorization.current_target_authorization(conn, origin) is not None
             assert await target_authorization.current_target_authorization(conn, other) is None
