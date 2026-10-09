@@ -246,7 +246,7 @@ async def _export_document(
         # The slot is taken before any row is read: a refused request holds no rows.
         # A browse page has its own slots and smaller budgets: a user's browsing never waits
         # behind a download, theirs or anyone's.
-        light = is_light_export(export_format, limit)
+        light = is_light_export(export_format, limit, redaction=effective_redaction)
         async with export_admission(export_caller(request), light=light):
             content, total = await _build_export_bytes(
                 scan_id=scan_id, hunt_run_id=hunt_run_id, export_format=export_format,
