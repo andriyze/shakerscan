@@ -31,10 +31,12 @@ union-based alone needed 424 and 212 requests there, so both were killed in the 
 again -- 900 s, a quarter of the Scan, that also crowded out the extension of the login form's
 XSS slice. A body with several fields is now verified one field per run, and each unfinished
 SQLi candidate names the wall its next unit is predicted to need at its own robust rate
-(``sqli_stages.resume_plan``); that prediction is the extension's floor. A unit predicted above
-one round's lane share gets one probe round at the share to measure again; a candidate whose
-next unit two measurements put above the share is not extended, and its receipt records it as
-inconclusive for budget.
+(``sqli_stages.resume_plan``); that prediction is the extension's floor, and the predicted wall
+of every fundable unit it has left is its cap. Each SQLi extension also carries its part of the
+Scan's residual (``SCAN_WALL_SHARE_ARG``, divided shortest remaining need first), and a
+technique that needs more is inconclusive for budget. A slice whose candidates have nothing
+fundable left is not extended. A slice stopped by its request or mutation hold is extended with
+the holds its remaining units need, and those holds never bound its wall.
 
 Every wall-killed slice of a lane is eligible in the same round, and the lane's wall share is
 divided fairly among them (see ``plan_verification_extensions``): candidates with the fewest
@@ -52,9 +54,12 @@ from typing import Any
 
 from .action_plan import CAPABILITY_REGISTRY, _LANE_WALL_SHARE
 from .capability_result import BUDGET_EXHAUSTION_REASONS
+from .external_process import BATCH_ATTEMPT_REQUEST_HEADROOM, batch_attempt_floor
 from .sqli_stages import MINIMUM_STAGE_WALL_SECONDS
 
 EXTENDS_ARG = "extends"
+# A resumable extension's fair part of the Scan's tool-wall residual when it was planned.
+SCAN_WALL_SHARE_ARG = "scan_wall_share"
 # A proof re-planned behind an extension also reads candidate signals from the verifier slices
 # its original escalation depended on (terminal actions of an earlier round).
 SIGNAL_SOURCES_ARG = "signal_sources"
@@ -75,7 +80,9 @@ _MINIMUM_SCALE = 1.25
 _MAXIMUM_SPENT_FRACTION = 0.5
 _SCALED_DIMENSIONS = ("http_requests", "state_changing_requests", "tool_wall_seconds")
 _ROUND_SUFFIX = re.compile(r"\.r\d{2}$")
-_CARRIED_ARGS_EXCLUDED = frozenset({"continuation_work_key", EXTENDS_ARG, SIGNAL_SOURCES_ARG})
+_CARRIED_ARGS_EXCLUDED = frozenset({
+    "continuation_work_key", EXTENDS_ARG, SIGNAL_SOURCES_ARG, SCAN_WALL_SHARE_ARG,
+})
 # A resumable slice that stopped because its own holds could not fund the candidates it was
 # given. Soak scan 0eb39a8a (Thorough, honey) planned four SQLi candidates, three of them
 # request bodies, into one slice holding 720 s and one body attempt's 480 mutations: the first
@@ -134,8 +141,20 @@ def extension_scale(
     wall_ceiling: int,
     residual: Mapping[str, int],
     minimum: float = _MINIMUM_SCALE,
+    request_bound: bool = False,
+    request_need: Mapping[str, tuple[int, int]] | None = None,
 ) -> float | None:
-    """How much larger the extension's holds are than the slice's, or None for no extension."""
+    """How much larger the extension's holds are than the slice's, or None for no extension.
+
+    ``request_need`` names request dimensions a resumable slice needs only so much of (its
+    remaining units' requests): those are held at that need instead of scaling with the wall,
+    so a slow endpoint's extension is not refused for mutations it would never send.
+
+    ``request_bound`` is a resumable slice its request or mutation hold stopped, not its wall.
+    When it spent most of its requests it was not starved by latency, so it gets the holds its
+    remaining units need (``minimum``) rather than a latency-sized one; otherwise it is sized
+    from its latency like a wall-killed slice.
+    """
     held_requests = int(reserved.get("http_requests") or 0)
     sent = int(consumed.get("http_requests") or 0)
     held_wall = int(reserved.get("tool_wall_seconds") or 0)
@@ -143,21 +162,54 @@ def extension_scale(
     if held_requests <= 0 or held_wall <= 0 or sent <= 0 or spent_wall <= 0:
         # No measured traffic means no latency measurement: nothing to scale by.
         return None
-    if sent > held_requests * _MAXIMUM_SPENT_FRACTION:
+    latency_scale = (
+        (held_requests * (spent_wall / sent)) / held_wall
+        if sent <= held_requests * _MAXIMUM_SPENT_FRACTION else None
+    )
+    if request_bound:
+        # Whatever its latency says, it needs at least the holds its remaining units need.
+        scale = max(latency_scale or 0.0, 1.0, float(minimum))
+        scale = min(scale, max(float(minimum), max(0, int(wall_ceiling)) / held_wall))
+        scale = _bound_by_residual(scale, reserved, residual, request_need)
+        if scale is None:
+            return None
+        return scale if scale >= min(1.0, float(minimum)) else None
+    if latency_scale is None:
         return None
-    seconds_per_request = spent_wall / sent
     # The wall the slice's request hold needs at the measured rate.
-    scale = (held_requests * seconds_per_request) / held_wall
+    scale = latency_scale
     scale = min(scale, max(0, int(wall_ceiling)) / held_wall)
+    scale = _bound_by_residual(scale, reserved, residual, request_need)
+    if scale is None:
+        return None
+    return scale if scale >= minimum else None
+
+
+def _bound_by_residual(
+    scale: float, reserved: Mapping[str, int], residual: Mapping[str, int],
+    request_need: Mapping[str, tuple[int, int]] | None,
+) -> float | None:
+    """``scale`` bounded by what the residual can fund in every held dimension."""
     for dimension in _SCALED_DIMENSIONS:
         amount = int(reserved.get(dimension) or 0)
-        if amount > 0:
-            scale = min(scale, max(0, int(residual.get(dimension, 0))) / amount)
-    return scale if scale >= minimum else None
+        if amount <= 0:
+            continue
+        room = max(0, int(residual.get(dimension, 0)))
+        need = (request_need or {}).get(dimension)
+        if need is not None:
+            # Scaled with the wall, but never past what the remaining units need, and never
+            # below one attempt's floor.
+            # Held at what fits the residual instead of bounding the wall.
+            if room < need[0]:
+                return None
+            continue
+        scale = min(scale, room / amount)
+    return scale
 
 
 def _floor_scale(
     capability_name: str, held_wall: int, resume_wall: int | None = None,
+    reserved: Mapping[str, int] | None = None,
 ) -> float:
     """The smallest scale at which an extension still makes progress on its slice.
 
@@ -177,10 +229,21 @@ def _floor_scale(
     if capability_name not in RESUMABLE_CAPABILITIES:
         return _MINIMUM_SCALE
     if resume_wall is not None and resume_wall > 0:
-        # Never below the slice's own holds: the request and mutation holds scale with the
-        # wall, and a candidate needs at least its attempt floor in every dimension, so a
-        # smaller extension would be unfundable in those and send nothing.
-        return max(1.0, resume_wall / held_wall)
+        # Never below one candidate attempt's floor in any held dimension: the request and
+        # mutation holds scale with the wall, and a smaller extension would be unfundable in
+        # those and send nothing. It used to be never below the slice's own holds, so every
+        # link of a chain was at least as large as the one before -- a candidate settled one
+        # unit per round with the whole share (soak N55 review).
+        attempt = batch_attempt_floor(capability_name, body_candidate=True)
+        held = dict(reserved or {})
+        # The wall floor is the checkpoint's own: a measured candidate runs one unit at a
+        # time, and ``resume_wall`` is what its next unit needs.
+        dimension_floor = max((
+            int(attempt[name]) / int(held[name])
+            for name in ("http_requests", "state_changing_requests")
+            if int(attempt.get(name) or 0) > 0 and int(held.get(name) or 0) > 0
+        ), default=0.0)
+        return max(resume_wall / held_wall, dimension_floor)
     return (held_wall + MINIMUM_STAGE_WALL_SECONDS) / held_wall
 
 
@@ -213,13 +276,36 @@ def stage_resume_walls(observations: Mapping[str, Any]) -> dict[str, int]:
     return walls
 
 
+def stage_remaining_walls(
+    observations: Mapping[str, Any], *, key: str = "remaining_wall_seconds",
+) -> dict[str, int]:
+    """The most wall each resumable slice's unfinished candidates are predicted to use.
+
+    Each unfinished SQLi candidate names the predicted wall of every fundable unit it has left
+    (``remaining_wall_seconds``); an extension is never sized above their sum, so a slice with
+    two units left is not handed a whole round's share. With ``key="remaining_requests"`` it
+    is the requests those units need instead.
+    """
+    walls: dict[str, int] = {}
+    for action_id, rows in (observations or {}).items():
+        unfinished = [
+            row for row in rows or ()
+            if isinstance(row, Mapping)
+            and row.get("kind") in _RESUME_RECORD_KINDS
+            and not row.get("carried_from")
+            and row.get("resume_wall_seconds")
+        ]
+        if unfinished and all(isinstance(row.get(key), int) for row in unfinished):
+            walls[str(action_id)] = sum(int(row[key]) for row in unfinished)
+    return walls
+
+
 def budget_concluded_slices(observations: Mapping[str, Any]) -> dict[str, str]:
     """Resumable slices whose every unfinished candidate is inconclusive for budget.
 
-    ``"positive_only"`` when one of them still has a cheap unit that could prove an injection
-    (``sqli_stages.resume_plan``), else ``"closed"``: a closed slice is never extended, and a
-    positive-only one only while no other lane has work waiting. A slice whose every unfinished
-    candidate is on a probe round is ``"probe"``: it is funded at its floor and no more.
+    ``"closed"``: nothing any of them still has to run is fundable (``sqli_stages``), so the
+    slice is never extended. A slice whose every unfinished candidate is on a probe round is
+    ``"probe"``: it is funded at its floor and no more.
     """
     concluded: dict[str, str] = {}
     for action_id, rows in (observations or {}).items():
@@ -231,15 +317,13 @@ def budget_concluded_slices(observations: Mapping[str, Any]) -> dict[str, str]:
             and (row.get("resume_wall_seconds") or row.get("verdict"))
         ]
         if unfinished and all(row.get("verdict") == "inconclusive" for row in unfinished):
-            concluded[str(action_id)] = (
-                "positive_only"
-                if any(row.get("positive_only") and row.get("resume_wall_seconds")
-                       for row in unfinished)
-                else "closed"
-            )
-        elif unfinished and all(row.get("resume_probe") for row in unfinished):
-            # A probe re-measures a rate; like a positive-only unit it is funded at its floor,
-            # never water-filled.
+            concluded[str(action_id)] = "closed"
+        elif unfinished and all(
+            row.get("resume_probe") or row.get("resume_unconfirmed")
+            or row.get("verdict") == "inconclusive"
+            for row in unfinished
+        ):
+            # A probe re-measures a rate; it is funded at its floor, never water-filled.
             concluded[str(action_id)] = "probe"
     return concluded
 
@@ -306,6 +390,49 @@ def _fair_walls(
     }
 
 
+def _request_need(
+    capability_name: str, reserved: Mapping[str, int], remaining_requests: int | None,
+) -> dict[str, tuple[int, int]] | None:
+    """(floor, cap) of the request and mutation holds a resumable slice's extension needs.
+
+    The floor is one attempt's; the cap is what its remaining units can send, so a slow
+    endpoint's extension is not sized -- or refused -- for mutations it would never send.
+    """
+    if capability_name not in RESUMABLE_CAPABILITIES or not remaining_requests:
+        return None
+    attempt = batch_attempt_floor(capability_name, body_candidate=True)
+    cap = math.ceil(int(remaining_requests) / BATCH_ATTEMPT_REQUEST_HEADROOM) + 1
+    needs = {}
+    for name in ("http_requests", "state_changing_requests"):
+        if int(reserved.get(name) or 0) > 0:
+            floor_amount = int(attempt.get(name) or 0)
+            needs[name] = (floor_amount, max(floor_amount, cap))
+    return needs or None
+
+
+def _request_scale(reserved: Mapping[str, int], needed: int | None) -> float:
+    """How much larger a request-bound slice's holds must be to fund the units it has left."""
+    held = min(
+        int(reserved.get(name) or 0) for name in ("http_requests", "state_changing_requests")
+        if int(reserved.get(name) or 0) > 0
+    ) if any(int(reserved.get(name) or 0) > 0 for name in (
+        "http_requests", "state_changing_requests",
+    )) else 0
+    if not needed or held <= 0:
+        return 1.0
+    return max(1.0, int(needed) / held)
+
+
+def _shortest_first_shares(demands: Mapping[int, int], total: int) -> dict[int, int]:
+    """Divide ``total`` smallest demand first: each gets its demand while it lasts."""
+    shares: dict[int, int] = {}
+    left = max(0, int(total))
+    for index, demand in sorted(demands.items(), key=lambda item: (item[1], item[0])):
+        shares[index] = min(int(demand), left)
+        left -= shares[index]
+    return shares
+
+
 def _lineage_measurement(
     action: Any, by_id: Mapping[str, Any], parent_results: Mapping[str, Any],
 ) -> dict[str, int] | None:
@@ -334,6 +461,8 @@ def plan_verification_extensions(
     residual: Mapping[str, int],
     stage_resume_walls: Mapping[str, int] | None = None,
     budget_concluded: Mapping[str, str] | None = None,
+    stage_remaining_walls: Mapping[str, int] | None = None,
+    stage_remaining_requests: Mapping[str, int] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """One optional extension per timed-out, latency-starved verifier slice not yet extended.
 
@@ -388,7 +517,7 @@ def plan_verification_extensions(
         floor = (
             _floor_scale(
                 action.capability_name, held_wall,
-                (stage_resume_walls or {}).get(action.action_id),
+                (stage_resume_walls or {}).get(action.action_id), reserved,
             )
             if held_wall > 0 else 0
         )
@@ -402,12 +531,31 @@ def plan_verification_extensions(
             consumed = _lineage_measurement(action, by_id, parent_results) or consumed
         # The largest extension this slice can use: its latency-sized need inside the lane
         # share and the whole remaining residual.
+        request_bound = (
+            action.capability_name in RESUMABLE_CAPABILITIES
+            and _status(result) == "partial"
+            and _reason(result) in _UNFUNDED_STOP_REASONS
+        )
+        request_need = _request_need(
+            action.capability_name, reserved,
+            (stage_remaining_requests or {}).get(action.action_id),
+        )
+        resume_wall = (stage_resume_walls or {}).get(action.action_id)
+        if request_need and resume_wall and held_wall > 0:
+            # Its request holds are set from what its units need, not scaled with the wall,
+            # so only its next unit's wall bounds the extension from below.
+            floor = resume_wall / held_wall
         scale = extension_scale(
             reserved=reserved,
             consumed=consumed,
             wall_ceiling=wall_ceiling,
             residual=remaining,
-            minimum=floor,
+            minimum=max(floor, min(
+                _request_scale(reserved, (stage_remaining_requests or {}).get(action.action_id)),
+                max(0, wall_ceiling) / max(1, held_wall),
+            )) if request_bound else floor,
+            request_bound=request_bound,
+            request_need=request_need,
         )
         if scale is None:
             continue
@@ -419,68 +567,110 @@ def plan_verification_extensions(
         lanes.setdefault(action.capability_name, []).append({
             "index": index, "action": action, "reserved": reserved, "depth": depth,
             "need_wall": (
-                math.ceil(held_wall * floor) if concluded in {"probe", "positive_only"}
-                else int(math.floor(held_wall * scale))
+                # A request-bound slice needs holds, not time: its requests scale with its wall.
+                math.floor(held_wall * scale) if request_bound
+                else math.ceil(held_wall * floor) if concluded == "probe"
+                else min(
+                    math.floor(held_wall * scale),
+                    max(
+                        math.ceil(held_wall * floor),
+                        int((stage_remaining_walls or {}).get(
+                            action.action_id, held_wall * scale,
+                        )),
+                    ),
+                )
             ),
             "floor_wall": int(math.ceil(held_wall * floor)),
             "held_wall": held_wall,
-            "positive_only": concluded == "positive_only",
             "probe": concluded == "probe",
+            "request_need": request_need,
         })
-    # A candidate already inconclusive for budget is funded only for a cheap unit that could
-    # still prove an injection, and only while no other lane has work waiting (soak N55).
-    waiting = {
-        name for name, items in lanes.items()
-        if any(not item["positive_only"] for item in items)
-    }
-    for name in list(lanes):
-        if waiting - {name}:
-            lanes[name] = [item for item in lanes[name] if not item["positive_only"]]
-        if not lanes[name]:
-            del lanes[name]
     planned_by_index: dict[int, dict[str, Any]] = {}
     # The residual is shared fairly between the lanes with work waiting, not handed to the
     # lanes in name order: soak scan 9de6a910's SQLi extensions drained it before the login
-    # form's XSS extension was considered. Each lane first holds an equal part of what is left
-    # (never above its round share); a lane whose floors did not fit its part may then use
-    # what the others left, smallest floor first.
-    start_wall = max(0, int(remaining.get("tool_wall_seconds", 0)))
-    part = min(wall_ceiling, start_wall // max(1, len(lanes)))
-    order = sorted(lanes, key=lambda name: (min(item["floor_wall"] for item in lanes[name]), name))
-    funded: set[str] = set()
-    passes = [(name, part) for name in order]
-    passes += [(name, None) for name in order]
-    for capability_name, lane_part in passes:
-        if lane_part is None:
-            if capability_name in funded:
-                continue
-            lane_part = min(wall_ceiling, max(0, remaining.get("tool_wall_seconds", 0)))
-        eligible = sorted(
-            lanes[capability_name],
-            # Work that can still conclude a candidate first, then probes, then positive-only.
-            key=lambda item: (
-                item["positive_only"], item["probe"], item["depth"], item["index"],
-            ),
+    # form's XSS extension was considered. In a first pass each lane holds an equal part of
+    # what is left in every scaled dimension (its wall part never above its round share); in a
+    # second pass every lane may use what the first left, smallest floor first.
+    start = {name: max(0, int(remaining.get(name, 0))) for name in _SCALED_DIMENSIONS}
+    # Each SQLi extension carries its part of the Scan's residual: a technique whose remaining
+    # units need more is inconclusive for budget (``sqli_stages.resume_plan``). The residual is
+    # divided shortest-remaining-need first, so work that can conclude is funded to its end and
+    # a candidate that needs many times what is left (13 s per request over eight fields)
+    # keeps only its own hold, and is judged against that.
+    demands = {
+        item["index"]: max(
+            int(item["need_wall"]),
+            int((stage_remaining_walls or {}).get(item["action"].action_id, 0)),
         )
-        eligible = [item for item in eligible if item["index"] not in planned_by_index]
-        allowance = max(0, min(lane_part, remaining.get("tool_wall_seconds", 0)))
+        for items in lanes.values() for item in items
+    }
+    scan_shares = _shortest_first_shares(demands, start["tool_wall_seconds"])
+    lane_count = max(1, len(lanes))
+    first_part = {name: amount // lane_count for name, amount in start.items()}
+    first_part["tool_wall_seconds"] = min(wall_ceiling, first_part["tool_wall_seconds"])
+    order = sorted(lanes, key=lambda name: (min(item["floor_wall"] for item in lanes[name]), name))
+    lane_used: dict[str, dict[str, int]] = {name: {} for name in lanes}
+    passes = [(name, True) for name in order] + [(name, False) for name in order]
+    for capability_name, first in passes:
+        used = lane_used[capability_name]
+        if not first:
+            # The second pass may top up what the first gave this lane: its extensions are
+            # re-planned from what is left, without the equal-part bound.
+            for index in [
+                item["index"] for item in lanes[capability_name] if item["index"] in planned_by_index
+            ]:
+                for name, amount in planned_by_index.pop(index)["budget"].items():
+                    remaining[name] = remaining.get(name, 0) + amount
+                    used[name] = used.get(name, 0) - amount
+        caps = {
+            name: (
+                first_part[name] - used.get(name, 0) if first
+                else (wall_ceiling - used.get(name, 0) if name == "tool_wall_seconds" else None)
+            )
+            for name in _SCALED_DIMENSIONS
+        }
+        eligible = sorted(
+            (item for item in lanes[capability_name] if item["index"] not in planned_by_index),
+            # Work that can still conclude a candidate first, then probes.
+            key=lambda item: (item["probe"], item["depth"], item["index"]),
+        )
+        allowance = max(0, min(
+            caps["tool_wall_seconds"], remaining.get("tool_wall_seconds", 0),
+        ))
         walls = _fair_walls(eligible, allowance)
         for item in eligible:
             wall = walls.get(item["index"])
             if wall is None:
                 continue
             scale = wall / item["held_wall"]
-            # The other scaled holds must still fit what earlier extensions left.
+            # The other scaled holds must still fit what earlier extensions left, and in the
+            # first pass this lane's equal part of them.
+            needs = item["request_need"] or {}
             for name in _SCALED_DIMENSIONS:
                 amount = int(item["reserved"].get(name) or 0)
                 if amount > 0:
-                    scale = min(scale, max(0, remaining.get(name, 0)) / amount)
+                    room = max(0, remaining.get(name, 0))
+                    if caps[name] is not None:
+                        room = min(room, max(0, caps[name]))
+                    if name in needs:
+                        if room < needs[name][0]:
+                            scale = 0.0
+                        continue
+                    scale = min(scale, room / amount)
             if scale * item["held_wall"] < item["floor_wall"]:
                 continue
             action = item["action"]
             budget = {
                 name: (
-                    int(math.floor(int(amount) * scale))
+                    min(
+                        max(0, remaining.get(name, 0)) if caps[name] is None
+                        else max(0, min(remaining.get(name, 0), caps[name])),
+                        max(needs[name][0], min(
+                            needs[name][1], math.floor(int(amount) * scale),
+                        )),
+                    )
+                    if name in needs
+                    else int(math.floor(int(amount) * scale))
                     if name in _SCALED_DIMENSIONS else int(amount)
                 )
                 for name, amount in item["reserved"].items()
@@ -488,7 +678,9 @@ def plan_verification_extensions(
             }
             for name, amount in budget.items():
                 remaining[name] = remaining.get(name, 0) - amount
-            funded.add(capability_name)
+                if name in caps and caps[name] is not None:
+                    caps[name] -= amount
+                used[name] = used.get(name, 0) + amount
             planned_by_index[item["index"]] = {
                 "action_id": extension_action_id(action.action_id),
                 "stage": action.stage,
@@ -499,6 +691,18 @@ def plan_verification_extensions(
                         if key not in _CARRIED_ARGS_EXCLUDED
                     },
                     EXTENDS_ARG: action.action_id,
+                    # Only when other work is waiting: a slice alone may use the whole residual,
+                    # unit by unit, for as long as it lasts.
+                    **(
+                        {SCAN_WALL_SHARE_ARG: max(
+                            int(scan_shares[item["index"]]),
+                            int(budget.get("tool_wall_seconds", 0)),
+                        )}
+                        if action.capability_name in RESUMABLE_CAPABILITIES
+                        and item["index"] in scan_shares
+                        and scan_shares[item["index"]] < start["tool_wall_seconds"]
+                        and len(scan_shares) > 1 else {}
+                    ),
                 },
                 "budget": budget,
                 "dependencies": (),

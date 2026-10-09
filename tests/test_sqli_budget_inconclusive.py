@@ -43,16 +43,19 @@ from scan.sqli_stages import (
     rate_sample,
     resume_plan,
     run_staged_sqli_attempt,
+    sqli_budget_outcomes,
     stage_attempt_id,
     stage_requests,
     stage_units,
 )
 from scan.verification_extension import (
     EXTENDS_ARG,
+    SCAN_WALL_SHARE_ARG,
     budget_concluded_slices,
     lane_round_wall_ceiling,
     plan_verification_extensions,
     resume_observation_action_ids,
+    stage_remaining_walls,
     stage_resume_walls,
 )
 from scan.work_manifests import build_candidate_manifest, build_endpoint_manifest
@@ -125,36 +128,56 @@ def test_balanced_five_field_body_continues_error_based_field_by_field():
     assert not resume.budget_inconclusive and not resume.probe
 
 
-def test_fast_two_field_login_reaches_error_based_until_time_based_is_confirmed_unfundable():
-    """Review blocker: Fast's 375 s share; the login form at 2 s per request."""
+def test_fast_two_field_login_runs_error_based_and_judges_time_based_by_itself():
+    """Review blockers: Fast's 375 s share; the login form at 2 s per request."""
     fields = ("username", "password")
     settled = [f"{technique}:{name}" for technique in "UB" for name in fields]
-    # One sample: time-based (398 s on one field) would not fit, but one sample is not a
-    # verdict. The next unit, E, is run as a probe that measures the rate again: 50 s holds
-    # 15 requests at 2 s, plus one stage minimum.
+    # One sample: E on one field (308 s) fits and runs as normal work. Time-based (398 s on
+    # one field) is above the share on that single sample: not a verdict, and not a probe of
+    # E either -- it is judged when it is next.
     error = resume_plan(
         settled, {}, fields=fields, rate_samples=[("U:username", 2.0)], round_wall_ceiling=375,
     )
-    assert (error.technique, error.field_name, error.wall_seconds) == ("E", "username", 50)
-    assert error.probe and not error.budget_inconclusive
-    # Time-based next on a single sample: one probe measures again.
-    time_based = resume_plan(
-        settled + [f"E:{name}" for name in fields], {}, fields=fields,
-        rate_samples=[("U:username", 2.0)], round_wall_ceiling=375,
-    )
-    assert (time_based.technique, time_based.field_name) == ("T", "username")
-    assert time_based.probe and time_based.wall_seconds == 50
-    assert not time_based.budget_inconclusive
-    # Two samples judged by their minimum confirm time-based above the share: the candidate
-    # cannot reach a full negative, so it is inconclusive now, before E is spent on.
+    assert (error.technique, error.field_name, error.wall_seconds) == ("E", "username", 308)
+    assert not error.probe and not error.budget_inconclusive and error.unfundable == ()
+    assert error.unconfirmed
+    # Two samples, judged by their minimum, confirm time-based above the share: only time-based
+    # is inconclusive for budget; error-based still runs and concludes normally.
     samples = [("U:username", 2.0), ("B:username", 2.0)]
     confirmed = resume_plan(settled, {}, fields=fields, rate_samples=samples, round_wall_ceiling=375)
-    assert confirmed.budget_inconclusive and confirmed.unfundable == ("T",)
-    assert confirmed.wall_seconds is None and not confirmed.positive_only
+    assert confirmed.unfundable == ("T",) and not confirmed.budget_inconclusive
+    assert (confirmed.technique, confirmed.wall_seconds) == ("E", 308)
+    # With E settled too, nothing fundable is left: the candidate is closed.
+    closed = resume_plan(
+        settled + [f"E:{name}" for name in fields], {}, fields=fields, rate_samples=samples,
+        round_wall_ceiling=375,
+    )
+    assert closed.budget_inconclusive and closed.wall_seconds is None
+    assert closed.unfundable == ("T",)
     # The same candidate is fully fundable on Balanced and Thorough.
     for ceiling in (900, 2_700):
         fits = resume_plan(settled, {}, fields=fields, rate_samples=samples, round_wall_ceiling=ceiling)
-        assert fits.wall_seconds == 308 and not fits.budget_inconclusive and not fits.probe
+        assert fits.wall_seconds == 308 and fits.unfundable == () and not fits.probe
+
+
+def test_a_technique_above_the_scan_share_is_inconclusive_while_the_others_run():
+    """Review blocker 2: a technique whose remaining units need more than the candidate's fair
+    part of the Scan's residual is not funded, even though each unit fits a round."""
+    fields = ("a", "b", "c", "d")
+    samples = [("U:a", 5.3), ("U:b", 5.3)]
+    settled = ["U:a", "U:b", "U:c", "U:d"]
+    # B costs 481 s per field at 5.3 s: one unit fits Balanced's 900 s share. Its four fields
+    # (1,924 s) do not fit a 1,500 s part of the residual, so B is inconclusive; E and T are too.
+    shared = resume_plan(
+        settled, {}, fields=fields, rate_samples=samples, round_wall_ceiling=900,
+        scan_wall_share=1_500,
+    )
+    assert shared.unfundable == ("B", "E", "T") and shared.budget_inconclusive
+    # With the residual to itself (no share named) B is funded unit by unit: a late-field
+    # boolean injection is still reached.
+    alone = resume_plan(settled, {}, fields=fields, rate_samples=samples, round_wall_ceiling=900)
+    assert (alone.technique, alone.field_name, alone.wall_seconds) == ("B", "a", 482)
+    assert alone.unfundable == ("T",)  # 189 requests at 5.3 s exceed the 900 s share
 
 
 def test_thorough_funds_what_balanced_cannot_for_the_slow_chat_candidate():
@@ -165,12 +188,13 @@ def test_thorough_funds_what_balanced_cannot_for_the_slow_chat_candidate():
     balanced = resume_plan(
         settled, {}, fields=fields, rate_samples=samples, round_wall_ceiling=900,
     )
-    assert (balanced.technique, balanced.field_name) == ("B", "field0")
-    assert balanced.wall_seconds == 1_160 and balanced.budget_inconclusive
+    # Boolean (1,160 s per field), error- and time-based all exceed Balanced's share: closed.
+    assert balanced.budget_inconclusive and balanced.unfundable == ("B", "E", "T")
     thorough = resume_plan(
         settled, {}, fields=fields, rate_samples=samples, round_wall_ceiling=2_700,
     )
-    assert thorough.wall_seconds == 1_160 and not thorough.budget_inconclusive
+    assert (thorough.technique, thorough.field_name, thorough.wall_seconds) == ("B", "field0", 1_160)
+    assert thorough.unfundable == ()
 
 
 def test_one_slow_run_is_re_measured_before_any_verdict():
@@ -182,23 +206,25 @@ def test_one_slow_run_is_re_measured_before_any_verdict():
     )
     # E on one field at 8 s is 1,172 s: one probe, not a verdict. The probe holds just enough
     # for a second rate sample (10 requests, half again, at 8 s, plus one stage minimum).
-    assert first.probe and first.wall_seconds == 140 and not first.budget_inconclusive
+    assert first.probe and first.wall_seconds == 140 and first.unfundable == ()
     # The probe measured the true 1 s per request: E on one field fits at 164 s.
     second = resume_plan(
         ["U:a", "U:b", "U:c", "B:a", "B:b", "B:c"], {}, fields=fields,
         rate_samples=[("B:a", 8.0), ("B:b", 1.0)], round_wall_ceiling=900,
     )
-    assert second.wall_seconds == 164 and not second.probe and not second.budget_inconclusive
-    # A unit killed at the share already needs no probe: its own kill is the second measurement.
+    assert second.wall_seconds == 164 and not second.probe and second.unfundable == ()
+    # A unit already killed at the share needs no probe: its own kill is the second
+    # measurement, so union-based is inconclusive -- and the next technique is judged on its own.
     killed = resume_plan(
         [], {"U": 900}, rate_samples=[("U", 20.0)], killed_sent={"U": 45},
         round_wall_ceiling=900,
     )
-    assert killed.budget_inconclusive and killed.wall_seconds == 1_380  # 68 requests (1.5 x 45)
+    assert killed.unfundable == ("U",)
+    assert (killed.technique, killed.probe) == ("B", True)
     # Too few requests to measure anything: only the killed-wall floor applies.
     unmeasured = resume_plan([], {"U": 20}, rate_samples=[], round_wall_ceiling=900)
     assert unmeasured.wall_seconds == 20 + MINIMUM_STAGE_WALL_SECONDS
-    assert not unmeasured.budget_inconclusive
+    assert unmeasured.unfundable == ()
 
 
 def test_the_guard_counts_one_field_per_run_before_starting_it():
@@ -278,6 +304,11 @@ def test_the_field_count_is_what_sqlmap_is_handed_after_leaf_deduplication():
 
 # Fixture endpoints: seconds per request and tested body fields.
 ENDPOINTS = {
+    "/vuln": (5.3, 4),
+    "/fast5": (0.08, 5),
+    "/slow8": (8.0, 2),
+    "/mid": (2.0, 3),
+    "/slow10": (10.0, 5),
     "/stall": (150.0, 1),
     "/chat": (13.1, 8),
     "/copilot": (5.3, 4),
@@ -290,7 +321,11 @@ ENDPOINTS = {
 class _Scan:
     """A Scan's SQLi slices run round by round against one checkpoint store."""
 
-    def __init__(self, monkeypatch, paths, *, profile_wall=BALANCED_WALL):
+    def __init__(self, monkeypatch, paths, *, profile_wall=BALANCED_WALL, vuln=(), earlier=0):
+        self.vuln = set(vuln)  # (path, technique, field) a fixture injection answers on
+        self.found: set[tuple[str, str, str]] = set()
+        # Tool wall the Scan spent outside these lanes (discovery, templates, exposure).
+        self.earlier = earlier
         self.scan_id = str(uuid.uuid4())
         self.profile = {**BALANCED, "tool_wall_seconds": profile_wall}
         self.execution_plan = _plan(profile_wall)
@@ -343,6 +378,20 @@ class _Scan:
         wall = int(context.requested_budget["tool_wall_seconds"])
         self.calls.append((path, technique, tested, wall))
         rate, _fields = ENDPOINTS[path]
+        hit = [item for item in tested if (path, technique, item) in self.vuln]
+        if hit:
+            # sqlmap tests the fields in order and stops at the vulnerable one: the fields
+            # before it cost a full negative, the injection about 30 requests.
+            requests = NEGATIVE[technique] * tested.index(hit[0]) + 30
+            if requests * rate <= wall:
+                self.found.add((path, technique, hit[0]))
+                return CapabilityAdapterResult(
+                    status="success",
+                    actual_budget={"http_requests": requests, "tool_wall_seconds": int(requests * rate)},
+                    observations=({"kind": "sqli_finding", "param": hit[0],
+                                   "proof_state": "candidate"},),
+                    execution_started=True, parser_version="sqlmap-output/v1",
+                )
         need = NEGATIVE[technique] * len(tested)
         if need * rate <= wall:
             return CapabilityAdapterResult(
@@ -356,13 +405,14 @@ class _Scan:
             execution_started=True, parser_version="sqlmap-output/v1",
         )
 
-    def add(self, action_id, *, path, budget, extends=None):
+    def add(self, action_id, *, path, budget, extends=None, share=None):
         args = {
             "candidate_manifest_ref": self.candidates.reference().canonical_dict(),
             "endpoint_manifest_ref": self.endpoints.reference().canonical_dict(),
             "slice": {"start": self.order.index(path), "count": 1},
             "profile": "balanced_batch_v1", "proof_policy": "deterministic_differential_required",
             **({EXTENDS_ARG: extends} if extends else {}),
+            **({SCAN_WALL_SHARE_ARG: share} if share else {}),
         }
         self.actions.append(dataclasses.replace(
             _action(action_id, "sqli.verify_batch", len(self.actions), capability_args=args),
@@ -401,24 +451,70 @@ class _Scan:
             )
 
     def residual(self):
-        return {
+        left = {
             name: self.profile[name] - sum(
                 int(result.budget_consumed.get(name, 0)) for result in self.results.values()
             )
             for name in self.profile
         }
+        left["tool_wall_seconds"] -= self.earlier
+        return left
 
-    def next_round(self, round_number):
+    def drive(self, rounds=8):
+        """Continue round by round until the planner funds nothing; return the rounds run."""
+        ran = []
+        for round_number in range(2, 2 + rounds):
+            added = self.next_round(round_number)
+            if not added:
+                break
+            self.run({action_id for action_id, _ in added})
+            ran.append(added)
+        return ran
+
+    def sqli_wall(self):
+        return sum(
+            int(result.budget_consumed.get("tool_wall_seconds", 0))
+            for action_id, result in self.results.items() if action_id.startswith("verify.sqli")
+        )
+
+    def outcomes(self):
+        """The finalizer's budget outcome for every SQLi candidate (sqli_budget_outcomes)."""
+        rows = [
+            item for action in self.actions if action.action_id in self.receipts
+            for item in self.receipts[action.action_id].observations
+        ]
+        return {item["candidate_id"]: item for item in sqli_budget_outcomes(rows)}
+
+    def candidate(self, path):
+        return self.candidates.entries[self.order.index(path)]["candidate_id"]
+
+    def settled(self, path):
+        candidate = self.candidate(path)
+        return {
+            (item["technique"], item.get("field"))
+            for receipt in self.receipts.values() for item in receipt.observations
+            if item.get("kind") == "sqli_technique_stage" and item.get("candidate_id") == candidate
+            and item.get("status") == "success" and not item.get("carried_from")
+        }
+
+    def plan_extensions(self):
+        """Plan the next round exactly as ``compile_continuation_round`` does."""
         plan = self.plan()
         observations = {
             action_id: tuple(self.receipts[action_id].observations)
             for action_id in resume_observation_action_ids(plan, self.results)
+            if action_id in self.receipts
         }
-        planned = plan_verification_extensions(
+        return plan_verification_extensions(
             parent_plan=plan, parent_results=self.results, profile_limits=self.profile,
             residual=self.residual(), stage_resume_walls=stage_resume_walls(observations),
             budget_concluded=budget_concluded_slices(observations),
+            stage_remaining_walls=stage_remaining_walls(observations),
+            stage_remaining_requests=stage_remaining_walls(observations, key="remaining_requests"),
         )
+
+    def next_round(self, round_number):
+        planned = self.plan_extensions()
         added = []
         for spec in planned:
             action_id = f"{spec['action_id']}.r{round_number:02d}"
@@ -430,6 +526,7 @@ class _Scan:
             self.add(
                 action_id, path=path, budget=spec["budget"],
                 extends=spec["capability_args"][EXTENDS_ARG],
+                share=spec["capability_args"].get(SCAN_WALL_SHARE_ARG),
             )
             added.append((action_id, int(spec["budget"]["tool_wall_seconds"])))
         return added
@@ -447,7 +544,7 @@ SLICE = {"http_requests": 800, "state_changing_requests": 480, "tool_wall_second
 WIDE_SLICE = {"http_requests": 1_200, "state_changing_requests": 600, "tool_wall_seconds": 420}
 
 
-def test_a_slice_that_settled_nothing_gets_one_probe_then_a_verdict(monkeypatch):
+def test_a_slice_that_settled_nothing_is_continued_once_then_given_a_verdict(monkeypatch):
     """Regression for N55: verify.sqli.r01 settled nothing and was extended again and again."""
     scan = _Scan(monkeypatch, ("/chat", "/copilot"))
     scan.add("verify.sqli.r01", path="/chat", budget=SLICE)
@@ -455,29 +552,15 @@ def test_a_slice_that_settled_nothing_gets_one_probe_then_a_verdict(monkeypatch)
     scan.run({"verify.sqli.r01", "verify.sqli.001.r01"})
     # Union-based on the chat's first field needs 53 requests at 13.1 s: the slice is killed.
     # The copilot settles union-based on its first field (281 s) -- progress a whole-body run
-    # never checkpointed -- and spends the 139 s it cannot finish the next field in measuring
-    # its rate a second time instead of returning it.
+    # never checkpointed -- and yields the rest of its slice.
     assert [
         (path, technique, tested) for path, technique, tested, _ in scan.calls
-    ] == [
-        ("/chat", "U", ("field0",)), ("/copilot", "U", ("field0",)),
-        ("/copilot", "U", ("field1",)),
-    ]
+    ] == [("/chat", "U", ("field0",)), ("/copilot", "U", ("field0",))]
     [chat] = scan.records("verify.sqli.r01", "candidate_attempt")
     assert (chat["resume_technique"], chat["resume_field"]) == ("U", "field0")
-    assert chat["field_count"] == 8
-    # One rate sample (13.1 s) puts boolean-based above the 900 s share: not yet a verdict,
-    # but only a probe -- the least hold above the 420 s the unit was killed at.
-    assert chat["resume_probe"] is True and chat["resume_wall_seconds"] == 440
-    assert "verdict" not in chat
-    # Two samples put time-based on any copilot field (1,019 s) above the share: the copilot
-    # cannot reach a full negative, so it is inconclusive now; its next union-based unit is
-    # cheap enough to fund for a positive while no other lane is waiting.
-    [copilot] = scan.records("verify.sqli.001.r01", "candidate_attempt")
-    assert copilot["verdict"] == "inconclusive" and copilot["positive_only"] is True
-    [copilot_verdict] = scan.records("verify.sqli.001.r01", INCONCLUSIVE_RECORD_KIND)
-    assert copilot_verdict["unfundable_techniques"] == ["T"]
-    assert copilot_verdict["settled_units"] == ["U:field0"]
+    assert chat["field_count"] == 8 and chat["resume_wall_seconds"] == 716
+    # One rate sample: boolean-based (1,160 s per field) over the share is not yet judged.
+    assert chat["resume_unconfirmed"] is True and "verdict" not in chat
 
     # Control: the floor the 2.8.0 planner read -- the killed wall plus one stage minimum --
     # granted two 450 s extensions the wall killed again, settling nothing.
@@ -491,18 +574,21 @@ def test_a_slice_that_settled_nothing_gets_one_probe_then_a_verdict(monkeypatch)
     )
     assert [item["budget"]["tool_wall_seconds"] for item in old] == [450, 450]
 
-    # Now: the chat's probe is funded at its floor, and the copilot's cheap positive-only unit
-    # at its own, since no other lane is waiting.
+    # Now the chat's next unit is funded once, at what it needs; its second measurement shows
+    # union-based over eight fields (5,700 s) cannot fit its part of the residual, and the
+    # other techniques cannot fit a round: closed, inconclusive for budget, never funded again.
     second = scan.next_round(2)
-    assert second == [("verify.sqli.r01.ext.r02", 440), ("verify.sqli.001.r01.ext.r02", 420)]
-    scan.run({action_id for action_id, _ in second})
-    # The probe measured the chat again: boolean-, error- and time-based can never fit a
-    # round, so the chat is inconclusive for budget and is not funded again.
+    assert second == [("verify.sqli.r01.ext.r02", 716)]
+    scan.run({second[0][0]})
     [chat_verdict] = scan.records("verify.sqli.r01.ext.r02", INCONCLUSIVE_RECORD_KIND)
-    assert chat_verdict["unfundable_techniques"] == ["B", "E", "T"]
-    assert chat_verdict["positive_only"] is False
-    third = scan.next_round(3)
-    assert all(not action_id.startswith("verify.sqli.r01.") for action_id, _ in third)
+    assert chat_verdict["unfundable_techniques"] == ["U", "B", "E", "T"]
+    assert chat_verdict["closed"] is True
+    assert chat_verdict["settled_units"] == ["U:field0"]
+    assert scan.results["verify.sqli.r01.ext.r02"].reason_code.value == "insufficient_plan_budget"
+    rounds = scan.drive()
+    assert all(
+        not action_id.startswith("verify.sqli.r01.") for added in rounds for action_id, _ in added
+    )
 
 
 def test_a_unit_no_round_can_fund_is_probed_once_then_inconclusive(monkeypatch):
@@ -519,16 +605,15 @@ def test_a_unit_no_round_can_fund_is_probed_once_then_inconclusive(monkeypatch):
     probe = scan.next_round(2)
     assert probe == [("verify.sqli.r01.ext.r02", 440)]
     scan.run({probe[0][0]})
-    # The probe was killed again: two measurements agree, so the candidate is inconclusive
+    # The probe was killed again: two measurements agree, so every technique is inconclusive
     # for budget and no further continuation is granted.
     [attempt] = scan.records(probe[0][0], "candidate_attempt")
     assert attempt["verdict"] == "inconclusive" and attempt["inconclusive_reason"] == "budget"
     [verdict] = scan.records(probe[0][0], INCONCLUSIVE_RECORD_KIND)
-    assert verdict["reason"] == "verdict_exceeds_round_budget"
-    assert verdict["technique"] == "U" and verdict["field_count"] == 1
-    assert verdict["refuted_techniques"] == []
-    assert verdict["unsettled_techniques"] == ["U", "B", "E", "T"]
-    assert verdict["predicted_wall_seconds"] > verdict["round_wall_ceiling_seconds"] == 900
+    assert verdict["reason"] == "verdict_exceeds_budget"
+    assert verdict["unfundable_techniques"] == ["U", "B", "E", "T"]
+    assert verdict["refuted_techniques"] == [] and verdict["closed"] is True
+    assert verdict["round_wall_ceiling_seconds"] == 900
     assert verdict["url"].startswith("https://app.example.test/")
     assert scan.next_round(3) == []
 
@@ -557,35 +642,99 @@ def test_the_balanced_login_form_concludes_in_the_next_round(monkeypatch):
     assert scan.next_round(3) == []
 
 
-def test_the_fast_login_form_keeps_its_per_field_progress_and_is_told_why_it_stops(
-    monkeypatch,
-):
-    """Review blocker, Fast (375 s share): the login form at 2 s per request.
+def test_the_fast_login_form_refutes_three_techniques_and_judges_time_based_alone(monkeypatch):
+    """Review blockers, Fast (375 s share): the login form at 2 s per request.
 
-    Fast's body slice holds 420 s and the planner never sizes an extension below the 420 s body
-    attempt floor, so no Fast body candidate is ever extended. Run over both fields at once,
-    union-based (212 s) settled and boolean (348 s) was cut off; field by field, boolean on the
-    first field settles too, and the candidate says why it stops.
+    A whole-body run never got past boolean-based. Field by field, one unit at a time, every
+    unit that fits Fast's share runs: union-, boolean- and error-based are refuted on both
+    fields, and only time-based (398 s on one field) is inconclusive for budget.
     """
     scan = _Scan(monkeypatch, ("/fastlogin",), profile_wall=FAST)
     scan.add("verify.sqli.r01", path="/fastlogin", budget=WIDE_SLICE)
     scan.run({"verify.sqli.r01"})
-    ran = [(technique, tested[0]) for _, technique, tested, _ in scan.calls]
-    assert ran == [("U", "field0"), ("U", "field1"), ("B", "field0")]
-    [attempt] = scan.records("verify.sqli.r01", "candidate_attempt")
-    assert (attempt["resume_technique"], attempt["resume_field"]) == ("B", "field1")
-    assert attempt["verdict"] == "inconclusive"
-    [verdict] = scan.records("verify.sqli.r01", INCONCLUSIVE_RECORD_KIND)
-    assert verdict["refuted_techniques"] == ["U"]
-    assert verdict["unsettled_techniques"] == ["B", "E", "T"]
-    assert (verdict["technique"], verdict["field"]) == ("B", "field1")
+    assert [(technique, tested[0]) for _, technique, tested, _ in scan.calls] == [
+        ("U", "field0"), ("U", "field1"), ("B", "field0"),
+    ]
+    rounds = scan.drive()
+    assert [wall for added in rounds for _, wall in added] == [375, 375, 308]
+    assert scan.settled("/fastlogin") == {(t, f) for t in "UBE" for f in ("field0", "field1")}
+    [verdict] = scan.records(rounds[-1][0][0], INCONCLUSIVE_RECORD_KIND)
+    assert verdict["unfundable_techniques"] == ["T"] and verdict["closed"] is True
+    assert verdict["refuted_techniques"] == ["U", "B", "E"]
     assert verdict["round_wall_ceiling_seconds"] == 375
-    # Time-based on one field (398 s at 2 s per request) can never fit Fast's share, so the
-    # candidate cannot reach a full negative: inconclusive now, and not funded again.
-    assert verdict["unfundable_techniques"] == ["T"]
-    assert verdict["positive_only"] is False and "predicted_wall_seconds" not in verdict
-    assert verdict["settled_units"] == ["B:field0", "U:field0", "U:field1"]
-    assert scan.next_round(2) == []
+
+
+def test_a_late_field_boolean_injection_at_5_3_s_is_found_on_balanced(monkeypatch):
+    """Review blocker 1: boolean-based on a 4-field body at 5.3 s per request (481 s per field)
+    fits Balanced's share; it used to be skipped once time-based was over the share."""
+    scan = _Scan(monkeypatch, ("/vuln",), vuln={("/vuln", "B", "field3")}, earlier=540)
+    scan.add("verify.sqli.r01", path="/vuln", budget=SLICE)
+    scan.run({"verify.sqli.r01"})
+    scan.drive()
+    assert scan.found == {("/vuln", "B", "field3")}
+    assert scan.settled("/vuln") >= {("U", f) for f in ("field0", "field1", "field2", "field3")}
+
+
+def test_error_based_on_a_middle_field_is_found_or_the_residual_is_used(monkeypatch):
+    """Review blocker 1, single candidate: error-based on field 2 at 5.3 s per request."""
+    for rate, expect_found in ((2.5, True), (5.3, False)):
+        ENDPOINTS["/vuln"] = (rate, 4)
+        scan = _Scan(monkeypatch, ("/vuln",), vuln={("/vuln", "E", "field2")}, earlier=540)
+        scan.add("verify.sqli.r01", path="/vuln", budget=SLICE)
+        scan.run({"verify.sqli.r01"})
+        scan.drive()
+        if expect_found:
+            assert scan.found == {("/vuln", "E", "field2")}
+            continue
+        # At 5.3 s the injection lies beyond what Balanced can fund (U and B over four fields
+        # alone need 3,048 s): the candidate uses the residual unit by unit until the next one
+        # no longer fits, rather than stopping early.
+        [record] = [
+            item for item in scan.receipts[scan.actions[-1].action_id].observations
+            if item.get("kind") == "candidate_attempt"
+        ]
+        assert scan.residual()["tool_wall_seconds"] < record["resume_wall_seconds"]
+        assert len(scan.settled("/vuln")) >= 7
+    ENDPOINTS["/vuln"] = (5.3, 4)
+
+
+def test_a_thorough_scan_stops_sqli_with_verdicts_before_the_residual_runs_out(monkeypatch):
+    """Review blocker 2: Thorough's 2,700 s share fits a unit of almost anything, so only the
+    residual check stops an endpoint that would need ~50,000 s."""
+    paths = ("/chat", "/copilot", "/slow8", "/mid", "/login", "/slow10")
+    scan = _Scan(
+        monkeypatch, paths, profile_wall=THOROUGH, vuln={("/mid", "B", "field2")}, earlier=540,
+    )
+    for index, path in enumerate(paths):
+        scan.add(f"verify.sqli.{index:03d}.r01", path=path, budget=WIDE_SLICE)
+    scan.run({action.action_id for action in scan.actions})
+    scan.drive(rounds=12)
+    assert scan.found == {("/mid", "B", "field2")}
+    assert scan.settled("/login") == {(t, f) for t in "UBET" for f in ("field0", "field1")}
+    outcomes = scan.outcomes()
+    for path in ("/chat", "/copilot", "/slow10"):
+        assert scan.candidate(path) in outcomes, f"{path} ends with no budget outcome"
+    # Every candidate ends proven, refuted, or inconclusive with a reason -- and SQLi stopped
+    # with wall left that it could have spent.
+    assert scan.residual()["tool_wall_seconds"] > 0
+    assert scan.sqli_wall() < THOROUGH - 540
+
+
+def test_a_fast_body_stopped_by_its_mutation_hold_is_extended_and_concludes(monkeypatch):
+    """Review should-fix: a fast 5-field body whose next unit needs more mutations than its
+    hold has left stops on the request ceiling -- not as wall-exhausted -- and is extended."""
+    for mutations in (600, 1_200):
+        ENDPOINTS["/fast5"] = (0.08, 5)
+        scan = _Scan(monkeypatch, ("/fast5",), earlier=540)
+        scan.add(
+            "verify.sqli.r01", path="/fast5",
+            budget={"http_requests": 1_200, "state_changing_requests": mutations, "tool_wall_seconds": 420},
+        )
+        scan.run({"verify.sqli.r01"})
+        if mutations == 600:
+            assert scan.results["verify.sqli.r01"].reason_code.value == "http_request_budget_exhausted"
+        scan.drive()
+        assert scan.settled("/fast5") == {(t, f"field{i}") for t in "UBET" for i in range(5)}
 
 
 class _HoneyScan(_Scan):
@@ -624,17 +773,7 @@ class _HoneyScan(_Scan):
         )
 
     def next_round(self, round_number):
-        plan = self.plan()
-        observations = {
-            action_id: tuple(self.receipts[action_id].observations)
-            for action_id in resume_observation_action_ids(plan, self.results)
-            if action_id in self.receipts
-        }
-        planned = plan_verification_extensions(
-            parent_plan=plan, parent_results=self.results, profile_limits=self.profile,
-            residual=self.residual(), stage_resume_walls=stage_resume_walls(observations),
-            budget_concluded=budget_concluded_slices(observations),
-        )
+        planned = self.plan_extensions()
         sqli = []
         for spec in planned:
             action_id = f"{spec['action_id']}.r{round_number:02d}"
@@ -655,6 +794,7 @@ class _HoneyScan(_Scan):
             self.add(
                 action_id, path=self.order[original.capability_args["slice"]["start"]],
                 budget=budget, extends=spec["capability_args"][EXTENDS_ARG],
+                share=spec["capability_args"].get(SCAN_WALL_SHARE_ARG),
             )
             sqli.append(action_id)
         return sqli
@@ -683,10 +823,9 @@ def _batch_candidate(scan, manifest_candidate_id):
 def test_the_honey_scan_concludes_and_sqli_does_not_starve_xss(monkeypatch):
     """N55 end to end on 9de6a910's shapes (scripted fixtures, Balanced 3,600 s).
 
-    2.8.0 spent 2,833 s of SQLi on these candidates and concluded nothing. The first version
-    of this fix (a774b411) still spent 2,928 s -- the 8-field chat drew a 900 s share in three
-    rounds -- without a budget verdict, and SQLi extensions were planned before the form's XSS
-    extension.
+    2.8.0 spent 2,833 s of SQLi on these candidates and concluded nothing. a774b411 still spent
+    2,928 s -- the 8-field chat drew a 900 s share in three rounds -- without a budget verdict,
+    and SQLi extensions were planned before the form's XSS extension.
     """
     scan = _HoneyScan(monkeypatch)
     # Round 1: one slice per chat candidate, and the login form's XSS slice, wall-killed with
@@ -731,16 +870,18 @@ def test_the_honey_scan_concludes_and_sqli_does_not_starve_xss(monkeypatch):
 
     # XSS on the form is funded in the first continuation round, beside the SQLi work.
     assert scan.xss_funded == [("verify.xss.001.r01.ext.r02", 583)]
-    # Both chat candidates end with an explicit budget verdict naming what no round can fund.
-    chat, copilot = scan.verdicts("/chat")[0], scan.verdicts("/copilot")[0]
-    assert chat["unfundable_techniques"] == ["B", "E", "T"]
-    assert chat["positive_only"] is False
-    assert copilot["unfundable_techniques"] == ["T"]
-    # The login form's SQLi concludes, and the whole SQLi lane has concluded by round 3.
-    assert concluded_at == (3, 1_844)
-    # Afterwards only the copilot's cheap union-based units are funded, for a positive, from
-    # what no other lane is waiting for; the lane stays below 2.8.0's 2,833 s.
-    assert scan.sqli_wall() == 2_404
+    # Both chat candidates end closed with an explicit budget verdict: their union-based units
+    # each fit a round, but not their part of the residual beside the form's work, and their
+    # other techniques fit no round at 13.1 and 5.3 s per request.
+    chat, copilot = scan.verdicts("/chat")[-1], scan.verdicts("/copilot")[-1]
+    assert chat["unfundable_techniques"] == ["U", "B", "E", "T"] and chat["closed"] is True
+    assert copilot["unfundable_techniques"] == ["U", "B", "E", "T"] and copilot["closed"] is True
+    assert scan.settled("/copilot") == {("U", "field0"), ("U", "field1")}
+    # The login form's SQLi concludes, and the whole SQLi lane has concluded by round 3, with
+    # 331 s of the Scan's wall unspent; the lane spent 2,238 s against 2.8.0's 2,833 s.
+    assert concluded_at == (3, 2_238)
+    assert scan.sqli_wall() == 2_238
+    assert scan.residual()["tool_wall_seconds"] == 331
 
 
 def test_lane_order_does_not_decide_who_gets_the_residual():
@@ -785,10 +926,10 @@ def test_lane_order_does_not_decide_who_gets_the_residual():
             stage_resume_walls={"verify.sqli.r01": 716},
         )
         walls = {item["capability_name"]: item["budget"]["tool_wall_seconds"] for item in planned}
-        # Each lane first holds half of what is left: XSS is funded, and SQLi's 716 s floor
-        # does not fit its half, so it waits rather than draining the residual first.
-        assert "xss.verify_batch" in walls, order
-        assert walls["xss.verify_batch"] <= 500
+        # Each lane first holds half of what is left: SQLi's 716 s floor does not fit its half,
+        # XSS is funded and then topped up to its latency-sized need from what the first pass
+        # left. SQLi no longer drains the residual first, whatever the lanes' order or names.
+        assert walls == {"xss.verify_batch": 583}, order
 
 
 def test_time_based_is_not_predicted_from_union_based_rate():
