@@ -13,6 +13,11 @@ import re
 from typing import Any
 import urllib.parse
 
+try:
+    from scanner_tools.host_names import canonical_host
+except ModuleNotFoundError:  # package import
+    from scanner.scanner_tools.host_names import canonical_host
+
 from .asset_schema import ASSET_MIGRATION, ASSET_SCHEMA_SQL, ASSET_VIEW_SQL
 from .asset_invariants import _install_host_key
 
@@ -29,7 +34,7 @@ def locator_from_url(value: str) -> str | None:
         try:
             return str(ipaddress.ip_address(host))
         except ValueError:
-            return host.encode("idna").decode("ascii")
+            return canonical_host(host)  # HostNameError is a ValueError: no locator
     except (ValueError, UnicodeError):
         return None
 

@@ -23,6 +23,11 @@ from typing import Any, Mapping, MutableMapping
 from urllib.parse import urlsplit
 
 try:
+    from scanner_tools.host_names import HostNameError, canonical_host
+except ModuleNotFoundError:  # source-checkout host tests
+    from scanner.scanner_tools.host_names import HostNameError, canonical_host
+
+try:
     from target_address_policy import normalize_frozen_addresses
 except ModuleNotFoundError:  # source-checkout host tests
     from api.target_address_policy import normalize_frozen_addresses
@@ -80,8 +85,8 @@ def _normalized_host(value: Any) -> str:
     if not text or len(text) > 253 or any(ord(ch) < 33 for ch in text):
         return ""
     try:
-        return text.encode("idna").decode("ascii").lower()
-    except UnicodeError:
+        return canonical_host(text)
+    except HostNameError:
         return ""
 
 

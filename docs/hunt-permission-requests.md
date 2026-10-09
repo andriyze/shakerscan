@@ -192,6 +192,18 @@ Rules for bounds:
   - Bounds are parsed by the server.
   - Host patterns are IDNA ASCII and must contain a registrable domain, so `*` and `*.com` are
     refused.
+  - Every host (bounds, destination subjects, credential home hosts, approval screens) is spelled
+    by one strict IDNA 2008/UTS #46 canonicalizer (`scanner_tools/host_names.py`), as the HTTP
+    client connects: `straße.example` is `xn--strae-oqa.example`, never `strasse.example`. A host
+    strict processing refuses (a ZWJ/ZWNJ outside its script, a malformed `xn--` label) is
+    refused, not re-encoded with the IDNA 2003 codec. Approval text shows the canonical ASCII host
+    with its Unicode form beside it.
+  - Bounds stored before this (no `host_canonicalization` in `bounds_json`) were parsed with
+    IDNA 2003. On load each host bound is re-derived from the strings the person approved: one
+    whose IDNA 2003 and 2008 encodings are identical stands; one that differs, or whose source
+    cannot be confirmed, is withheld (it covers nothing) and listed under `reapproval_required`.
+    The row's other bounds stand, and the withheld bounds are offered back once as a pending
+    `preauthorization_reapproval` request the person grants with `shakerscan approve <id>`.
   - A bound never covers a hard limit, and kind rules still apply to each credential.
 - **When a request falls inside the bounds,** it is created and granted in the same transaction
   (`decision_via=preauthorization`) and audited as pre-authorized by the starting person. The

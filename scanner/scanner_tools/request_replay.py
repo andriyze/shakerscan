@@ -15,6 +15,11 @@ from typing import Any, Iterable, Mapping
 import urllib.parse
 
 try:
+    from .host_names import HostNameError, canonical_host
+except ImportError:  # direct host-side import in focused tests
+    from host_names import HostNameError, canonical_host
+
+try:
     from .url_redaction import redact_url
 except ImportError:  # direct host-side import in focused tests
     from url_redaction import redact_url
@@ -67,8 +72,8 @@ def _canonical_origin(value: Any) -> str:
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
         raise RequestReplayError("origin must not contain path, query, or fragment")
     try:
-        host = parsed.hostname.encode("idna").decode("ascii").lower().rstrip(".")
-    except UnicodeError as exc:
+        host = canonical_host(parsed.hostname)
+    except HostNameError as exc:
         raise RequestReplayError("origin hostname is invalid") from exc
     display_host = f"[{host}]" if ":" in host else host
     default_port = 443 if parsed.scheme.lower() == "https" else 80

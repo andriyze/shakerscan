@@ -23,6 +23,7 @@ from .permission_store import (
     list_events,
     list_grants,
     list_requests,
+    load_preauthorizations,
     load_request,
     public_preauthorization,
     public_request,
@@ -140,9 +141,7 @@ async def get_hunt_preauthorization(hunt_id: str):
     hunt_uuid = _uuid(hunt_id, "hunt id")
     async with _pool().acquire() as conn:
         await _hunt_exists(conn, hunt_uuid)
-        rows = await conn.fetch(
-            "SELECT * FROM hunt_preauthorizations WHERE hunt_run_id=$1 ORDER BY created_at, id", hunt_uuid,
-        )
+        rows = await load_preauthorizations(conn, hunt_uuid)
         return {"hunt_id": str(hunt_uuid), "preauthorizations": [public_preauthorization(row) for row in rows]}
 
 

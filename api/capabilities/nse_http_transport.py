@@ -24,9 +24,11 @@ from runtime.request_replay_executor import ReplayExecutionError
 try:
     from scanner_tools.request_replay import ReplayRequest
     from scanner_tools.url_redaction import redact_url
+    from scanner_tools.host_names import HostNameError, canonical_host
 except ModuleNotFoundError:
     from scanner.scanner_tools.request_replay import ReplayRequest
     from scanner.scanner_tools.url_redaction import redact_url
+    from scanner.scanner_tools.host_names import HostNameError, canonical_host
 
 HTTP_SCRIPT_LIMITS = {"http-methods": 6, "http-security-headers": 3, "http-trace": 2}
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
@@ -44,7 +46,13 @@ def http_envelope(scripts: tuple[str, ...], ports: int, *, allow_write: bool) ->
 
 
 def normalized_host(value: str) -> str:
-    return value.encode("idna").decode("ascii").lower().rstrip(".")
+    """The one canonical host spelling (strict IDNA 2008/UTS #46, as the client connects)."""
+    if not value:
+        return ""
+    try:
+        return canonical_host(value)
+    except HostNameError:
+        raise ReplayExecutionError("nse_invalid_destination") from None
 
 
 class NseHttpTransport:

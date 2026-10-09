@@ -175,6 +175,8 @@ def granted_destination(policy: Mapping[str, Any], origin: Any) -> Mapping[str, 
     port = port or (443 if parsed.scheme == "https" else 80)
     # The spelling the grant was recorded under (``permission_subjects.destination_host``).
     host = _destination_host(parsed.hostname)
+    if not host:
+        return None
     for item in policy.get("granted_destinations") or ():
         if (isinstance(item, Mapping) and _destination_host(item.get("host")) == host
                 and int(item.get("port") or 0) == port and item.get("scheme") == parsed.scheme):
@@ -221,6 +223,8 @@ def resolve_hunt_http_origin(target: TargetBinding, origin: Any, policy: Mapping
     # The scope guard's host spelling (``action_scope._canonical_host``: IDNA 2008 with UTS #46,
     # as httpx connects), and the admitted origin is recorded in that ASCII form.
     host = _destination_host(parsed.hostname)
+    if not host:
+        raise ValueError("HTTP service origin host is not a valid IDNA 2008/UTS #46 name")
     netloc = f"[{host}]" if ":" in host else host
     candidate = _origin(f"{parsed.scheme}://{netloc}" + (f":{port}" if port is not None else ""))
     granted = granted_destination(policy, text)

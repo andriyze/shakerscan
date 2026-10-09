@@ -6047,10 +6047,18 @@ def normalize_target_url(target: str) -> tuple[str, str | None]:
         import ipaddress
         host = str(ipaddress.ip_address(host))
     except ValueError:
+        # The one host spelling every scope check, bound and connection shares: strict IDNA
+        # 2008/UTS #46 (the IDNA 2003 codec turned straße.example into strasse.example).
         try:
-            host = host.encode('idna').decode('ascii')
-        except UnicodeError as exc:
-            raise TargetNormalizationError("Invalid target URL: hostname is not a valid IDN") from exc
+            from scanner_tools.host_names import HostNameError, canonical_host
+        except ModuleNotFoundError:
+            from scanner.scanner_tools.host_names import HostNameError, canonical_host
+        try:
+            host = canonical_host(host) + ('.' if host.endswith('.') else '')
+        except HostNameError as exc:
+            raise TargetNormalizationError(
+                "Invalid target URL: hostname is not a valid IDNA 2008/UTS #46 name"
+            ) from exc
     # DNS names are bounded to 253 visible characters. Apart from producing an
     # unusable target, accepting an unbounded host lets one historical row turn
     # lightweight domain-filter responses into multi-megabyte UI payloads.

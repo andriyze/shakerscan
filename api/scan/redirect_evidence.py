@@ -9,6 +9,11 @@ import re
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
+try:
+    from scanner_tools.host_names import HostNameError, canonical_host
+except ModuleNotFoundError:  # package import
+    from scanner.scanner_tools.host_names import HostNameError, canonical_host
+
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
@@ -29,7 +34,10 @@ def http_origin(value: Any) -> str | None:
         if ":" in host:
             host = f"[{ipaddress.IPv6Address(host)}]" if "%" not in host else ""
         else:
-            host = host.encode("idna").decode("ascii")
+            try:
+                host = canonical_host(host)
+            except HostNameError:
+                return None
             if len(host) > 253 or not all(
                 re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
                 for label in host.split(".")
