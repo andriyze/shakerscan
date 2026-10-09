@@ -1576,6 +1576,9 @@ CREATE TABLE discovery_runs (
     completed_at TIMESTAMPTZ,
     error_message TEXT,
 
+    -- Who asked for it (POST /discovery requested_by; the Enterprise gateway names the person)
+    requested_by TEXT,
+
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
