@@ -6,12 +6,18 @@ and bounded so one caller cannot flood the queue or third-party sources:
 
 - the domain is a bare host name at or below a registrable domain (``scope.psl.parse_domain``:
   no scheme, path, port, wildcard or address; not a public suffix such as ``co.uk``);
-- its apex (eTLD+1) holds a target the person added (not one discovery or the CT monitor
-  inserted), or a scope receipt names it as an allowed root;
+- its apex (eTLD+1) holds a target a person added: not one inserted by discovery, the CT
+  monitor, Model Intake, an AI session, AI Gate or an observed device service, nor a ``host``
+  row the asset model created as the owner of other rows (archived ones included). A scope
+  receipt that names the domain or apex as an allowed root also admits it, but only when the
+  receipt is bound to such a declared target (an unbound Arsenal preview admits nothing);
 - one discovery per apex is pending or running at a time, and at most
   ``SHAKERSCAN_DISCOVERY_MAX_ACTIVE`` (default 2) across the engine; a run older than
   ``ACTIVE_WINDOW`` no longer holds a slot, so a lost worker cannot block an apex for ever;
-- the run records who requested it (``requested_by``).
+- the run records who requested it (``requested_by``). The engine has no per-person identity
+  on this route (OSS has one implicit operator; the Enterprise gateway does not forward a
+  verified identity), so the value is derived here, never taken from the request: it is
+  ``local-operator``. The gateway's own audit names the person.
 
 The checks and the insert run under one transaction-scoped advisory lock, so two concurrent
 requests cannot both pass. The worker validates the queued domain again before it spawns
@@ -36,8 +42,9 @@ DEFAULT_MAX_ACTIVE = 2
 MAX_ACTIVE_CEILING = 20
 ACTIVE_WINDOW = timedelta(hours=2)
 ADMISSION_LOCK = 0x5348_4B44_4953_4331  # "SHKDISC1": serializes discovery admission
-# Targets inserted by discovery itself or the CT monitor do not count as declared by a person.
-UNDECLARED_SOURCES = ("subfinder", "gungnir-monitor", "model-intake")
+# Targets inserted by automation do not count as declared by a person.
+UNDECLARED_SOURCES = ("subfinder", "gungnir-monitor", "model-intake", "ai_session", "ai_gate",
+                      "device-service")
 DEFAULT_REQUESTER = "local-operator"
 
 
@@ -67,23 +74,34 @@ def discovery_domain(raw: Any) -> str:
         raise DiscoveryRefused(400, f"Cannot discover subdomains: {exc}.") from exc
 
 
-def requester(raw: Any) -> str:
-    """Who asked: printable, one line, bounded (the Enterprise gateway names the person)."""
-    text = " ".join("".join(ch if ch.isprintable() else " " for ch in str(raw or "")).split())
-    return text[:200] or DEFAULT_REQUESTER
+def requester() -> str:
+    """Who asked, as the engine can establish it: never a caller-supplied value. The single
+    place to read a verified principal once the engine has one."""
+    return DEFAULT_REQUESTER
 
 
-_DECLARED_TARGETS_SQL = """
-SELECT url, COALESCE(discovery_source, 'manual') AS source FROM targets
-WHERE COALESCE(is_active, true) AND strpos(lower(url), $1) > 0
+# A row counts when a person added it: an active target from no automated source, and for a
+# ``host`` row (which the asset model also creates as the owner of web rows) only one with a
+# device profile or that owns no rows at all, archived ones included.
+_DECLARED = """
+    COALESCE({t}.is_active, true)
+    AND COALESCE({t}.discovery_source, 'manual') <> ALL($2::text[])
+    AND (COALESCE({t}.discovery_source, 'manual') <> 'host'
+         OR EXISTS (SELECT 1 FROM target_device_profiles p WHERE p.target_id = {t}.id)
+         OR NOT EXISTS (SELECT 1 FROM targets m WHERE m.asset_owner_id = {t}.id))
+"""
+_DECLARED_TARGETS_SQL = f"""
+SELECT t.url FROM targets t
+WHERE strpos(lower(t.url), $1) > 0 AND {_DECLARED.format(t='t')}
 LIMIT 5000
 """
-_DECLARED_SCOPE_SQL = """
+_DECLARED_SCOPE_SQL = f"""
 SELECT EXISTS (
-    SELECT 1 FROM scope_receipts
-    WHERE verdict <> 'blocked'
-      AND jsonb_typeof(allowed_root_domains) = 'array'
-      AND allowed_root_domains ?| $1::text[]
+    SELECT 1 FROM scope_receipts s JOIN targets bound ON bound.id = s.target_id
+    WHERE s.verdict <> 'blocked'
+      AND jsonb_typeof(s.allowed_root_domains) = 'array'
+      AND s.allowed_root_domains ?| $1::text[]
+      AND {_DECLARED.format(t='bound')}
 )
 """
 
@@ -100,19 +118,13 @@ def _host(url: str) -> str:
 
 
 async def _declared(conn: Any, apex: str, domain: str) -> bool:
-    """A target the person added lives under ``apex``, or a scope receipt names it as a root.
-
-    Rows discovery or the CT monitor inserted do not count, nor does the ``host`` owner row the
-    asset model creates beside such a row; a host target added on its own does.
-    """
-    rows = [(_host(row["url"]), str(row["source"])) for row in
-            await conn.fetch(_DECLARED_TARGETS_SQL, apex)]
-    rows = [(host, source) for host, source in rows if host == apex or host.endswith("." + apex)]
-    discovered = {host for host, source in rows if source in UNDECLARED_SOURCES}
-    if any(source not in UNDECLARED_SOURCES and (source != "host" or host not in discovered)
-           for host, source in rows):
-        return True
-    return bool(await conn.fetchval(_DECLARED_SCOPE_SQL, sorted({apex, domain})))
+    """A person-added target lives under ``apex``, or a scope receipt bound to a person-added
+    target names ``apex`` or ``domain`` as an allowed root."""
+    for row in await conn.fetch(_DECLARED_TARGETS_SQL, apex, list(UNDECLARED_SOURCES)):
+        host = _host(row["url"])
+        if host == apex or host.endswith("." + apex):
+            return True
+    return bool(await conn.fetchval(_DECLARED_SCOPE_SQL, sorted({apex, domain}), list(UNDECLARED_SOURCES)))
 
 
 async def admit_discovery(conn: Any, domain: str, *, requested_by: str) -> uuid.UUID:

@@ -48,7 +48,7 @@ try:
     from scan.compatibility import record_compatibility_call
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from operations.discovery import (
-        DEFAULT_REQUESTER, DiscoveryRefused, admit_discovery, discovery_domain, requester,
+        DiscoveryRefused, admit_discovery, discovery_domain, requester,
     )
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_control_requirements import AI_CONTROL_REQUIREMENTS
@@ -65,7 +65,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.compatibility import record_compatibility_call
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from .discovery import (
-        DEFAULT_REQUESTER, DiscoveryRefused, admit_discovery, discovery_domain, requester,
+        DiscoveryRefused, admit_discovery, discovery_domain, requester,
     )
 
 
@@ -372,10 +372,7 @@ async def list_cli_v1_findings(
 
 
 @router.post("/discovery")
-async def start_discovery(
-    root_domain: str = Query(..., max_length=1012),
-    requested_by: str = Query(DEFAULT_REQUESTER, max_length=200),
-):
+async def start_discovery(root_domain: str = Query(..., max_length=1012)):
     """Start passive subdomain discovery for a domain under a declared target.
 
     Refused with 400 for anything but a bare domain at or below a registrable domain, 403 when
@@ -385,7 +382,7 @@ async def start_discovery(
     try:
         domain = discovery_domain(root_domain)
         async with _pool().acquire() as conn:
-            discovery_uuid = await admit_discovery(conn, domain, requested_by=requester(requested_by))
+            discovery_uuid = await admit_discovery(conn, domain, requested_by=requester())
     except DiscoveryRefused as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     r = get_redis()
