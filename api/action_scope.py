@@ -15,6 +15,8 @@ import re
 import urllib.parse
 from typing import Any
 
+import idna
+
 import deployment_policy
 
 try:
@@ -65,12 +67,23 @@ def _add_check(checks: list[ScopeCheck], name: str, status: str, message: str) -
 
 
 def _canonical_host(value: str | None) -> str:
+    """The ASCII host the HTTP client connects to.
+
+    A non-ASCII host is encoded with IDNA 2008 and the UTS #46 mapping, as httpx and browsers
+    resolve it: Python's ``idna`` codec is IDNA 2003, which maps ``straße.example`` to
+    ``strasse.example`` while the client connects to ``xn--strae-oqa.example``, so the scope
+    decision and the connection named different hosts. Full-width and zero-width spellings map
+    to the same ASCII host under both. A host neither encodes is returned unchanged (and is
+    refused as an invalid origin where one is required).
+    """
     host = str(value or "").strip().strip("[]").lower()
     if host.endswith("."):
         host = host[:-1]
     try:
-        return host.encode("idna").decode("ascii")
-    except UnicodeError:
+        if host.isascii():
+            return host.encode("idna").decode("ascii")
+        return idna.encode(host, uts46=True).decode("ascii").rstrip(".")
+    except (UnicodeError, idna.IDNAError):
         return host
 
 
