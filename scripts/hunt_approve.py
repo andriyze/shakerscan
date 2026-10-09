@@ -68,6 +68,13 @@ PREAUTHORIZATION_USES = ("agent_launch", "hunt_start")
 OPEN_HUNT_STATUSES = ("active", "awaiting_planner", "budget_exhausted")
 SESSION_SECONDS = 30 * 60
 WATCH_POLL_SECONDS = 3.0
+# --watch keys: after a request is shown, keys are discarded for this long before its prompt is
+# written (a key meant for the previous screen never decides the next one); bytes arriving within
+# KEY_BURST_SECONDS of each other are one burst (an escape sequence or a paste), never a key; after
+# such a burst, anything more within KEY_ESCAPE_TAIL_SECONDS is discarded too.
+KEY_SETTLE_SECONDS = 0.75
+KEY_BURST_SECONDS = 0.03
+KEY_ESCAPE_TAIL_SECONDS = 0.15
 # `hunt permissions wait`: never more than one read of a request per this many seconds (L1).
 WAIT_MIN_POLL_SECONDS = 1.0
 # Ending --watch revokes the approver session as a courtesy (it expires on its own anyway), so the
@@ -80,6 +87,10 @@ _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 
 class ApprovalError(Exception):
     """A problem the person can act on; printed without a traceback."""
+
+
+class RequestGone(ApprovalError):
+    """The request is not there (HTTP 404): it ended with its Hunt, or never existed."""
 
 
 class StepUpUnavailable(ApprovalError):
@@ -157,7 +168,7 @@ def find_request(send: Send, request_id: str, hunt_id: str | None = None) -> dic
         if status != 404 and hunt_id:
             raise ApprovalError(f"cannot read permission request {request_id}: HTTP {status}: {_detail_text(body)}")
     where = f"Hunt {hunt_id}" if hunt_id else "any active Hunt"
-    raise ApprovalError(f"no permission request {request_id} in {where}; it may have ended with its Hunt")
+    raise RequestGone(f"no permission request {request_id} in {where}; it may have ended with its Hunt")
 
 
 def wait_for(send: Send, request: Mapping[str, Any], seconds: float, *, step: int = 25,
@@ -318,8 +329,8 @@ class Terminal:
         ``tty.setcbreak``'s default TCSAFLUSH, so a key typed in between was echoed and then
         thrown away, and the watch sat in a blocking read with nothing decided and no polling.
         The mode is now switched on once, before any request is shown, without flushing; a key
-        typed before a request was on the screen is discarded deliberately (by ``pending_keys``)
-        and said so, and every key typed after that is read. The terminal is restored on the way
+        typed before a prompt is ready is discarded deliberately (``key``'s settle) and said
+        so, and every key typed after that is read. The terminal is restored on the way
         out, whatever ends the block (Ctrl-C included)."""
         try:
             import termios
@@ -337,30 +348,57 @@ class Terminal:
             self._key_fd = None
             # TCSANOW: TCSADRAIN waits until the terminal's output queue is read, and an echoed
             # key nobody reads (a pseudo-terminal) would hold Ctrl-C there for ever.
-            termios.tcsetattr(fd, termios.TCSANOW, saved)
+            try:
+                termios.tcsetattr(fd, termios.TCSANOW, saved)
+            except (OSError, termios.error):  # the terminal is gone (SIGHUP): nothing to restore
+                pass
 
-    def pending_keys(self) -> int:
-        """Discard whatever was typed before now (keypress mode only); return how many bytes."""
+    def _burst(self, fd: int, first: bytes) -> bytes:
+        """``first`` and every byte that follows it at once: an escape sequence or a paste."""
+        data = first
+        while select.select([fd], [], [], KEY_BURST_SECONDS)[0]:
+            more = os.read(fd, 1024)
+            if not more:
+                break
+            data += more
+        return data
+
+    def drain_keys(self, seconds: float) -> int:
+        """Discard every key typed before now and during the next ``seconds`` (keypress mode
+        only); return how many bytes were discarded."""
         fd = getattr(self, "_key_fd", None)
+        if fd is None:
+            return 0
         dropped = 0
-        while fd is not None and select.select([fd], [], [], 0)[0]:
+        deadline = time.monotonic() + max(0.0, seconds)
+        while True:
+            left = deadline - time.monotonic()
+            if not select.select([fd], [], [], max(0.0, left))[0]:
+                if left <= 0:
+                    return dropped
+                continue
             chunk = os.read(fd, 1024)
             if not chunk:
-                break
+                return dropped
             dropped += len(chunk)
-        return dropped
 
     def key(self, prompt: str, choices: str, *, keep_waiting: Callable[[], bool] | None = None,
-            interval: float = WATCH_POLL_SECONDS) -> str | None:
-        """One keypress from ``choices``; any other key is ignored and the wait goes on.
+            interval: float = WATCH_POLL_SECONDS, settle: float = KEY_SETTLE_SECONDS) -> str | None:
+        """One lone keypress from ``choices``; anything else is ignored and the wait goes on.
 
-        While no key arrives, ``keep_waiting()`` is asked every ``interval`` seconds; when it
-        answers False the prompt is abandoned and None is returned, so a watch never stops
-        polling while it waits for the person. Outside keypress mode (no terminal control) a
-        line is read instead."""
+        Before the prompt is written, keys typed until then and for ``settle`` seconds more are
+        discarded (and said so): a key meant for an earlier screen never decides this one. Only
+        a single byte arriving on its own counts. B1: an arrow key (``ESC [ A``), Alt-a
+        (``ESC a``) or a paste arrives as a burst, and the burst is discarded whole; reading it
+        byte by byte made the Up arrow an "a" (allow). While no key arrives,
+        ``keep_waiting()`` is asked every ``interval`` seconds; when it answers False the prompt
+        is abandoned and None is returned, so a watch never stops polling while it waits.
+        Outside keypress mode (no terminal control) a line is read instead."""
+        fd = getattr(self, "_key_fd", None)
+        if fd is not None and self.drain_keys(settle):
+            self.say("(ignored keys pressed before this prompt was ready)")
         self.stdout.write(prompt)
         self.stdout.flush()
-        fd = getattr(self, "_key_fd", None)
         if fd is None:
             answer = self.stdin.readline()[:1].lower()
             return answer if answer and answer in choices else ""
@@ -371,10 +409,16 @@ class Terminal:
                     self.stdout.flush()
                     return None
                 continue
-            data = os.read(fd, 1)
-            if not data:
+            first = os.read(fd, 1)
+            if not first:
                 raise ApprovalError("the terminal closed; nothing was decided")
-            answer = data.decode("utf-8", "replace").lower()
+            data = self._burst(fd, first)
+            if len(data) != 1 or data == b"\x1b":
+                # An escape sequence (arrow, function or Alt key) or a paste: nothing is decided,
+                # including from a tail of it that arrives a moment later.
+                self.drain_keys(KEY_ESCAPE_TAIL_SECONDS)
+                continue
+            answer = data.decode("ascii", "replace").lower()
             if answer in choices:
                 self.stdout.write(answer + "\n")
                 self.stdout.flush()
@@ -684,6 +728,8 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
     # "approver session ended" although there is no session there.
     ended = "approver session ended" if enterprise else "stopped watching for permission requests"
 
+    ended_prompt: list[str] = []  # what replaced the last prompt, announced with the next one
+
     def still_pending(request: Mapping[str, Any]) -> Callable[[], bool]:
         """Asked while the prompt waits: the watch keeps polling the request it shows."""
         def check() -> bool:
@@ -691,15 +737,22 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
                 return False
             try:
                 current = find_request(send, str(request["id"]), str(request["hunt_id"]))
+            except RequestGone:
+                # A 404: the request ended with its Hunt. It will never be decided here.
+                terminal.say(f"  {request.get('title')}: no longer there (it ended with its Hunt)")
+                ended_prompt.append(f"request {request['id']} ended")
+                return False
             except ApprovalError:
                 return True  # a failed read is not a decision; keep the prompt and try again
             if current.get("status") == "pending":
                 return True
             terminal.say(f"  {current.get('title') or request.get('title')}: {current.get('status')} elsewhere"
                          + (f" by {current.get('decided_by')}" if current.get("decided_by") else ""))
+            ended_prompt.append(f"request {request['id']} ended ({current.get('status')})")
             return False
         return check
 
+    restore_signals = _signals_end_the_watch()
     try:
         with terminal.keypresses():
             terminal.say(f"watching {where} for permission requests... (Ctrl-C to stop)")
@@ -708,8 +761,12 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
                     if str(request["id"]) in seen:
                         continue
                     seen.add(str(request["id"]))
-                    if terminal.pending_keys():
-                        terminal.say("(ignored keys pressed before this request was shown)")
+                    if ended_prompt:
+                        # The switch race: a key meant for the request that just ended must not
+                        # decide this one. Say what changed; key() takes only a fresh key.
+                        terminal.say(f"{ended_prompt.pop()}; now showing request {request['id']} "
+                                     "(press a new key for it)")
+                        ended_prompt.clear()
                     terminal.say(render_request(request))
                     remember = "r" if request.get("remember_supported") else ""
                     choice = terminal.key(
@@ -729,11 +786,43 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
         terminal.say(f"{ended} (time limit)")
         return 0
     except KeyboardInterrupt:
-        terminal.say(f"\n{ended}")
+        with contextlib.suppress(OSError, ValueError):  # a hung-up terminal cannot be written to
+            terminal.say(f"\n{ended}")
         return 0
     finally:
+        restore_signals()
         if session is not None and held is not None:
             _revoke(send, terminal, session["session_id"], held)
+
+
+def _signals_end_the_watch() -> Callable[[], None]:
+    """SIGTERM and SIGHUP end the watch the way Ctrl-C does, so its ``finally`` runs: the
+    terminal leaves keypress mode and the approver session is revoked (best effort). Without
+    this a closed terminal window or a ``kill`` left the terminal without echo and the session
+    open. Returns the function that puts the previous handlers back."""
+    import signal
+
+    def interrupt(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    previous: dict[int, Any] = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        number = getattr(signal, name, None)
+        if number is None:
+            continue
+        try:
+            previous[number] = signal.signal(number, interrupt)
+        except (ValueError, OSError):  # not the main thread, or not supported here
+            continue
+
+    def restore() -> None:
+        for number, handler in previous.items():
+            try:
+                signal.signal(number, handler)
+            except (ValueError, OSError, TypeError):
+                pass
+
+    return restore
 
 
 def _revoke(send: Send, terminal: Terminal, session_id: str, held: _HeldSecret) -> None:
@@ -751,7 +840,8 @@ def _revoke(send: Send, terminal: Terminal, session_id: str, held: _HeldSecret) 
     finally:
         held.wipe()
     if not revoked:
-        terminal.say("could not revoke the approver session at the gateway; it expires on its own")
+        with contextlib.suppress(OSError, ValueError):
+            terminal.say("could not revoke the approver session at the gateway; it expires on its own")
 
 
 # --- the commands ------------------------------------------------------------------------------
@@ -815,7 +905,7 @@ def add_arguments(parser: Any, command: str) -> None:
 
 __all__ = [
     "APPROVAL_SCHEMA_PREFIX", "ApprovalError", "BEGIN_PATH", "FINISH_PATH", "PREAUTHORIZATION_HEADER",
-    "REVOKE_TIMEOUT_SECONDS", "SESSION_REVOKE_PATH", "StepUp", "StepUpUnavailable", "Terminal", "add_arguments",
+    "REVOKE_TIMEOUT_SECONDS", "RequestGone", "SESSION_REVOKE_PATH", "StepUp", "StepUpUnavailable", "Terminal", "add_arguments",
     "assertion_json", "decide", "decision_entry", "expected_challenge", "find_request", "list_pending", "preauthorize",
     "render_request", "run", "set_digest", "set_document", "wait_for", "watch",
 ]
