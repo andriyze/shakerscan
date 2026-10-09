@@ -157,8 +157,9 @@ def approval_required_refusal(
 
 def destination_host(value: Any) -> str:
     """The one spelling of a destination host that the subject, the grant and the denial
-    cooldown share, and that the approval screen shows: lowercase, no trailing dot, IDNA ASCII
-    (punycode), as the scope guard spells it (``action_scope._canonical_host``).
+    cooldown share, and that the approval screen shows: lowercase, no trailing dot, IDNA 2008/
+    UTS #46 ASCII (punycode), as the scope guard spells it (``action_scope._canonical_host``);
+    "" for a host strict processing refuses.
 
     ``https://ｅｖｉｌ.example`` (full-width) and ``evil.example`` reach one host. The subject
     used to key on the raw lowercased spelling, so after a person denied one, the other was a
@@ -359,7 +360,8 @@ async def credential_use_refusal(conn: Any, run: Mapping[str, Any], refusal: Hun
     subject = {
         "profile_id": str(row["id"]), "profile_version": int(row["current_version"]),
         "home_target_id": str(row["target_id"]),
-        "home_host": (urllib.parse.urlsplit(str(row["home_url"] or "")).hostname or None),
+        # The home target's host in the one canonical spelling the credential bounds match.
+        "home_host": destination_host(urllib.parse.urlsplit(str(row["home_url"] or "")).hostname) or None,
         "slot": refusal.subject.get("slot"), "consuming_target_id": consuming,
     }
     if await credential_kind_error(conn, run, subject):

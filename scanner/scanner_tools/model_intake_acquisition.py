@@ -22,6 +22,11 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    from .host_names import HostNameError, canonical_host
+except ImportError:  # direct host-side import in focused tests
+    from host_names import HostNameError, canonical_host
+
 
 DEFAULT_REDIRECT_LIMIT = 5
 DEFAULT_ALLOWED_PORTS = {443}
@@ -93,9 +98,9 @@ def _canonical_hostname(hostname: str) -> str:
     if not host or any(ord(char) < 33 or ord(char) == 127 for char in host):
         raise AcquisitionPolicyError("Artifact URL hostname is missing or contains control characters")
     try:
-        return host.encode("idna").decode("ascii").lower()
-    except UnicodeError as exc:
-        raise AcquisitionPolicyError("Artifact URL hostname is not valid IDNA") from exc
+        return canonical_host(host)
+    except HostNameError as exc:
+        raise AcquisitionPolicyError("Artifact URL hostname is not valid IDNA 2008/UTS #46") from exc
 
 
 def _host_allowed(host: str, patterns: list[str]) -> bool:

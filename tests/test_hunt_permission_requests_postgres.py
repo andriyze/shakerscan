@@ -28,7 +28,8 @@ from hunt.budget_amendments import HuntBudgetAmendmentRequest, apply_budget_amen
 from hunt.credential_uses import HUNT_CREDENTIAL_USES_SCHEMA_SQL, admit_action_credentials
 from hunt.permission_grants import decide, revoke_grant, settle_for_ended_hunt
 from hunt.permission_store import (
-    HUNT_PERMISSION_SCHEMA_SQL, expire_due, list_events, request_expiry,
+    HUNT_PERMISSION_SCHEMA_SQL, canonical_digest, expire_due, hunt_bounds, list_events,
+    load_preauthorizations, public_preauthorization, public_request, request_expiry,
 )
 from hunt.permission_bounds import parse_bounds
 from hunt.start_contract import HUNT_BUDGET_PROFILES, normalize_hunt_start_payload
@@ -813,6 +814,62 @@ def test_the_start_answer_names_the_pending_proposal_and_its_approve_command(env
             return await record_start_permissions(conn, hunt, contract, [])
 
     assert run(env, without_bounds()) == {}
+
+
+def test_a_legacy_idna2003_bound_fails_closed_and_is_offered_back_in_one_step(env, monkeypatch):
+    """R3 (external release audit, 2026-10-09). v2.8.0 stored ``target.authorize:straße.example``
+    as ``strasse.example`` (IDNA 2003), so a destination request for that other ASCII host was
+    granted automatically. The legacy row now withholds that host bound, keeps the row's other
+    bounds, and raises one re-approval request; approving it covers the intended host only."""
+    async def resolver(url, environment):  # labelled double: no DNS in tests
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(permission_subjects, "resolve_destination_addresses", resolver)
+    hunt = run(env, env.hunt(budget={"max_capability_calls": 2}, used={"agent_actions": 2}))
+    allow = ["target.authorize:straße.example", "budget.raise:2x"]
+    legacy = {"budget_multiplier": 2.0, "budget_totals": {}, "credential_targets": [],
+              "target_patterns": ["strasse.example"], "capability_flags": [],
+              "ssh_host_trust_first_contact": False}  # Bounds.public() exactly as v2.8.0 wrote it
+    run(env, env.conn.execute(
+        """UPDATE hunt_runs SET context_pack = jsonb_set(context_pack, '{hunt_start_contract,allow}', $2::jsonb)
+           WHERE id=$1""", hunt["id"], json.dumps(allow)))
+    run(env, env.conn.execute(
+        """INSERT INTO hunt_preauthorizations(hunt_run_id, bounds_json, bounds_digest, created_by, proof)
+           VALUES ($1,$2::jsonb,$3,'alice@example.test','stepup')""",
+        hunt["id"], json.dumps(legacy), canonical_digest(legacy)))
+
+    # The budget bound in the same row still stands.
+    assert run(env, env.call(hunt, "legacy-budget-0001")) == "admitted"
+    # The other ASCII host is no longer granted automatically.
+    run(env, env.conn.execute(
+        "UPDATE hunt_runs SET budget_json = jsonb_set(budget_json, '{max_capability_calls}', '100') WHERE id=$1",
+        hunt["id"]))
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, "legacy-dest-0001",
+                          values={"method": "GET", "path": "/", "origin": "https://strasse.example"}))
+    requests = {row["kind"]: row for row in run(env, env.requests(hunt))}
+    destination = requests["target.authorize"]
+    assert destination["status"] == "pending" and destination["decision_via"] is None
+    offer = requests["preauthorization"]
+    assert offer["status"] == "pending" and offer["reason_code"] == "preauthorization_reapproval"
+    shown = public_request(offer)
+    assert shown["approve_command"] == f"shakerscan approve {offer['id']}"
+    assert "covers xn--strae-oqa.example (Unicode: straße.example)" in shown["explanation"]
+    assert "strasse.example" in shown["explanation"] and "other pre-authorized bounds" in shown["effect"]
+    (listed,) = [public_preauthorization(row) for row in run(env, load_preauthorizations(env.conn, hunt["id"]))]
+    assert listed["host_canonicalization"] == "idna2003-legacy"
+    assert listed["reapproval_required"][0]["canonical"] == "xn--strae-oqa.example"
+
+    # One step: the person approves the offer; it is not raised again afterwards.
+    run(env, env.decide(hunt, offer, key="decision-reapprove"))
+    bounds, rows = run(env, hunt_bounds(env.conn, hunt["id"]))
+    assert bounds.covers_target(host="xn--strae-oqa.example", port=443)
+    assert not bounds.covers_target(host="strasse.example", port=443)
+    assert bounds.budget_multiplier == 2.0 and len(rows) == 2
+    with pytest.raises(HTTPException):
+        run(env, env.call(hunt, "legacy-dest-0002",
+                          values={"method": "GET", "path": "/", "origin": "https://strasse.example"}))
+    assert [row["kind"] for row in run(env, env.requests(hunt))].count("preauthorization") == 1
 
 
 def test_bound_grammar_refuses_wildcards_and_normalizes_idna():

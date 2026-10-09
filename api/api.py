@@ -15035,13 +15035,13 @@ def _disallowed_commands_from_context(context_pack: dict[str, Any]) -> set[str]:
 
 
 def _canonical_receipt_host(value: Any) -> str:
-    host = str(value or "").strip().strip("[]").lower()
-    if host.endswith("."):
-        host = host[:-1]
+    # The scope guard's one spelling (strict IDNA 2008/UTS #46); "" for a refused host, which
+    # matches no receipt.
     try:
-        return host.encode("idna").decode("ascii")
-    except UnicodeError:
-        return host
+        from action_scope import _canonical_host
+    except ModuleNotFoundError:
+        from .action_scope import _canonical_host
+    return _canonical_host(value)
 
 
 def _host_matches_receipt_scope(host: str, scope: dict[str, Any]) -> bool:

@@ -26,9 +26,11 @@ import urllib.parse
 try:
     from scanner_tools.request_replay import ReplayPlan, ReplayRequest
     from scanner_tools.url_redaction import redact_url
+    from scanner_tools.host_names import HostNameError, canonical_host
 except ModuleNotFoundError:  # package import when scanner is installed as a package
     from scanner.scanner_tools.request_replay import ReplayPlan, ReplayRequest
     from scanner.scanner_tools.url_redaction import redact_url
+    from scanner.scanner_tools.host_names import HostNameError, canonical_host
 
 from .budget_reservations import DurableBudgetReservation
 from .models import TargetBinding
@@ -64,8 +66,8 @@ def _canonical_authority(value: str) -> tuple[str, str, int | None]:
     if parsed.username is not None or parsed.password is not None:
         raise ReplayExecutionError("transport URL must not contain user information")
     try:
-        host = parsed.hostname.encode("idna").decode("ascii").lower().rstrip(".")
-    except UnicodeError as exc:
+        host = canonical_host(parsed.hostname)
+    except HostNameError as exc:
         raise ReplayExecutionError("transport URL hostname is invalid") from exc
     display = f"[{host}]" if ":" in host else host
     default = 443 if scheme == "https" else 80

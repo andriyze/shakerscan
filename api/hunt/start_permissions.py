@@ -65,7 +65,10 @@ async def _preauthorized_profile(
         return None
     home = await conn.fetchrow("SELECT url FROM targets WHERE id=$1", uuid.UUID(str(profile.target_id)))
     import urllib.parse
-    home_host = urllib.parse.urlsplit(str((home or {}).get("url") or "")).hostname if home else None
+    from .permission_subjects import destination_host
+    raw_home = urllib.parse.urlsplit(str((home or {}).get("url") or "")).hostname if home else None
+    # The one canonical spelling (IDNA 2008/UTS #46) the credential bounds are matched in.
+    home_host = destination_host(raw_home) or None if raw_home else None
     if not bounds.covers_credential(home_target_id=str(profile.target_id), home_host=home_host):
         return None
     subject = {"profile_id": profile.profile_id, "profile_version": profile.current_version}

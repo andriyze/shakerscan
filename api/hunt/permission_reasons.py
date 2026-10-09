@@ -110,6 +110,9 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     "preauthorization_bound_invalid": ReasonSpec(422, recorded=False),
     # Bounds the agent proposed through the MCP start tool: one pending request for a person.
     "preauthorization_proposed": ReasonSpec(409, KIND_PREAUTHORIZATION, recorded=False),
+    # Host bounds stored under IDNA 2003 whose IDNA 2008/UTS #46 spelling differs: withheld, and
+    # offered back to the person as one pending request (``shakerscan approve``) to grant again.
+    "preauthorization_reapproval": ReasonSpec(409, KIND_PREAUTHORIZATION, recorded=False),
     # Same key, other action.
     "idempotency_key_reused": ReasonSpec(409, recorded=False),
     # A parked action whose request was not granted.

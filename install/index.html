@@ -729,6 +729,7 @@ download "$REPO_RAW_BASE/scanner/risk_scoring.py" "$INSTALL_DIR/scanner/risk_sco
 download "$REPO_RAW_BASE/scanner/score_bands.py" "$INSTALL_DIR/scanner/score_bands.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/__init__.py" "$INSTALL_DIR/scanner/scanner_tools/__init__.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/address_classes.py" "$INSTALL_DIR/scanner/scanner_tools/address_classes.py"
+download "$REPO_RAW_BASE/scanner/scanner_tools/host_names.py" "$INSTALL_DIR/scanner/scanner_tools/host_names.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/browser_profile.py" "$INSTALL_DIR/scanner/scanner_tools/browser_profile.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/build_fingerprint.py" "$INSTALL_DIR/scanner/scanner_tools/build_fingerprint.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/device_postman.py" "$INSTALL_DIR/scanner/scanner_tools/device_postman.py"

@@ -5,7 +5,7 @@ Grammar (one bound per string, at most ``MAX_BOUNDS``)::
     budget.raise:<N>x                    each dimension up to N times its start limit (1 < N <= 10)
     budget.raise:<dimension>=<max>       one dimension up to an absolute total
     credential.use:<target-id|host>,...  credentials whose home target is one of these
-    target.authorize:<pattern>,...       host[:port] or *.domain[:port], IDNA ASCII
+    target.authorize:<pattern>,...       host[:port] or *.domain[:port]; IDNA 2008/UTS #46 ASCII
     capability:<flag>                    active-testing | state-changing | oob | tcp-discovery
                                          | active-replay
     ssh.host_trust:first-contact         recorded; SSH requests are not raised in this release
@@ -14,6 +14,13 @@ The server parses bounds; nothing here is trusted from the agent. A host pattern
 registrable domain, so ``*`` and ``*.com`` are refused. A bound never covers a hard limit:
 requests are only ever raised for refusals on the allowable list, and every grant still passes
 the same scope, kind and admission checks as before.
+
+Hosts are spelled by the one canonicalizer every destination subject uses
+(``host_names.canonical_host``: strict IDNA 2008 with UTS #46), so a bound names the host the HTTP
+client connects to. Bounds stored before that (IDNA 2003, which turned ``straße.example`` into
+``strasse.example``) carry no ``host_canonicalization`` marker; ``stored_bounds`` re-derives
+them from the strings the person approved and withholds every host bound whose two encodings
+differ, rather than silently reinterpreting approved scope (``LegacyHostBound``).
 """
 from __future__ import annotations
 
@@ -25,6 +32,13 @@ import json
 import re
 from typing import Any
 import uuid
+
+try:
+    from scanner_tools.host_names import HOST_CANONICALIZATION, HostNameError, canonical_host, display_host
+except ModuleNotFoundError:  # package import (api.hunt.permission_bounds)
+    from scanner.scanner_tools.host_names import (
+        HOST_CANONICALIZATION, HostNameError, canonical_host, display_host,
+    )
 
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
@@ -54,14 +68,24 @@ class BoundError(ValueError):
     """A bound outside the grammar; the message names the bound."""
 
 
+def _host_or_none(host: Any) -> str | None:
+    """A subject's host in canonical form; None (never a match) when strict processing refuses it."""
+    try:
+        return canonical_host(host)
+    except HostNameError:
+        return None
+
+
 @dataclass(frozen=True)
 class HostPattern:
-    host: str  # IDNA ASCII, lower case, without "*."
+    host: str  # IDNA 2008/UTS #46 ASCII, lower case, without "*."
     wildcard: bool
     port: int | None
 
     def covers(self, host: str, port: int | None) -> bool:
-        host = host.lower().rstrip(".")
+        host = _host_or_none(host)
+        if host is None:
+            return False
         if self.port is not None and port != self.port:
             return False
         if self.wildcard:
@@ -72,7 +96,19 @@ class HostPattern:
         return ("*." if self.wildcard else "") + self.host + (f":{self.port}" if self.port else "")
 
 
-def _idna(host: str) -> str:
+def _canonical(host: str) -> str:
+    try:
+        return canonical_host(host)
+    except HostNameError as exc:
+        raise BoundError(
+            f"host {host!r} is not a valid IDNA 2008 / UTS #46 name; spell it as the ASCII "
+            "(xn--) form you mean"
+        ) from exc
+
+
+def _legacy_idna2003(host: str) -> str:
+    """How bounds stored before ``HOST_CANONICALIZATION`` spelled a host (Python's IDNA 2003
+    codec). Used only to recognise those rows; never to decide coverage."""
     try:
         ascii_host = host.encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
@@ -80,7 +116,7 @@ def _idna(host: str) -> str:
     return ascii_host.rstrip(".")
 
 
-def parse_host_pattern(raw: str) -> HostPattern:
+def parse_host_pattern(raw: str, *, _encode: Any = _canonical) -> HostPattern:
     text = raw.strip()
     port: int | None = None
     if ":" in text and not text.startswith("["):
@@ -89,7 +125,7 @@ def parse_host_pattern(raw: str) -> HostPattern:
             raise BoundError(f"target.authorize pattern {raw!r} has an invalid port")
         port = int(port_text)
     wildcard = text.startswith("*.")
-    host = _idna(text[2:] if wildcard else text)
+    host = _encode(text[2:] if wildcard else text)
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -116,6 +152,7 @@ class Bounds:
 
     def public(self) -> dict[str, Any]:
         return {
+            "host_canonicalization": HOST_CANONICALIZATION,
             "budget_multiplier": self.budget_multiplier,
             "budget_totals": dict(self.budget_totals or {}),
             "credential_targets": list(self.credential_targets),
@@ -145,7 +182,10 @@ class Bounds:
 
     def covers_credential(self, *, home_target_id: str, home_host: str | None) -> bool:
         wanted = {item.lower() for item in self.credential_targets}
-        return str(home_target_id).lower() in wanted or bool(home_host and home_host.lower() in wanted)
+        if str(home_target_id).lower() in wanted:
+            return True
+        host = _host_or_none(home_host) if home_host else None
+        return bool(host and host in wanted)
 
     def covers_target(self, *, host: str, port: int | None) -> bool:
         return any(pattern.covers(host, port) for pattern in self.target_patterns)
@@ -160,6 +200,10 @@ def parse_bounds(values: Iterable[Any], *, budget_fields: Iterable[str] | None =
     ``budget_fields`` (the Hunt budget dimensions) is passed in by the start contract rather than
     imported, so this grammar stays below the start contract in the import graph.
     """
+    return _parse_bounds(values, budget_fields=budget_fields, encode=_canonical)
+
+
+def _parse_bounds(values: Iterable[Any], *, budget_fields: Iterable[str] | None, encode: Any) -> Bounds:
     budget_fields = frozenset(budget_fields) if budget_fields is not None else None
     items = [str(value or "").strip() for value in values]
     if len(items) > MAX_BOUNDS:
@@ -199,12 +243,12 @@ def parse_bounds(values: Iterable[Any], *, budget_fields: Iterable[str] | None =
                 try:
                     credential_targets.append(str(uuid.UUID(part)))
                 except ValueError:
-                    pattern = parse_host_pattern(part)
+                    pattern = parse_host_pattern(part, _encode=encode)
                     if pattern.wildcard or pattern.port:
                         raise BoundError("credential.use names target ids or exact hosts")
                     credential_targets.append(pattern.host)
         elif kind == KIND_TARGET_AUTHORIZE:
-            patterns.extend(parse_host_pattern(part) for part in value.split(",") if part.strip())
+            patterns.extend(parse_host_pattern(part, _encode=encode) for part in value.split(",") if part.strip())
         elif kind == "capability" or kind == KIND_CAPABILITY_ENABLE:
             if value not in CAPABILITY_FLAGS:
                 raise BoundError(
@@ -227,14 +271,178 @@ def parse_bounds(values: Iterable[Any], *, budget_fields: Iterable[str] | None =
 
 
 def bounds_from_public(value: Mapping[str, Any]) -> Bounds:
-    """Rebuild stored bounds (``Bounds.public()``)."""
+    """Rebuild stored bounds (``Bounds.public()``) written under ``HOST_CANONICALIZATION``.
+
+    A row without the marker is a legacy (IDNA 2003) row: use ``stored_bounds`` with the strings
+    the person approved. Here its host bounds are withheld (fail closed).
+    """
+    return stored_bounds(value).bounds
+
+
+def _host_parts(values: Iterable[Any]) -> list[tuple[str, str, str]]:
+    """(kind, bound text, host spelling) for every host the ``--allow`` strings name."""
+    parts: list[tuple[str, str, str]] = []
+    for item in values:
+        kind, _sep, value = str(item or "").strip().partition(":")
+        if kind not in {KIND_TARGET_AUTHORIZE, KIND_CREDENTIAL_USE}:
+            continue
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if kind == KIND_CREDENTIAL_USE:
+                try:
+                    uuid.UUID(part)
+                    continue
+                except ValueError:
+                    pass
+            text = part
+            if ":" in text and not text.startswith("["):
+                text = text.rpartition(":")[0]
+            parts.append((kind, f"{kind}:{part}", text[2:] if text.startswith("*.") else text))
+    return parts
+
+
+@dataclass(frozen=True)
+class LegacyHostBound:
+    """A host bound stored under IDNA 2003 that no longer matches anything until re-approved."""
+    bound: str
+    stored_as: str | None
+    canonical: str | None
+    reason: str
+
+    def public(self) -> dict[str, Any]:
+        if self.reason == "encoding_changed":
+            message = (
+                f"The pre-authorized bound {self.bound!r} was stored as {self.stored_as!r} (IDNA 2003), "
+                f"but the host the client connects to is {display_host(self.canonical)} (IDNA 2008/UTS #46). "
+                "It no longer covers any request. Approve the re-approval request this Hunt raises "
+                "(shakerscan approve) to cover the intended host; your other bounds and grants are unchanged."
+            )
+        elif self.reason == "host_invalid":
+            message = (
+                f"The pre-authorized bound {self.bound!r} was stored as {self.stored_as!r} (IDNA 2003), "
+                "but the host is not a valid IDNA 2008/UTS #46 name. It no longer covers any request; "
+                "approve a bound that spells the host you mean."
+            )
+        else:
+            message = (
+                "These host bounds were stored before hosts were spelled with IDNA 2008/UTS #46 and the "
+                "strings that were approved could not be confirmed. They no longer cover any request; "
+                "approve them again."
+            )
+        return {"bound": self.bound, "stored_as": self.stored_as, "canonical": self.canonical,
+                "reason": self.reason, "reapproval_required": True, "message": message}
+
+
+@dataclass(frozen=True)
+class StoredBounds:
+    bounds: Bounds
+    legacy: tuple[LegacyHostBound, ...] = ()
+
+
+def _without_marker(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in dict(value).items() if key != "host_canonicalization"}
+
+
+def _rebuilt(value: Mapping[str, Any], *, target_patterns: Iterable[str],
+             credential_targets: Iterable[str]) -> Bounds:
     return Bounds(
         budget_multiplier=value.get("budget_multiplier"),
         budget_totals={str(k): int(v) for k, v in dict(value.get("budget_totals") or {}).items()},
-        credential_targets=tuple(str(item) for item in value.get("credential_targets") or ()),
-        target_patterns=tuple(parse_host_pattern(item) for item in value.get("target_patterns") or ()),
+        credential_targets=tuple(str(item) for item in credential_targets),
+        target_patterns=tuple(parse_host_pattern(item) for item in target_patterns),
         capability_flags=tuple(str(item) for item in value.get("capability_flags") or ()),
         ssh_first_contact=bool(value.get("ssh_host_trust_first_contact")),
+    )
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _encoding_review(values: Iterable[Any]) -> tuple[set[tuple[str, str]], list[LegacyHostBound]]:
+    """Split the hosts ``values`` name into those IDNA 2003 and IDNA 2008/UTS #46 spell alike
+    (``(kind, host)``) and those they do not (withheld, ``LegacyHostBound``)."""
+    stable: set[tuple[str, str]] = set()
+    legacy: list[LegacyHostBound] = []
+    for kind, bound, host in _host_parts(values):
+        try:
+            old: str | None = _legacy_idna2003(host)
+        except BoundError:
+            old = None
+        try:
+            new: str | None = canonical_host(host)
+        except HostNameError:
+            new = None
+        if new is not None and new == old:
+            stable.add((kind, new))
+        else:
+            legacy.append(LegacyHostBound(
+                bound=bound, stored_as=old, canonical=new,
+                reason="encoding_changed" if new else "host_invalid",
+            ))
+    return stable, legacy
+
+
+def legacy_host_changes(values: Iterable[Any]) -> list[LegacyHostBound]:
+    """The hosts in ``--allow`` strings that IDNA 2003 spelled differently from IDNA 2008/UTS #46.
+
+    An approval recorded (or a proposal digested) under IDNA 2003 that names one of these must be
+    approved again: the scope it names is not the scope the person saw.
+    """
+    return _encoding_review(values)[1]
+
+
+def stored_bounds(value: Mapping[str, Any], *, source_allow: Sequence[Any] | None = None) -> StoredBounds:
+    """The bounds a stored row grants, failing closed on legacy host spellings.
+
+    A row with the current ``host_canonicalization`` is rebuilt as stored. A legacy row (no
+    marker) was parsed with IDNA 2003: its budget and capability bounds stand, and each host bound
+    stands only when ``source_allow`` (the strings the person approved) reproduces the stored row
+    and that host's IDNA 2003 and IDNA 2008 encodings are identical. Every other host bound is
+    withheld and reported, so approved scope is never silently reinterpreted.
+    """
+    value = dict(value or {})
+    if value.get("host_canonicalization") == HOST_CANONICALIZATION:
+        return StoredBounds(_rebuilt(
+            value, target_patterns=value.get("target_patterns") or (),
+            credential_targets=value.get("credential_targets") or (),
+        ))
+    patterns = [str(item) for item in value.get("target_patterns") or ()]
+    credentials = [str(item) for item in value.get("credential_targets") or ()]
+    host_credentials = [item for item in credentials if not _is_uuid(item)]
+    id_credentials = [item for item in credentials if _is_uuid(item)]
+    if not patterns and not host_credentials:
+        return StoredBounds(_rebuilt(value, target_patterns=(), credential_targets=id_credentials))
+    try:
+        reproduced = _parse_bounds(
+            [str(item) for item in source_allow or ()], budget_fields=None, encode=_legacy_idna2003,
+        ) if source_allow is not None else None
+    except BoundError:
+        reproduced = None
+    if reproduced is None or _without_marker(reproduced.public()) != _without_marker(value):
+        withheld = tuple(
+            LegacyHostBound(bound=item, stored_as=item, canonical=None, reason="source_unconfirmed")
+            for item in (*patterns, *host_credentials)
+        )
+        return StoredBounds(_rebuilt(value, target_patterns=(), credential_targets=id_credentials), withheld)
+    stable, legacy = _encoding_review(source_allow or ())
+
+    def pattern_host(text: str) -> str:
+        host = text.rpartition(":")[0] if ":" in text else text
+        return host[2:] if host.startswith("*.") else host
+
+    kept_patterns = [item for item in patterns if (KIND_TARGET_AUTHORIZE, pattern_host(item)) in stable]
+    kept_hosts = [item for item in host_credentials if (KIND_CREDENTIAL_USE, item) in stable]
+    kept_credentials = [item for item in credentials if item in id_credentials or item in kept_hosts]
+    return StoredBounds(
+        _rebuilt(value, target_patterns=kept_patterns, credential_targets=kept_credentials),
+        tuple(legacy),
     )
 
 
@@ -252,7 +460,23 @@ def merge(bounds: Sequence[Bounds]) -> Bounds:
     )
 
 
+def bound_hosts(values: Iterable[Any]) -> list[dict[str, str]]:
+    """Each host an ``--allow`` list names, with the canonical ASCII form it covers, for an
+    approval screen: ``{"bound", "ascii", "display"}``. A host strict processing refuses is
+    reported with an empty ``ascii``."""
+    shown: list[dict[str, str]] = []
+    for _kind, bound, host in _host_parts(values):
+        try:
+            ascii_host = canonical_host(host)
+        except HostNameError:
+            shown.append({"bound": bound, "ascii": "", "display": "not a valid IDNA 2008/UTS #46 host"})
+            continue
+        shown.append({"bound": bound, "ascii": ascii_host, "display": display_host(ascii_host)})
+    return shown
+
+
 __all__ = [
-    "Bounds", "BoundError", "CAPABILITY_FLAGS", "HostPattern", "MAX_BOUNDS", "bounds_from_public",
-    "merge", "parse_bounds", "parse_host_pattern",
+    "Bounds", "BoundError", "CAPABILITY_FLAGS", "HostPattern", "LegacyHostBound", "MAX_BOUNDS",
+    "StoredBounds", "bound_hosts", "bounds_from_public", "legacy_host_changes", "merge", "parse_bounds",
+    "parse_host_pattern", "stored_bounds",
 ]

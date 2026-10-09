@@ -31,7 +31,7 @@ import uuid
 from fastapi import HTTPException
 
 from .budget_amendments import HuntBudgetAmendmentRequest, amendable_dimensions, apply_budget_amendment
-from .permission_bounds import CAPABILITY_FLAGS, Bounds, parse_bounds
+from .permission_bounds import CAPABILITY_FLAGS, BoundError, Bounds, legacy_host_changes, parse_bounds
 from .permission_reasons import (
     KIND_BUDGET_RAISE,
     KIND_CAPABILITY_ENABLE,
@@ -43,6 +43,7 @@ from .permission_store import (
     covering_preauthorization,
     hunt_bounds,
     load_request,
+    offer_reapproval,
     public_grant,
     public_request,
     record_event,
@@ -302,7 +303,7 @@ async def apply_grant(
         effect = await _apply_credential(conn, run, request)
     elif kind == KIND_PREAUTHORIZATION:
         subject = _json(request["subject_json"], {})
-        bounds = parse_bounds(subject.get("allow") or ())
+        bounds = _approvable_proposal(subject)
         stored = await record_preauthorization(
             conn, hunt_id=run["id"], bounds=bounds, created_by=actor, proof="request_approval",
             source_request_id=request["id"],
@@ -333,6 +334,31 @@ async def apply_grant(
 # ---------------------------------------------------------------------------------------------
 # Pre-authorization.
 
+def _approvable_proposal(subject: Mapping[str, Any]) -> Bounds:
+    """The bounds an agent's proposal grants, refused when they are not the bounds it digested.
+
+    A proposal raised before hosts were spelled with IDNA 2008/UTS #46 carries a digest of its
+    IDNA 2003 parse. When a host it names is spelled differently now (``straße.example`` was
+    ``strasse.example``), granting it would authorize another host than the one recorded, so the
+    person is asked to approve a new proposal instead; nothing is reinterpreted silently.
+    """
+    allow = [str(item) for item in subject.get("allow") or ()]
+    try:
+        bounds = parse_bounds(allow)
+    except BoundError as exc:
+        raise GrantRefused(409, "preauthorization_reapproval_required", (
+            f"These proposed bounds cannot be granted: {exc}. Start the Hunt again with bounds "
+            "that spell the intended hosts."
+        )) from exc
+    if subject.get("bounds_digest") != bounds.digest():
+        changed = legacy_host_changes(allow)
+        if changed:
+            raise GrantRefused(409, "preauthorization_reapproval_required", " ".join(
+                item.public()["message"] for item in changed
+            ))
+    return bounds
+
+
 def _covers(bounds: Bounds, request: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any] | None:
     """The grant choice when ``bounds`` cover this request, else None."""
     kind = request["kind"]
@@ -362,6 +388,8 @@ async def try_preauthorized_grant(conn: Any, run: dict[str, Any], request: Mappi
     if request["kind"] == KIND_PREAUTHORIZATION or request["status"] != "pending":
         return None
     _bounds, rows = await hunt_bounds(conn, run["id"])
+    # Legacy (IDNA 2003) host bounds that no longer match are offered back to the person.
+    await offer_reapproval(conn, run, rows)
     choices: dict[str, Any] = {}
 
     def predicate(bounds: Bounds) -> bool:

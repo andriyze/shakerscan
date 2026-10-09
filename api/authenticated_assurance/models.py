@@ -11,6 +11,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+try:
+    from scanner_tools.host_names import canonical_host
+except ModuleNotFoundError:  # package import
+    from scanner.scanner_tools.host_names import canonical_host
+
 SCHEMA_VERSION = "authenticated-scan-profile/v1"
 ASSURANCE_VERSION = "authentication-assurance/v1"
 AuthenticationState = Literal["valid", "invalid", "expired", "unknown", "revoked", "unsupported"]
@@ -34,8 +39,8 @@ def exact_origin(value: str) -> str:
     try:
         parsed = urlsplit(value)
         port = parsed.port
-        host = (parsed.hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
-    except (ValueError, UnicodeError) as exc:
+        host = canonical_host(parsed.hostname or "")
+    except (ValueError, UnicodeError) as exc:  # HostNameError is a ValueError
         raise ValueError("invalid credential destination") from exc
     if parsed.scheme not in {"https", "http"} or not host or parsed.username is not None or parsed.password is not None:
         raise ValueError("credential destination must be an HTTP(S) origin without user information")
