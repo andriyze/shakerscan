@@ -35,6 +35,7 @@ from typing import Any, Callable
 from .gungnir import gungnir_scan, check_gungnir_available
 from .subfinder import subfinder_scan
 from .ct_monitor import check_certificate_transparency
+from .discovered_names import subdomain_of
 
 
 async def discover_subdomains(
@@ -176,8 +177,10 @@ async def discover_subdomains(
         normalized = set()
         for sub in subdomains:
             if sub:
-                s = sub.lower().strip().replace("*.", "")
-                if s and s.endswith(domain.lower()) and s != domain.lower():
+                # Label-boundary match after canonicalisation: ``notexample.com`` is not a
+                # subdomain of ``example.com``, whatever a source returned.
+                s = subdomain_of(sub, domain)
+                if s:
                     normalized.add(s)
                     all_subdomains.add(s)
                     if callback:

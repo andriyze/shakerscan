@@ -31,6 +31,7 @@ import tempfile
 from typing import Any
 
 from .common import run
+from .discovered_names import subdomain_of
 
 
 GUNGNIR_BIN = "/opt/tools/gungnir"
@@ -123,24 +124,20 @@ async def gungnir_scan(
                             result["certificates"].append(cert_data)
 
                             # Get domains from CN and SANs
-                            if "common_name" in cert_data:
-                                cn = cert_data["common_name"].lower()
-                                if cn.endswith(domain.lower()) and cn != domain.lower():
-                                    subdomains.add(cn.replace("*.", ""))
-
-                            for san in cert_data.get("sans", []):
-                                san = san.lower()
-                                if san.endswith(domain.lower()) and san != domain.lower():
-                                    subdomains.add(san.replace("*.", ""))
+                            for name in (cert_data.get("common_name"), *(cert_data.get("sans") or ())):
+                                accepted = subdomain_of(name, domain)
+                                if accepted:
+                                    subdomains.add(accepted)
                         except Exception:
                             # Not valid JSON, treat as plain domain
-                            if line.endswith(domain.lower()) and line != domain.lower():
-                                subdomains.add(line.replace("*.", ""))
+                            accepted = subdomain_of(line, domain)
+                            if accepted:
+                                subdomains.add(accepted)
                     else:
                         # Plain text output - each line is a domain
-                        subdomain = line.lower().replace("*.", "")
-                        if subdomain.endswith(domain.lower()) and subdomain != domain.lower():
-                            subdomains.add(subdomain)
+                        accepted = subdomain_of(line, domain)
+                        if accepted:
+                            subdomains.add(accepted)
 
             result["subdomains"] = sorted(list(subdomains))
             result["count"] = len(result["subdomains"])
@@ -219,18 +216,20 @@ async def gungnir_monitor(
                     line = await proc.stdout.readline()
                     if not line:
                         break
-                    subdomain = line.decode().strip().lower().replace("*.", "")
-                    if subdomain and subdomain not in seen:
-                        seen.add(subdomain)
-                        # Find which root domain this belongs to
-                        for domain in domains:
-                            if subdomain.endswith(domain.lower()):
-                                if subdomain != domain.lower():
-                                    result["discoveries"][domain].append(subdomain)
-                                    result["total_discovered"] += 1
-                                    if callback:
-                                        await callback(subdomain)
-                                break
+                    raw = line.decode(errors="replace").strip()
+                    if raw and raw not in seen:
+                        seen.add(raw)
+                        # The most specific root this name sits under, on label boundaries.
+                        owners = [
+                            (domain, accepted) for domain in domains
+                            if (accepted := subdomain_of(raw, domain))
+                        ]
+                        if owners:
+                            domain, subdomain = max(owners, key=lambda item: len(item[0]))
+                            result["discoveries"][domain].append(subdomain)
+                            result["total_discovered"] += 1
+                            if callback:
+                                await callback(subdomain)
 
             # Run for specified duration
             try:

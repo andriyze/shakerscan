@@ -24,6 +24,11 @@ from .network_inputs import (
     CapabilityInputError, _addresses, _port_range, _ports, _require_network_policy,
 )
 
+try:
+    from scanner_tools.discovered_names import subdomain_of
+except ModuleNotFoundError:  # package import (api.capabilities.network)
+    from scanner.scanner_tools.discovered_names import subdomain_of
+
 
 from .ssh_commands import SshCommandAdapter
 
@@ -504,16 +509,17 @@ class SubdomainsDiscoverAdapter:
         )
 
     def parse(self, output: str, *, root_domain: str, timed_out: bool = False) -> ParsedCapabilityResult:
-        suffix = "." + root_domain.lower().rstrip(".")
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
         for line in str(output or "").splitlines():
             try:
                 row = json.loads(line)
-                host = str(row.get("host") or row.get("input") or "").lower().rstrip(".")
+                raw = row.get("host") or row.get("input") if isinstance(row, dict) else None
             except json.JSONDecodeError:
-                host = line.strip().lower().rstrip(".")
-            if host.endswith(suffix) and _DOMAIN_RE.fullmatch(host):
+                raw = line
+            # Canonical name strictly below the bound root, compared on label boundaries.
+            host = subdomain_of(raw, root_domain)
+            if host:
                 observations.append({"kind": "subdomain", "host": host, "root_domain": root_domain})
             elif line.strip():
                 errors.append("out_of_scope_or_malformed_subdomain_record")

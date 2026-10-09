@@ -22,6 +22,11 @@ from datetime import datetime, timezone
 import asyncpg
 import redis
 
+try:
+    from scanner_tools.discovered_names import canonical_name, subdomain_of
+except ModuleNotFoundError:  # source checkout / package import
+    from scanner.scanner_tools.discovered_names import canonical_name, subdomain_of
+
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://scanner:scanner@localhost:5432/scanner')
@@ -68,8 +73,8 @@ def match_root_domain(subdomain: str, domains: list[str]) -> str | None:
     Matching is on label boundaries: ``a.example.com`` belongs to ``example.com`` and never
     to a shorter string suffix such as ``le.com``, whose ASM policy it would otherwise inherit.
     """
-    matches = [domain for domain in domains if subdomain.endswith("." + domain.lower().rstrip("."))]
-    return max(matches, key=len) if matches else None
+    matches = [domain for domain in domains if subdomain_of(subdomain, domain)]
+    return max(matches, key=lambda domain: len(canonical_name(domain) or "")) if matches else None
 
 
 async def store_subdomain(subdomain: str, root_domain: str) -> bool:
@@ -175,12 +180,11 @@ async def run_gungnir(domains: list[str]):
                 if not line:
                     break
 
-                subdomain = line.decode().strip().lower()
+                # Canonical name (lower case, no wildcard label or trailing dot, IDNA), or
+                # nothing when the line is not a DNS name.
+                subdomain = canonical_name(line.decode(errors='replace'))
                 if not subdomain or subdomain in seen:
                     continue
-
-                # Remove wildcard prefix
-                subdomain = subdomain.replace('*.', '')
 
                 # Find the monitored root this name belongs to
                 domain = match_root_domain(subdomain, domains)
