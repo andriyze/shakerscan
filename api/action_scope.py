@@ -19,13 +19,13 @@ import deployment_policy
 
 try:
     from scanner_tools.address_classes import (
-        IPAddress, cloud_service_address, embedded_ipv4_addresses, judged_addresses, private_class,
-        shared_address_space,
+        IPAddress, always_refused, cloud_service_address, destination_block_reason,
+        embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
     )
 except ModuleNotFoundError:  # package import (api.action_scope)
     from scanner.scanner_tools.address_classes import (
-        IPAddress, cloud_service_address, embedded_ipv4_addresses, judged_addresses, private_class,
-        shared_address_space,
+        IPAddress, always_refused, cloud_service_address, destination_block_reason,
+        embedded_ipv4_addresses, judged_addresses, private_class, shared_address_space,
     )
 
 
@@ -110,17 +110,6 @@ def _deployment_allows_private_networks(allow_private_networks: bool | None) -> 
     return deployment_policy.private_network_targets_allowed()
 
 
-def _always_refused(address: IPAddress) -> bool:
-    """Classes no environment or deployment setting admits."""
-    return (
-        cloud_service_address(address)
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_unspecified
-        or str(address) == "255.255.255.255"
-    )
-
-
 def _ip_scope_block_reason(
     host: str,
     environment: str,
@@ -147,22 +136,14 @@ def _ip_scope_block_reason(
     except ValueError:
         return None
     # ::ffff:a.b.c.d is a.b.c.d, 64:ff9b::a.b.c.d reaches a.b.c.d through NAT64, and so on:
-    # classify every embedded IPv4 address so another spelling of a restricted address is not
-    # admitted where the plain spelling is refused.
-    # A mapped address is only its IPv4 address (the ::ffff:0:0/96 block itself reads private).
-    candidates = judged_addresses(ip_obj)
-    # Restricted classes first, so no label can admit them. A lab environment used to return
-    # here before this check, which let "Lab" admit link-local, multicast and unspecified
-    # addresses -- 169.254.169.254 among them -- contradicting the docstring above. That became
-    # reachable from the add-target dialog once the chosen cohort started reaching authorization.
-    if any(_always_refused(candidate) for candidate in candidates):
-        return "loopback_or_private_range"
-    if environment in SAFE_LAB_ENVIRONMENTS:
-        return None
-    # Shared address space (100.64.0.0/10: CGNAT, Tailscale) is private-class too.
-    if any(private_class(candidate) for candidate in candidates):
-        return None if deployment_allows else "loopback_or_private_range"
-    return None
+    # every embedded IPv4 address is classified, so another spelling of a restricted address is
+    # not admitted where the plain spelling is refused. Restricted classes are tested first, so
+    # no label admits them (a Lab label once admitted 169.254.169.254). Shared address space
+    # (100.64.0.0/10: CGNAT, Tailscale) is private-class. The decision lives in
+    # ``address_classes.destination_block_reason`` so the scanner's own egress shares it.
+    return destination_block_reason(
+        ip_obj, lab=environment in SAFE_LAB_ENVIRONMENTS, allow_private=deployment_allows,
+    )
 
 
 # Never routable to a real origin, whatever the deployment admits: "this network" and the
@@ -235,7 +216,7 @@ def destination_refusal_explanation(host: str, environment: str) -> str:
         # the one refused.
         def weight(item: IPAddress) -> int:
             return (0 if cloud_service_address(item) else 1 if item.is_link_local
-                    else 2 if _always_refused(item) else 3 if private_class(item) else 4)
+                    else 2 if always_refused(item) else 3 if private_class(item) else 4)
 
         embedded = embedded_ipv4_addresses(ip_obj)
         if embedded:

@@ -169,8 +169,43 @@ def private_class(address: IPAddress) -> bool:
             or shared_address_space(address))
 
 
+# Must equal api/action_scope.SAFE_LAB_ENVIRONMENTS; a test keeps the two identical.
+LAB_ENVIRONMENTS = frozenset({"development", "dev", "preview", "staging", "lab", "test"})
+REFUSED_DESTINATION_REASON = "loopback_or_private_range"
+
+
+def always_refused(address: IPAddress) -> bool:
+    """Classes no environment or deployment setting admits."""
+    return (
+        cloud_service_address(address)
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_unspecified
+        or address == LIMITED_BROADCAST
+    )
+
+
+def destination_block_reason(address: IPAddress, *, lab: bool, allow_private: bool) -> str | None:
+    """The web scope guard's address decision, shared with the scanner's own egress (SMTP MX).
+
+    Every address ``address`` is judged as (``judged_addresses``) is tested: an always-refused
+    class refuses in every environment; private-class space is admitted in a Lab environment or
+    when the deployment allows private-network targets. Returns
+    ``REFUSED_DESTINATION_REASON`` or None.
+    """
+    candidates = judged_addresses(address)
+    if any(always_refused(candidate) for candidate in candidates):
+        return REFUSED_DESTINATION_REASON
+    if lab:
+        return None
+    if any(private_class(candidate) for candidate in candidates):
+        return None if allow_private else REFUSED_DESTINATION_REASON
+    return None
+
+
 __all__ = [
-    "CLOUD_SERVICE_ADDRESSES", "CLOUD_SERVICE_ADDRESS_NAMES", "IPAddress", "LIMITED_BROADCAST", "NAT64_PREFIXES_ENV", "SHARED_ADDRESS_SPACE",
+    "CLOUD_SERVICE_ADDRESSES", "CLOUD_SERVICE_ADDRESS_NAMES", "IPAddress", "LAB_ENVIRONMENTS",
+    "LIMITED_BROADCAST", "REFUSED_DESTINATION_REASON", "always_refused", "destination_block_reason", "NAT64_PREFIXES_ENV", "SHARED_ADDRESS_SPACE",
     "cloud_service_address", "embedded_ipv4_addresses", "judged_addresses", "nat64_prefixes",
     "private_class", "shared_address_space", "validate_nat64_prefixes_setting", "without_scope",
 ]
