@@ -101,8 +101,8 @@ def _canonical(host: str) -> str:
         return canonical_host(host)
     except HostNameError as exc:
         raise BoundError(
-            f"host {host!r} is not a valid IDNA 2008 / UTS #46 name; spell it as the ASCII "
-            "(xn--) form you mean"
+            f"{exc}; spell the host as its canonical name (an IDN as its IDNA 2008/UTS #46 "
+            "xn-- form, an address in dotted decimal)"
         ) from exc
 
 
