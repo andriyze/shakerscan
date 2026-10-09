@@ -1158,12 +1158,12 @@ def build_parser() -> argparse.ArgumentParser:
     permissions_list.add_argument("hunt_id", nargs="?")
     permissions_list.add_argument("--status", choices=("pending", "granted", "denied", "expired", "withdrawn"))
     permissions_show = permission_commands.add_parser("show", help="One request, with its server-rendered text")
-    permissions_show.add_argument("request_id")
+    permissions_show.add_argument("request_id", help="the permission request id (the Hunt goes in --hunt)")
     permissions_show.add_argument("--hunt", help="the request's Hunt (found automatically otherwise)")
     permissions_wait = permission_commands.add_parser(
         "wait", help="Wait for the person's decision: granted, denied, expired, withdrawn or still_pending",
     )
-    permissions_wait.add_argument("request_id")
+    permissions_wait.add_argument("request_id", help="the permission request id (the Hunt goes in --hunt)")
     permissions_wait.add_argument("--hunt", help="the request's Hunt (found automatically otherwise)")
     permissions_wait.add_argument("--seconds", type=_positive_seconds, default=300.0, help="how long to wait (default 300)")
 
@@ -1322,9 +1322,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _selected_parser(parser: argparse.ArgumentParser, args: argparse.Namespace) -> argparse.ArgumentParser:
+    """The innermost subcommand parser ``args`` went through (``hunt permissions show``)."""
+    for action in parser._actions:  # argparse keeps its subparsers only here
+        if isinstance(action, argparse._SubParsersAction):
+            chosen = action.choices.get(getattr(args, action.dest, None) or "")
+            if chosen is not None:
+                return _selected_parser(chosen, args)
+    return parser
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    # O3: argparse reports arguments left over by a subcommand with the top-level usage, so
+    # `hunt permissions show <hunt> <request>` printed the whole CLI's usage. The subcommand that
+    # was used reports them instead, with its own usage.
+    args, extra = parser.parse_known_args(argv)
+    if extra:
+        _selected_parser(parser, args).error(f"unrecognized arguments: {' '.join(extra)}")
     try:
         token = os.environ.get("SHAKERSCAN_API_TOKEN", "").strip() or None
         if token and (len(token) > 4096 or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token)):

@@ -42,15 +42,18 @@ docs/hunt-permission-requests.md ("E3: the terminal approval protocol and the G1
 from __future__ import annotations
 
 import base64
+import contextlib
 import getpass
 import hashlib
 import json
+import math
 import os
 import re
+import select
 import sys
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 APPROVAL_SCHEMA_PREFIX = "shakerscan-approval-"
@@ -65,6 +68,8 @@ PREAUTHORIZATION_USES = ("agent_launch", "hunt_start")
 OPEN_HUNT_STATUSES = ("active", "awaiting_planner", "budget_exhausted")
 SESSION_SECONDS = 30 * 60
 WATCH_POLL_SECONDS = 3.0
+# `hunt permissions wait`: never more than one read of a request per this many seconds (L1).
+WAIT_MIN_POLL_SECONDS = 1.0
 # Ending --watch revokes the approver session as a courtesy (it expires on its own anyway), so the
 # revoke waits this long at most: Ctrl-C must end the command promptly even when the gateway or
 # the network has stalled, not after the CLI's general per-request timeout.
@@ -155,18 +160,36 @@ def find_request(send: Send, request_id: str, hunt_id: str | None = None) -> dic
     raise ApprovalError(f"no permission request {request_id} in {where}; it may have ended with its Hunt")
 
 
-def wait_for(send: Send, request: Mapping[str, Any], seconds: float, *, step: int = 25) -> dict[str, Any]:
-    """Long-poll one request until it is decided or ``seconds`` pass; return its last state."""
-    deadline = time.monotonic() + max(0.0, seconds)
+def wait_for(send: Send, request: Mapping[str, Any], seconds: float, *, step: int = 25,
+             clock: Callable[[], float] = time.monotonic,
+             sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    """Long-poll one request until it is decided or ``seconds`` pass; return its last state.
+
+    L1: the time left was rounded down to whole seconds, so in the last second every poll asked
+    for ``wait_seconds=0`` and the loop hammered the engine (79-86 requests in that second). Each
+    poll now asks the server to hold for the time left rounded up (at most ``step``), so
+    ``wait_seconds=0`` is sent only when the caller asked for no wait at all, and only once. A
+    server that answers before holding (or a pending answer that comes back early) is polled at
+    most once per WAIT_MIN_POLL_SECONDS. The wait ends at the deadline, at most the last whole
+    second's rounding past it."""
+    deadline = clock() + max(0.0, seconds)
     path = f"/hunts/{_quote(request['hunt_id'])}/permission-requests/{_quote(request['id'])}"
     current = dict(request)
     while True:
-        remaining = int(max(0, deadline - time.monotonic()))
-        status, body = send("GET", f"{path}?wait_seconds={min(step, remaining)}")
+        started = clock()
+        left = deadline - started
+        hold = min(step, max(1, math.ceil(left))) if left > 0 else 0
+        status, body = send("GET", f"{path}?wait_seconds={hold}")
         if not _ok(status):
             raise ApprovalError(f"cannot read permission request {request['id']}: HTTP {status}: {_detail_text(body)}")
         current = {**body, "hunt_id": str(body.get("hunt_id") or request["hunt_id"])}
-        if current.get("status") != "pending" or time.monotonic() >= deadline - 0.5:
+        now = clock()
+        if current.get("status") != "pending" or now >= deadline:
+            return current
+        pause = min(WAIT_MIN_POLL_SECONDS - (now - started), deadline - now)
+        if pause > 0:
+            sleep(pause)
+        if clock() >= deadline:
             return current
 
 
@@ -253,6 +276,7 @@ class Terminal:
     def __init__(self, stdin: Any = None, stdout: Any = None) -> None:
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
+        self._key_fd: int | None = None
 
     def require(self, what: str) -> None:
         try:
@@ -286,26 +310,75 @@ class Terminal:
     def confirm(self, prompt: str) -> bool:
         return self.line(prompt + " [y/N] ").lower() in {"y", "yes"}
 
-    def key(self, prompt: str, choices: str) -> str:
-        """One keypress from ``choices`` (a line on terminals that cannot read a single key)."""
-        self.stdout.write(prompt)
-        self.stdout.flush()
-        answer = ""
+    @contextlib.contextmanager
+    def keypresses(self) -> Iterator[None]:
+        """Read single keys (no echo, no Enter) for as long as the block runs.
+
+        L2: the keypress mode used to be switched on after the prompt was written, with
+        ``tty.setcbreak``'s default TCSAFLUSH, so a key typed in between was echoed and then
+        thrown away, and the watch sat in a blocking read with nothing decided and no polling.
+        The mode is now switched on once, before any request is shown, without flushing; a key
+        typed before a request was on the screen is discarded deliberately (by ``pending_keys``)
+        and said so, and every key typed after that is read. The terminal is restored on the way
+        out, whatever ends the block (Ctrl-C included)."""
         try:
             import termios
             import tty
             fd = self.stdin.fileno()
             saved = termios.tcgetattr(fd)
-            try:
-                tty.setcbreak(fd)
-                answer = os.read(fd, 1).decode("utf-8", "replace")
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-            self.stdout.write(answer + "\n")
+            tty.setcbreak(fd, termios.TCSANOW)
         except (ImportError, OSError, ValueError, AttributeError):
-            answer = self.stdin.readline()[:1]
-        answer = answer.lower()
-        return answer if answer and answer in choices else ""
+            yield  # no terminal control here: key() falls back to reading a line
+            return
+        self._key_fd = fd
+        try:
+            yield
+        finally:
+            self._key_fd = None
+            # TCSANOW: TCSADRAIN waits until the terminal's output queue is read, and an echoed
+            # key nobody reads (a pseudo-terminal) would hold Ctrl-C there for ever.
+            termios.tcsetattr(fd, termios.TCSANOW, saved)
+
+    def pending_keys(self) -> int:
+        """Discard whatever was typed before now (keypress mode only); return how many bytes."""
+        fd = getattr(self, "_key_fd", None)
+        dropped = 0
+        while fd is not None and select.select([fd], [], [], 0)[0]:
+            chunk = os.read(fd, 1024)
+            if not chunk:
+                break
+            dropped += len(chunk)
+        return dropped
+
+    def key(self, prompt: str, choices: str, *, keep_waiting: Callable[[], bool] | None = None,
+            interval: float = WATCH_POLL_SECONDS) -> str | None:
+        """One keypress from ``choices``; any other key is ignored and the wait goes on.
+
+        While no key arrives, ``keep_waiting()`` is asked every ``interval`` seconds; when it
+        answers False the prompt is abandoned and None is returned, so a watch never stops
+        polling while it waits for the person. Outside keypress mode (no terminal control) a
+        line is read instead."""
+        self.stdout.write(prompt)
+        self.stdout.flush()
+        fd = getattr(self, "_key_fd", None)
+        if fd is None:
+            answer = self.stdin.readline()[:1].lower()
+            return answer if answer and answer in choices else ""
+        while True:
+            if not select.select([fd], [], [], max(0.05, interval))[0]:
+                if keep_waiting is not None and not keep_waiting():
+                    self.stdout.write("\n")
+                    self.stdout.flush()
+                    return None
+                continue
+            data = os.read(fd, 1)
+            if not data:
+                raise ApprovalError("the terminal closed; nothing was decided")
+            answer = data.decode("utf-8", "replace").lower()
+            if answer in choices:
+                self.stdout.write(answer + "\n")
+                self.stdout.flush()
+                return answer
 
 
 # --- Enterprise step-up ------------------------------------------------------------------------
@@ -606,29 +679,57 @@ def watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hunt
                      "(held in this process only; Ctrl-C ends it)")
     deadline = time.monotonic() + seconds
     seen: set[str] = set()
+    where = f"Hunt {hunt_id}" if hunt_id else "every open Hunt"
+    # O2: on an open-source engine nothing was printed until a request arrived, and the end said
+    # "approver session ended" although there is no session there.
+    ended = "approver session ended" if enterprise else "stopped watching for permission requests"
+
+    def still_pending(request: Mapping[str, Any]) -> Callable[[], bool]:
+        """Asked while the prompt waits: the watch keeps polling the request it shows."""
+        def check() -> bool:
+            if time.monotonic() >= deadline:
+                return False
+            try:
+                current = find_request(send, str(request["id"]), str(request["hunt_id"]))
+            except ApprovalError:
+                return True  # a failed read is not a decision; keep the prompt and try again
+            if current.get("status") == "pending":
+                return True
+            terminal.say(f"  {current.get('title') or request.get('title')}: {current.get('status')} elsewhere"
+                         + (f" by {current.get('decided_by')}" if current.get("decided_by") else ""))
+            return False
+        return check
+
     try:
-        while time.monotonic() < deadline:
-            for request in list_pending(send, hunt_id):
-                if str(request["id"]) in seen:
-                    continue
-                seen.add(str(request["id"]))
-                terminal.say(render_request(request))
-                remember = "r" if request.get("remember_supported") else ""
-                choice = terminal.key(
-                    "  [a]llow" + ("  [r]emember for the target" if remember else "") + "  [d]eny  [s]kip  [q]uit: ",
-                    "ads" + remember + "q",
-                )
-                if choice == "q":
-                    return 0
-                if choice in {"a", "r", "d"}:
-                    decide(send, terminal, [request], "deny" if choice == "d" else "allow",
-                           enterprise=enterprise, origin=origin, remember=choice == "r",
-                           account=account, method=method, session=session, confirmed=not enterprise)
-            sleep(poll_seconds)
-        terminal.say("approver session ended (time limit)")
+        with terminal.keypresses():
+            terminal.say(f"watching {where} for permission requests... (Ctrl-C to stop)")
+            while time.monotonic() < deadline:
+                for request in list_pending(send, hunt_id):
+                    if str(request["id"]) in seen:
+                        continue
+                    seen.add(str(request["id"]))
+                    if terminal.pending_keys():
+                        terminal.say("(ignored keys pressed before this request was shown)")
+                    terminal.say(render_request(request))
+                    remember = "r" if request.get("remember_supported") else ""
+                    choice = terminal.key(
+                        "  [a]llow" + ("  [r]emember for the target" if remember else "") + "  [d]eny  [s]kip  [q]uit: ",
+                        "ads" + remember + "q", keep_waiting=still_pending(request), interval=poll_seconds,
+                    )
+                    if choice == "q":
+                        terminal.say(ended)
+                        return 0
+                    if choice in {"a", "r", "d"}:
+                        decide(send, terminal, [request], "deny" if choice == "d" else "allow",
+                               enterprise=enterprise, origin=origin, remember=choice == "r",
+                               account=account, method=method, session=session, confirmed=not enterprise)
+                    if time.monotonic() >= deadline:
+                        break
+                sleep(poll_seconds)
+        terminal.say(f"{ended} (time limit)")
         return 0
     except KeyboardInterrupt:
-        terminal.say("\napprover session ended")
+        terminal.say(f"\n{ended}")
         return 0
     finally:
         if session is not None and held is not None:

@@ -4,8 +4,9 @@ Unit fixtures throughout: ``send`` is a scripted instance and the terminal is a 
 (the pseudo-terminal process tests are in test_hunt_terminal_approval.py). Covered here: the set
 digest and the security-key challenge binding, the opt-in approver session (in memory only,
 revoked at the end), the security-key path through a CTAP2 test double, ``--all-pending`` with one
-step-up, ``hunt permissions list|show|wait``, ``hunt start --allow``, the ``hunt call`` text for a
-parked action, and the redirect explanation (D17).
+step-up, ``hunt permissions list|show|wait`` (L1: the wait's pacing, also counted against the HTTP
+stub of tests/hunt_permission_stub.py, a unit fixture), ``hunt start --allow``, the ``hunt call``
+text for a parked action, and the redirect explanation (D17).
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import io
 import json
 import os
 import sys
+import time
 import types
 import urllib.error
 from pathlib import Path
@@ -58,7 +60,7 @@ class Terminal(approval.Terminal):
         self.stdout.write(prompt)
         return self.answers.pop(0)
 
-    def key(self, prompt, choices):
+    def key(self, prompt, choices, **_waiting):
         self.stdout.write(prompt)
         if not self.keys:
             raise KeyboardInterrupt
@@ -432,3 +434,92 @@ def test_cli_redirect_errors_name_the_https_origin_and_the_url_option():
     error = urllib.error.HTTPError("http://scanner.example.com/hunts", 308, "redirect",
                                    {"Location": "https://scanner.example.com/hunts"}, io.BytesIO(b""))
     assert "--url https://scanner.example.com" in v2_cli._redirect_text(error, "http://scanner.example.com/hunts")
+
+
+class _Clock:
+    """A labelled fake monotonic clock: sleeping and a server's hold advance it."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        assert seconds > 0, "never a zero or negative pause"
+        self.now += seconds
+
+
+def _waiting_engine(clock, *, holds):
+    """A pending request behind a scripted engine (unit fixture). ``holds``: the engine keeps the
+    long-poll open for the wait it was asked for; otherwise it answers at once (the worst case)."""
+    asked = []
+
+    def engine(method, path, payload=None, headers=None):
+        assert method == "GET" and path.startswith(f"/hunts/{HUNT}/permission-requests/{REQUEST}?wait_seconds=")
+        seconds = int(path.rsplit("=", 1)[1])
+        asked.append(seconds)
+        if holds:
+            clock.now += seconds
+        else:
+            clock.now += 0.01
+        return 200, _request()
+
+    return engine, asked
+
+
+@pytest.mark.parametrize("seconds", [8, 5, 7.63, 1, 0.4])
+def test_wait_never_floods_the_engine_with_zero_second_polls(seconds):
+    """L1: the time left was rounded down, so the last second sent ~80 wait_seconds=0 reads."""
+    clock = _Clock()
+    engine, asked = _waiting_engine(clock, holds=False)
+    started = clock()
+    current = approval.wait_for(engine, _request(), seconds, clock=clock, sleep=clock.sleep)
+    assert current["status"] == "pending"
+    assert 0 not in asked, f"a zero-second long-poll was sent: {asked}"
+    assert len(asked) <= int(seconds) + 1, f"{len(asked)} reads in {seconds}s: {asked}"
+    assert asked[0] == min(25, max(1, -(-seconds // 1))), "the first poll holds for the time left, rounded up"
+    assert started + seconds <= clock() <= started + seconds + 0.05, "it ends at the deadline"
+
+
+@pytest.mark.parametrize("seconds", [8, 7.63, 60])
+def test_wait_against_an_engine_that_holds_asks_once_per_hold(seconds):
+    clock = _Clock()
+    engine, asked = _waiting_engine(clock, holds=True)
+    approval.wait_for(engine, _request(), seconds, clock=clock, sleep=clock.sleep)
+    assert asked == ([8] if seconds < 25 else [25, 25, 10])
+    assert sum(asked) - seconds < 1, "at most the last second's rounding past the deadline"
+
+
+def test_wait_for_no_time_reads_once():
+    clock = _Clock()
+    engine, asked = _waiting_engine(clock, holds=False)
+    approval.wait_for(engine, _request(), 0, clock=clock, sleep=clock.sleep)
+    assert asked == [0]
+
+
+def test_hunt_permissions_wait_counts_its_requests_against_a_stub_engine():
+    """L1 over real HTTP: the stub engine holds each long-poll for the wait it is asked for."""
+    from tests.hunt_permission_stub import StubInstance
+
+    with StubInstance() as stub:
+        started = time.monotonic()
+        code = v2_cli.main(["--api-url", stub.url, "hunt", "permissions", "wait", REQUEST,
+                            "--hunt", HUNT, "--seconds", "2.5"])
+        elapsed = time.monotonic() - started
+    polls = [path for method, path, _ in stub.seen
+             if method == "GET" and path.startswith(f"/hunts/{HUNT}/permission-requests/{REQUEST}?")]
+    assert code == 0
+    assert polls == [f"/hunts/{HUNT}/permission-requests/{REQUEST}?wait_seconds=3"], polls
+    assert 2.5 <= elapsed < 6, elapsed
+
+
+def test_permissions_show_with_arguments_in_the_wrong_order_prints_its_own_usage(capsys):
+    """O3: the leftover argument was reported with the whole CLI's usage."""
+    with pytest.raises(SystemExit) as exited:
+        v2_cli.main(["--api-url", "http://127.0.0.1:8080", "hunt", "permissions", "show", HUNT, REQUEST])
+    assert exited.value.code == 2
+    err = capsys.readouterr().err
+    assert "permissions show [-h] [--hunt HUNT] request_id" in err, err
+    assert f"unrecognized arguments: {REQUEST}" in err
+    assert "{hunt,approve,deny" not in err, "not the top-level usage"
