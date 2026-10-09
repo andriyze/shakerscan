@@ -267,7 +267,11 @@ providers, other MCP servers, instructions, hooks) in the client's state directo
 (`${XDG_STATE_HOME:-~/.local/state}/shakerscan/workspaces/`, never in the workspace an agent can
 write), and the next launch lists under `changed:` exactly what changed in between (secret values
 hidden); nothing is blocked. When the record of a workspace prepared before is missing or not
-valid, the launch says that changes since the last launch could not be checked. Kit files and hook entries the kit no longer ships are removed (a kit file you changed
+valid, the launch says that changes since the last launch could not be checked. A record that
+would sit inside the workspace (`--here` from your home directory) is not used, and a workspace
+that contains the client's configuration directory (it holds the token) is warned about. With
+`SHAKERSCAN_CONFIG_DIR` set, state and data sit beside it (`<dir>.state`, `<dir>.data`), so an
+isolated profile stays isolated. Kit files and hook entries the kit no longer ships are removed (a kit file you changed
 is kept and named); your own files stay. `opencode.json` with comments or trailing commas is read
 and written back as plain JSON, its original kept beside it; a file that is not JSON or JSONC is
 moved aside (`.shakerscan-unreadable-*.bak`) with the reason. The client never writes through a
@@ -345,7 +349,8 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
   next one; when a request ends elsewhere while its prompt waits, the switch to the next one is
   announced. Only a single lowercase key pressed on its own decides: arrow, function and Alt
   keys (however slowly their bytes arrive), terminal control strings (OSC, DCS, APC, PM, SOS,
-  up to their BEL or ST), 8-bit CSI, uppercase letters and pastes are ignored. It keeps
+  up to their BEL or ST, or a 1.5 s pause with no input, and said so), 8-bit CSI, uppercase
+  letters and pastes are ignored. It keeps
   polling while it waits, and SIGTERM or a closed terminal ends it like Ctrl-C (terminal
   restored, Enterprise approver session revoked, also during the step-up), with exit status
   128 + the signal number.

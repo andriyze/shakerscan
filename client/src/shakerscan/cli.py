@@ -88,8 +88,15 @@ def config_dir(environ: Mapping[str, str] | None = None) -> Path:
 
 def _xdg(variable: str, fallback: tuple[str, ...], environ: Mapping[str, str] | None = None) -> Path:
     """``$<variable>/shakerscan`` when it is an absolute path (the XDG rule), else
-    ``~/<fallback>/shakerscan``; the same on macOS as elsewhere, like ``config_dir``."""
+    ``~/<fallback>/shakerscan``; the same on macOS as elsewhere, like ``config_dir``.
+
+    With ``$SHAKERSCAN_CONFIG_DIR`` set (an isolated profile) the directory sits beside it
+    instead, ``<config dir>.state`` or ``<config dir>.data``: the profile stays isolated, and the
+    agent workspace is still outside the directory that holds the token."""
     environ = os.environ if environ is None else environ
+    if environ.get(ENV_CONFIG_DIR):
+        isolated = config_dir(environ)
+        return isolated.with_name(isolated.name + (".state" if variable == "XDG_STATE_HOME" else ".data"))
     value = environ.get(variable) or ""
     base = Path(value) if value and Path(value).is_absolute() else Path.home().joinpath(*fallback)
     return base / "shakerscan"
@@ -548,9 +555,17 @@ def prepare_workspace(
     workspace = workspace.resolve()
     root = _workspace.Root(workspace)
     record = _workspace.state_path(state_directory or state_dir() / "workspaces", workspace)
+    record_inside = _inside(record, workspace)
+    if record_inside:
+        notes.append(f"warning:   the client's record of this workspace ({record}) would be inside the workspace, "
+                     "where the agent can edit it, so it is not used: changes to the agent settings since the last "
+                     "launch are not checked. Run the agent in its own directory, not --here from your home.")
+    if _inside(config_dir(), workspace):
+        notes.append(f"warning:   this workspace contains the client's configuration directory {config_dir()}, which "
+                     "holds the instance token: the agent can read it. Run the agent in its own directory.")
     try:
         _workspace.refuse_links(workspace)
-        state = _workspace.load_state(record, workspace, notes)
+        state = {} if record_inside else _workspace.load_state(record, workspace, notes)
         before = _workspace.fingerprint(_workspace.security_view(_workspace.quiet_configs(root)))
         if isinstance(state.get("security"), Mapping):
             changed = _workspace.changes(state["security"], before)
@@ -598,8 +613,19 @@ def prepare_workspace(
         after = _workspace.fingerprint(_workspace.security_view(_workspace.quiet_configs(root)))
     except _workspace.WorkspaceError as exc:
         raise ClientError(str(exc)) from exc
-    _workspace.save_state(record, workspace, {**kit_state, "security": after})
+    if not record_inside:
+        _workspace.save_state(record, workspace, {**kit_state, "security": after})
     return written
+
+
+def _inside(path: Path, directory: Path) -> bool:
+    """Whether ``path`` is ``directory`` or lies under it, links resolved."""
+    try:
+        resolved = path.resolve()
+        base = directory.resolve()
+    except OSError:
+        return False
+    return resolved == base or base in resolved.parents
 
 
 def pi_arguments(workspace: Path) -> list[str]:
