@@ -20,10 +20,10 @@ def test_registrable_domain_extracts_last_two_labels():
 
 def test_registrable_domain_handles_localhost_and_ips():
     assert _registrable_domain("localhost") == "localhost"
-    # IPv4 collapses to the last two labels by the naive split — fine in
-    # practice because the cross-origin check just compares both sides
-    # symmetrically.
-    assert _registrable_domain("127.0.0.1") == "0.1"
+    # An address is its own site. The former last-two-labels rule made 127.0.0.1 "0.1", so
+    # credentials could be posted from 10.0.0.1 to 192.168.0.1.
+    assert _registrable_domain("127.0.0.1") == "127.0.0.1"
+    assert _is_action_safe_for_credentials("http://192.168.0.1/login", "http://10.0.0.1/") is False
 
 
 def test_relative_action_is_safe():

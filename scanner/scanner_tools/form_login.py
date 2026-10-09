@@ -39,25 +39,17 @@ from urllib.parse import urljoin, urlparse
 
 # Import auth session for making requests
 from .auth_session import AuthConfig, AuthSession
+from .registrable import site_of
 
 
 def _registrable_domain(host: str) -> str:
-    """Return the last two host labels (eTLD+1 approximation).
+    """The registrable domain (eTLD+1) under the bundled Public Suffix List, PRIVATE section
+    included, or the host itself when it has none (``localhost``, an address, ``github.io``).
 
-    Good-enough for "same registrable domain" checks: avoids the full PSL
-    dependency and accepts the common case of subdomain login flows like
-    `app.example.com` → `auth.example.com`. Hostnames with fewer than two
-    labels (`localhost`, raw IPs) are returned as-is.
+    A "last two labels" rule made ``victim.github.io`` and ``attacker.github.io`` (and every
+    ``*.co.uk``) one site, so credentials could be posted to another registrant's form.
     """
-    host = (host or "").strip().lower()
-    if not host:
-        return ""
-    # Strip port if present and any IPv6 brackets.
-    host = host.split(":", 1)[0].strip("[]")
-    parts = [p for p in host.split(".") if p]
-    if len(parts) < 2:
-        return host
-    return ".".join(parts[-2:])
+    return site_of(host)
 
 
 def _is_action_safe_for_credentials(action_url: str, base_url: str) -> bool:

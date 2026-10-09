@@ -27,6 +27,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 try:
+    from .registrable import site_of
+except ImportError:  # pragma: no cover - flat-module fallback
+    from registrable import site_of
+
+try:
     import aiohttp
     HAS_AIOHTTP = True
 except ImportError:
@@ -214,47 +219,13 @@ def is_self_hosted_analytics_url(url: str, base_domain: str | None = None) -> bo
     return False
 
 
-# Common multi-part TLDs that need special handling
-MULTI_PART_TLDS = {
-    'co.uk', 'org.uk', 'me.uk', 'ac.uk', 'gov.uk', 'ltd.uk', 'plc.uk',
-    'co.nz', 'org.nz', 'net.nz', 'govt.nz', 'ac.nz',
-    'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
-    'co.jp', 'ne.jp', 'or.jp', 'ac.jp', 'go.jp',
-    'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br',
-    'co.in', 'net.in', 'org.in', 'gen.in', 'firm.in',
-    'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn',
-    'co.kr', 'ne.kr', 'or.kr', 'go.kr', 're.kr',
-    'com.mx', 'net.mx', 'org.mx', 'gob.mx', 'edu.mx',
-    'co.za', 'net.za', 'org.za', 'gov.za', 'edu.za',
-    'com.sg', 'net.sg', 'org.sg', 'gov.sg', 'edu.sg',
-    'com.hk', 'net.hk', 'org.hk', 'gov.hk', 'edu.hk',
-    'co.il', 'net.il', 'org.il', 'gov.il', 'ac.il',
-}
-
-
 def get_registrable_domain(domain: str) -> str:
+    """The registrable domain (eTLD+1) under the bundled Public Suffix List, PRIVATE section
+    included, so ``cdn.example.co.uk`` is ``example.co.uk`` and ``victim.github.io`` is not
+    first-party to ``attacker.github.io``. A name with none (an address, a public suffix) is
+    returned as is.
     """
-    Get the registrable domain (eTLD+1) handling multi-part TLDs.
-
-    Examples:
-        example.co.uk -> example.co.uk (not co.uk)
-        sub.example.com -> example.com
-        cdn.example.co.uk -> example.co.uk
-    """
-    parts = domain.lower().split('.')
-    if len(parts) < 2:
-        return domain
-
-    # Check for multi-part TLDs (last 2 parts)
-    potential_tld = '.'.join(parts[-2:])
-    if potential_tld in MULTI_PART_TLDS:
-        # Need 3 parts for multi-part TLD
-        if len(parts) >= 3:
-            return '.'.join(parts[-3:])
-        return domain
-
-    # Standard TLD - use last 2 parts
-    return '.'.join(parts[-2:])
+    return site_of(domain)
 
 
 def is_third_party(resource_url: str, base_domain: str) -> bool:
