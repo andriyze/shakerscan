@@ -385,6 +385,18 @@ def _is_uuid(value: str) -> bool:
     return True
 
 
+def _unconfirmed(kind: str, stored: str) -> LegacyHostBound:
+    """A stored host bound whose approved source string is unknown. It can be offered back in its
+    stored spelling only if that spelling is itself valid under IDNA 2008/UTS #46 (an IDNA
+    2003-only A-label such as ``xn--i-7iq.example`` is not): otherwise it is ``host_invalid``."""
+    bound = f"{kind}:{stored}"
+    try:
+        _parse_bounds([bound], budget_fields=None, encode=_canonical)
+    except BoundError:
+        return LegacyHostBound(bound=bound, stored_as=stored, canonical=None, reason="host_invalid")
+    return LegacyHostBound(bound=bound, stored_as=stored, canonical=stored, reason="source_unconfirmed")
+
+
 def _encoding_review(values: Iterable[Any]) -> tuple[set[tuple[str, str]], list[LegacyHostBound]]:
     """Split the hosts ``values`` name into those IDNA 2003 and IDNA 2008/UTS #46 spell alike
     (``(kind, host)``) and those they do not (withheld, ``LegacyHostBound``)."""
@@ -432,10 +444,16 @@ def stored_bounds(value: Mapping[str, Any], *, source_allow: Sequence[Any] | Non
     """
     value = dict(value or {})
     if value.get("host_canonicalization") == HOST_CANONICALIZATION:
-        return StoredBounds(_rebuilt(
-            value, target_patterns=value.get("target_patterns") or (),
-            credential_targets=value.get("credential_targets") or (),
-        ))
+        try:
+            return StoredBounds(_rebuilt(
+                value, target_patterns=value.get("target_patterns") or (),
+                credential_targets=value.get("credential_targets") or (),
+            ))
+        except BoundError:
+            # A stored host that no longer parses (never written by this release): fail closed on
+            # the row's host bounds, report them, and keep its other bounds -- never raise here.
+            value.pop("host_canonicalization")
+            source_allow = None
     patterns = [str(item) for item in value.get("target_patterns") or ()]
     credentials = [str(item) for item in value.get("credential_targets") or ()]
     host_credentials = [item for item in credentials if not _is_uuid(item)]
@@ -450,7 +468,7 @@ def stored_bounds(value: Mapping[str, Any], *, source_allow: Sequence[Any] | Non
         reproduced = None
     if reproduced is None or _without_marker(reproduced.public()) != _without_marker(value):
         withheld = tuple(
-            LegacyHostBound(bound=f"{kind}:{item}", stored_as=item, canonical=item, reason="source_unconfirmed")
+            _unconfirmed(kind, item)
             for kind, item in (*((KIND_TARGET_AUTHORIZE, item) for item in patterns),
                                *((KIND_CREDENTIAL_USE, item) for item in host_credentials))
         )

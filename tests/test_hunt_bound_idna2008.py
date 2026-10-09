@@ -248,6 +248,27 @@ def test_a_legacy_row_its_source_does_not_reproduce_fails_closed(source):
     assert [item.reason for item in loaded.legacy] == ["source_unconfirmed"]
 
 
+def test_an_unconfirmed_stored_spelling_strict_parsing_refuses_is_reported_not_offered():
+    """R3 review: an unconfirmed legacy bound is offered back in its stored IDNA 2003 spelling,
+    which IDNA 2008 may refuse (xn--i-7iq.example). It is reported as host_invalid instead."""
+    row = _v280_row(target_patterns=["xn--i-7iq.example", "api.example.com"], budget_multiplier=2.0)
+    loaded = stored_bounds(row, source_allow=None)
+    reasons = {item.bound: item.reason for item in loaded.legacy}
+    assert reasons == {"target.authorize:xn--i-7iq.example": "host_invalid",
+                       "target.authorize:api.example.com": "source_unconfirmed"}
+    bad = next(item for item in loaded.legacy if item.reason == "host_invalid").public()
+    assert "not a valid IDNA 2008/UTS #46 name" in bad["message"] and "Start the Hunt again" in bad["message"]
+    assert loaded.bounds.budget_multiplier == 2.0 and loaded.bounds.target_patterns == ()
+
+
+def test_a_current_row_with_a_host_that_no_longer_parses_fails_closed_without_raising():
+    row = {**parse_bounds(["target.authorize:api.example.com", "budget.raise:2x"]).public(),
+           "target_patterns": ["xn--i-7iq.example", "api.example.com"]}
+    loaded = stored_bounds(row)
+    assert loaded.bounds.target_patterns == () and loaded.bounds.budget_multiplier == 2.0
+    assert {item.reason for item in loaded.legacy} == {"host_invalid", "source_unconfirmed"}
+
+
 def test_the_preauthorization_listing_flags_legacy_rows():
     row = _v280_row(target_patterns=["strasse.example"])
     item = {"id": uuid.uuid4(), "bounds_json": row, "bounds_digest": _v280_digest(row),
