@@ -11,21 +11,28 @@ from runtime.hunt_http_contract import require_http_request_authority, uses_http
 from runtime.hunt_http_exchange import HttpWorkflowExchange, prepare_http_exchange
 from .http import execute_bound_http_request
 
+try:
+    from runtime.archive_body_masking import active_withheld_values
+except ModuleNotFoundError:  # package import layout
+    from api.runtime.archive_body_masking import active_withheld_values
+
 
 _BOUND_VALUE_MARKER = "[withheld:bound]"
 
 
 def _scrub_bound_values(value: Any, bound: list[str]) -> Any:
-    """Replace every bound value (longest first) in every string of a public response."""
-    secrets = sorted({item for item in bound if item}, key=len, reverse=True)
-    if not secrets:
+    """Withhold every echo of a bound value in every string of a public response: the body
+    sample, ``location``, ``final_url``, redirect locations and selected headers, in any case,
+    HTML/JSON/URL encoding or base64 (see ``KnownValueScrubber``). The body sample was already
+    masked whole before it was cut, so no value is split by its end."""
+    from runtime.archive_body_masking import KnownValueScrubber
+    scrubber = KnownValueScrubber(sorted({str(item) for item in bound if item}))
+    if not scrubber.values:
         return value
 
     def scrub(item: Any) -> Any:
         if isinstance(item, str):
-            for secret in secrets:
-                item = item.replace(secret, _BOUND_VALUE_MARKER)
-            return item
+            return scrubber.scrub(item, lambda _value: _BOUND_VALUE_MARKER)
         if isinstance(item, Mapping):
             return {scrub(key): scrub(nested) for key, nested in item.items()}
         if isinstance(item, (list, tuple)):
@@ -68,6 +75,10 @@ async def prepare_http_operation(
                     )
                 except (ValueError, CredentialResolutionError, CredentialReferenceError) as exc:
                     return {"ok": False, "error": "http_workflow_preflight:" + str(exc)[:240]}
+            collector = active_withheld_values()
+            if collector is not None and withheld_only:
+                # Every echo of a value sent by reference is withheld before any sample is cut.
+                collector.bind_known(exchange.bound_values)
             response = await execute_bound_http_request(
                 target_url, wire_input, target=target,
                 allow_write=inputs['method'] in {'POST', 'PUT', 'PATCH', 'DELETE'},

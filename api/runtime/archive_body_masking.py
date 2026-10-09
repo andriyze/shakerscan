@@ -36,10 +36,12 @@ is untouched; it is a separate, deployment-gated choice.
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 import math
 import re
+import urllib.parse
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator
@@ -86,6 +88,14 @@ MAX_WITHHELD_VALUES = 64
 MAX_WITHHELD_VALUE_CHARS = 8_192
 # Fingerprints are scrypt (memory-hard by design), so only the first few are computed.
 _MAX_FINGERPRINTED_REFERENCES = 20
+# A short value's fingerprint is a guessing oracle: a planner that can make the target reflect a
+# guess sees the guess fingerprinted beside the secret. References already deduplicate within an
+# output, so short values carry no fingerprint at all.
+_MIN_FINGERPRINTED_CHARS = 12
+# A bound value shorter than this is not searched for in echoes (it would match ordinary text).
+_MIN_KNOWN_VALUE_CHARS = 3
+_MIN_EDGE_FRAGMENT_CHARS = 4
+_MAX_EDGE_VALUE_CHARS = 512
 
 
 def withheld_preview(value: str) -> str:
@@ -106,6 +116,25 @@ class WithheldValues:
         self.values: list[str] = []
         self._numbers: dict[str, int] = {}
         self._fingerprints: dict[int, str | None] = {}
+        # Values this action sends (bound by reference): withheld wherever the target echoes them.
+        self.known: list[str] = []
+        self._known_scrubber: KnownValueScrubber | None = None
+
+    def bind_known(self, values: Any) -> None:
+        """Values this action sends: every echo of one, in any encoding, is withheld too."""
+        for value in values or ():
+            text = str(value)
+            if len(text) >= _MIN_KNOWN_VALUE_CHARS and text not in self.known:
+                self.known.append(text)
+                self.marker(text)
+        self._known_scrubber = None
+
+    def known_scrubber(self) -> KnownValueScrubber | None:
+        if not self.known:
+            return None
+        if self._known_scrubber is None:
+            self._known_scrubber = KnownValueScrubber(self.known)
+        return self._known_scrubber
 
     def __repr__(self) -> str:
         return f"WithheldValues(action_id={self.action_id!r}, count={len(self.values)}, values_visible=False)"
@@ -158,6 +187,8 @@ class WithheldValues:
         return result
 
     def _fingerprint(self, number: int, value: str) -> str | None:
+        if len(value) < _MIN_FINGERPRINTED_CHARS:
+            return None
         if number not in self._fingerprints:
             if len(self._fingerprints) >= _MAX_FINGERPRINTED_REFERENCES:
                 return None
@@ -167,6 +198,128 @@ class WithheldValues:
                 from api.capabilities.secret_material import value_fingerprint
             self._fingerprints[number] = value_fingerprint(value)
         return self._fingerprints[number]
+
+
+_BASE64_RUN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/_-=")
+_MIN_BASE64_CORE_CHARS = 6
+
+
+def _encodings(value: str) -> set[str]:
+    """The forms a target echoes a value in: verbatim, HTML-, JSON- and URL-encoded, base64."""
+    raw = value.encode("utf-8")
+    forms = {
+        value,
+        html.escape(value, quote=True), html.escape(value, quote=False),
+        html.escape(value, quote=True).replace("&#x27;", "&#39;"),
+        json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1],
+        json.dumps(value)[1:-1].replace("/", "\\/"),
+        json.dumps(value, ensure_ascii=False)[1:-1].replace("/", "\\/"),
+        urllib.parse.quote(value, safe=""), urllib.parse.quote(value),
+        urllib.parse.quote_plus(value), urllib.parse.quote_plus(value, safe="/"),
+    }
+    for encoded in (base64.b64encode(raw), base64.urlsafe_b64encode(raw)):
+        text = encoded.decode("ascii")
+        forms.update({text, text.rstrip("=")})
+    return {form for form in forms if len(form) >= _MIN_KNOWN_VALUE_CHARS}
+
+
+def _base64_cores(value: str) -> set[str]:
+    """Alignment-independent base64 fragments of ``value`` embedded in a longer encoding (a
+    Basic credential, a JWT claim): the characters that depend only on the value's own bytes."""
+    raw = value.encode("utf-8")
+    cores: set[str] = set()
+    for shift in range(3):
+        total = shift + len(raw)
+        for encoder in (base64.b64encode, base64.urlsafe_b64encode):
+            encoded = encoder(b"\0" * shift + raw).decode("ascii")
+            # Leading characters mix in the shift bytes; trailing ones mix in what follows.
+            core = encoded[-(-shift * 4 // 3):(total // 3) * 4]
+            if len(core) >= _MIN_BASE64_CORE_CHARS:
+                cores.add(core)
+    return cores
+
+
+class KnownValueScrubber:
+    """Withhold every echo of values an action sent: any case, HTML/JSON/URL-encoded, base64
+    (whole or inside a longer encoding), and a fragment cut by the text's start or end."""
+
+    def __init__(self, values: list[str]) -> None:
+        self.values = [value for value in values if len(value) >= _MIN_KNOWN_VALUE_CHARS]
+        owners: dict[str, str] = {}
+        for value in sorted(self.values, key=len):
+            for form in _encodings(value):
+                owners.setdefault(form.lower(), value)
+        self._owners = owners
+        forms = sorted(owners, key=len, reverse=True)
+        self._forms = re.compile("|".join(re.escape(form) for form in forms), re.IGNORECASE) if forms else None
+        cores: dict[str, str] = {}
+        for value in self.values:
+            # A JWT claim or a JSON document carries the value JSON-escaped before encoding.
+            for form in {value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]}:
+                for core in _base64_cores(form):
+                    cores.setdefault(core, value)
+        self._core_owners = cores
+        self._cores = re.compile("|".join(re.escape(core) for core in sorted(cores, key=len, reverse=True))) if cores else None
+
+    def __repr__(self) -> str:
+        return f"KnownValueScrubber(count={len(self.values)}, values_visible=False)"
+
+    def scrub(self, text: str, replace: Any) -> str:
+        """``replace(value)`` gives the replacement text for an echo of ``value``."""
+        if not text or not self.values:
+            return text
+        if self._forms is not None:
+            text = self._forms.sub(lambda match: replace(self._owners[match.group(0).lower()]), text)
+        if self._cores is not None:
+            text = self._scrub_cores(text, replace)
+        return self._scrub_edges(text, replace)
+
+    def _scrub_cores(self, text: str, replace: Any) -> str:
+        pieces: list[str] = []
+        cursor = 0
+        for match in self._cores.finditer(text):
+            if match.start() < cursor:
+                continue
+            start, end = match.start(), match.end()
+            while start > cursor and text[start - 1] in _BASE64_RUN_CHARS:
+                start -= 1
+            while end < len(text) and text[end] in _BASE64_RUN_CHARS:
+                end += 1
+            pieces.append(text[cursor:start])
+            pieces.append(replace(self._core_owners[match.group(0)]))
+            cursor = end
+        if not pieces:
+            return text
+        pieces.append(text[cursor:])
+        return "".join(pieces)
+
+    def _scrub_edges(self, text: str, replace: Any) -> str:
+        """A window or a truncated body can cut a value: its head ends the text, its tail starts it."""
+        lowered = text.lower()
+        for value in sorted(self.values, key=len, reverse=True):
+            if len(value) > _MAX_EDGE_VALUE_CHARS:
+                continue
+            folded = value.lower()
+            for size in range(len(folded) - 1, _MIN_EDGE_FRAGMENT_CHARS - 1, -1):
+                if lowered.endswith(folded[:size]):
+                    text, lowered = text[:-size] + replace(value), lowered[:-size] + "\0"
+                    break
+            for size in range(len(folded) - 1, _MIN_EDGE_FRAGMENT_CHARS - 1, -1):
+                if lowered.startswith(folded[-size:]):
+                    text, lowered = replace(value) + text[size:], "\0" + lowered[size:]
+                    break
+        return text
+
+
+def scrub_known_values(text: str, values: list[str], replacement: str) -> str:
+    """Replace every echo of ``values`` in ``text`` (see ``KnownValueScrubber``)."""
+    return KnownValueScrubber(values).scrub(text, lambda _value: replacement)
+
+
+def _mask_known_values(text: str) -> str:
+    collector = _COLLECTOR.get()
+    scrubber = collector.known_scrubber() if collector is not None else None
+    return text if scrubber is None else scrubber.scrub(text, collector.marker)
 
 
 _COLLECTOR: ContextVar[WithheldValues | None] = ContextVar("withheld_values", default=None)
@@ -184,6 +337,15 @@ def collecting_withheld_values(collector: WithheldValues) -> Iterator[WithheldVa
 
 def active_withheld_values() -> WithheldValues | None:
     return _COLLECTOR.get()
+
+
+def holds_withheld_material(text: str) -> bool:
+    """Whether masking would withhold anything from ``text`` (no collector side effects)."""
+    token = _COLLECTOR.set(None)
+    try:
+        return mask_body_text(text) != text
+    finally:
+        _COLLECTOR.reset(token)
 
 
 def _withhold(raw: str) -> str:
@@ -234,7 +396,26 @@ def is_withheld_key(key: Any) -> bool:
         or normalized.rsplit("_", 1)[-1] in _DESCRIPTIVE_LAST_SEGMENTS
     ):
         return False
+    if _COLLECTOR.get() is not None and is_csrf_name(text):
+        return False  # a Hunt planner needs the page's CSRF token to drive a form
     return is_redactable_key_name(text) or is_sensitive_key(text)
+
+
+_CSRF_NAMES = frozenset({
+    "_token", "authenticity_token", "__requestverificationtoken", "csrfmiddlewaretoken",
+    "request_verification_token",
+})
+
+
+def is_csrf_name(name: Any) -> bool:
+    """A CSRF/XSRF token field: bound to the session and the page, and needed to submit it.
+    Withheld from shared archive views, shown to the Hunt planner."""
+    raw = str(name or "").strip().lower()
+    if raw in _CSRF_NAMES:
+        return True
+    return any(
+        segment.startswith(("csrf", "xsrf")) for segment in normalized_key_name(raw).split("_")
+    ) or normalized_key_name(raw) in _CSRF_NAMES
 
 
 # Database and structure terms that end in ``key`` but name no secret: a ``Primary key`` label in
@@ -307,9 +488,11 @@ def mask_credential_shaped(text: str) -> str:
     )
 
 
-def mask_string_content(text: str, *, credential_context: bool) -> str:
-    """Withhold the secrets a string *documents*: labelled values (``Master key: ...``) and,
-    in a credential context, every credential-shaped token."""
+def mask_string_content(text: str, *, credential_context: bool, depth: int = 0) -> str:
+    """Withhold the secrets a string *documents*: labelled values (``Master key: ...``), the
+    formats it nests (a config file, markup, a SQL dump, JSON) and, in a credential context,
+    every credential-shaped token."""
+    text = _mask_nested_text(text, depth)
     text = mask_text_assignments(text)
     if credential_context:
         text = mask_credential_shaped(text)
@@ -330,7 +513,7 @@ def _string_value(token: str) -> str:
     return decoded if isinstance(decoded, str) else str(decoded)
 
 
-def mask_json_text(text: str) -> str:
+def mask_json_text(text: str, *, _depth: int = 0) -> str:
     """Mask a JSON document's secret values in place, tolerating a truncated document.
 
     A tolerant tokenizer keeps the original formatting (and works on a body the archive cut
@@ -352,7 +535,7 @@ def mask_json_text(text: str) -> str:
             context = top is not None and (
                 frames[top][3] or _opens_credential_context(key_in_parent)
             )
-            frames.append([top, key_in_parent, False, context])
+            frames.append([top, key_in_parent, False, context, token == "["])
             index = len(frames) - 1
             stack.append(index)
             keys[index] = None
@@ -413,7 +596,19 @@ def mask_json_text(text: str) -> str:
 
     pieces: list[str] = []
     cursor = 0
+    # ``["smtp_password", "..."]``: a row of a settings table, a secret name then its value.
+    named_next: set[int] = set()
     for start, end, frame, key in values:
+        parent = frames[frame][0]
+        if frames[frame][4] and parent is not None and frames[parent][4] and text[start] == '"':
+            if frame in named_next:
+                named_next.discard(frame)
+                pieces.append(text[cursor:start])
+                pieces.append(_withhold_json(_string_value(text[start:end])))
+                cursor = end
+                continue
+            if _names_secret(_string_value(text[start:end])):
+                named_next.add(frame)
         if withheld_in(frame, key) or frame_withheld(frame):
             if text[start] == '"' and is_location_value(key, _string_value(text[start:end])):
                 continue
@@ -422,7 +617,7 @@ def mask_json_text(text: str) -> str:
             # Prose and examples inside a string: a key walk never reads them.
             decoded = _string_value(text[start:end])
             lowered = (key or "").lower()
-            masked = mask_string_content(decoded, credential_context=(
+            masked = mask_string_content(decoded, depth=_depth, credential_context=(
                 lowered not in _CONTEXT_NAME_KEYS
                 and (frames[frame][3] or frames[frame][2] or _opens_credential_context(key))
             ))
@@ -460,8 +655,51 @@ def _yaml_line(line: str) -> tuple[int, bool, str | None, str | None, int]:
     return indent, bool(dash), match.group(2).strip(), (value or "").strip() or None, value_offset
 
 
-def _masked_line(line: str, offset: int) -> str:
-    return line[:offset] + _withhold(line[offset:].strip().strip("\"'"))
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0"}
+_BACKSLASH_ESCAPE_RE = re.compile(r"\\(.)", re.DOTALL)
+
+
+def unescape_backslashes(text: str) -> str:
+    return _BACKSLASH_ESCAPE_RE.sub(lambda match: _ESCAPES.get(match.group(1), match.group(1)), text)
+
+
+def _scalar(text: str) -> tuple[int, int, str, str]:
+    """``(start, end, raw value, quote)`` of a YAML/INI/dotenv scalar: a quoted string honouring
+    its escapes (``''`` in single quotes), or an unquoted value without its trailing comment."""
+    leading = len(text) - len(text.lstrip())
+    body = text[leading:]
+    if body[:1] in {'"', "'"}:
+        quote = body[0]
+        index = 1
+        pieces: list[str] = []
+        while index < len(body):
+            char = body[index]
+            if quote == '"' and char == "\\" and index + 1 < len(body):
+                pieces.append(_ESCAPES.get(body[index + 1], body[index + 1]))
+                index += 2
+                continue
+            if char == quote:
+                if quote == "'" and body[index + 1:index + 2] == "'":
+                    pieces.append("'")
+                    index += 2
+                    continue
+                return leading + 1, leading + index, "".join(pieces), quote
+            pieces.append(char)
+            index += 1
+        return leading + 1, len(text), "".join(pieces), quote
+    comment = re.search(r"[ \t]+[#;]", body)
+    value = (body[:comment.start()] if comment else body).rstrip()
+    return leading, leading + len(value), value, ""
+
+
+def _masked_line(line: str, offset: int, key: str | None = None) -> str:
+    start, end, raw, _quote = _scalar(line[offset:])
+    if key is not None and normalized_key_name(key) in _COOKIE_LABELS and ";" in raw:
+        raw = raw.split(";", 1)[0].rstrip()  # Set-Cookie: the cookie, not its attributes
+        end = start + len(raw)
+    if not raw:
+        return line
+    return line[:offset + start] + _withhold(raw) + line[offset + end:]
 
 
 def mask_yaml_text(text: str) -> str:
@@ -541,7 +779,7 @@ def mask_yaml_text(text: str) -> str:
     if not any(masked) and not shaped:
         return text
     return "\n".join(
-        _masked_line(line, parsed[index][4])
+        _masked_line(line, parsed[index][4], parsed[index][2])
         if masked[index] and not is_location_value(parsed[index][2], parsed[index][3])
         else shaped.get(index, line)
         for index, line in enumerate(lines)
@@ -564,11 +802,13 @@ def mask_html_fields(text: str) -> str:
     def tag(match: re.Match[str]) -> str:
         body = match.group(1)
         attributes = list(_HTML_ATTRIBUTE_RE.finditer(body))
-        if not any(
-            item.group(1).lower() in _HTML_NAME_ATTRIBUTES
-            and is_withheld_key(item.group(2).strip("\"'"))
-            for item in attributes
-        ):
+        names = [
+            item.group(2).strip("\"'") for item in attributes
+            if item.group(1).lower() in _HTML_NAME_ATTRIBUTES
+        ]
+        if not any(is_withheld_key(name) for name in names):
+            return match.group(0)
+        if _COLLECTOR.get() is not None and any(is_csrf_name(name) for name in names):
             return match.group(0)
         pieces: list[str] = []
         cursor = 0
@@ -577,7 +817,7 @@ def mask_html_fields(text: str) -> str:
                 continue
             quote = item.group(2)[0] if item.group(2)[0] in "\"'" else '"'
             pieces.append(body[cursor:item.start(2)])
-            pieces.append(f"{quote}{_withhold(item.group(2).strip(chr(34) + chr(39)))}{quote}")
+            pieces.append(f"{quote}{_withhold(html.unescape(item.group(2).strip(chr(34) + chr(39))))}{quote}")
             cursor = item.end(2)
         pieces.append(body[cursor:])
         start = match.start(1) - match.start(0)
@@ -643,8 +883,43 @@ _TEXT_ASSIGNMENT_RE = re.compile(
     r"([\"']?[ \t]*[:=][ \t]*[\"']?)"
     # The value is only looked at, not consumed, so a value that itself starts a label
     # (``description: 'Signing key: ...'``) is scanned again as one.
-    r"(?=([^\s,;\"'<>&{\[][^\s,;\"'<>&]{0,199}))"
+    r"(?=([^\s,;\"'<>&{`][^\r\n\"'<>&`]{0,511}))"
 )
+_LINE_HEAD_RE = re.compile(r"[ \t]*(?:(?:export|set)[ \t]+)?")
+
+
+def _at_line_start(text: str, position: int) -> bool:
+    """Whether only blanks (or ``export``) precede ``position`` on its line; a bounded look-back."""
+    window_start = max(0, position - 32)
+    prefix = text[window_start:position]
+    newline = prefix.rfind("\n")
+    if newline < 0 and window_start > 0:
+        return False
+    return bool(_LINE_HEAD_RE.fullmatch(prefix[newline + 1:]))
+_COOKIE_LABELS = frozenset({"cookie", "set_cookie"})
+# ``Bearer <token>``: an authorization scheme and its credential are one value.
+_AUTH_SCHEME_RE = re.compile(r"(?i)(?:bearer|basic|digest|token|negotiate|apikey)[ \t]+[^\s,;]+")
+# The tail an unquoted value ends with that is not part of it: an inline comment, a list or
+# statement separator, trailing blanks.
+
+
+def _trimmed_value(value: str) -> str:
+    """An unquoted value runs to the end of its line (a password may hold ``;`` or spaces), less
+    a trailing comment or separator."""
+    if WITHHELD_MARKER_RE.match(value):
+        return ""
+    comment = re.search(r"(?:[ \t]+[#;]|[ \t]+//)", value)
+    trimmed = value[:comment.start()] if comment else value
+    # Trailing separators, and a closing bracket only when the value did not open it.
+    while trimmed:
+        last = trimmed[-1]
+        if last in ";, \t\r\n":
+            trimmed = trimmed[:-1]
+        elif last in ")]}" and trimmed.count({")": "(", "]": "[", "}": "{"}[last]) < trimmed.count(last):
+            trimmed = trimmed[:-1]
+        else:
+            break
+    return trimmed
 
 
 def mask_text_assignments(text: str) -> str:
@@ -656,15 +931,124 @@ def mask_text_assignments(text: str) -> str:
         label = re.sub(r"[ \t]+", "_", match.group(1))
         if match.start(3) < cursor or not is_withheld_key(label):
             continue
-        if is_location_value(label, match.group(3)):
+        value = match.group(3)
+        if value.startswith("[") and value[1:2] in {"", '"', "'", "{", "[", "]"}:
+            continue  # an embedded array: the embedded-object pass owns it
+        if normalized_key_name(label) in _COOKIE_LABELS:
+            value = value.split(";", 1)[0]
+        elif not _at_line_start(text, match.start(1)):
+            # Inline (prose, a query, a header list): the value ends at the first blank.
+            scheme = _AUTH_SCHEME_RE.match(value)
+            value = (scheme.group(0) if scheme else re.split(r"[ \t]", value, maxsplit=1)[0])
+        value = _trimmed_value(value)
+        if not value or is_location_value(label, value):
             continue
         pieces.append(text[cursor:match.start(3)])
-        pieces.append(_withhold(match.group(3)))
-        cursor = match.end(3)
+        pieces.append(_withhold(value))
+        cursor = match.start(3) + len(value)
     if not pieces:
         return text
     pieces.append(text[cursor:])
     return "".join(pieces)
+
+
+# --- Percent-encoded assignments (``next=%2Fcb%3Faccess_token%3D...``) -------------------------
+
+_ENCODED_ASSIGNMENT_RE = re.compile(
+    r"(?:(?<=%3[Ff])|(?<=%26)|(?<![A-Za-z0-9_.\-%]))([A-Za-z_][A-Za-z0-9_.\-]{0,80})%3[Dd]((?:[^&\s%\"'<>]|%(?!26)[0-9A-Fa-f]{2}){1,1024})"
+)
+
+
+def mask_encoded_assignments(text: str) -> str:
+    """Withhold a secret-named assignment nested, percent-encoded, inside a URL parameter."""
+    def replace(match: re.Match[str]) -> str:
+        if not is_withheld_key(match.group(1)):
+            return match.group(0)
+        raw = urllib.parse.unquote(match.group(2))
+        if is_location_value(match.group(1), raw):
+            return match.group(0)
+        return f"{match.group(1)}%3D{urllib.parse.quote(_withhold(raw), safe='[]:')}"
+
+    return _ENCODED_ASSIGNMENT_RE.sub(replace, text)
+
+
+# --- Quoted assignments and PHP defines -----------------------------------------------------------
+# ``'password' => '...'`` (PHP arrays), ``password: "..."`` (JS objects, quoted YAML/dotenv),
+# ``define('DB_PASSWORD', '...')`` (wp-config.php). The whole quoted value is withheld, escapes
+# honoured, so a ``;``, a space or an escaped quote inside it never leaves a tail behind (N56).
+
+_QUOTED_VALUE = r"""(["'`])((?:\\.|(?!\{q})[^\\\r\n]){{0,4096}})\{q}"""
+_QUOTED_ASSIGNMENT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.\-<$])([\"']?)((?:[A-Za-z][A-Za-z0-9_\-]{0,40}[ \t]){0,2}[A-Za-z_][A-Za-z0-9_.\-]{0,80})\1"
+    r"[ \t]*(?:=>|:=|[:=])[ \t]*" + _QUOTED_VALUE.format(q=3)
+)
+_PHP_DEFINE_RE = re.compile(
+    r"(?i)\bdefine[ \t]*\([ \t]*([\"'])([A-Za-z_][A-Za-z0-9_]{0,80})\1[ \t]*,[ \t]*"
+    + _QUOTED_VALUE.format(q=3)
+)
+
+
+def _replace_quoted(text: str, pattern: re.Pattern[str], name_group: int, value_group: int) -> str:
+    pieces: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        name = re.sub(r"[ \t]+", "_", match.group(name_group))
+        raw = unescape_backslashes(match.group(value_group))
+        if (
+            match.start() < cursor or not raw or not is_withheld_key(name)
+            or is_location_value(name, raw) or WITHHELD_MARKER_RE.fullmatch(raw)
+        ):
+            continue
+        pieces.append(text[cursor:match.start(value_group)])
+        pieces.append(_withhold(raw))
+        cursor = match.end(value_group)
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def mask_quoted_assignments(text: str) -> str:
+    """Withhold the whole quoted value of a secret-named assignment or array/object entry."""
+    return _replace_quoted(text, _QUOTED_ASSIGNMENT_RE, 2, 4)
+
+
+def mask_php_defines(text: str) -> str:
+    """Withhold ``define('DB_PASSWORD', '...')`` values (wp-config.php and the like)."""
+    return _replace_quoted(text, _PHP_DEFINE_RE, 2, 4)
+
+
+# --- XML element values (Hibernate, Maven, Spring, Tomcat) ---------------------------------------
+# ``<password>...</password>``, ``<property name="hibernate.connection.password">...</property>``.
+
+_MARKUP_ELEMENT_RE = re.compile(
+    r"<([A-Za-z][\w:.\-]{0,63})\b([^<>]{0,1024})(?<!/)>([^<]{1,4096})</\1[ \t]*>"
+)
+
+
+def mask_markup_elements(text: str) -> str:
+    """Withhold the text of an element whose tag or name attribute names a secret."""
+    def element(match: re.Match[str]) -> str:
+        tag = match.group(1).rsplit(":", 1)[-1]
+        names = [
+            item.group(2).strip("\"'") for item in _HTML_ATTRIBUTE_RE.finditer(match.group(2))
+            if item.group(1).lower() in _MARKUP_NAME_ATTRIBUTES
+        ]
+        if not (_names_secret(tag) or any(_names_secret(name) for name in names)):
+            return match.group(0)
+        content = match.group(3)
+        value = html.unescape(content).strip()
+        if not value or WITHHELD_MARKER_RE.fullmatch(value) or value == MASK:
+            return match.group(0)
+        if _URL_VALUE_RE.match(value) and is_non_secret_value_shape(value):
+            return match.group(0)
+        leading = len(content) - len(content.lstrip())
+        trailing = len(content.rstrip())
+        start = match.start(3) - match.start(0)
+        whole = match.group(0)
+        return whole[:start + leading] + _withhold(value) + whole[start + trailing:]
+
+    return _MARKUP_ELEMENT_RE.sub(element, text)
 
 
 # --- Markup key/value pairs (web.config, XML settings) -----------------------------------------
@@ -678,9 +1062,14 @@ _MARKUP_NAME_ATTRIBUTES = frozenset({
 _MARKUP_VALUE_ATTRIBUTES = frozenset({"value", "content", "default", "val", "data"})
 
 
+_SHORT_SECRET_NAMES = frozenset({"pw", "db_pw", "user_pw", "passwd_hash"})
+
+
 def _names_secret(name: str) -> bool:
     """A name that holds a secret, by the narrow configuration contract (not ``Primary key``)."""
-    return bool(name) and is_secret_key_name(name, server_side=True)
+    if not name or (_COLLECTOR.get() is not None and is_csrf_name(name)):
+        return False
+    return is_secret_key_name(name, server_side=True) or normalized_key_name(name) in _SHORT_SECRET_NAMES
 
 
 def mask_markup_pairs(text: str) -> str:
@@ -720,7 +1109,10 @@ def mask_markup_pairs(text: str) -> str:
 # ``<tr><td class="e">DB_PASSWORD</td><td class="v">...</td></tr>``: the label is one cell and the
 # secret the next ones in the same row; or a header row names the column (N56).
 
-_TABLE_CELL_RE = re.compile(r"(?i)<(t[dh])\b[^<>]{0,512}>([^<]{0,4096})")
+# Inline formatting a cell may wrap its value in: ``<td class="v"><i>...</i></td>``.
+_TABLE_CELL_RE = re.compile(
+    r"(?i)<(t[dh])\b[^<>]{0,512}>(?:<(?:i|b|em|strong|code|span|font|tt|kbd|samp)\b[^<>]{0,256}>){0,4}([^<]{0,4096})"
+)
 _ROW_BREAK_RE = re.compile(r"(?i)<(/?)(tr|table)\b")
 
 
@@ -797,7 +1189,13 @@ _SQL_CONSTRAINT_WORDS = frozenset({
 _SQL_VALUES_RE = re.compile(r"(?i)[ \t\r\n]{0,16}VALUES?\b")
 _SQL_COPY_FROM_STDIN_RE = re.compile(r"(?i)[ \t\r\n]{0,16}FROM[ \t]{1,16}stdin")
 _SQL_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0"}
-_KEYLIKE_PREFIX_RE = re.compile(r"^[A-Za-z]{2,8}_(?:(?:live|test|prod)_)?[A-Za-z0-9]{16,256}$")
+# Prefixes that issue API keys and secret tokens (``ak_``, ``sk_live_``, ``whsec_``). Identifier
+# prefixes (``pi_``, ``ch_``, ``cus_``, ``u_``) are deliberately absent: an ID is not a secret.
+_KEYLIKE_PREFIX_RE = re.compile(
+    r"^(?:ak|sk|rk|st|pat|whsec|apikey|api|key|secret|token)_(?:(?:live|test|prod)_)?[A-Za-z0-9]{16,256}$"
+)
+# Columns that hold identifiers, never secrets, whatever their values look like.
+_ID_COLUMN_RE = re.compile(r"^(?:id|ref|uuid|guid|.*_(?:id|ref|uuid|guid))$")
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _HEX_DIGEST_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 # A dump's column lists are remembered for at most this many tables.
@@ -809,16 +1207,19 @@ def _sql_identifier(token: str) -> str:
 
 
 def looks_like_key_literal(value: str) -> bool:
-    """A literal that is a key by its own shape: a key-like prefix or a long mixed-class token."""
+    """A literal that is a key by its own issued shape (an API-key prefix); provider formats
+    (``AKIA``, ``ghp_``, ``sk_live_`` ...) are withheld everywhere by the provider pass."""
     if _UUID_RE.match(value) or _HEX_DIGEST_RE.match(value):
         return False
-    if _KEYLIKE_PREFIX_RE.match(value):
-        return True
-    return bool(_CREDENTIAL_TOKEN_RE.fullmatch(value)) and _is_credential_shaped(value)
+    return bool(_KEYLIKE_PREFIX_RE.match(value))
+
+
+def _is_id_column(column: str | None) -> bool:
+    return column is not None and bool(_ID_COLUMN_RE.match(normalized_key_name(column)))
 
 
 def _sql_secret_literal(value: str, column: str | None) -> bool:
-    if not value or value.upper() in {"NULL", "\\N"}:
+    if not value or value.upper() in {"NULL", "\\N"} or _is_id_column(column):
         return False
     if column is not None and _names_secret(column):
         return not is_location_value(column, value)
@@ -869,12 +1270,13 @@ def _sql_rows(
     """Withhold the secret literals of ``VALUES (...), (...);``; returns (end, cursor)."""
     depth = 0
     index = 0
+    named = False  # the previous literal of this row named a secret (``'mailserver_pass', '...'``)
     for token in _SQL_TOKEN_RE.finditer(text, position):
         value = token.group(0)
         if value == "(":
             depth += 1
             if depth == 1:
-                index = 0
+                index, named = 0, False
         elif value == ")":
             depth -= 1
         elif value == ",":
@@ -885,7 +1287,9 @@ def _sql_rows(
         elif depth == 1 and value[0] in "'\"":
             raw = _sql_unquote(value)
             column = columns[index] if index < len(columns) else None
-            if _sql_secret_literal(raw, column):
+            secret = (named and not _is_id_column(column) and bool(raw)) or _sql_secret_literal(raw, column)
+            named = not secret and _names_secret(raw)
+            if secret:
                 pieces.append(text[cursor:token.start()])
                 pieces.append(f"{value[0]}{_withhold(raw)}{value[0]}")
                 cursor = token.end()
@@ -907,10 +1311,13 @@ def _copy_rows(
         if line.rstrip("\r") == "\\.":
             return line_end, cursor
         field_start = line_start
+        named = False
         for index, field in enumerate(line.split("\t")):
             column = columns[index] if index < len(columns) else None
             raw = field.rstrip("\r")
-            if _sql_secret_literal(raw, column):
+            secret = (named and not _is_id_column(column) and raw not in {"", "\\N"}) or _sql_secret_literal(raw, column)
+            named = not secret and _names_secret(raw)
+            if secret:
                 pieces.append(text[cursor:field_start])
                 pieces.append(_withhold(raw))
                 cursor = field_start + len(raw)
@@ -965,9 +1372,14 @@ _PRIVATE_KEY_BLOCK_RE = re.compile(
 )
 
 
+# crypt(3) password hashes (htpasswd, /etc/shadow): md5-crypt, apr1, sha256/512-crypt, yescrypt.
+_CRYPT_HASH_RE = re.compile(r"\$(?:1|apr1|5|6|y|gy)\$[./A-Za-z0-9$=]{8,200}")
+
+
 def mask_provider_secrets(text: str) -> str:
     """Mask every provider-format secret, screened or not, and every private key block."""
     text = _PRIVATE_KEY_BLOCK_RE.sub(lambda match: _withhold(match.group(0)), text)
+    text = _CRYPT_HASH_RE.sub(lambda match: _withhold(match.group(0)), text)
     for label, pattern in SELF_EVIDENT_SECRET_PATTERNS:
         if label == "private_key" or not pattern.groups:
             continue
@@ -981,23 +1393,50 @@ def mask_provider_secrets(text: str) -> str:
     return text
 
 
+# An INI/TOML section header (``[client]`` in my.cnf, ``[database]`` in php.ini) starts with ``[``
+# but is not JSON: such a body takes the text passes.
+_INI_SECTION_RE = re.compile(r"\A\s*\[[^\[\]\"{}:,\r\n]{1,200}\][ \t]*(?:\r?\n|\Z)")
+# JSON string values nest other formats (a config file inside an LFI response, a dump in a field):
+# the text passes run over each decoded string, at most this deep.
+_MAX_NESTED_DEPTH = 2
+_NESTED_FORMAT_HINT_RE = re.compile(r"[=:<(\n]")
+
+
 def _is_json_text(text: str) -> bool:
-    return text.lstrip()[:1] in {"{", "["}
+    return text.lstrip()[:1] in {"{", "["} and not _INI_SECTION_RE.match(text)
 
 
-def mask_body_text(text: str) -> str:
+def _mask_text_passes(text: str) -> str:
+    text = mask_yaml_text(text)
+    text = mask_html_fields(text)
+    text = mask_markup_pairs(text)
+    text = mask_markup_elements(text)
+    text = mask_table_cells(text)
+    text = mask_sql_values(text)
+    text = mask_php_defines(text)
+    text = mask_quoted_assignments(text)
+    text = mask_embedded_objects(text)
+    text = mask_encoded_assignments(text)
+    return mask_text_assignments(text)
+
+
+def mask_body_text(text: str, *, _depth: int = 0) -> str:
     """Every masking pass that applies to one body's text."""
+    text = _mask_known_values(text)
     if _is_json_text(text):
-        text = mask_json_text(text)
+        text = mask_json_text(text, _depth=_depth)
     else:
-        text = mask_yaml_text(text)
-        text = mask_html_fields(text)
-        text = mask_markup_pairs(text)
-        text = mask_table_cells(text)
-        text = mask_sql_values(text)
-        text = mask_embedded_objects(text)
-        text = mask_text_assignments(text)
+        text = _mask_text_passes(text)
     return mask_provider_secrets(text)
+
+
+def _mask_nested_text(text: str, depth: int) -> str:
+    """The formats a JSON string value can carry: JSON, a config file, markup, a SQL dump."""
+    if depth >= _MAX_NESTED_DEPTH or len(text) < 6 or not _NESTED_FORMAT_HINT_RE.search(text):
+        return text
+    if _is_json_text(text):
+        return mask_json_text(text, _depth=depth + 1)
+    return _mask_text_passes(text)
 
 
 def withhold_body_secrets(value: Any) -> Any:
