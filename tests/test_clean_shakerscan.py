@@ -127,7 +127,8 @@ class CleanShakerScanTests(unittest.TestCase):
             p.chmod(0o755)
         self.env = dict(os.environ)
         for name in list(self.env):
-            if name.startswith(("SHAKERSCAN_", "DOCKER_", "COMPOSE_")) or name == "SUDO_USER":
+            if name.startswith(("SHAKERSCAN_", "DOCKER_", "COMPOSE_")) or name in {
+                    "SUDO_USER", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"}:
                 self.env.pop(name)
         self.env.update(HOME=str(self.home), PATH=str(self.tools) + os.pathsep + os.environ["PATH"],
                         CLEAN_TEST_STATE=str(self.state), CLEAN_TEST_LOG=str(self.log),
@@ -363,6 +364,104 @@ class CleanShakerScanTests(unittest.TestCase):
         (self.runtime / ".env").write_text("$(touch /never-execute-this)\nPOSTGRES_PASSWORD=\n")
         self.assertEqual(self.run_script("--yes").returncode, 0)
         self.assertFalse([c for c in self.commands() if "compose" in c or c[0] in {"systemctl", "wg-quick"}])
+
+    # --- the client's state (workspace records) and data (default agent workspace) ---------------
+
+    def _records(self, base):
+        records = base / "workspaces"
+        (records / "superseded").mkdir(parents=True)
+        (records / "a.json").write_text("{}")
+        (records / "superseded" / "b.json").write_text("{}")
+        (records / "notes.txt").write_text("retain")
+        (records / "link.json").symlink_to(self.home / "Documents")
+        return records
+
+    def _agent(self, base, first_line="# Connected ShakerScan instance"):
+        agent = base / "agent"
+        agent.mkdir(parents=True)
+        (agent / "AGENTS.md").write_text(first_line + "\n\nkit\n")
+        (agent / "my-notes.md").write_text("work")
+        return agent
+
+    def removed(self):
+        return [c[-1] for c in self.commands() if c[0] == "rm"]
+
+    def test_workspace_records_are_removed_and_agent_workspaces_kept_by_default(self):
+        state = self.home / ".local" / "state" / "shakerscan"
+        records = self._records(state)
+        old_records = self._records(self.config)  # client 0.8.1 kept them in the configuration
+        agent = self._agent(self.home / ".local" / "share" / "shakerscan")
+        old_agent = self._agent(self.config)
+        result = self.run_script("--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        removed = self.removed()
+        for base in (records, old_records):
+            self.assertIn(str(base / "a.json"), removed)
+            self.assertIn(str(base / "superseded" / "b.json"), removed)
+            self.assertNotIn(str(base / "link.json"), removed, "a link is never removed through")
+            self.assertNotIn(str(base / "notes.txt"), removed)
+        self.assertNotIn(str(agent), removed)
+        self.assertNotIn(str(old_agent), removed)
+        self.assertIn(f"Kept agent workspace (it may hold your work; --agent-workspace removes it): {agent}", result.stdout)
+        self.assertIn("Agent workspaces: kept", result.stdout)
+
+    def test_agent_workspace_flag_removes_recognized_workspaces_only(self):
+        agent = self._agent(self.home / ".local" / "share" / "shakerscan")
+        old_agent = self._agent(self.config, first_line="# Remote ShakerScan engine")
+        result = self.run_script("--agent-workspace", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        rm_rf = [c[-1] for c in self.commands() if c[0] == "rm" and "-rf" in c]
+        self.assertIn(str(agent), rm_rf)
+        self.assertIn(str(old_agent), rm_rf)
+
+    def test_unrecognized_or_linked_agent_workspace_is_refused(self):
+        share = self.home / ".local" / "share" / "shakerscan"
+        self._agent(share, first_line="# Somebody else's project")
+        result = self.run_script("--agent-workspace", "--yes")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Not a recognized ShakerScan agent workspace", result.stderr)
+        self.assert_no_local_removal()
+        shutil.rmtree(share / "agent")
+        (share / "agent").symlink_to(self.home / "Documents", target_is_directory=True)
+        result = self.run_script("--agent-workspace", "--yes")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Agent workspace is not a plain directory", result.stderr)
+        self.assert_no_local_removal()
+
+    def test_state_directory_follows_the_client_precedence(self):
+        isolated = self.root / "profile" / "client"
+        isolated.mkdir(parents=True)
+        (isolated / "config.json").write_text('{"url":"http://fixture:8080"}\n')
+        beside = self._records(self.root / "profile" / "client.state")
+        result = self.run_script("--yes", env={"SHAKERSCAN_CONFIG_DIR": str(isolated)})
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn(str(beside / "a.json"), self.removed())
+        self.log.unlink()
+        xdg = self._records(self.root / "xdg-state" / "shakerscan")
+        result = self.run_script("--yes", env={"XDG_STATE_HOME": str(self.root / "xdg-state")})
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn(str(xdg / "a.json"), self.removed())
+
+    def test_relative_state_directory_and_linked_state_root_are_refused(self):
+        result = self.run_script("--yes", env={"SHAKERSCAN_STATE_DIR": "relative/state"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SHAKERSCAN_STATE_DIR must be an absolute path", result.stderr)
+        self.assert_no_local_removal()
+        target = self.root / "elsewhere"; self._records(target)
+        (self.home / ".local" / "state").mkdir(parents=True)
+        (self.home / ".local" / "state" / "shakerscan").symlink_to(target, target_is_directory=True)
+        result = self.run_script("--yes")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Client state directory must not be a symlink", result.stderr)
+        self.assert_no_local_removal()
+
+    def test_keep_client_keeps_records_and_agent_workspaces(self):
+        records = self._records(self.home / ".local" / "state" / "shakerscan")
+        self._agent(self.home / ".local" / "share" / "shakerscan")
+        self.assertEqual(self.run_script("--keep-client", "--agent-workspace", "--yes").returncode, 0)
+        self.assertEqual(self.removed(), [str(self.runtime)])
+        self.assertTrue((records / "a.json").exists())
+
 
 
 if __name__ == "__main__":
