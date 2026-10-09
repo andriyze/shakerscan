@@ -32,6 +32,7 @@ from tests.hunt_permission_stub import HUNT, REQUEST, TITLE, TOKEN, TOTP, StubIn
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SRC = ROOT / "client" / "src"
+sys.path.insert(0, str(ROOT / "scripts"))
 
 
 @contextlib.contextmanager
@@ -349,6 +350,44 @@ def test_control_strings_and_8bit_csi_never_decide(tmp_path, pieces, close):
     assert code == 0, (out, err)
     decisions = [body["decision"] for method, path, body in stub.seen if path.endswith("/decision")]
     assert decisions == ["allow"], decisions
+
+
+def test_an_open_control_string_ends_after_a_quiet_pause_and_not_before(tmp_path):
+    """Alt-] (ESC ]) opens an OSC string that only BEL or ST would end. Keys inside the quiet
+    window never decide (each one restarts it) and are reported; after about 1.5 s with no input
+    the string is closed and a lone key counts again."""
+    with StubInstance() as stub:
+        session = _local_watch(stub, tmp_path)
+        session.expect(PROMPT)
+        session.type("\x1b]")
+        time.sleep(0.3)
+        session.type("a")
+        session.expect("(input ignored: a terminal control string is open)")
+        for _ in range(3):  # keep typing inside the window: still nothing decides
+            time.sleep(0.8)
+            session.type("a")
+        time.sleep(0.5)
+        assert stub.request["status"] == "pending", "a key inside the reset window decided"
+        session.expect("(the terminal control string ended after a pause; keys count again)", timeout=5)
+        session.type("a")
+        session.expect(f"granted: {TITLE}", timeout=10)
+        session.proc.send_signal(signal.SIGINT)
+        code, out, err = session.finish()
+    assert code == 0, (out, err)
+    decisions = [body["decision"] for method, path, body in stub.seen if path.endswith("/decision")]
+    assert decisions == ["allow"], decisions
+    assert out.count("(input ignored: a terminal control string is open)") == 1, "said once per string"
+
+
+def test_escape_escape_starts_a_new_sequence():
+    import hunt_approve  # the runtime helper, as the client vendors it
+
+    terminal = hunt_approve.Terminal()
+    assert terminal._feed(b"\x1b") is False
+    assert terminal._feed(b"\x1b") is False and terminal._escape == "escape", "ESC ESC: a new sequence"
+    assert terminal._feed(b"[") is False and terminal._escape == "csi"
+    assert terminal._feed(b"A") is False and terminal._escape == "idle"
+    assert terminal._feed(b"a") is True
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP], ids=["SIGTERM", "SIGHUP"])
