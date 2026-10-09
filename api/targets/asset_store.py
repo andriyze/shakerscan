@@ -14,7 +14,7 @@ except ModuleNotFoundError:
 
 # The inventory listing lives in asset_inventory; this module keeps detail and history.
 from .asset_inventory import (  # noqa: F401  (re-exported for existing callers)
-    ROOT_COLUMNS, ROOT_FROM, ROOT_WHERE, list_assets, public_asset,
+    ROOT_COLUMNS, ROOT_FROM, ROOT_WHERE, authorized_sql, list_assets, public_asset,
 )
 
 
@@ -52,9 +52,11 @@ async def asset_detail(conn: Any, target_id: Any) -> dict[str, Any]:
     from .asset_services import asset_service_knowledge
     owner = await resolve_asset_id(conn, target_id)
     row = await conn.fetchrow(f'SELECT {ROOT_COLUMNS} FROM {ROOT_FROM} WHERE t.id=$1', owner)
-    origins = await conn.fetch("""SELECT id,url,name,is_active,last_scanned_at,last_score,last_grade,
-        active_findings_count,(target_asset_access_owner(id)=$1) AS current_membership
-        FROM targets WHERE asset_owner_id=$1 ORDER BY url,id""", owner)
+    origins = await conn.fetch(f"""SELECT member.id,member.url,member.name,member.is_active,
+        member.last_scanned_at,member.last_score,member.last_grade,member.active_findings_count,
+        (target_asset_access_owner(member.id)=$1) AS current_membership,
+        {authorized_sql('member')} AS authorized
+        FROM targets member WHERE member.asset_owner_id=$1 ORDER BY member.url,member.id""", owner)
     services = await conn.fetch("""SELECT id,transport,port,state,service_name,product,version,cpe,
         encrypted,web_origin,policy_disposition,first_seen_at,last_seen_at,scan_id
         FROM device_services WHERE target_id=$1 ORDER BY transport,port LIMIT 1000""", owner)

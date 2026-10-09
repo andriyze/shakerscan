@@ -10,6 +10,7 @@ import { Button, gradeTextColor } from '@/components/ui'
 import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import type { TargetAsset } from '@/lib/targetAssetApi'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { assetAuthorizationStatus } from '@/lib/assetAuthorization.mjs'
 import { configureScanHref, latestGrade, originLabel, relativeTime, scanUrls, severitySummary } from '@/lib/targetInventoryModel.mjs'
 import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
 import { TargetDomainDiscovery } from '../TargetDomainDiscovery'
@@ -117,6 +118,7 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
   const canScan = asset.is_active && (webApps > 0 || domain || devices)
   const scanLabel = webApps ? `Scan ${webApps} web app${webApps === 1 ? '' : 's'}` : domain ? 'Scan website' : 'Discover services'
   const schedule = asset.origins?.find(origin => origin.is_active)?.id || asset.id
+  const authorization = assetAuthorizationStatus(asset)
   return <div role="row" data-testid="target-asset-row" aria-selected={selected}
     className={`group/row relative px-4 py-3 transition-colors ${selected ? 'bg-blue-500/[0.06]' : 'hover:bg-gray-800/30'} ${ROW_GRID}`}>
     <span role="cell" className="absolute left-4 top-4 lg:static">
@@ -131,9 +133,11 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
         </Link>
         {name && <span className="block truncate font-mono text-xs text-gray-500">{locator}</span>}
         <span className="mt-1 flex flex-wrap items-center gap-1.5">
-          {asset.authorized
-            ? <Pill className="bg-emerald-500/10 text-emerald-300" title="Standing authorization recorded: scans and Hunts can test this target"><ShieldCheck className="h-3 w-3" aria-hidden="true" />Authorized</Pill>
-            : asset.is_active && <Pill className="bg-gray-800 text-gray-400" title="No standing authorization: only passive checks run until you authorize it"><ShieldOff className="h-3 w-3" aria-hidden="true" />Not authorized</Pill>}
+          {authorization.state === 'authorized' || authorization.state === 'partial'
+            ? <Pill className="bg-emerald-500/10 text-emerald-300" title={authorization.title}><ShieldCheck className="h-3 w-3" aria-hidden="true" />{authorization.label}</Pill>
+            : authorization.state === 'web_apps'
+              ? <Pill className="bg-teal-500/10 text-teal-300" title={authorization.title}><ShieldCheck className="h-3 w-3" aria-hidden="true" />{authorization.label}</Pill>
+              : asset.is_active && <Pill className="bg-gray-800 text-gray-400" title={authorization.title}><ShieldOff className="h-3 w-3" aria-hidden="true" />{authorization.label}</Pill>}
           <Pill className="bg-gray-800/70 text-gray-400">{asset.environment}</Pill>
           {asset.connected_device && <Pill className="bg-violet-500/10 text-violet-300">{asset.device_class && asset.device_class !== 'generic' ? asset.device_class : 'device'}</Pill>}
           {asset.has_target_skill && <Pill className="bg-blue-500/10 text-blue-300" title="Hunt instructions saved for this target"><BookOpen className="h-3 w-3" aria-hidden="true" />Instructions</Pill>}
@@ -163,7 +167,7 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
           <MenuSeparator />
           {asset.authorized
             ? <MenuItem icon={<ShieldOff />} onSelect={() => actions.revoke(asset)}>Revoke authorization</MenuItem>
-            : <MenuItem icon={<ShieldCheck />} onSelect={() => actions.authorize([asset])}>Authorize testing…</MenuItem>}
+            : <MenuItem icon={<ShieldCheck />} onSelect={() => actions.authorize([asset])}>{authorization.state === 'web_apps' ? 'Authorize the whole asset…' : 'Authorize testing…'}</MenuItem>}
           <MenuItem icon={<CalendarClock />} href={`/schedules?create=true&target_id=${schedule}`}>Schedule scans</MenuItem>
         </>}
         <MenuItem icon={<ExternalLink />} href={`/targets/${asset.id}/asset`}>Open details</MenuItem>

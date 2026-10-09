@@ -46,17 +46,35 @@ SCANNING = f"""EXISTS(SELECT 1 FROM scans sc WHERE sc.status IN ('pending','queu
     AND sc.target_id IN {MEMBERS})"""
 # The same standing-authorization rule the submission gate applies (target_authorization.py):
 # an active, approved, unexpired standing receipt whose scope names the authority target's host,
-# resolved through current same-host membership.
-AUTHORIZED = """EXISTS(SELECT 1 FROM targets authority
+# resolved through current same-host membership. ``alias`` names the targets row it is asked for.
+# Both the target and each scope host go through target_asset_locator, so an IP literal is
+# compared in one canonical spelling (2001:DB8::0001 is 2001:db8::1), as the Python reader does.
+def authorized_sql(alias: str) -> str:
+    return f"""EXISTS(SELECT 1 FROM targets authority
     JOIN scope_receipts s ON s.target_id=authority.id
     JOIN approval_receipts a ON a.scope_receipt_id=s.id
-    WHERE authority.id=target_effective_authorization_target(t.id)
+    WHERE authority.id=target_effective_authorization_target({alias}.id)
       AND a.approved_by IS NOT NULL AND a.status='active'
       AND a.risk_tier IN ('active','intrusive') AND a.action_name='target.authorization'
       AND (a.expires_at IS NULL OR a.expires_at > NOW())
       AND COALESCE(s.verdict,'') <> 'blocked'
-      AND (COALESCE(s.allowed_hosts,'[]'::jsonb) ? target_asset_locator(authority.url)
-           OR lower(s.normalized_scope->>'host')=target_asset_locator(authority.url)))"""
+      AND target_asset_locator(authority.url) IN (
+          SELECT target_asset_locator(target_asset_url(lower(trim(both '[]' FROM scope_host))))
+          FROM (SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(s.allowed_hosts)='array' THEN s.allowed_hosts ELSE '[]'::jsonb END)
+                UNION ALL SELECT s.normalized_scope->>'host') hosts(scope_host)
+          WHERE COALESCE(scope_host,'') <> ''))"""
+
+
+# The asset (host) itself: its authority covers every linked web app that inherits it.
+AUTHORIZED = authorized_sql('t')
+# A linked web app the scan path treats as authorized: through the host, or through its own
+# standing receipt (recorded on the web address by the scan flow or POST /targets/{id}/authorization),
+# which also overrides a host authorization it does not want.
+AUTHORIZED_MEMBERS = f"""(SELECT count(*) FROM targets member
+    WHERE member.asset_owner_id=t.id AND member.is_active AND {authorized_sql('member')})"""
+# Anything on the asset that a scan may actively test. The list filters on this, so an asset
+# whose web address is authorized is never filed under "Not authorized".
+ANY_AUTHORIZED = f"({AUTHORIZED} OR {AUTHORIZED_MEMBERS} > 0)"
 
 DETAIL_COLUMNS = f"""
     (SELECT count(*) FROM targets member WHERE member.asset_owner_id=t.id AND member.is_active) AS origin_count,
@@ -66,16 +84,18 @@ DETAIL_COLUMNS = f"""
         SELECT f.severity,count(*) AS total FROM {ACTIVE_FINDINGS} GROUP BY f.severity) counts) AS severity_counts,
     (SELECT COALESCE(jsonb_agg(jsonb_build_object('id',member.id,'url',member.url,'name',member.name,
         'is_active',member.is_active,'last_scanned_at',member.last_scanned_at,'last_grade',member.last_grade,
-        'last_score',member.last_score,'active_findings_count',member.active_findings_count)
+        'last_score',member.last_score,'active_findings_count',member.active_findings_count,
+        'authorized',{authorized_sql('member')})
         ORDER BY member.url),'[]'::jsonb) FROM (
         SELECT * FROM targets member WHERE member.asset_owner_id=t.id AND (member.is_active OR $1::boolean)
         ORDER BY member.url,member.id LIMIT 24) member) AS origins,
     {LAST_SCANNED} AS last_scanned_at,
     {SCANNING} AS scanning,
-    {AUTHORIZED} AS authorized"""
+    {AUTHORIZED} AS authorized,
+    {AUTHORIZED_MEMBERS} AS authorized_origin_count"""
 
 FILTERS = {
-    'authorization': {'authorized': AUTHORIZED, 'unauthorized': f'NOT {AUTHORIZED}'},
+    'authorization': {'authorized': ANY_AUTHORIZED, 'unauthorized': f'NOT {ANY_AUTHORIZED}'},
     'findings': {
         'any': f'EXISTS(SELECT 1 FROM {ACTIVE_FINDINGS})',
         'critical_high': f"EXISTS(SELECT 1 FROM {ACTIVE_FINDINGS} AND f.severity IN ('critical','high'))",
@@ -221,7 +241,7 @@ async def _list_domain_groups(conn: Any, query: _Query, *, sort: str, limit: int
 async def inventory_facets(conn: Any, query: _Query) -> dict[str, Any]:
     """Counts for each filter value over the search scope, before the other filters apply."""
     row = await conn.fetchrow(f"""WITH scope AS (
-        SELECT {ENVIRONMENT} AS environment,{AUTHORIZED} AS authorized,
+        SELECT {ENVIRONMENT} AS environment,{FILTERS['authorization']['authorized']} AS authorized,
             EXISTS(SELECT 1 FROM {ACTIVE_FINDINGS}) AS has_findings,
             EXISTS(SELECT 1 FROM {ACTIVE_FINDINGS} AND f.severity IN ('critical','high')) AS critical_high,
             {LAST_SCANNED} IS NOT NULL AS scanned,{SCANNING} AS scanning,

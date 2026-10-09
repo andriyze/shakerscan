@@ -189,3 +189,95 @@ def test_alphabetical_groups_follow_the_domain_not_member_names(monkeypatch):
             result = await list_assets(conn, group_by='domain')
             assert [group['root_domain'] for group in result['groups']] == ['alpha.test', 'mid.test', 'zeta.test']
     asyncio.run(run())
+
+
+def test_inventory_authorization_follows_the_authority_the_scan_path_resolves(monkeypatch):
+    """An authorized web address must not be listed as "Not authorized". On the home lab the
+    honey origin had its own standing receipt and active scans ran under it, while the host row
+    the list shows had none, so the Targets page said "Not authorized" and offered to authorize."""
+    encryption(monkeypatch)
+    async def run():
+        async with database() as conn:
+            await prepare(conn)
+            async with conn.transaction():
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
+            from targets.asset_migration import host_url
+            import target_authorization
+            hosts, origins = {}, {}
+            for host in ('origin-only.test', 'host-only.test', 'host-revoked-origin.test', 'neither.test'):
+                hosts[host] = await conn.fetchval(
+                    "INSERT INTO targets(url,discovery_source) VALUES($1,'host') RETURNING id", host_url(host))
+                origins[host] = await conn.fetchval(
+                    "INSERT INTO targets(url) VALUES($1) RETURNING id", f'https://{host}')
+            # Authority recorded on the web address only: what the scan flow does.
+            await target_authorization.authorize_target(conn, origins['origin-only.test'], approved_by='operator')
+            # Host authority, inherited by its web app.
+            await target_authorization.authorize_target(conn, hosts['host-only.test'], approved_by='operator')
+            # Host authority with the web app explicitly withdrawn from it.
+            await target_authorization.authorize_target(conn, hosts['host-revoked-origin.test'], approved_by='operator')
+            await target_authorization.revoke_target_authorization(
+                conn, origins['host-revoked-origin.test'], revoked_by='operator', reason='excluded')
+
+            async def scan_authorized(target_id):
+                return await target_authorization.current_target_authorization(conn, target_id) is not None
+
+            result = await list_assets(conn, include_facets=True)
+            rows = {row['locator']: row for row in result['targets']}
+            for host in hosts:
+                row = rows[host]
+                origin = next(item for item in row['origins'] if item['id'] == str(origins[host]))
+                # Each listed flag is what the scan path resolves for the same target.
+                assert row['authorized'] is await scan_authorized(hosts[host]), host
+                assert origin['authorized'] is await scan_authorized(origins[host]), host
+                assert row['authorized_origin_count'] == int(origin['authorized']), host
+
+            assert rows['origin-only.test']['authorized'] is False
+            assert rows['origin-only.test']['authorized_origin_count'] == 1
+            assert rows['host-only.test']['authorized'] is True
+            assert rows['host-only.test']['authorized_origin_count'] == 1
+            assert rows['host-revoked-origin.test']['authorized'] is True
+            assert rows['host-revoked-origin.test']['authorized_origin_count'] == 0
+            assert rows['neither.test']['authorized'] is False
+            assert rows['neither.test']['authorized_origin_count'] == 0
+
+            def locators(page):
+                return sorted(row['locator'] for row in page['targets'])
+            assert locators(await list_assets(conn, authorization='authorized')) == [
+                'host-only.test', 'host-revoked-origin.test', 'origin-only.test']
+            assert locators(await list_assets(conn, authorization='unauthorized')) == ['neither.test']
+            assert result['facets']['authorization'] == {'authorized': 3, 'unauthorized': 1}
+
+            detail = await asset_detail(conn, hosts['origin-only.test'])
+            assert detail['authorization'] is None
+            assert [item['authorized'] for item in detail['origins']] == [True]
+    asyncio.run(run())
+
+
+def test_an_ipv6_web_address_is_authorized_in_the_list_as_the_scan_path_reads_it(monkeypatch):
+    """The scope stores the address as written (2001:db8::0001); the locator canonicalises it
+    (2001:db8::1). Python authorized the scan while the list said "Not authorized"."""
+    encryption(monkeypatch)
+    async def run():
+        async with database() as conn:
+            await prepare(conn)
+            async with conn.transaction():
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
+            import target_authorization
+            origin = await conn.fetchval("INSERT INTO targets(url) VALUES('https://[2001:DB8::0001]:8443/') RETURNING id")
+            other = await conn.fetchval("INSERT INTO targets(url) VALUES('https://[2001:db8::2]:8443/') RETURNING id")
+            await target_authorization.authorize_target(conn, origin, approved_by='operator')
+            scope_hosts = await conn.fetchval(
+                'SELECT s.allowed_hosts FROM scope_receipts s WHERE s.target_id=$1 ORDER BY s.created_at DESC LIMIT 1', origin)
+            assert '0001' in str(scope_hosts), scope_hosts  # the drift this test exists for
+
+            assert await target_authorization.current_target_authorization(conn, origin) is not None
+            assert await target_authorization.current_target_authorization(conn, other) is None
+            rows = {row['locator']: row for row in (await list_assets(conn))['targets']}
+            asset = rows['2001:db8::1']
+            assert [item['authorized'] for item in asset['origins']] == [True]
+            assert asset['authorized_origin_count'] == 1
+            assert rows['2001:db8::2']['authorized_origin_count'] == 0
+            assert '2001:db8::1' in [row['locator'] for row in (await list_assets(conn, authorization='authorized'))['targets']]
+    asyncio.run(run())
