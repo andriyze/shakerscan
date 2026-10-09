@@ -50,16 +50,16 @@ except ModuleNotFoundError:  # package import layout
 try:
     from runtime.http_archive_reader import (
         MAX_EXPORT_ROWS,
+        build_export_document,
         count_transactions,
-        export_document,
         read_archive_stats,
         read_transactions,
     )
 except ModuleNotFoundError:  # package import layout
     from ..runtime.http_archive_reader import (
         MAX_EXPORT_ROWS,
+        build_export_document,
         count_transactions,
-        export_document,
         read_archive_stats,
         read_transactions,
     )
@@ -1361,7 +1361,7 @@ class HuntRunService:
                 coverage_ledger, redact_strings=True, scrub_text=True,
             ),
             "notes": redact_sensitive(notes, redact_strings=True, scrub_text=True),
-            "http_archive": export_document(
+            "http_archive": await build_export_document(
                 transactions, export_format="transactions", redaction="redacted",
                 owner={"hunt_id": hunt_id}, total=total, archive_total=total, stats=stats,
             ),
