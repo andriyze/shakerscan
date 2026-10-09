@@ -278,6 +278,12 @@ async def async_main():
 
 def main():
     """Entry point."""
+    try:
+        import deployment_policy
+    except ModuleNotFoundError:  # source checkout: the API module sits beside this one in /app
+        from api import deployment_policy
+    # A malformed destination setting stops this worker as it stops the API and scan workers.
+    deployment_policy.require_valid_destination_settings()
     # Check gungnir binary
     if not os.path.isfile(GUNGNIR_BIN):
         print(f"[gungnir] ERROR: Gungnir binary not found at {GUNGNIR_BIN}", flush=True)

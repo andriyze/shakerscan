@@ -63,3 +63,23 @@ def test_the_worker_refuses_to_start_before_its_preflight(monkeypatch):
     monkeypatch.setenv(ENV, "2001:db8:64::/96")
     worker.main()
     assert started == ["preflight", "report", "main", "loop"]
+
+
+def test_the_broker_worker_refuses_to_start_before_any_lease(monkeypatch):
+    import broker_worker
+
+    monkeypatch.setenv(ENV, "garbage")
+    monkeypatch.setattr(sys, "argv", ["broker_worker.py", "--once"])
+    monkeypatch.setattr(broker_worker, "assert_outbound_only_runtime_environment", lambda: None)
+    monkeypatch.setattr(broker_worker, "load_state", lambda _path: pytest.fail("state read before the check"))
+    with pytest.raises(RuntimeError, match=ENV):
+        broker_worker.main()
+
+
+def test_the_gungnir_worker_refuses_to_start(monkeypatch):
+    import gungnir_worker
+
+    monkeypatch.setenv(ENV, "garbage")
+    monkeypatch.setattr(gungnir_worker.asyncio, "run", lambda _coroutine: pytest.fail("started"))
+    with pytest.raises(RuntimeError, match=ENV):
+        gungnir_worker.main()
