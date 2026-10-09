@@ -195,17 +195,66 @@ def test_external_and_budget_omissions_are_reported_separately_and_in_the_har(mo
     assert "text" not in har["log"]["entries"][1]["response"]["content"]
 
 
-def test_a_body_the_worker_cannot_mask_is_withheld(monkeypatch):
-    def out_of_memory(_value):
-        raise MemoryError
+@pytest.mark.parametrize("failure", [MemoryError, RecursionError, ValueError, UnicodeError])
+def test_a_body_the_worker_cannot_mask_is_withheld_and_never_quoted(monkeypatch, caplog, failure):
+    def fails(value):
+        raise failure(f"cannot mask {value}")  # an exception message can quote the body
 
-    monkeypatch.setattr(worker, "masked_body_text", out_of_memory)
+    monkeypatch.setattr(worker, "masked_body_text", fails)
     assert worker.encode_body(f"password={CANARY}", True) == (None, worker.MASKING_FAILED)
-    document = reader.export_document([_row(0, f"password={CANARY}")], **_ARGUMENTS, total=1)
-    item = document["transactions"][0]
-    assert item["response"]["body"] is None
-    assert item["payload_omitted_reasons"] == {"response_body": "masking_failed"}
+    rows = [_row(0, f"password={CANARY}"), _row(1, "next body")]
+    document = reader.export_document(rows, **_ARGUMENTS, total=2)
+    first, second = document["transactions"]
+    assert first["response"]["body"] is None and first["response"]["sha256"] is None
+    assert first["payload_omitted_reasons"] == {"response_body": "masking_failed"}
+    assert second["payload_omitted_reasons"] == {"response_body": "masking_failed"}  # same stub
     assert "could not be masked" in document["fidelity_detail"]
+    assert CANARY not in json.dumps(document) and CANARY not in caplog.text
+
+
+def test_one_hostile_body_does_not_fail_the_export():
+    deep = "[" * 200_000 + "]" * 200_000  # json.loads raises RecursionError on this
+    rows = [_row(0, deep), _row(1, f"password={CANARY}"), _row(2, b"\xff\xfe password=" + CANARY.encode())]
+    for export_format in ("transactions", "har"):
+        encoded = _pooled(rows, export_format=export_format)
+        content = encoded.render()
+        assert CANARY.encode() not in content
+        assert json.loads(content.decode("utf-8"))
+    document = reader.export_document(rows, **_ARGUMENTS, total=3)
+    assert document["transactions"][0]["response"]["body"].startswith("[[[")
+    assert document["transactions"][1]["response"]["body"] == "password=***"
+
+
+def _assert_well_formed(value) -> None:
+    """Every string in a parsed export encodes as UTF-8 (no lone surrogate survived)."""
+    if isinstance(value, str):
+        value.encode("utf-8")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _assert_well_formed(key)
+            _assert_well_formed(item)
+    elif isinstance(value, list):
+        for item in value:
+            _assert_well_formed(item)
+
+
+def test_the_export_is_strict_utf8_json_with_lone_surrogates_anywhere():
+    lone = "\ud800"
+    rows = [
+        _row(0, '{"a":"\\ud800","password":"' + CANARY + '"}'),  # decodes to a lone surrogate
+        _row(1, f"x{lone}y password={CANARY}"),
+        {**_row(2, "body"), "url": f"https://example.test/{lone}", "response_headers": {"x-weird": f"a{lone}b"}},
+    ]
+    for redaction in ("redacted", "raw"):
+        for export_format in ("transactions", "har"):
+            arguments = {**_ARGUMENTS, "redaction": redaction, "export_format": export_format, "total": 3}
+            content = asyncio.run(reader.build_export(rows, **arguments)).render()
+            text = content.decode("utf-8")  # strict: raises on surrogates
+            _assert_well_formed(json.loads(text))
+            if redaction == "redacted":
+                assert CANARY not in text
+    document = reader.export_document(rows, **_ARGUMENTS, total=3)
+    assert "\ufffd" in document["transactions"][1]["response"]["body"]
 
 
 # --- Off the event loop ------------------------------------------------------------------------
@@ -357,3 +406,183 @@ def test_the_route_reads_external_payloads_within_the_masking_budget(monkeypatch
     assert response.media_type == "application/json"
     assert CANARY not in response.body.decode()
     assert json.loads(response.body)["transactions"][0]["response"]["body"] == "password=***"
+
+
+def test_one_caller_holds_at_most_one_slot():
+    async def scenario():
+        release = asyncio.Event()
+        holding = asyncio.Event()
+
+        async def hold(caller):
+            async with reader.export_admission(caller):
+                holding.set()
+                await release.wait()
+
+        first = asyncio.create_task(hold("198.51.100.7"))
+        await holding.wait()
+        # The same caller waits for its own slot, then is refused, though a slot is free...
+        with pytest.raises(reader.ExportBusy):
+            async with reader.export_admission("198.51.100.7", wait_seconds=0.05):
+                pass
+        # ...which another caller still gets at once.
+        async with reader.export_admission("203.0.113.9", wait_seconds=0.05):
+            pass
+        release.set()
+        await first
+        async with reader.export_admission("198.51.100.7", wait_seconds=0.05):
+            return "admitted again"
+
+    assert asyncio.run(scenario()) == "admitted again"
+
+
+def test_the_caller_is_the_peer_or_the_trusted_gateways_forwarded_address(monkeypatch):
+    class Request:
+        def __init__(self, headers):
+            self.client = type("Client", (), {"host": "10.0.0.5"})()
+            self.headers = headers
+
+    monkeypatch.setenv("FLEET_GATEWAY_PROXY_SECRET", "gateway-fixture-secret")
+    forwarded = {"x-forwarded-for": "192.0.2.1, 198.51.100.7"}
+    assert archive_router.export_caller(Request(forwarded)) == "10.0.0.5"  # not from the gateway
+    trusted = {**forwarded, "x-shakerscan-gateway-secret": "gateway-fixture-secret"}
+    assert archive_router.export_caller(Request(trusted)) == "198.51.100.7"  # right-most only
+    junk = {"x-forwarded-for": "not-an-ip", "x-shakerscan-gateway-secret": "gateway-fixture-secret"}
+    assert archive_router.export_caller(Request(junk)) == "10.0.0.5"
+
+
+# --- Bodies read a batch at a time -------------------------------------------------------------
+
+
+def _lazy_row(index: int, size: int, **extra) -> dict:
+    row = _row(index, "")
+    row.update(response_body=None, request_body=None, **{reader.LAZY_BODIES: {"response_body": size}}, **extra)
+    return row
+
+
+def test_bodies_are_read_in_bounded_batches_and_never_past_the_budget(monkeypatch):
+    _budget(monkeypatch, 3 * MIB)
+    monkeypatch.setattr(reader, "EXPORT_BATCH_BYTES", 2 * MIB)
+    body = "lorem ipsum " * (MIB // 12)  # ~1 MiB
+    rows = [_lazy_row(index, len(body)) for index in range(8)]
+    reads: list[list[str]] = []
+
+    async def read_bodies(ids, budget):
+        reads.append([str(item) for item in ids])
+        return {str(item): {"response_body": body, "request_body": None, "unavailable": set(), "omitted": set()}
+                for item in ids}, 0
+
+    encoded = asyncio.run(reader.build_export(rows, **_ARGUMENTS, total=8, stats=_COMPLETE, read_bodies=read_bodies))
+    document = encoded.materialize()
+    shown = [item["response"]["body"] is not None for item in document["transactions"]]
+    assert shown == [True, True, True, False, False, False, False, False]  # 3 x ~1 MiB fit in 3 MiB
+    assert all(len(batch) <= 2 for batch in reads)  # 2 MiB of stored body per read
+    read = {row_id for batch in reads for row_id in batch}
+    # A batch is chosen before its own bodies are charged, so the body after the last that fits
+    # may be read; nothing beyond that batch is read at all.
+    assert read <= {"row-0", "row-1", "row-2", "row-3"}
+    assert {item["payload_omitted_reasons"].get("response_body") for item in document["transactions"][3:]} \
+        == {"masking_budget"}
+
+
+def test_a_lazily_read_body_gets_the_legacy_decoding_and_its_read_outcome(monkeypatch):
+    legacy = repr(f"password={CANARY}".encode())  # stored by the old writer as b'...'
+    rows = [
+        _lazy_row(0, len(legacy)),
+        _lazy_row(1, 10),
+        _lazy_row(2, 10),
+        _lazy_row(3, 10),
+    ]
+
+    async def read_bodies(ids, budget):
+        return {
+            "row-0": {"response_body": legacy, "request_body": None, "unavailable": set(), "omitted": set()},
+            "row-1": {"response_body": None, "request_body": None, "unavailable": {"response_body"}, "omitted": set()},
+            "row-2": {"response_body": None, "request_body": None, "unavailable": set(), "omitted": {"response_body"}},
+        }, 0  # row-3 was purged between the reads
+
+    document = asyncio.run(reader.build_export(
+        rows, **_ARGUMENTS, total=4, stats={"attempted": 4, "stored": 4}, read_bodies=read_bodies,
+    )).materialize()
+    first, second, third, fourth = document["transactions"]
+    assert first["response"]["body"] == "password=***"
+    assert second["payload_unavailable"] == ["response_body"] and second["payload_omitted"] == []
+    assert third["payload_omitted_reasons"] == {"response_body": "external_read_budget"}
+    assert fourth["payload_unavailable"] == ["response_body"]
+    assert "payloads that are unavailable" in document["fidelity_detail"]
+    assert CANARY not in json.dumps(document)
+
+
+def test_the_route_reads_rows_without_bodies(monkeypatch):
+    seen = {}
+
+    @asynccontextmanager
+    async def acquire():
+        yield object()
+
+    class _Pool:
+        def acquire(self):
+            return acquire()
+
+    async def _ids(conn, scan_id):
+        return (scan_id,)
+
+    async def _count(conn, **kwargs):
+        return 1
+
+    async def _stats(conn, **kwargs):
+        return {}
+
+    async def _rows(conn, **kwargs):
+        seen.update(kwargs)
+        return [_lazy_row(0, 30)]
+
+    async def _bodies(conn, ids, **kwargs):
+        seen["body_ids"] = [str(item) for item in ids]
+        return {"row-0": {"response_body": f"password={CANARY}", "request_body": None,
+                          "unavailable": set(), "omitted": set()}}, 0
+
+    for name, value in (("_pool", lambda: _Pool()), ("_scan_archive_ids", _ids), ("count_transactions", _count),
+                        ("read_archive_stats", _stats), ("read_transactions", _rows),
+                        ("read_transaction_bodies", _bodies)):
+        monkeypatch.setattr(archive_router, name, value)
+    response = asyncio.run(archive_router._export(
+        request=object(), scan_id="11111111-1111-4111-8111-111111111111", hunt_run_id=None,
+        export_format="transactions", redaction="redacted", method=None, status_code=None,
+        search=None, limit=10, offset=0,
+    ))
+    assert seen["bodies"] is False and seen["body_ids"] == ["row-0"]
+    assert json.loads(response.body)["transactions"][0]["response"]["body"] == "password=***"
+
+
+_NO_MAIN_SCRIPT = r"""
+import asyncio, os
+print("MAIN RAN", flush=True)  # no __main__ guard on purpose: a worker must not run this
+from api.runtime import http_archive_reader as reader
+
+async def main():
+    rows = [{"id": f"r{i}", "sequence": i, "plane": "scan", "method": "GET", "url": "https://e.test/",
+             "status_code": 200, "request_headers": {}, "response_headers": {}, "request_body": None,
+             "response_body": "password=x"} for i in range(4)]
+    print(reader.EncodedExport.render(await reader.build_export(
+        rows, export_format="transactions", redaction="redacted", owner={}, total=4)).count(b"***"), flush=True)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+"""
+
+
+def test_masking_workers_do_not_rerun_the_launching_script(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    script = tmp_path / "launcher.py"
+    script.write_text(_NO_MAIN_SCRIPT)
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join(str(repo / part) for part in ("", "api", "scanner"))}
+    completed = subprocess.run(
+        [sys.executable, str(script)], cwd=tmp_path, env=environment,
+        capture_output=True, text=True, timeout=120, check=True,
+    )
+    assert completed.stdout.splitlines() == ["MAIN RAN", "4"]

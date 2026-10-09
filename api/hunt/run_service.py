@@ -55,6 +55,7 @@ try:
         export_admission,
         export_read_budget,
         read_archive_stats,
+        read_transaction_bodies,
         read_transactions,
     )
 except ModuleNotFoundError:  # package import layout
@@ -65,6 +66,7 @@ except ModuleNotFoundError:  # package import layout
         export_admission,
         export_read_budget,
         read_archive_stats,
+        read_transaction_bodies,
         read_transactions,
     )
 
@@ -1286,19 +1288,19 @@ class HuntRunService:
                 )
         return await self.get(hunt_id)
 
-    async def export_record(self, hunt_id: str) -> dict[str, Any]:
+    async def export_record(self, hunt_id: str, *, caller: str | None = None) -> dict[str, Any]:
         """Return the complete redacted, explicit Hunt record and its HTTP archive."""
-        async with export_admission():
+        async with export_admission(caller):
             record, archive = await self._export_record(hunt_id)
             return archive.materialize(record)
 
-    async def export_record_json(self, hunt_id: str) -> bytes:
+    async def export_record_json(self, hunt_id: str, *, caller: str | None = None) -> bytes:
         """The record as response bytes; its archive bodies are encoded in the masking workers.
 
         Taken under an export slot before any row is read (raises ``ExportBusy``), so a record
         export is bounded like every other archive export.
         """
-        async with export_admission():
+        async with export_admission(caller):
             record, archive = await self._export_record(hunt_id)
             return archive.render(record)
 
@@ -1334,7 +1336,7 @@ class HuntRunService:
             transactions = await read_transactions(
                 connection, scan_id=None, hunt_run_id=hunt_id,
                 limit=MAX_EXPORT_ROWS, offset=0,
-                external_payload_budget=export_read_budget("redacted"),
+                external_payload_budget=export_read_budget("redacted"), bodies=False,
             )
             # The full event history, superseded events included, with an explicit
             # bound; the per-Hunt event cap keeps it below MAX_EXPORT_ROWS.
@@ -1350,9 +1352,14 @@ class HuntRunService:
             scrub_text=True,
         )
         notes = _decode_json(_row_dict(row).get("notes"), [])
+        async def read_bodies(ids, budget: int):
+            async with self._pool().acquire() as connection:
+                return await read_transaction_bodies(connection, ids, external_payload_budget=budget)
+
         archive = await build_export(
             transactions, export_format="transactions", redaction="redacted",
             owner={"hunt_id": hunt_id}, total=total, archive_total=total, stats=stats,
+            read_bodies=read_bodies,
         )
         record = {
             "schema_version": "hunt-record/v1",

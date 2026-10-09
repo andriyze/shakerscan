@@ -1217,3 +1217,62 @@ def test_externally_stored_payloads_read_back_and_a_lost_file_is_reported(tmp_pa
                                    owner={"scan_id": str(scan)}, total=1, stats=stats)
         assert document["fidelity"] == "partial"
     run(scenario)
+
+
+def test_a_masked_export_reads_bodies_lazily_and_shows_what_a_full_read_shows(tmp_path, monkeypatch):
+    """R2 (external release audit, 2026-10-09): an export reads rows without bodies and fetches
+    the bodies a batch at a time within its budget; the result must equal an export of the full
+    read, inline and external bodies alike, and nothing past the budget may be read."""
+    _archive_key(monkeypatch)
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE", "full")
+    monkeypatch.delenv("EVIDENCE_INLINE_MAX_BYTES", raising=False)
+    from runtime import http_archive_reader as reader
+    from runtime.http_archive import archive_recorded_calls
+
+    external = '{"password": "LazyCanary7Q", "orders": [' + ",".join(f'{{"id": {n}}}' for n in range(4000)) + ']}'
+    assert len(external.encode()) > 40 * 1024  # stored in a file, not inline
+    inline = '{"api_key": "LazyCanary7Q", "ok": true}'
+
+    async def scenario(pool):
+        t, sibling, scan, f, other, e = await seeded(pool)
+        calls = [_large_tx(scan, t, 1, inline.encode()), _large_tx(scan, t, 2, external.encode()),
+                 _large_tx(scan, t, 3, b"plain body")]
+        async with pool.acquire() as c:
+            await archive_recorded_calls(c, calls, results_dir=tmp_path, label="lazy bodies",
+                                         owner_kind="scan", owner_id=str(scan))
+            full = await reader.read_transactions(c, scan_id=str(scan), results_dir=tmp_path)
+            light = await reader.read_transactions(c, scan_id=str(scan), results_dir=tmp_path, bodies=False)
+        assert all(row["response_body"] is None for row in light)
+        assert [sorted(row[reader.LAZY_BODIES]) for row in light] == [["response_body"]] * 3
+        read: list[str] = []
+
+        async def read_bodies(ids, budget):
+            read.extend(str(item) for item in ids)
+            async with pool.acquire() as c:
+                return await reader.read_transaction_bodies(
+                    c, ids, external_payload_budget=budget, results_dir=tmp_path,
+                )
+
+        stats = {"attempted": 3, "stored": 3, "failed": 0, "dropped": 0}
+        for redaction in ("redacted", "raw"):
+            arguments = {"export_format": "transactions", "redaction": redaction,
+                         "owner": {"scan_id": str(scan)}, "total": 3, "stats": stats}
+            lazy = (await reader.build_export(light, read_bodies=read_bodies, **arguments)).materialize()
+            assert lazy == reader.export_document(full, **arguments)
+            if redaction == "redacted":
+                assert "LazyCanary7Q" not in json.dumps(lazy)
+                assert lazy["transactions"][2]["response"]["body"] == "plain body"
+
+        # A budget that holds the first body only: the later ones are never read.
+        monkeypatch.setattr(reader, "MIN_MASKED_EXPORT_BYTES", 1)
+        monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_MASKED_EXPORT_BYTES", str(len(inline) + 8))
+        read.clear()
+        small = (await reader.build_export(
+            light, read_bodies=read_bodies, export_format="transactions", redaction="redacted",
+            owner={"scan_id": str(scan)}, total=3, stats=stats,
+        )).materialize()
+        assert [item["payload_omitted_reasons"] for item in small["transactions"]] == [
+            {}, {"response_body": "masking_budget"}, {"response_body": "masking_budget"},
+        ]
+        assert str(light[1]["id"]) not in read  # the large external body is never fetched
+    run(scenario)

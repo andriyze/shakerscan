@@ -15,8 +15,10 @@ from .run_service import HuntRunService
 
 try:
     from runtime.http_archive_reader import EXPORT_RETRY_AFTER_SECONDS, ExportBusy, ExportUnavailable
+    from runtime.http_archive_router import export_caller
 except ModuleNotFoundError:  # package import layout
     from ..runtime.http_archive_reader import EXPORT_RETRY_AFTER_SECONDS, ExportBusy, ExportUnavailable
+    from ..runtime.http_archive_router import export_caller
 from .budget_amendments import HuntBudgetAmendmentRequest
 from .coverage_ledger import COVERAGE_LOCUS_KEYS, CoverageLedgerError
 from .skills import HuntSkillError, skill_library
@@ -511,10 +513,10 @@ async def get_hunt_checkpoint(hunt_id: str):
 
 
 @router.get("/hunts/{hunt_id}/record", tags=["Hunt"])
-async def export_hunt_record(hunt_id: str):
+async def export_hunt_record(hunt_id: str, request: Request):
     """Download the redacted explicit decision trace plus archived HTTP calls."""
     try:
-        content = await _service().export_record_json(hunt_id)
+        content = await _service().export_record_json(hunt_id, caller=export_caller(request))
     except (ExportBusy, ExportUnavailable) as exc:
         raise HTTPException(
             status_code=503, detail="archive exports are busy; retry shortly",
