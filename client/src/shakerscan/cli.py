@@ -481,12 +481,6 @@ def agent_origin(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
-def _copy_tree(source: Path, target: Path) -> None:
-    if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(source, target)
-
-
 def _retire_legacy_agent_guide(workspace: Path) -> None:
     """Remove stale guide precedence without losing operator edits or following links."""
     legacy = workspace / "CLAUDE.md"
@@ -507,12 +501,16 @@ def _retire_legacy_agent_guide(workspace: Path) -> None:
 def prepare_workspace(
     workspace: Path, url: str, who: str, executable: str, *, authenticated: bool = True,
     mcp_env: Mapping[str, str] | None = None, notes: list[str] | None = None,
+    state_directory: Path | None = None,
 ) -> list[str]:
     """Materialize the agent kit against the instance; return what was written.
 
-    The agents' configuration files are merged, not rewritten, and never written through a link
-    (``_workspace``). ``notes`` receives one printable line per thing the person should know:
-    what was kept, what changed since the last launch without the client, what was set aside.
+    The agents' configuration files are merged, not rewritten, and nothing is written through a
+    symbolic or hard link (``_workspace``). What the client knows about the workspace (the kit's
+    files and hooks, the settings fingerprint) is kept in ``state_directory`` (default: the
+    client's configuration directory), never in the workspace an agent can write. ``notes``
+    receives one printable line per thing the person should know: what was kept, what changed
+    since the last launch without the client, what was set aside.
 
     ``authenticated`` is the saved Enterprise connection (token in its file, per-person
     identity). Otherwise the workspace addresses an open-source engine by URL: the MCP
@@ -523,60 +521,60 @@ def prepare_workspace(
     sources = kit_sources()
     mcp_args = ["mcp"] if authenticated else ["mcp", "--url", url]
     workspace.mkdir(parents=True, exist_ok=True)
+    workspace = workspace.resolve()
+    root = _workspace.Root(workspace)
+    record = _workspace.state_path(state_directory or config_dir() / "workspaces", workspace)
     try:
         _workspace.refuse_links(workspace)
+        state = _workspace.load_state(record, workspace, notes)
+        before = _workspace.fingerprint(_workspace.security_view(_workspace.quiet_configs(root)))
+        if isinstance(state.get("security"), Mapping):
+            changed = _workspace.changes(state["security"], before)
+            if changed:
+                notes.append("changed:   since the last `shakerscan agent`, something other than shakerscan changed "
+                             "these agent settings (check that you made them):")
+                notes += [f"           {line}" for line in changed]
+        written: list[str] = []
+        if (workspace / "skills").is_dir():
+            shutil.rmtree(workspace / "skills")  # fd-based: removes links inside, never follows them
+        _workspace.install_tree(root, sources["skills"], "skills")
+        written.append("skills/")
+        kit_state = _workspace.refresh_claude_dir(sources[".claude"], root, notes, state)
+        written.append(".claude/")
+        # The release the kit was built from (the repository VERSION, vendored as _kit/VERSION),
+        # and the client carrying it.
+        release = ""
+        version_file = sources.get("VERSION")
+        if version_file is not None and version_file.is_file():
+            release = version_file.read_text(encoding="utf-8").strip()
+        kit_version = f"{release} (client {__version__})" if release else f"client {__version__}"
+        template = INSTANCE_NOTE if authenticated else ENGINE_NOTE
+        note = template.format(url=url, who=who, kit_version=kit_version)
+        for name in ("AGENTS.md",):
+            root.write(name, (note + sources[name].read_text(encoding="utf-8")).encode("utf-8"))
+            written.append(name)
+        # `agent --allow`: the launch bounds reach the MCP server even where an agent starts it with
+        # a reduced environment. Rewritten on every launch, so a launch without --allow clears them.
+        env = dict(mcp_env or {})
+        config, kept = _workspace.merge_mcp_json(_workspace.read_config(root, ".mcp.json", notes), {
+            "command": executable, "args": mcp_args, **({"env": env} if env else {}),
+        })
+        _workspace.write_config(root, ".mcp.json", config)
+        notes += filter(None, [_workspace.kept_note(".mcp.json", kept, "mcpServers.shakerscan")])
+        written.append(".mcp.json")
+        config, kept = _workspace.merge_opencode_config(_workspace.read_config(root, "opencode.json", notes), {
+            "type": "local", "command": [executable, *mcp_args], "enabled": True,
+            **({"environment": env} if env else {}),
+        })
+        _workspace.write_config(root, "opencode.json", config)
+        notes += filter(None, [_workspace.kept_note(
+            "opencode.json", kept, f"mcp.shakerscan and the {_workspace.HUNT_SKILL_INSTRUCTION} instruction")])
+        written.append("opencode.json")
+        _retire_legacy_agent_guide(workspace)
+        after = _workspace.fingerprint(_workspace.security_view(_workspace.quiet_configs(root)))
     except _workspace.WorkspaceError as exc:
         raise ClientError(str(exc)) from exc
-    state = _workspace.load_state(workspace)
-    before = _workspace.fingerprint(_workspace.security_view(_workspace.quiet_configs(workspace)))
-    if isinstance(state.get("security"), Mapping):
-        changed = _workspace.changes(state["security"], before)
-        if changed:
-            notes.append("changed:   since the last `shakerscan agent`, something other than shakerscan changed "
-                         "these agent settings (check that you made them):")
-            notes += [f"           {line}" for line in changed]
-    written: list[str] = []
-    _copy_tree(sources["skills"], workspace / "skills")
-    written.append("skills/")
-    kit_state = _workspace.refresh_claude_dir(sources[".claude"], workspace / ".claude", notes, state)
-    for hook in (workspace / ".claude" / "hooks").glob("*.sh"):
-        if hook.is_file() and not hook.is_symlink():  # never chmod through a link
-            hook.chmod(hook.stat().st_mode | 0o111)
-    written.append(".claude/")
-    # The release the kit was built from (the repository VERSION, vendored as _kit/VERSION),
-    # and the client carrying it.
-    release = ""
-    version_file = sources.get("VERSION")
-    if version_file is not None and version_file.is_file():
-        release = version_file.read_text(encoding="utf-8").strip()
-    kit_version = f"{release} (client {__version__})" if release else f"client {__version__}"
-    template = INSTANCE_NOTE if authenticated else ENGINE_NOTE
-    note = template.format(url=url, who=who, kit_version=kit_version)
-    for name in ("AGENTS.md",):
-        (workspace / name).write_text(note + sources[name].read_text(encoding="utf-8"), encoding="utf-8")
-        written.append(name)
-    # `agent --allow`: the launch bounds reach the MCP server even where an agent starts it with a
-    # reduced environment. Rewritten on every launch, so a launch without --allow clears them.
-    env = dict(mcp_env or {})
-    mcp_json = workspace / ".mcp.json"
-    config, kept = _workspace.merge_mcp_json(_workspace.read_config(mcp_json, ".mcp.json", notes), {
-        "command": executable, "args": mcp_args, **({"env": env} if env else {}),
-    })
-    _workspace.write_config(mcp_json, config)
-    notes += filter(None, [_workspace.kept_note(".mcp.json", kept, "mcpServers.shakerscan")])
-    written.append(".mcp.json")
-    opencode = workspace / "opencode.json"
-    config, kept = _workspace.merge_opencode_config(_workspace.read_config(opencode, "opencode.json", notes), {
-        "type": "local", "command": [executable, *mcp_args], "enabled": True,
-        **({"environment": env} if env else {}),
-    })
-    _workspace.write_config(opencode, config)
-    notes += filter(None, [_workspace.kept_note(
-        "opencode.json", kept, f"mcp.shakerscan and the {_workspace.HUNT_SKILL_INSTRUCTION} instruction")])
-    written.append("opencode.json")
-    _retire_legacy_agent_guide(workspace)
-    after = _workspace.fingerprint(_workspace.security_view(_workspace.quiet_configs(workspace)))
-    _workspace.save_state(workspace, {**kit_state, "security": after})
+    _workspace.save_state(record, workspace, {**kit_state, "security": after})
     return written
 
 

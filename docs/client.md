@@ -261,14 +261,16 @@ everything else, such as an OpenCode `permission` block with a bash deny-list, C
 `permissions`, other MCP servers and `.claude/settings.local.json`; each `kept:` line says what
 was kept, hook command lines included. Because an agent can write these files too, each launch
 records a fingerprint of the settings that change what an agent may do (permissions, plugins,
-providers, other MCP servers, instructions, hooks) in `.shakerscan/workspace.json`, and the next
+providers, other MCP servers, instructions, hooks) in the client's configuration directory
+(`~/.config/shakerscan/workspaces/`, never in the workspace an agent can write), and the next
 launch lists under `changed:` exactly what changed in between (secret values hidden); nothing is
 blocked. Kit files and hook entries the kit no longer ships are removed (a kit file you changed
 is kept and named); your own files stay. `opencode.json` with comments or trailing commas is read
 and written back as plain JSON, its original kept beside it; a file that is not JSON or JSONC is
 moved aside (`.shakerscan-unreadable-*.bak`) with the reason. The client never writes through a
-symbolic link: if any path it writes, or anything under `.claude/`, is a link, it refuses and
-writes nothing. The
+link: if any path it writes, or anything under `.claude/`, is a symbolic or hard link, it refuses
+and writes nothing, and every file it writes is a new file renamed into place through directories
+opened without following links. The
 kit's API calls go through `shakerscan api`, so the same commands work locally and remotely.
 
 `shakerscan api METHOD PATH [JSON]` calls the instance directly (`shakerscan api GET
@@ -338,9 +340,11 @@ shakerscan hunt permissions wait 8f0c…  # JSON: granted, denied, expired, with
 - `--watch` (both): each request's prompt appears about 0.75 s after the request, and keys pressed
   before it are ignored (and said so), so a key meant for an earlier request never decides the
   next one; when a request ends elsewhere while its prompt waits, the switch to the next one is
-  announced. Only a single key pressed on its own decides: arrow and Alt keys and pastes are
-  ignored. It keeps polling while it waits, and SIGTERM or a closed terminal ends it like
-  Ctrl-C (terminal restored, Enterprise approver session revoked).
+  announced. Only a single lowercase key pressed on its own decides: arrow, function and Alt
+  keys (however slowly their bytes arrive), uppercase letters and pastes are ignored. It keeps
+  polling while it waits, and SIGTERM or a closed terminal ends it like Ctrl-C (terminal
+  restored, Enterprise approver session revoked, also during the step-up), with exit status
+  128 + the signal number.
   The engine has no accounts: anyone who can reach its API could decide, and the command says so.
 - Neither runs without an interactive terminal, so an agent cannot run it in its own shell. Never
   type a code into an agent's chat.
