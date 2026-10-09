@@ -8,6 +8,7 @@ import ipaddress
 import json
 import math
 import re
+import sys
 import time
 from typing import Any, Awaitable, Callable, Mapping
 import xml.etree.ElementTree as ET
@@ -26,8 +27,12 @@ from .network_inputs import (
 
 try:
     from scanner_tools.discovered_names import subdomain_of
+    from scanner_tools import subfinder_providers
+    from scanner_tools.common import stderr_withheld_from_receipts
 except ModuleNotFoundError:  # package import (api.capabilities.network)
     from scanner.scanner_tools.discovered_names import subdomain_of
+    from scanner.scanner_tools import subfinder_providers
+    from scanner.scanner_tools.common import stderr_withheld_from_receipts
 
 
 from .ssh_commands import SshCommandAdapter
@@ -100,10 +105,29 @@ class NetworkExecutionAdapter:
         self._max_stdout_bytes = int(max_stdout_bytes)
         self._max_stderr_bytes = int(max_stderr_bytes)
         self._heartbeat_interval_seconds = float(heartbeat_interval_seconds)
+        # Fixed codes raised while binding a command (never a value), reported with the run.
+        self._binding_errors: list[str] = []
         if self._heartbeat_interval_seconds <= 0:
             raise ValueError("network capability heartbeat interval must be positive")
 
     async def _run_command_with_heartbeats(self, command, **kwargs):
+        if self.capability_name == "subdomains.discover":
+            # Provider keys are rendered per run into a private 0600 file and named by path
+            # only; the prepared argv (and so every receipt) never carries them.
+            with subfinder_providers.provider_config() as (config_path, config_error):
+                if config_error:
+                    print(f"[subfinder] provider keys ignored: {config_error}", file=sys.stderr)
+                    self._binding_errors.append(config_error)
+                bound = PreparedCommand(
+                    command.binary,
+                    tuple(subfinder_providers.with_provider_config(command.argv, config_path)),
+                    command.destination_address,
+                )
+                if config_path is None:
+                    return await self._run_process_with_heartbeats(bound, **kwargs)
+                # A keyed source can echo its request URL (key in the query) on stderr.
+                with stderr_withheld_from_receipts():
+                    return await self._run_process_with_heartbeats(bound, **kwargs)
         if self.capability_name != "service.nse_check":
             return await self._run_process_with_heartbeats(command, **kwargs)
         from .nse_http_runtime import NseCommandResult, command_transport
@@ -220,6 +244,8 @@ class NetworkExecutionAdapter:
                 partial = partial or bool(bridge.errors)
             observations.extend(dict(row) for row in parsed_observations)
             errors.extend(str(item) for item in parsed.errors)
+            errors.extend(self._binding_errors)
+            self._binding_errors.clear()
             partial = bool(
                 partial
                 or parsed.partial
@@ -498,8 +524,7 @@ class SubdomainsDiscoverAdapter:
         if not _DOMAIN_RE.fullmatch(root):
             raise CapabilityInputError("root domain is invalid")
         command = PreparedCommand(
-            "subfinder", ("-d", root, "-silent", "-json", "-disable-update-check", "-timeout", "10",
-                          "-max-time", "2"), None,
+            "subfinder", subfinder_providers.subfinder_arguments(root), None,
         )
         normalized = {"root_domain": root, "target_id": target.target_id}
         return PreparedExecution(

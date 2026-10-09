@@ -1746,3 +1746,24 @@ def test_run_flushes_buffered_output_before_handing_the_terminal_to_a_child(monk
     )
     fleet_cli._run(["true"], capture=False)
     assert flushed == ["out", "err"]
+
+
+def test_connection_bundle_forwards_inline_subfinder_keys_but_not_a_host_path(tmp_path):
+    bundle = fleet_cli._connection_bundle(
+        "10.77.0.1",
+        {
+            "POSTGRES_PASSWORD": "p" * 40,
+            "REDIS_PASSWORD": "r" * 40,
+            "SHAKERSCAN_SUBFINDER_PROVIDERS": "securitytrails=KEY;censys=ID:SECRET",
+            "SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG": "/run/secrets/subfinder.yaml",
+        },
+    )
+    env = bundle["worker_environment"]
+    assert env["SHAKERSCAN_SUBFINDER_PROVIDERS"] == "securitytrails=KEY;censys=ID:SECRET"
+    assert "SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG" not in env
+    destination = tmp_path / "worker.env"
+    fleet_cli._write_worker_environment(destination, bundle)
+    assert "SHAKERSCAN_SUBFINDER_PROVIDERS=securitytrails=KEY;censys=ID:SECRET\n" in (
+        destination.read_text(encoding="utf-8")
+    )
+    assert destination.stat().st_mode & 0o777 == 0o600

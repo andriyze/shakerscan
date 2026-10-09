@@ -409,6 +409,9 @@ services:
       - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
       - SHAKERSCAN_NAT64_PREFIXES=${SHAKERSCAN_NAT64_PREFIXES:-}
       - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
+      # Optional subfinder provider keys (docs/functionality-reference.md, section 10); never logged.
+      - SHAKERSCAN_SUBFINDER_PROVIDERS=${SHAKERSCAN_SUBFINDER_PROVIDERS:-}
+      - SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG=${SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG:-}
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
@@ -500,6 +503,9 @@ services:
       - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
       - SHAKERSCAN_NAT64_PREFIXES=${SHAKERSCAN_NAT64_PREFIXES:-}
       - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
+      # Optional subfinder provider keys (docs/functionality-reference.md, section 10); never logged.
+      - SHAKERSCAN_SUBFINDER_PROVIDERS=${SHAKERSCAN_SUBFINDER_PROVIDERS:-}
+      - SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG=${SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG:-}
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
