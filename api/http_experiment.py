@@ -412,11 +412,11 @@ def response_summary(
         )
         for name in selected_headers or []
     }
-    # A ranged response (206, or a Content-Range starting past byte 0) is a window cut at any
-    # offset; a body that opens like JSON but does not parse is not (only) JSON.
+    # A ranged response starting past byte 0 is a window cut at any offset; a body that opens like
+    # JSON but does not parse is not (only) JSON. A range from byte 0 that parses is whole JSON.
     range_start = re.match(r"\s*bytes\s+(\d+)-", str(response.headers.get("content-range") or ""), re.I)
     window = (
-        response.status_code == 206 or bool(range_start and int(range_start.group(1)) > 0)
+        bool(range_start and int(range_start.group(1)) > 0)
         or (parsed_json is None and text.lstrip()[:1] in ("{", "["))
     )
     masked_text = _masked_body(text, window=window)

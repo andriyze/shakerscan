@@ -841,7 +841,9 @@ def _quoted_content(pieces: list[str], quote: str) -> str:
     return unescape_yaml_double(content) if quote == '"' else content
 
 
-_JSON_LITERAL_VALUE_RE = re.compile(r"(?:true|false|null)[ \t]*,?[ \t]*")
+# A JSON literal, or a container that only opens (or is empty) on this line: its members are
+# masked on their own lines, and replacing the bracket would only break the structure.
+_JSON_LITERAL_VALUE_RE = re.compile(r"(?:true|false|null|[\[{]|\[[ \t]*\]|\{[ \t]*\})[ \t]*,?[ \t]*")
 
 
 def _json_member_value(line: str, offset: int, raw: str) -> tuple[str, bool]:
@@ -859,7 +861,7 @@ def _masked_line(line: str, offset: int, key: str | None = None) -> str:
         raw = raw.split(";", 1)[0].rstrip()  # Set-Cookie: the cookie, not its attributes
         end = start + len(raw)
     if not quote and _JSON_LITERAL_VALUE_RE.fullmatch(raw):
-        return line  # ``true``/``false``/``null`` hold nothing
+        return line  # ``true``/``false``/``null`` or a bare ``[``/``{`` hold nothing
     quoted_key = False
     if not quote:
         raw, quoted_key = _json_member_value(line, offset, raw)
