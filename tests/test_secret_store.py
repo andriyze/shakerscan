@@ -1,6 +1,7 @@
 """Encryption-at-rest for target credential secrets."""
 
 import os
+import secrets
 import sys
 
 import pytest
@@ -37,10 +38,13 @@ def test_roundtrip_and_passthrough_when_key_set(monkeypatch):
     ss = _reload_secret_store()
     assert ss.encryption_enabled() is True
 
-    enc = ss.encrypt_secret("hunter2")
+    # A 48-character random secret: a short word can occur in base64 ciphertext by chance.
+    plain = "hunter2-" + secrets.token_hex(20)
+    enc = ss.encrypt_secret(plain)
     assert enc.startswith("enc:fernet:")
-    assert "hunter2" not in enc                       # ciphertext, not plaintext
-    assert ss.decrypt_secret(enc) == "hunter2"        # round-trips
+    Fernet(os.environ["AI_CREDENTIAL_ENC_KEY"].encode()).decrypt(enc[len("enc:fernet:"):].encode())  # a valid token
+    assert plain not in enc                           # ciphertext, not plaintext
+    assert ss.decrypt_secret(enc) == plain            # round-trips
     assert ss.encrypt_secret(enc) == enc              # never double-encrypts
     assert ss.decrypt_secret("legacy-plaintext") == "legacy-plaintext"  # legacy rows pass through
 
