@@ -86,6 +86,8 @@ WITHHELD_REF_RE = re.compile(
 )
 MAX_WITHHELD_VALUES = 256
 MAX_WITHHELD_VALUE_CHARS = 8_192
+# The resolver's limit (hunt_http_exchange.MAX_VALUE_BYTES), as serialized JSON bytes.
+MAX_WITHHELD_VALUE_BYTES = 8_192
 # Fingerprints are scrypt (memory-hard by design), so only the first few are computed.
 _MAX_FINGERPRINTED_REFERENCES = 20
 # A short value's fingerprint is a guessing oracle: a planner that can make the target reflect a
@@ -162,14 +164,18 @@ class WithheldValues:
         return f"WithheldValues(action_id={self.action_id!r}, count={len(self.values)}, values_visible=False)"
 
     def marker(self, raw: str) -> str:
-        value = str(raw).strip()
-        if WITHHELD_MARKER_RE.fullmatch(value):
-            return value  # already withheld by an earlier pass: keep its reference
+        # The exact decoded value is both what is sealed and the identity references dedupe on:
+        # ``"  ValidPassword42!  "`` is a different secret from ``"ValidPassword42!"``. Each format
+        # parser removes only what its grammar says is not part of the value.
+        value = str(raw)
+        if WITHHELD_MARKER_RE.fullmatch(value.strip()):
+            return value.strip()  # already withheld by an earlier pass: keep its reference
         if (
             not value or value == MASK or len(value) > MAX_WITHHELD_VALUE_CHARS
+            or len(json.dumps(value, ensure_ascii=False).encode()) > MAX_WITHHELD_VALUE_BYTES
             or WITHHELD_MARKER_RE.search(value)
         ):
-            return MASK
+            return MASK  # withheld, but no reference: the resolver could not send it
         number = self._numbers.get(value)
         if number is None:
             if len(self.values) >= self.limit:
@@ -980,7 +986,7 @@ def mask_embedded_objects(text: str) -> str:
             if token[0] in "\"'" and _KEY_SUFFIX_RE.match(text, literal.end()):
                 continue  # a key names a field; only values are withheld
             pieces.append(text[cursor:literal.start()])
-            pieces.append(f'"{_withhold(token[1:-1] if token[0] in chr(34) + chr(39) else token)}"')
+            pieces.append(f'"{_withhold(unescape_backslashes(token[1:-1]) if token[0] in chr(34) + chr(39) else token)}"')
             cursor = literal.end()
         pieces.append(text[cursor:end])
         cursor = end
@@ -1115,6 +1121,28 @@ def mask_url_secrets(url: Any) -> Any:
         return f"{match.group(1)}{match.group(2)}={_withhold(raw)}"
 
     return _URL_PARAM_RE.sub(replace, url)
+
+
+def mask_public_http_urls(result: dict[str, Any]) -> dict[str, Any]:
+    """The one schema-aware pass over an HTTP capability result's public URL fields:
+    ``response.location``, ``response.final_url``, ``response.selected_headers.location``,
+    a top-level ``final_url`` and every ``redirect_chain[].location``. In place; returns it."""
+    summary = result.get("response")
+    if isinstance(summary, dict):
+        for key in ("location", "final_url"):
+            if isinstance(summary.get(key), str):
+                summary[key] = mask_url_secrets(summary[key])
+        selected = summary.get("selected_headers")
+        if isinstance(selected, dict):
+            for name in list(selected):
+                if str(name).lower() in {"location", "content-location", "refresh", "link"} and isinstance(selected[name], str):
+                    selected[name] = mask_url_secrets(selected[name])
+    if isinstance(result.get("final_url"), str):
+        result["final_url"] = mask_url_secrets(result["final_url"])
+    for hop in result.get("redirect_chain") or ():
+        if isinstance(hop, dict) and isinstance(hop.get("location"), str):
+            hop["location"] = mask_url_secrets(hop["location"])
+    return result
 
 
 # --- Percent-encoded assignments (``next=%2Fcb%3Faccess_token%3D...``) -------------------------
@@ -1626,12 +1654,43 @@ _COPY_HEADER_RE = re.compile(r"(?i)\bCOPY[ \t]+[\w.\"]{1,200}[ \t]*(?:\([^)]{0,4
 _COPY_END_RE = re.compile(r"(?m)^\\\.\r?$")
 
 
+# Carried per resource: whether its head (first bytes) shows a database dump (["dump"] / ["text"]).
+HEAD_VERDICT_KEY = "\0head"
+_DUMP_HEAD_RE = re.compile(
+    r"(?im)^(?:--[ \t]*(?:PostgreSQL|MySQL|MariaDB)[ \t]+(?:database[ \t]+)?dump|COPY[ \t]+\S+.{0,4096}?FROM[ \t]+stdin"
+    r"|CREATE[ \t]+TABLE\b|INSERT[ \t]+INTO\b|SET[ \t]+(?:client_encoding|standard_conforming_strings|NAMES)\b)"
+)
+
+
+def looks_like_dump_head(text: str) -> bool:
+    """Whether the first bytes of a resource read as a SQL dump (pg_dump, mysqldump)."""
+    return bool(_DUMP_HEAD_RE.search(text))
+
+
+def tab_row_run(text: str) -> int | None:
+    """The tab count of a run of at least three lines with the same number of tabs (table-like
+    data), or ``None``. The first line may be cut by a window and does not count."""
+    counts: dict[int, int] = {}
+    for line in text.split("\n")[1:]:
+        tabs = line.count("\t")
+        if tabs:
+            counts[tabs] = counts.get(tabs, 0) + 1
+    if not counts:
+        return None
+    tabs, run = max(counts.items(), key=lambda item: item[1])
+    return tabs if run >= _COPY_RUN_LINES else None
+
+
+def copy_evidence(text: str, tables: dict[str, list[str]], tabs: int) -> bool:
+    return _copy_evidence(text, len(text), tables, tabs)
+
+
 def _copy_evidence(text: str, end: int, tables: dict[str, list[str]], tabs: int) -> bool:
     """Whether tab-separated lines are a PostgreSQL dump's COPY rows, not any tab-separated text:
     a COPY block open in this resource's carried knowledge, a dump-like resource, a ``\\.`` or a
     ``COPY ... FROM stdin`` header in view, or a learned COPY table as wide as the lines."""
     collector = _COLLECTOR.get()
-    if tables.get(OPEN_COPY_KEY):
+    if tables.get(OPEN_COPY_KEY) or tables.get(HEAD_VERDICT_KEY) == ["dump"]:
         return True
     if collector is not None and collector.sql_dump_like:
         return True
@@ -1909,9 +1968,14 @@ def withhold_body_secrets(value: Any) -> Any:
 
 
 __all__ = [
+    "HEAD_VERDICT_KEY",
     "KnownValueScrubber",
+    "copy_evidence",
+    "looks_like_dump_head",
+    "tab_row_run",
     "MAX_WITHHELD_VALUES",
     "holds_withheld_material",
+    "mask_public_http_urls",
     "mask_url_secrets",
     "scrub_known_values",
     "WITHHELD_MARKER_RE",

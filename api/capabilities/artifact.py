@@ -24,13 +24,15 @@ except ModuleNotFoundError:
 
 try:
     from runtime.archive_body_masking import (
-        MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
-        holds_withheld_material, mask_body_text, mask_sql_values, scrub_known_values,
+        HEAD_VERDICT_KEY, MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
+        copy_evidence, holds_withheld_material, looks_like_dump_head, mask_body_text, mask_sql_values,
+        scrub_known_values, tab_row_run,
     )
 except ModuleNotFoundError:
     from api.runtime.archive_body_masking import (
-        MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
-        holds_withheld_material, mask_body_text, mask_sql_values, scrub_known_values,
+        HEAD_VERDICT_KEY, MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
+        copy_evidence, holds_withheld_material, looks_like_dump_head, mask_body_text, mask_sql_values,
+        scrub_known_values, tab_row_run,
     )
 try:
     from capabilities.secret_material import keyed_body_digest
@@ -205,6 +207,53 @@ def _context_bytes(path: str) -> int:
 
 # The values a window can show in part sit just before it; only those are collected.
 _NEAR_CONTEXT_BYTES = 65_536
+
+
+HEAD_PROBE_BYTES = 65_536
+
+
+async def _check_resource_head(
+    target_url: str, path: str, target: TargetBinding, offset: int, span: bytes,
+    transaction_recorder: Callable[[dict[str, Any]], None] | None,
+) -> int:
+    """Whether tab-separated rows in a window are a dump's COPY rows, when nothing in view says:
+    read the resource's head (``HEAD_PROBE_BYTES``) once per resource per Hunt and remember the
+    verdict. Returns the extra requests made (0 or 1); artifact.inspect reserves 2 for this.
+
+    A dump head also teaches its COPY/CREATE TABLE columns. A head that reads as plain text keeps
+    the rows visible (a TSV export stays a TSV export). A failed head read fails closed for this
+    window only."""
+    collector = active_withheld_values()
+    if collector is None or offset <= 0 or collector.sql_dump_like:
+        return 0
+    resource = _resource_path(path)
+    tables = collector.sql_tables.setdefault(resource, {})
+    verdict = tables.get(HEAD_VERDICT_KEY)
+    if verdict is not None:
+        collector.sql_dump_like = verdict == ["dump"]
+        return 0
+    text = span.decode("utf-8", errors="replace")
+    tabs = tab_row_run(text)
+    if tabs is None or copy_evidence(text, tables, tabs):
+        return 0
+    result, private = await _fetch_artifact(
+        target_url, path=path, target=target, offset=0, length=HEAD_PROBE_BYTES,
+        transaction_recorder=transaction_recorder,
+    )
+    if not result.get("ok") or private is None or private.status_code not in {200, 206}:
+        collector.sql_dump_like = True  # unknown: fail closed, and ask again next time
+        return 1
+    head = private.body()[:HEAD_PROBE_BYTES].decode("utf-8", errors="replace")
+    if looks_like_dump_head(head) or _served_as_dump(private.headers()):
+        tables[HEAD_VERDICT_KEY] = ["dump"]
+        collector.sql_dump_like = True
+        learner = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=0)
+        learner.sql_tables, learner.sql_path, learner.sql_dump_like = collector.sql_tables, resource, True
+        with collecting_withheld_values(learner):
+            mask_sql_values(head)  # the head's column lists, for this and later windows
+    else:
+        tables[HEAD_VERDICT_KEY] = ["text"]
+    return 1
 
 
 def _window_recorder(recorder: Callable[[dict[str, Any]], None] | None, lead: int):
@@ -383,6 +432,8 @@ async def inspect_target_artifact(
         collector.sql_dump_like = True
     context = private.body()[:lead]
     received = private.body()[lead:]
+    requests = 1 + await _check_resource_head(
+        target_url, path, target, offset, context + received[:length], transaction_recorder)
     body = received[:length]
     resource_bytes = _resource_bytes(private)
     terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]
@@ -423,11 +474,13 @@ async def inspect_target_artifact(
         # References, masked previews and keyed fingerprints for the markers in the sample; the
         # values stay in the worker (``request_bindings[].withheld_ref`` sends one).
         observation["withheld_values"] = withheld.entries(text_sample)
+    if requests > 1:
+        observation["resource_head_checked"] = True  # the second request this inspect made
     return {
         "ok": True,
         "status": "success",
         "observation": observation,
-        "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
+        "budget_consumed": {"http_requests": requests, "tool_wall_seconds": 1},
     }
 
 

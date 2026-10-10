@@ -11,6 +11,7 @@ import base64
 import hashlib
 import html
 import json
+import re
 import sys
 import urllib.parse
 import uuid
@@ -567,24 +568,77 @@ def test_session_name_value_rows_are_withheld():
 
 # --- Round 2 should-fix: secret URL parameters become references -----------------------------
 
-def test_redirect_urls_withhold_secret_parameters_as_references():
-    from capabilities.http_workflow import _withhold_url_secrets
-
+def test_public_url_fields_withhold_secret_parameters_in_the_nested_shape():
     response = {
-        "response": {"location": "/cb?code=FxAuthCode998877&state=xyz", "selected_headers": {
-            "location": "/cb?code=FxAuthCode998877&state=xyz"}},
-        "final_url": "https://honey.fixture.test/reset?reset_token=FxReset0123&lang=en",
+        "response": {"location": "/cb?code=FxAuthCode998877&state=xyz",
+                     "final_url": "https://honey.fixture.test/reset?reset_token=FxReset0123&lang=en",
+                     "selected_headers": {"location": "/cb?code=FxAuthCode998877&state=xyz"}},
         "redirect_chain": [{"location": "/s3?X-Amz-Signature=FxSig0123abcd&x=1"},
                            {"location": "/app#access_token=FxImplicit0123&token_type=bearer"}],
     }
     collector = masking.WithheldValues(ACTION)
     with masking.collecting_withheld_values(collector):
-        _withhold_url_secrets(response)
+        masking.mask_public_http_urls(response)
     text = json.dumps(response)
     for secret in ("FxAuthCode998877", "FxReset0123", "FxSig0123abcd", "FxImplicit0123"):
         assert secret not in text and secret in collector.values
     assert "state=xyz" in text and "lang=en" in text and "token_type=bearer" in text
-    assert "code=[withheld:1]" in response["response"]["location"]
+    assert response["response"]["location"] == response["response"]["selected_headers"]["location"]
+
+
+def test_executor_adapter_observation_carries_no_raw_url_secret(monkeypatch):
+    """D02: the executor writes ``response.final_url``; a plain GET with redirects, run as the worker
+    runs it (executor -> adapter -> observation), shows no raw key, code, token or signature."""
+    from capabilities.http import execute_bound_http_request
+    from capabilities.inline import HttpRequestExecutionAdapter
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+    from runtime.hunt_http_exchange import withholding_operation
+
+    secrets = ("FxQueryKey0123", "FxAuthCode998877", "FxImplicitTok0123", "FxSignature0123abc")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={
+                "location": f"/cb?code={secrets[1]}&state=xyz&key={secrets[0]}#access_token={secrets[2]}"})
+        if request.url.path == "/cb":
+            return httpx.Response(302, headers={"location": f"/final?sig={secrets[3]}&code={secrets[1]}"})
+        return httpx.Response(200, headers={"content-type": "text/plain"}, content=b"welcome")
+
+    class _MockClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("transport", None)
+            super().__init__(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+    target = TargetBinding(
+        target_id="target-1", target_kind="web", canonical_host="shop.test",
+        allowed_origins=("https://shop.test",), allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("shop.test",),
+    )
+
+    async def operation():
+        return await execute_bound_http_request(
+            "https://shop.test",
+            {"method": "GET", "path": f"/start?key={secrets[0]}", "follow_redirects": True,
+             "selected_headers": ["location"]},
+            target=target, allow_bound_origin_redirects=True)
+
+    wrapped, collector = withholding_operation("http.request", ACTION, operation)
+    adapter = HttpRequestExecutionAdapter(
+        specification=CAPABILITY_REGISTRY.require("http.request"), operation=wrapped,
+        requested_budget={"http_requests": 5, "tool_wall_seconds": 30}, redacted_execution={})
+    outcome = asyncio.run(adapter.execute(heartbeat=lambda: None, cancelled=lambda: False))
+    observation = json.dumps(outcome.observations)
+    assert outcome.status == "success"
+    for secret in secrets[1:]:
+        assert secret not in observation, secret
+    assert observation.count("[withheld:") >= 4  # final_url, redirect locations, repeated copies
+    response = outcome.observations[0]["response"]
+    assert "[withheld:" in response["final_url"] and "state=xyz" in json.dumps(outcome.observations)
+    # The same code in two redirect hops is one reference.
+    code_markers = {m for m in re.findall(r"code=(\[withheld:\d+\])", observation)}
+    assert len(code_markers) == 1
+
 
 
 # --- Round 2 should-fix: experiment extract digests ------------------------------------------
@@ -981,3 +1035,167 @@ def test_long_lowercase_runs_are_tokens_not_enums(url, withheld):
         masked = masking.mask_url_secrets(url)
     assert (masked == url and collector.values == []) if withheld is None else (
         withheld not in masked and collector.values == [withheld])
+
+
+# --- D04: the exact value is sealed, resolved and sent -----------------------------------------
+
+@pytest.mark.parametrize(("body", "secret"), [
+    ('{"password": "  ValidPassword42!  "}', "  ValidPassword42!  "),
+    ('{"api_key": "\\tTabbedKey0123\\n"}', "\tTabbedKey0123\n"),
+    ('db:\n  password: "  Spaced Secret\\t"\n', "  Spaced Secret\t"),
+    ("password = '  quoted ini secret  '\n", "  quoted ini secret  "),
+    ("INSERT INTO users (u, password) VALUES ('a','  sql secret  ');", "  sql secret  "),
+    ("INSERT INTO users (u, password) VALUES ('a','esc\\tsql\\\\pw ');", "esc\tsql\\pw "),
+])
+def test_exact_value_round_trips_into_the_request_body(encryption_key, body, secret):
+    masked, collector = _collect(body)
+    assert collector.values == [secret]
+    conn = _ActionRows()
+    sealing = asyncio.run(persist_withheld_values(
+        conn, run=RUN, action_id=ACTION, target=TARGET, values=collector, status="success",
+        observations=[masked]))
+    assert sealing == {"sealed": 1, "status": "sealed"}
+    inputs, _headers, _exchange = asyncio.run(prepare_http_exchange(
+        conn, run=RUN, action_id=uuid.uuid4(), target=TARGET, context={},
+        policy={"active_testing": True, "allow_state_changing_http": True},
+        values={"method": "POST", "path": "/login", "json_body": {"password": None},
+                "request_bindings": [{"withheld_ref": f"withheld://hunt/{ACTION}/1", "body_pointer": "/password"}]},
+        trusted_headers={}))
+    assert inputs["json_body"]["password"] == secret
+
+
+def test_distinct_values_get_distinct_references():
+    body = json.dumps({"password": "Secret123!", "old_password": " Secret123!", "pin_password": "Secret123! "})
+    masked, collector = _collect(body)
+    assert collector.values == ["Secret123!", " Secret123!", "Secret123! "]
+    assert {"[withheld:1]", "[withheld:2]", "[withheld:3]"} <= set(re.findall(r"\[withheld:\d+\]", masked))
+
+
+# --- D05: one aggregate byte budget for the sealed private result ------------------------------
+
+def _written_plaintext(conn) -> bytes:
+    ciphertext = conn.rows[ACTION]["private_http_result"]
+    from runtime.hunt_http_exchange import MAX_PRIVATE_RESULT_CHARS
+    assert len(ciphertext) <= MAX_PRIVATE_RESULT_CHARS
+    return secret_store.decrypt_secret(ciphertext).encode()
+
+
+def _huge_knowledge(collector, *, multibyte: bool = False, tables: int = 200):
+    name = "таблица_пользователей_" if multibyte else "table_"
+    collector.sql_path = "/dump.sql"
+    collector.sql_tables = {"/dump.sql": {
+        f"{name}{index}": [f"{'колонка' if multibyte else 'column'}_{index}_{column}" for column in range(60)]
+        for index in range(tables)}}
+
+
+def _resolve_all(conn, numbers):
+    for number in numbers:
+        _inputs, headers, _exchange = asyncio.run(prepare_http_exchange(
+            conn, run=RUN, action_id=uuid.uuid4(), target=TARGET, context={}, policy=POLICY,
+            values={"method": "GET", "path": "/", "request_bindings": [
+                {"withheld_ref": f"withheld://hunt/{ACTION}/{number}", "header": "X-K"}]},
+            trusted_headers={}))
+        assert headers["X-K"]
+
+
+@pytest.mark.parametrize("multibyte", [False, True])
+@pytest.mark.parametrize("with_secrets", [False, True])
+def test_oversized_knowledge_never_exceeds_the_budget_and_keeps_references(encryption_key, multibyte, with_secrets):
+    from runtime.hunt_http_exchange import MAX_PRIVATE_RESULT_BYTES
+
+    collector = masking.WithheldValues(ACTION)
+    _huge_knowledge(collector, multibyte=multibyte)
+    text = ""
+    if with_secrets:
+        with masking.collecting_withheld_values(collector):
+            text = mask_body_text("\n".join(f"key_{index}_password=Fx{index:04d}SecretValue!" for index in range(120)))
+    conn = _ActionRows()
+    sealing = asyncio.run(persist_withheld_values(
+        conn, run=RUN, action_id=ACTION, target=TARGET, values=collector, status="success", observations=[text]))
+    written = _written_plaintext(conn)
+    assert len(written) <= MAX_PRIVATE_RESULT_BYTES
+    payload = json.loads(written)
+    if with_secrets:
+        assert sealing["sealed"] == 120 and sealing["status"] == "sealed"
+        assert len(payload["withheld"]) == 120
+        _resolve_all(conn, range(1, 121))
+    assert sealing["not_retained"]["sql_tables"] > 0  # the knowledge that did not fit is reported
+    assert sum(len(by_table) for by_table in payload.get("sql_tables", {}).values()) == (
+        200 - sealing["not_retained"]["sql_tables"])
+
+
+def test_prior_capture_is_kept_and_references_fill_what_is_left(encryption_key):
+    from runtime.hunt_http_exchange import MAX_PRIVATE_RESULT_BYTES, SCHEMA
+
+    prior = {"schema_version": SCHEMA, "hunt_id": HUNT, "source_action_id": ACTION,
+             "target_digest": masking_target_digest(), "expires_at": "2999-01-01T00:00:00+00:00",
+             "values": {"token": "c" * 60_000}}
+    conn = _ActionRows(prior=secret_store.encrypt_secret(json.dumps(prior)))
+    values = {number: f"FxRef{number:03d}" + "v" * 200 for number in range(1, 60)}
+    sealing = asyncio.run(persist_withheld_values(
+        conn, run=RUN, action_id=ACTION, target=TARGET, values=values, status="success"))
+    written = _written_plaintext(conn)
+    payload = json.loads(written)
+    assert len(written) <= MAX_PRIVATE_RESULT_BYTES
+    assert payload["values"]["token"] == "c" * 60_000  # the workflow capture survives
+    assert 0 < sealing["sealed"] < 59 and sealing["status"] == "partially_sealed"
+    assert sealing["not_retained"]["values"] == 59 - sealing["sealed"]
+    _resolve_all(conn, range(1, sealing["sealed"] + 1))
+    with pytest.raises(ValueError):
+        _resolve_all(conn, [sealing["sealed"] + 1])
+
+
+def test_budget_boundary_is_exact(encryption_key):
+    from runtime.hunt_http_exchange import MAX_PRIVATE_RESULT_BYTES
+
+    for size in range(40_000, 70_000, 997):
+        conn = _ActionRows()
+        sealing = asyncio.run(persist_withheld_values(
+            conn, run=RUN, action_id=ACTION, target=TARGET, values={1: "é" * (size // 2)}, status="success"))
+        if conn.rows[ACTION]["private_http_result"]:
+            assert len(_written_plaintext(conn)) <= MAX_PRIVATE_RESULT_BYTES
+        if sealing["sealed"]:
+            _resolve_all(conn, [1])
+        else:
+            assert sealing["not_retained"]["values"] == 1
+
+
+def masking_target_digest():
+    from runtime.hunt_http_exchange import _target_digest
+    return _target_digest(TARGET)
+
+
+# --- Round 6: the resource head decides whether tab rows are a dump -------------------------
+
+@pytest.mark.parametrize("offset", [200_000, 3_000_000])
+def test_copy_rows_with_no_evidence_in_view_read_the_head_once(monkeypatch, encryption_key, offset):
+    """``/download?id=7`` served as text/plain with no filename, a window 3 MB in, the head never
+    inspected: the inspect reads the head once, finds the dump, and withholds the rows."""
+    document = _copy_dump()
+    conn = _KnowledgeRows()
+    result, seen = _hunt_inspect_path(monkeypatch, document, "/download?id=7", offset, conn)
+    assert "!q0" not in json.dumps(result)
+    assert (0, artifact_capability.HEAD_PROBE_BYTES - 1) in seen  # the head read
+    assert result["budget_consumed"]["http_requests"] == 2 and result["observation"]["resource_head_checked"]
+    assert "@fixture.test" in result["observation"]["text_sample"]
+    # The verdict is remembered for the resource: the next window does not read the head again.
+    result, seen = _hunt_inspect_path(monkeypatch, document, "/download?id=7", offset + 400_000, conn)
+    assert "!q0" not in json.dumps(result)
+    assert all(start != 0 for start, _end in seen) and result["budget_consumed"]["http_requests"] == 1
+
+
+@pytest.mark.parametrize("path", sorted(TAB_TEXTS))
+def test_tab_text_reads_its_head_once_and_keeps_its_fields(monkeypatch, encryption_key, path):
+    document = TAB_TEXTS[path].encode()
+    conn = _KnowledgeRows()
+    for offset in (70_000, 300_000):
+        result, seen = _hunt_inspect_path(monkeypatch, document, path, offset, conn)
+        sample = result["observation"]["text_sample"]
+        assert "[withheld:" not in sample and "***" not in sample
+    heads = [1 for start, _end in seen if start == 0]
+    assert len(heads) == 0  # second window: the "text" verdict was carried, no new head read
+
+
+def test_artifact_inspect_reserves_two_requests_for_the_head_check():
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+    assert CAPABILITY_REGISTRY.require("artifact.inspect").budget_cost["http_requests"] == 2
