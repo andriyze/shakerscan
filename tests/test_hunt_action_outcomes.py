@@ -274,6 +274,9 @@ def test_unified_startup_installs_the_candidate_schema_on_converted_instances(mo
         ("runtime.archive_blob_secrets", "encrypt_stored_blobs"),
         ("runtime.credential_migration", "migrate_legacy_web_credentials"),
         ("hunt.grant_repair", "signal_repair_cancellations"),
+        # Data migrations over targets (their own Postgres tests cover them).
+        ("scope.roots", "recompute_spanning_target_roots"),
+        ("targets.host_canonical_repair", "repair_target_host_spellings"),
     ):
         monkeypatch.setattr(importlib.import_module(module), name, noop)
 
@@ -286,3 +289,5 @@ def test_unified_startup_installs_the_candidate_schema_on_converted_instances(mo
         "CREATE INDEX IF NOT EXISTS idx_investigation_candidate_observations_hunt_run" in statement
         for statement in executed
     )
+    # The 2.8.2 column reaches converted instances too.
+    assert "ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS requested_by TEXT" in executed
