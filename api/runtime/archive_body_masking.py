@@ -1111,11 +1111,20 @@ def mask_embedded_objects(text: str) -> str:
 _TEXT_ASSIGNMENT_RE = re.compile(
     # ``<`` too: in ``<add key="ApiKey" ...>`` the tag name is not the first word of a label.
     r"(?<![A-Za-z0-9_.\-<])((?:[A-Za-z][A-Za-z0-9_\-]{0,40}[ \t]){0,2}[A-Za-z_][A-Za-z0-9_.\-]{0,80})"
-    r"([\"']?[ \t]*[:=][ \t]*[\"']?)"
+    # ``=>``: PHP arrays and ``php -i`` output (``DB_PASSWORD => ...``).
+    r"([\"']?[ \t]*(?:=>|[:=])[ \t]*[\"']?)"
     # The value is only looked at, not consumed, so a value that itself starts a label
-    # (``description: 'Signing key: ...'``) is scanned again as one.
-    r"(?=([^\s,;\"'<>&{`][^\r\n\"'<>&`]{0,511}))"
+    # (``description: 'Signing key: ...'``) is scanned again as one. Inline, a value ends at
+    # ``&``, a quote or markup; the second form (a value that starts with ``&`` or a quote) is
+    # taken only at the start of a line or after ``;``, where the value runs on past them.
+    r"(?=([^\s,;\"'<>&{`][^\r\n\"'<>&`]{0,511}|[\"'&`][^\r\n]{0,511}))"
 )
+# The characters that end an inline value; a value starting with one is a line value only.
+_INLINE_VALUE_STOPS = frozenset("\"'<>&`")
+# The longest line value withheld as one (a value on a longer line is cut here).
+_LINE_VALUE_CHARS = 4096
+# A ``;``-separated pair's value: to the next ``;``, the line end, a quote or markup.
+_LISTED_VALUE_RE = re.compile(r"[^;\r\n\"'<>`]{0,4096}")
 _LINE_HEAD_RE = re.compile(r"[ \t]*(?:(?:export|set)[ \t]+)?")
 
 
@@ -1153,6 +1162,20 @@ def _trimmed_value(value: str) -> str:
     return trimmed
 
 
+def _line_value(text: str, start: int, separator: str) -> str:
+    """The value of an assignment at the start of a line (``.env``, ``.ini``, shell): the rest
+    of the line, so a ``&``, ``=``, quote or ``<`` inside a password never leaves a tail behind.
+    After an opening quote the value ends at the matching quote on the line."""
+    end = text.find("\n", start, start + _LINE_VALUE_CHARS)
+    value = text[start:end if end >= 0 else start + _LINE_VALUE_CHARS].rstrip("\r")
+    quote = separator.rstrip()[-1:]
+    if quote in {'"', "'"}:
+        close = value.find(quote)
+        if close >= 0:
+            value = value[:close]
+    return value
+
+
 def mask_text_assignments(text: str) -> str:
     """Withhold the value of every secret-named assignment or labelled value in free text."""
     pieces: list[str] = []
@@ -1165,16 +1188,26 @@ def mask_text_assignments(text: str) -> str:
         value = match.group(3)
         if value.startswith("[") and value[1:2] in {"", '"', "'", "{", "[", "]"}:
             continue  # an embedded array: the embedded-object pass owns it
+        separator = match.group(2)
+        line_start = _at_line_start(text, match.start(1))
+        # ``Server=s;Password=Ab1&Cd2;``: a pair after ``;`` (a connection string, a cookie list)
+        # runs to the next ``;``, blanks and ``&`` included.
+        listed = match.start(1) > 0 and text[match.start(1) - 1] == ";"
+        if value[:1] in _INLINE_VALUE_STOPS and not (line_start or listed):
+            continue  # inline, ``token=&next=`` holds no value
         if normalized_key_name(label) in _COOKIE_LABELS:
             value = value.split(";", 1)[0]
-        elif not _at_line_start(text, match.start(1)):
+        elif listed:
+            value = _LISTED_VALUE_RE.match(text, match.start(3)).group(0)
+        elif not line_start:
             # Inline (prose, a query, a header list): the value ends at the first blank.
             scheme = _AUTH_SCHEME_RE.match(value)
             value = (scheme.group(0) if scheme else re.split(r"[ \t]", value, maxsplit=1)[0])
+        else:
+            value = _line_value(text, match.start(3), separator)
         value = _trimmed_value(value)
         if not value or is_location_value(label, value) or _JSON_LITERAL_VALUE_RE.fullmatch(value):
             continue
-        separator = match.group(2)
         pieces.append(text[cursor:match.start(3)])
         if separator.startswith('"') and not separator.rstrip().endswith(('"', "'")):
             # ``"key": 12`` (a JSON member): the replacement stays a JSON string.
@@ -1548,6 +1581,77 @@ def mask_markup_pairs(text: str) -> str:
             quote = item.group(2)[0] if item.group(2)[0] in "\"'" else '"'
             pieces.append(body[cursor:item.start(2)])
             pieces.append(f"{quote}{_withhold(html.unescape(raw))}{quote}")
+            cursor = item.end(2)
+        if not pieces:
+            return match.group(0)
+        pieces.append(body[cursor:])
+        start = match.start(1) - match.start(0)
+        return match.group(0)[:start] + "".join(pieces) + match.group(0)[start + len(body):]
+
+    return _MARKUP_TAG_RE.sub(tag, text)
+
+
+# --- Connection strings in markup attributes (``web.config``) ----------------------------------
+# ``<add name="Db" connectionString="Server=s;Password=Ab1&amp;Cd2;" />``: the attribute is
+# decoded first, so an entity (``&amp;``, ``&quot;``) inside a password is part of it rather than
+# the end of it, and each ``key=value`` pair is read the way a connection string is: an unquoted
+# value runs to the next ``;``, a quoted one to its closing quote (doubled inside).
+
+_CONNECTION_PAIR_RE = re.compile(
+    r"(?:^|(?<=;))[ \t]{0,64}([A-Za-z][A-Za-z0-9 _.\-]{0,40}?)[ \t]{0,64}=[ \t]{0,64}"
+    r"('(?:[^']|''){0,4096}'|\"(?:[^\"]|\"\"){0,4096}\"|[^;]{0,4096})"
+)
+
+
+def _masked_connection_string(decoded: str) -> str | None:
+    """``decoded`` with every secret-named pair's value withheld, or None when none is."""
+    pieces: list[str] = []
+    cursor = 0
+    for match in _CONNECTION_PAIR_RE.finditer(decoded):
+        if not is_withheld_key(match.group(1).strip()):
+            continue
+        raw = match.group(2)
+        if len(raw) >= 2 and raw[0] in "'\"" and raw[-1] == raw[0]:
+            quote = raw[0]
+            secret = raw[1:-1].replace(quote * 2, quote)
+            lead, trail = quote, quote
+        else:
+            secret = raw.strip()
+            lead = raw[:len(raw) - len(raw.lstrip())]
+            trail = raw[len(raw.rstrip()):]
+        if not secret or WITHHELD_MARKER_RE.fullmatch(secret) or secret == MASK:
+            continue
+        pieces.append(decoded[cursor:match.start(2)])
+        pieces.append(f"{lead}{_withhold(secret)}{trail}")
+        cursor = match.end(2)
+    if not pieces:
+        return None
+    pieces.append(decoded[cursor:])
+    return "".join(pieces)
+
+
+def mask_markup_connection_strings(text: str) -> str:
+    """Withhold the secret-named values of a connection string held in a markup attribute."""
+    def tag(match: re.Match[str]) -> str:
+        body = match.group(1)
+        if "=" not in body:
+            return match.group(0)
+        pieces: list[str] = []
+        cursor = 0
+        for item in _HTML_ATTRIBUTE_RE.finditer(body):
+            raw = item.group(2)
+            quote = raw[0] if raw[0] in "\"'" else ""
+            inner = raw[1:-1] if quote else raw
+            if "=" not in inner:
+                continue
+            masked = _masked_connection_string(html.unescape(inner))
+            if masked is None:
+                continue
+            encoded = html.escape(masked, quote=False)
+            if quote:
+                encoded = encoded.replace(quote, "&quot;" if quote == '"' else "&#39;")
+            pieces.append(body[cursor:item.start(2)])
+            pieces.append(f"{quote}{encoded}{quote}")
             cursor = item.end(2)
         if not pieces:
             return match.group(0)
@@ -2379,6 +2483,7 @@ def _mask_text_passes(text: str) -> str:
     text = mask_yaml_text(text)
     text = mask_html_fields(text)
     text = mask_markup_pairs(text)
+    text = mask_markup_connection_strings(text)
     text = mask_markup_elements(text)
     text = mask_table_cells(text)
     text = mask_sql_values(text)
