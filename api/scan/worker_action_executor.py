@@ -110,21 +110,33 @@ class ReceiptScanActionExecutor:
         signal = ActionInterruption()
         authority_interruption: str | None = None
 
-        async def keep_lease_alive() -> None:
+        async def guarded_heartbeat() -> bool:
+            """Heartbeat the lease; ``False`` once the control plane withdrew the authorization.
+
+            A withdrawal stops the action as the authority monitor would (the tool sees
+            ``action_interrupted``) and its receipt is settled as an authorization stop. It is
+            never raised into the adapter, which would turn it into an adapter failure.
+            """
             nonlocal authority_interruption
+            try:
+                await heartbeat()
+                return True
+            except ActionAuthorityWithdrawn as exc:
+                if signal.reason is None:
+                    authority_interruption = exc.reason
+                    signal.record(exc.reason)
+                return False
+
+        async def adapter_heartbeat() -> None:
+            await guarded_heartbeat()
+
+        async def keep_lease_alive() -> None:
             interval = max(1.0, min(30.0, float(lease.lease_seconds) / 3.0))
             while not stop_heartbeats.is_set():
                 try:
                     await asyncio.wait_for(stop_heartbeats.wait(), timeout=interval)
                 except asyncio.TimeoutError:
-                    try:
-                        await heartbeat()
-                    except ActionAuthorityWithdrawn as exc:
-                        # The control plane withdrew the action's authorization: stop it as
-                        # the authority monitor would, and settle what it observed.
-                        if signal.reason is None:
-                            authority_interruption = exc.reason
-                            signal.record(exc.reason)
+                    if not await guarded_heartbeat():
                         return
 
         heartbeat_task = asyncio.create_task(keep_lease_alive())
@@ -178,7 +190,7 @@ class ReceiptScanActionExecutor:
                         authority_monitor = asyncio.create_task(watch_authorization(
                             authority, action, confirmed_at=confirmed_at, stopped=stop_heartbeats,
                             signal=signal, on_interrupt=authorization_interrupted))
-                    result = await self._dispatcher(action, lease, heartbeat)
+                    result = await self._dispatcher(action, lease, adapter_heartbeat)
                     if check is not None:
                         await check_authority()
         finally:

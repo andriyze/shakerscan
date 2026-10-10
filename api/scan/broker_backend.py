@@ -47,14 +47,21 @@ class BrokerActionHTTPError(ScanExecutionBackendError):
 AUTHORITY_WITHDRAWN_DETAIL = "authority_withdrawn:"
 
 
+# The reasons an authorization stop can carry; anything else in that answer is a lost lease.
+AUTHORITY_STOP_REASONS = frozenset({
+    CapabilityResultReason.AUTHORIZATION_REVOKED.value,
+    CapabilityResultReason.AUTHORIZATION_EXPIRED.value,
+    CapabilityResultReason.SCOPE_INVALID.value,
+    CapabilityResultReason.AUTHORIZATION_UNVERIFIED.value,
+})
+
+
 def authority_withdrawn_reason(exc: BrokerActionHTTPError) -> str | None:
     detail = exc.detail.strip()
     if exc.status_code != 409 or not detail.startswith(AUTHORITY_WITHDRAWN_DETAIL):
         return None
-    try:
-        return CapabilityResultReason(detail[len(AUTHORITY_WITHDRAWN_DETAIL):]).value
-    except ValueError:
-        return None
+    reason = detail[len(AUTHORITY_WITHDRAWN_DETAIL):]
+    return reason if reason in AUTHORITY_STOP_REASONS else None
 
 
 class BrokerScanExecutionBackend:
