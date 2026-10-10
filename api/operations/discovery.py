@@ -10,10 +10,14 @@ and bounded so one caller cannot flood the queue or third-party sources:
   or device added there, or a manual finding's target), not one created by a scan submission
   (``scan``), discovery, the CT monitor, Model Intake, an AI session, AI Gate, an observed device
   service or a Hunt agent (``metadata.created_via``), nor a ``host`` row the asset model created as
-  the owner of other rows (archived ones included). Rows stored before 2.8.2 cannot be told apart:
-  a scan-submitted target then also read as ``manual`` and still counts. Scope receipts do not
-  admit a domain on their own: a receipt is only as good as its bound target, which must itself
-  be a declared target under the apex;
+  the owner of other rows (archived ones included). A host a person adds is marked
+  ``metadata.declared``, so it keeps counting after a scan attaches web rows under it; adding a
+  target a scan or a Hunt agent created first makes it the person's
+  (``targets.asset_router.mark_person_added``). Rows stored before these markers existed cannot
+  be told apart: a scan-submitted target then also read as ``manual`` and still counts, and an
+  unmarked host counts, as before, while it has a device profile or owns no rows; adding it again
+  on the Targets page marks it. Scope receipts do not admit a domain on their own: a receipt is
+  only as good as its bound target, which must itself be a declared target under the apex;
 - one discovery per apex is pending or running at a time, and at most
   ``SHAKERSCAN_DISCOVERY_MAX_ACTIVE`` (default 2) across the engine; a run older than
   ``ACTIVE_WINDOW`` no longer holds a slot, so a lost worker cannot block an apex for ever;
@@ -84,13 +88,15 @@ def requester() -> str:
 
 
 # A row counts when a person added it: an active target from no automated source, and for a
-# ``host`` row (which the asset model also creates as the owner of web rows) only one with a
-# device profile or that owns no rows at all, archived ones included.
+# ``host`` row (which the asset model also creates as the owner of web rows) only one a person
+# marked as declared, one with a device profile, or one that owns no rows at all, archived ones
+# included.
 _DECLARED = """
     COALESCE({t}.is_active, true)
     AND COALESCE({t}.discovery_source, 'manual') <> ALL($2::text[])
     AND COALESCE({t}.metadata_json->>'created_via', '') = ''
     AND (COALESCE({t}.discovery_source, 'manual') <> 'host'
+         OR {t}.metadata_json->>'declared' = 'true'
          OR EXISTS (SELECT 1 FROM target_device_profiles p WHERE p.target_id = {t}.id)
          OR NOT EXISTS (SELECT 1 FROM targets m WHERE m.asset_owner_id = {t}.id))
 """

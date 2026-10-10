@@ -1,10 +1,15 @@
 """Public Suffix List boundaries on real PostgreSQL: discovery admission, legacy roots, Targets
 list grouping and domain deletion never span registrants (run by the target-assets job)."""
 import asyncio
+import json
+import types
+import uuid
+
+import pytest
 
 from operations import discovery
 from scope.roots import recompute_spanning_target_roots
-from targets.asset_migration import migrate_target_assets
+from targets.asset_migration import BoundConnectionPool, migrate_target_assets
 from targets.asset_inputs_migration import migrate_asset_inputs
 from targets.asset_store import list_assets
 from tests.test_target_asset_migration_postgres import database
@@ -22,6 +27,27 @@ async def _converted(conn):
         await migrate_asset_inputs(conn)
 
 
+async def _admission(conn, name):
+    """The status POST /discovery would answer for ``name``; an admitted run is completed so the
+    next probe of the same apex is not refused as already running."""
+    try:
+        run_id = await discovery.admit_discovery(conn, name, requested_by=discovery.requester())
+    except discovery.DiscoveryRefused as exc:
+        return exc.status_code
+    await conn.execute("UPDATE discovery_runs SET status='completed' WHERE id=$1", run_id)
+    return 200
+
+
+def _resolve_everything(monkeypatch):
+    """Every name resolves to one global address (a fixture; no network)."""
+    import target_resolution
+
+    async def lookup(_hostname):
+        return ["93.184.215.14"]
+
+    monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+
+
 def test_discovery_counts_only_targets_a_person_added(monkeypatch):
     encryption(monkeypatch)
     monkeypatch.setenv(discovery.MAX_ACTIVE_ENV, "20")
@@ -36,7 +62,7 @@ def test_discovery_counts_only_targets_a_person_added(monkeypatch):
                 "INSERT INTO targets(url, name, discovery_source) VALUES ('https://x.other.test', 'x', 'subfinder')")
             await conn.execute(
                 "INSERT INTO targets(url, name, discovery_source) VALUES ('https://chat.ai.test', 'c', 'ai_session')")
-            # A scan submission's own target (2.8.2 marks it) is not a declaration.
+            # A scan submission's own target is not a declaration.
             await conn.execute(
                 "INSERT INTO targets(url, name, discovery_source) VALUES ('https://shop.scanned.test', 's', 'scan')")
             # An archived discovered row: the host row the asset model made for it stays active,
@@ -138,3 +164,168 @@ def test_targets_list_groups_and_domain_deletion_never_span_registrants(monkeypa
     assert ids["api.victim.github.io"] in victim
     assert ids["github.io"] in suffix
     assert not {ids["victim.github.io"], ids["attacker.github.io"]} & suffix
+
+
+def test_a_host_a_person_added_keeps_declaring_its_domain_after_a_scan(monkeypatch):
+    """Adding a host, then scanning its URL, attaches the scan's row under the host. The host is
+    still the person's declaration, so discovery for its domain stays admitted."""
+    from targets.asset_router import HostTargetCreate, persist_host_target
+    encryption(monkeypatch)
+    monkeypatch.setenv(discovery.MAX_ACTIVE_ENV, "20")
+
+    async def run():
+        async with database() as conn:
+            await _converted(conn)
+            host = await persist_host_target(conn, HostTargetCreate(locator="db.example.net"))
+            before = await _admission(conn, "example.net")
+            await conn.execute("""INSERT INTO targets(url, name, discovery_source)
+                VALUES ('https://db.example.net', 'db', 'scan')""")
+            owner = await conn.fetchval(
+                "SELECT asset_owner_id FROM targets WHERE url = 'https://db.example.net'")
+            after = await _admission(conn, "example.net")
+            # A host stored before the marker existed counts as it did: not once a scan's row is
+            # under it. Adding it again on the Targets page marks it.
+            await conn.execute("""INSERT INTO targets(url, name, discovery_source)
+                VALUES ('host://db.legacy.test', 'db', 'host')""")
+            await conn.execute("""INSERT INTO targets(url, name, discovery_source)
+                VALUES ('https://db.legacy.test', 'db', 'scan')""")
+            legacy = await _admission(conn, "legacy.test")
+            await persist_host_target(conn, HostTargetCreate(locator="db.legacy.test"))
+            legacy_added = await _admission(conn, "legacy.test")
+            # The host the asset model creates for a scan's row is not a declaration either way.
+            await conn.execute("""INSERT INTO targets(url, name, discovery_source)
+                VALUES ('https://db.scanned.test', 'db', 'scan')""")
+            owned = await conn.fetchrow(
+                "SELECT discovery_source, metadata_json FROM targets WHERE url = 'host://db.scanned.test'")
+            scanned = await _admission(conn, "scanned.test")
+            return host, before, owner, after, legacy, legacy_added, owned, scanned
+
+    host, before, owner, after, legacy, legacy_added, owned, scanned = asyncio.run(run())
+    assert host["status"] == "created" and str(owner) == host["id"]
+    assert (before, after) == (200, 200)
+    assert (legacy, legacy_added) == (403, 200)
+    assert owned["discovery_source"] == "host" and "declared" not in (owned["metadata_json"] or "")
+    assert scanned == 403
+
+
+def test_adding_a_target_a_scan_or_hunt_created_makes_it_the_persons(monkeypatch):
+    """POST /targets and POST /targets/hosts on a row a scan or a Hunt agent created first turn it
+    into the person's own target; rows from other automated sources keep their source."""
+    from api import api as api_module
+    from targets.asset_router import HostTargetCreate, persist_host_target
+    encryption(monkeypatch)
+    _resolve_everything(monkeypatch)
+    monkeypatch.setenv(discovery.MAX_ACTIVE_ENV, "20")
+
+    async def run():
+        async with database() as conn:
+            await _converted(conn)
+            monkeypatch.setattr(api_module, "db_pool", BoundConnectionPool(conn))
+            await conn.execute("""INSERT INTO targets(url, name, discovery_source) VALUES
+                ('https://app.scanned.test', 'a', 'scan'),
+                ('https://found.discovered.test', 'f', 'subfinder')""")
+            await conn.execute("""INSERT INTO targets(url, name, metadata_json) VALUES
+                ('https://app.agentweb.test', 'w', '{"created_via": "hunt", "cohort": "lab"}')""")
+            await persist_host_target(conn, HostTargetCreate(locator="db.agent.test"), created_via="hunt")
+            before = {name: await _admission(conn, name)
+                      for name in ("scanned.test", "agentweb.test", "agent.test", "discovered.test")}
+            responses = []
+            for url in ("https://app.scanned.test", "https://app.agentweb.test",
+                        "https://found.discovered.test"):
+                responses.append(await api_module.create_target(
+                    types.SimpleNamespace(url=url, name=None, scan_options={})))
+            host = await persist_host_target(conn, HostTargetCreate(locator="db.agent.test"))
+            after = {name: await _admission(conn, name)
+                     for name in ("scanned.test", "agentweb.test", "agent.test", "discovered.test")}
+            rows = {row["url"]: (row["discovery_source"], row["metadata_json"]) for row in await conn.fetch(
+                """SELECT url, discovery_source, metadata_json::text AS metadata_json FROM targets
+                   WHERE url IN ('https://app.scanned.test', 'https://app.agentweb.test',
+                                 'https://found.discovered.test', 'host://db.agent.test')""")}
+            return before, responses, host, after, rows
+
+    before, responses, host, after, rows = asyncio.run(run())
+    assert before == {"scanned.test": 403, "agentweb.test": 403, "agent.test": 403, "discovered.test": 403}
+    assert [response["status"] for response in responses] == ["already_exists"] * 3
+    assert host["status"] == "already_exists"
+    assert after == {"scanned.test": 200, "agentweb.test": 200, "agent.test": 200, "discovered.test": 403}
+    assert rows["https://app.scanned.test"][0] == "manual"
+    assert rows["https://app.agentweb.test"][0] == "manual"
+    assert "created_via" not in rows["https://app.agentweb.test"][1]
+    assert '"cohort": "lab"' in rows["https://app.agentweb.test"][1]
+    assert rows["https://found.discovered.test"][0] == "subfinder"
+    assert rows["host://db.agent.test"][0] == "host"
+    assert "created_via" not in rows["host://db.agent.test"][1]
+    assert '"declared": true' in rows["host://db.agent.test"][1]
+
+
+class _StopAfterTargetRow(Exception):
+    pass
+
+
+def test_a_scan_submission_records_its_target_as_scan_created(monkeypatch):
+    """Drive the real submission path to the row it creates: it is marked 'scan' and does not
+    declare its domain."""
+    from api import api as api_module
+    encryption(monkeypatch)
+    monkeypatch.setenv(discovery.MAX_ACTIVE_ENV, "20")
+
+    async def dns_alias(_pool, target, **_kwargs):
+        return target, None, None, None
+
+    async def no_op(*_args, **_kwargs):
+        return None
+
+    async def stop(*_args, **_kwargs):
+        raise _StopAfterTargetRow
+
+    monkeypatch.setattr(api_module, "get_redis", lambda: object())
+    monkeypatch.setattr(api_module.target_dns_alias, "prepare_scan_dns_alias", dns_alias)
+    monkeypatch.setattr(api_module, "_worker_freshness_snapshot", lambda: {"available": False})
+    monkeypatch.setattr(api_module, "_require_approval_receipt_if_policy_enabled", no_op)
+    monkeypatch.setattr(api_module, "_require_reachable_fleet_placement", no_op)
+    monkeypatch.setattr(api_module, "_generic_collection_refs", stop)
+
+    async def run():
+        async with database() as conn:
+            await _converted(conn)
+            monkeypatch.setattr(api_module, "db_pool", BoundConnectionPool(conn))
+            with pytest.raises(_StopAfterTargetRow):
+                await api_module._submit_scan(api_module.ScanRequest(
+                    target="https://shop.submitted.test", policy={"active_testing": False}))
+            row = await conn.fetchrow(
+                "SELECT discovery_source, asset_owner_id FROM targets WHERE url = 'https://shop.submitted.test'")
+            return row, await _admission(conn, "submitted.test")
+
+    row, status = asyncio.run(run())
+    assert row["discovery_source"] == "scan" and row["asset_owner_id"] is not None
+    assert status == 403
+
+
+def test_a_hunt_agents_target_create_records_created_via_hunt(monkeypatch):
+    """Drive the Hunt ``targets.create`` action: the host it creates records created_via='hunt'
+    and does not declare its domain; a host the person already had is left theirs."""
+    from hunt.asset_actions import execute_asset_action
+    from targets.asset_router import HostTargetCreate, persist_host_target
+    encryption(monkeypatch)
+    monkeypatch.setenv(discovery.MAX_ACTIVE_ENV, "20")
+
+    async def run():
+        async with database() as conn:
+            await _converted(conn)
+            pool = BoundConnectionPool(conn)
+            subject = await persist_host_target(conn, HostTargetCreate(locator="subject.mine.test"))
+            hunt = {"id": uuid.uuid4(), "target_id": uuid.UUID(subject["id"]), "target_kind": "network",
+                    "policy_json": {}}
+            created = await execute_asset_action(pool, hunt, "targets.create", {"locator": "db.agent.test"})
+            existing = await execute_asset_action(pool, hunt, "targets.create", {"locator": "subject.mine.test"})
+            metadata = {row["url"]: json.loads(row["metadata_json"]) for row in await conn.fetch(
+                """SELECT url, metadata_json::text AS metadata_json FROM targets
+                   WHERE url IN ('host://db.agent.test', 'host://subject.mine.test')""")}
+            return (created, existing, metadata,
+                    await _admission(conn, "agent.test"), await _admission(conn, "mine.test"))
+
+    created, existing, metadata, agent, mine = asyncio.run(run())
+    assert created["status"] == "created" and existing["status"] == "already_exists"
+    assert metadata["host://db.agent.test"]["created_via"] == "hunt"
+    assert "created_via" not in metadata["host://subject.mine.test"]
+    assert (agent, mine) == (403, 200)

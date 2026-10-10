@@ -79,9 +79,32 @@ async def create_host_target(request: HostTargetCreate):
         return await persist_host_target(conn, request)
 
 
+# A person adding a target on the Targets page makes it theirs, even when a scan or a Hunt agent
+# created the row first: a scan-submitted row becomes 'manual', a Hunt agent's created_via is
+# dropped, and a host row is marked ``declared`` so it keeps declaring its domain after scans
+# attach web rows under it (operations/discovery.py). Other automated sources are left alone.
+_PERSON_ADDED_SQL = """
+UPDATE targets SET
+    discovery_source = CASE WHEN discovery_source = 'scan' THEN 'manual' ELSE discovery_source END,
+    metadata_json = CASE WHEN metadata_json->>'created_via' = 'hunt'
+                         THEN metadata_json - 'created_via' ELSE COALESCE(metadata_json, '{}'::jsonb) END
+        || CASE WHEN discovery_source = 'host' THEN '{"declared": true}'::jsonb ELSE '{}'::jsonb END
+WHERE id = $1
+  AND (discovery_source = 'scan' OR metadata_json->>'created_via' = 'hunt'
+       OR (discovery_source = 'host' AND metadata_json->>'declared' IS DISTINCT FROM 'true'))
+RETURNING discovery_source, metadata_json
+"""
+
+
+async def mark_person_added(conn, target_id) -> Any:
+    """Record that a person added ``target_id``; the updated row, or None when nothing changed."""
+    return await conn.fetchrow(_PERSON_ADDED_SQL, target_id)
+
+
 async def persist_host_target(conn, request: HostTargetCreate, *, created_via: str | None = None):
     """Create or update a host target. ``created_via`` names automation that created it (a Hunt
-    agent); it is recorded on a new row only, so a host a person added keeps counting as theirs."""
+    agent); it is recorded on a new row only, so a host a person added keeps counting as theirs.
+    Without it the caller is a person: the row is marked as theirs (``mark_person_added``)."""
     try:
         from scanner_tools.device_posture import normalize_device_locator
     except ModuleNotFoundError:
@@ -105,6 +128,8 @@ async def persist_host_target(conn, request: HostTargetCreate, *, created_via: s
             json.dumps({'environment':request.environment,'cohort':request.environment,
                         'port_hints':request.port_hints,
                         **({'created_via':created_via} if created_via else {})}),bool(request.port_hints))
+        if created_via is None:
+            await mark_person_added(conn, row['id'])
         result = {'id':str(row['id']), 'asset_id':str(row['id']), 'url':row['url'],
                   'status':'created' if row['created'] else 'already_exists'}
         saved = row['metadata_json']
