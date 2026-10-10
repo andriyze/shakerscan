@@ -527,9 +527,13 @@ def test_revoking_authorization_stops_an_action_running_on_a_fleet_node(template
 
 class _Api:
     def __init__(self, pool, monkeypatch):
-        import api as api_module
-        if not hasattr(api_module, "_validate_approval_receipt_for_action"):  # the package, not api.py
-            from api import api as api_module
+        import importlib
+
+        # api.py itself. An earlier import in the fixtures may have loaded the ``api`` package
+        # under that name; then its ``api.api`` submodule is the same file.
+        api_module = importlib.import_module("api")
+        if not hasattr(api_module, "_validate_approval_receipt_for_action"):
+            api_module = importlib.import_module("api.api")
         import arsenal_routes.router as arsenal
         monkeypatch.setattr(arsenal, "_pool", lambda: pool)
         self.api, self.arsenal, self.pool = api_module, arsenal, pool
