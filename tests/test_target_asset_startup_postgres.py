@@ -369,3 +369,32 @@ def test_converted_2_8_1_installation_gets_the_2_8_2_schema_and_data_migrations_
             assert await conn.fetchval('SELECT url FROM targets WHERE id=$1', numeric) == 'https://127.0.0.1/'
             assert await conn.fetchval('SELECT count(*) FROM discovery_runs') == 1
     asyncio.run(run())
+
+
+def test_post_discovery_answers_on_a_converted_2_8_1_installation_after_restart(monkeypatch):
+    """The route the Targets page's "Discover subdomains" calls (POST /discovery), on an upgraded
+    database: queued, not 500."""
+    async def run():
+        async with startup_database() as conn:
+            api_root = str(Path(__file__).resolve().parents[1] / 'api')
+            if api_root not in sys.path:
+                sys.path.insert(0, api_root)
+            module = importlib.import_module('retest_contract')
+            operations = importlib.import_module('operations.router')
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            # This is an isolated disposable database; no retained operator evidence exists.
+            await conn.execute('ALTER TABLE discovery_runs DROP COLUMN requested_by')
+            await conn.execute("INSERT INTO targets(url) VALUES('https://www.example.co.uk')")
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+
+            queued = []
+            pool = BoundConnectionPool(conn)
+            monkeypatch.setattr(operations, '_pool_provider', lambda: pool)
+            monkeypatch.setitem(operations._deps, 'get_redis', lambda: object())
+            monkeypatch.setitem(operations._deps, 'enqueue_job', lambda _r, _q, job: queued.append(job))
+            answer = await operations.start_discovery(root_domain='example.co.uk')
+            assert answer['status'] == 'queued' and queued[0]['root_domain'] == 'example.co.uk'
+            assert await conn.fetchval(
+                'SELECT requested_by FROM discovery_runs WHERE id=$1',
+                uuid.UUID(answer['discovery_id'])) == 'local-operator'
+    asyncio.run(run())
