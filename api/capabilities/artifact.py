@@ -223,7 +223,7 @@ _MIN_HEAD_READ_SECONDS = 5
 
 def _learn_head(
     collector: WithheldValues, tables: dict[str, list[str]], resource: str, head: bytes,
-    headers: dict[str, str],
+    headers: dict[str, str], version: str | None = None,
 ) -> None:
     """Remember whether a resource's head reads as a dump; a dump head also teaches its COPY and
     CREATE TABLE columns and where its COPY blocks open."""
@@ -233,7 +233,7 @@ def _learn_head(
         return
     tables[HEAD_VERDICT_KEY] = ["dump"]
     collector.sql_dump_like = True
-    track_copy_blocks(tables, 0, head)
+    track_copy_blocks(tables, 0, head, resource=version)
     learner = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=0)
     learner.sql_tables, learner.sql_path, learner.sql_dump_like = collector.sql_tables, resource, True
     with collecting_withheld_values(learner):
@@ -259,7 +259,7 @@ def _metadata_recorder(recorder: Callable[[dict[str, Any]], None] | None):
 async def _check_resource_head(
     target_url: str, path: str, target: TargetBinding, offset: int, span: bytes,
     transaction_recorder: Callable[[dict[str, Any]], None] | None,
-    *, span_start: int = 0, deadline: float | None = None,
+    *, span_start: int = 0, deadline: float | None = None, version: str | None = None,
 ) -> int:
     """Whether tab-separated rows in a window are a dump's COPY rows, when nothing in view says:
     read the resource's head (``HEAD_PROBE_BYTES``) once per resource per Hunt and remember the
@@ -285,7 +285,7 @@ async def _check_resource_head(
     if tabs is None or copy_evidence(text, tables, tabs):
         return 0
     if span_start == 0:
-        _learn_head(collector, tables, resource, span[:HEAD_PROBE_BYTES], {})
+        _learn_head(collector, tables, resource, span[:HEAD_PROBE_BYTES], {}, version)
         return 0
     attempts = 0
     if verdict[:1] == ["unreadable"] and len(verdict) > 1 and str(verdict[1]).isdigit():
@@ -303,7 +303,8 @@ async def _check_resource_head(
         tables[HEAD_VERDICT_KEY] = ["unreadable", str(attempts + 1)]
         collector.sql_dump_like = True  # unknown: fail closed
         return 1
-    _learn_head(collector, tables, resource, private.body()[:HEAD_PROBE_BYTES], private.headers())
+    _learn_head(collector, tables, resource, private.body()[:HEAD_PROBE_BYTES], private.headers(),
+                _resource_version(private))
     return 1
 
 
@@ -356,9 +357,11 @@ def _context_secrets(context: bytes, body: bytes, start: int | None = None) -> l
     probe = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=16_384)
     probe.sql_tables, probe.sql_path = shared
     probe.sql_dump_like = bool(collector and collector.sql_dump_like)
-    probe.copy_block = _copy_block_at(None if start is None else start + len(context) - len(near))
+    near_start = None if start is None else start + len(context) - len(near)
+    probe.copy_block = _copy_block_at(near_start)
     with collecting_withheld_values(probe):
-        mask_body_text((near + body).decode("utf-8", errors="replace"))
+        # A text cut at an arbitrary offset: a ``{`` at its start proves nothing about its format.
+        mask_body_text((near + body).decode("utf-8", errors="replace"), window=near_start != 0)
     return probe.values
 
 
@@ -382,7 +385,7 @@ def _masked_window_text(body: bytes, context: bytes = b"", start: int | None = N
     if collector is not None:
         collector.copy_block = _copy_block_at(None if start is None else start + len(context))
     try:
-        text = mask_body_text(text)
+        text = mask_body_text(text, window=(start or 0) + len(context) > 0)
     finally:
         if collector is not None:
             collector.copy_block = None
@@ -416,6 +419,16 @@ def _resource_bytes(private: WorkerPrivateHTTPResponse) -> int | None:
     return int(length) if length.isdigit() and int(length) > len(private.body()) else None
 
 
+def _resource_version(private: WorkerPrivateHTTPResponse) -> str | None:
+    """What identifies the resource's version, when the response says: its full size and ETag.
+    Byte positions learned from one version are not applied to another."""
+    size = _resource_bytes(private)
+    etag = str(private.headers().get("etag") or "").strip()[:200]
+    if size is None and not etag:
+        return None
+    return f"{'' if size is None else size}/{etag}"
+
+
 async def _fetch_artifact(
     target_url: str,
     *,
@@ -442,6 +455,7 @@ async def _fetch_artifact(
         timeout_seconds=timeout_seconds,
         allow_bound_origin_redirects=True,
         private_response_sink=captured.append,
+        private_response_headers=("etag",),
         response_body_limit=max(length, MAX_PUBLIC_TEXT),
     )
     return result, captured[-1] if captured else None
@@ -504,13 +518,14 @@ async def inspect_target_artifact(
         collector.sql_dump_like = True
     context = private.body()[:lead]
     received = private.body()[lead:]
+    version = _resource_version(private)
     if collector is not None and collector.sql_path:
         # Where COPY blocks open and end in what was read, by byte position in the resource.
         track_copy_blocks(collector.sql_tables.setdefault(collector.sql_path, {}), context_start,
-                          context + received[:length])
+                          context + received[:length], resource=version)
     requests = 1 + await _check_resource_head(
         target_url, path, target, offset, context + received[:length], transaction_recorder,
-        span_start=context_start, deadline=deadline)
+        span_start=context_start, deadline=deadline, version=version)
     body = received[:length]
     resource_bytes = _resource_bytes(private)
     terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]

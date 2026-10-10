@@ -218,3 +218,17 @@ def test_yaml_masking_work_grows_linearly(make):
     # A quadratic pass does 16x the work at 4x the input; a linear one about 4x.
     small, large = _line_events(mask_yaml_text, make(500)), _line_events(mask_yaml_text, make(2_000))
     assert large <= 6 * small, (small, large)
+
+
+@pytest.mark.parametrize("make", [
+    pytest.param(lambda size: "COPY a FROM stdin\n" * size, id="repeated-headers"),
+    pytest.param(lambda size: 'COPY public."a-b" (x, y) FROM stdin\n1\t2\n\\.\n' * size, id="closed-blocks"),
+])
+def test_copy_block_tracking_work_grows_linearly(make):
+    # Each header must cost the same however many came before it (at most a fixed number of
+    # blocks is kept); rebuilding the kept list per header grew with the input.
+    def track(text):
+        masking.track_copy_blocks({}, 0, text.encode())
+
+    small, large = _line_events(track, make(500)), _line_events(track, make(2_000))
+    assert large <= 6 * small, (small, large)
