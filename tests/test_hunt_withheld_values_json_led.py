@@ -252,3 +252,12 @@ def test_userinfo_passwords_are_withheld_exactly(url, secret):
 def test_a_leading_brace_that_is_not_json_gets_the_text_passes(body):
     assert S not in masking.withhold_body_secrets(body)
     assert S not in _collect(body)[0]
+
+
+def test_a_window_keeps_containers_under_secret_like_keys_valid_json():
+    window = ('{\n  "id": 1,\n  "session_timeout": [\n    1,\n    2\n  ],\n  "api_key_set": {},\n'
+              '  "password": "Fx7WindowPass!q",\n  "tokens": {\n    "access_token": "Fx7AccessTok0123xyz"\n  }\n}')
+    masked = masking.mask_body_text(window, window=True)
+    document = json.loads(masked)
+    assert document["api_key_set"] == {} and isinstance(document["session_timeout"], list)
+    assert "Fx7WindowPass" not in masked and "Fx7AccessTok" not in masked
