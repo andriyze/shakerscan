@@ -597,7 +597,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.create"
       },
-      "description": "Create instructions for this target, used automatically by future Hunts. Does not grant testing authority.",
+      "description": "Create this target’s advisory knowledge (purpose=knowledge), or its instructions where the operator opted in with instruction_changes. Used by future Hunts; grants no testing authority.",
       "input": {
         "fields": [
           "title",
@@ -631,7 +631,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.update"
       },
-      "description": "Update this target’s saved instructions with a revision check. This Hunt’s startup snapshot is unchanged.",
+      "description": "Update this target’s advisory knowledge, or its instructions where the operator opted in with instruction_changes, with a revision check. This Hunt’s startup snapshot is unchanged.",
       "input": {
         "fields": [
           "title",
@@ -665,7 +665,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.delete"
       },
-      "description": "Delete this target’s saved instructions with a revision check. Existing Hunt snapshots are retained.",
+      "description": "Delete this target’s advisory knowledge, or its instructions where the operator opted in with instruction_changes, with a revision check. Existing Hunt snapshots are retained.",
       "input": {
         "fields": [
           "expected_revision",
@@ -689,6 +689,43 @@ export const HUNT_START_CONTRACT = {
         "alternate_adapters": [],
         "binary": null,
         "name": "targets.skill.delete"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.propose"
+      },
+      "description": "Propose a change to this target’s operator instructions for an operator to review: the full proposed text, the revision you read, a reason and ids of supporting records. Applies nothing; at most 5 per Hunt.",
+      "input": {
+        "fields": [
+          "title",
+          "methodology",
+          "reason",
+          "base_revision",
+          "evidence_refs",
+          "operator_confirmed"
+        ],
+        "required": [
+          "title",
+          "methodology",
+          "reason",
+          "base_revision"
+        ]
+      },
+      "name": "targets.skill.propose",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.skill.propose",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.skill.propose"
       }
     },
     {

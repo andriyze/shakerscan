@@ -7,7 +7,7 @@ const profile='00000000-0000-4000-8000-000000000723'
 const collection='00000000-0000-4000-8000-000000000724'
 const targets=[{id,asset_id:id,locator:'example.test',name:'example.test',url:'host://example.test',is_active:true,environment:'lab',connected_device:false,origin_count:1},
   {id:source,asset_id:source,locator:'192.0.2.8',name:'Home TV',url:'host://192.0.2.8',is_active:true,environment:'lab',connected_device:true,service_count:3}]
-const permission={target_id:id,revision:0,metadata_changes:true,credential_profile_ids:[],collection_ids:[],ssh_host_keys:[],ssh_trust_first_contact:false}
+const permission={target_id:id,revision:0,metadata_changes:true,instruction_changes:false,credential_profile_ids:[],collection_ids:[],ssh_host_keys:[],ssh_trust_first_contact:false}
 
 test('TARGET-FILTERS-001 server filters select Web and IP/network without losing canonical actions',async ({page}) => {
   await pinMockApiOrigin(page)
@@ -52,7 +52,7 @@ test('TARGET-FILTERS-001 server filters select Web and IP/network without losing
   })).toBe(true)
 })
 
-test('TARGET-PERMISSIONS-001 metadata defaults on; operator can opt out while sharing named inputs and an SSH key',async ({page}) => {
+test('TARGET-PERMISSIONS-001 metadata defaults on, instruction edits off; operator can change both while sharing named inputs and an SSH key',async ({page}) => {
   await pinMockApiOrigin(page)
   let submitted:Record<string,unknown>|undefined
   let grants=0
@@ -75,6 +75,10 @@ test('TARGET-PERMISSIONS-001 metadata defaults on; operator can opt out while sh
   const metadata=dialog.getByRole('checkbox',{name:/Let Hunt manage targets/})
   await expect(metadata).toBeChecked()
   await metadata.uncheck()
+  // Editing instructions is its own opt-in, off by default and independent of metadata changes.
+  const instructions=dialog.getByRole('checkbox',{name:/Let Hunt edit these instructions/})
+  await expect(instructions).not.toBeChecked()
+  await instructions.check()
   await dialog.getByLabel('Source target').selectOption(source)
   await dialog.getByRole('checkbox',{name:'TV SSH identity',exact:true}).check()
   await dialog.getByRole('checkbox',{name:'TV API collection',exact:true}).check()
@@ -83,7 +87,7 @@ test('TARGET-PERMISSIONS-001 metadata defaults on; operator can opt out while sh
   await dialog.getByLabel('SSH fingerprint 1',{exact:true}).fill('SHA256:'+'a'.repeat(43))
   await dialog.getByRole('button',{name:'Save permissions',exact:true}).click()
   await expect(page.getByText(/Hunt permissions saved/)).toBeVisible()
-  expect(submitted).toEqual({expected_revision:0,metadata_changes:false,credential_profile_ids:[profile],collection_ids:[collection],ssh_host_keys:[{port:2222,fingerprint:'SHA256:'+'a'.repeat(43)}],ssh_trust_first_contact:false})
+  expect(submitted).toEqual({expected_revision:0,metadata_changes:false,instruction_changes:true,credential_profile_ids:[profile],collection_ids:[collection],ssh_host_keys:[{port:2222,fingerprint:'SHA256:'+'a'.repeat(43)}],ssh_trust_first_contact:false})
   expect(grants).toBe(0)
   expect(await page.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth)).toBe(false)
 })

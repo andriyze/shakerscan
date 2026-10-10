@@ -1,4 +1,4 @@
-/** Saved delegation makes Hunt instruction edits effective; knowledge is a separate input. */
+/** Operator (or explicitly opted-in delegated) instructions are effective; knowledge is a separate input. */
 export function targetInstructionState(saved) {
   const current = saved?.skill ?? null
   const trusted = ['operator', 'operator_delegated'].includes(saved?.trust)

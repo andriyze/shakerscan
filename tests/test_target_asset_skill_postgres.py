@@ -124,6 +124,12 @@ def test_hunt_starts_with_snapshot_and_crud_changes_only_future_hunts(monkeypatc
             owner = await authority_row(conn,identifier)
             await save_authority(conn,owner,{'revision':1,'metadata_changes':True},recorded_by='operator:test')
             values = {'operator_confirmed':True,'methodology':'Login with the TV profile; never reboot.', 'expected_revision':0}
+            # Saved metadata delegation alone no longer lets a Hunt write instructions.
+            with pytest.raises(HTTPException) as refused:
+                await asset_actions.execute_asset_action(pool,run_row,'targets.skill.create',values)
+            assert refused.value.detail['reason_code'] == 'instruction_changes_not_delegated'
+            await save_authority(conn,owner,{'revision':2,'metadata_changes':True,'instruction_changes':True},
+                                 recorded_by='operator:test')
             spec = CAPABILITY_REGISTRY.require('targets.skill.create')
             adapter = ControlPlaneExecutionAdapter(specification=spec,
                 operation=lambda:asset_actions.execute_asset_action(pool,run_row,spec.name,values),
@@ -139,7 +145,7 @@ def test_hunt_starts_with_snapshot_and_crud_changes_only_future_hunts(monkeypatc
             assert read['revision'] == 1 and read['skill']['methodology'] == values['methodology']
             started = await app_module._start_hunt_v2(contract)
             assert started['target_skill']['skill']['methodology'] == values['methodology']
-            assert started['target_skill']['skill']['instruction_authority'] == 'target_metadata_delegation'
+            assert started['target_skill']['skill']['instruction_authority'] == 'target_instruction_delegation'
             assert started['target_skill']['advisory'] is None
             assert started['target_skill']['authority_granted'] is False
             assert not started['policy']['active_testing']
@@ -163,10 +169,12 @@ def test_hunt_starts_with_snapshot_and_crud_changes_only_future_hunts(monkeypatc
                         assert (await skill.read_target_skill(conn,identifier))['skill']['methodology'] == values['methodology']
                     blocked = await client.patch(f'/devices/{device}',json={'metadata_json':{'target_skill':None}})
                     assert blocked.status_code == 422
-            await save_authority(conn,owner,{'revision':2,'metadata_changes':False},recorded_by='operator:test')
-            with pytest.raises(HTTPException, match='metadata changes'):
+            await save_authority(conn,owner,{'revision':3,'metadata_changes':False},recorded_by='operator:test')
+            with pytest.raises(HTTPException) as refused:
                 await asset_actions.execute_asset_action(pool,admitted,'targets.skill.delete',{'expected_revision':1})
-            await save_authority(conn,owner,{'revision':3,'metadata_changes':True},recorded_by='operator:test')
+            assert refused.value.detail['reason_code'] == 'instruction_changes_not_delegated'
+            await save_authority(conn,owner,{'revision':4,'metadata_changes':True,'instruction_changes':True},
+                                 recorded_by='operator:test')
             await asset_actions.execute_asset_action(pool,admitted,'targets.skill.update',
                 {**values,'methodology':'New priorities','expected_revision':1})
             await asset_actions.execute_asset_action(pool,admitted,'targets.skill.delete',

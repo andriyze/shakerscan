@@ -130,7 +130,9 @@ def test_outcome_summary_names_the_candidates_this_hunt_recorded():
     summary = asyncio.run(HuntRunService(lambda: _Pool(Connection())).get(hunt_id))["outcome_summary"]
     assert summary["candidate_ids"] == sorted(candidate_ids)
     assert summary["candidate_count"] == 2 and summary["candidate_ids_truncated"] is False
-    (query, args), = [item for item in queries if "FROM investigation_candidates" in item[0]]
+    # The briefing also counts the target's open candidates; this is the Hunt's own observation query.
+    (query, args), = [item for item in queries if "FROM investigation_candidates" in item[0]
+                      and "investigation_candidate_observations" in item[0]]
     assert args == (uuid.UUID(hunt_id),)
     assert "o.hunt_run_id=$1" in query and "status <> 'expired'" in query
 
