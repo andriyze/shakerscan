@@ -38,6 +38,9 @@ AUTHORITY_CHECK_RETRY_DELAYS = (0.5, 1.0, 2.0)
 AUTHORITY_CHECK_CANCEL_GRACE_SECONDS = 1.0
 
 UNVERIFIED = CapabilityResultReason.AUTHORIZATION_UNVERIFIED.value
+# How long work stopped on its authorization may take to wind down through its own stop checks
+# before it is cancelled outright.
+HARD_STOP_GRACE_SECONDS = 5.0
 
 
 class AuthorityCheckTimeout(Exception):

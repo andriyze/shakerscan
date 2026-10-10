@@ -47,14 +47,12 @@ import uuid
 
 from .action_authority_guard import ScanAuthorityGuard
 from .action_interruption import ActionInterruption, interruption_scope
-from .authority_deadline import UNVERIFIED, check_before_start, stop_task, watch_authorization
+from .authority_deadline import (
+    HARD_STOP_GRACE_SECONDS, UNVERIFIED, check_before_start, stop_task, watch_authorization,
+)
 from .authorization import ActionAuthorityDecision
 from .capability_result import CapabilityResultReason
 
-
-# How long a stopped run may take to wind down through its own stop checks before it is
-# cancelled outright.
-HARD_STOP_GRACE_SECONDS = 5.0
 
 _RUN_KINDS = frozenset({"device_posture", "device_probe",
                         "ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"})

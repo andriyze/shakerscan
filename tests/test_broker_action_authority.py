@@ -328,7 +328,7 @@ def test_an_adapter_heartbeating_from_its_own_dispatch_is_stopped_as_an_authoriz
     assert settled.budget_consumed["http_requests"] == 1 and len(seen) == 6
 
 
-def test_a_withdrawal_escaping_the_executor_is_settled_as_an_authorization_stop():
+def test_a_withdrawal_escaping_the_executor_fails_with_its_reason_and_keeps_its_reservation():
     from api.scan.execution_backend import ActionAuthorityWithdrawn
 
     plan = _plan()
@@ -345,8 +345,10 @@ def test_a_withdrawal_escaping_the_executor_is_settled_as_an_authorization_stop(
 
     executor = Escaping(_executor_for(lambda *_a: None, None))
     settled = _orchestrate(_WithdrawingBackend(plan, {}), executor, plan)
-    assert settled.status == "blocked" and settled.errors == ("authorization_expired",)
-    assert set(settled.budget_consumed.values()) == {0}  # not charged in full
+    # The action may already have sent traffic: an unknown outcome keeps its full reservation,
+    # and the reason is the authorization stop, not an adapter failure.
+    assert settled.status == "failed" and settled.errors == ("authorization_expired",)
+    assert dict(settled.budget_consumed) == dict(plan.actions[0].requested_budget)
 
 
 def test_only_authorization_stop_reasons_count_as_a_withdrawal():
@@ -362,3 +364,37 @@ def _executor_for(dispatch, authority):
     from tests.test_scan_orchestrator import SCAN_ID
     return ReceiptScanActionExecutor(scan_id=SCAN_ID, target_id="target-1", worker_id="local-worker-1",
                                      dispatcher=dispatch, authority=authority)
+
+
+def test_an_adapter_that_ignores_the_stop_is_cancelled_after_the_grace_and_heartbeats_stop():
+    from api.scan.execution_backend import ActionAuthorityWithdrawn
+
+    plan = _plan()
+    action = plan.actions[0]
+    heartbeats = []
+    cancelled = []
+
+    async def heartbeat():
+        heartbeats.append(time.monotonic())
+        raise ActionAuthorityWithdrawn("authorization_revoked")
+
+    async def ignoring(_action, _lease, adapter_heartbeat):
+        # Heartbeats itself and never looks at action_interrupted().
+        try:
+            while True:
+                await adapter_heartbeat()
+                await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            cancelled.append(time.monotonic())
+            raise
+
+    control = FixtureControlPlane(default={"reason": None})
+    authority = _authority(plan, control, poll_seconds=30.0, unverified_after_seconds=60.0)
+    authority.hard_stop_grace_seconds = 0.3
+    started = time.monotonic()
+    receipt = asyncio.run(_executor(ignoring, authority).execute(action, _lease(plan, action), heartbeat))
+    # Withdrawn at the first heartbeat, cancelled after the grace, never asked again.
+    assert len(heartbeats) == 1 and len(cancelled) == 1
+    assert 0.3 <= cancelled[0] - heartbeats[0] < 0.3 + 0.2 and time.monotonic() - started < 1.0
+    assert receipt.status == "failed" and receipt.errors == ("authorization_revoked",)
+    assert dict(receipt.budget_consumed) == dict(action.requested_budget)

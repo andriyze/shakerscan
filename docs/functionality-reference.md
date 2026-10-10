@@ -136,7 +136,8 @@ offline deterministic finalizer ── findings / coverage / grade reliability
   withdrawn action's heartbeat is refused with 409 `authority_withdrawn:<reason>`, which the node
   treats as an authorization stop, not a lost lease: before the action starts it is settled
   blocked with the reason and nothing charged; while it runs the tool is stopped and the receipt
-  is partial. A result reporting traffic for a withdrawn action is always recorded partial with
+  is partial, and a tool that has not stopped 5 s later is cancelled and fails with the reason,
+  keeping its full reservation because what it did is unknown. A result reporting traffic for a withdrawn action is always recorded partial with
   the control plane's reason, keeping its observations and any stop the node reported, never as a
   clean success. A revoke or expiry stays a stop for the rest of the action; an out-of-scope answer
   (a deactivated target) is checked afresh on the next poll. Device posture
