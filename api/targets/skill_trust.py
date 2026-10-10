@@ -10,12 +10,28 @@ from typing import Any, Mapping
 from uuid import UUID
 
 
+#: The instruction authorities this engine writes. A record from a later engine may carry another
+#: (2.9's ``target_instruction_delegation``): it is read as ``none``, the least trusted.
+KNOWN_AUTHORITIES = ('operator', 'target_metadata_delegation', 'none')
+
+
+def known_authority(value: Any) -> str:
+    return value if value in KNOWN_AUTHORITIES else 'none'
+
+
 def instruction_trust(document: Mapping[str, Any] | None) -> str:
     if not document:
         return 'none'
     writer = document.get('written_by')
+    hunt = isinstance(writer, str) and writer.startswith('hunt:')
     if document.get('purpose') == 'knowledge':
-        return 'hunt_advisory' if isinstance(writer, str) and writer.startswith('hunt:') else 'unknown_advisory'
+        return 'hunt_advisory' if hunt else 'unknown_advisory'
+    # A later engine records where the text came from (``origin``). Any origin other than an
+    # operator's (``agent_delegated``, ``agent_unconfirmed`` or one this engine does not know) only
+    # demotes: such text is advisory here, never operator or delegated guidance.
+    origin = document.get('origin')
+    if origin is not None and origin != 'operator':
+        return 'hunt_advisory' if hunt else 'unknown_advisory'
     if isinstance(writer, str) and writer.startswith('operator:'):
         return 'operator'
     if isinstance(writer, str) and writer.startswith('hunt:'):
