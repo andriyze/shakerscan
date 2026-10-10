@@ -604,3 +604,147 @@ def _outage(flaky, seconds, *, settle=0.0):
         flaky.down = False
         await asyncio.sleep(settle)
     return outage
+
+
+class StallingPool:
+    """Fixture pool for the guard only: ``acquire`` can stay pending or be delayed.
+
+    While ``stalled``, an acquisition never completes (a pool or network that never answers);
+    ``delay`` holds every acquisition that long before the real one. ``pending`` counts
+    acquisitions still waiting, ``cancelled`` those the guard abandoned at its deadline.
+    """
+
+    def __init__(self, pool, *, delay=0.0):
+        self._pool, self.delay, self.stalled = pool, delay, False
+        self.pending = self.cancelled = 0
+
+    def acquire(self):
+        pool = self
+
+        @asynccontextmanager
+        async def acquired():
+            pool.pending += 1
+            try:
+                if pool.stalled:
+                    await asyncio.Event().wait()
+                await asyncio.sleep(pool.delay)
+            except asyncio.CancelledError:
+                pool.cancelled += 1
+                raise
+            finally:
+                pool.pending -= 1
+            async with pool._pool.acquire() as conn:
+                yield conn
+        return acquired()
+
+
+def _stall_for(seconds, *, start, stop, marks):
+    """A ``during`` hook: start a stall, end it ``seconds`` later in the background."""
+    async def hook():
+        await asyncio.sleep(0.3)
+        await start()
+        marks["stalled_at"] = time.monotonic()
+
+        async def release():
+            await asyncio.sleep(seconds)
+            await stop()
+        marks["release"] = asyncio.create_task(release())
+    return hook
+
+
+def test_a_pool_acquisition_that_never_completes_stops_the_scan_within_the_tolerance(template_database):
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            stalling = StallingPool(pool)
+            marks = {}
+
+            async def start():
+                stalling.stalled = True
+
+            async def stop():
+                stalling.stalled = False
+
+            dispatcher = FixtureToolDispatcher(
+                str(scan.target_id), str(scan.scan_id), long_actions=frozenset({"templates.active"}),
+                during={"templates.active": _stall_for(6.0, start=start, stop=stop, marks=marks)})
+            guard = scan.guard(poll_seconds=0.3, unverified_after_seconds=1.5)
+            guard.pool = stalling
+            await scan.run(dispatcher, guard)
+            returncode, exited_at = dispatcher.process_exits["templates.active"]
+            # Due 1.5 s after the last confirmation, which started at most one poll before the
+            # stall: the hung acquisition did not hold the interruption back.
+            assert returncode is not None and returncode < 0
+            assert 1.5 - 0.3 - 0.1 <= exited_at - marks["stalled_at"] < 1.5 + 0.5
+            actions = await scan.actions()
+            assert actions["templates.active"] == ("partial", "authorization_unverified")
+            # The database still does not answer: the next action's check is bounded too and
+            # blocks it, unverified; nothing else is dispatched.
+            assert actions["templates.followup"] == ("blocked", "authorization_unverified")
+            assert dispatcher.dispatched == ["baseline.http", "templates.active", "finalize.report"]
+            assert not guard.withdrawn and not scan.events
+            assert not any(reason == "authorization_revoked" for _status, reason in actions.values())
+            assert await scan.held_reservations() == 0
+            assert stalling.cancelled >= 2 and stalling.pending == 0
+            await marks["release"]
+    asyncio.run(run())
+
+
+def test_a_query_left_waiting_on_a_lock_is_cancelled_at_the_deadline(template_database):
+    """A real pending query: another session holds a lock the guard's statements need."""
+    async def run():
+        import asyncpg
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            database = await pool.fetchval("SELECT current_database()")
+            locker = await asyncpg.connect(_dsn(), database=database)
+            marks = {}
+
+            async def start():
+                await locker.execute("BEGIN; LOCK TABLE approval_receipts IN ACCESS EXCLUSIVE MODE")
+
+            async def stop():
+                marks["waiting_on_lock"] = await locker.fetchval(
+                    """SELECT count(*) FROM pg_stat_activity
+                        WHERE datname=current_database() AND wait_event_type='Lock'""")
+                await locker.execute("ROLLBACK")
+
+            try:
+                dispatcher = FixtureToolDispatcher(
+                    str(scan.target_id), str(scan.scan_id), long_actions=frozenset({"templates.active"}),
+                    during={"templates.active": _stall_for(5.0, start=start, stop=stop, marks=marks)})
+                guard = scan.guard(poll_seconds=0.3, unverified_after_seconds=1.5)
+                await scan.run(dispatcher, guard)
+                _returncode, exited_at = dispatcher.process_exits["templates.active"]
+                assert exited_at - marks["stalled_at"] < 1.5 + 0.5
+                actions = await scan.actions()
+                assert actions["templates.active"] == ("partial", "authorization_unverified")
+                assert actions["templates.followup"] == ("blocked", "authorization_unverified")
+                assert dispatcher.dispatched == ["baseline.http", "templates.active", "finalize.report"]
+                assert not guard.withdrawn and not scan.events
+                assert await scan.held_reservations() == 0
+                await marks["release"]
+            finally:
+                await locker.close()
+            # The abandoned statements were cancelled on the server, not left queued on the lock,
+            # and every connection went back to the pool.
+            assert marks["waiting_on_lock"] == 0
+            assert pool.get_idle_size() == pool.get_size()
+    asyncio.run(run())
+
+
+def test_slow_but_answering_checks_do_not_stop_a_healthy_scan(template_database):
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            slow = StallingPool(pool, delay=0.5)  # every acquisition slower than the poll interval
+            dispatcher = FixtureToolDispatcher(str(scan.target_id), str(scan.scan_id),
+                                               after={"templates.active": lambda: asyncio.sleep(2.5)})
+            guard = scan.guard(poll_seconds=0.3, unverified_after_seconds=1.5)
+            guard.pool = slow
+            await scan.run(dispatcher, guard)
+            actions = await scan.actions()
+            assert {status for status, _reason in actions.values()} == {"success"}
+            assert dispatcher.dispatched == [action.action_id for action in scan.plan.actions]
+            assert guard.polls >= 2 and slow.cancelled == 0 and not guard.withdrawn
+    asyncio.run(run())

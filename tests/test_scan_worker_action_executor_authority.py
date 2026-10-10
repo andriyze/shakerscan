@@ -229,3 +229,135 @@ def test_an_unknown_reason_from_the_check_fails_closed(reason):
         action, _lease(plan, action), lambda: asyncio.sleep(0)))
     assert calls == [] and receipt.status == "blocked"
     assert receipt.errors == ("authorization_unverified",)
+
+
+class StallingAuthority(FixtureAuthority):
+    """Fixture authority whose checks stall: they never answer, or answer only after a delay.
+
+    ``poll_stall``/``check_stall`` is ``None`` for no stall, ``float('inf')`` for a check that
+    never returns (a pool acquisition or query left pending), or seconds before the scripted
+    answer. Records every check that was cancelled and every check still pending.
+    """
+
+    def __init__(self, *, poll_stall=None, check_stall=None, stall_polls_from=0, **kwargs):
+        super().__init__(**kwargs)
+        self.poll_stall, self.check_stall, self.stall_polls_from = poll_stall, check_stall, stall_polls_from
+        self.cancelled: list[str] = []
+        self.pending = 0
+
+    async def _stall(self, seconds, kind):
+        self.pending += 1
+        try:
+            await asyncio.sleep(3600 if seconds == float("inf") else seconds)
+        except asyncio.CancelledError:
+            self.cancelled.append(kind)
+            raise
+        finally:
+            self.pending -= 1
+
+    async def check(self, action):
+        if self.check_stall is not None:
+            await self._stall(self.check_stall, "check")
+        return await super().check(action)
+
+    async def poll(self, action):
+        if self.poll_stall is not None and len(self.polled) >= self.stall_polls_from:
+            self.polled.append(action.action_id)
+            await self._stall(self.poll_stall, "poll")
+            answer = self._polls.pop(0) if self._polls else None
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        return await super().poll(action)
+
+
+def _run_with_tasks(coro):
+    """Run ``coro``; return its result and the tasks still alive once it finished."""
+    async def run():
+        result = await coro
+        await asyncio.sleep(0)
+        return result, [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+    return asyncio.run(run())
+
+
+def test_a_poll_that_never_returns_interrupts_within_the_tolerance():
+    plan = _plan()
+    action = plan.actions[0]
+    calls = []
+    authority = StallingAuthority(poll_stall=float("inf"), poll_seconds=0.05, unverified_after_seconds=0.4)
+    started = time.monotonic()
+    receipt, alive = _run_with_tasks(_executor(_long_dispatch(calls), authority).execute(
+        action, _lease(plan, action), lambda: asyncio.sleep(0)))
+    elapsed = time.monotonic() - started
+    # The deadline runs from the pre-dispatch confirmation; the hung poll cannot hold it back.
+    assert 0.35 <= elapsed < 0.4 + 0.3
+    assert calls == [action.action_id]
+    assert receipt.status == "partial" and receipt.errors == ("authorization_unverified",)
+    assert receipt.budget_consumed["http_requests"] == 1
+    assert receipt.redacted_execution["target_authority_interruption"]["reason_code"] == "authorization_unverified"
+    # The stalled poll was cancelled and nothing is left running.
+    assert authority.cancelled == ["poll"] and authority.pending == 0
+    assert alive == []
+
+
+def test_the_deadline_runs_from_the_last_confirmation_not_the_first_failure():
+    plan = _plan()
+    action = plan.actions[0]
+    # Two confirmed polls, then every poll fails only after a delay longer than its interval.
+    authority = StallingAuthority(poll_stall=0.15, stall_polls_from=2, poll_seconds=0.05,
+                                  unverified_after_seconds=0.4,
+                                  polls=(None, None) + (OSError("slow failure"),) * 50)
+    started = time.monotonic()
+    receipt, alive = _run_with_tasks(_executor(_long_dispatch([]), authority).execute(
+        action, _lease(plan, action), lambda: asyncio.sleep(0)))
+    elapsed = time.monotonic() - started
+    # Last confirmation at about 0.1 s (two 0.05 s intervals), so the stop is due by about
+    # 0.5 s; counting from the first slow failure (about 0.25 s) would give about 0.65 s.
+    assert elapsed < 0.1 + 0.4 + 0.1
+    assert receipt.status == "partial" and receipt.errors == ("authorization_unverified",)
+    assert authority.pending == 0 and alive == []
+
+
+def test_a_slow_but_successful_poll_does_not_interrupt():
+    plan = _plan()
+    action = plan.actions[0]
+    # Each poll answers after 0.1 s: slower than the interval, well inside the tolerance.
+    authority = StallingAuthority(poll_stall=0.1, poll_seconds=0.05, unverified_after_seconds=0.4)
+    receipt, alive = _run_with_tasks(_executor(_long_dispatch([], seconds=0.8), authority).execute(
+        action, _lease(plan, action), lambda: asyncio.sleep(0)))
+    assert receipt.status == "success" and receipt.errors == ()
+    assert len(authority.polled) >= 4 and alive == []
+
+
+def test_a_pre_dispatch_check_that_never_returns_blocks_within_the_tolerance():
+    plan = _plan()
+    action = plan.actions[0]
+    calls = []
+    authority = StallingAuthority(check_stall=float("inf"), unverified_after_seconds=0.3,
+                                  check_retry_delays=(0.01, 0.01))
+    started = time.monotonic()
+    receipt, alive = _run_with_tasks(_executor(_long_dispatch(calls), authority).execute(
+        action, _lease(plan, action), lambda: asyncio.sleep(0)))
+    assert time.monotonic() - started < 0.3 + 0.3
+    assert calls == [] and receipt.status == "blocked"
+    assert receipt.errors == ("authorization_unverified",)
+    assert set(receipt.budget_consumed.values()) == {0}
+    assert authority.cancelled == ["check"] and authority.pending == 0 and alive == []
+
+
+def test_pre_dispatch_retries_stop_at_the_tolerance():
+    plan = _plan()
+    action = plan.actions[0]
+    calls = []
+    # Each attempt fails after 0.15 s; four attempts with their delays would take about 1.5 s.
+    authority = StallingAuthority(check_stall=0.15, unverified_after_seconds=0.4,
+                                  check=OSError("slow failure"), check_retry_delays=(0.2, 0.2, 0.2))
+    started = time.monotonic()
+    receipt, alive = _run_with_tasks(_executor(_long_dispatch(calls), authority).execute(
+        action, _lease(plan, action), lambda: asyncio.sleep(0)))
+    assert time.monotonic() - started < 0.4 + 0.3
+    assert calls == [] and receipt.errors == ("authorization_unverified",)
+    # The first attempt failed at 0.15 s; the second started at 0.35 s and was cancelled at the
+    # 0.4 s deadline before it answered; no third attempt was made.
+    assert len(authority.checked) == 1 and authority.cancelled == ["check"]
+    assert authority.pending == 0 and alive == []

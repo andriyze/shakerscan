@@ -118,7 +118,20 @@ offline deterministic finalizer ── findings / coverage / grade reliability
 - **Workers** (`api/worker.py`, `api/broker_worker.py`): lease only admitted jobs/actions by leasing
   Redis Stream messages. They resolve secrets late, revalidate scope and approval immediately before
   privileged work, reserve typed budget, execute one registered capability adapter, and settle a
-  content-safe receipt.
+  content-safe receipt. A canonical web DAST Scan executed on the local worker
+  (`_execute_reserved_deterministic_scan`, including its parallel shards) re-checks the target's
+  authorization before each action and about every 2 s while one runs: a revoked or expired
+  authorization, or a deactivated target, stops the running tool, blocks every later action without
+  traffic and releases its budget; the report keeps what was found, reads partial and names
+  `stop_reason: authorization_withdrawn` and the actions that did not run. When the database cannot
+  be reached the check is retried; about 10 s without a successful confirmation (an outage, or a
+  pool acquisition or query that never answers, which is cancelled) stops the action as
+  `authorization_unverified`, which is not reported as a revoke. The check before an action is
+  bounded by the same 10 s, retries included. Broker actions are re-checked when
+  each one is leased, not while running on a node. Not yet re-checked while running: device
+  posture, probe and web-DAST runs and AI scans (the `run_scan` path), device web children, finding
+  retests, and broker actions already running on a node; these rely on the authorization checked
+  when they were admitted or started.
 - **Compatibility scanner** (`scanner/scanner.py`, `scanner/scanner_tools/`): supplies migrated detector
   implementations behind registered adapters. Its historical phase waterfall and mode flags are not
   V2 orchestration authority and must not be used to add a new Scan engine.
@@ -245,6 +258,23 @@ The canonical graph uses `web.probe`, `web.crawl`, `web.content_discover`, `subd
 `ports.discover`, and `service.fingerprint`. All targets receive the bounded web probe; the `recon`
 family controls additional crawl/content breadth, and network/subdomain actions require their
 separate policy permission. Output is normalized into one content-addressed endpoint manifest.
+
+**Subdomain takeover** (`subdomains.takeover_check`, planned after `subdomains.discover` whenever
+subdomain discovery is permitted): a passive check of the bound host plus at most 50 discovered
+names under the bound root. Discovered names are not destinations of the Scan, so they get DNS
+evidence only: the CNAME chain and whether its terminal exists. The service catalogue follows
+can-i-take-over-xyz: a terminal that does not exist and belongs to a "vulnerable" NXDOMAIN-signature
+service (Azure, Elastic Beanstalk), confirmed by an independent resolver (the configured
+`SHAKERSCAN_DNS_DOH_RESOLVERS`, not the system resolver's negative cache), is a verified high
+finding. Only such a catalogue service name is ever sent to the DoH resolvers, never a name under
+an internal suffix, and only for a binding `dns.inspect` would also let use DoH; otherwise the
+finding stays suspected; any other non-existent terminal is a suspected dangling CNAME (medium). A first hop at a
+service whose signature is an HTTP page (S3, Bitbucket, WordPress.com, ...) is listed as
+`inconclusive_dns_only` in `report.discovery.subdomains.takeover`. Only the bound host, through the
+bound-request path and within the reserved request budget, gets one `GET /` whose bounded body is
+matched against that service's unclaimed-resource page: verified for a "vulnerable" service,
+suspected for an "edge case" one (GitHub Pages, Heroku, Shopify, Tumblr). Nothing is claimed,
+registered or changed.
 
 **Declared surface** (`web.spec_ingest`): besides the conventional OpenAPI/Swagger locations, the
 same action fetches `robots.txt` and `llms.txt` from the origin root. `Disallow`/`Allow` rules and
@@ -731,20 +761,20 @@ digest-pinned physical acceptance and fault matrix. Follow the [operator guide](
 ## 10. Attack-surface management: discovery, CT monitoring, schedules
 
 **Subdomain discovery** (`POST /discovery`, `process_discovery_job`): enumerates subdomains for a root
-domain via Gungnir, Subfinder, and crt.sh, then upserts discovered hosts as targets. The domain must
-be a bare host name at or below a registrable domain under the bundled Public Suffix List (400 for a
-URL, port, wildcard, address or public suffix such as `co.uk`, or a name with one below it such
-as `amazonaws.com`), its apex must hold a target a person added on the Targets page (not one a scan
-submission, discovery, the CT monitor, an AI session, AI Gate, Model Intake, a Hunt agent or the
-asset model created; a host a person added keeps counting after scans attach web rows under it,
-adding a target a scan or a Hunt agent created makes it the person's, and rows stored before these
-markers existed cannot be told apart and count as they did) (403), and only one run per apex (409) and
-`SHAKERSCAN_DISCOVERY_MAX_ACTIVE` runs engine-wide (default 2, 429) may be queued or running; the run
-records `requested_by` (derived by the engine, `local-operator`; never taken from the request),
-and the worker re-validates the queued domain before running. Each name is
+domain via Gungnir, Subfinder (all sources, `-all`), and crt.sh, then upserts discovered hosts as
+targets. A name is accepted only when, canonicalised (lower case, no trailing dot or `*.` label,
+IDNA), it ends with `.` + the root on a label boundary: `notexample.com` is never a subdomain of
+`example.com`, on this path, the Scan's own discovery or the Gungnir CT monitor. Each name is
 resolved first (bounded concurrency, short timeout); a name the resolver says has no A/AAAA record
 is not added and is reported in the run's `resolution` (`GET /discovery/{id}`), while a name the
-resolver could not judge is still added. Adding a target (`POST /targets`) or submitting a Scan
+resolver could not judge is still added. Wildcard DNS is detected in the same bounded lookups:
+random 16-hex labels are resolved under the root and under the (at most eight) parents the names
+sit under, and a name whose answer is only a wildcard's addresses or CNAME target is suppressed
+unless a certificate (Gungnir, crt.sh or a CT-backed subfinder source) names it. The run's
+`resolution` lists each wildcard and a note such as `wildcard DNS at *.dev.example.com; 12 names
+suppressed`; a Scan's recorded discovery adds the `wildcard_dns` partial reason.
+
+Adding a target (`POST /targets`) or submitting a Scan
 (`POST /scans`, `/scans/batch`, `/targets/{id}/scan`, `shakerscan scan`) for a name
 with no address record uses its www/apex twin when that twin resolves to an address the destination
 policy admits in the requested target's environment; the response carries `dns_fallback`/`notice`,
@@ -756,14 +786,43 @@ scope receipt for the exact pair, without a second operator confirmation; bounde
 receipts are not copied. This also works for multi-label suffixes such as `example.co.uk`. Otherwise
 Scan admission names the non-resolving host.
 
+**Subfinder provider keys**: without keys, subfinder skips every source that needs one
+(SecurityTrails, Shodan, Censys, Chaos, VirusTotal, ...). Set either variable for the workers.
+The Compose files pass both to `worker` (Scan and Targets-page discovery) and `agent-tool-worker`
+(a Hunt's `subdomains.discover` runs there, so Hunt discovery also spends provider quota). Fleet
+nodes receive `SHAKERSCAN_SUBFINDER_PROVIDERS` once, in the connection bundle captured at
+`fleet init` and written to the node's 0600 `worker.env`: after rotating a key, re-enroll the node
+(or edit `SHAKERSCAN_SUBFINDER_PROVIDERS` in its `worker.env` and restart its worker). Only the
+inline variable is forwarded; a `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` path is not, so a node that
+should use a mounted file needs its own.
+
+- `SHAKERSCAN_SUBFINDER_PROVIDERS` -- inline in `.env`, `provider=key[,key...]` entries separated by
+  `;`, for example `SHAKERSCAN_SUBFINDER_PROVIDERS=securitytrails=KEY;censys=ID:SECRET;shodan=K1,K2`.
+  A key containing `;`, `,` or `=` escapes it with a backslash (`\;`, `\,`, `\=`; `\\` is a
+  backslash). Compose strips one layer of surrounding quotes from a `.env` value; anywhere else
+  (a shell export, a fleet `worker.env`) the parser keeps quote characters literally as part of
+  the provider name or key, so write the value unquoted.
+- `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` -- the in-container path of a subfinder
+  `provider-config.yaml` (`provider: [key, ...]`). Mount it read-only with a Compose override,
+  e.g. `- ./secrets/subfinder.yaml:/run/secrets/subfinder.yaml:ro` and
+  `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG=/run/secrets/subfinder.yaml`.
+
+Both sources are merged. For each run the keys are rendered into a fresh 0700 temporary directory
+as a 0600 file, passed with `-pc`, and deleted when the run ends; they never appear in argv,
+receipts, logs or stored errors: a keyed run that fails keeps only `subfinder_exit_<code>`, and
+its subprocess receipt withholds stderr (a source error can echo a URL with the key in its query).
+The generic redactor also masks a URL userinfo password with an empty user name
+(`redis://:***@redis`). Directories a killed run left behind are removed by the first render in
+each process. An invalid configuration is reported as
+`subfinder_provider_config_invalid` (or `_unreadable`), without any value, in the discovery run's
+subfinder source error and the Scan action's errors, and discovery proceeds on the keyless sources. Time bounds are unchanged: `-all` adds
+sources that run concurrently within subfinder's 2-minute `-max-time` and 10 s per-source timeout,
+which the registry's 120 s tool wall already covers.
+
 **Certificate Transparency monitoring (Gungnir)** (`api/gungnir_worker.py`): a long-running worker
 that watches CT logs in real time, discovering new certificates for monitored domains. New subdomains
 are auto-added as targets (`discovery_source = gungnir-monitor`); if the root domain has ASM enabled,
-discovered surface inherits the ASM policy. A root that is a public suffix is never monitored, a name
-must be a valid host under a monitored root on a label boundary (a leading `*.` names its parent), and
-each apex gains at most `SHAKERSCAN_CT_MONITOR_DAILY_CAP` new targets per UTC day (default 100); names
-over the cap are counted per apex and day in Redis `gungnir:suppressed` and the status's
-`suppressed_over_daily_cap`, not added. Controlled via `./scanner.sh gungnir start|stop|status`
+discovered surface inherits the ASM policy. Controlled via `./scanner.sh gungnir start|stop|status`
 and `/gungnir/*` endpoints.
 
 **Schedules** (`schedule_runner`, `/schedules`): recurring daily/weekly actions with timezone and
@@ -1608,6 +1667,8 @@ identity. These routes will be removed after remaining legacy callers migrate.
 - Allocation fallback: `COVERAGE_ALLOCATION_DEFAULT`. Shard ceilings: `SHAKERSCAN_MAX_SHARDS`,
   `SHAKERSCAN_COVERAGE_MAX_SHARDS`, `PARALLEL_SHARD_MAX_PER_PARENT`, etc.
 - Custom dictionaries: `SHAKERSCAN_CUSTOM_WORDLIST`, `SHAKERSCAN_CUSTOM_<CAT>_PAYLOADS`.
+- Subdomain discovery provider keys: `SHAKERSCAN_SUBFINDER_PROVIDERS` (inline) or
+  `SHAKERSCAN_SUBFINDER_PROVIDER_CONFIG` (mounted YAML); see §10.
 - Deployment/binding: `SHAKERSCAN_BIND_HOST` (UI/API), `SHAKERSCAN_DATA_BIND_HOST`
   (Redis/Postgres; loopback by default), `SHAKERSCAN_PUBLIC_HOST`, `SHAKERSCAN_REMOTE`.
 - Data-store authentication: `REDIS_PASSWORD`, `POSTGRES_PASSWORD` (`shakerscan start` generates
