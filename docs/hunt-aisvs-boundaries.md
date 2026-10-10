@@ -1,22 +1,28 @@
 # Hunt instruction, learning and planner boundaries
 
-**Status:** Instruction CRUD and automatic learning implemented; scoped ingress is opt-in.
+**Status:** Instruction CRUD (behind its own opt-in), proposals, the startup briefing and automatic learning implemented; scoped ingress is opt-in.
 
 These controls keep default-on metadata editing, operator opt-outs, standing
-authorization and same-asset service reuse. It is not
-an AISVS compliance claim.
+authorization and same-asset service reuse. Editing operator instructions is a
+separate permission, off by default. It is not an AISVS compliance claim.
 
 ## Effective instruction changes, not hidden drafts
 
 The existing versioned `target_skill` record has two bounded sections, not two
 target inventories. `operator_skill` retains its compatibility field name but now
-means effective instructions: operator-written or written by Hunt under the
-server's saved target metadata delegation. `knowledge` contains learned advisory
+means effective instructions: operator-written, written by Hunt under the
+target's saved `instruction_changes` permission, or applied from an accepted
+instruction proposal. `knowledge` contains learned advisory
 context. Each section is limited to 12,000 characters. They share the existing
 revision check and 20-entry history.
 
-`targets.skill.create|update|delete` defaults to `purpose: instructions`. A
-successful authorized update changes the instructions loaded by future Hunts.
+`targets.skill.create|update|delete` defaults to `purpose: instructions`, which
+is refused unless the operator turned on the target's `instruction_changes`
+permission (saved through `PUT /targets/{id}/hunt-authority` or the UI's Hunt
+permissions; off for every target, including targets whose permissions were
+saved before the setting existed). Metadata delegation never permits it. The
+refusal names `targets.skill.propose`. A successful authorized update changes
+the instructions loaded by future Hunts.
 A successful deletion removes those active instructions; it does not leave a
 hidden operator baseline in force. Existing Hunt admission snapshots and revision
 history remain immutable. No additional UI save is required.
@@ -32,9 +38,80 @@ review show the two sections separately.
 The API derives writer and delegation provenance. Client-supplied writer, trust,
 or delegation fields are rejected. Saved operator opt-outs still stop metadata
 writes. Neither instructions nor learning can create testing authority, credential
-grants, or budget increases. Broad instruction delegation intentionally permits
-broad instruction edits: this is not a claim that a compromised delegated planner
-cannot abuse the permission that the operator chose to give it.
+grants, or budget increases. Turning on `instruction_changes` intentionally
+permits broad instruction edits: this is not a claim that a compromised delegated
+planner cannot abuse the permission that the operator chose to give it.
+
+## Instruction proposals
+
+Without `instruction_changes`, a Hunt suggests guidance with
+`targets.skill.propose`: the complete proposed text, the `base_revision` it read
+(it must be the current revision), a title, a reason and up to 20 ids of this
+Hunt actions or receipts, findings, candidates or scans on the target's asset.
+A proposal is stored
+in `target_instruction_proposals` as `pending` and applies nothing. A Hunt files
+at most 5; a target holds at most 20 pending Hunt proposals and, separately, 20
+pending operator proposals; a Hunt's newer proposal supersedes its earlier
+pending one. Proposal text may not contain terminal control characters, invisible formatting characters (zero-width, direction marks, tag characters) or line separators; `shakerscan knowledge review` shows any such character inside a reviewed recipe or instruction text as a visible escape.
+
+Operators list proposals (`GET /instruction-proposals`,
+`GET /targets/{id}/instruction-proposals`, each pending one with a unified diff
+against the current instructions and a `stale` flag), accept, reject or rebase
+them (`POST /targets/{id}/instruction-proposals/{proposal_id}/accept|reject|rebase`),
+or review them in a terminal with `shakerscan knowledge review [target]`
+(`--accept ID`, `--reject ID`), which decides each one with a single keypress
+and ignores arrow keys, escape sequences and pastes; it offers accept only when
+the whole difference was shown, and sends the digest of the text it showed,
+which the server checks. Accepting writes the text
+through the ordinary revision-checked operator write. A proposal is stale when
+the instructions changed after its base revision; a stale proposal cannot be
+accepted until it is rebased, which files the same text against the current
+instructions as a new pending proposal so the new difference is reviewed.
+Pending proposal text never reaches a Hunt's instructions, briefing or planner
+context; the briefing carries only the count.
+
+Saved target actions shape future Hunts the same way, so they share the
+permission. A Hunt's `targets.actions.create|update|delete` applies only where
+`instruction_changes` is on; otherwise it files a `saved_action` proposal in the
+same table (the operation, the action id and the proposed recipe; optional
+`reason` and `evidence_refs`), reviewed with the same routes and
+`shakerscan knowledge review`. The reviewed text is the recipe as indented JSON
+with control, invisible formatting and line-separator characters escaped; accepting applies
+that recipe through the revision-checked operator write and binds to the digest
+of the text shown. Any change to the target's saved actions makes such a
+proposal stale. Only the specific `instruction_changes_not_delegated` refusal
+becomes a proposal; every other refusal or error is returned as is.
+
+## Agent-written, unconfirmed instructions
+
+Instructions whose last writer cannot be shown to be an operator or a Hunt acting
+under `instruction_changes` (in particular text a Hunt wrote under the former
+metadata delegation, `instruction_authority: target_metadata_delegation`) are
+*agent-written, unconfirmed*. They are not operator guidance: the planner
+snapshot carries them in `target_skill.unconfirmed` (never `target_skill.skill`),
+the briefing in its own `unconfirmed_instructions` section, and the skill API in
+`unconfirmed_instructions` with `trust: agent_unconfirmed`. They grant no
+permission and never widen scope. A Hunt started before this rule is read under
+it. Saved actions follow the same rule (`trust: agent_unconfirmed`). Startup marks
+such records `origin: agent_unconfirmed` on every start from the always-run
+migration path, so databases converted by earlier releases are covered; a stored
+origin can only lower trust. An operator save (the UI, `PUT`/`POST
+/targets/{id}/skill`, `POST /targets/{id}/skill/confirm` with the digest of the
+text read, `c` in `shakerscan knowledge review`, or accepting a proposal)
+replaces the record and clears the mark.
+
+## Startup briefing
+
+Every Hunt start response, `GET /hunts/{id}` and the summary query carry a
+bounded `briefing` (`hunt-briefing/v1`, at most about 24 KB): the operator
+instructions snapshotted at start (whole, or headings and a leading part with
+`more_available` and where to read the rest), the objective, an authority
+summary (scope, permissions, target delegation, approval requirements, budget
+limits and use), knowledge counts by kind, the pending proposal count and
+unresolved work (open candidates, unfinished authorization investigations,
+actions in progress or awaiting permission). The compact MCP view never omits it;
+anything shortened is listed in
+`briefing.trimmed`.
 
 ### Example
 
@@ -52,7 +129,8 @@ cannot abuse the permission that the operator chose to give it.
 Send to the current Hunt's `targets.skill.create` capability when no knowledge
 section exists, or `targets.skill.update` otherwise. Read current state through
 `targets.skill.read`; revisions are shared across the two sections. For an
-operator-directed instruction change, use the default `instructions` purpose.
+operator-directed instruction change, use the default `instructions` purpose
+where `instruction_changes` is on, and `targets.skill.propose` otherwise.
 
 ## Optional scoped planner listener
 

@@ -16,6 +16,11 @@ from .budget_amendments import (
     require_resume_headroom,
 )
 
+from .briefing import reproject_snapshot, static_briefing, with_live_briefing
+try:
+    from targets.skill_trust import action_trust
+except ModuleNotFoundError:  # pragma: no cover - package import layout
+    from ..targets.skill_trust import action_trust
 from .credential_uses import read_credential_uses
 from .permission_grants import settle_for_ended_hunt
 from .permission_store import pending_summary
@@ -675,10 +680,24 @@ def public_hunt_run(
     # needs to see which methodology a hunt was run under without parsing the whole pack.
     bound_skills = (context.get("skills") or {}).get("bound")
     result["skills"] = list(bound_skills) if isinstance(bound_skills, list) else []
+    if isinstance(context.get("target_skill"), Mapping):
+        # Hunts started before the current trust rule are read under it: agent-written text that no
+        # operator confirmed is never returned in the operator-instruction slot.
+        context = {**context, "target_skill": reproject_snapshot(context["target_skill"])}
+    if isinstance(context.get("target_actions"), Mapping) and isinstance(context["target_actions"].get("actions"), list):
+        # Saved actions snapshotted before trust labels existed are labelled under the same rule.
+        context = {**context, "target_actions": {**context["target_actions"], "actions": [
+            {**entry, "trust": action_trust(entry)} if isinstance(entry, Mapping) and "trust" not in entry else entry
+            for entry in context["target_actions"]["actions"]]}}
     result["target_skill"] = context.get("target_skill")
     if not include_context and result["target_skill"] and result["target_skill"].get("skill"):
         result["target_skill"] = {**result["target_skill"], "skill": {
             key: value for key, value in result["target_skill"]["skill"].items() if key != "methodology"
+        }}
+    if not include_context and result["target_skill"] and result["target_skill"].get("unconfirmed"):
+        result["target_skill"] = {**result["target_skill"], "unconfirmed": {
+            key: value for key, value in result["target_skill"]["unconfirmed"].items()
+            if key not in {"methodology", "title"}
         }}
     if not include_context and result["target_skill"] and result["target_skill"].get("advisory"):
         result["target_skill"] = {**result["target_skill"], "advisory": {
@@ -693,6 +712,8 @@ def public_hunt_run(
         [str(item) for item in adjustments] if isinstance(adjustments, list) else []
     )
     if include_context:
+        # Small by construction and never dropped by compact clients, unlike the context pack.
+        result["briefing"] = static_briefing(item, policy, context)
         result["context_pack"] = context
     return result
 
@@ -868,7 +889,7 @@ class HuntRunService:
             live_candidates = await connection.fetch(HUNT_CANDIDATES_QUERY, hunt_uuid)
             credential_uses = await read_credential_uses(connection, hunt_uuid)
             pending_permissions = await pending_summary(connection, hunt_uuid)
-        result = public_hunt_run(row)
+            result = await with_live_briefing(connection, public_hunt_run(row), row)
         result["actions"] = [public_hunt_action(action) for action in actions]
         result["outcome_summary"] = hunt_action_outcome_summary(result["actions"])
         result["outcome_summary"]["finding_ids"] = sorted(str(item["id"]) for item in live_findings)

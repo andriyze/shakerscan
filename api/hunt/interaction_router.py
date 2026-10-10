@@ -374,8 +374,11 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
     async with _pool().acquire() as conn:
         run = await _hunt_run_or_404(conn, hunt_id)
         if request.kind == "summary":
+            from .briefing import with_live_briefing
+            public = await with_live_briefing(conn, _hunt_public(run), run)
             return {"hunt_id": hunt_id, "kind": "summary", "count": 0, "rows": [],
-                    "context": _hunt_public(run).get("context_pack"),
+                    "briefing": public.get("briefing"),
+                    "context": public.get("context_pack"),
                     "has_more": False, "next_cursor": None}
         try:
             result = await query_knowledge_page(
@@ -1291,7 +1294,9 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
             await _require_candidate_evidence(conn, run, request.evidence_refs)
             candidate = investigation_candidates.normalize_candidate(
                 plane="device" if run["device_target_id"] else "web",
-                target_id=str(run["target_id"]) if run["target_id"] else None,
+                # A device Hunt's run row carries the device id in both columns; a device candidate
+                # names it only as device_target_id.
+                target_id=str(run["target_id"]) if run["target_id"] and not run["device_target_id"] else None,
                 device_target_id=str(run["device_target_id"]) if run["device_target_id"] else None,
                 hunt_run_id=str(run["id"]), family=request.family, locus=request.locus,
                 title=request.title, claim=request.claim, severity=request.severity,
@@ -4234,7 +4239,7 @@ def _hunt_redacted_capability_input(
     if capability_name == "ssh.exec":
         from .ssh_command_audit import redact_ssh_command
         values = redact_ssh_command(values)
-    if capability_name in {'targets.skill.create', 'targets.skill.update'} and 'methodology' in values:
+    if capability_name in {'targets.skill.create', 'targets.skill.update', 'targets.skill.propose'} and 'methodology' in values:
         body = str(values.pop('methodology'))
         values.update(body_sha256=hashlib.sha256(body.encode('utf-8')).hexdigest(), characters=len(body))
     if capability_name in {'targets.actions.create', 'targets.actions.update'}:

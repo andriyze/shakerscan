@@ -491,7 +491,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.create"
       },
-      "description": "Save a named reusable action for this target using canonical capabilities and opaque references.",
+      "description": "Save a named reusable action for this target using canonical capabilities and opaque references. Applied only where the operator saved instruction_changes for this target; otherwise filed as a proposal for operator review (the result says applied=false).",
       "input": {
         "fields": [
           "name",
@@ -499,6 +499,8 @@ export const HUNT_START_CONTRACT = {
           "expected_revision",
           "steps",
           "parameters",
+          "reason",
+          "evidence_refs",
           "operator_confirmed"
         ],
         "required": [
@@ -527,7 +529,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.update"
       },
-      "description": "Edit a saved action on this exact target with a revision check. Future Hunts load the change.",
+      "description": "Edit a saved action on this exact target with a revision check. Future Hunts load the change. Applied only where the operator saved instruction_changes for this target; otherwise filed as a proposal for operator review (the result says applied=false).",
       "input": {
         "fields": [
           "name",
@@ -535,6 +537,8 @@ export const HUNT_START_CONTRACT = {
           "expected_revision",
           "steps",
           "parameters",
+          "reason",
+          "evidence_refs",
           "action_id",
           "operator_confirmed"
         ],
@@ -565,11 +569,13 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.delete"
       },
-      "description": "Delete a saved action on this exact target with a revision check.",
+      "description": "Delete a saved action on this exact target with a revision check. Applied only where the operator saved instruction_changes for this target; otherwise filed as a proposal for operator review (the result says applied=false).",
       "input": {
         "fields": [
           "action_id",
           "expected_revision",
+          "reason",
+          "evidence_refs",
           "operator_confirmed"
         ],
         "required": [
@@ -597,7 +603,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.create"
       },
-      "description": "Create instructions for this target, used automatically by future Hunts. Does not grant testing authority.",
+      "description": "Create this target’s advisory knowledge (purpose=knowledge), or its instructions where the operator opted in with instruction_changes. Used by future Hunts; grants no testing authority.",
       "input": {
         "fields": [
           "title",
@@ -631,7 +637,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.update"
       },
-      "description": "Update this target’s saved instructions with a revision check. This Hunt’s startup snapshot is unchanged.",
+      "description": "Update this target’s advisory knowledge, or its instructions where the operator opted in with instruction_changes, with a revision check. This Hunt’s startup snapshot is unchanged.",
       "input": {
         "fields": [
           "title",
@@ -665,7 +671,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.delete"
       },
-      "description": "Delete this target’s saved instructions with a revision check. Existing Hunt snapshots are retained.",
+      "description": "Delete this target’s advisory knowledge, or its instructions where the operator opted in with instruction_changes, with a revision check. Existing Hunt snapshots are retained.",
       "input": {
         "fields": [
           "expected_revision",
@@ -689,6 +695,43 @@ export const HUNT_START_CONTRACT = {
         "alternate_adapters": [],
         "binary": null,
         "name": "targets.skill.delete"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.propose"
+      },
+      "description": "Propose a change to this target’s operator instructions for an operator to review: the full proposed text, the revision you read, a reason and ids of supporting records. Applies nothing; at most 5 per Hunt.",
+      "input": {
+        "fields": [
+          "title",
+          "methodology",
+          "reason",
+          "base_revision",
+          "evidence_refs",
+          "operator_confirmed"
+        ],
+        "required": [
+          "title",
+          "methodology",
+          "reason",
+          "base_revision"
+        ]
+      },
+      "name": "targets.skill.propose",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.skill.propose",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.skill.propose"
       }
     },
     {

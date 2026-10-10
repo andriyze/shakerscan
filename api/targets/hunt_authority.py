@@ -23,6 +23,9 @@ def authority_from_row(row) -> dict:
     return {
         'target_id': str(row['id']), 'revision': int(saved.get('revision') or 0),
         'metadata_changes': active if not saved else current and saved.get('metadata_changes', True) is True,
+        # Editing operator instructions is a separate, explicit opt-in. Never derived from
+        # metadata_changes, and absent from every authority saved before it existed.
+        'instruction_changes': current and saved.get('instruction_changes') is True,
         'credential_profile_ids': list(saved.get('credential_profile_ids') or []) if current else [],
         'collection_ids': list(saved.get('collection_ids') or []) if current else [],
         'ssh_host_keys': list(saved.get('ssh_host_keys') or []) if current else [],
@@ -76,9 +79,51 @@ async def save_authority(conn, row, values: dict, *, recorded_by: str):
     return saved
 
 
+INSTRUCTION_SKILL_WRITES = frozenset({'targets.skill.create', 'targets.skill.update', 'targets.skill.delete'})
+# Saved actions shape future Hunts exactly like instructions, so they share the same opt-in.
+SAVED_ACTION_WRITES = frozenset({'targets.actions.create', 'targets.actions.update', 'targets.actions.delete'})
+
+
+def skill_write_purpose(values) -> str:
+    """The slot a skill write targets; the same default the write itself applies."""
+    purpose = (values or {}).get('purpose')
+    return 'instructions' if purpose is None else str(purpose)
+
+
+def instruction_changes_refusal(kind: str = 'instructions') -> HTTPException:
+    if kind == 'saved_action':
+        return HTTPException(403, {
+            'error': 'instruction_changes_not_delegated',
+            'reason_code': 'instruction_changes_not_delegated',
+            'message': ('This Hunt may not change this target’s saved actions directly. Without the '
+                        'operator’s instruction_changes setting a saved-action write is filed as a '
+                        'proposal that an operator reviews (shakerscan knowledge review).'),
+            'operator_setting': 'instruction_changes',
+        })
+    return HTTPException(403, {
+        'error': 'instruction_changes_not_delegated',
+        'reason_code': 'instruction_changes_not_delegated',
+        'message': ('This Hunt may not edit this target’s operator instructions. Suggest the change '
+                    'with targets.skill.propose (the full proposed text, a reason and evidence refs); '
+                    'an operator reviews it. Use purpose=knowledge with targets.skill.create|update '
+                    'to record advisory observations.'),
+        'propose_with': 'targets.skill.propose',
+        'operator_setting': 'instruction_changes',
+    })
+
+
 async def require_hunt_delegation(conn, run, name, values):
     row = await authority_row(conn, run.get('device_target_id') or run['target_id'], lock=True)
     authority = authority_from_row(row)
+    if name in INSTRUCTION_SKILL_WRITES and skill_write_purpose(values) != 'knowledge':
+        # Instructions are operator guidance: their own opt-in, independent of metadata changes.
+        if not authority['instruction_changes']:
+            raise instruction_changes_refusal()
+        return row, authority
+    if name in SAVED_ACTION_WRITES:
+        if not authority['instruction_changes']:
+            raise instruction_changes_refusal('saved_action')
+        return row, authority
     if name.startswith('targets.') and not authority['metadata_changes']:
         raise HTTPException(403, 'Enable Hunt metadata changes in this target’s Hunt permissions')
     if name == 'credentials.grant' and str(values.get('profile_id')) not in authority['credential_profile_ids']:

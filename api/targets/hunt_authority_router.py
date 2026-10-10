@@ -19,6 +19,8 @@ class HuntAuthorityWrite(BaseModel):
     model_config = ConfigDict(extra='forbid')
     expected_revision: StrictInt = Field(ge=0)
     metadata_changes: StrictBool = True
+    # Off unless the operator sends true: Hunts propose instruction changes instead.
+    instruction_changes: StrictBool = False
     credential_profile_ids: list[UUID] = Field(default_factory=list, max_length=64)
     collection_ids: list[UUID] = Field(default_factory=list, max_length=64)
     ssh_host_keys: list[SshHostKey] = Field(default_factory=list, max_length=32)

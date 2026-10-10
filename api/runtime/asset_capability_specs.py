@@ -1,13 +1,14 @@
 """Target management declarations composed into the canonical capability registry."""
 
 MAX_TARGET_SKILL_CHARACTERS = 12_000
+MAX_PROPOSALS_PER_HUNT = 5
 
 def asset_capability_specs(spec, schema, kinds):
-    confirmed = {'type':'boolean','description':'Deprecated compatibility field; grants no authority. Metadata edits default on but obey operator opt-outs; sharing needs saved grants.'}
+    confirmed = {'type':'boolean','description':'Deprecated compatibility field; grants no authority. Metadata edits default on but obey operator opt-outs; instruction edits need the operator’s explicit instruction_changes opt-in; sharing needs saved grants.'}
     identifier = {'type':'string','format':'uuid'}
     revision = {'type':'integer','minimum':0}
     purpose = {'type':'string','enum':['instructions','knowledge'],'default':'instructions',
-               'description':'instructions applies delegated CRUD immediately to future Hunts; knowledge is automatically loaded advisory learning. Neither grants execution authority.'}
+               'description':'instructions edits the operator’s target instructions and is refused unless the operator saved instruction_changes for this target (otherwise use targets.skill.propose); knowledge is automatically loaded advisory learning, permitted by metadata delegation. Neither grants execution authority.'}
     skill_text = {'title':{'type':'string','minLength':1,'maxLength':120},
                   'methodology':{'type':'string','minLength':1,'maxLength':MAX_TARGET_SKILL_CHARACTERS},
                   'expected_revision':revision, 'purpose':purpose}
@@ -21,19 +22,38 @@ def asset_capability_specs(spec, schema, kinds):
                 'input':{'type':'object'},'description':{'type':'string','maxLength':240}}}},
         'parameters':{'type':'object','maxProperties':16},
     }
+    review_note = {
+        'reason':{'type':'string','maxLength':2000,
+                  'description':'Why the change helps; shown to the operator when the change is filed for review.'},
+        'evidence_refs':{'type':'array','maxItems':20,'uniqueItems':True,'items':{'type':'string','format':'uuid'},
+                         'description':'Ids of Hunt actions or receipts, findings, candidates or scans on this target’s asset.'},
+    }
+    reviewed = (' Applied only where the operator saved instruction_changes for this target; otherwise filed as '
+                'a proposal for operator review (the result says applied=false).')
     definitions = (
-        ('targets.actions.create','Save a named reusable action for this target using canonical capabilities and opaque references.',
-         action_text,('name','steps','expected_revision')),
-        ('targets.actions.update','Edit a saved action on this exact target with a revision check. Future Hunts load the change.',
-         {**action_text,'action_id':identifier},('action_id','name','steps','expected_revision')),
-        ('targets.actions.delete','Delete a saved action on this exact target with a revision check.',
-         {'action_id':identifier,'expected_revision':revision},('action_id','expected_revision')),
-        ('targets.skill.create','Create instructions for this target, used automatically by future Hunts. Does not grant testing authority.',
+        ('targets.actions.create','Save a named reusable action for this target using canonical capabilities and opaque references.'+reviewed,
+         {**action_text,**review_note},('name','steps','expected_revision')),
+        ('targets.actions.update','Edit a saved action on this exact target with a revision check. Future Hunts load the change.'+reviewed,
+         {**action_text,**review_note,'action_id':identifier},('action_id','name','steps','expected_revision')),
+        ('targets.actions.delete','Delete a saved action on this exact target with a revision check.'+reviewed,
+         {'action_id':identifier,'expected_revision':revision,**review_note},('action_id','expected_revision')),
+        ('targets.skill.create','Create this target’s advisory knowledge (purpose=knowledge), or its instructions where the operator opted in with instruction_changes. Used by future Hunts; grants no testing authority.',
          skill_text,('methodology','expected_revision')),
-        ('targets.skill.update','Update this target’s saved instructions with a revision check. This Hunt’s startup snapshot is unchanged.',
+        ('targets.skill.update','Update this target’s advisory knowledge, or its instructions where the operator opted in with instruction_changes, with a revision check. This Hunt’s startup snapshot is unchanged.',
          skill_text,('methodology','expected_revision')),
-        ('targets.skill.delete','Delete this target’s saved instructions with a revision check. Existing Hunt snapshots are retained.',
+        ('targets.skill.delete','Delete this target’s advisory knowledge, or its instructions where the operator opted in with instruction_changes, with a revision check. Existing Hunt snapshots are retained.',
          {'expected_revision':revision,'purpose':purpose},('expected_revision',)),
+        ('targets.skill.propose',('Propose a change to this target’s operator instructions for an operator to review: the full proposed text, the revision you read, a reason and ids of supporting records. Applies nothing; at most '
+         f'{MAX_PROPOSALS_PER_HUNT} per Hunt.'),
+         {'title':{'type':'string','minLength':1,'maxLength':120,'description':'One line saying what the change does.'},
+          'methodology':{'type':'string','minLength':1,'maxLength':MAX_TARGET_SKILL_CHARACTERS,
+                         'description':'The complete proposed instructions text (a full replacement, not a diff).'},
+          'reason':{'type':'string','minLength':1,'maxLength':2000},
+          'base_revision':{**revision,'description':'The revision targets.skill.read returned; the proposal is reviewed against it.'},
+          'evidence_refs':{'type':'array','maxItems':20,'uniqueItems':True,
+                           'items':{'type':'string','format':'uuid'},
+                           'description':'Ids of Hunt actions or receipts, findings, candidates or scans on this target’s asset.'}},
+         ('title','methodology','reason','base_revision')),
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
           'name':{'type':'string','maxLength':255},

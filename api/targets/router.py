@@ -132,11 +132,13 @@ from .asset_router import router as asset_router, configure_asset_router, mark_p
 from .skill import router as target_skill_router
 from .actions import router as target_actions_router
 from .hunt_authority_router import router as hunt_authority_router
+from .instruction_proposals import router as instruction_proposals_router
 router = APIRouter()
 router.include_router(asset_router)
 router.include_router(target_skill_router)
 router.include_router(target_actions_router)
 router.include_router(hunt_authority_router)
+router.include_router(instruction_proposals_router)
 
 _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}
@@ -3276,6 +3278,8 @@ class TargetUpdate(BaseModel):
             raise ValueError("edit target instructions through /targets/{id}/skill with a revision check")
         if value and "hunt_authority" in value:
             raise ValueError("edit Hunt permissions through /targets/{id}/hunt-authority with a revision check")
+        if value and "hunt_actions" in value:
+            raise ValueError("edit saved actions through /targets/{id}/actions with a revision check")
         if value and ({"declared", "created_via"} & set(value)):
             # Provenance that subdomain discovery admission reads: set only when a target is added
             # (POST /targets, POST /targets/hosts) or created by automation, never edited here.

@@ -4,6 +4,8 @@ export interface TargetHuntAuthority {
   target_id: string
   revision: number
   metadata_changes: boolean
+  /** Off unless the operator opts in: lets a Hunt edit this target's instructions directly. */
+  instruction_changes: boolean
   credential_profile_ids: string[]
   collection_ids: string[]
   ssh_host_keys: Array<{port: number; fingerprint: string}>

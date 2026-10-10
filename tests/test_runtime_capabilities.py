@@ -58,6 +58,7 @@ def test_registry_filters_target_kind_and_active_permission():
         "targets.actions.read", "targets.actions.create", "targets.actions.update", "targets.actions.delete",
         "targets.create", "targets.update",
         "targets.skill.read", "targets.skill.create", "targets.skill.update", "targets.skill.delete",
+        "targets.skill.propose",
         "scan.finalize", "scan.execute", "scan.origin_select",
         "web.probe", "http.request", "artifact.inspect", "javascript.analyze",
         "dns.inspect", "infrastructure.inspect", "subdomains.discover", "subdomains.takeover_check",

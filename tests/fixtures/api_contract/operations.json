@@ -1285,6 +1285,11 @@
     "operation_id": "stream_ssh_command_hunts__hunt_id__ssh_exec_post"
   },
   {
+    "path": "/instruction-proposals",
+    "method": "get",
+    "operation_id": "get_all_instruction_proposals_instruction_proposals_get"
+  },
+  {
     "path": "/investigation/candidates",
     "method": "get",
     "operation_id": "list_investigation_candidates_investigation_candidates_get"
@@ -2180,6 +2185,31 @@
     "operation_id": "put_hunt_authority_targets__target_id__hunt_authority_put"
   },
   {
+    "path": "/targets/{target_id}/instruction-proposals",
+    "method": "get",
+    "operation_id": "get_target_instruction_proposals_targets__target_id__instruction_proposals_get"
+  },
+  {
+    "path": "/targets/{target_id}/instruction-proposals",
+    "method": "post",
+    "operation_id": "post_instruction_proposal_targets__target_id__instruction_proposals_post"
+  },
+  {
+    "path": "/targets/{target_id}/instruction-proposals/{proposal_id}/accept",
+    "method": "post",
+    "operation_id": "post_accept_instruction_proposal_targets__target_id__instruction_proposals__proposal_id__accept_post"
+  },
+  {
+    "path": "/targets/{target_id}/instruction-proposals/{proposal_id}/rebase",
+    "method": "post",
+    "operation_id": "post_rebase_instruction_proposal_targets__target_id__instruction_proposals__proposal_id__rebase_post"
+  },
+  {
+    "path": "/targets/{target_id}/instruction-proposals/{proposal_id}/reject",
+    "method": "post",
+    "operation_id": "post_reject_instruction_proposal_targets__target_id__instruction_proposals__proposal_id__reject_post"
+  },
+  {
     "path": "/targets/{target_id}/invariants",
     "method": "get",
     "operation_id": "list_target_invariant_contracts_targets__target_id__invariants_get"
@@ -2293,6 +2323,11 @@
     "path": "/targets/{target_id}/skill",
     "method": "put",
     "operation_id": "update_target_skill_targets__target_id__skill_put"
+  },
+  {
+    "path": "/targets/{target_id}/skill/confirm",
+    "method": "post",
+    "operation_id": "confirm_target_skill_targets__target_id__skill_confirm_post"
   },
   {
     "path": "/timeline",

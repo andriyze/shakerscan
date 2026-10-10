@@ -50,6 +50,17 @@ def test_scoped_planner_learns_updates_deletes_and_cannot_self_authorize(monkeyp
                         assert response.json()['action_result']['status'] == 'success', response.text
                         return response.json()
                     body = {'methodology':'Inspect port 8443 instead.', 'expected_revision':1}
+                    # Instruction edits are their own opt-in, off by default: the refusal says how to propose.
+                    refused = await planner.post(f'/hunts/{hunt_id}/capabilities/targets.skill.update',
+                        json={'idempotency_key':'runtime-refused-01','input':body})
+                    assert refused.status_code == 403, refused.text
+                    assert refused.json()['detail']['propose_with'] == 'targets.skill.propose'
+                    authority_path = f'/targets/{target}/hunt-authority'
+                    self_grant = await planner.put(authority_path,json={'expected_revision':0,'instruction_changes':True})
+                    assert self_grant.status_code == 403
+                    opted_in = await operator.put(authority_path,json={'expected_revision':0,'instruction_changes':True})
+                    assert opted_in.status_code == 200 and opted_in.json()['instruction_changes'] is True, opted_in.text
+                    assert opted_in.json()['metadata_changes'] is True
                     changed = await invoke('update','runtime-change-01',body)
                     assert changed['result']['trust'] == 'operator_delegated'
                     assert await conn.fetchval('SELECT receipt_id IS NOT NULL FROM hunt_actions WHERE id=$1',UUID(changed['action_id']))
@@ -81,7 +92,6 @@ def test_scoped_planner_learns_updates_deletes_and_cannot_self_authorize(monkeyp
                     first = await planner.get(f'/hunts/{hunt_id}')
                     assert first.status_code == 200, first.text
                     assert first.json()['target_skill']['skill']['methodology'] == 'Inspect port 443.'
-                    authority_path = f'/targets/{target}/hunt-authority'
                     before = (await operator.get(authority_path)).json()
                     attack = await planner.put(authority_path,json={
                         'expected_revision':before['revision'],'metadata_changes':True,
@@ -92,6 +102,7 @@ def test_scoped_planner_learns_updates_deletes_and_cannot_self_authorize(monkeyp
                     opted_out = await operator.put(authority_path,json={
                         'expected_revision':before['revision'],'metadata_changes':False})
                     assert opted_out.status_code == 200, opted_out.text
+                    assert opted_out.json()['instruction_changes'] is False  # not sent: off again
                     denied = await planner.post(f'/hunts/{hunt_id}/capabilities/targets.skill.create',json={
                         'idempotency_key':'runtime-optout-01','input':{
                             'methodology':'No longer allowed','expected_revision':4,'operator_confirmed':True}})

@@ -11,8 +11,9 @@ export interface TargetSkill {
   updated_at: string
   written_by?: string | null
   purpose?: 'instructions' | 'knowledge'
-  instruction_authority?: 'operator' | 'target_metadata_delegation' | 'none'
+  instruction_authority?: 'operator' | 'target_instruction_delegation' | 'target_metadata_delegation' | 'none'
   delegation_revision?: number | null
+  origin?: 'operator' | 'agent_delegated' | 'agent_unconfirmed' | null
 }
 export interface TargetSkillState {
   target_id: string
@@ -21,7 +22,8 @@ export interface TargetSkillState {
   max_characters: number
   operator_skill?: TargetSkill | null
   knowledge?: TargetSkill | null
-  trust?: 'none' | 'operator' | 'operator_delegated' | 'hunt_advisory' | 'unknown_advisory'
+  unconfirmed_instructions?: TargetSkill | null
+  trust?: 'none' | 'operator' | 'operator_delegated' | 'agent_unconfirmed' | 'hunt_advisory' | 'unknown_advisory'
 }
 export interface TargetSkillSnapshot extends TargetSkillState {
   loaded_at_start: boolean
@@ -33,7 +35,7 @@ async function request(id: string, init?: RequestInit, query = ''): Promise<Targ
   const response = await fetch(`${API_URL}/targets/${encodeURIComponent(id)}/skill${query}`, {cache:'no-store', ...init})
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Could not update target instructions'))
   const value: TargetSkillState = await response.json()
-  if (!Number.isSafeInteger(value.revision) || value.revision < 0 || !Number.isSafeInteger(value.max_characters) || value.max_characters <= 0 || (value.skill !== null && typeof value.skill?.methodology !== 'string') || (value.operator_skill != null && typeof value.operator_skill.methodology !== 'string') || (value.knowledge != null && typeof value.knowledge.methodology !== 'string') || (value.trust !== undefined && !['none', 'operator', 'operator_delegated', 'hunt_advisory', 'unknown_advisory'].includes(value.trust))) {
+  if (!Number.isSafeInteger(value.revision) || value.revision < 0 || !Number.isSafeInteger(value.max_characters) || value.max_characters <= 0 || (value.skill !== null && typeof value.skill?.methodology !== 'string') || (value.operator_skill != null && typeof value.operator_skill.methodology !== 'string') || (value.knowledge != null && typeof value.knowledge.methodology !== 'string') || (value.unconfirmed_instructions != null && typeof value.unconfirmed_instructions.methodology !== 'string') || (value.trust !== undefined && !['none', 'operator', 'operator_delegated', 'agent_unconfirmed', 'hunt_advisory', 'unknown_advisory'].includes(value.trust))) {
     throw new Error('The server returned an invalid target instructions record. Reload and try again.')
   }
   return value

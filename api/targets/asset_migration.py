@@ -240,6 +240,8 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 # Who requested a Targets-page discovery run (POST /discovery, 2.8.2).
                 await conn.execute(
                     "ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS requested_by TEXT")
+                from .instruction_proposal_schema import INSTRUCTION_PROPOSAL_SCHEMA_SQL
+                await conn.execute(INSTRUCTION_PROPOSAL_SCHEMA_SQL)
                 # Data migrations added after the conversion must run here: the baseline above
                 # never runs again on a converted database. Each is marker-gated.
                 try:
@@ -281,6 +283,10 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 except ModuleNotFoundError:
                     from api.targets.host_canonical_repair import repair_target_host_spellings
                 await repair_target_host_spellings(conn)
+                # Idempotent, on every startup: instructions and saved actions no operator wrote
+                # are marked agent-written and unconfirmed (advisory until an operator saves them).
+                from .instruction_origin_migration import mark_unconfirmed_agent_writes
+                await mark_unconfirmed_agent_writes(conn)
             # After the schema commits, still under the startup lock: Hunts granted something by
             # 2.8.0 have no recorded baseline, so their authority is rebuilt from their live
             # grants once (R1), each Hunt in its own short transaction. A Hunt that cannot be
