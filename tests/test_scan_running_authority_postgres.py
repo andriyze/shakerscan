@@ -120,19 +120,21 @@ async def _ai_target(pool, *, expires="1 hour"):
     return ai_id, str(approval), scope_id
 
 
-async def _run_device(pool, scanner, monkeypatch, *, device_id, receipt, during=None, guard_pool=None, **timing):
+async def _run_device(pool, scanner, monkeypatch, *, device_id, receipt, during=None, guard_pool=None,
+                      options=None, **timing):
     from scanner_tools import device_posture
 
     async def fixture_posture(_target, options):
         return await scanner.run(options["_cancel_check"])
     monkeypatch.setattr(device_posture, "run_device_posture_scan", fixture_posture)
-    options = {"run_kind": "device_posture", "asset_authorization_receipt_id": receipt}
+    options = options or {"run_kind": "device_posture", "asset_authorization_receipt_id": receipt}
     scan_id = str(uuid.uuid4())
     events: list[str] = []
     authority = await running_scan_authority(pool, options=options, device_target_id=str(device_id),
                                              record_event=events.append, **timing)
     if guard_pool is not None and authority.guard is not None:
-        authority.guard.pool = guard_pool
+        for guard in authority.guard.guards:
+            guard.pool = guard_pool
     hook = asyncio.create_task(during()) if during else None
     try:
         async with authority:
@@ -291,7 +293,7 @@ def test_a_device_scan_admitted_without_a_receipt_is_not_watched(template_databa
 
 
 async def _run_ai(pool, scanner, monkeypatch, *, ai_id, approval, scope_id, during=None, boundary=False,
-                  grace=None, **timing):
+                  grace=None, options=None, **timing):
     if boundary:
         from ai_gate.boundary import runner
 
@@ -304,7 +306,7 @@ async def _run_ai(pool, scanner, monkeypatch, *, ai_id, approval, scope_id, duri
         async def fixture_ai_scan(_target, _options):  # no stop check, as the real one has none
             return await scanner.run(_await_stop(lambda: False))
         monkeypatch.setattr(ai_gate_scan, "run_ai_target_scan", fixture_ai_scan)
-    options = {"run_kind": "ai_api", "approval_receipt_id": approval, "scope_receipt_id": scope_id,
+    options = {**(options or {"run_kind": "ai_api", "approval_receipt_id": approval, "scope_receipt_id": scope_id}),
                **({"ai_probe_pack": "shaker-ai-boundary"} if boundary else {})}
     scan_id = str(uuid.uuid4())
     authority = await running_scan_authority(pool, options=options, ai_target_id=str(ai_id), **timing)
@@ -364,6 +366,12 @@ def test_an_ai_scan_without_a_stop_check_is_cancelled_after_the_grace(template_d
                 await _run_ai(pool, scanner, monkeypatch, ai_id=ai_id, approval=approval, scope_id=scope_id,
                               during=revoke_soon, grace=0.5, poll_seconds=0.2)
             assert not stopped.value.before_start and stopped.value.reason == "authorization_revoked"
+            # What the Scan records names the authorization stop, not a validation error.
+            report = stopped.value.report
+            assert "target authorization" in report["error"] and "authorization_revoked" in report["error"]
+            assert report["coverage"]["status"] == "partial"
+            assert report["scan_metadata"]["stop_reason"] == "authorization_withdrawn"
+            assert report["scan_metadata"]["authority_stop"]["reason_code"] == "authorization_revoked"
             # One poll to see the revoke, then the grace, then the cancelled scan's process is gone.
             assert scanner.stopped_at - marks["revoked_at"] < 0.2 + 0.5 + 0.5
             assert scanner.returncode is not None and scanner.returncode < 0
@@ -484,4 +492,197 @@ def test_revoking_authorization_stops_an_action_running_on_a_fleet_node(template
             assert actions["templates.followup"] == ("blocked", "authorization_revoked")
             assert dispatcher.dispatched == ["baseline.http", "templates.active", "finalize.report"]
             assert await scan.held_reservations() == 0
+    asyncio.run(run())
+
+
+# --- Receipts created and admitted as the API creates and admits them ---
+#
+# Scope and approval receipts come from the real routes (``POST /arsenal/scope/preview``,
+# ``POST /arsenal/approvals``, ``POST /arsenal/approvals/{id}/revoke``), a standing
+# authorization from ``target_authorization.authorize_target`` (``POST /targets/{id}/authorization``),
+# and the Scan options are composed as the device and AI scan routes compose them, from the
+# real admission check (``api._validate_approval_receipt_for_action``). The run must start
+# exactly when admission accepted it, and stop only for what changed afterwards.
+
+class _Api:
+    def __init__(self, pool, monkeypatch):
+        import api as api_module
+        if not hasattr(api_module, "_validate_approval_receipt_for_action"):  # the package, not api.py
+            from api import api as api_module
+        import arsenal_routes.router as arsenal
+        monkeypatch.setattr(arsenal, "_pool", lambda: pool)
+        self.api, self.arsenal, self.pool = api_module, arsenal, pool
+
+    async def approval(self, url, *, action_name, expires_at=None):
+        """A scope receipt for ``url`` and an approval of it, as the UI requests them."""
+        scope = (await self.arsenal.arsenal_scope_preview(self.arsenal.ScopePreviewRequest(
+            url=url, environment="lab")))["scope_receipt"]
+        approval = (await self.arsenal.arsenal_create_approval(self.arsenal.ApprovalReceiptRequest(
+            scope_receipt_id=scope["receipt_id"], risk_tier="active",
+            # The UI asks for the scope review when the preview needs it.
+            confirmations=["confirm_authorized",
+                           *(["confirm_scope_reviewed"] if scope["verdict"] == "needs_approval" else [])],
+            action_name=action_name, approved_by="fixture-owner", expires_at=expires_at)))["approval_receipt"]
+        return str(approval["id"])
+
+    async def revoke(self, approval_id):
+        await self.arsenal.arsenal_revoke_approval(approval_id, self.arsenal.ApprovalReceiptRevocationRequest(
+            revoked_by="fixture-owner", reason="fixture revoke mid-scan"))
+
+    async def device_options(self, device_id, *, approval_id=None, confirm_authorized=False):
+        """``POST /devices/{id}/scan`` options: standing snapshot unless confirmed inline."""
+        from devices.network_authorization import network_authorization_snapshot
+        async with self.pool.acquire() as conn:
+            device = await conn.fetchrow("SELECT primary_locator FROM device_targets WHERE id=$1", device_id)
+            standing = None if confirm_authorized else await network_authorization_snapshot(conn, device_id)
+            assert confirm_authorized or standing, "admission requires a standing authorization"
+            context = await self.api._validate_approval_receipt_for_action(
+                conn, approval_id, target_url=str(device["primary_locator"]), action_name="device.scan",
+                risk_tier="active", created_by="device_scan_endpoint")
+        options = {"run_kind": "device_posture", "confirm_authorized": True,
+                   "asset_authorization_receipt_id": standing["approval_receipt_id"] if standing else None,
+                   "approval_receipt_id": approval_id}
+        options.update(context or {})
+        return options
+
+    async def ai_options(self, ai_id, *, approval_id):
+        """``POST /ai/targets/{id}/scan`` options without credentials (expiry not required)."""
+        async with self.pool.acquire() as conn:
+            endpoint = await conn.fetchval("SELECT endpoint_url FROM ai_targets WHERE id=$1", ai_id)
+            context = await self.api._validate_approval_receipt_for_action(
+                conn, approval_id, target_url=endpoint, target_id=None, action_name="ai_gate.scan",
+                risk_tier="active", always_require_receipt=False, require_target_binding=False,
+                require_expiry=False)
+        return {"run_kind": "ai_api", "approval_receipt_id": approval_id, **(context or {})}
+
+
+def _revoke_after(seconds, revoke, marks):
+    async def hook():
+        await asyncio.sleep(seconds)
+        marks["revoked_at"] = time.monotonic()
+        await revoke()
+    return hook
+
+
+def test_an_ai_scan_admitted_with_a_non_expiring_approval_runs_and_stops_on_its_revoke(template_database,
+                                                                                         monkeypatch):
+    async def run():
+        async with scan_database(template_database) as pool:
+            api = _Api(pool, monkeypatch)
+            async with pool.acquire() as conn:
+                ai_id = await conn.fetchval(
+                    "INSERT INTO ai_targets(name, endpoint_url) VALUES('model', 'https://model.fixture.test/v1/chat') "
+                    "RETURNING id")
+            approval = await api.approval("https://model.fixture.test/v1/chat", action_name="ai_gate.scan")
+            options = await api.ai_options(ai_id, approval_id=approval)
+            # Admitted without an expiry: it runs to completion while nothing changes.
+            scanner = FixtureScanner(seconds=1)
+            result, authority = await _run_ai(pool, scanner, monkeypatch, ai_id=ai_id, approval=None,
+                                              scope_id=None, options=options, boundary=True, poll_seconds=0.2)
+            assert authority.reason is None and scanner.returncode == 0 and result["result"]["grade"] == "A"
+            # The same receipt revoked through the route stops the next run while it runs.
+            marks = {}
+            scanner = FixtureScanner()
+            result, authority = await _run_ai(pool, scanner, monkeypatch, ai_id=ai_id, approval=None, scope_id=None,
+                                              options=options, boundary=True, poll_seconds=0.2,
+                                              during=_revoke_after(0.3, lambda: api.revoke(approval), marks))
+            assert authority.reason == "authorization_revoked" and scanner.returncode < 0
+            assert scanner.stopped_at - marks["revoked_at"] < 1.0
+            assert result["scan_metadata"]["authority_stop"]["reason_code"] == "authorization_revoked"
+    asyncio.run(run())
+
+
+def test_a_device_scan_admitted_with_a_non_expiring_per_scan_approval_runs_and_stops_on_its_revoke(
+        template_database, monkeypatch):
+    async def run():
+        async with scan_database(template_database) as pool:
+            api = _Api(pool, monkeypatch)
+            device_id, _ = await _device(pool, standing=False)
+            approval = await api.approval("http://device.fixture.test", action_name="device.scan")
+            options = await api.device_options(device_id, approval_id=approval, confirm_authorized=True)
+            assert options["asset_authorization_receipt_id"] is None
+            scanner = FixtureScanner(seconds=1)
+            result, authority, _events = await _run_device(pool, scanner, monkeypatch, device_id=device_id,
+                                                           receipt=None, options=options, poll_seconds=0.2)
+            assert authority.reason is None and scanner.returncode == 0
+            marks = {}
+            scanner = FixtureScanner()
+            result, authority, events = await _run_device(
+                pool, scanner, monkeypatch, device_id=device_id, receipt=None, options=options, poll_seconds=0.2,
+                during=_revoke_after(0.3, lambda: api.revoke(approval), marks))
+            assert authority.reason == "authorization_revoked" and "approval_revocation" in events
+            assert scanner.stopped_at - marks["revoked_at"] < 1.0
+    asyncio.run(run())
+
+
+def test_a_device_scan_with_standing_authorization_and_a_per_scan_approval_watches_both(template_database,
+                                                                                          monkeypatch):
+    async def run():
+        async with scan_database(template_database) as pool:
+            api = _Api(pool, monkeypatch)
+            device_id, standing = await _device(pool)
+            approval = await api.approval("http://device.fixture.test", action_name="device.scan")
+            options = await api.device_options(device_id, approval_id=approval)
+            # The options' scope is the per-scan approval's; the standing receipt has its own.
+            assert options["asset_authorization_receipt_id"] == standing
+            assert options["approval_receipt_id"] == approval
+            scanner = FixtureScanner(seconds=1)
+            _result, authority, _events = await _run_device(pool, scanner, monkeypatch, device_id=device_id,
+                                                            receipt=None, options=options, poll_seconds=0.2)
+            assert authority.reason is None and scanner.returncode == 0
+
+            async def revoke_standing():
+                async with pool.acquire() as conn:
+                    await target_authorization.revoke_target_authorization(
+                        conn, device_id, revoked_by="fixture-owner", reason="fixture revoke mid-scan")
+            for revoke in (revoke_standing, lambda: api.revoke(approval)):
+                if revoke is not revoke_standing:  # a fresh standing authorization; the approval is revoked
+                    async with pool.acquire() as conn:
+                        standing = str((await target_authorization.authorize_target(
+                            conn, device_id, approved_by="fixture-owner"))["approval_receipt_id"])
+                    options = {**options, "asset_authorization_receipt_id": standing}
+                scanner = FixtureScanner()
+                _result, authority, _events = await _run_device(
+                    pool, scanner, monkeypatch, device_id=device_id, receipt=None, options=options,
+                    poll_seconds=0.2, during=_revoke_after(0.3, revoke, {}))
+                assert authority.reason == "authorization_revoked" and scanner.returncode < 0
+    asyncio.run(run())
+
+
+def test_a_device_moved_outside_its_approved_scope_stops_as_out_of_scope_not_revoked(template_database,
+                                                                                      monkeypatch):
+    async def run():
+        async with scan_database(template_database) as pool:
+            api = _Api(pool, monkeypatch)
+            device_id, _ = await _device(pool, standing=False)
+            approval = await api.approval("http://device.fixture.test", action_name="device.scan")
+            options = await api.device_options(device_id, approval_id=approval, confirm_authorized=True)
+
+            async def move():
+                async with pool.acquire() as conn:
+                    await conn.execute("UPDATE device_targets SET primary_locator='elsewhere.fixture.test' "
+                                       "WHERE id=$1", device_id)
+            scanner = FixtureScanner()
+            result, authority, events = await _run_device(
+                pool, scanner, monkeypatch, device_id=device_id, receipt=None, options=options,
+                poll_seconds=0.2, during=_revoke_after(0.3, move, {}))
+            assert authority.reason == "scope_invalid" and "approval_revocation" not in events
+            assert result["scan_metadata"]["authority_stop"]["reason_code"] == "scope_invalid"
+    asyncio.run(run())
+
+
+def test_an_approval_with_an_expiry_that_passes_stops_the_run_as_expired(template_database, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            api = _Api(pool, monkeypatch)
+            device_id, _ = await _device(pool, standing=False)
+            approval = await api.approval("http://device.fixture.test", action_name="device.scan",
+                                          expires_at=datetime.now(timezone.utc) + timedelta(milliseconds=1500))
+            options = await api.device_options(device_id, approval_id=approval, confirm_authorized=True)
+            _result, authority, _events = await _run_device(pool, FixtureScanner(), monkeypatch,
+                                                             device_id=device_id, receipt=None, options=options,
+                                                             poll_seconds=0.3)
+            assert authority.reason == "authorization_expired"
     asyncio.run(run())

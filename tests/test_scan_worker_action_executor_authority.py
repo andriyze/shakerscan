@@ -361,3 +361,47 @@ def test_pre_dispatch_retries_stop_at_the_tolerance():
     # 0.4 s deadline before it answered; no third attempt was made.
     assert len(authority.checked) == 1 and authority.cancelled == ["check"]
     assert authority.pending == 0 and alive == []
+
+
+def test_a_slow_but_successful_pre_dispatch_check_does_not_make_the_action_unverified():
+    plan = _plan()
+    action = plan.actions[0]
+    # The check before dispatch answers yes after 0.92 s of a 1 s tolerance; polls are healthy.
+    authority = StallingAuthority(check_stall=0.92, poll_seconds=0.2, unverified_after_seconds=1.0)
+    receipt, alive = _run_with_tasks(_executor(_long_dispatch([], seconds=1.5), authority).execute(
+        action, _lease(plan, action), lambda: asyncio.sleep(0)))
+    assert receipt.status == "success" and receipt.errors == ()
+    # The first poll ran at once, before the deadline, instead of after a full interval.
+    assert len(authority.polled) >= 5 and alive == []
+
+
+def test_steady_polls_slower_than_the_interval_keep_a_healthy_action_running():
+    plan = _plan()
+    action = plan.actions[0]
+    # Every poll takes 0.4 s of a 1 s tolerance with a 0.3 s interval. Waiting a full interval
+    # after each poll would leave the next one 0.3 s to answer; it starts early enough instead.
+    authority = StallingAuthority(poll_stall=0.4, poll_seconds=0.3, unverified_after_seconds=1.0)
+    receipt, alive = _run_with_tasks(_executor(_long_dispatch([], seconds=2.5), authority).execute(
+        action, _lease(plan, action), lambda: asyncio.sleep(0)))
+    assert receipt.status == "success" and receipt.errors == ()
+    assert authority.pending == 0 and alive == []  # the poll pending at the end was cancelled
+
+
+def test_unverified_is_declared_only_after_a_poll_was_attempted():
+    from api.scan.authority_deadline import watch_authorization
+    from api.scan.action_interruption import ActionInterruption
+
+    async def run():
+        # The confirmation is already at the deadline when watching starts (a slow check).
+        authority = FixtureAuthority(poll_seconds=0.2, unverified_after_seconds=0.5)
+        loop = asyncio.get_running_loop()
+        signal, stopped, interrupts = ActionInterruption(), asyncio.Event(), []
+        task = asyncio.create_task(watch_authorization(
+            authority, _plan().actions[0], confirmed_at=loop.time() - 0.5, stopped=stopped,
+            signal=signal, on_interrupt=interrupts.append))
+        await asyncio.sleep(0.3)
+        stopped.set()
+        await task
+        return authority, interrupts
+    authority, interrupts = asyncio.run(run())
+    assert interrupts == [] and len(authority.polled) >= 1

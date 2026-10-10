@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import time
-from typing import Any, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 import uuid
 
 from .authorization import ActionAuthorityDecision, revalidate_scan_action_authority
@@ -130,6 +130,9 @@ class ScanAuthorityGuard:
     scope_receipt_id: str | None
     approval_receipt_id: str | None
     record_event: Callable[[str], Any] | None = None
+    # The decision a full check makes; ``scan_action_authority_reason`` unless a caller that
+    # was admitted under different rules supplies its own (``running_scan_authority``).
+    decide: Callable[..., Awaitable[tuple[str | None, ActionAuthorityDecision | None]]] | None = None
     poll_seconds: float = 2.0
     full_recheck_seconds: float = 30.0
     # How long a running action may go without a successful confirmation (database
@@ -212,7 +215,7 @@ class ScanAuthorityGuard:
                 "SELECT target_id FROM scope_receipts WHERE id=$1", str(self.scope_receipt_id),
             ))
         fingerprint, _expires_at = await self._read_fingerprint(conn)
-        reason, decision = await scan_action_authority_reason(
+        reason, decision = await (self.decide or scan_action_authority_reason)(
             conn,
             action=action,
             target_binding=self.target_binding,
@@ -233,7 +236,7 @@ class ScanAuthorityGuard:
                 pass
 
     async def annotate(self, report: dict[str, Any], *, scan_id: str, interrupted: str | None = None,
-                       interrupted_action: str | None = None) -> dict[str, Any]:
+                       interrupted_action: str | None = None, record_not_run: bool = True) -> dict[str, Any]:
         """Record on the Scan report that it stopped because authorization was withdrawn.
 
         ``not_run_actions`` is every action the Scan did not run after the stop: those this
@@ -243,13 +246,14 @@ class ScanAuthorityGuard:
         A Scan that runs as one piece of work (``running_scan_authority``) also passes the
         reason it was stopped for as ``interrupted``: when the guard is not withdrawn that is
         ``authorization_unverified``, and the report names that stop instead, never a revoke.
+        It has no actions to list, so it passes ``record_not_run=False`` and nothing is read.
         """
         reason = self.reason or interrupted
         if reason is None:
             return report
         stop_reason = AUTHORIZATION_WITHDRAWN if self.reason is not None else reason
         rows: list[Any] = []
-        if self.reason is not None:
+        if self.reason is not None and record_not_run:
             # An unverified stop is reported without another query: the database has just
             # failed to answer, and only a withdrawal blocks later actions.
             async with self.pool.acquire() as conn:

@@ -132,14 +132,18 @@ offline deterministic finalizer ── findings / coverage / grade reliability
   control plane (`POST /fleet/broker/nodes/{node}/leases/{lease}/actions/{action}/authority`,
   answered by the same guard decision), so a revoke stops the remote tool; a control plane that
   cannot be reached for about 10 s stops the action as `authorization_unverified`. Device posture
-  and probe scans (with their device web children) and AI scans bound to a receipt (the target's
-  standing authorization or the approval receipt they were submitted with) are re-checked the
-  same way as one run (`api/scan/running_scan_authority.py`): a revoke, an expiry or a deactivated
-  device or AI target stops the scanner through its own stop checks. A scanner that returns keeps
-  what it found and its report reads partial and names the stop; one that ends with an error, or
-  has not stopped 5 s later and is cancelled, fails the scan with the authorization reason. A
-  device or AI scan submitted without any receipt has no revocable authorization and is not
-  re-checked. Not yet re-checked while
+  and probe scans (with their device web children) and AI scans are re-checked the same way as one
+  run (`api/scan/running_scan_authority.py`), against what admitted them: the target's standing
+  authorization and the approval receipt they were submitted with, each against its own scope. A
+  revoked receipt stops the run as `authorization_revoked`, an expiry that was set and passed as
+  `authorization_expired`, and a deactivated device or AI target, a blocked scope or a host the
+  scope no longer covers as `scope_invalid`; a per-scan approval admitted without an expiry is not
+  required to have one. The scanner stops through its own stop checks. A scanner that returns
+  keeps what it found and its report reads partial and names the stop; one that ends with an
+  error, or has not stopped 5 s later and is cancelled, fails the scan with a report naming the
+  authorization stop. Only runs admitted with a receipt are watched: a device probe or a
+  `confirm_authorized` posture scan without a standing authorization or approval receipt, and an
+  AI scan without an approval receipt, are not re-checked while running. Not yet re-checked while
   running: finding retests, which rely on the authorization checked when they were queued.
 - **Compatibility scanner** (`scanner/scanner.py`, `scanner/scanner_tools/`): supplies migrated detector
   implementations behind registered adapters. Its historical phase waterfall and mode flags are not
