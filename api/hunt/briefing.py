@@ -254,19 +254,28 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
                     SELECT status FROM investigation_candidates
                     WHERE {owner_clause} AND status NOT IN ('verified','refuted','expired') LIMIT 1001
                 ) open GROUP BY status ORDER BY status""", target)
-        inconclusive = await conn.fetchval(
-            """SELECT count(*) FROM (SELECT 1 FROM application_graph_nodes
-                   WHERE target_id=$1 AND node_type='experiment'
-                     AND COALESCE((attributes->'attempts'->(-1))->>'outcome','inconclusive')='inconclusive'
-                   LIMIT 1001) bounded""", target)
-        in_progress = await conn.fetchval(
-            """SELECT count(*) FROM hunt_actions WHERE hunt_run_id=$1 AND status IN ('reserved','running')""",
-            item.get("id"))
+        # Authorization investigations persist proposal/attempt/decision references and take their
+        # outcomes from canonical actions; the projection the investigation read uses classifies them
+        # here, on this asset (for a host asset also its service members) across every Hunt.
+        from .authorization_service import asset_investigation_counts
+        authorization = await asset_investigation_counts(conn, asset=target, include_members=device)
+        actions = await conn.fetch(
+            """SELECT status, count(*) AS count FROM hunt_actions
+               WHERE hunt_run_id=$1 AND status IN ('reserved','running','awaiting_permission')
+               GROUP BY status""", item.get("id"))
+        action_counts = {str(entry["status"]): int(entry["count"]) for entry in actions}
         by_status = {str(entry["status"]): int(entry["count"]) for entry in candidates}
+        open_count = sum(by_status.values())
         return {
-            "open_candidates": {"count": sum(by_status.values()), "by_status": by_status},
-            "inconclusive_experiments": int(inconclusive or 0),
-            "in_progress_actions": int(in_progress or 0),
+            "open_candidates": {"count": min(open_count, 1000), "at_least": open_count > 1000,
+                                "by_status": by_status},
+            "authorization_investigations": {
+                **authorization,
+                "read_with": "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id} "
+                             "(graph node type authorization_proposal)",
+            },
+            "in_progress_actions": action_counts.get("reserved", 0) + action_counts.get("running", 0),
+            "awaiting_permission_actions": action_counts.get("awaiting_permission", 0),
             "counts_capped_at": 1000,
         }
 

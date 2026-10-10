@@ -1294,7 +1294,9 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
             await _require_candidate_evidence(conn, run, request.evidence_refs)
             candidate = investigation_candidates.normalize_candidate(
                 plane="device" if run["device_target_id"] else "web",
-                target_id=str(run["target_id"]) if run["target_id"] else None,
+                # A device Hunt's run row carries the device id in both columns; a device candidate
+                # names it only as device_target_id.
+                target_id=str(run["target_id"]) if run["target_id"] and not run["device_target_id"] else None,
                 device_target_id=str(run["device_target_id"]) if run["device_target_id"] else None,
                 hunt_run_id=str(run["id"]), family=request.family, locus=request.locus,
                 title=request.title, claim=request.claim, severity=request.severity,

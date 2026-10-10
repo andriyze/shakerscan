@@ -49,6 +49,105 @@ def _target_context(run: Mapping[str, Any]) -> dict[str, Any]:
     return {"target": target, "addresses": context.get("authorized_target_addresses", [])}
 
 
+#: A latest attempt with one of these outcomes settles an investigation; anything else leaves it open.
+SETTLED_OUTCOMES = frozenset({"supported", "refuted"})
+
+
+async def attempt_views(repo: PostgresAuthorizationRepository, conn: Any, run: Mapping[str, Any],
+                        proposal: Mapping[str, Any], *, latest_only: bool = False) -> list[dict[str, Any]]:
+    """Each attempt's outcome, read back from its canonical action and transactions.
+
+    Every persisted attempt binding is checked. ``latest_only`` reads the canonical records of the
+    last attempt alone (one view, or none), which is all a settled/open decision needs.
+    Raises ``AuthorizationWorkflowError`` when a persisted binding is inconsistent.
+    """
+    attempts = await repo.attempts(conn, run, proposal["proposal_id"])
+    for attempt in attempts:
+        if attempt["input_digest"] != proposal["capability_input_sha256"]:
+            raise AuthorizationWorkflowError("The attempt does not match the proposal's bound input")
+    views = []
+    for attempt in attempts[-1:] if latest_only else attempts:
+        action = await repo.action(conn, run, attempt["action_id"])
+        transactions = await repo.transactions(conn, run, attempt["action_id"])
+        outcome = attributed_outcome(proposal, attempt, action, transactions)
+        views.append({"attempt": attempt["attempt"], **outcome})
+    return views
+
+
+def investigation_status(attempts: list[Mapping[str, Any]], deferral_recorded: bool) -> dict[str, bool]:
+    """Deferred and settled, from the attempt views (in order) and whether a skip was recorded.
+
+    A deferral counts only while no attempt exists; an attempt made after a skip is not deferred.
+    """
+    latest = attempts[-1] if attempts else None
+    return {"deferred": bool(deferral_recorded and not attempts), "deferral_recorded": bool(deferral_recorded),
+            "settled": bool(latest and latest["outcome"] in SETTLED_OUTCOMES)}
+
+
+#: Proposals examined per asset; beyond this a count is reported as at least this many.
+MAX_COUNTED_INVESTIGATIONS = 1000
+_UNREADABLE = (AuthorizationWorkflowError, KeyError, TypeError)  # inconsistent persisted records
+
+
+async def asset_investigation_counts(conn: Any, *, asset: Any, include_members: bool,
+                                     repo: PostgresAuthorizationRepository | None = None) -> dict[str, Any]:
+    """Authorization investigations on one asset, across every Hunt, by state.
+
+    Each proposal is classified from the same reads as ``AuthorizationInvestigationService.read``:
+    its persisted binding, its latest attempt's canonical action and transactions
+    (``attributed_outcome``) and any recorded skip. States:
+
+    * ``proposed_not_run``: no attempt and no deferral;
+    * ``awaiting_execution``: the latest attempt's canonical action exists and is not finished
+      (reserved, running or awaiting permission);
+    * ``inconclusive``: the latest attempt finished, failed or was never dispatched without a
+      supported or refuted outcome (an undispatched attempt is recovered by approving the same
+      attempt number again);
+    * ``deferred``: skipped with no attempt; ``settled``: latest outcome supported or refuted;
+    * ``needs_review``: the persisted proposal, its Hunt or an attempt binding is inconsistent,
+      so no state can be derived from it.
+
+    ``open`` is proposed_not_run + awaiting_execution + inconclusive. ``include_members`` adds the
+    asset's service members (a host asset's application origins). Database errors propagate.
+    """
+    repo = repo or PostgresAuthorizationRepository()
+    scope = ("target_id IN (SELECT id FROM targets WHERE id=$1 OR asset_owner_id=$1)"
+             if include_members else "target_id=$1")
+    rows = await conn.fetch(
+        f"""SELECT id, attributes->>'hunt_id' AS hunt_id FROM application_graph_nodes
+            WHERE {scope} AND node_type=$2 ORDER BY last_seen_at DESC, id LIMIT $3""",
+        asset, PROPOSAL_TYPE, MAX_COUNTED_INVESTIGATIONS + 1,
+    )
+    counts = dict.fromkeys(("proposed_not_run", "awaiting_execution", "inconclusive",
+                            "deferred", "settled", "needs_review"), 0)
+    runs: dict[str, Any] = {}
+    for row in rows[:MAX_COUNTED_INVESTIGATIONS]:
+        try:
+            hunt_id = str(row["hunt_id"])
+            if hunt_id not in runs:
+                runs[hunt_id] = await repo.run(conn, hunt_id)
+            run = runs[hunt_id]
+            proposal = await repo.proposal(conn, run, row["id"])
+            attempts = await attempt_views(repo, conn, run, proposal, latest_only=True)
+            status = investigation_status(attempts, await repo.skipped(conn, run, row["id"]))
+        except _UNREADABLE:
+            counts["needs_review"] += 1
+            continue
+        if not attempts:
+            counts["deferred" if status["deferred"] else "proposed_not_run"] += 1
+        elif status["settled"]:
+            counts["settled"] += 1
+        elif attempts[-1]["execution_status"] not in TERMINAL_ACTION_STATES | {"not_dispatched"}:
+            counts["awaiting_execution"] += 1
+        else:
+            counts["inconclusive"] += 1
+    return {
+        "open": counts["proposed_not_run"] + counts["awaiting_execution"] + counts["inconclusive"],
+        **counts,
+        "at_least": len(rows) > MAX_COUNTED_INVESTIGATIONS,
+    }
+
+
 class AuthorizationInvestigationService:
     def __init__(self, pool: Any, execute: Executor, public_proof_url: ProofURL,
                  repository: PostgresAuthorizationRepository | None = None) -> None:
@@ -164,22 +263,14 @@ class AuthorizationInvestigationService:
         return await self.read(hunt_id, proposal_id)
 
     async def _attempt_views(self, conn: Any, run: Mapping[str, Any], proposal: Mapping[str, Any]) -> list[dict[str, Any]]:
-        views = []
-        for attempt in await self.repo.attempts(conn, run, proposal["proposal_id"]):
-            if attempt["input_digest"] != proposal["capability_input_sha256"]:
-                raise AuthorizationWorkflowError("The attempt does not match the proposal's bound input")
-            action = await self.repo.action(conn, run, attempt["action_id"])
-            transactions = await self.repo.transactions(conn, run, attempt["action_id"])
-            outcome = attributed_outcome(proposal, attempt, action, transactions)
-            views.append({"attempt": attempt["attempt"], **outcome})
-        return views
+        return await attempt_views(self.repo, conn, run, proposal)
 
     async def read(self, hunt_id: Any, proposal_id: Any) -> dict[str, Any]:
         async with self.pool.acquire() as conn:
             run = await self.repo.run(conn, hunt_id)
             proposal = await self.repo.proposal(conn, run, proposal_id)
             attempts = await self._attempt_views(conn, run, proposal)
-            deferred = await self.repo.skipped(conn, run, proposal_id)
+            status = investigation_status(attempts, await self.repo.skipped(conn, run, proposal_id))
         # A request-scoped memory projection, reconstructed from PostgreSQL after
         # every restart. The graph stores references; canonical actions own outcomes.
         memory = InvestigationMemory(InMemoryGraphStore(), target_id=asset_id(run))
@@ -208,8 +299,7 @@ class AuthorizationInvestigationService:
             "capture_id": proposal["capture_id"], "baseline_capture_id": proposal["baseline_capture_id"],
             "route": template, "resource_id_sha256": proposal["resource_id_sha256"],
             "evidence_needed": proposal["evidence_needed"], "attempts": attempts,
-            "deferred": deferred and not attempts, "deferral_recorded": deferred,
-            "settled": bool(latest and latest["outcome"] in {"supported", "refuted"}),
+            **status,
             "next_attempt": len(attempts) + 1 if len(attempts) < MAX_ATTEMPTS else None,
             "resume": memory.resume_briefing(),
             "selected_request_examined": any(a.get("selected_request_examined") for a in attempts),
@@ -273,7 +363,7 @@ class AuthorizationInvestigationService:
                             if not previous or previous.get("status") not in TERMINAL_ACTION_STATES:
                                 raise AuthorizationWorkflowError("Recover the preceding attempt before starting another")
                             previous_outcome = (await self._attempt_views(conn, run, proposal))[-1]
-                            if previous_outcome["outcome"] in {"supported", "refuted"} and retry_settled is not True:
+                            if previous_outcome["outcome"] in SETTLED_OUTCOMES and retry_settled is not True:
                                 raise AuthorizationWorkflowError("This experiment is settled; explicitly request a retest")
                     primary, secondary, capture, baseline = await self._bindings(conn, run, proposal)
                     if (digest(_target_context(run)) != proposal["target_context_sha256"]
