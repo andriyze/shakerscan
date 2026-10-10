@@ -19,6 +19,7 @@ from .action_interruption import ActionInterruption, interruption_scope
 from .authority_deadline import (  # noqa: F401  (the tolerance constants are re-exported)
     AUTHORITY_CHECK_RETRY_DELAYS,
     AUTHORITY_UNVERIFIED_AFTER_SECONDS,
+    HARD_STOP_GRACE_SECONDS,
     check_before_start,
     stop_task,
     watch_authorization,
@@ -109,22 +110,34 @@ class ReceiptScanActionExecutor:
 
         signal = ActionInterruption()
         authority_interruption: str | None = None
+        # Cancels a dispatch that keeps running after its authorization was withdrawn, once
+        # it has had ``HARD_STOP_GRACE_SECONDS`` to stop through its own checks.
+        hard_stop: Any = None
+        grace = float(getattr(self._authority, "hard_stop_grace_seconds", HARD_STOP_GRACE_SECONDS))
+
+        def authority_stopped(reason: str) -> None:
+            nonlocal authority_interruption
+            authority_interruption = reason
+            if hard_stop is not None:
+                hard_stop.reschedule(asyncio.get_running_loop().time() + grace)
 
         async def guarded_heartbeat() -> bool:
-            """Heartbeat the lease; ``False`` once the control plane withdrew the authorization.
+            """Heartbeat the lease; ``False`` once the action's authorization was withdrawn.
 
             A withdrawal stops the action as the authority monitor would (the tool sees
             ``action_interrupted``) and its receipt is settled as an authorization stop. It is
-            never raised into the adapter, which would turn it into an adapter failure.
+            never raised into the adapter, which would turn it into an adapter failure, and
+            after it the control plane is not asked again.
             """
-            nonlocal authority_interruption
+            if authority_interruption is not None:
+                return False
             try:
                 await heartbeat()
                 return True
             except ActionAuthorityWithdrawn as exc:
                 if signal.reason is None:
-                    authority_interruption = exc.reason
                     signal.record(exc.reason)
+                    authority_stopped(exc.reason)
                 return False
 
         async def adapter_heartbeat() -> None:
@@ -164,9 +177,9 @@ class ReceiptScanActionExecutor:
                     await check_authority()
 
         def authorization_interrupted(reason: str) -> None:
-            nonlocal authority_interruption
-            authority_interruption = reason
+            authority_stopped(reason)
 
+        hard_stopped = False
         try:
             denial = None
             confirmed_at = 0.0
@@ -190,8 +203,21 @@ class ReceiptScanActionExecutor:
                         authority_monitor = asyncio.create_task(watch_authorization(
                             authority, action, confirmed_at=confirmed_at, stopped=stop_heartbeats,
                             signal=signal, on_interrupt=authorization_interrupted))
-                    result = await self._dispatcher(action, lease, adapter_heartbeat)
-                    if check is not None:
+                    try:
+                        async with asyncio.timeout(None) as hard_stop:
+                            if authority_interruption is not None:  # stopped before dispatch
+                                authority_stopped(authority_interruption)
+                            result = await self._dispatcher(action, lease, adapter_heartbeat)
+                    except TimeoutError:
+                        if hard_stop is None or not hard_stop.expired():
+                            raise  # the adapter's own timeout, not this stop
+                        # The adapter ignored the stop: what it did is unknown, so the action
+                        # fails with the authorization reason and keeps its full reservation.
+                        hard_stopped = True
+                        result = await self.terminal_without_execution(action, lease,
+                            status="failed", reason_code=str(authority_interruption),
+                            charge_full_reservation=True)
+                    if check is not None and not hard_stopped:
                         await check_authority()
         finally:
             stop_heartbeats.set()
@@ -224,7 +250,9 @@ class ReceiptScanActionExecutor:
             raise WorkerActionExecutionError(
                 "worker receipt differs from immutable action authority"
             )
-        if authority_interruption is not None and signal.reason == authority_interruption and denial is None:
+        if hard_stopped:
+            pass  # settled failed with the reason and its full reservation, as an unknown outcome
+        elif authority_interruption is not None and signal.reason == authority_interruption and denial is None:
             # Authorization was withdrawn while the action ran: what it observed before the
             # stop is kept, and the receipt says it is partial and why.
             receipt = with_authority_interruption(receipt, authority_interruption, signal.observed_at)
