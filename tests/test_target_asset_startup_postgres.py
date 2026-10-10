@@ -445,3 +445,35 @@ def test_findings_routes_answer_through_the_cli_bridge_and_the_main_route(monkey
             finally:
                 await pool.close()
     asyncio.run(run())
+
+
+def test_a_numeric_host_with_an_unreadable_port_is_flagged_and_startup_completes():
+    """``http://127.1:99999/`` has one numeric reading but no readable port. The host repair now
+    runs on every upgraded database inside the startup transaction: such a row is flagged and
+    left as stored, and startup completes, rather than the API failing to start."""
+    async def run():
+        async with startup_database() as conn:
+            api_root = str(Path(__file__).resolve().parents[1] / 'api')
+            if api_root not in sys.path:
+                sys.path.insert(0, api_root)
+            module = importlib.import_module('retest_contract')
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            # This is an isolated disposable database; no retained operator evidence exists.
+            await conn.execute("DELETE FROM app_schema_migrations WHERE name='target_host_canonical_spelling_v1'")
+            unreadable = {}
+            for url in ('http://127.1:99999/', 'http://0x7f.1:abc/'):
+                unreadable[url] = await conn.fetchval("INSERT INTO targets(url) VALUES($1) RETURNING id", url)
+            readable = await conn.fetchval("INSERT INTO targets(url) VALUES('http://127.2:8080/x') RETURNING id")
+
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+
+            for url, target in unreadable.items():
+                assert await conn.fetchval('SELECT url FROM targets WHERE id=$1', target) == url
+                reason = await conn.fetchval(
+                    "SELECT metadata_json->'host_canonicalization_review'->>'reason' FROM targets WHERE id=$1",
+                    target)
+                assert reason and 'port cannot be read' in reason, (url, reason)
+            assert await conn.fetchval('SELECT url FROM targets WHERE id=$1', readable) == 'http://127.0.0.2:8080/x'
+            assert await conn.fetchval(
+                "SELECT 1 FROM app_schema_migrations WHERE name='target_host_canonical_spelling_v1'") == 1
+    asyncio.run(run())
