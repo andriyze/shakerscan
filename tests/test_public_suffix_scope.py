@@ -211,3 +211,14 @@ def test_hunt_binding_of_an_upgraded_target_recomputes_its_root():
     source = (ROOT / "api" / "hunt" / "target_binding.py").read_text()
     assert "binding_roots((), target_context.get(\"root_domain\"), parsed.hostname)" in source
     assert target_binding.binding_roots((), "co.uk", "app.example.co.uk") == ("example.co.uk",)
+
+
+def test_a_stored_spelling_that_no_longer_parses_is_not_listed_as_refused_and_never_raises():
+    # Withheld and reported by stored_bounds (reapproval_required); the public-suffix view skips it.
+    stored = {"target_patterns": ["xn--i-7iq.example", "*.co.uk"], "credential_targets": []}
+    assert [item["bound"] for item in refused_bounds(stored)] == ["target.authorize:*.co.uk"]
+    shown = public_preauthorization({
+        "id": "1", "bounds_json": stored, "bounds_digest": "d", "created_by": "p", "proof": "start",
+        "created_at": None,
+    })
+    assert [item["bound"] for item in shown["refused_bounds"]] == ["target.authorize:*.co.uk"]
