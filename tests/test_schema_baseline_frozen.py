@@ -140,3 +140,29 @@ def test_the_guard_refuses_each_way_of_adding_a_migration(addition):
     recorded = Counter(json.loads(FIXTURE.read_text(encoding="utf-8"))["digests"])
     added = Counter(digest(entry) for entry in baseline_entries(changed)) - recorded
     assert added, addition
+
+
+def _startup_source() -> str:
+    source = (ROOT / "api" / "targets" / "asset_migration.py").read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "run_unified_startup":
+            return ast.get_source_segment(source, node) or ""
+    raise AssertionError("run_unified_startup moved; update this guard")
+
+
+@pytest.mark.parametrize("called", ["mark_unconfirmed_agent_writes", "recompute_spanning_target_roots"])
+def test_always_run_migrations_are_not_behind_a_conditional(called):
+    """The always-run section runs on every start: a migration inside an ``if`` (such as the
+    "not yet converted" branch) would again reach fresh installs only."""
+    tree = ast.parse(_startup_source())
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and _called_name(node) == called]
+    assert len(calls) == 1, called
+    for gate in (node for node in ast.walk(tree) if isinstance(node, (ast.If, ast.IfExp))):
+        assert calls[0] not in list(ast.walk(gate)), f"{called} sits inside a conditional"
+
+
+def test_the_proposal_schema_is_installed_by_the_always_run_path():
+    startup = _startup_source()
+    assert "INSTRUCTION_PROPOSAL_SCHEMA_SQL" in startup
+    for entry in baseline_entries():
+        assert "target_instruction_proposals" not in entry and "mark_unconfirmed_agent_writes" not in entry

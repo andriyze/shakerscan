@@ -483,6 +483,8 @@ EDGE_METADATA = [
     '{"target_skill":{"methodology":"m","written_by":"operator:x","operator_snapshot":{"methodology":"m",'
     '"written_by":"hunt:x","instruction_authority":"target_metadata_delegation"}}}',
     '{"target_skill":{"revision":3,"operator_snapshot":null}}',
+    '{"target_skill":{"methodology":"m","written_by":"hunt:x","instruction_authority":"target_metadata_delegation",'
+    '"origin":"some_future_origin"},"hunt_actions":{"actions":[{"written_by":"hunt:a","origin":"some_future_origin"}]}}',
 ]
 
 
@@ -508,6 +510,6 @@ def test_the_candidate_query_selects_every_record_the_rule_marks_and_the_migrati
             stored = {row['id']: row['metadata_json'] for row in await conn.fetch('SELECT id, metadata_json FROM targets')}
             hunt_action = json.loads(stored[ids[6]])['hunt_actions']['actions']
             assert hunt_action[:2] == [1, 'x'] and hunt_action[2]['origin'] == 'agent_unconfirmed'
-            for untouched in (7, 8, 9, 11, 12):
+            for untouched in (7, 8, 9, 11, 12, 15):  # 15: a later engine's origin is never overwritten
                 assert json.loads(stored[ids[untouched]]) == json.loads(EDGE_METADATA[untouched])
     asyncio.run(run())
