@@ -581,6 +581,28 @@ def test_an_existing_state_directory_left_open_is_tightened_to_owner_only(tmp_pa
     assert ((state / "workspaces").stat().st_mode & 0o777) == 0o700
 
 
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="POSIX")
+def test_an_explicit_state_directory_and_a_linked_one_keep_their_mode(tmp_path, monkeypatch):
+    """A directory the user named in SHAKERSCAN_STATE_DIR (possibly shared) keeps its mode; the
+    client's records directory inside it is still tightened. A symbolic link is never followed."""
+    shared = tmp_path / "shared"
+    (shared / "workspaces").mkdir(parents=True)
+    shared.chmod(0o755)
+    (shared / "workspaces").chmod(0o755)
+    monkeypatch.setenv("SHAKERSCAN_STATE_DIR", str(shared))
+    assert cli.ensure_client_dir("state", child="workspaces") == shared / "workspaces"
+    assert (shared.stat().st_mode & 0o777) == 0o755
+    assert ((shared / "workspaces").stat().st_mode & 0o777) == 0o700
+    monkeypatch.delenv("SHAKERSCAN_STATE_DIR")
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    target.chmod(0o755)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "shakerscan").symlink_to(target, target_is_directory=True)
+    cli.ensure_client_dir("state")
+    assert (target.stat().st_mode & 0o777) == 0o755
+
+
 def test_a_state_directory_another_user_owns_is_not_changed(tmp_path, monkeypatch):
     state = tmp_path / "state" / "shakerscan"
     state.mkdir(parents=True)

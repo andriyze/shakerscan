@@ -146,21 +146,32 @@ def ensure_client_dir(kind: str, environ: Mapping[str, str] | None = None, child
                 f"cannot use {directory} for the client's {kind} ({exc.strerror or exc}); set {variable} to a "
                 "writable absolute directory"
             ) from exc
-        if kind == "state":
+        # The client's own state directories; a directory the user named in $SHAKERSCAN_STATE_DIR
+        # (which may be shared, or their home) keeps its mode, its records directory does not.
+        if kind == "state" and (directory != path or not (environ if environ is not None else os.environ).get(variable)):
             _owner_only(directory)
     return path / child if child else path
 
 
 def _owner_only(directory: Path) -> None:
     """Tighten a state directory an earlier client (or a umask) left open to others to 0700,
-    only when this user owns it; anything else is left as it is."""
+    only when this user owns it and it is not a symbolic link; anything else is left as it is."""
     getuid = getattr(os, "getuid", None)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if getuid is None or not nofollow:
+        return
     try:
-        status = directory.stat()
-        if getuid is not None and status.st_uid == getuid() and stat.S_IMODE(status.st_mode) & 0o077:
-            os.chmod(directory, 0o700)
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+    except OSError:
+        return  # a link, or not openable: left as it is
+    try:
+        status = os.fstat(fd)
+        if stat.S_ISDIR(status.st_mode) and status.st_uid == getuid() and stat.S_IMODE(status.st_mode) & 0o077:
+            os.fchmod(fd, 0o700)
     except OSError:
         pass  # usable as it is; the records inside are written owner-only regardless
+    finally:
+        os.close(fd)
 
 
 def state_dir(environ: Mapping[str, str] | None = None) -> Path:
