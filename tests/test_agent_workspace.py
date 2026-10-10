@@ -566,6 +566,31 @@ def test_the_root_is_refused_as_the_state_or_data_directory(monkeypatch, variabl
         cli.state_dir() if variable == "SHAKERSCAN_STATE_DIR" else cli.data_dir()
 
 
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership and modes")
+def test_an_existing_state_directory_left_open_is_tightened_to_owner_only(tmp_path, monkeypatch, capsys):
+    """0.8.1 and earlier could leave ~/.local/state/shakerscan at 0755 (a umask, or created before
+    the client set modes); starting the agent tightens the state directory it owns to 0700."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    state = tmp_path / "state" / "shakerscan"
+    (state / "workspaces").mkdir(parents=True)
+    state.chmod(0o755)
+    (state / "workspaces").chmod(0o755)
+    assert cli.main(["agent", "--url", URL, "--workspace", str(tmp_path / "ws"), "--no-launch"]) == 0
+    capsys.readouterr()
+    assert (state.stat().st_mode & 0o777) == 0o700
+    assert ((state / "workspaces").stat().st_mode & 0o777) == 0o700
+
+
+def test_a_state_directory_another_user_owns_is_not_changed(tmp_path, monkeypatch):
+    state = tmp_path / "state" / "shakerscan"
+    state.mkdir(parents=True)
+    state.chmod(0o755)
+    owner = os.getuid() if hasattr(os, "getuid") else 0
+    monkeypatch.setattr(cli.os, "getuid", lambda: owner + 1, raising=False)
+    assert cli.ensure_client_dir("state") == state
+    assert (state.stat().st_mode & 0o777) == 0o755
+
+
 def test_an_unwritable_state_directory_names_the_variable_to_set(tmp_path, monkeypatch, capsys,
                                                                  make_unwritable):
     locked = tmp_path / "etc"

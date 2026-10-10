@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -145,7 +146,21 @@ def ensure_client_dir(kind: str, environ: Mapping[str, str] | None = None, child
                 f"cannot use {directory} for the client's {kind} ({exc.strerror or exc}); set {variable} to a "
                 "writable absolute directory"
             ) from exc
+        if kind == "state":
+            _owner_only(directory)
     return path / child if child else path
+
+
+def _owner_only(directory: Path) -> None:
+    """Tighten a state directory an earlier client (or a umask) left open to others to 0700,
+    only when this user owns it; anything else is left as it is."""
+    getuid = getattr(os, "getuid", None)
+    try:
+        status = directory.stat()
+        if getuid is not None and status.st_uid == getuid() and stat.S_IMODE(status.st_mode) & 0o077:
+            os.chmod(directory, 0o700)
+    except OSError:
+        pass  # usable as it is; the records inside are written owner-only regardless
 
 
 def state_dir(environ: Mapping[str, str] | None = None) -> Path:

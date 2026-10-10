@@ -397,8 +397,8 @@ follow `next_cursor`.
 
 A client built from a repository checkout (a release, or `pipx install
 "git+https://github.com/andriyze/shakerscan@<commit>#subdirectory=client"`) also records the commit
-it was built from: `shakerscan version` prints `shakerscan client 0.8.2 (source 1a2b3c4d5e6f)`,
-`doctor` shows the same, and the MCP `serverInfo.version` is `client-0.8.2+1a2b3c4d5e6f`.
+it was built from: `shakerscan version` prints `shakerscan client 0.8.3 (source 1a2b3c4d5e6f)`,
+`doctor` shows the same, and the MCP `serverInfo.version` is `client-0.8.3+1a2b3c4d5e6f`.
 
 The client has its own version (`client/src/shakerscan/__init__.py`), tagged `client-vX.Y.Z`,
 independent of the engine release: because tool catalogues come from the live contracts, one
