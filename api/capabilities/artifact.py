@@ -229,11 +229,13 @@ def _learn_head(
     CREATE TABLE columns and where its COPY blocks open."""
     text = head.decode("utf-8", errors="replace")
     if not (looks_like_dump_head(text) or _served_as_dump(headers)):
-        tables[HEAD_VERDICT_KEY] = ["text"]
+        # Bound to the version it was read from: another version may be a dump.
+        tables[HEAD_VERDICT_KEY] = ["text", version or ""]
         return
     tables[HEAD_VERDICT_KEY] = ["dump"]
     collector.sql_dump_like = True
-    track_copy_blocks(tables, 0, head, resource=version)
+    if _validated(version) is not None:
+        track_copy_blocks(tables, 0, head, resource=_validated(version))
     learner = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=0)
     learner.sql_tables, learner.sql_path, learner.sql_dump_like = collector.sql_tables, resource, True
     with collecting_withheld_values(learner):
@@ -277,8 +279,10 @@ async def _check_resource_head(
     resource = _resource_path(path)
     tables = collector.sql_tables.setdefault(resource, {})
     verdict = tables.get(HEAD_VERDICT_KEY) or []
-    if verdict in (["dump"], ["text"]):
-        collector.sql_dump_like = verdict == ["dump"]
+    if verdict == ["dump"]:
+        collector.sql_dump_like = True
+        return 0
+    if version is not None and verdict == ["text", version]:
         return 0
     text = span.decode("utf-8", errors="replace")
     tabs = tab_row_run(text)
@@ -420,13 +424,21 @@ def _resource_bytes(private: WorkerPrivateHTTPResponse) -> int | None:
 
 
 def _resource_version(private: WorkerPrivateHTTPResponse) -> str | None:
-    """What identifies the resource's version, when the response says: its full size and ETag.
-    Byte positions learned from one version are not applied to another."""
+    """What identifies the resource's version, when the response says: its full size, ETag and
+    Last-Modified. A head verdict is reused only for the same version."""
     size = _resource_bytes(private)
-    etag = str(private.headers().get("etag") or "").strip()[:200]
-    if size is None and not etag:
+    headers = private.headers()
+    etag = str(headers.get("etag") or "").strip()[:200]
+    modified = str(headers.get("last-modified") or "").strip()[:100]
+    if size is None and not etag and not modified:
         return None
-    return f"{'' if size is None else size}/{etag}"
+    return f"{'' if size is None else size}/{etag}/{modified}"
+
+
+def _validated(version: str | None) -> str | None:
+    """A version that names a validator (ETag or Last-Modified); byte positions are carried
+    between reads only under one: the same size alone does not show the bytes are the same."""
+    return version if version is not None and version.split("/", 1)[1].strip("/") else None
 
 
 async def _fetch_artifact(
@@ -455,7 +467,7 @@ async def _fetch_artifact(
         timeout_seconds=timeout_seconds,
         allow_bound_origin_redirects=True,
         private_response_sink=captured.append,
-        private_response_headers=("etag",),
+        private_response_headers=("etag", "last-modified"),
         response_body_limit=max(length, MAX_PUBLIC_TEXT),
     )
     return result, captured[-1] if captured else None
@@ -522,7 +534,7 @@ async def inspect_target_artifact(
     if collector is not None and collector.sql_path:
         # Where COPY blocks open and end in what was read, by byte position in the resource.
         track_copy_blocks(collector.sql_tables.setdefault(collector.sql_path, {}), context_start,
-                          context + received[:length], resource=version)
+                          context + received[:length], resource=_validated(version))
     requests = 1 + await _check_resource_head(
         target_url, path, target, offset, context + received[:length], transaction_recorder,
         span_start=context_start, deadline=deadline, version=version)

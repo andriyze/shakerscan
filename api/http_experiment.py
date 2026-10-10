@@ -335,11 +335,13 @@ def normalize_experiment(target_url: str, raw: Any) -> dict[str, Any]:
     }
 
 
-def _masked_body(value: str) -> str:
+def _masked_body(value: str, *, window: bool = False) -> str:
     """The masked-archive body masking over the whole bounded body (N56: SQL dump rows, markup
     pairs, table cells, assignments, provider formats). Inside a Hunt worker withheld values
-    become ``[withheld:n]`` references, and every echo of a value the request sent is withheld."""
-    text = mask_body_text(value)
+    become ``[withheld:n]`` references, and every echo of a value the request sent is withheld.
+    ``window``: the body may start anywhere in a resource (a ranged response), or opens like
+    JSON but is not, so the text passes run over it whatever its first character."""
+    text = mask_body_text(value, window=window)
     # A bare bearer credential in prose, which no assignment names. A reference is kept.
     return re.sub(r"(?i)(bearer\s+)(?!\[withheld:)[a-z0-9._~+/=-]+", r"\1<redacted>", text)
 
@@ -410,7 +412,14 @@ def response_summary(
         )
         for name in selected_headers or []
     }
-    masked_text = _masked_body(text)
+    # A ranged response (206, or a Content-Range starting past byte 0) is a window cut at any
+    # offset; a body that opens like JSON but does not parse is not (only) JSON.
+    range_start = re.match(r"\s*bytes\s+(\d+)-", str(response.headers.get("content-range") or ""), re.I)
+    window = (
+        response.status_code == 206 or bool(range_start and int(range_start.group(1)) > 0)
+        or (parsed_json is None and text.lstrip()[:1] in ("{", "["))
+    )
+    masked_text = _masked_body(text, window=window)
     body_sample = masked_text[:MAX_RESPONSE_SAMPLE]
     summary = {
         "status": response.status_code,

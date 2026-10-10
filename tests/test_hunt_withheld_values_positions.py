@@ -91,19 +91,22 @@ def test_windows_in_a_later_same_width_block_never_take_the_earlier_blocks_colum
         assert "@fixture.test" in sample and "2024-02-19 14:07:31" in sample
 
 
+VERSION = "4096/\"v1\"/"  # a size with an ETag: positions carry between its reads
+
+
 def test_copy_block_positions_follow_what_was_read():
     document = _two_table_dump(audit_rows=2_000, user_rows=2_000)
     users_header = document.index(b"COPY public.users")
     users_rows = document.index(b"\n", users_header) + 1
     audit_end = document.index(b"\\.\n")
     tables: dict[str, list[str]] = {}
-    masking.track_copy_blocks(tables, 0, document[:4_096])  # a head read: audit is open
+    masking.track_copy_blocks(tables, 0, document[:4_096], resource=VERSION)  # a head read: audit is open
     assert masking.copy_block_at(tables, 2_000) == "public.audit"
     assert masking.copy_block_at(tables, 50_000) is None  # past what was read: not known
-    masking.track_copy_blocks(tables, 4_096, document[4_096:8_192])  # a contiguous read
+    masking.track_copy_blocks(tables, 4_096, document[4_096:8_192], resource=VERSION)  # a contiguous read
     assert masking.copy_block_at(tables, 8_000) == "public.audit"
     # A read that shows audit's end and the users header: users is open from its first row.
-    masking.track_copy_blocks(tables, audit_end - 100, document[audit_end - 100:users_rows + 500])
+    masking.track_copy_blocks(tables, audit_end - 100, document[audit_end - 100:users_rows + 500], resource=VERSION)
     assert masking.copy_block_at(tables, users_rows + 100) == "public.users"
     assert masking.copy_block_at(tables, audit_end + 2) is None  # between the blocks
 

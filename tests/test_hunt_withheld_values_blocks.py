@@ -98,8 +98,9 @@ def test_copy_headers_with_quoted_identifiers_are_read(header, hunt):
 
 
 def test_quoted_identifiers_name_blocks_exactly():
-    assert masking._sql_table_name('public."My ""Quoted"" Keys"') == 'public.my "quoted" keys'
-    assert masking._sql_table_name("`db`.`Users`") == "db.users"
+    assert masking._sql_table_name('public."My ""Quoted"" Keys"') == 'public.My "Quoted" Keys'
+    assert masking._sql_table_name("`we``ird`.[we]]ird]") == "we`ird.we]ird"
+    assert masking._sql_table_name('PUBLIC."Users"') != masking._sql_table_name("public.users")
     document = (_HEAD + 'COPY public."api-keys" (id, token) FROM stdin;\n1\tx\n').encode()
     tables: dict[str, list[str]] = {}
     masking.track_copy_blocks(tables, 0, document)
@@ -130,8 +131,8 @@ def test_a_shorter_read_of_the_head_keeps_the_larger_known_extent():
     document = (_HEAD + "COPY public.audit (id, email, label, created_at) FROM stdin;\n"
                 + "".join(_rows("a", 6_000, False))).encode()
     tables: dict[str, list[str]] = {}
-    masking.track_copy_blocks(tables, 0, document[:200_000])
-    masking.track_copy_blocks(tables, 0, document[:65_536])  # the head, read again
+    masking.track_copy_blocks(tables, 0, document[:200_000], resource="v1")
+    masking.track_copy_blocks(tables, 0, document[:65_536], resource="v1")  # the head, read again
     assert masking.copy_block_at(tables, 150_000) == "public.audit"
 
 
