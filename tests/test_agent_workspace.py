@@ -6,11 +6,14 @@ Unit tests against a real directory tree; the kit is the repository's own.
 
 from __future__ import annotations
 
+import builtins
 import hashlib
+import io
 import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -36,6 +39,139 @@ def _rerun(workspace, notes=None):
     notes = [] if notes is None else notes
     cli.prepare_workspace(workspace, URL, "operator", "shakerscan", authenticated=False, notes=notes)
     return notes
+
+
+# --- directories the client cannot write -----------------------------------------------------------
+
+
+def _refuse_writes_in(monkeypatch, directory: Path) -> None:
+    """Make ``directory`` behave for this process as mode 0o500 does for an ordinary user: what
+    is in it can be read (and linked elsewhere), but no entry can be created in it, renamed into
+    or out of it, or removed from it, and ``os.access`` reports it unwritable. The os calls that
+    would change it fail with the kernel's EACCES, so root, whom mode bits do not stop, is
+    refused the same way."""
+    locked = os.path.realpath(directory)
+
+    def inside(path) -> bool:
+        return os.path.realpath(os.path.dirname(os.path.abspath(os.fspath(path)))) == locked
+
+    def denied(path):
+        return PermissionError(13, "Permission denied", os.fspath(path))
+
+    def changing(real, *, both: bool):
+        def call(source, *args, **kwargs):
+            for path in (source, args[0]) if both else (source,):
+                if inside(path):
+                    raise denied(path)
+            return real(source, *args, **kwargs)
+        return call
+
+    real_mkdir, real_open, real_link, real_access = os.mkdir, os.open, os.link, os.access
+    real_symlink, real_io_open = os.symlink, io.open
+
+    def mkdir(path, *args, **kwargs):
+        if inside(path) and not os.path.lexists(path):  # an existing entry is EEXIST, as the kernel says
+            raise denied(path)
+        return real_mkdir(path, *args, **kwargs)
+
+    def open_(path, flags, *args, **kwargs):
+        if flags & os.O_CREAT and inside(path) and not os.path.lexists(path):
+            raise denied(path)
+        return real_open(path, flags, *args, **kwargs)
+
+    def open_file(file, mode="r", *args, **kwargs):  # open() and Path.write_text, not via os.open
+        if (isinstance(file, (str, bytes, os.PathLike)) and set(mode) & set("wxa+") and inside(file)
+                and not os.path.lexists(file)):
+            raise denied(file)
+        return real_io_open(file, mode, *args, **kwargs)
+
+    def link(source, target, *args, **kwargs):
+        if inside(target) and not os.path.lexists(target):
+            raise denied(target)
+        return real_link(source, target, *args, **kwargs)
+
+    def symlink(source, target, *args, **kwargs):  # ``source`` is only the link's text
+        if inside(target) and not os.path.lexists(target):
+            raise denied(target)
+        return real_symlink(source, target, *args, **kwargs)
+
+    def access(path, mode, *args, **kwargs):
+        if mode & os.W_OK and os.path.realpath(path) == locked:
+            return False
+        return real_access(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", mkdir)
+    monkeypatch.setattr(os, "open", open_)
+    monkeypatch.setattr(io, "open", open_file)
+    monkeypatch.setattr(builtins, "open", open_file)
+    monkeypatch.setattr(os, "link", link)
+    monkeypatch.setattr(os, "symlink", symlink)
+    monkeypatch.setattr(os, "rename", changing(os.rename, both=True))
+    monkeypatch.setattr(os, "replace", changing(os.replace, both=True))
+    monkeypatch.setattr(os, "unlink", changing(os.unlink, both=False))
+    monkeypatch.setattr(os, "remove", changing(os.remove, both=False))
+    monkeypatch.setattr(os, "rmdir", changing(os.rmdir, both=False))
+    monkeypatch.setattr(os, "access", access)
+
+
+@pytest.fixture(params=["by-mode", "by-refused-calls"])
+def make_unwritable(request, monkeypatch):
+    """Make a directory unwritable. ``by-mode`` sets mode 0o500, the real thing for an ordinary
+    user; root is not stopped by mode bits, so it is not used as root. ``by-refused-calls``
+    refuses the os calls that would write there (``_refuse_writes_in``) and holds for root as
+    well, so the behaviour is tested whoever runs the suite."""
+    if request.param == "by-mode" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root is not stopped by mode bits; the by-refused-calls case covers root")
+    chmodded: list[Path] = []
+
+    def lock(directory: Path) -> None:
+        if request.param == "by-mode":
+            directory.chmod(0o500)
+            chmodded.append(directory)
+        else:
+            _refuse_writes_in(monkeypatch, directory)
+
+    yield lock
+    for directory in chmodded:
+        directory.chmod(0o700)
+
+
+def test_an_unwritable_directory_refuses_what_its_mode_refuses(tmp_path, make_unwritable):
+    """Both ways of making a directory unwritable refuse the same things -- for an ordinary user
+    the by-refused-calls simulation is checked here against the real mode -- no entry in it can
+    be created, replaced or removed, its contents stay readable, other directories are not
+    affected."""
+    locked, free = tmp_path / "locked", tmp_path / "free"
+    locked.mkdir()
+    free.mkdir()
+    (locked / "kept.json").write_text("{}", encoding="utf-8")
+    (free / "other.json").write_text("{}", encoding="utf-8")
+    make_unwritable(locked)
+    attempts = {
+        "mkdir": lambda: (locked / "new").mkdir(),
+        "create": lambda: (locked / "new.json").write_text("{}", encoding="utf-8"),
+        "mkstemp": lambda: tempfile.mkstemp(dir=locked),
+        "link in": lambda: os.link(free / "other.json", locked / "linked.json"),
+        "symlink in": lambda: os.symlink(free / "other.json", locked / "pointer.json"),
+        "replace in": lambda: os.replace(free / "other.json", locked / "kept.json"),
+        "rename out": lambda: os.rename(locked / "kept.json", free / "taken.json"),
+        "unlink": lambda: (locked / "kept.json").unlink(),
+    }
+    for name, attempt in attempts.items():
+        try:
+            attempt()
+        except PermissionError:
+            continue
+        pytest.fail(f"{name} was allowed in the refused directory")
+    assert not os.access(locked, os.W_OK) and os.access(locked, os.R_OK | os.X_OK)
+    assert (locked / "kept.json").read_text(encoding="utf-8") == "{}"
+    assert sorted(path.name for path in locked.iterdir()) == ["kept.json"]
+    with pytest.raises(FileExistsError):  # an existing entry is reported as existing
+        (locked / "kept.json").mkdir()
+    os.link(locked / "kept.json", free / "linked.json")  # reading out of it is allowed
+    (free / "new").mkdir()
+    (free / "linked.json").unlink()
+    assert os.access(free, os.W_OK)
 
 
 def _json(path):
@@ -430,19 +566,18 @@ def test_the_root_is_refused_as_the_state_or_data_directory(monkeypatch, variabl
         cli.state_dir() if variable == "SHAKERSCAN_STATE_DIR" else cli.data_dir()
 
 
-def test_an_unwritable_state_directory_names_the_variable_to_set(tmp_path, monkeypatch, capsys):
+def test_an_unwritable_state_directory_names_the_variable_to_set(tmp_path, monkeypatch, capsys,
+                                                                 make_unwritable):
     locked = tmp_path / "etc"
     locked.mkdir()
-    locked.chmod(0o500)
-    try:
-        monkeypatch.delenv("XDG_STATE_HOME")
-        monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(locked / "shakerscan"))  # -> /etc/shakerscan.state
-        assert cli.main(["agent", "--url", URL, "--workspace", str(tmp_path / "ws"), "--no-launch"]) == 2
-        err = capsys.readouterr().err
-        assert f"cannot use {locked / 'shakerscan.state'} for the client's state" in err, err
-        assert "set SHAKERSCAN_STATE_DIR to a writable absolute directory" in err
-    finally:
-        locked.chmod(0o700)
+    make_unwritable(locked)
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(locked / "shakerscan"))  # -> /etc/shakerscan.state
+    assert cli.main(["agent", "--url", URL, "--workspace", str(tmp_path / "ws"), "--no-launch"]) == 2
+    err = capsys.readouterr().err
+    assert f"cannot use {locked / 'shakerscan.state'} for the client's state" in err, err
+    assert "set SHAKERSCAN_STATE_DIR to a writable absolute directory" in err
+    assert list(locked.iterdir()) == []
 
 
 def test_an_existing_default_workspace_and_its_record_move_once(tmp_path, monkeypatch, capsys):
@@ -700,32 +835,29 @@ def test_a_directory_at_the_new_location_is_left_alone(tmp_path):
     assert [path.name for path in new.iterdir()] == ["a.json"]
 
 
-def test_an_unwritable_records_directory_names_the_variable_to_set(tmp_path, monkeypatch, capsys):
+def test_an_unwritable_records_directory_names_the_variable_to_set(tmp_path, monkeypatch, capsys,
+                                                                   make_unwritable):
     _old_records(tmp_path, "a.json")
     state = tmp_path / "explicit-state"
     (state / "workspaces").mkdir(parents=True)
-    (state / "workspaces").chmod(0o500)
-    try:
-        monkeypatch.setenv("SHAKERSCAN_STATE_DIR", str(state))
-        assert cli.main(["agent", "--url", URL, "--workspace", str(tmp_path / "ws"), "--no-launch"]) == 2
-        err = capsys.readouterr().err
-        assert f"cannot use {state / 'workspaces'} for the client's state" in err, err
-        assert "set SHAKERSCAN_STATE_DIR to a writable absolute directory" in err
-        assert (tmp_path / "cfg" / "workspaces" / "a.json").is_file(), "left where it was"
-    finally:
-        (state / "workspaces").chmod(0o700)
+    make_unwritable(state / "workspaces")
+    monkeypatch.setenv("SHAKERSCAN_STATE_DIR", str(state))
+    assert cli.main(["agent", "--url", URL, "--workspace", str(tmp_path / "ws"), "--no-launch"]) == 2
+    err = capsys.readouterr().err
+    assert f"cannot use {state / 'workspaces'} for the client's state" in err, err
+    assert "set SHAKERSCAN_STATE_DIR to a writable absolute directory" in err
+    assert (tmp_path / "cfg" / "workspaces" / "a.json").is_file(), "left where it was"
+    assert list((state / "workspaces").iterdir()) == []
 
 
-def test_records_that_cannot_be_written_are_left_not_raised(tmp_path):
+def test_records_that_cannot_be_written_are_left_not_raised(tmp_path, make_unwritable):
     old, new = _old_records(tmp_path, "a.json")
     new.mkdir(parents=True)
-    new.chmod(0o500)
-    try:
-        notes = _workspace.migrate_records(old, new)
-    finally:
-        new.chmod(0o700)
+    make_unwritable(new)
+    notes = _workspace.migrate_records(old, new)
     assert notes == [f"note:      left in {old}: a.json (not plain record files, or they could not be moved)"], notes
-    assert (old / "a.json").is_file()
+    assert (old / "a.json").read_text(encoding="utf-8") == '{"from": "old"}'
+    assert list(new.iterdir()) == []
 
 
 def test_the_loser_of_a_concurrent_default_workspace_move_says_it_moved(tmp_path, monkeypatch):
@@ -782,11 +914,18 @@ def test_a_workspace_holding_the_token_directory_is_warned_about(tmp_path, monke
 # --- the guard that keeps tests out of the real home ----------------------------------------------
 
 
-def test_client_tests_run_with_their_own_directories():
-    from tests.conftest import REAL_HOME
+def test_client_tests_run_with_their_own_directories(tmp_path_factory):
+    """Each client directory is inside this run's temporary directory, and is none of (nor inside
+    any of) the real home's client directories. The home may itself hold the temporary directory
+    (HOME=/tmp in a container), so being under the home is not what is tested."""
+    from tests.conftest import _CLIENT_HOME_DIRECTORIES, REAL_HOME
 
+    run = tmp_path_factory.getbasetemp().resolve()
+    real = [(REAL_HOME / relative).resolve() for relative in _CLIENT_HOME_DIRECTORIES]
     for directory in (cli.config_dir(), cli.state_dir(), cli.data_dir()):
-        assert REAL_HOME not in directory.resolve().parents, directory
+        resolved = directory.resolve()
+        assert run in resolved.parents, directory
+        assert not any(resolved == home or home in resolved.parents for home in real), directory
 
 
 def test_the_real_home_guard_notices_a_write(tmp_path):
