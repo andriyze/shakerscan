@@ -20944,6 +20944,7 @@ def test_create_target_reuses_an_existing_dead_host_identity_for_its_www_twin(mo
     import target_resolution
 
     existing_id = uuid.uuid4()
+    marked: list[tuple] = []
 
     class Conn:
         def transaction(self):
@@ -20957,6 +20958,10 @@ def test_create_target_reuses_an_existing_dead_host_identity_for_its_www_twin(mo
             return Transaction()
 
         async def fetchrow(self, query, *args):
+            if query.lstrip().startswith("UPDATE targets SET") and "'declared'" in query:
+                # The person's add marks the reused row as theirs; it is already 'manual'.
+                marked.append(args)
+                return None
             assert "FROM targets WHERE canonical_key=$1" in query, "the live twin must not create a second row"
             assert args == ("web:example.com",)
             return {
@@ -20980,6 +20985,7 @@ def test_create_target_reuses_an_existing_dead_host_identity_for_its_www_twin(mo
     assert response["status"] == "already_exists"
     assert response["dns_fallback"]["resolved_host"] == "www.example.com"
     assert response.get("origin_merged") is None
+    assert marked == [(existing_id,)]
 
 
 def test_create_target_keeps_the_typed_name_when_it_resolves_or_the_resolver_fails(monkeypatch):

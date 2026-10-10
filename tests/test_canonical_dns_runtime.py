@@ -582,3 +582,18 @@ def test_a_binding_whose_roots_do_not_cover_the_host_is_still_refused():
     )
     result = asyncio.run(inspect_dns_posture(target, timeout_seconds=15, resolver=_Resolver()))
     assert result["status"] == "blocked"
+
+
+def test_an_explicit_host_root_under_a_spanning_domain_asks_the_registrable_domain_for_its_zone():
+    # api.typeform.com bound to its own name only: the deepest covering root is the host, and
+    # typeform.com spans registrants, so NS/SOA/DS go to the registrable domain as one name.
+    target = TargetBinding(
+        target_id="t", target_kind="web", canonical_host="api.typeform.com",
+        allowed_origins=("https://api.typeform.com",), allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("api.typeform.com",), scope_receipt_id="scope-api",
+    )
+    resolver = _Resolver()
+    result = asyncio.run(inspect_dns_posture(target, timeout_seconds=15, resolver=resolver, doh_query=None))
+    assert result["status"] == "success", result
+    zone = {name for name, query_type, _kwargs in resolver.calls if query_type in {"NS", "SOA", "DS"}}
+    assert zone == {"typeform.com"}

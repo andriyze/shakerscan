@@ -736,8 +736,9 @@ be a bare host name at or below a registrable domain under the bundled Public Su
 URL, port, wildcard, address or public suffix such as `co.uk`, or a name with one below it such
 as `amazonaws.com`), its apex must hold a target a person added on the Targets page (not one a scan
 submission, discovery, the CT monitor, an AI session, AI Gate, Model Intake, a Hunt agent or the
-asset model created; rows stored before 2.8.2 cannot be told apart and count) (403), and only one
-run per apex (409) and
+asset model created; a host a person added keeps counting after scans attach web rows under it,
+adding a target a scan or a Hunt agent created makes it the person's, and rows stored before these
+markers existed cannot be told apart and count as they did) (403), and only one run per apex (409) and
 `SHAKERSCAN_DISCOVERY_MAX_ACTIVE` runs engine-wide (default 2, 429) may be queued or running; the run
 records `requested_by` (derived by the engine, `local-operator`; never taken from the request),
 and the worker re-validates the queued domain before running. Each name is

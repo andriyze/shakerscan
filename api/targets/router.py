@@ -128,7 +128,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
 
 
-from .asset_router import router as asset_router, configure_asset_router
+from .asset_router import router as asset_router, configure_asset_router, mark_person_added
 from .skill import router as target_skill_router
 from .actions import router as target_actions_router
 from .hunt_authority_router import router as hunt_authority_router
@@ -708,14 +708,26 @@ async def create_target(request: TargetCreate):
                 # Canonical find-or-create: a scheme/trailing-slash variant of an existing
                 # origin reuses that target instead of creating a duplicate. xmax = 0 is
                 # true only for a freshly INSERTed row, so we can report created vs reused.
+                # A scan or a Hunt agent may have created the row first; adding it here makes it
+                # the person's own target (asset_router.mark_person_added, which the upsert below
+                # applies inline).
                 row = await target_dns_alias.existing_registration_for_dns_alias(
                     conn, original_target, normalized_target,
                 ) if dns_fallback else None
+                if row is not None:
+                    promoted = await mark_person_added(conn, row['id'])
+                    if promoted is not None:
+                        row = {**dict(row), **dict(promoted)}
                 if row is None:
                     row = await conn.fetchrow("""
                     INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
+                    ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url,
+                        discovery_source = CASE WHEN targets.discovery_source = 'scan' THEN 'manual'
+                                                ELSE targets.discovery_source END,
+                        metadata_json = CASE WHEN targets.metadata_json->>'created_via' = 'hunt'
+                                             THEN targets.metadata_json - 'created_via'
+                                             ELSE targets.metadata_json END
                     RETURNING id, url, name, discovery_source, metadata_json,
                               root_domain, is_root, (xmax = 0) AS created
                     """, normalized_target, request.name, root_domain, is_root,
