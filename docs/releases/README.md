@@ -7,7 +7,8 @@ use `../release-process.md` plus `RELEASES.md` at the repository root.
 
 ## 2.8 line
 
-- [`2.8.1.md`](2.8.1.md) — candidate prepared 2026-10-09; publication and stable promotion pending.
+- [`2.8.2.md`](2.8.2.md) — candidate prepared 2026-10-10; publication and stable promotion pending.
+- [`2.8.1.md`](2.8.1.md) — published 2026-10-10 and promoted to the stable installer channel.
 - [`2.8.0.md`](2.8.0.md) — published 2026-10-09 and promoted to the stable installer channel.
 
 ## 2.7 line
