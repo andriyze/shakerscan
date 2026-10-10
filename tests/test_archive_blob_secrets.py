@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import os
 from pathlib import Path
 import sys
@@ -30,9 +31,13 @@ def test_the_store_only_receives_the_sealed_payload_and_keeps_the_plaintext_dige
         received.append(content)
         raw, sha, size = serialize_evidence_content(content)
         return {"content_sha256": sha, "size_bytes": size, "storage_uri": "inline:", "content": raw}
-    payload = {"authorization": "Bearer archive-canary"}
+    # A 48-character random marker: a short word can occur in base64 ciphertext by chance.
+    marker = "plain-" + secrets.token_hex(24)
+    payload = {"authorization": f"Bearer {marker}"}
     stored = encrypting_store(store)(payload)
-    assert "archive-canary" not in json.dumps(received) and "archive-canary" not in json.dumps(stored)
+    assert marker not in json.dumps(received) and marker not in json.dumps(stored)
+    sealed = json.loads(stored["content"])
+    assert set(sealed) == {"schema_version", "ciphertext"} and sealed["ciphertext"].startswith("enc:fernet:")
     # Deduplication still keys on the payload, not on the random ciphertext.
     assert (stored["content_sha256"], stored["size_bytes"]) == serialize_evidence_content(payload)[1:]
     assert json.loads(reveal(stored["content"])) == payload

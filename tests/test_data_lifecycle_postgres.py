@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -1063,24 +1064,46 @@ def test_archived_plaintext_is_encrypted_once_at_startup_including_local_files(t
 
     async def scenario(pool):
         t, sibling, scan, f, other, e = await seeded(pool)
+        inline_marker, file_marker = _plaintext_marker(), _plaintext_marker()
+        inline_payload = {"authorization": f"Bearer {inline_marker}"}
+        file_payload = f"Set-Cookie: sid={file_marker}"
         async with pool.acquire() as c:
             await c.execute("DELETE FROM app_schema_migrations WHERE name=$1", blobs.MIGRATION)
             inline = await c.fetchval("""INSERT INTO evidence_objects(scan_id,object_type,content_sha256,size_bytes,
                 storage_uri,redaction_profile,content) VALUES($1,'http_archive_blob',$2,10,'inline:','none',
-                '{"authorization":"Bearer legacy-canary"}'::jsonb) RETURNING id""", scan, 'a' * 64)
+                $3::jsonb) RETURNING id""", scan, 'a' * 64, json.dumps(inline_payload))
             uri = "local:evidence_objects/bb/" + "b" * 64 + ".json"
             path = tmp_path / "evidence-objects" / "bb" / ("b" * 64 + ".json")
             path.parent.mkdir(parents=True)
-            path.write_text('"Set-Cookie: sid=legacy-file-canary"')
+            path.write_text(json.dumps(file_payload))
             await c.execute("""INSERT INTO evidence_objects(scan_id,object_type,content_sha256,size_bytes,
                 storage_uri,redaction_profile) VALUES($1,'http_archive_blob',$2,10,$3,'none')""", scan, 'b' * 64, uri)
             assert await blobs.encrypt_stored_blobs(c, results_dir=tmp_path) == 2
             stored = await c.fetchval("SELECT content::text FROM evidence_objects WHERE id=$1", inline)
-            assert "legacy-canary" not in stored and "legacy-file-canary" not in path.read_text()
-            assert json.loads(blobs.reveal(stored)) == {"authorization": "Bearer legacy-canary"}
-            assert json.loads(blobs.reveal(path.read_text())) == "Set-Cookie: sid=legacy-file-canary"
+            _assert_sealed_text(stored, inline_payload, inline_marker)
+            _assert_sealed_text(path.read_text(), file_payload, file_marker)
             assert await blobs.encrypt_stored_blobs(c, results_dir=tmp_path) == 0  # marker: once
     run(scenario)
+
+
+def _plaintext_marker() -> str:
+    """A 48-character random marker: a chance match inside base64 ciphertext is negligible
+    (a short word such as ``zzzz`` is not: valid Fernet text can contain it)."""
+    import secrets
+    return "plain-" + secrets.token_hex(24)
+
+
+def _assert_sealed_text(text: str, payload: Any, marker: str) -> None:
+    """``text`` is the encrypted evidence envelope of ``payload``: the envelope's fields, a round
+    trip under the test key, and no copy of the high-entropy marker the payload holds."""
+    from runtime import archive_blob_secrets as blobs
+    stored = json.loads(text)
+    assert set(stored) == {"schema_version", "ciphertext"}, sorted(stored)
+    assert stored["schema_version"] == blobs.SCHEMA
+    assert isinstance(stored["ciphertext"], str) and stored["ciphertext"].startswith("enc:fernet:")
+    assert marker in json.dumps(payload)
+    assert json.loads(blobs.reveal(text)) == payload
+    assert marker not in text
 
 
 def _large_tx(scan, target, n, body):
@@ -1097,7 +1120,8 @@ def test_repeated_large_payloads_leave_one_sealed_file_and_no_orphans(tmp_path, 
 
     async def scenario(pool):
         t, sibling, scan, f, other, e = await seeded(pool)
-        body = b"z" * 4096
+        marker = _plaintext_marker()
+        body = (b"z" * 2048) + marker.encode() + (b"z" * 2048)
         async with pool.acquire() as c:
             for n in range(3):  # three separate captures of the same payload
                 await archive_http_transactions(c, [_large_tx(scan, t, n + 1, body)], store=_default_store(tmp_path),
@@ -1106,7 +1130,7 @@ def test_repeated_large_payloads_leave_one_sealed_file_and_no_orphans(tmp_path, 
                 WHERE object_type='http_archive_blob' AND scan_id=$1 AND storage_uri LIKE 'local:%'""", scan)
         files = [p for p in (tmp_path / "evidence-objects").rglob("*.json")]
         assert rows == 1 and len(files) == 1, (rows, files)
-        assert "zzzz" not in files[0].read_text()
+        _assert_sealed_text(files[0].read_text(), body.decode(), marker)
     run(scenario)
 
 
@@ -1116,7 +1140,10 @@ def test_a_failed_backfill_is_retried_and_remote_objects_are_sealed(tmp_path, mo
 
     async def scenario(pool):
         t, sibling, scan, f, other, e = await seeded(pool)
-        objects = {"s3key": b'{"authorization": "Bearer remote-canary"}'}
+        remote_marker, local_marker = _plaintext_marker(), _plaintext_marker()
+        remote_payload = {"authorization": f"Bearer {remote_marker}"}
+        local_payload = f"Cookie: sid={local_marker}"
+        objects = {"s3key": json.dumps(remote_payload).encode()}
         def s3(method, bucket, key, **kwargs):
             if method == "GET":
                 return objects["s3key"]
@@ -1132,7 +1159,7 @@ def test_a_failed_backfill_is_retried_and_remote_objects_are_sealed(tmp_path, mo
             uri = "local:evidence_objects/dd/" + "d" * 64 + ".json"
             path = tmp_path / "evidence-objects" / "dd" / ("d" * 64 + ".json")
             path.parent.mkdir(parents=True)
-            path.write_text('"Cookie: sid=local-canary"')
+            path.write_text(json.dumps(local_payload))
             await c.execute("""INSERT INTO evidence_objects(scan_id,object_type,content_sha256,size_bytes,
                 storage_uri,redaction_profile) VALUES($1,'http_archive_blob',$2,10,$3,'none')""", scan, 'd' * 64, uri)
             # A temporary failure on the local file: the remote object is sealed, the step is not marked done.
@@ -1140,12 +1167,11 @@ def test_a_failed_backfill_is_retried_and_remote_objects_are_sealed(tmp_path, mo
             monkeypatch.setattr(blobs, "_seal_local", lambda p: "failed")
             await blobs.encrypt_stored_blobs(c, results_dir=tmp_path)
             assert not await c.fetchval("SELECT 1 FROM app_schema_migrations WHERE name=$1", blobs.MIGRATION)
-            assert b"remote-canary" not in objects["s3key"]
-            assert json.loads(blobs.reveal(objects["s3key"].decode())) == {"authorization": "Bearer remote-canary"}
+            _assert_sealed_text(objects["s3key"].decode(), remote_payload, remote_marker)
             # Repaired and restarted: the file is sealed and the step completes.
             monkeypatch.setattr(blobs, "_seal_local", real_seal)
             assert await blobs.encrypt_stored_blobs(c, results_dir=tmp_path) >= 1
-            assert "local-canary" not in path.read_text()
+            _assert_sealed_text(path.read_text(), local_payload, local_marker)
             assert await c.fetchval("SELECT 1 FROM app_schema_migrations WHERE name=$1", blobs.MIGRATION)
     run(scenario)
 
@@ -1191,7 +1217,8 @@ def test_externally_stored_payloads_read_back_and_a_lost_file_is_reported(tmp_pa
     from runtime.http_archive import archive_recorded_calls
     from runtime.http_archive_reader import export_document, read_transactions
 
-    body = '{"orders": [' + ",".join(f'{{"id": {n}, "note": "café"}}' for n in range(2000)) + ']}'
+    marker = _plaintext_marker()
+    body = '{"marker": "' + marker + '", "orders": [' + ",".join(f'{{"id": {n}, "note": "café"}}' for n in range(2000)) + ']}'
     assert len(body.encode()) > 40 * 1024
 
     async def scenario(pool):
@@ -1202,7 +1229,8 @@ def test_externally_stored_payloads_read_back_and_a_lost_file_is_reported(tmp_pa
             rows = await read_transactions(c, scan_id=str(scan), results_dir=tmp_path)
             stats = {"attempted": 1, "stored": 1, "failed": 0, "dropped": 0}
             files = list((tmp_path / "evidence-objects").rglob("*.json"))
-            assert len(files) == 1 and "orders" not in files[0].read_text()
+            assert len(files) == 1
+            _assert_sealed_text(files[0].read_text(), body, marker)
             document = export_document(rows, export_format="transactions", redaction="raw",
                                        owner={"scan_id": str(scan)}, total=1, stats=stats)
             assert document["fidelity"] == "complete", document["fidelity_detail"]

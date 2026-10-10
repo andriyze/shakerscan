@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from pathlib import Path
 import sys
 
@@ -24,11 +25,15 @@ def key(monkeypatch):
 
 def test_secret_headers_are_encrypted_and_content_headers_are_not(key):
     from runtime.ai_header_secrets import protect
-    stored = protect({'Content-Type': 'application/json', 'X-Api-Key': 'sk-live-123', 'Authorization': 'Bearer abc'})
+    # A 48-character random value: a short word can occur in base64 ciphertext by chance.
+    api_key = 'sk-live-' + secrets.token_hex(20)
+    stored = protect({'Content-Type': 'application/json', 'X-Api-Key': api_key, 'Authorization': 'Bearer abc'})
     assert stored['Content-Type'] == 'application/json'
     for name in ('X-Api-Key', 'Authorization'):
-        assert stored[name].startswith('enc:fernet:') and 'sk-live' not in stored[name]
-    assert key.decrypt_secret(stored['X-Api-Key']) == 'sk-live-123'
+        assert stored[name].startswith('enc:fernet:')
+    assert api_key not in stored['X-Api-Key']
+    assert key.decrypt_secret(stored['X-Api-Key']) == api_key
+    assert key.decrypt_secret(stored['Authorization']) == 'Bearer abc'
 
 
 def test_the_mask_keeps_the_stored_value_and_never_becomes_the_value(key):
