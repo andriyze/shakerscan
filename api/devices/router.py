@@ -1499,7 +1499,9 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             conn, device_uuid, request.request_collection_ids,
         )
         request_collection_refs = await bind_environments(conn, request_collection_refs, request.request_collection_environment_ids)
-        standing = await network_authorization_snapshot(conn, device_uuid) if not request.confirm_authorized else None
+        # A standing authorization is bound whenever the device has one, whatever the per-scan
+        # confirmation says: revoking it must stop this scan too (RunningScanAuthority).
+        standing = await network_authorization_snapshot(conn, device_uuid)
         if not request.confirm_authorized and not standing:
             raise HTTPException(409, 'Standing asset authorization changed during submission; review it before retrying')
         if credential_refs and not safety_contract.credentials_allowed:
@@ -1837,6 +1839,8 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
             device_uuid,
         ):
             raise HTTPException(status_code=409, detail="Connected-device traffic is already active for this device")
+        # As for a posture scan: the device's standing authorization is bound when it has one.
+        standing = await network_authorization_snapshot(conn, device_uuid)
         options = {
             "run_kind": "device_probe",
             _QUEUE_HANDOFF_CONFIRMATION_KEY: False,
@@ -1852,6 +1856,7 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
             "reason": request.reason,
             "safety_profile": request.safety_profile,
             "confirm_authorized": True,
+            "asset_authorization_receipt_id": standing['approval_receipt_id'] if standing else None,
             "approval_receipt_id": request.approval_receipt_id,
             "candidate_id": str(candidate_uuid) if candidate_uuid else None,
             "proof_contract_id": str(candidate["verifier_contract_id"] or "") if candidate else None,

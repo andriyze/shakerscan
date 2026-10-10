@@ -555,11 +555,11 @@ class _Api:
             revoked_by="fixture-owner", reason="fixture revoke mid-scan"))
 
     async def device_options(self, device_id, *, approval_id=None, confirm_authorized=False):
-        """``POST /devices/{id}/scan`` options: standing snapshot unless confirmed inline."""
+        """``POST /devices/{id}/scan`` options: the standing snapshot whenever there is one."""
         from devices.network_authorization import network_authorization_snapshot
         async with self.pool.acquire() as conn:
             device = await conn.fetchrow("SELECT primary_locator FROM device_targets WHERE id=$1", device_id)
-            standing = None if confirm_authorized else await network_authorization_snapshot(conn, device_id)
+            standing = await network_authorization_snapshot(conn, device_id)
             assert confirm_authorized or standing, "admission requires a standing authorization"
             context = await self.api._validate_approval_receipt_for_action(
                 conn, approval_id, target_url=str(device["primary_locator"]), action_name="device.scan",
@@ -1056,4 +1056,129 @@ def test_an_adapter_heartbeating_itself_on_a_fleet_node_settles_an_authorization
             assert settled.status.value == "partial" and settled.reason_code.value == "authorization_revoked"
             assert settled.budget_consumed["http_requests"] == 1
             assert await scan.held_reservations() == 0
+    asyncio.run(run())
+
+
+# --- The device routes bind the standing authorization whatever the per-scan confirmation -------
+#
+# The /devices list's Scan dialog always confirms authorization (``confirm_authorized: true``).
+# 2.8.2 then skipped the device's standing receipt, so the scan was admitted with no revocable
+# authority and ran to completion after "Revoke authorization" (2.8.2 acceptance). These call the
+# real ``POST /devices/{id}/scan`` and ``POST /devices/{id}/verify-service`` route functions; only
+# the queue, the worker registry and name resolution are fixtures.
+
+class _DeviceRoutes:
+    def __init__(self, pool, monkeypatch):
+        import devices.router as device_router
+
+        self.router, self.queued = device_router, []
+
+        async def admitted(*_args, **_kwargs):
+            return None
+
+        async def handed_off(**_kwargs):
+            return None
+
+        async def no_receipt(_conn, receipt_id, **_kwargs):
+            assert receipt_id is None
+            return None
+
+        class _Redis:
+            def hset(self, *_args, **_kwargs):
+                return 1
+
+        monkeypatch.setattr(device_router, "_pool_provider", lambda: pool)
+        monkeypatch.setattr(device_router, "_device_worker_readiness",
+                            lambda: {"status": "ready", "reason": "fixture", "worker_count": 1})
+        monkeypatch.setattr(device_router, "admit_device_destination", admitted)
+        monkeypatch.setattr(device_router, "_confirm_device_queue_handoff", handed_off)
+        monkeypatch.setitem(device_router._deps, "get_redis", lambda: _Redis())
+        monkeypatch.setitem(device_router._deps, "enqueue_job",
+                            lambda _redis, _queue, job: self.queued.append(job))
+        monkeypatch.setitem(device_router._deps, "validate_approval_receipt", no_receipt)
+
+    async def options(self, pool, scan_id):
+        import json
+        async with pool.acquire() as conn:
+            stored = await conn.fetchval("SELECT options FROM scans WHERE id=$1", uuid.UUID(scan_id))
+        return json.loads(stored) if isinstance(stored, str) else dict(stored)
+
+    async def scan(self, device_id, *, confirm_authorized):
+        return await self.router.scan_device(str(device_id), self.router.DeviceScanRequest(
+            profile="inventory", safety_profile="safe_remote", include_web_dast=False,
+            max_web_origins=0, confirm_authorized=confirm_authorized))
+
+    async def verify_service(self, device_id):
+        return await self.router.verify_device_service(str(device_id), self.router.DeviceServiceVerifyRequest(
+            transport="tcp", port=22, expected_state="open", confirm_authorized=True, reason="fixture"))
+
+
+async def _finish(pool, scan_id):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE scans SET status='completed' WHERE id=$1", uuid.UUID(scan_id))
+
+
+def test_a_confirmed_device_scan_binds_the_standing_authorization_and_stops_on_its_revoke(template_database,
+                                                                                            monkeypatch):
+    async def run():
+        async with scan_database(template_database) as pool:
+            routes = _DeviceRoutes(pool, monkeypatch)
+            device_id, standing = await _device(pool)
+            for confirm_authorized in (True, False):  # the /devices list dialog, the device page
+                queued = await routes.scan(device_id, confirm_authorized=confirm_authorized)
+                options = await routes.options(pool, queued["scan_id"])
+                assert options["asset_authorization_receipt_id"] == standing, confirm_authorized
+                assert routes.queued[-1]["options"]["asset_authorization_receipt_id"] == standing
+                await _finish(pool, queued["scan_id"])
+
+            # The list dialog's scan, run as the worker runs it, stops when the device is revoked.
+            async def revoke_standing():
+                async with pool.acquire() as conn:
+                    await target_authorization.revoke_target_authorization(
+                        conn, device_id, revoked_by="fixture-owner", reason="fixture revoke mid-scan")
+            queued = await routes.scan(device_id, confirm_authorized=True)
+            options = await routes.options(pool, queued["scan_id"])
+            marks = {}
+            scanner = FixtureScanner()
+            _result, authority, events = await _run_device(
+                pool, scanner, monkeypatch, device_id=device_id, receipt=None, options=options,
+                poll_seconds=0.2, during=_revoke_after(0.3, revoke_standing, marks))
+            assert authority.reason == "authorization_revoked" and scanner.returncode < 0
+            assert scanner.stopped_at - marks["revoked_at"] < 1.0
+    asyncio.run(run())
+
+
+def test_a_confirmed_device_scan_without_a_standing_authorization_still_runs_unbound(template_database,
+                                                                                      monkeypatch):
+    async def run():
+        async with scan_database(template_database) as pool:
+            routes = _DeviceRoutes(pool, monkeypatch)
+            device_id, _ = await _device(pool, standing=False)
+            queued = await routes.scan(device_id, confirm_authorized=True)
+            options = await routes.options(pool, queued["scan_id"])
+            assert options["asset_authorization_receipt_id"] is None
+            assert options["confirm_authorized"] is True
+            await _finish(pool, queued["scan_id"])
+            # Without the per-scan confirmation and with no standing authorization it is refused.
+            from fastapi import HTTPException
+            with pytest.raises(HTTPException) as refused:
+                await routes.scan(device_id, confirm_authorized=False)
+            assert refused.value.status_code == 409
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("has_standing", [True, False])
+def test_a_device_service_probe_binds_the_standing_authorization_when_there_is_one(template_database,
+                                                                                    monkeypatch, has_standing):
+    async def run():
+        async with scan_database(template_database) as pool:
+            routes = _DeviceRoutes(pool, monkeypatch)
+            device_id, standing = await _device(pool, standing=has_standing)
+            queued = await routes.verify_service(device_id)
+            options = await routes.options(pool, queued["scan_id"])
+            assert options["run_kind"] == "device_probe"
+            assert options["asset_authorization_receipt_id"] == standing
+            authority = await running_scan_authority(pool, options=options, device_target_id=str(device_id))
+            # Watched (a revoke stops it) exactly when there is a standing authorization to revoke.
+            assert (authority.guard is not None) is has_standing
     asyncio.run(run())
