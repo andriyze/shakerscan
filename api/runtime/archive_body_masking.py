@@ -841,14 +841,33 @@ def _quoted_content(pieces: list[str], quote: str) -> str:
     return unescape_yaml_double(content) if quote == '"' else content
 
 
+_JSON_LITERAL_VALUE_RE = re.compile(r"(?:true|false|null)[ \t]*,?[ \t]*")
+
+
+def _json_member_value(line: str, offset: int, raw: str) -> tuple[str, bool]:
+    """``(value, quoted key)``: an unquoted value of a ``"key": value,`` line (a JSON member read
+    as YAML) loses its trailing comma, and must be written back as a JSON string."""
+    quoted_key = line[:offset].rstrip().rstrip(":").rstrip().endswith('"')
+    if quoted_key:
+        raw = raw.rstrip().rstrip(",").rstrip()
+    return raw, quoted_key
+
+
 def _masked_line(line: str, offset: int, key: str | None = None) -> str:
-    start, end, raw, _quote = _scalar(line[offset:])
+    start, end, raw, quote = _scalar(line[offset:])
     if key is not None and normalized_key_name(key) in _COOKIE_LABELS and ";" in raw:
         raw = raw.split(";", 1)[0].rstrip()  # Set-Cookie: the cookie, not its attributes
         end = start + len(raw)
+    if not quote and _JSON_LITERAL_VALUE_RE.fullmatch(raw):
+        return line  # ``true``/``false``/``null`` hold nothing
+    quoted_key = False
+    if not quote:
+        raw, quoted_key = _json_member_value(line, offset, raw)
+        end = start + len(raw)
     if not raw:
         return line
-    return line[:offset + start] + _withhold(raw) + line[offset + end:]
+    replacement = json.dumps(_withhold(raw), ensure_ascii=False) if quoted_key else _withhold(raw)
+    return line[:offset + start] + replacement + line[offset + end:]
 
 
 def _is_secret_descriptor(key: str | None, value: str | None) -> bool:
@@ -1151,10 +1170,15 @@ def mask_text_assignments(text: str) -> str:
             scheme = _AUTH_SCHEME_RE.match(value)
             value = (scheme.group(0) if scheme else re.split(r"[ \t]", value, maxsplit=1)[0])
         value = _trimmed_value(value)
-        if not value or is_location_value(label, value):
+        if not value or is_location_value(label, value) or _JSON_LITERAL_VALUE_RE.fullmatch(value):
             continue
+        separator = match.group(2)
         pieces.append(text[cursor:match.start(3)])
-        pieces.append(_withhold(value))
+        if separator.startswith('"') and not separator.rstrip().endswith(('"', "'")):
+            # ``"key": 12`` (a JSON member): the replacement stays a JSON string.
+            pieces.append(json.dumps(_withhold(value), ensure_ascii=False))
+        else:
+            pieces.append(_withhold(value))
         cursor = match.start(3) + len(value)
     if not pieces:
         return text
@@ -1191,20 +1215,36 @@ def _plain_url_value(value: str) -> bool:
     )
 
 
-# The password of an absolute URL's userinfo (``https://user:<password>@host/``), at its start.
-_URL_USERINFO_PASSWORD_RE = re.compile(
-    r"[A-Za-z][A-Za-z0-9+.\-]{0,30}://[^/?#@:\s]{0,256}:([^/?#@\s]{1,1024})@"
-)
+# A URL's authority (``scheme://`` or a scheme-relative ``//``), at the value's start.
+_URL_AUTHORITY_RE = re.compile(r"[ \t\r\n]{0,64}(?:[A-Za-z][A-Za-z0-9+.\-]{0,30}:)?//([^/?#\s]{1,2048})")
+
+
+def _url_decoded(raw: str) -> str:
+    """A percent-encoded userinfo password as the value a client sends; one whose escapes are not
+    UTF-8 is kept as written."""
+    try:
+        return urllib.parse.unquote(raw, errors="strict")
+    except UnicodeDecodeError:
+        return raw
 
 
 def _mask_url_userinfo(url: str) -> str:
-    match = _URL_USERINFO_PASSWORD_RE.match(url)
+    """The password of a URL's userinfo (``https://user:<password>@host``): the userinfo ends at
+    the authority's last ``@``."""
+    match = _URL_AUTHORITY_RE.match(url)
     if match is None:
         return url
-    raw = urllib.parse.unquote(match.group(1))
-    if WITHHELD_MARKER_RE.fullmatch(raw) or raw == MASK:
+    authority = match.group(1)
+    userinfo = authority[:max(0, authority.rfind("@"))]
+    colon = userinfo.find(":")
+    if colon < 0 or colon == len(userinfo) - 1:
         return url
-    return url[:match.start(1)] + _withhold(raw) + url[match.end(1):]
+    raw = userinfo[colon + 1:]
+    value = _url_decoded(raw)
+    if WITHHELD_MARKER_RE.fullmatch(value) or value == MASK:
+        return url
+    start = match.start(1) + colon + 1
+    return url[:start] + _withhold(value) + url[start + len(raw):]
 
 
 def mask_url_secrets(url: Any) -> Any:
@@ -1328,7 +1368,8 @@ def mask_encoded_assignments(text: str) -> str:
 _QUOTED_VALUE = r"""(["'`])((?:\\.|(?!\{q})[^\\\r\n]){{0,4096}})\{q}"""
 _QUOTED_ASSIGNMENT_RE = re.compile(
     r"(?<![A-Za-z0-9_.\-<$])([\"']?)((?:[A-Za-z][A-Za-z0-9_\-]{0,40}[ \t]){0,2}[A-Za-z_][A-Za-z0-9_.\-]{0,80})\1"
-    r"[ \t]*(?:=>|:=|[:=])[ \t]*" + _QUOTED_VALUE.format(q=3)
+    # A PHP array entry may put its value on the next line (``'password' =>\n    '...'``).
+    r"[ \t]*(?:=>[ \t]*(?:\r?\n[ \t]{0,64})?|:=|[:=])[ \t]*" + _QUOTED_VALUE.format(q=3)
 )
 _PHP_DEFINE_RE = re.compile(
     r"(?i)\bdefine[ \t]*\([ \t]*([\"'])([A-Za-z_][A-Za-z0-9_]{0,80})\1[ \t]*,[ \t]*"
@@ -1340,18 +1381,20 @@ def _replace_quoted(
     text: str, pattern: re.Pattern[str], name_group: int, value_group: int, *, php: bool = False,
 ) -> str:
     """Each value is decoded by its language's string grammar: PHP for ``define`` and for
-    ``'key' => '...'`` array entries, dotenv for a one-word ``KEY="..."`` at a line start (an
-    ``.env`` file), JavaScript/JSON for every other assignment."""
+    ``'key' => '...'`` array entries, dotenv for ``KEY="..."`` (one word, no blanks around the
+    ``=``, optionally after ``export``) at a line start, as an ``.env`` file writes it;
+    JavaScript/JSON for every other assignment (``SECRET_KEY = '...'`` in Python or Ruby too)."""
     pieces: list[str] = []
     cursor = 0
     for match in pattern.finditer(text):
         name = re.sub(r"[ \t]+", "_", match.group(name_group))
         quote = match.group(value_group - 1)
-        operator = text[match.end(name_group):match.start(value_group - 1)].strip(" \t\"'")
+        operator = text[match.end(name_group):match.start(value_group - 1)].strip(" \t\r\n\"'")
         if php or operator == "=>":
             raw = unescape_php(match.group(value_group), quote)
         elif (
-            operator == "=" and _at_line_start(text, match.start())
+            text[match.end(name_group):match.start(value_group - 1)] == "="
+            and _at_line_start(text, match.start())
             and len(re.sub(r"^export[ \t]+", "", match.group(name_group)).split()) == 1
         ):
             raw = unescape_dotenv(match.group(value_group), quote)
@@ -1588,9 +1631,11 @@ def mask_table_cells(text: str) -> str:
 
 # One part of a table name: a quoted identifier (``"api-keys"``, ``"My ""Keys"""``, `` `t` ``,
 # ``[t]``) or a bare one; a name is up to three dotted parts (``db.schema.table``).
-_SQL_NAME_PART = r'(?:"(?:[^"\n]|""){1,128}"|`[^`\n]{1,128}`|\[[^\]\n]{1,128}\]|[\w$]{1,64})'
+_SQL_NAME_PART = r'(?:"(?:[^"\n]|""){1,128}"|`(?:[^`\n]|``){1,128}`|\[(?:[^\]\n]|\]\]){1,128}\]|[\w$]{1,64})'
 _SQL_NAME = rf"(?:{_SQL_NAME_PART}\.){{0,2}}{_SQL_NAME_PART}"
-_SQL_NAME_PART_RE = re.compile(r'"((?:[^"\n]|""){1,128})"|`([^`\n]{1,128})`|\[([^\]\n]{1,128})\]|([\w$]{1,64})')
+_SQL_NAME_PART_RE = re.compile(
+    r'"((?:[^"\n]|""){1,128})"|`((?:[^`\n]|``){1,128})`|\[((?:[^\]\n]|\]\]){1,128})\]|([\w$]{1,64})'
+)
 _SQL_STATEMENT_RE = re.compile(
     r"(?i)\b(?:(CREATE[ \t\r\n]{1,16}TABLE)(?:[ \t\r\n]{1,16}IF[ \t\r\n]{1,16}NOT[ \t\r\n]{1,16}EXISTS)?"
     r"|(INSERT)(?:[ \t\r\n]{1,16}IGNORE)?[ \t\r\n]{1,16}INTO|(COPY))[ \t\r\n]{1,16}"
@@ -1622,24 +1667,36 @@ _HEX_DIGEST_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _MAX_SQL_TABLES = 256
 
 
-def _sql_name_parts(token: str) -> list[str]:
+def _sql_name_parts(token: str) -> list[tuple[str, bool]]:
+    """``(name, quoted)`` per dotted part, a doubled delimiter inside a quoted part unescaped."""
     parts = []
     for match in _SQL_NAME_PART_RE.finditer(token.strip()):
         quoted, backticked, bracketed, bare = match.groups()
-        parts.append(quoted.replace('""', '"') if quoted is not None else backticked or bracketed or bare)
+        if quoted is not None:
+            parts.append((quoted.replace('""', '"'), True))
+        elif backticked is not None:
+            parts.append((backticked.replace("``", "`"), True))
+        elif bracketed is not None:
+            parts.append((bracketed.replace("]]", "]"), True))
+        else:
+            parts.append((bare, False))
     return parts
 
 
 def _sql_identifier(token: str) -> str:
     """A column's name: the last part of the token, unquoted."""
     parts = _sql_name_parts(token)
-    return parts[-1] if parts else token.strip().strip("`\"[]")
+    return parts[-1][0] if parts else token.strip().strip("`\"[]")
 
 
 def _sql_table_name(token: str) -> str:
-    """A table's key in carried knowledge: every part (schema included), unquoted and case-folded,
-    so ``auth.users`` and ``public.users`` never share columns."""
-    return ".".join(part.lower() for part in _sql_name_parts(token)) or token.strip().lower()
+    """A table's key in carried knowledge: every part (schema included), unquoted; a bare part is
+    case-folded as the database folds it, a quoted one keeps its case (``public."Users"`` is not
+    ``public.users``). ``auth.users`` and ``public.users`` never share columns."""
+    parts = _sql_name_parts(token)
+    if not parts:
+        return token.strip().lower()
+    return ".".join(name if quoted else name.lower() for name, quoted in parts)
 
 
 def looks_like_key_literal(value: str) -> bool:
@@ -1867,7 +1924,8 @@ _COPY_HEADER_RE = re.compile(
 _COPY_END_RE = re.compile(r"(?m)^\\\.\r?$")
 
 
-# Carried per resource: whether its head (first bytes) shows a database dump (["dump"] / ["text"]).
+# Carried per resource: whether its head (first bytes) shows a database dump: ["dump"], or
+# ["text", <resource version>] (a plain-text verdict holds only for the version it was read from).
 HEAD_VERDICT_KEY = "\0head"
 _DUMP_HEAD_RE = re.compile(
     r"(?im)^(?:--[ \t]*(?:PostgreSQL|MySQL|MariaDB)[ \t]+(?:database[ \t]+)?dump|INSERT[ \t]+INTO\b"
@@ -1950,8 +2008,9 @@ def _copy_blocks(tables: dict[str, list[str]]) -> dict[int, tuple[str, int]]:
 
 
 def _same_resource(tables: dict[str, list[str]], resource: str | None) -> bool:
-    known = tables.get(COPY_RESOURCE_KEY)
-    return resource is None or known is None or known == [resource]
+    """Positions recorded for ``resource`` (a version naming a validator): an unknown version on
+    either side is never the same version."""
+    return resource is not None and tables.get(COPY_RESOURCE_KEY) == [resource]
 
 
 def track_copy_blocks(
@@ -1967,13 +2026,17 @@ def track_copy_blocks(
     line's start. A row
     whose block is not known this way never takes a table's columns (``copy_block_at``).
 
-    ``resource`` identifies the resource's version (its size, its ETag) when the response says;
-    positions recorded for another version are dropped. One pass, at most ``_MAX_COPY_BLOCKS``
-    blocks kept (the most recently seen)."""
+    ``resource`` identifies the resource's version (its size with an ETag or Last-Modified) when
+    the response says. Positions recorded for another version, or by a read whose version was
+    not known, are dropped before this read is recorded: without a validator a resource may have
+    changed between reads, even at the same size. One pass, at most ``_MAX_COPY_BLOCKS`` blocks
+    kept (the most recently seen)."""
     if not _same_resource(tables, resource):
         tables.pop(OPEN_COPY_KEY, None)
     if resource is not None:
         tables[COPY_RESOURCE_KEY] = [resource]
+    else:
+        tables.pop(COPY_RESOURCE_KEY, None)
     text = data.decode("latin-1")  # one character per byte: positions are byte offsets
     last_line = text.rfind("\n") + 1
     # A last line cut short that may still become ``\.`` is not known to be a row.
@@ -2007,8 +2070,9 @@ def track_copy_blocks(
 def copy_block_at(
     tables: dict[str, list[str]], position: int, *, resource: str | None = None,
 ) -> str | None:
-    """The table whose COPY rows are known to continue at byte ``position``, or ``None``."""
-    if not _same_resource(tables, resource):
+    """The table whose COPY rows are known to continue at byte ``position``, or ``None``. With
+    ``resource``, only positions recorded for that version count."""
+    if resource is not None and not _same_resource(tables, resource):
         return None
     names = {table for opened, (table, until) in _copy_blocks(tables).items() if opened <= position <= until}
     return names.pop() if len(names) == 1 else None
@@ -2254,26 +2318,33 @@ def _json_value_end(text: str, position: int) -> int:
 
 
 def _mask_json_led(text: str, depth: int, *, window: bool = False) -> str:
-    """A text that opens with a JSON value: each top-level JSON value is masked as JSON, and what
-    follows a closed one (a log line after ``[timestamp]``, a config file after ``{}``, a phpinfo
-    table after a CSS rule) by the text passes. ``window``: the text was cut from a resource at
-    an arbitrary offset, so a ``{`` or ``[`` at its start proves nothing about its format; the
-    text passes run over the JSON values too."""
-    pieces: list[str] = []
-    position = 0
-    while position < len(text):
-        lead = _BLANKS_RE.match(text, position).end()
-        if lead >= len(text):
-            pieces.append(text[position:])
-            break
-        if text[lead] not in "{[" or _INI_SECTION_AT_RE.match(text, position):
-            pieces.append(_mask_text_passes(text[position:]))
-            break
-        end = _json_value_end(text, lead)
-        chunk = mask_json_text(text[position:end], _depth=depth)
-        pieces.append(_mask_text_passes(chunk) if window else chunk)
-        position = end
-    return "".join(pieces)
+    """A text that opens with a JSON value.
+
+    The whole text is masked as JSON first, exactly as a JSON body is, so nothing the JSON pass
+    withholds anywhere in it (a later ``{"name": "db_password", "value": ...}`` line included)
+    is ever shown. What follows the first top-level value once it closes (a log line after
+    ``[timestamp]``, a config file after ``{}``, a phpinfo table after a CSS rule) then also
+    gets the text passes. ``window``: the text was cut from a resource at an arbitrary offset, so
+    a ``{`` or ``[`` at its start proves nothing about its format; the text passes run over all
+    of it, as they do when the first value does not parse as JSON."""
+    masked = mask_json_text(text, _depth=depth)
+    if window or not _parses_as_json(text):
+        return _mask_text_passes(masked)
+    end = _json_value_end(masked, _BLANKS_RE.match(masked).end())
+    if not masked[end:].strip():
+        return masked
+    return masked[:end] + _mask_text_passes(masked[end:])
+
+
+def _parses_as_json(text: str) -> bool:
+    """Whether the text's first top-level value is JSON (a ``{`` block of PHP, nginx or an env
+    file, or a value cut short, is not: the text passes run over all of it)."""
+    lead = _BLANKS_RE.match(text).end()
+    try:
+        json.loads(text[lead:_json_value_end(text, lead)])
+    except (ValueError, RecursionError):
+        return False
+    return True
 
 
 # Every pass is linear, but masking is still CPU work for whoever asks for the masked view, and
