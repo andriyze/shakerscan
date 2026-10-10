@@ -265,7 +265,7 @@ def test_upgrade_recomputes_legacy_public_suffix_roots_and_keeps_monitoring(monk
     dsn = require_disposable_database(DSN or "", "shakerscan_discovery_test")
 
     async def legacy_rows(conn):
-        # As an engine before 2.8.1 stored them: two-label roots.
+        # As an engine before 2.8.2 stored them: two-label roots.
         await conn.execute("""INSERT INTO targets(url, name, root_domain, is_root) VALUES
             ('https://shop.example.co.uk', 'shop', 'co.uk', false),
             ('https://example.co.uk', 'apex', 'co.uk', false),

@@ -133,7 +133,7 @@ def test_every_image_that_runs_the_api_carries_the_scope_package_and_snapshot():
     assert packages - {"ai_gate_boundary"} <= copied | {"ai_gate"}, sorted(packages - copied)
 
 
-# Names the 2.8.1 first cut got wrong, with the answers of the reference implementation
+# Names a label-counting first cut got wrong, with the answers of the reference implementation
 # (publicsuffixlist, same snapshot): the parent of a "*." rule is itself a public suffix. A
 # sample of the 281 differing names; scratch tooling compares all 43,322 generated names.
 REFERENCE_WILDCARD_PARENTS = [

@@ -134,7 +134,7 @@ def test_daily_cap_is_configurable(gungnir, monkeypatch, raw, cap):
 
 
 def test_a_legacy_public_suffix_root_keeps_monitoring_under_the_customers_domain(gungnir):
-    # targets.root_domain still holds the pre-2.8.1 two-label root (the startup migration has not
+    # targets.root_domain still holds the pre-2.8.2 two-label root (the startup migration has not
     # run yet): monitoring continues for example.co.uk and never covers co.uk.
     class Conn:
         async def fetch(self, query, *args):
