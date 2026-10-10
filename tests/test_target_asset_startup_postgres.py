@@ -319,3 +319,53 @@ def test_startup_rebuilds_hunt_authority_2_8_0_left_after_a_revocation_and_ends_
                                        broken) == 0
             await module.run_schema_migrations(BoundConnectionPool(conn))  # idempotent
     asyncio.run(run())
+
+
+def test_converted_2_8_1_installation_gets_the_2_8_2_schema_and_data_migrations_on_restart():
+    """2.8.2 put discovery_runs.requested_by, the public-suffix root recompute and the host
+    spelling repair only in the frozen baseline, which a converted database skips: every upgraded
+    install answered POST /discovery with 500. Restart must apply all three."""
+    async def run():
+        async with startup_database() as conn:
+            api_root = str(Path(__file__).resolve().parents[1] / 'api')
+            if api_root not in sys.path:
+                sys.path.insert(0, api_root)
+            module = importlib.import_module('retest_contract')
+            discovery = importlib.import_module('operations.discovery')
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            assert await conn.fetchval("SELECT relkind::text FROM pg_class WHERE oid='device_targets'::regclass") == 'v'
+            # Reproduce an installation converted by 2.8.1: no requested_by column, no host
+            # spelling marker, a legacy two-label root and a numeric host spelling stored as typed.
+            # This is an isolated disposable database; no retained operator evidence exists.
+            await conn.execute('ALTER TABLE discovery_runs DROP COLUMN requested_by')
+            await conn.execute("DELETE FROM app_schema_migrations WHERE name='target_host_canonical_spelling_v1'")
+            shop = await conn.fetchval(
+                "INSERT INTO targets(url,root_domain,is_root) VALUES('https://shop.example.co.uk','co.uk',false) RETURNING id")
+            numeric = await conn.fetchval("INSERT INTO targets(url) VALUES('https://127.1/') RETURNING id")
+            with pytest.raises(Exception, match='requested_by'):
+                await discovery.admit_discovery(conn, 'example.co.uk', requested_by='local-operator')
+
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+
+            assert await conn.fetchval(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_name='discovery_runs' AND column_name='requested_by'") == 'text'
+            assert await conn.fetchval('SELECT root_domain FROM targets WHERE id=$1', shop) == 'example.co.uk'
+            assert await conn.fetchval("SELECT count(*) FROM targets WHERE root_domain='co.uk'") == 0
+            assert await conn.fetchval('SELECT url FROM targets WHERE id=$1', numeric) == 'https://127.0.0.1/'
+            assert await conn.fetchval(
+                "SELECT metadata_json->'host_repair'->>'from' FROM targets WHERE id=$1", numeric) == '127.1'
+            assert await conn.fetchval(
+                "SELECT 1 FROM app_schema_migrations WHERE name='target_host_canonical_spelling_v1'") == 1
+
+            # Targets-page discovery is admitted and records who asked.
+            run_id = await discovery.admit_discovery(conn, 'example.co.uk', requested_by='local-operator')
+            assert await conn.fetchval(
+                'SELECT requested_by FROM discovery_runs WHERE id=$1', run_id) == 'local-operator'
+
+            # A further restart is idempotent.
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            assert await conn.fetchval('SELECT root_domain FROM targets WHERE id=$1', shop) == 'example.co.uk'
+            assert await conn.fetchval('SELECT url FROM targets WHERE id=$1', numeric) == 'https://127.0.0.1/'
+            assert await conn.fetchval('SELECT count(*) FROM discovery_runs') == 1
+    asyncio.run(run())

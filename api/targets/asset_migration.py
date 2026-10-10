@@ -237,6 +237,9 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                     from api.investigation_candidates import CANDIDATE_SCHEMA_STATEMENTS
                 for statement in CANDIDATE_SCHEMA_STATEMENTS:
                     await conn.execute(statement)
+                # Who requested a Targets-page discovery run (POST /discovery, 2.8.2).
+                await conn.execute(
+                    "ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS requested_by TEXT")
                 # Data migrations added after the conversion must run here: the baseline above
                 # never runs again on a converted database. Each is marker-gated.
                 try:
@@ -262,6 +265,22 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                     from api.runtime.credential_migration import migrate_legacy_web_credentials
                 await migrate_legacy_web_credentials(conn)
                 await reconcile_active_finding_counts(conn)
+                # Engines before 2.8.2 stored two-label roots (co.uk for shop.example.co.uk), which
+                # span registrants; recompute them from each URL under the Public Suffix List.
+                # Idempotent: a database with no spanning root reads one DISTINCT and changes nothing.
+                try:
+                    from scope.roots import recompute_spanning_target_roots
+                except ModuleNotFoundError:
+                    from api.scope.roots import recompute_spanning_target_roots
+                await recompute_spanning_target_roots(conn)
+                # Targets whose stored host the one canonicalizer now refuses: rewrite a numeric
+                # spelling with one reading, flag the rest (targets/host_canonical_repair.py).
+                # Marker-gated: runs once.
+                try:
+                    from targets.host_canonical_repair import repair_target_host_spellings
+                except ModuleNotFoundError:
+                    from api.targets.host_canonical_repair import repair_target_host_spellings
+                await repair_target_host_spellings(conn)
             # After the schema commits, still under the startup lock: Hunts granted something by
             # 2.8.0 have no recorded baseline, so their authority is rebuilt from their live
             # grants once (R1), each Hunt in its own short transaction. A Hunt that cannot be
