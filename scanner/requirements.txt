@@ -35,7 +35,7 @@ paramiko>=5.0.0
 # Test runner (so `make test` works in the api/worker image without an ad-hoc install).
 # Security floors for transitive dependencies. The lock already resolves newer versions, but a
 # floor is what a scanner of this file (OSV, Scorecard) resolves, and what an unlocked install gets.
-anyio>=4.14.2
+anyio>=4.15.1
 idna>=3.15
 pygments>=2.20.0
 pytest>=9.0.3
