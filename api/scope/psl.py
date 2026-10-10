@@ -2,7 +2,7 @@
 
 Every scope decision that accepts a domain wildcard or an apex uses this module: Hunt
 ``target.authorize`` and ``credential.use`` bounds, ``allowed_root_domains`` in scope receipts
-and target bindings, ``POST /discovery`` and the CT monitor (and, in 2.9, apex scope). Such a
+and target bindings, ``POST /discovery`` and the CT monitor. Such a
 pattern must sit at or below a registrable domain (eTLD+1). Counting labels is not enough:
 ``*.co.uk``, ``*.github.io`` and ``*.herokuapp.com`` each cover every site under a shared
 suffix. The list includes its PRIVATE section, so ``github.io`` and ``herokuapp.com`` are public

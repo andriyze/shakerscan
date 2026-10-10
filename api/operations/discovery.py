@@ -16,15 +16,18 @@ and bounded so one caller cannot flood the queue or third-party sources:
   (``targets.asset_router.mark_person_added``). Rows stored before these markers existed cannot
   be told apart: a scan-submitted target then also read as ``manual`` and still counts, and an
   unmarked host counts, as before, while it has a device profile or owns no rows; adding it again
-  on the Targets page marks it. Scope receipts do not admit a domain on their own: a receipt is
-  only as good as its bound target, which must itself be a declared target under the apex;
+  on the Targets page marks it (an owner host the asset model created, whose last row was
+  deleted, also owns no rows and counts the same way). These markers record how a target was
+  added, for this admission only; they are not an authentication boundary: any caller of the
+  target routes acts as the operator, and PATCH /targets/{id} cannot edit them. Scope receipts do
+  not admit a domain on their own: a receipt is only as good as its bound target, which must
+  itself be a declared target under the apex;
 - one discovery per apex is pending or running at a time, and at most
   ``SHAKERSCAN_DISCOVERY_MAX_ACTIVE`` (default 2) across the engine; a run older than
   ``ACTIVE_WINDOW`` no longer holds a slot, so a lost worker cannot block an apex for ever;
 - the run records who requested it (``requested_by``). The engine has no per-person identity
-  on this route (OSS has one implicit operator; the Enterprise gateway does not forward a
-  verified identity), so the value is derived here, never taken from the request: it is
-  ``local-operator``. The gateway's own audit names the person.
+  on this route (it has one implicit operator and receives no verified identity), so the value
+  is derived here, never taken from the request: it is ``local-operator``.
 
 The checks and the insert run under one transaction-scoped advisory lock, so two concurrent
 requests cannot both pass. The worker validates the queued domain again before it spawns

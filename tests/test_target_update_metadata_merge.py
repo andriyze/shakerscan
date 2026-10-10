@@ -80,3 +80,13 @@ def test_metadata_or_cohort_alone_still_merge(connection, fields, expected):
     asyncio.run(targets_router.update_target(TARGET_ID, targets_router.TargetUpdate(**fields)))
 
     assert _metadata_patch(connection) == expected
+
+
+@pytest.mark.parametrize("metadata", [{"declared": True}, {"created_via": ""}, {"created_via": "hunt", "owner": "x"}])
+def test_how_a_target_was_added_cannot_be_edited(metadata):
+    """Subdomain discovery admits a domain by how its targets were added; PATCH cannot rewrite it."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="declared and created_via"):
+        targets_router.TargetUpdate(metadata_json=metadata)
+    assert targets_router.TargetUpdate(metadata_json={"owner": "team-a"}).metadata_json == {"owner": "team-a"}
