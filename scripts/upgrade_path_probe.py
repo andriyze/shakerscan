@@ -49,6 +49,21 @@ TERMINAL_SCAN_STATES = {"completed", "partial", "failed", "error", "cancelled", 
 PASSING_SCAN_STATES = {"completed", "partial"}
 SCAN_CEILING_SECONDS = 600
 
+# Fields read back before and after the upgrade: a migration that nulls or rewrites them fails.
+# Responses nest records differently by route, so each field lists its flat and nested spellings.
+SNAPSHOTS = {
+    "fixture target": ("fixture_target_id", "/targets/{}", ("url", "name", "cohort")),
+    "apex target": ("apex_target_id", "/targets/{}", ("url", "name", "cohort")),
+    "discovery seed target": ("seed_target_id", "/targets/{}", ("url", "name", "cohort")),
+    "scan": ("scan_id", "/scans/{}", ("status", "target_url", "target_id", "scan_type")),
+    "finding": ("finding_id", "/findings/{}", ("title", "severity", "target_id")),
+    "device": ("device_id", "/devices/{}", ("primary_locator", "name", "environment")),
+    "schedule": ("schedule_id", "/schedules/{}", ("frequency", "day_of_week", "time_of_day", "target_id")),
+    "discovery run": ("discovery_id", "/discovery/{}", ("root_domain",)),
+    "hunt": ("hunt_id", "/hunts/{}", ("target_id", "objective", "target_kind")),
+}
+SNAPSHOT_WRAPPERS = ("", "target.", "scan.", "finding.", "device.", "schedule.", "hunt.", "run.")
+
 # Path parameter name -> seeded state key. Parameters not listed (or not seeded) get UNKNOWN_ID.
 SEEDED_PARAMETERS = {
     "target_id": "apex_target_id",
@@ -366,26 +381,62 @@ def seed(api: Api, fixture: str, apex: str, seed_apex: str, scan_deadline: int) 
         "goal": "upgrade-path seeded Hunt record", "budget_profile": "fast", "policy": {},
     })
     # A Hunt needs no model to exist as a record; a release that refuses one is reported, not seeded.
-    state["hunt_id"] = first(hunt.json(), "hunt_id", "id") if hunt.status < 300 else None
+    state["hunt_id"] = first(hunt.json(), "hunt_id", "id") if 200 <= hunt.status < 300 else None
     state["hunt_seed"] = "created" if state["hunt_id"] else f"refused {hunt.status} {excerpt(hunt.body, 200)}"
     state["scan_id"] = start_scan(api, state["apex_url"], "upgrade-path baseline")
     state["scan_status"] = wait_for_scan(api, state["scan_id"], scan_deadline)
     if state["scan_status"] not in PASSING_SCAN_STATES:
         raise ProbeError(f"the baseline Scan {state['scan_id']} ended {state['scan_status']}")
-    state["totals"] = totals(api)
     missing = [key for key in ("fixture_target_id", "apex_target_id", "apex_receipt_id", "seed_target_id",
                                "discovery_id", "finding_id", "device_id", "schedule_id", "scan_id")
                if not state.get(key)]
     if missing:
         raise ProbeError("seed responses carried no id for: " + ", ".join(missing))
+    state["totals"] = totals(api)
+    state["snapshots"] = {}
+    for name in SNAPSHOTS:
+        if not state.get(SNAPSHOTS[name][0]):
+            continue
+        fields = snapshot(api, state, name)
+        if not fields:
+            raise ProbeError(f"the seeded {name} has none of the fields the check compares")
+        state["snapshots"][name] = fields
     return state
+
+
+def snapshot(api: Api, state: dict[str, Any], name: str) -> dict[str, Any]:
+    """The comparable fields of one seeded record, keyed by the field name."""
+    key, template, fields = SNAPSHOTS[name]
+    body = api.ok("GET", template.format(state[key]), what=f"read the seeded {name}")
+    values = {}
+    for field_name in fields:
+        value = first(body, *(wrapper + field_name for wrapper in SNAPSHOT_WRAPPERS))
+        if value is not None:
+            values[field_name] = value
+    return values
+
+
+def snapshot_changes(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    return [f"{field_name}: {value!r} -> {after.get(field_name)!r}"
+            for field_name, value in sorted(before.items()) if after.get(field_name) != value]
+
+
+def seeded_regressions(baseline: dict[str, int], upgraded: dict[str, int]) -> list[str]:
+    """Seeded GETs that read a record on the previous release and no longer do."""
+    return [f"GET {template}: {baseline[template]} before the upgrade, {upgraded[template]} after"
+            for template in sorted(baseline)
+            if 200 <= baseline[template] < 300 and template in upgraded
+            and not 200 <= upgraded[template] < 300]
 
 
 def totals(api: Api) -> dict[str, int]:
     counts = {}
     for collection in ("targets", "scans", "findings"):
         body = api.ok("GET", f"/{collection}?limit=1", what=f"count {collection}")
-        counts[collection] = int(first(body, "total") or 0)
+        total = first(body, "total")
+        if not isinstance(total, int) or total < 1:
+            raise ProbeError(f"GET /{collection}?limit=1 reports total {total!r} after rows were seeded")
+        counts[collection] = total
     return counts
 
 
@@ -413,12 +464,22 @@ def check_preserved(api: Api, state: dict[str, Any], report: Report) -> None:
         "schedule": f"/schedules/{state['schedule_id']}",
         "discovery run": f"/discovery/{state['discovery_id']}",
     }
+    report.check("seeded Hunt record", bool(state.get("hunt_id")),
+                 f"the previous release did not create one: {state.get('hunt_seed')}")
     if state.get("hunt_id"):
         reads["hunt"] = f"/hunts/{state['hunt_id']}"
     for name, path in reads.items():
         response = api.call("GET", path)
-        report.check(f"preserved {name}", response.status == 200,
-                     f"GET {path} -> {response.status or response.error} {excerpt(response.body)}")
+        if not report.check(f"preserved {name}", response.status == 200,
+                            f"GET {path} -> {response.status or response.error} {excerpt(response.body)}"):
+            continue
+        before = state.get("snapshots", {}).get(name)
+        if before is not None:
+            try:
+                changes = snapshot_changes(before, snapshot(api, state, name))
+            except ProbeError as exc:
+                changes = [str(exc)]
+            report.check(f"unchanged {name}", not changes, "; ".join(changes))
     scan = api.call("GET", f"/scans/{state['scan_id']}").json() or {}
     report.check("preserved scan status", scan.get("status") == state["scan_status"],
                  f"{state['scan_status']} -> {scan.get('status')}")
@@ -471,6 +532,28 @@ def targeted_writes(api: Api, state: dict[str, Any], report: Report, scan_deadli
     write("PATCH /schedules/{id}", "PATCH", f"/schedules/{state['schedule_id']}", {"is_active": False})
     if state.get("hunt_id"):
         write("POST /hunts/{id}/cancel", "POST", f"/hunts/{state['hunt_id']}/cancel", {})
+    # Every create the seed made, again on the upgraded schema: a column added only on the
+    # fresh-database path breaks the insert, not the read.
+    new_apex = "upgrade-path-new.test"
+    created = write("POST /targets", "POST", "/targets", {
+        "url": f"http://www.{new_apex}", "name": "upgrade-path created after the upgrade", "cohort": "lab"})
+    new_target = first(created, "id", "target.id")
+    if new_target:
+        write("POST /targets/{id}/authorization (new target)", "POST", f"/targets/{new_target}/authorization",
+              {"approved_by": "upgrade-path-smoke", "environment": "lab"})
+        write("POST /schedules", "POST", "/schedules", {
+            "target_id": new_target, "name": "upgrade-path daily", "frequency": "daily", "time_of_day": "04:00"})
+        write("POST /discovery for a target added after the upgrade", "POST",
+              "/discovery?" + urllib.parse.urlencode({"root_domain": new_apex}))
+    write("POST /devices", "POST", "/devices", {
+        "name": "upgrade-path device (upgraded)", "primary_locator": "192.0.2.11", "environment": "lab"})
+    hunt = write("POST /hunts", "POST", "/hunts", {
+        "target_id": target, "target_kind": "web", "goal": "upgrade-path Hunt after the upgrade",
+        "budget_profile": "fast", "policy": {}})
+    hunt_id = first(hunt, "hunt_id", "id")
+    if hunt_id:
+        write("GET /hunts/{id} (new)", "GET", f"/hunts/{hunt_id}")
+        write("POST /hunts/{id}/cancel (new)", "POST", f"/hunts/{hunt_id}/cancel", {})
     try:
         scan_id = start_scan(api, state["apex_url"], "upgrade-path upgraded")
         status = wait_for_scan(api, scan_id, scan_deadline)
@@ -500,9 +583,18 @@ def run_sweep(api: Api, report: Report, state: dict[str, Any], args: argparse.Na
         "skipped": sorted(args.skip),
         "status_counts": _status_counts(outcomes),
         "server_errors": [asdict(o) for o in outcomes if is_server_error(o.status)],
+        "seeded_statuses": {o.template: o.status for o in outcomes if o.seeded},
         "slowest": [asdict(o) for o in sorted(outcomes, key=lambda o: -o.seconds)[:5]],
     }
     report.check("GET sweep", not problems, "; ".join(problems[:40]))
+    if args.command == "check" and args.baseline_sweep:
+        try:
+            baseline = json.loads(Path(args.baseline_sweep).read_text(encoding="utf-8"))["sweep"]["seeded_statuses"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            report.check("seeded GETs still read their records", False, f"no baseline sweep to compare: {exc}")
+        else:
+            lost = seeded_regressions(baseline, report.details["sweep"]["seeded_statuses"])
+            report.check("seeded GETs still read their records", not lost, "; ".join(lost[:40]))
 
 
 def _status_counts(outcomes: list[Outcome]) -> dict[str, int]:
@@ -533,7 +625,7 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--api", required=True)
         command.add_argument("--state", required=True)
         command.add_argument("--report", required=name != "seed")
-        command.add_argument("--scan-deadline", type=int, default=900)
+        command.add_argument("--scan-deadline", type=int, default=600)
         command.add_argument("--request-timeout", type=float, default=30.0)
         command.add_argument("--skip", action="append", default=[],
                              help="GET path template not to call (a streaming route); repeatable")
@@ -546,6 +638,8 @@ def main(argv: list[str] | None = None) -> int:
         if name == "check":
             command.add_argument("--expect-version", required=True)
             command.add_argument("--expect-sha", default="")
+            command.add_argument("--baseline-sweep", default="",
+                                 help="the sweep report from the previous release, to compare seeded reads")
     args = parser.parse_args(argv)
 
     if args.command == "baselines":
@@ -566,6 +660,7 @@ def main(argv: list[str] | None = None) -> int:
 
     state = json.loads(Path(args.state).read_text(encoding="utf-8"))
     report = Report(phase=args.command)
+    report.details["seed"] = {"hunt": state.get("hunt_seed"), "snapshots": state.get("snapshots")}
     if args.command == "check":
         health = api.call("GET", "/health")
         problems = identity_problems(health.json() or {}, args.expect_version, args.expect_sha) \

@@ -49,7 +49,9 @@ PROBE="$ROOT/scripts/upgrade_path_probe.py"
 # The launcher treats these as operator overrides that win over a release image lock; inherited
 # from the caller they would run other images than the baseline's and the candidate's locks name.
 unset SCANNER_IMAGE API_IMAGE UI_IMAGE SIGNER_IMAGE MODEL_INTAKE_IMAGE SHAKERSCAN_RAW_BASE \
-    SHAKERSCAN_RELEASE_ASSET_ROOT SHAKERSCAN_INSTALL_VERSION
+    SHAKERSCAN_RELEASE_ASSET_ROOT SHAKERSCAN_INSTALL_VERSION SCANNER_IMAGE_TAG SCANNER_IMAGE_REPO \
+    API_IMAGE_REPO UI_IMAGE_REPO MODEL_INTAKE_SIGNER_IMAGE_REPO MODEL_INTAKE_IMAGE_REPO \
+    SCANNER_USE_PREBUILT SCANNER_LOCAL_BUILD SHAKERSCAN_DISABLE_IMAGE_LOCK COMPOSE_FILE
 
 if [ -n "$CANDIDATE_IMAGE_LOCK" ] && [ -n "$CANDIDATE_VERSION" ]; then
     echo "upgrade path: set CANDIDATE_IMAGE_LOCK or CANDIDATE_VERSION, not both" >&2; exit 2
@@ -202,6 +204,11 @@ cleanup() {
     exit "$status"
 }
 trap cleanup EXIT
+# A runner timeout or a cancelled lab run sends TERM: exit through the cleanup, not around it.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+# A step that fails outside fail() still names itself in the receipt.
+trap 'FAILURE="${FAILURE:-line $LINENO: $BASH_COMMAND}"' ERR
 
 wait_healthy() {
     local version="$1"
@@ -257,6 +264,9 @@ python3 "$PROBE" sweep --api "$API" --state "$STATE" --report "$LOG_DIR/baseline
     > "$LOG_DIR/baseline-sweep.log" 2>&1 || echo "upgrade path: note: $BASELINE_VERSION itself answers some GETs with 5xx (see the receipt)"
 
 echo "== 3. upgrade to ${CANDIDATE_VERSION:-the candidate} with the real installer"
+# The fixture is not a Compose service: detached, it cannot hold the project network if the
+# candidate's Compose file recreates it.
+docker network disconnect "${PROJECT}_default" "$FIXTURE" > /dev/null || fail "could not detach the fixture"
 if [ -n "$CANDIDATE_IMAGE_LOCK" ]; then
     # This tree's installer, reading this tree and the candidate's lock from file:// sources:
     # the same downloads, manifest verification and owned-file pruning as a hosted upgrade.
@@ -276,17 +286,26 @@ fi
 cp "$RUNTIME/release-image-lock.env" "$LOG_DIR/candidate-image-lock.env"
 start_stack start-candidate
 wait_healthy "$EXPECTED_VERSION" || fail "the upgraded stack never reported $EXPECTED_VERSION healthy"
-# Every running engine container must use the candidate's locked digests.
-for service in api worker; do
-    image="$(docker inspect --format '{{.Config.Image}}' "$PROJECT-$service-1" 2>/dev/null || true)"
-    want="$(sed -n "s/^$( [ "$service" = api ] && echo API || echo SCANNER )_IMAGE=//p" "$RUNTIME/release-image-lock.env")"
-    [ "$image" = "$want" ] || fail "$service runs $image, not the candidate's $want"
+docker network connect --alias "$FIXTURE_HOST" --alias "app.$APEX" "${PROJECT}_default" "$FIXTURE" > /dev/null || \
+    fail "could not reattach the fixture"
+# Every ShakerScan container of the project runs one of the candidate's locked digests, and the
+# api, ui and worker are among them; postgres, redis and the proxy are not release images.
+locked="$(sed -n 's/^[A-Z_]*_IMAGE=//p' "$RUNTIME/release-image-lock.env")"
+running="$(docker ps --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}} {{.Image}}')"
+while read -r name image; do
+    case "$image" in
+        shakerscan/*|*/shakerscan/*) grep -qxF "$image" <<< "$locked" || fail "$name runs $image, not a candidate digest" ;;
+    esac
+done <<< "$running"
+for service in api ui worker; do
+    grep -q "^$PROJECT-$service-1 " <<< "$running" || fail "the upgraded stack has no running $service"
 done
 
 echo "== 4. check the upgraded stack"
 started="$(date +%s)"
 CHECK_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-check_args=(--api "$API" --state "$STATE" --report "$LOG_DIR/upgraded-check.json" --expect-version "$EXPECTED_VERSION")
+check_args=(--api "$API" --state "$STATE" --report "$LOG_DIR/upgraded-check.json" --expect-version "$EXPECTED_VERSION"
+    --baseline-sweep "$LOG_DIR/baseline-sweep.json")
 [ -z "$CANDIDATE_SHA" ] || check_args+=(--expect-sha "$CANDIDATE_SHA")
 # This tree is the candidate only in lock mode; then every GET in its committed public contract
 # must be served and swept.
