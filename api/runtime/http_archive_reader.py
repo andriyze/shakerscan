@@ -33,7 +33,7 @@ try:
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import redact_sensitive
 
-from .archive_body_masking import MAX_MASKED_BODY_CHARS
+from .archive_body_masking import MAX_MASKED_BODY_CHARS, withhold_url_userinfo
 from .archive_export_worker import (
     MASKING_FAILED,
     OVER_MASKING_LIMIT,
@@ -839,7 +839,9 @@ def _project_without_payloads(row: Mapping[str, Any], *, redaction: str) -> tupl
         # Payloads are redacted on their own (archive_export_worker): a value beside a
         # secret-named parameter or nested below a secret-named key is not under a sensitive
         # dictionary key, and a stored body is text (N39).
-        item = redact_sensitive(item, redact_strings=True, scrub_text=True)
+        # A URL userinfo password anywhere in the call (its URL, a redirect hop in its metadata) is
+        # withheld by the rule the bodies use, before the shared redactor re-encodes a query.
+        item = redact_sensitive(withhold_url_userinfo(item), redact_strings=True, scrub_text=True)
         # The recorded digests are of the raw bodies. Beside a masked body they let anyone holding
         # the export confirm a guess at what was masked (a four-digit PIN in a known JSON shape is
         # 10,000 hashes away), so they stay in raw exports and private storage only.

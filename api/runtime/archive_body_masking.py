@@ -39,6 +39,7 @@ from __future__ import annotations
 import base64
 import bisect
 import html
+import html.entities
 import json
 import math
 import re
@@ -1357,8 +1358,56 @@ def _plain_url_value(value: str) -> bool:
     )
 
 
-# A URL's authority (``scheme://`` or a scheme-relative ``//``), at the value's start.
-_URL_AUTHORITY_RE = re.compile(r"[ \t\r\n]{0,64}(?:[A-Za-z][A-Za-z0-9+.\-]{0,30}:)?//([^/?#\s]{1,2048})")
+# --- URL userinfo, anywhere in a text -----------------------------------------------------------
+# The password of a URL's userinfo: ``postgres://user:<password>@host``, and with an empty user
+# name, ``redis://:<password>@host`` (N1: a Redis URL in a ``.env`` reached the planner whole,
+# because the body passes withheld only the provider pattern's ``user:password@`` form). The user
+# name and the host stay visible. One function serves a response body's text (every planner view
+# and masked export of it) and a URL field (``Location``, ``final_url``, a redirect hop), so the
+# two can never disagree about what a userinfo password is.
+
+# ``scheme://``, the same with JSON-escaped slashes (``redis:\/\/``, as PHP's ``json_encode`` writes
+# it), or a whole URL percent-encoded into a query (``?next=redis%3A%2F%2F%3Apw%40h``).
+_USERINFO_SEPARATOR_RE = re.compile(r"://|:\\/\\/|%3[Aa]%2[Ff]%2[Ff]")
+# A user name is userinfo characters only (RFC 3986: unreserved, sub-delimiters, escapes), an
+# ``@`` (an address as the user name, ``smtp://ops@corp.example:pw@mail``, as clients accept it)
+# or a reference an earlier pass left. So a bare host in one string (``"https://api.example.com"``)
+# never starts a userinfo that ends at the ``@`` of an address in a later one.
+_USERINFO_NAME_RE = re.compile(r"(?:[A-Za-z0-9\-._~!$&'()*+,;=@]|%[0-9A-Fa-f]{2}|\[withheld:[1-9][0-9]{0,3}\])*")
+# A URL opened by a quote (``"redis://..."``, ``'...'``) ends at that quote.
+_URL_OPENING_QUOTES = frozenset("\"'`")
+# A backslash escape of a quote, a backslash or a slash inside a quoted URL (JS, dotenv, JSON).
+_QUOTED_ESCAPE_RE = re.compile(r"\\([\"'`\\/])")
+# Markup: a tag, a comment or a declaration.
+_MARKUP_RE = re.compile(r"<[A-Za-z!/]")
+# A markup character reference in a password (``S3cr3t&amp;Pass``): bound as the character.
+_CHARACTER_REFERENCE_RE = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+_SCHEME_CHAR_RE = re.compile(r"[A-Za-z0-9+.\-]")
+# A scheme-relative URL field (``//user:pw@host``), after at most a few blanks.
+_SCHEME_RELATIVE_RE = re.compile(r"[ \t\r\n]{0,64}//")
+# Where an authority ends, by the form ``text`` is in:
+# - ``url``: one URL (a header, a redirect hop), where RFC 3986 says;
+# - ``text``: a body's text or a decoded string, also at markup or a backtick, but not at the ``#``
+#   of a character reference (``&#x27;``, a markup-escaped quote). A quote does not end it: a
+#   password holding one (``redis://:pa"ss@h`` in a ``.env``) is withheld whole, and the userinfo
+#   still ends at the authority's last ``@``;
+# - ``escaped``: text whose strings are still escaped (a JSON body as written), also at a double
+#   quote or a backslash, so a withheld password never spans a string's end. A single quote is a
+#   userinfo sub-delimiter, so it never ends one.
+_AUTHORITY_STOP_RES = {
+    "url": re.compile(r"[\s/?#]"),
+    "text": re.compile(r"[\s/?<>`]|(?<!&)#"),
+    "escaped": re.compile(r"[\s/?<>\"`\\]|(?<!&)#"),
+}
+# A percent-encoded URL's authority also ends at its query's own separators and at an encoded
+# ``/``, ``?`` or ``#``.
+_ENCODED_AUTHORITY_STOP_RE = re.compile(r"[\s/?#<>\"'`\\&]|%(?:2[Ff]|3[Ff]|23)")
+_AT_RE = re.compile(r"@")
+_ENCODED_AT_RE = re.compile(r"@|%40")
+_COLON_RE = re.compile(r":")
+_ENCODED_COLON_RE = re.compile(r":|%3[Aa]")
+# The longest userinfo read: an ``@`` further than this from its ``://`` does not end one.
+_MAX_USERINFO_CHARS = 2048
 
 
 def _url_decoded(raw: str) -> str:
@@ -1370,23 +1419,172 @@ def _url_decoded(raw: str) -> str:
         return raw
 
 
-def _mask_url_userinfo(url: str) -> str:
-    """The password of a URL's userinfo (``https://user:<password>@host``): the userinfo ends at
-    the authority's last ``@``."""
-    match = _URL_AUTHORITY_RE.match(url)
-    if match is None:
-        return url
-    authority = match.group(1)
-    userinfo = authority[:max(0, authority.rfind("@"))]
-    colon = userinfo.find(":")
-    if colon < 0 or colon == len(userinfo) - 1:
-        return url
-    raw = userinfo[colon + 1:]
-    value = _url_decoded(raw)
-    if WITHHELD_MARKER_RE.fullmatch(value) or value == MASK:
-        return url
-    start = match.start(1) + colon + 1
-    return url[:start] + _withhold(value) + url[start + len(raw):]
+class _AuthorityRuns:
+    """The run of characters an authority may span, from a position to the next stop, with the
+    ``@`` signs in it. A run is read once: every ``://`` inside it shares its end and its ``@``
+    signs, so text of repeated ``a://`` is read in linear time, not once per separator."""
+
+    def __init__(self, text: str, stop: re.Pattern[str], at: re.Pattern[str]) -> None:
+        self.text, self.stop, self.at = text, stop, at
+        self.end = -1
+        self.at_starts: list[int] = []
+        self.at_ends: list[int] = []
+
+    def last_at(self, start: int) -> tuple[int, int] | None:
+        """The last ``@`` of the run ``start`` is in, at most ``_MAX_USERINFO_CHARS`` after it."""
+        if start >= self.end:
+            found = self.stop.search(self.text, start)
+            self.end = found.start() if found else len(self.text)
+            spans = [match.span() for match in self.at.finditer(self.text, start, self.end)]
+            self.at_starts = [first for first, _last in spans]
+            self.at_ends = [last for _first, last in spans]
+        index = bisect.bisect_right(self.at_starts, start + _MAX_USERINFO_CHARS) - 1
+        if index < 0 or self.at_starts[index] < start:
+            return None
+        return self.at_starts[index], self.at_ends[index]
+
+
+def mask_url_userinfo(text: Any, *, form: str = "text") -> Any:
+    """Withhold the password of every URL userinfo in ``text``: ``scheme://user:<password>@host``,
+    ``scheme://:<password>@host``, and the same percent-encoded into a query. The userinfo ends at
+    the authority's last ``@`` (a password may hold one); the password starts after the userinfo's
+    first ``:``. The reference binds the decoded password, the value a client sends. An empty
+    password, or one already withheld, is kept. ``form`` says where an authority ends (above); a
+    ``url`` may also be scheme-relative (``//user:pw@host``)."""
+    if not isinstance(text, str) or ("@" not in text and "%40" not in text):
+        return text
+    runs = {
+        False: _AuthorityRuns(text, _AUTHORITY_STOP_RES[form], _AT_RE),
+        True: _AuthorityRuns(text, _ENCODED_AUTHORITY_STOP_RE, _ENCODED_AT_RE),
+    }
+    starts: list[tuple[int, bool, str | None]] = []
+    relative = _SCHEME_RELATIVE_RE.match(text) if form == "url" else None
+    if relative is not None:
+        starts.append((relative.end(), False, None))
+    starts.extend(
+        (separator.end(), separator.group(0).startswith("%"),
+         None if form == "url" else _scheme_quote(text, separator.start()))
+        for separator in _USERINFO_SEPARATOR_RE.finditer(text)
+        if separator.start() > 0 and _SCHEME_CHAR_RE.match(text, separator.start() - 1)
+    )
+    # Character references are read only in markup; in a ``.env`` ``&amp;`` is four characters.
+    markup = form != "url" and _MARKUP_RE.search(text) is not None
+    pieces: list[str] = []
+    cursor = 0
+    for start, encoded, quote in starts:
+        if start < cursor:
+            continue  # inside a password already withheld
+        at = runs[encoded].last_at(start)
+        if at is not None and quote is not None:
+            closing = _closing_quote(text, quote, start, at[0])
+            if closing >= 0:  # the URL's own quote closes it before that ``@``
+                at = _last_at_before(text, start, closing, encoded)
+        if at is None:
+            continue
+        userinfo_end = at[0]
+        colon = _userinfo_colon(text, start, userinfo_end, encoded)
+        if colon is None or colon[1] == userinfo_end:
+            continue  # no password, or an empty one (``user:@``, ``:@``)
+        if not _USERINFO_NAME_RE.fullmatch(text, start, colon[0]):
+            continue  # not a user name: a host, or text that is no URL's
+        raw = text[colon[1]:userinfo_end]
+        if raw == MASK or WITHHELD_MARKER_RE.fullmatch(raw):
+            continue
+        pieces.append(text[cursor:colon[1]])
+        # A reference an earlier pass put inside the password keeps its place; every piece around
+        # it is withheld on its own.
+        position = 0
+        for marker in WITHHELD_MARKER_RE.finditer(raw):
+            if marker.start() > position:
+                pieces.append(_withhold(_userinfo_value(raw[position:marker.start()], encoded, quote, markup)))
+            pieces.append(marker.group(0))
+            position = marker.end()
+        if position < len(raw):
+            pieces.append(_withhold(_userinfo_value(raw[position:], encoded, quote, markup)))
+        cursor = userinfo_end
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _scheme_quote(text: str, separator: int) -> str | None:
+    """The quote that opens the URL whose scheme ends at ``separator``, if one does."""
+    position = separator
+    while position > 0 and separator - position < 32 and _SCHEME_CHAR_RE.match(text, position - 1):
+        position -= 1
+    if position > 0 and text[position - 1] in _URL_OPENING_QUOTES:
+        return text[position - 1]
+    return None
+
+
+def _closing_quote(text: str, quote: str, start: int, end: int) -> int:
+    """The first ``quote`` in ``[start, end)`` that no backslash escapes (``"pa\\"ss"`` is one
+    string), or -1."""
+    position = text.find(quote, start, end)
+    while position >= 0:
+        backslashes = 0
+        while position - backslashes - 1 >= start and text[position - backslashes - 1] == "\\":
+            backslashes += 1
+        if backslashes % 2 == 0:
+            return position
+        position = text.find(quote, position + 1, end)
+    return -1
+
+
+def _last_at_before(text: str, start: int, end: int, encoded: bool) -> tuple[int, int] | None:
+    at = None
+    for at in (_ENCODED_AT_RE if encoded else _AT_RE).finditer(text, start, end):
+        pass
+    return at.span() if at is not None else None
+
+
+def _userinfo_colon(text: str, start: int, end: int, encoded: bool) -> tuple[int, int] | None:
+    """The userinfo's first ``:`` outside any reference an earlier pass put in it."""
+    colons = _ENCODED_COLON_RE if encoded else _COLON_RE
+    position = start
+    while position < end:
+        colon = colons.search(text, position, end)
+        if colon is None:
+            return None
+        marker = WITHHELD_MARKER_RE.search(text, position, end)
+        if marker is None or colon.start() < marker.start():
+            return colon.span()
+        position = marker.end()
+    return None
+
+
+def _character_reference(match: re.Match[str]) -> str:
+    reference = match.group(0)
+    if reference[1] != "#" and reference[1:] not in html.entities.html5:
+        return reference  # no such named reference: the characters as written
+    return html.unescape(reference)
+
+
+def _userinfo_value(raw: str, encoded: bool, quote: str | None, markup: bool) -> str:
+    """A written password as the value a client sends: in a quoted string, its backslash escapes
+    read (``pa\\"ss``); in markup, each character reference read as its character; then
+    percent-decoded (twice for a URL percent-encoded into a query)."""
+    if quote is not None and "\\" in raw:
+        raw = _QUOTED_ESCAPE_RE.sub(r"\1", raw)
+    if markup and "&" in raw:
+        raw = _CHARACTER_REFERENCE_RE.sub(_character_reference, raw)
+    return _url_decoded(_url_decoded(raw) if encoded else raw)
+
+
+def withhold_url_userinfo(value: Any) -> Any:
+    """``mask_url_userinfo`` over every string in ``value`` (a mapping, a list, a string): a
+    masked export's URL, headers and metadata, before the shared redactor, whose own userinfo rule
+    stops at a password's first ``@`` and cannot read a URL percent-encoded into a query."""
+    if isinstance(value, str):
+        # A string that holds JSON (stored metadata) is read as written, never across its strings.
+        json_text = value.lstrip()[:1] in ("{", "[")
+        return mask_url_userinfo(value, form="escaped" if json_text else "text")
+    if isinstance(value, dict):
+        return {key: withhold_url_userinfo(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(withhold_url_userinfo(item) for item in value)
+    return value
 
 
 def mask_url_secrets(url: Any) -> Any:
@@ -1394,8 +1592,7 @@ def mask_url_secrets(url: Any) -> Any:
     its userinfo."""
     if not isinstance(url, str):
         return url
-    if "@" in url:
-        url = _mask_url_userinfo(url)
+    url = mask_url_userinfo(url, form="url")
     if "=" not in url:
         return url
 
@@ -2500,6 +2697,9 @@ def mask_provider_secrets(text: str) -> str:
         def replace(match: re.Match[str]) -> str:
             whole = match.group(0)
             start, end = match.start(1) - match.start(0), match.end(1) - match.start(0)
+            if WITHHELD_MARKER_RE.search(whole, 0, end):
+                # Withheld by an earlier pass (a URL userinfo): its references are kept.
+                return whole
             return whole[:start] + _withhold(match.group(1)) + whole[end:]
 
         text = pattern.sub(replace, text)
@@ -2606,7 +2806,8 @@ def _mask_text_passes(text: str) -> str:
     text = mask_embedded_objects(text)
     text = mask_encoded_assignments(text)
     text = mask_php_info_superglobals(text)
-    return mask_text_assignments(text)
+    text = mask_text_assignments(text)
+    return mask_url_userinfo(text)
 
 
 def mask_body_text(text: str, *, _depth: int = 0, window: bool = False) -> str:
@@ -2619,6 +2820,9 @@ def mask_body_text(text: str, *, _depth: int = 0, window: bool = False) -> str:
         text = _mask_json_led(text, _depth, window=window)
     else:
         text = _mask_text_passes(text)
+    # Over the whole text as written, JSON-led or not: a URL in a string the nested passes did not
+    # decode (a string in a string in a string), never spanning a string's end.
+    text = mask_url_userinfo(text, form="escaped")
     return mask_provider_secrets(text)
 
 
@@ -2656,6 +2860,8 @@ __all__ = [
     "COPY_RESOURCE_KEY",
     "track_copy_blocks",
     "mask_url_secrets",
+    "mask_url_userinfo",
+    "withhold_url_userinfo",
     "scrub_known_values",
     "withheld_body_notice",
     "WITHHELD_MARKER_RE",

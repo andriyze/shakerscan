@@ -15,12 +15,12 @@ import httpx
 try:
     from runtime.archive_body_masking import (
         URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, holds_withheld_material,
-        mask_body_text,
+        mask_body_text, mask_url_userinfo, withhold_url_userinfo,
     )
 except ModuleNotFoundError:  # package import layout
     from api.runtime.archive_body_masking import (
         URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, holds_withheld_material,
-        mask_body_text,
+        mask_body_text, mask_url_userinfo, withhold_url_userinfo,
     )
 
 
@@ -399,16 +399,24 @@ def response_summary(
         pass
     json_keys = sorted(str(key)[:120] for key in parsed_json.keys())[:100] if isinstance(parsed_json, dict) else []
     selected_json: dict[str, Any] = {}
+    # Inside a Hunt a selected value's or header's URL userinfo password becomes a reference, as
+    # in the body sample. Elsewhere selected values are compared (a changed password must still
+    # read as a change), and the caller's redactor masks them.
+    in_hunt = active_withheld_values() is not None
     for path in selected_json_paths or []:
         try:
-            selected_json[path] = _json_path_get(parsed_json, path)
+            value = _json_path_get(parsed_json, path)
+            selected_json[path] = withhold_url_userinfo(value) if in_hunt else value
         except ExperimentContractError:
             selected_json[path] = None
-    # A URL-bearing header's secret parameters are withheld (inside a Hunt) before it is cut.
+    # A URL-bearing header's secret parameters are withheld (inside a Hunt) before it is cut; any
+    # other header's URL userinfo password too (``X-Cache-Backend: redis://:pw@h``), in a Hunt.
     selected_response_headers = {
         name: (
             bounded_public_url(str(response.headers.get(name) or ""), 1000)
-            if str(name).lower() in URL_BEARING_HEADERS else str(response.headers.get(name) or "")[:1000]
+            if str(name).lower() in URL_BEARING_HEADERS
+            else (mask_url_userinfo(str(response.headers.get(name) or "")) if in_hunt
+                  else str(response.headers.get(name) or ""))[:1000]
         )
         for name in selected_headers or []
     }
@@ -445,9 +453,11 @@ def response_summary(
     }
     withheld = active_withheld_values()
     if withheld is not None:
-        # Every marker the summary shows has its entry: the body sample's and the URL fields'.
+        # Every marker the summary shows has its entry: the body sample's, the URL fields' and the
+        # selected values'.
         entries = withheld.entries(
-            body_sample, summary["location"], json.dumps(selected_response_headers, ensure_ascii=False))
+            body_sample, summary["location"], json.dumps(selected_response_headers, ensure_ascii=False),
+            json.dumps(selected_json, ensure_ascii=False, default=str))
         if entries:
             summary["withheld_values"] = entries
     return summary

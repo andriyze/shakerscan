@@ -28,6 +28,7 @@ from .archive_body_masking import (
     MAX_MASKED_BODY_CHARS,
     archived_body_text,
     withhold_body_secrets,
+    withhold_url_userinfo,
 )
 
 try:
@@ -198,7 +199,7 @@ def encoded_headers(value: Any, masked: bool, private: bool) -> tuple[Any, int]:
     """
     headers = _decoded(value)
     if masked:
-        headers = redact_sensitive(headers, redact_strings=True, scrub_text=True)
+        headers = redact_sensitive(withhold_url_userinfo(headers), redact_strings=True, scrub_text=True)
         if private:
             headers = {key: "[REDACTED]" for key in (headers or {})}
     size = len(utf8(json.dumps(headers, ensure_ascii=False)))

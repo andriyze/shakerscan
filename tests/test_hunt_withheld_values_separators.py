@@ -529,3 +529,412 @@ def test_php_info_superglobals_compose_lists_php_properties_and_deep_indents(bod
         masked = mask_body_text(body)
     assert "Cd2Tail" not in masked and kept in masked
     assert collector.values == ["Ab1&Cd2Tail"]
+
+
+# --- URL userinfo (N1): a password behind an empty user name, and every other userinfo shape -------
+#
+# 2.8.2 and 2.8.3 acceptance: ``REDIS_URL=redis://:<password>@redis.internal:6379/0`` in honey's
+# ``/.env`` reached the planner whole in ``http.request``'s ``response.body_sample``, while
+# ``DATABASE_URL=postgres://user:<password>@...`` was withheld: the body passes knew a userinfo
+# password only by the provider pattern, which needs a user name. The exports and
+# ``artifact.inspect`` also ran the scanner's free-text redaction, which hid the gap there. The
+# passwords below are generated (seeded) synthetic fixtures, never real secrets.
+
+_URL_SCHEMES = ("redis", "rediss", "amqp", "mongodb+srv", "postgres", "mysql", "http", "https", "ftp", "smtp")
+_URL_HOSTS = ("redis.internal:6379", "[::1]:6379", "[2001:db8::7]", "10.0.0.5:5672", "db.fixture.test")
+# What a userinfo password may hold as written (RFC 3986 unreserved, sub-delimiters and ``:``), and
+# ``@``: the userinfo ends at the authority's last one.
+_USERINFO_WRITTEN = "-._~!$&'()*+,;=:@"
+# What it may hold only percent-encoded.
+_USERINFO_ENCODED_ONLY = " /?#%\"<>[]\\^`{|}" + _HOSTILE_UNICODE
+
+
+def _url_cases(count: int, seed: int) -> list[tuple[str, str, str, str, str]]:
+    """(scheme, user name, decoded password, password as written, host)."""
+    rng = random.Random(seed)
+    cases = []
+    for index in range(count):
+        length = rng.choice((4, 6, 9, 16, 24, 40, 120))
+        encoded = index % 3 == 0
+        pool = _ALNUM * 3 + _USERINFO_WRITTEN * 2 + (_USERINFO_ENCODED_ONLY if encoded else "")
+        password = rng.choice(_ALNUM) + "".join(rng.choice(pool) for _ in range(length)) + rng.choice(_ALNUM)
+        written = urllib.parse.quote(password, safe=rng.choice(("", "!$&'()*+,;=:"))) if encoded else password
+        user = "" if index % 2 == 0 else rng.choice(("app", "halvern_app", "u%40corp", "default"))
+        cases.append((_URL_SCHEMES[index % len(_URL_SCHEMES)], user, password, written,
+                      _URL_HOSTS[index % len(_URL_HOSTS)]))
+    return cases
+
+
+URL_CASES = _url_cases(60, seed=2831)
+assert sum(1 for case in URL_CASES if case[1] == "") >= 25  # the N1 shape: no user name
+assert any("@" in case[3] for case in URL_CASES) and any("%" in case[3] for case in URL_CASES)
+assert {case[0] for case in URL_CASES} == set(_URL_SCHEMES)
+
+
+def _url(scheme: str, user: str, written: str, host: str) -> str:
+    return f"{scheme}://{user}:{written}@{host}/0"
+
+
+# Where a URL is written. The second item says whether the reference must bind the decoded password
+# exactly (markup character references read as their characters, percent-escapes decoded).
+_URL_CONTEXTS = {
+    ".env": (lambda url: f"DEBUG=0\nREDIS_URL={url}\nALLOWED_HOSTS=*\n", True),
+    ".env double-quoted": (lambda url: f'CACHE_URL="{url}"\nDEBUG=0\n', True),
+    ".env single-quoted": (lambda url: "BROKER_URL='" + url.replace("'", "%27") + "'\nDEBUG=0\n", True),
+    "json string": (lambda url: json.dumps({"debug": False, "cache": {"backends": [url]}}), True),
+    "json escaped in a string": (lambda url: json.dumps({"settings": json.dumps({"cache": url})}), True),
+    "yaml": (lambda url: f"cache:\n  url: {url}\n  timeout: 5\n", True),
+    "query string": (lambda url: f"GET /connect?next={url}&x=1 HTTP/1.1\n", True),
+    "query string percent-encoded": (
+        lambda url: "<a href=\"/connect?next=" + urllib.parse.quote(url, safe="") + "&amp;x=1\">go</a>", True),
+    "html attribute": (lambda url: f'<a href="{html.escape(url)}">cache</a>', True),
+    "html text": (lambda url: f"<pre>connecting to {html.escape(url)} failed</pre>", True),
+    "js string": (lambda url: f"var cache = '{url.replace(chr(39), '%27')}'; var n = 2;", True),
+    "log line": (lambda url: f"[error] connecting to {url} failed: timeout\n", True),
+}
+
+
+def _url_leaks(output: str, password: str, written: str, template: str) -> list[str]:
+    leaks = []
+    for form in dict.fromkeys((password, written, urllib.parse.quote(password, safe=""))):
+        for start in range(0, max(1, len(form) - 3)):
+            piece = form[start:start + 4]
+            if len(piece) == 4 and piece in output and piece not in template:
+                leaks.append(piece)
+                break
+    return leaks
+
+
+def _url_template(context: str, scheme: str, user: str, host: str) -> str:
+    return mask_body_text(_URL_CONTEXTS[context][0](_url(scheme, user, "Zz", host)))
+
+
+@pytest.mark.parametrize("context", sorted(_URL_CONTEXTS))
+def test_url_userinfo_passwords_never_reach_the_planner_view(context):
+    build, exact = _URL_CONTEXTS[context]
+    for scheme, user, password, written, host in URL_CASES:
+        body = build(_url(scheme, user, written, host))
+        collector = masking.WithheldValues(ACTION)
+        with masking.collecting_withheld_values(collector):
+            masked = mask_body_text(body)
+        template = _url_template(context, scheme, user, host)
+        case = (context, scheme, user, len(password))
+        assert _url_leaks(masked, password, written, template) == [], case
+        assert _url_leaks(mask_body_text(body), password, written, template) == [], case
+        if exact:
+            # The reference stands for the password a client sends: decoded, whole.
+            assert password in collector.values, case
+        if "percent-encoded" not in context:
+            assert f"@{host}" in html.unescape(masked).replace("\\/", "/"), case  # the host stays readable
+            assert f"://{user}:" in html.unescape(masked), case  # so does the user name
+
+
+@pytest.mark.parametrize("scheme", _URL_SCHEMES)
+@pytest.mark.parametrize("userinfo", ["user:@", ":@", "user@", "@"])
+def test_url_userinfo_without_a_password_is_kept(scheme, userinfo):
+    body = f"CACHE_URL={scheme}://{userinfo}cache.fixture.test:6379/0\nDEBUG=0\n"
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        assert mask_body_text(body) == body
+    assert collector.values == []
+
+
+# --- Every entry point, with the N1 shape and the generated userinfo passwords --------------------
+
+# The empty user name cases (the N1 shape), raw and percent-encoded, with ``@`` and ``:`` inside.
+N1_CASES = [case for case in URL_CASES if case[1] == ""][:12]
+N1_PASSWORD = "Rd5:p@ss!w$rd&x'Kq9Zt"
+
+
+def _n1_env(written: str, scheme: str = "redis", host: str = "redis.internal:6379") -> str:
+    return (f"DEBUG=0\nDATABASE_URL=postgres://halvern_app:Pg7Hx2Vw9Kq@db.fixture.test/app\n"
+            f"REDIS_URL={scheme}://:{written}@{host}/0\nALLOWED_HOSTS=*\n")
+
+
+def _assert_withheld(text: str, password: str, written: str, collector=None, template: str = "") -> None:
+    assert _url_leaks(text, password, written, template) == [], text[:400]
+    if collector is not None:
+        assert password in collector.values
+
+
+def test_honey_n1_redis_url_is_one_reference_beside_the_database_url():
+    body = _n1_env("S3cr3tPassw0rd123Zq")
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text(body)
+    assert "REDIS_URL=redis://:[withheld:2]@redis.internal:6379/0\n" in masked
+    assert "DATABASE_URL=postgres://halvern_app:[withheld:1]@db.fixture.test/app\n" in masked
+    assert collector.values == ["Pg7Hx2Vw9Kq", "S3cr3tPassw0rd123Zq"]
+    assert "REDIS_URL=redis://:***@redis.internal:6379/0\n" in mask_body_text(body)
+
+
+@pytest.mark.parametrize("case", N1_CASES + [("redis", "", N1_PASSWORD, N1_PASSWORD, "redis.internal")],
+                         ids=lambda case: f"{case[0]}-{len(case[2])}")
+def test_http_request_observation_withholds_an_empty_user_password(monkeypatch, case):
+    """``http.request`` as the worker runs it: the body sample, a followed redirect whose location
+    nests the URL, and a selected header that carries one."""
+    import httpx
+    from api.capabilities.http import execute_bound_http_request
+    from capabilities.inline import HttpRequestExecutionAdapter
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+    from runtime.hunt_http_exchange import withholding_operation
+
+    scheme, _user, password, written, host = case
+
+    def observe(written: str):
+        url = _url(scheme, "", written, host)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/start":
+                return httpx.Response(302, headers={"location": "/.env?next=" + urllib.parse.quote(url, safe="")})
+            return httpx.Response(200, headers={"content-type": "text/plain", "x-cache-backend": url},
+                                  content=_n1_env(written, scheme, host).encode())
+
+        class _MockClient(httpx.AsyncClient):
+            def __init__(self, *args, **kwargs):
+                kwargs.pop("transport", None)
+                super().__init__(transport=httpx.MockTransport(handler), **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+
+        async def operation():
+            return await execute_bound_http_request(
+                "https://honey.fixture.test",
+                {"method": "GET", "path": "/start", "follow_redirects": True,
+                 "selected_headers": ["location", "x-cache-backend"]},
+                target=TARGET, allow_bound_origin_redirects=True)
+
+        wrapped, collector = withholding_operation("http.request", ACTION, operation)
+        adapter = HttpRequestExecutionAdapter(
+            specification=CAPABILITY_REGISTRY.require("http.request"), operation=wrapped,
+            requested_budget={"http_requests": 5, "tool_wall_seconds": 30}, redacted_execution={})
+        outcome = asyncio.run(adapter.execute(heartbeat=lambda: None, cancelled=lambda: False))
+        assert outcome.status == "success"
+        return json.dumps(outcome.observations, ensure_ascii=False), collector
+
+    observation, collector = observe(written)
+    template, _ = observe("Zz")
+    _assert_withheld(observation, password, written, collector, template)
+    assert "REDIS_URL=" in observation and "ALLOWED_HOSTS" in observation
+
+
+@pytest.mark.parametrize("case", N1_CASES, ids=lambda case: f"{case[0]}-{len(case[2])}")
+def test_http_experiment_summary_withholds_an_empty_user_password(case):
+    import httpx
+    from api.http_experiment import response_summary
+
+    scheme, _user, password, written, host = case
+    url = _url(scheme, "", written, host)
+    body = json.dumps({"cache": url, "env": _n1_env(written, scheme, host)})
+    collector = masking.WithheldValues(ACTION)
+    response = httpx.Response(200, headers={"content-type": "application/json", "x-cache-backend": url,
+                                            "link": f"<{url}>; rel=cache"}, content=body.encode())
+    with masking.collecting_withheld_values(collector):
+        summary = response_summary(response, body.encode(), selected_json_paths=["$.cache"],
+                                   selected_headers=["x-cache-backend", "link"])
+    text = json.dumps(summary, ensure_ascii=False)
+    _assert_withheld(text, password, written, collector)
+    shown = {entry["marker"] for entry in summary["withheld_values"]}
+    assert set(re.findall(r"\[withheld:\d+\]", text)) <= shown  # every marker shown has its entry
+
+
+@pytest.mark.parametrize("case", N1_CASES, ids=lambda case: f"{case[0]}-{len(case[2])}")
+def test_artifact_inspect_withholds_an_empty_user_password(monkeypatch, case):
+    scheme, _user, password, written, host = case
+    collector = masking.WithheldValues(ACTION)
+    result = _inspect(monkeypatch, _n1_env(written, scheme, host), collector)
+    _assert_withheld(json.dumps(result, ensure_ascii=False), password, written, collector)
+
+
+@pytest.mark.parametrize("export_format", ["transactions", "har"])
+def test_masked_exports_withhold_userinfo_passwords_in_every_field(export_format):
+    rows = []
+    for index, (scheme, user, password, written, host) in enumerate(URL_CASES):
+        url = _url(scheme, user, written, host)
+        rows.append({
+            "id": str(uuid.UUID(int=1200 + index)), "plane": "hunt", "sequence": index,
+            "hunt_run_id": HUNT, "hunt_action_id": ACTION, "capability_name": "http.request",
+            "method": "GET", "url": "https://honey.fixture.test/go?next=" + url, "status_code": 302,
+            "request_headers": {"referer": url}, "request_body": None,
+            "response_headers": {"content-type": "text/plain", "location": url,
+                                 "link": f"<{url}>; rel=next", "refresh": f"0; url={url}"},
+            "response_body": _URL_CONTEXTS[".env"][0](url), "metadata_json": {"hops": [url]},
+        })
+    def export(rows):
+        return json.dumps(export_document(rows, export_format=export_format, redaction="redacted",
+                                          owner={"hunt_id": HUNT}, total=len(rows)), ensure_ascii=False)
+
+    text = export(rows)
+    # The same rows with a two-character password: what the export shows without the secret.
+    template_rows = [json.loads(json.dumps(row).replace(json.dumps(_url(*case[:2], case[3], case[4]))[1:-1],
+                                                        json.dumps(_url(*case[:2], "Zz", case[4]))[1:-1]))
+                     for row, case in zip(rows, URL_CASES)]
+    assert all(json.dumps(row).count("Zz") >= 6 for row in template_rows)
+    template = export(template_rows)
+    for scheme, user, password, written, host in URL_CASES:
+        encoded = urllib.parse.quote(written, safe="")
+        assert _url_leaks(text, password, written, template) == [], (export_format, scheme, len(password))
+        assert _url_leaks(text, encoded, encoded, template) == [], (export_format, scheme, len(password))
+
+
+def test_mcp_tool_result_relays_no_empty_user_password(monkeypatch):
+    from tests.test_hunt_withheld_values import _load_mcp
+    from tests.test_mcp_refusal_reasons import ScriptedOpener
+
+    mcp = _load_mcp()
+    collector = masking.WithheldValues(ACTION)
+    observation = _inspect(monkeypatch, _n1_env(N1_PASSWORD), collector)["observation"]
+    hunt_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaac"
+    client = mcp.ArsenalClient("http://127.0.0.1:8080", poll_seconds=0.01, action_wait_seconds=0.5)
+    client.opener = ScriptedOpener({
+        ("GET", f"/hunts/{hunt_id}"): {
+            "hunt_id": hunt_id, "status": "active",
+            "capabilities": [{"name": "artifact.inspect", "input_schema": {"type": "object"}}],
+        },
+        ("POST", f"/hunts/{hunt_id}/capabilities/artifact.inspect"): {
+            "hunt_id": hunt_id, "capability": "artifact.inspect", "action_id": ACTION,
+            "action_result": {"status": "success", "observations": [observation]},
+        },
+    })
+    result = client.call_tool("shakerscan_hunt_capability", {
+        "hunt_id": hunt_id, "capability_name": "artifact.inspect",
+        "input": {"path": "/.env"}, "idempotency_key": "n1-key-1",
+    })
+    _assert_withheld(json.dumps(result, ensure_ascii=False), N1_PASSWORD, N1_PASSWORD)
+    assert N1_PASSWORD in collector.values
+
+
+@pytest.mark.parametrize("field", [
+    "redis://:{pw}@cache.internal:6379/0", "//:{pw}@cache.internal/x", " https://:{pw}@h.fixture.test/",
+    "<https://:{pw}@h.fixture.test/a>; rel=next", "0; url=https://:{pw}@h.fixture.test/",
+    "default-src 'self'; report-uri https://:{pw}@r.fixture.test/csp",
+    "https://h.fixture.test/cb?next=redis://:{pw}@cache/0&state=s",
+    "https://h.fixture.test/cb?next=redis%3A%2F%2F%3A{encoded}%40cache%2F0&state=s",
+])
+def test_url_fields_withhold_an_empty_user_password(field):
+    """``Location``, ``Link``, ``Refresh``, a CSP ``report-uri``, a redirect hop: one URL field,
+    where the password may also sit in a URL nested (or percent-encoded) in the query."""
+    value = field.format(pw=N1_PASSWORD, encoded=urllib.parse.quote(N1_PASSWORD, safe=""))
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = masking.mask_url_secrets(value)
+        bounded = masking.bounded_public_url(value, 500)
+    for text in (masked, bounded, masking.mask_url_secrets(value)):
+        _assert_withheld(text, N1_PASSWORD, N1_PASSWORD)
+    assert collector.values == [N1_PASSWORD]
+
+
+@pytest.mark.parametrize("text", ["a://" * 50_000 + "@", "a://:" * 50_000 + "@", "a://:b@" * 30_000,
+                                  "a%3A%2F%2F%3Ab%40" * 20_000, "x://" + "@" * 200_000])
+def test_url_userinfo_pass_is_linear(text):
+    import time
+
+    started = time.perf_counter()
+    masking.mask_url_userinfo(text)
+    masking.mask_url_userinfo(text, form="url")
+    assert time.perf_counter() - started < 2.0
+
+
+# --- Review of the fix: no userinfo across strings, references kept, escapes read ----------------
+
+@pytest.mark.parametrize("body", [
+    '<script id="__NEXT_DATA__" type="application/json">{"props":{"site":"https://example.com",'
+    '"apiBase":"https://api.example.com","contact":"support@example.com"}}</script>',
+    '!function(e){var t={api:"https://api.example.com",ver:"1.2"};e.exports=t}(this);require("@babel/runtime")',
+    'callback({"home":"https://example.com","mail":"x@y.com"})',
+    "var a={u:'https://api.example.com',m:'x@y.com'}",
+])
+def test_a_bare_host_never_starts_a_userinfo_in_a_later_string(body):
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        assert mask_body_text(body) == body
+    assert collector.values == []
+
+
+def test_a_quoted_url_ends_at_its_quote_and_keeps_the_references_after_it():
+    key = "sk_live_" + "51HabcDEFghiJKLmnoPQRstu"
+    body = f'<script>window.cfg={{"api":"http://api:8080","stripeKey":"{key}","owner":"ops@corp.com"}}</script>'
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text(body)
+    assert '"api":"http://api:8080"' in masked and '"owner":"ops@corp.com"' in masked
+    assert key not in masked and key in collector.values
+
+
+def test_a_reference_inside_a_userinfo_is_kept_and_the_password_bound_alone():
+    collector = masking.WithheldValues(ACTION)
+    collector.bind_known(["svc"])
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text("REDIS_URL=redis://ro_svc:S3cr3tPassQ@h.fixture.test/0\n")
+    assert "S3cr3t" not in masked and "[withheld:[" not in masked and "***" not in masked
+    assert re.fullmatch(r"REDIS_URL=redis://ro_\[withheld:\d\]:\[withheld:\d\]@h\.fixture\.test/0\n", masked), masked
+    assert "S3cr3tPassQ" in collector.values
+
+
+@pytest.mark.parametrize(("body", "password"), [
+    ('<script>var cfg={"redis":"redis:\\/\\/:S3cr3tPassQ@h"}</script>', "S3cr3tPassQ"),
+    ("<td>redis://:S3cr3t&amp;PassQ@h</td>", "S3cr3t&PassQ"),
+    ("<td>redis://:S3cr3t&#39;PassQ@h</td>", "S3cr3t'PassQ"),
+])
+def test_escaped_slashes_and_markup_references_are_read(body, password):
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text(body)
+    assert "S3cr3t" not in masked and "PassQ" not in masked
+    assert collector.values == [password]
+
+
+def test_selected_values_outside_a_hunt_stay_comparable():
+    import httpx
+    from api.http_experiment import response_summary
+
+    def summary(password: str):
+        body = json.dumps({"cache": f"redis://:{password}@cache.fixture.test/0"}).encode()
+        response = httpx.Response(200, headers={"content-type": "application/json"}, content=body)
+        return response_summary(response, body, selected_json_paths=["$.cache"])
+
+    assert summary("FirstPassQ1")["selected_json"] != summary("OtherPassQ2")["selected_json"]
+
+
+def test_json_text_is_read_as_written_never_across_its_strings():
+    """Stored metadata can be JSON text: a bare host in one string never opens a userinfo that
+    ends at an address in a later one, and a password inside one string is still withheld."""
+    text = json.dumps({"hop": "https://h.fixture.test", "workflow_values_private": True,
+                       "contact": "ops@corp.com", "cache": "redis://:S3cr3tPassQ@c"}, separators=(",", ":"))
+    masked = masking.withhold_url_userinfo({"metadata_json": text})["metadata_json"]
+    assert json.loads(masked)["contact"] == "ops@corp.com"
+    assert json.loads(masked)["cache"] == "redis://:***@c"
+
+
+def test_an_address_as_the_user_name_keeps_the_user_name_and_withholds_the_password():
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text("MAIL_URL=smtp://ops@corp.example:Ml7PassQx@mail.fixture.test:587\n")
+    assert masked == "MAIL_URL=smtp://ops@corp.example:[withheld:1]@mail.fixture.test:587\n"
+    assert collector.values == ["Ml7PassQx"]
+
+
+@pytest.mark.parametrize(("body", "password"), [
+    ('REDIS_URL="redis://:pa\\"ssW0rd99@redis:6379"\n', 'pa"ssW0rd99'),
+    ('const u = "redis://:pa\\"ssW0rd99@redis";', 'pa"ssW0rd99'),
+    ("const u = 'redis://:pa\\'ssW0rd99@redis';", "pa'ssW0rd99"),
+    ('<script>var c="redis:\\/\\/user:pa\\"ssW0rd99@h"</script>', 'pa"ssW0rd99'),
+])
+def test_an_escaped_quote_does_not_close_a_quoted_url(body, password):
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text(body)
+    assert "ssW0rd99" not in masked
+    assert collector.values == [password]
+
+
+@pytest.mark.parametrize(("body", "password"), [
+    ("REDIS_URL=redis://:S3cr3t&amp;Pass@h\n", "S3cr3t&amp;Pass"),  # a .env: written as is
+    ("REDIS_URL=redis://:S3&copyright9;Pass@h\n", "S3&copyright9;Pass"),
+    ("<td>redis://:Pw&lt;x&ampy9@h</td>", "Pw<x&ampy9"),  # only complete references are read
+])
+def test_character_references_are_read_only_in_markup_and_only_whole(body, password):
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        mask_body_text(body)
+    assert collector.values == [password]
