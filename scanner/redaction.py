@@ -231,6 +231,47 @@ _LINE_BREAK_RE = re.compile(r"[\r\n]")
 _NON_SPACE_RE = re.compile(r"\S+")
 
 
+# The password of a URL's userinfo (``https://ID:SECRET@host``, ``redis://:SECRET@host``); the user
+# name stays visible: it identifies the account, the password is the credential. As
+# ``(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]*):[^@\s/]+@`` finds it, except that a password that is
+# already a Hunt marker (``[withheld:3]``) is kept. That regex tried a scheme at every word start
+# and read each to its end (``token-`` repeated took minutes on 1 MB). Here each ``://`` is found
+# once, its scheme is read backwards to the previous one, and the userinfo forwards to the next
+# ``/``, so every character is read a bounded number of times.
+_URL_SCHEME_CHAR_RE = re.compile(r"(?i)[a-z0-9+.-]")
+_URL_SCHEME_START_RE = re.compile(r"(?i)[a-z]")
+_WORD_CHAR_RE = re.compile(r"\w")
+_URL_USERINFO_RE = re.compile(r"([^/\s:@]*):(?!\[withheld:[1-9][0-9]{0,3}\]@)([^@\s/]+)@")
+
+
+def _mask_url_userinfo(text: str) -> str:
+    if "://" not in text or "@" not in text:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    separator = text.find("://")
+    while separator >= 0:
+        run_start = separator
+        while run_start > cursor and _URL_SCHEME_CHAR_RE.match(text, run_start - 1):
+            run_start -= 1
+        scheme_start = next((
+            position for position in range(run_start, separator)
+            if _URL_SCHEME_START_RE.match(text, position)
+            and (position == 0 or not _WORD_CHAR_RE.match(text, position - 1))
+        ), None)
+        userinfo = _URL_USERINFO_RE.match(text, separator + 3) if scheme_start is not None else None
+        if userinfo is None:
+            separator = text.find("://", separator + 1)
+            continue
+        pieces.extend((text[cursor:userinfo.start(2)], "***@"))
+        cursor = userinfo.end()
+        separator = text.find("://", cursor)
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _mask_mysql_passwords(text: str) -> str:
     pieces: list[str] = []
     cursor = position = 0
@@ -311,9 +352,8 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str] | Callable[[str], str], ...] =
     ),
     # Simple XML credential elements.
     _mask_xml_elements,
-    # The password of a URL's userinfo (``https://ID:SECRET@host``, ``redis://:SECRET@host``).
-    # The user name stays visible: it identifies the account, the password is the credential.
-    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]*):[^@\s/]+@"), r"\1:***@"),
+    # The password of a URL's userinfo.
+    _mask_url_userinfo,
     # Standalone JWTs and common command-line password forms in planner/free-text output.
     (
         re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}(?![A-Za-z0-9_-])"),
