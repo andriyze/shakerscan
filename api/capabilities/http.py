@@ -23,7 +23,9 @@ from http_experiment import (
     rewrite_method_for_redirect,
     validate_next_hop,
 )
-from runtime.archive_body_masking import active_withheld_values, mask_public_http_urls
+from runtime.archive_body_masking import (
+    URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, mask_public_http_urls,
+)
 from runtime.models import TargetBinding
 from runtime.target_bound_socket import FrozenTargetSocketFactory
 
@@ -659,7 +661,7 @@ async def execute_bound_http_request(
                 if hops_followed >= MAX_REDIRECT_HOPS:
                     redirect_chain.append({
                         "status": response.status_code,
-                        "location": location[:500],
+                        "location": bounded_public_url(location, 500),
                         "followed": False,
                         "stopped": "max_hops",
                     })
@@ -679,7 +681,7 @@ async def execute_bound_http_request(
                 ):
                     redirect_chain.append({
                         "status": response.status_code,
-                        "location": location[:500],
+                        "location": bounded_public_url(location, 500),
                         "followed": False,
                         "stopped": "cross_origin",
                     })
@@ -692,13 +694,13 @@ async def execute_bound_http_request(
                     # never authorizes disclosing this request's identity to a
                     # different scheme or port, including cookies just received.
                     redirect_chain.append({
-                        "status": response.status_code, "location": location[:500],
+                        "status": response.status_code, "location": bounded_public_url(location, 500),
                         "followed": False, "stopped": "credential_destination",
                     })
                     break
                 redirect_chain.append({
                     "status": response.status_code,
-                    "location": location[:500],
+                    "location": bounded_public_url(location, 500),
                     "followed": True,
                 })
                 current_method = rewrite_method_for_redirect(
@@ -781,7 +783,11 @@ async def execute_bound_http_request(
     # exists to report (HSTS, CSP, frame options...) was fetched and then discarded, and the report
     # lost the certificate/header sections operators had in 0.8.18.
     summary["security_headers"] = {
-        name: str(response.headers[name])[:2_000]
+        # A CSP ``report-uri`` can carry a token: inside a Hunt it is withheld before the cut.
+        name: (
+            bounded_public_url(str(response.headers[name]), 2_000) if name in URL_BEARING_HEADERS
+            else str(response.headers[name])[:2_000]
+        )
         for name in _SECURITY_POSTURE_HEADERS
         if name in response.headers
     }

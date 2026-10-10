@@ -69,6 +69,8 @@ try:
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import MASK, is_sensitive_key
 
+from .string_escapes import unescape_copy_text, unescape_js, unescape_php, unescape_yaml_double
+
 _MASKED_JSON_VALUE = json.dumps(MASK)
 
 
@@ -139,6 +141,12 @@ class WithheldValues:
         # Context bytes read for masking: this action's, and the Hunt's so far (a budget).
         self.context_bytes = 0
         self.context_bytes_used = 0
+        # The COPY block the next text masked starts inside, established by byte positions
+        # (``copy_block_at``); consumed by one ``mask_sql_values`` call. ``None``: not known.
+        self.copy_block: str | None = None
+        # The column knowledge this collector was seeded with (earlier actions'), so the
+        # knowledge this action learned can be told apart from it when sealing.
+        self.sql_seeded: dict[str, dict[str, list[str]]] = {}
 
     def bind_known(self, values: Any, *, found: bool = False) -> None:
         """Values every echo of which is withheld, in any encoding. Values this action *sends*
@@ -149,8 +157,11 @@ class WithheldValues:
         minimum = _MIN_FOUND_VALUE_CHARS if found else _MIN_KNOWN_VALUE_CHARS
         for value in values or ():
             text = str(value)
-            if len(text) >= minimum and text not in target:
-                target.append(text)
+            # Sealed exactly as found, but a target echoes a value with surrounding whitespace
+            # trimmed as often as not (``Welcome back, <value>!``): both forms are searched for.
+            for form in dict.fromkeys((text, text.strip())):
+                if len(form) >= minimum and form not in target:
+                    target.append(form)
         self._known_scrubbers = None
 
     def known_scrubbers(self) -> list[KnownValueScrubber]:
@@ -781,17 +792,10 @@ def _yaml_line(line: str) -> tuple[int, bool, str | None, str | None, int]:
     return indent, bool(dash), match.group(2).strip(), (value or "").strip() or None, value_offset
 
 
-_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0"}
-_BACKSLASH_ESCAPE_RE = re.compile(r"\\(.)", re.DOTALL)
-
-
-def unescape_backslashes(text: str) -> str:
-    return _BACKSLASH_ESCAPE_RE.sub(lambda match: _ESCAPES.get(match.group(1), match.group(1)), text)
-
-
 def _scalar(text: str) -> tuple[int, int, str, str]:
-    """``(start, end, raw value, quote)`` of a YAML/INI/dotenv scalar: a quoted string honouring
-    its escapes (``''`` in single quotes), or an unquoted value without its trailing comment."""
+    """``(start, end, raw value, quote)`` of a YAML/INI/dotenv scalar: a quoted string decoded by
+    YAML's rules (double-quoted escapes, ``''`` in single quotes), or an unquoted value without
+    its trailing comment."""
     leading = len(text) - len(text.lstrip())
     body = text[leading:]
     if body[:1] in {'"', "'"}:
@@ -801,7 +805,7 @@ def _scalar(text: str) -> tuple[int, int, str, str]:
         while index < len(body):
             char = body[index]
             if quote == '"' and char == "\\" and index + 1 < len(body):
-                pieces.append(_ESCAPES.get(body[index + 1], body[index + 1]))
+                pieces.append(body[index:index + 2])  # decoded below, with the whole content
                 index += 2
                 continue
             if char == quote:
@@ -809,13 +813,18 @@ def _scalar(text: str) -> tuple[int, int, str, str]:
                     pieces.append("'")
                     index += 2
                     continue
-                return leading + 1, leading + index, "".join(pieces), quote
+                return leading + 1, leading + index, _quoted_content(pieces, quote), quote
             pieces.append(char)
             index += 1
-        return leading + 1, len(text), "".join(pieces), quote
+        return leading + 1, len(text), _quoted_content(pieces, quote), quote
     comment = re.search(r"[ \t]+[#;]", body)
     value = (body[:comment.start()] if comment else body).rstrip()
     return leading, leading + len(value), value, ""
+
+
+def _quoted_content(pieces: list[str], quote: str) -> str:
+    content = "".join(pieces)
+    return unescape_yaml_double(content) if quote == '"' else content
 
 
 def _masked_line(line: str, offset: int, key: str | None = None) -> str:
@@ -1048,7 +1057,7 @@ def mask_embedded_objects(text: str) -> str:
             if token[0] in "\"'" and _KEY_SUFFIX_RE.match(text, literal.end()):
                 continue  # a key names a field; only values are withheld
             pieces.append(text[cursor:literal.start()])
-            pieces.append(f'"{_withhold(unescape_backslashes(token[1:-1]) if token[0] in chr(34) + chr(39) else token)}"')
+            pieces.append(f'"{_withhold(unescape_js(token[1:-1]) if token[0] in chr(34) + chr(39) else token)}"')
             cursor = literal.end()
         pieces.append(text[cursor:end])
         cursor = end
@@ -1185,25 +1194,74 @@ def mask_url_secrets(url: Any) -> Any:
     return _URL_PARAM_RE.sub(replace, url)
 
 
+# Response headers whose values carry URLs: a redirect, a link, a CSP ``report-uri``.
+URL_BEARING_HEADERS = frozenset({
+    "location", "content-location", "refresh", "link", "content-security-policy",
+    "content-security-policy-report-only",
+})
+
+
+def bounded_public_url(value: Any, limit: int) -> Any:
+    """A URL-bearing value cut to ``limit`` characters for a public result.
+
+    Inside a Hunt the whole value's secret parameters are withheld *before* the cut, so a
+    reference always stands for the whole secret (never a prefix of it), and a cut that would
+    split a reference ends in ``***`` with no reference. Elsewhere it is only cut."""
+    if not isinstance(value, str):
+        return value
+    if _COLLECTOR.get() is None:
+        return value[:limit]
+    masked = mask_url_secrets(value)
+    if len(masked) <= limit:
+        return masked
+    prefix, straddled = _cut_outside_withheld(masked, limit)
+    if not straddled:
+        return prefix
+    if len(prefix) + len(MASK) > limit:
+        prefix, _straddled = _cut_outside_withheld(masked, limit - len(MASK))
+    return prefix + MASK
+
+
+_WITHHELD_SPAN_RE = re.compile(r"\[withheld:[1-9][0-9]{0,3}\]|\*\*\*")
+
+
+def _cut_outside_withheld(text: str, end: int) -> tuple[str, bool]:
+    """``text`` cut at ``end``, or just before the marker (or ``***``) the cut would split."""
+    for span in _WITHHELD_SPAN_RE.finditer(text, max(0, end - 20), min(len(text), end + 20)):
+        if span.start() < end < span.end():
+            return text[:span.start()], True
+    return text[:end], False
+
+
 def mask_public_http_urls(result: dict[str, Any]) -> dict[str, Any]:
     """The one schema-aware pass over an HTTP capability result's public URL fields:
-    ``response.location``, ``response.final_url``, ``response.selected_headers.location``,
-    a top-level ``final_url`` and every ``redirect_chain[].location``. In place; returns it."""
+    ``response.location``, ``response.final_url``, the URL-bearing ``selected_headers`` and
+    ``security_headers`` (a CSP ``report-uri``), a top-level ``final_url`` and every
+    ``redirect_chain[].location``. Inside a Hunt, the response's ``withheld_values`` is then
+    rebuilt from the whole result, so every marker shown in any field has its entry. In place;
+    returns it."""
     summary = result.get("response")
     if isinstance(summary, dict):
         for key in ("location", "final_url"):
             if isinstance(summary.get(key), str):
                 summary[key] = mask_url_secrets(summary[key])
-        selected = summary.get("selected_headers")
-        if isinstance(selected, dict):
-            for name in list(selected):
-                if str(name).lower() in {"location", "content-location", "refresh", "link"} and isinstance(selected[name], str):
-                    selected[name] = mask_url_secrets(selected[name])
+        for headers in (summary.get("selected_headers"), summary.get("security_headers")):
+            if isinstance(headers, dict):
+                for name in list(headers):
+                    if str(name).lower() in URL_BEARING_HEADERS and isinstance(headers[name], str):
+                        headers[name] = mask_url_secrets(headers[name])
     if isinstance(result.get("final_url"), str):
         result["final_url"] = mask_url_secrets(result["final_url"])
     for hop in result.get("redirect_chain") or ():
         if isinstance(hop, dict) and isinstance(hop.get("location"), str):
             hop["location"] = mask_url_secrets(hop["location"])
+    collector = _COLLECTOR.get()
+    if collector is not None:
+        holder = summary if isinstance(summary, dict) else result
+        holder.pop("withheld_values", None)
+        entries = collector.entries(json.dumps(result, ensure_ascii=False, default=str))
+        if entries:
+            holder["withheld_values"] = entries
     return result
 
 
@@ -1243,12 +1301,20 @@ _PHP_DEFINE_RE = re.compile(
 )
 
 
-def _replace_quoted(text: str, pattern: re.Pattern[str], name_group: int, value_group: int) -> str:
+def _replace_quoted(
+    text: str, pattern: re.Pattern[str], name_group: int, value_group: int, *, php: bool = False,
+) -> str:
+    """Each value is decoded by its language's string grammar: PHP for ``define`` and for
+    ``'key' => '...'`` array entries, JavaScript/JSON/Python for every other assignment."""
     pieces: list[str] = []
     cursor = 0
     for match in pattern.finditer(text):
         name = re.sub(r"[ \t]+", "_", match.group(name_group))
-        raw = unescape_backslashes(match.group(value_group))
+        quote = match.group(value_group - 1)
+        if php or "=>" in text[match.end(name_group):match.start(value_group - 1)]:
+            raw = unescape_php(match.group(value_group), quote)
+        else:
+            raw = unescape_js(match.group(value_group))
         if (
             match.start() < cursor or not raw or not is_withheld_key(name)
             or is_location_value(name, raw) or WITHHELD_MARKER_RE.fullmatch(raw)
@@ -1270,15 +1336,28 @@ def mask_quoted_assignments(text: str) -> str:
 
 def mask_php_defines(text: str) -> str:
     """Withhold ``define('DB_PASSWORD', '...')`` values (wp-config.php and the like)."""
-    return _replace_quoted(text, _PHP_DEFINE_RE, 2, 4)
+    return _replace_quoted(text, _PHP_DEFINE_RE, 2, 4, php=True)
 
 
 # --- XML element values (Hibernate, Maven, Spring, Tomcat) ---------------------------------------
 # ``<password>...</password>``, ``<property name="hibernate.connection.password">...</property>``.
 
+# An element's text, or a CDATA section (``<![CDATA[...]]>``) whose content is the value as is.
+_CDATA_CONTENT = r"[ \t\r\n]{0,64}<!\[CDATA\[(?P<cdata>(?:[^\]]|\](?!\]>)){0,4096})\]\]>[ \t\r\n]{0,64}"
 _MARKUP_ELEMENT_RE = re.compile(
-    r"<([A-Za-z][\w:.\-]{0,63})\b([^<>]{0,1024})(?<!/)>([^<]{1,4096})</\1[ \t]*>"
+    r"<([A-Za-z][\w:.\-]{0,63})\b([^<>]{0,1024})(?<!/)>(?:(?P<text>[^<]{1,4096})|" + _CDATA_CONTENT
+    + r")</\1[ \t]*>"
 )
+
+
+def _element_content(match: re.Match[str]) -> tuple[str, int, str]:
+    """``(content, start, value)``: the matched text or CDATA content, where it starts, and the
+    value it carries (entities decoded in text, not in CDATA; surrounding blanks dropped)."""
+    if match.group("cdata") is not None:
+        content = match.group("cdata")
+        return content, match.start("cdata"), content.strip()
+    content = match.group("text")
+    return content, match.start("text"), html.unescape(content).strip()
 
 
 def mask_markup_elements(text: str) -> str:
@@ -1291,15 +1370,14 @@ def mask_markup_elements(text: str) -> str:
         ]
         if not (_names_secret(tag) or any(_names_secret(name) for name in names)):
             return match.group(0)
-        content = match.group(3)
-        value = html.unescape(content).strip()
+        content, content_start, value = _element_content(match)
         if not value or WITHHELD_MARKER_RE.fullmatch(value) or value == MASK:
             return match.group(0)
         if _URL_VALUE_RE.match(value) and is_non_secret_value_shape(value):
             return match.group(0)
         leading = len(content) - len(content.lstrip())
         trailing = len(content.rstrip())
-        start = match.start(3) - match.start(0)
+        start = content_start - match.start(0)
         whole = match.group(0)
         return whole[:start + leading] + _withhold(value) + whole[start + trailing:]
 
@@ -1399,7 +1477,8 @@ def mask_markup_pairs(text: str) -> str:
 
 # Inline formatting a cell may wrap its value in: ``<td class="v"><i>...</i></td>``.
 _TABLE_CELL_RE = re.compile(
-    r"(?i)<(t[dh])\b[^<>]{0,512}>(?:<(?:i|b|em|strong|code|span|font|tt|kbd|samp)\b[^<>]{0,256}>){0,4}([^<]{0,4096})"
+    r"(?i)<(t[dh])\b[^<>]{0,512}>(?:<(?:i|b|em|strong|code|span|font|tt|kbd|samp)\b[^<>]{0,256}>){0,4}"
+    r"(?:<!\[CDATA\[(?P<cdata>(?:[^\]]|\](?!\]>)){0,4096})\]\]>|(?P<text>[^<]{0,4096}))"
 )
 _ROW_BREAK_RE = re.compile(r"(?i)<(/?)(tr|table)\b")
 
@@ -1427,10 +1506,13 @@ def mask_table_cells(text: str) -> str:
                 columns = []
             row_tags, row_labels, row_secret = [], [], False
         previous_end = cell.end()
-        tag, content = cell.group(1).lower(), cell.group(2)
+        tag = cell.group(1).lower()
+        cdata = cell.group("cdata") is not None
+        group = "cdata" if cdata else "text"
+        content = cell.group(group)
         index = len(row_tags)
         row_tags.append(tag)
-        row_labels.append(_names_secret(_cell_label(content)))
+        row_labels.append(_names_secret(content.strip() if cdata else _cell_label(content)))
         if tag == "th":
             continue
         column_secret = index < len(columns) and columns[index]
@@ -1439,16 +1521,16 @@ def mask_table_cells(text: str) -> str:
             continue
         if not (row_secret or column_secret):
             continue
-        value = html.unescape(content).strip()
+        value = content.strip() if cdata else html.unescape(content).strip()
         if not value or value == MASK or WITHHELD_MARKER_RE.fullmatch(value):
             continue
         if _URL_VALUE_RE.match(value) and is_non_secret_value_shape(value):
             continue
         leading = len(content) - len(content.lstrip())
         trailing = len(content.rstrip())
-        pieces.append(text[cursor:cell.start(2) + leading])
+        pieces.append(text[cursor:cell.start(group) + leading])
         pieces.append(_withhold(value))
-        cursor = cell.start(2) + trailing
+        cursor = cell.start(group) + trailing
     if not pieces:
         return text
     pieces.append(text[cursor:])
@@ -1476,7 +1558,10 @@ _SQL_CONSTRAINT_WORDS = frozenset({
 })
 _SQL_VALUES_RE = re.compile(r"(?i)[ \t\r\n]{0,16}VALUES?\b")
 _SQL_COPY_FROM_STDIN_RE = re.compile(r"(?i)[ \t\r\n]{0,16}FROM[ \t]{1,16}stdin")
-_SQL_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0"}
+# MySQL's string escapes; ``\\%`` and ``\\_`` keep their backslash, any other is the character.
+_SQL_ESCAPES = {
+    "n": "\n", "t": "\t", "r": "\r", "0": "\0", "b": "\b", "Z": "\x1a", "%": "\\%", "_": "\\_",
+}
 # Prefixes that issue API keys and secret tokens (``ak_``, ``sk_live_``, ``whsec_``). Identifier
 # prefixes (``pi_``, ``ch_``, ``cus_``, ``u_``) are deliberately absent: an ID is not a secret.
 _KEYLIKE_PREFIX_RE = re.compile(
@@ -1638,9 +1723,8 @@ def _sql_rows(
     return len(text), cursor
 
 
-_COPY_ESCAPES = {"t": "\t", "n": "\n", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "\\": "\\"}
-_COPY_ESCAPE_RE = re.compile(r"\\(.)", re.DOTALL)
-# The table whose COPY block is open (its header seen, its ``\.`` not yet), per resource.
+# Where COPY blocks are known to be open, by byte position in the resource, per resource:
+# ``[table, opened, until, ...]`` (see ``track_copy_blocks``).
 OPEN_COPY_KEY = "\0copy_open"
 
 
@@ -1648,7 +1732,7 @@ def copy_field_value(field: str) -> str | None:
     """A COPY text-format field as the value it carries; ``\\N`` is NULL (``None``)."""
     if field == "\\N":
         return None
-    return _COPY_ESCAPE_RE.sub(lambda match: _COPY_ESCAPES.get(match.group(1), match.group(1)), field)
+    return unescape_copy_text(field)
 
 
 def _copy_line(
@@ -1719,14 +1803,29 @@ _COPY_END_RE = re.compile(r"(?m)^\\\.\r?$")
 # Carried per resource: whether its head (first bytes) shows a database dump (["dump"] / ["text"]).
 HEAD_VERDICT_KEY = "\0head"
 _DUMP_HEAD_RE = re.compile(
-    r"(?im)^(?:--[ \t]*(?:PostgreSQL|MySQL|MariaDB)[ \t]+(?:database[ \t]+)?dump|COPY[ \t]+\S+.{0,4096}?FROM[ \t]+stdin"
-    r"|CREATE[ \t]+TABLE\b|INSERT[ \t]+INTO\b|SET[ \t]+(?:client_encoding|standard_conforming_strings|NAMES)\b)"
+    r"(?im)^(?:--[ \t]*(?:PostgreSQL|MySQL|MariaDB)[ \t]+(?:database[ \t]+)?dump|INSERT[ \t]+INTO\b"
+    r"|SET[ \t]+(?:client_encoding|standard_conforming_strings|NAMES)\b)"
 )
+# Not line-anchored: an archive-format dump's table of contents holds its statements as
+# length-prefixed strings, so no newline precedes them.
+_DUMP_STATEMENT_RE = re.compile(
+    r"\bCOPY[ \t]{1,16}[^\s()]{1,200}[ \t]{0,16}\([^()]{0,4096}\)[ \t]{0,16}FROM[ \t]{1,16}stdin\b"
+    r"|\bCREATE[ \t]{1,16}(?:UNLOGGED[ \t]{1,16})?TABLE\b"
+)
+# pg_dump's archive formats: custom (``-Fc``) starts with ``PGDMP``; tar (``-Ft``) is a tar of
+# ``toc.dat`` (itself starting ``PGDMP``) and one ``<dump id>.dat`` member per table.
+_PG_ARCHIVE_MEMBER_RE = re.compile(r"(?:\A|\0)(?:\./)?(?:toc|[0-9]{1,10})\.dat\0{8}")
+_TAR_BLOCK = 512
 
 
 def looks_like_dump_head(text: str) -> bool:
-    """Whether the first bytes of a resource read as a SQL dump (pg_dump, mysqldump)."""
-    return bool(_DUMP_HEAD_RE.search(text))
+    """Whether the first bytes of a resource read as a SQL dump: a plain pg_dump or mysqldump
+    script, or a pg_dump custom- or tar-format archive."""
+    return bool(
+        text.startswith("PGDMP") or text[_TAR_BLOCK:_TAR_BLOCK + 5] == "PGDMP"
+        or _PG_ARCHIVE_MEMBER_RE.search(text) or _DUMP_HEAD_RE.search(text)
+        or _DUMP_STATEMENT_RE.search(text)
+    )
 
 
 def tab_row_run(text: str) -> int | None:
@@ -1763,13 +1862,67 @@ def _copy_evidence(text: str, end: int, tables: dict[str, list[str]], tabs: int)
     )
 
 
+_MAX_COPY_BLOCKS = 8
+# A pg_dump COPY header at a line start, in text decoded one character per byte.
+_COPY_BLOCK_HEADER_RE = re.compile(
+    r"(?im)^COPY[ \t]{1,16}((?:[`\"\[]?[\w$]{1,64}[`\"\]]?\.){0,2}[`\"\[]?[\w$]{1,64}[`\"\]]?)"
+    r"[ \t]{0,16}(?:\([^()\n]{0,4096}\))?[ \t]{0,16}FROM[ \t]{1,16}stdin[^\n]{0,64}\n"
+)
+
+
+def _copy_blocks(tables: dict[str, list[str]]) -> list[tuple[str, int, int]]:
+    raw = tables.get(OPEN_COPY_KEY) or []
+    blocks: list[tuple[str, int, int]] = []
+    for index in range(0, len(raw) - 2, 3):
+        try:
+            blocks.append((str(raw[index]), int(raw[index + 1]), int(raw[index + 2])))
+        except (TypeError, ValueError):
+            continue
+    return blocks
+
+
+def track_copy_blocks(tables: dict[str, list[str]], start: int, data: bytes) -> None:
+    """Record which COPY block each byte range of a resource is known to lie inside.
+
+    ``data`` is the resource's bytes from ``start``. A block is ``(table, opened, until)``: its
+    rows start at byte ``opened`` (just past its header) and no ``\\.`` precedes ``until``. A
+    read that starts inside a known range continues it; a header in view opens a new one. A
+    row whose block is not known this way never takes a table's columns (``copy_block_at``)."""
+    text = data.decode("latin-1")  # one character per byte: positions are byte offsets
+    end = start + len(data)
+    ends = [match.start() for match in _COPY_END_RE.finditer(text)]
+    first_end = start + ends[0] if ends else end
+    blocks = [
+        (table, opened, max(until, first_end) if opened <= start <= until else until)
+        for table, opened, until in _copy_blocks(tables)
+    ]
+    for header in _COPY_BLOCK_HEADER_RE.finditer(text):
+        close = bisect.bisect_left(ends, header.end())
+        until = start + ends[close] if close < len(ends) else end
+        opened = start + header.end()
+        blocks = [block for block in blocks if block[1] != opened]
+        blocks.append((_sql_identifier(header.group(1)).lower(), opened, until))
+    if blocks:
+        tables[OPEN_COPY_KEY] = [str(item) for block in blocks[-_MAX_COPY_BLOCKS:] for item in block]
+
+
+def copy_block_at(tables: dict[str, list[str]], position: int) -> str | None:
+    """The table whose COPY rows are known to continue at byte ``position``, or ``None``."""
+    names = {table for table, opened, until in _copy_blocks(tables) if opened <= position <= until}
+    return names.pop() if len(names) == 1 else None
+
+
 def _mask_orphan_copy(
     text: str, end: int, tables: dict[str, list[str]], pieces: list[str], cursor: int,
+    block: str | None = None,
 ) -> int:
     """COPY rows before the first statement of a window: a run of lines with one tab count.
 
-    The open block's carried columns apply only when exactly that one block is open and its
-    column count matches; otherwise every field fails closed by its shape."""
+    A table's columns apply only when byte positions show the text starts inside that table's
+    block (``block``) and the column count matches; otherwise every field fails closed by its
+    shape (ids, dates and emails stay, other values are withheld). A block that was open when
+    an earlier read ended says nothing about rows at a later offset: another block may have
+    ended and begun in between."""
     lines: list[tuple[int, str]] = []
     position = 0
     while position < end:
@@ -1789,13 +1942,11 @@ def _mask_orphan_copy(
         return cursor
     if not _copy_evidence(text, end, tables, tabs):
         return cursor  # a TSV export, a log or a Makefile: tab-separated, but not a dump
-    open_tables = tables.get(OPEN_COPY_KEY) or []
-    carried = tables.get("copy:" + open_tables[0]) if len(open_tables) == 1 else None
+    carried = tables.get("copy:" + block) if block else None
     columns = carried if carried is not None and len(carried) == tabs + 1 else None
     for index, (line_start, line) in enumerate(lines):
         if line.rstrip("\r") == "\\.":
-            tables.pop(OPEN_COPY_KEY, None)  # the block ended: what follows is not its rows
-            break
+            break  # the block ended: what follows is not its rows
         if "\t" not in line:
             continue
         cursor = _copy_line(text, line_start, line, columns, pieces, cursor, partial_head=index == 0)
@@ -1883,13 +2034,16 @@ def mask_sql_values(text: str) -> str:
         if collector is not None and collector.sql_path else None
     )
     tables: dict[str, list[str]] = carried if carried is not None else {}
+    block = collector.copy_block if collector is not None else None
+    if collector is not None:
+        collector.copy_block = None  # it positions one text: this one
     pieces: list[str] = []
     cursor = 0
     position = 0
     first = _SQL_STATEMENT_RE.search(text)
     prefix_end = first.start() if first else len(text)
     if prefix_end and "\t" in text[:prefix_end]:
-        cursor = _mask_orphan_copy(text, prefix_end, tables, pieces, cursor)
+        cursor = _mask_orphan_copy(text, prefix_end, tables, pieces, cursor, block)
     if prefix_end and _SQL_ORPHAN_ROWS_RE.search(text, 0, prefix_end) and (
         first or carried or _orphan_row_signals(text, prefix_end) >= 2
     ):
@@ -1917,10 +2071,7 @@ def mask_sql_values(text: str) -> str:
                 continue
             if columns:
                 tables["copy:" + table] = columns
-            tables[OPEN_COPY_KEY] = [table]
-            position, cursor, ended = _copy_rows(text, after, columns, pieces, cursor)
-            if ended:
-                tables.pop(OPEN_COPY_KEY, None)
+            position, cursor, _ended = _copy_rows(text, after, columns, pieces, cursor)
             continue
         values = _SQL_VALUES_RE.match(text, after)
         if values is None:
@@ -2061,6 +2212,10 @@ __all__ = [
     "archived_body_text",
     "holds_withheld_material",
     "mask_public_http_urls",
+    "URL_BEARING_HEADERS",
+    "bounded_public_url",
+    "copy_block_at",
+    "track_copy_blocks",
     "mask_url_secrets",
     "scrub_known_values",
     "withheld_body_notice",

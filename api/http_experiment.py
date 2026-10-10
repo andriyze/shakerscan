@@ -13,9 +13,15 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 try:
-    from runtime.archive_body_masking import active_withheld_values, holds_withheld_material, mask_body_text
+    from runtime.archive_body_masking import (
+        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, holds_withheld_material,
+        mask_body_text,
+    )
 except ModuleNotFoundError:  # package import layout
-    from api.runtime.archive_body_masking import active_withheld_values, holds_withheld_material, mask_body_text
+    from api.runtime.archive_body_masking import (
+        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, holds_withheld_material,
+        mask_body_text,
+    )
 
 
 HTTP_EXPERIMENT_VERSION = "http-experiment-2026-07-12.v4"
@@ -396,8 +402,12 @@ def response_summary(
             selected_json[path] = _json_path_get(parsed_json, path)
         except ExperimentContractError:
             selected_json[path] = None
+    # A URL-bearing header's secret parameters are withheld (inside a Hunt) before it is cut.
     selected_response_headers = {
-        name: str(response.headers.get(name) or "")[:1000]
+        name: (
+            bounded_public_url(str(response.headers.get(name) or ""), 1000)
+            if str(name).lower() in URL_BEARING_HEADERS else str(response.headers.get(name) or "")[:1000]
+        )
         for name in selected_headers or []
     }
     masked_text = _masked_body(text)
@@ -419,14 +429,16 @@ def response_summary(
             else bool(text.strip())
         ),
         "truncated": truncated,
-        "location": str(response.headers.get("location") or "")[:500] or None,
+        "location": bounded_public_url(str(response.headers.get("location") or ""), 500) or None,
         "elapsed_ms": elapsed_ms,
         "selected_json": selected_json,
         "selected_headers": selected_response_headers,
     }
     withheld = active_withheld_values()
     if withheld is not None:
-        entries = withheld.entries(body_sample)
+        # Every marker the summary shows has its entry: the body sample's and the URL fields'.
+        entries = withheld.entries(
+            body_sample, summary["location"], json.dumps(selected_response_headers, ensure_ascii=False))
         if entries:
             summary["withheld_values"] = entries
     return summary

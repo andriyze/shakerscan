@@ -187,6 +187,60 @@ _MAX_SQL_TABLES = 256
 _MAX_SQL_COLUMNS = 256
 
 
+def _sql_entries(tables: Any) -> list[tuple[str, str, list[str]]]:
+    """``(path, table, columns)`` of carried knowledge, names bounded, in its order."""
+    entries: list[tuple[str, str, list[str]]] = []
+    if not isinstance(tables, Mapping):
+        return entries
+    for path, by_table in tables.items():
+        if not isinstance(by_table, Mapping):
+            continue
+        for table, columns in by_table.items():
+            if isinstance(columns, (list, tuple)) and columns:
+                entries.append((str(path)[:2048], str(table)[:128],
+                                [str(column)[:128] for column in columns[:_MAX_SQL_COLUMNS]]))
+    return entries
+
+
+def _knowledge_entries(
+    tables: Any, seeded: Any, prior: Any,
+) -> list[tuple[str, str, list[str]]]:
+    """The knowledge to seal, most worth keeping first, within the path and table bounds.
+
+    Resource verdicts and COPY block positions (keys starting with ``\0``) come first: they are
+    a few names each, and they decide whether rows fail closed. Then the column knowledge this
+    action learned (``tables`` less what it was ``seeded`` with), then the rest: knowledge
+    seeded from earlier actions (already sealed in their own results) and this action's
+    ``prior`` private result. Earlier entries win a duplicate."""
+    current, earlier = _sql_entries(tables), _sql_entries(prior)
+    seeded_tables = seeded if isinstance(seeded, Mapping) else {}
+
+    def learned(entry: tuple[str, str, list[str]]) -> bool:
+        path, table, columns = entry
+        by_table = seeded_tables.get(path)
+        return not isinstance(by_table, Mapping) or by_table.get(table) != columns
+
+    ordered = (
+        [entry for entry in current + earlier if entry[1].startswith("\0")]
+        + [entry for entry in current if learned(entry)]
+        + current + earlier
+    )
+    result: list[tuple[str, str, list[str]]] = []
+    seen: set[tuple[str, str]] = set()
+    per_path: dict[str, int] = {}
+    for path, table, columns in ordered:
+        if (path, table) in seen:
+            continue
+        if path not in per_path and len(per_path) >= _MAX_SQL_PATHS:
+            continue
+        if per_path.get(path, 0) >= _MAX_SQL_TABLES:
+            continue
+        seen.add((path, table))
+        per_path[path] = per_path.get(path, 0) + 1
+        result.append((path, table, columns))
+    return result
+
+
 def _bounded_sql_tables(tables: Any) -> dict[str, dict[str, list[str]]]:
     """Column names per resource path and table: names only, never values, bounded."""
     result: dict[str, dict[str, list[str]]] = {}
@@ -276,6 +330,7 @@ def withholding_operation(
                 collector.bind_known(knowledge.get("values") or (), found=True)
                 for path, by_table in (knowledge.get("sql_tables") or {}).items():
                     collector.sql_tables.setdefault(path, {}).update(by_table)
+                collector.sql_seeded = copy.deepcopy(collector.sql_tables)
                 collector.context_bytes_used = int(knowledge.get("context_bytes") or 0)
             else:
                 collector.bind_known(knowledge, found=True)
@@ -307,8 +362,9 @@ def _fit_private_payload(
     """``(payload, values kept, table entries kept)`` within ``MAX_PRIVATE_RESULT_BYTES``.
 
     The base (captures, expiry, accounting) is kept whole. Secret references come next, in order,
-    because a reference the planner was shown must resolve; column knowledge fills what is left
-    and is the first to be evicted, table by table."""
+    because a reference the planner was shown must resolve; dump knowledge fills what is left,
+    in the order given (``_knowledge_entries``: verdicts, then the newest columns), and is the
+    first to be evicted, last entry first."""
     payload = dict(base)
     budget = MAX_PRIVATE_RESULT_BYTES - _byte_size(payload) - 64  # the two keys and their braces
     kept_values: dict[str, str] = {}
@@ -318,36 +374,36 @@ def _fit_private_payload(
             break
         kept_values[key] = value
         budget -= cost
-    kept_tables: dict[str, dict[str, list[str]]] = {}
-    count = 0
+    kept: list[tuple[str, str, list[str]]] = []
+    paths: set[str] = set()
     for path, table, columns in tables:
-        cost = _byte_size(table) + _byte_size(columns) + 2 + (0 if path in kept_tables else _byte_size(path) + 4)
+        cost = _byte_size(table) + _byte_size(columns) + 2 + (0 if path in paths else _byte_size(path) + 4)
         if cost > budget:
             continue
-        kept_tables.setdefault(path, {})[table] = columns
+        kept.append((path, table, columns))
+        paths.add(path)
         budget -= cost
-        count += 1
-    if kept_values:
-        payload[WITHHELD_SCHEMA_KEY] = kept_values
-    if kept_tables:
-        payload[SQL_TABLES_KEY] = kept_tables
+
+    def place() -> None:
+        nested: dict[str, dict[str, list[str]]] = {}
+        for path, table, columns in kept:
+            nested.setdefault(path, {})[table] = columns
+        payload.pop(SQL_TABLES_KEY, None)
+        payload.pop(WITHHELD_SCHEMA_KEY, None)
+        if kept_values:
+            payload[WITHHELD_SCHEMA_KEY] = kept_values
+        if nested:
+            payload[SQL_TABLES_KEY] = nested
+
+    place()
     # The estimate is conservative; the exact serialized size is what is checked.
-    while _byte_size(payload) > MAX_PRIVATE_RESULT_BYTES and (kept_tables or kept_values):
-        if kept_tables:
-            path = next(reversed(kept_tables))
-            kept_tables[path].popitem()
-            count -= 1
-            if not kept_tables[path]:
-                del kept_tables[path]
-            payload[SQL_TABLES_KEY] = kept_tables
-            if not kept_tables:
-                payload.pop(SQL_TABLES_KEY)
+    while _byte_size(payload) > MAX_PRIVATE_RESULT_BYTES and (kept or kept_values):
+        if kept:
+            kept.pop()
         else:
             kept_values.popitem()
-            payload[WITHHELD_SCHEMA_KEY] = kept_values
-            if not kept_values:
-                payload.pop(WITHHELD_SCHEMA_KEY)
-    return payload, len(kept_values), count
+        place()
+    return payload, len(kept_values), len(kept)
 
 
 async def persist_withheld_values(
@@ -363,15 +419,21 @@ async def persist_withheld_values(
     dump column knowledge with what is left. What does not fit is reported in ``not_retained``
     and its references refuse rather than send something else. A prior private result that
     cannot be read is kept, never overwritten, and the status says so.
+
+    A value's number is its identity: when this action's prior private result already holds a
+    value under a number, the prior value is kept and the new one under that number is not
+    sealed, so a reference the planner was shown never starts resolving to something else.
     """
     if values is None:
         return {"sealed": 0, "status": "none"}
     tables: dict[str, dict[str, list[str]]] = {}
+    seeded: Any = {}
     context_bytes = 0
     if not isinstance(values, Mapping):
         collector = values
         values = collector.shown_values(json.dumps(observations, default=str))
-        tables = _bounded_sql_tables(collector.sql_tables)
+        tables = collector.sql_tables if _sql_entries(collector.sql_tables) else {}
+        seeded = getattr(collector, "sql_seeded", {}) or {}
         context_bytes = int(getattr(collector, "context_bytes", 0) or 0)
         collector.values.clear()
     if not values and not tables and not context_bytes:
@@ -396,7 +458,7 @@ async def persist_withheld_values(
             return {"sealed": 0, "status": "prior_private_result_unreadable"}
         base = prior
     prior_values = base.pop(WITHHELD_SCHEMA_KEY, None) or {}
-    prior_tables = _bounded_sql_tables(base.pop(SQL_TABLES_KEY, None))
+    prior_tables = base.pop(SQL_TABLES_KEY, None)
     base[WITHHELD_EXPIRES_KEY] = (
         datetime.now(timezone.utc) + timedelta(seconds=WITHHELD_TTL_SECONDS)).isoformat()
     if context_bytes:
@@ -409,10 +471,7 @@ async def persist_withheld_values(
     # retained instead of handing out a reference that cannot send.
     candidates += [(str(int(number)), str(value)) for number, value in sorted(values.items())
                    if str(int(number)) not in prior_values and _resolvable(str(value))]
-    merged: dict[str, dict[str, list[str]]] = {path: dict(by_table) for path, by_table in prior_tables.items()}
-    for path, by_table in tables.items():
-        merged.setdefault(path, {}).update(by_table)  # this action's knowledge is the newest
-    entries = [(path, table, columns) for path, by_table in merged.items() for table, columns in by_table.items()]
+    entries = _knowledge_entries(tables, seeded, prior_tables)
     payload, kept_count, table_count = _fit_private_payload(base, candidates, entries)
     kept_numbers = set(payload.get(WITHHELD_SCHEMA_KEY) or {})
     sealed_new = sum(1 for number in values if str(int(number)) in kept_numbers)
