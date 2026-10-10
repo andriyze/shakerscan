@@ -882,6 +882,7 @@ try:
         hunt_run_or_404 as _hunt_run_or_404,
         public_hunt_run as _hunt_public,
     )
+    from hunt.briefing import with_live_briefing as _hunt_with_live_briefing
 except ModuleNotFoundError:
     from api.hunt.action_dispatcher import (
         HUNT_ACTION_DISPATCHER,
@@ -950,6 +951,7 @@ except ModuleNotFoundError:
         hunt_run_or_404 as _hunt_run_or_404,
         public_hunt_run as _hunt_public,
     )
+    from api.hunt.briefing import with_live_briefing as _hunt_with_live_briefing
 try:
     from runtime.budget_reservations import DurableBudgetReservation
     from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
@@ -13342,7 +13344,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
         )
         await _hunt_skills.record_initial_skill_bindings(conn, hunt_run_id=row["id"], specs=bound.specs, requested_skill_ids=contract.skill_ids)
         started_permissions = await record_start_permissions(conn, row, contract, preauthorized_credentials)
-    return {**_hunt_public(row), **started_permissions}
+        started = await _hunt_with_live_briefing(conn, _hunt_public(row), row)
+    return {**started, **started_permissions}
 
 
 _hunt_run_service = HuntRunService(lambda: db_pool, get_redis)

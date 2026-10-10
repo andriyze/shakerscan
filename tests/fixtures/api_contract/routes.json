@@ -1822,6 +1822,13 @@
     "name": "stream_ssh_command"
   },
   {
+    "path": "/instruction-proposals",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_all_instruction_proposals"
+  },
+  {
     "path": "/investigation/candidates",
     "methods": [
       "GET"
@@ -3089,6 +3096,41 @@
       "PUT"
     ],
     "name": "put_hunt_authority"
+  },
+  {
+    "path": "/targets/{target_id}/instruction-proposals",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_instruction_proposals"
+  },
+  {
+    "path": "/targets/{target_id}/instruction-proposals",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_instruction_proposal"
+  },
+  {
+    "path": "/targets/{target_id}/instruction-proposals/{proposal_id}/accept",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_accept_instruction_proposal"
+  },
+  {
+    "path": "/targets/{target_id}/instruction-proposals/{proposal_id}/rebase",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_rebase_instruction_proposal"
+  },
+  {
+    "path": "/targets/{target_id}/instruction-proposals/{proposal_id}/reject",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_reject_instruction_proposal"
   },
   {
     "path": "/targets/{target_id}/invariants",

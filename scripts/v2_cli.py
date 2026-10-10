@@ -1223,6 +1223,20 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         _approval().add_arguments(products.add_parser(command, help=text), command)
 
+    knowledge = products.add_parser(
+        "knowledge", help="Review proposed changes to target instructions in your own terminal",
+    )
+    knowledge_commands = knowledge.add_subparsers(dest="knowledge_command", required=True)
+    review = knowledge_commands.add_parser(
+        "review",
+        help="Show each pending instruction proposal as a diff and decide it with a keypress",
+    )
+    review.add_argument("target_id", nargs="?", help="only this target's proposals (default: every target)")
+    decided = review.add_mutually_exclusive_group()
+    decided.add_argument("--accept", metavar="ID", help="show this proposal and accept it after a keypress")
+    decided.add_argument("--reject", metavar="ID", help="show this proposal and reject it after a keypress")
+    review.add_argument("--note", default=None, help="a note recorded with the decision")
+
     credentials = products.add_parser(
         "credentials", help="Create, rotate, or admission-test an encrypted profile",
     )
@@ -1347,6 +1361,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         client = ApiClient(args.api_url, api_token=token, timeout=args.timeout or DEFAULT_TIMEOUT_SECONDS)
         if args.product in {"approve", "deny"}:
             return _run_approval(args, client)
+        if args.product == "knowledge":
+            return _run_knowledge_review(args, client)
         if args.product == "hunt":
             result = _run_hunt(args, client)
         elif args.product == "credentials":
@@ -1374,6 +1390,164 @@ def _run_approval(args: argparse.Namespace, client: ApiClient) -> int:
         )
     except approval.ApprovalError as exc:
         print(f"shakerscan {args.product}: {exc}", file=sys.stderr)
+        return 2
+
+
+# --- knowledge review --------------------------------------------------------------------------
+#
+# Instruction proposals are suggestions (often from a Hunt) to replace a target's instructions.
+# Deciding one is the person's act, at their own terminal, with the same keypress hardening as
+# `approve --watch`: only a lone key decides; an arrow key, an escape sequence or a paste never does.
+
+KNOWLEDGE_DIFF_LINES = 400
+_CONTROL = {code: "?" for code in [*range(0x00, 0x09), *range(0x0B, 0x20), *range(0x7F, 0xA0)]}
+
+
+def _shown(value: Any) -> str:
+    """Proposal text is written by a Hunt: never let it move the cursor or rewrite the screen."""
+    return str(value if value is not None else "").translate(_CONTROL)
+
+
+def _fully_shown(proposal: Mapping[str, Any]) -> bool:
+    diff = proposal.get("diff") if isinstance(proposal.get("diff"), Mapping) else {}
+    return not diff.get("truncated") and len(str(diff.get("text") or "").splitlines()) <= KNOWLEDGE_DIFF_LINES
+
+
+def _render_proposal(proposal: Mapping[str, Any]) -> str:
+    target = proposal.get("target_name") or proposal.get("target_url") or proposal.get("target_id")
+    proposal = {key: (_shown(value) if isinstance(value, str) else value) for key, value in proposal.items()}
+    target = _shown(target)
+    lines = [
+        "",
+        f"proposal {proposal.get('id')}  target {target} ({proposal.get('target_id')})",
+        f"  title:    {proposal.get('title')}",
+        f"  from:     {proposal.get('proposed_by')}  at {proposal.get('created_at')}",
+        f"  reason:   {proposal.get('reason')}",
+        f"  evidence: {_shown(', '.join(str(ref) for ref in proposal.get('evidence_refs') or [])) or 'none'}",
+        f"  based on: revision {proposal.get('base_revision')} (target now at {proposal.get('current_revision')})",
+    ]
+    if proposal.get("stale"):
+        lines.append("  STALE: the instructions changed after this proposal was made; rebase it before accepting.")
+    diff = proposal.get("diff") if isinstance(proposal.get("diff"), Mapping) else {}
+    text = _shown(diff.get("text")).splitlines()
+    lines.append(f"  diff (+{diff.get('added_lines', 0)} -{diff.get('removed_lines', 0)}):")
+    lines.extend("    " + line for line in text[:KNOWLEDGE_DIFF_LINES])
+    if len(text) > KNOWLEDGE_DIFF_LINES or diff.get("truncated"):
+        lines.append(f"    ... diff cut here; the full text is in GET /targets/{proposal.get('target_id')}"
+                     "/instruction-proposals. It cannot be accepted here because it was not shown in full.")
+    return "\n".join(lines)
+
+
+def _proposal_path(proposal: Mapping[str, Any], action: str) -> str:
+    return (f"/targets/{urllib.parse.quote(str(proposal['target_id']), safe='')}/instruction-proposals/"
+            f"{urllib.parse.quote(str(proposal['id']), safe='')}/{action}")
+
+
+def _pending_proposals(send: Any, target_id: str | None) -> list[dict[str, Any]]:
+    path = (f"/targets/{urllib.parse.quote(target_id, safe='')}/instruction-proposals?status=pending"
+            if target_id else "/instruction-proposals?status=pending")
+    status, body = send("GET", path)
+    if not 200 <= status < 300 or not isinstance(body, Mapping):
+        raise _approval().ApprovalError(f"could not list instruction proposals: HTTP {status}: {body}")
+    return [dict(item) for item in body.get("proposals") or [] if isinstance(item, Mapping)]
+
+
+def _decide_proposal(send: Any, terminal: Any, proposal: Mapping[str, Any], action: str,
+                     note: str | None) -> tuple[bool, Any]:
+    payload = None if action == "rebase" else {"note": note}
+    if action == "accept":
+        # Bind the decision to the text that was shown: the server refuses any other text.
+        payload["methodology_sha256"] = proposal.get("methodology_sha256")
+    status, body = send("POST", _proposal_path(proposal, action), payload)
+    if 200 <= status < 300:
+        return True, body
+    detail = body.get("message") if isinstance(body, Mapping) else body
+    terminal.say(f"  not applied: HTTP {status}: {detail}")
+    return False, body
+
+
+def _review_one(send: Any, terminal: Any, proposal: dict[str, Any], note: str | None,
+                only: str | None = None) -> str:
+    """Show ``proposal`` and decide it with one key. Returns accepted|rejected|skipped|quit|failed."""
+    while True:
+        terminal.say(_render_proposal(proposal))
+        if proposal.get("stale"):
+            prompt, choices = "  [b] rebase onto the current instructions  [n] not now  [r] reject  [q] quit: ", "bnrq"
+        elif not _fully_shown(proposal):
+            prompt, choices = "  [n] not now  [r] reject  [q] quit: ", "nrq"
+        elif only == "accept":
+            prompt, choices = "  Accept it and replace the target instructions? [y] yes  [n] no: ", "yn"
+        elif only == "reject":
+            prompt, choices = "  Reject it? [r] reject  [n] no: ", "rn"
+        else:
+            prompt, choices = "  [y] accept  [n] not now  [r] reject  [q] quit: ", "ynrq"
+        choice = terminal.key(prompt, choices)
+        if choice == "q":
+            return "quit"
+        if choice == "b":
+            ok, body = _decide_proposal(send, terminal, proposal, "rebase", None)
+            if not ok:
+                return "failed"
+            if not isinstance(body, Mapping) or not isinstance(body.get("proposal"), Mapping):
+                terminal.say(f"  {body.get('message') if isinstance(body, Mapping) else 'rebased'}")
+                return "skipped"
+            proposal = {**proposal, **body["proposal"]}
+            terminal.say(f"  rebased as proposal {proposal['id']}: review the new difference")
+            continue
+        if choice == "y" and not proposal.get("stale") and _fully_shown(proposal):
+            ok, body = _decide_proposal(send, terminal, proposal, "accept", note)
+            if ok:
+                revision = ((body or {}).get("instructions") or {}).get("revision") if isinstance(body, Mapping) else None
+                terminal.say(f"  accepted: the target instructions are now revision {revision}")
+                return "accepted"
+            return "failed"
+        if choice == "r":
+            ok, _ = _decide_proposal(send, terminal, proposal, "reject", note)
+            if ok:
+                terminal.say("  rejected")
+                return "rejected"
+            return "failed"
+        terminal.say("  left pending")
+        return "skipped"
+
+
+def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
+    """``shakerscan knowledge review``: human output; the person decides, never an agent."""
+    approval = _approval()
+    send = _approval_send(client)
+    terminal = approval.Terminal()
+    try:
+        terminal.require("shakerscan knowledge review")
+        wanted = args.accept or args.reject
+        proposals = _pending_proposals(send, args.target_id)
+        if wanted:
+            proposals = [item for item in proposals if str(item.get("id")) == str(wanted).strip().lower()]
+            if not proposals:
+                raise approval.ApprovalError(f"no pending instruction proposal {wanted}"
+                                             + (f" on target {args.target_id}" if args.target_id else ""))
+        if not proposals:
+            terminal.say("no pending instruction proposals")
+            return 0
+        terminal.say(f"{len(proposals)} pending instruction proposal(s). Accepting one replaces the target's "
+                     "instructions for future Hunts; nothing here grants testing authority.")
+        if client.api_token is None:
+            terminal.say("This engine has no accounts: anyone who can reach its API could decide. "
+                         "The keypress below is the only check.")
+        else:
+            terminal.say("The instance's own access rules decide who may change instructions; the keypress "
+                         "below confirms that you, not an agent, are deciding.")
+        failures = 0
+        with terminal.keypresses():
+            for proposal in proposals:
+                outcome = _review_one(send, terminal, proposal, args.note,
+                                      only="accept" if args.accept else "reject" if args.reject else None)
+                failures += outcome == "failed"
+                if outcome == "quit":
+                    terminal.say("stopped; the remaining proposals stay pending")
+                    break
+        return 1 if failures else 0
+    except approval.ApprovalError as exc:
+        print(f"shakerscan knowledge review: {exc}", file=sys.stderr)
         return 2
 
 

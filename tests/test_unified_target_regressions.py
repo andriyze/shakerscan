@@ -156,7 +156,14 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
                     assert result['ok'] is True
                     assert result['observation']['subject_target_id'] == str(home)
                     continue
-                expected = 'metadata changes' if name.startswith('targets.') else 'no active'
+                if name == 'targets.skill.propose':
+                    # Advisory and authority-free: an opt-out does not stop it, its own input checks do.
+                    with pytest.raises(HTTPException) as invalid:
+                        await asset_actions.execute_asset_action(pool,run,name,{})
+                    assert invalid.value.status_code == 422
+                    continue
+                expected = ('instruction_changes' if name in {'targets.skill.create','targets.skill.update','targets.skill.delete'}
+                            else 'metadata changes' if name.startswith('targets.') else 'no active')
                 with pytest.raises(HTTPException,match=expected):
                     await asset_actions.execute_asset_action(pool,run,name,{})
             await save_authority(conn,await authority_row(conn,home),

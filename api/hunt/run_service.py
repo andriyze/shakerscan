@@ -16,6 +16,7 @@ from .budget_amendments import (
     require_resume_headroom,
 )
 
+from .briefing import static_briefing, with_live_briefing
 from .credential_uses import read_credential_uses
 from .permission_grants import settle_for_ended_hunt
 from .permission_store import pending_summary
@@ -693,6 +694,8 @@ def public_hunt_run(
         [str(item) for item in adjustments] if isinstance(adjustments, list) else []
     )
     if include_context:
+        # Small by construction and never dropped by compact clients, unlike the context pack.
+        result["briefing"] = static_briefing(item, policy, context)
         result["context_pack"] = context
     return result
 
@@ -868,7 +871,7 @@ class HuntRunService:
             live_candidates = await connection.fetch(HUNT_CANDIDATES_QUERY, hunt_uuid)
             credential_uses = await read_credential_uses(connection, hunt_uuid)
             pending_permissions = await pending_summary(connection, hunt_uuid)
-        result = public_hunt_run(row)
+            result = await with_live_briefing(connection, public_hunt_run(row), row)
         result["actions"] = [public_hunt_action(action) for action in actions]
         result["outcome_summary"] = hunt_action_outcome_summary(result["actions"])
         result["outcome_summary"]["finding_ids"] = sorted(str(item["id"]) for item in live_findings)

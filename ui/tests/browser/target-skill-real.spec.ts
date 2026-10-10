@@ -4,7 +4,7 @@ import { expect, test } from '@playwright/test'
 const REAL_STACK = process.env.PLAYWRIGHT_REAL_STACK === '1'
 const API = process.env.SHAKERSCAN_API_URL || 'http://localhost:8080'
 
-test('target instructions persist through the real editor and passive Hunt CRUD', async ({ page, request }, testInfo) => {
+test('target instructions persist through the real editor, proposals and opted-in Hunt CRUD', async ({ page, request }, testInfo) => {
   test.skip(!REAL_STACK, 'real-stack target instruction acceptance')
   const name = `Target skill acceptance ${testInfo.project.name} ${Date.now()}`
   const created = await request.post(`${API}/targets/hosts`, { data: {
@@ -37,7 +37,9 @@ test('target instructions persist through the real editor and passive Hunt CRUD'
     huntId = hunt.hunt_id
     expect(hunt.target_skill).toMatchObject({ revision: 1, skill: { methodology: initialText }, loaded_at_start: true })
     const names = hunt.capabilities.map((item: { name: string }) => item.name)
-    for (const operation of ['read', 'create', 'update', 'delete']) expect(names).toContain(`targets.skill.${operation}`)
+    for (const operation of ['read', 'create', 'update', 'delete', 'propose']) expect(names).toContain(`targets.skill.${operation}`)
+    expect(hunt.briefing.instructions).toMatchObject({ mode: 'full', text: initialText, more_available: false })
+    expect(hunt.briefing.authority.target_delegation.instruction_changes).toBe(false)
     expect(names).not.toContain('ports.discover')
 
     async function call(operation: string, input: Record<string, unknown>) {
@@ -51,6 +53,27 @@ test('target instructions persist through the real editor and passive Hunt CRUD'
       return action
     }
     await call('read', {})
+    // Editing instructions is a separate permission, off by default: the Hunt proposes instead.
+    const refused = await request.post(`${API}/hunts/${huntId}/capabilities/targets.skill.update`, {
+      data: { idempotency_key: `real-skill-refused-${Date.now()}`, input: { expected_revision: 1, methodology: 'Not allowed yet.' } },
+    })
+    expect(refused.status()).toBe(403)
+    expect((await refused.json()).detail.propose_with).toBe('targets.skill.propose')
+    const proposed = await call('propose', { title: 'Mention the admin port', methodology: `${initialText}\n\n## Also\nCheck 8443.`,
+      reason: 'The saved services include 8443.', base_revision: 1 })
+    expect(proposed.result.applied).toBe(false)
+    const pending = await (await request.get(`${API}/targets/${id}/instruction-proposals`)).json()
+    expect(pending.proposals.map((item: { id: string }) => item.id)).toEqual([proposed.result.proposal.id])
+    expect(pending.proposals[0].diff.text).toContain('+Check 8443.')
+    expect((await request.post(`${API}/targets/${id}/instruction-proposals/${proposed.result.proposal.id}/reject`, { data: {} })).ok()).toBeTruthy()
+    expect(await (await request.get(`${API}/targets/${id}/skill`)).json()).toMatchObject({ revision: 1, skill: { methodology: initialText } })
+    // The operator opts in through the real permissions dialog.
+    await page.getByRole('button', { name: 'Edit Hunt permissions', exact: true }).click()
+    const permissions = page.getByRole('dialog', { name: 'Hunt permissions', exact: true })
+    await permissions.getByRole('checkbox', { name: /Let Hunt edit these instructions/ }).check()
+    await permissions.getByRole('button', { name: 'Save permissions', exact: true }).click()
+    await expect(page.getByText(/Hunt permissions saved/)).toBeVisible()
+    expect((await (await request.get(`${API}/targets/${id}/hunt-authority`)).json()).instruction_changes).toBe(true)
     await call('update', { operator_confirmed: true, expected_revision: 1, methodology: 'Instructions changed by Hunt.' })
     await call('delete', { operator_confirmed: true, expected_revision: 2 })
     await call('create', { operator_confirmed: true, expected_revision: 3, methodology: 'Instructions for the next Hunt.' })

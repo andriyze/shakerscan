@@ -240,6 +240,8 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 # Who requested a Targets-page discovery run (POST /discovery, 2.8.2).
                 await conn.execute(
                     "ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS requested_by TEXT")
+                from .instruction_proposal_schema import INSTRUCTION_PROPOSAL_SCHEMA_SQL
+                await conn.execute(INSTRUCTION_PROPOSAL_SCHEMA_SQL)
                 # Data migrations added after the conversion must run here: the baseline above
                 # never runs again on a converted database. Each is marker-gated.
                 try:

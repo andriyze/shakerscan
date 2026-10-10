@@ -132,11 +132,13 @@ from .asset_router import router as asset_router, configure_asset_router, mark_p
 from .skill import router as target_skill_router
 from .actions import router as target_actions_router
 from .hunt_authority_router import router as hunt_authority_router
+from .instruction_proposals import router as instruction_proposals_router
 router = APIRouter()
 router.include_router(asset_router)
 router.include_router(target_skill_router)
 router.include_router(target_actions_router)
 router.include_router(hunt_authority_router)
+router.include_router(instruction_proposals_router)
 
 _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}

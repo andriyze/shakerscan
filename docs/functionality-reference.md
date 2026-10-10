@@ -1899,14 +1899,14 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 472 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 393 | `api/**/*.py` |
+| Public REST operations | 478 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 398 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
-| Canonical scanner wrapper commands | 36 | `scanner.sh` |
+| Canonical scanner wrapper commands | 37 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
@@ -1917,7 +1917,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 109 | `db/init.sql` + migrations |
+| Durable tables | 110 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2184,6 +2184,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/ssh/actions/{action_id}/cancel` | `cancel_ssh_action` |
 | `GET` | `/hunts/{hunt_id}/ssh/actions/{action_id}/output` | `ssh_action_output` |
 | `POST` | `/hunts/{hunt_id}/ssh/exec` | `stream_ssh_command` |
+| `GET` | `/instruction-proposals` | `get_all_instruction_proposals` |
 | `POST` | `/internal/model-intake/admissions/issue` | `issue` |
 | `POST` | `/internal/model-intake/runner/jobs` | `submit_job` |
 | `GET` | `/internal/model-intake/runner/jobs/{job_id}` | `get_job` |
@@ -2368,6 +2369,11 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/targets/{target_id}/history` | `get_asset_history` |
 | `GET` | `/targets/{target_id}/hunt-authority` | `get_hunt_authority` |
 | `PUT` | `/targets/{target_id}/hunt-authority` | `put_hunt_authority` |
+| `GET` | `/targets/{target_id}/instruction-proposals` | `get_target_instruction_proposals` |
+| `POST` | `/targets/{target_id}/instruction-proposals` | `post_instruction_proposal` |
+| `POST` | `/targets/{target_id}/instruction-proposals/{proposal_id}/accept` | `post_accept_instruction_proposal` |
+| `POST` | `/targets/{target_id}/instruction-proposals/{proposal_id}/rebase` | `post_rebase_instruction_proposal` |
+| `POST` | `/targets/{target_id}/instruction-proposals/{proposal_id}/reject` | `post_reject_instruction_proposal` |
 | `GET` | `/targets/{target_id}/invariants` | `list_target_invariant_contracts` |
 | `POST` | `/targets/{target_id}/invariants` | `create_target_invariant_contract` |
 | `POST` | `/targets/{target_id}/invariants/compile` | `compile_target_invariant_rule` |
@@ -2696,7 +2702,7 @@ opaque profile, and collection-reference fields.
 
 | Surface | Names |
 |---|---|
-| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `db-upgrade`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop`, `version` |
+| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `db-upgrade`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `knowledge`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop`, `version` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-hunt-ssh`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
@@ -3314,6 +3320,7 @@ Scan feature or a second orchestration engine.
 | `target_credential_profiles` | `api/retest_contract.py` |
 | `target_endpoint_expectations` | `api/retest_contract.py` |
 | `target_endpoints` | `db/init.sql` |
+| `target_instruction_proposals` | `db/init.sql` |
 | `target_invariant_contracts` | `api/retest_contract.py` |
 | `target_principal_provisioning_attempts` | `api/retest_contract.py` |
 | `target_principals` | `api/retest_contract.py` |
