@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import OrderedDict
 import copy
 import socket
 from datetime import datetime, timedelta, timezone
@@ -64,7 +65,8 @@ try:
     from scan.action_plan import ScanActionPlan, ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from scan.action_store import PostgresScanActionStore
     from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
-    from scan.action_authority_guard import scan_action_authority_reason
+    from scan.broker_authority import RunningBrokerAuthority
+    from scan.worker_action_executor import with_authority_interruption
     from scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
@@ -116,7 +118,8 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.action_plan import ScanActionPlan, ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from ..scan.action_store import PostgresScanActionStore
     from ..scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
-    from ..scan.action_authority_guard import scan_action_authority_reason
+    from ..scan.broker_authority import RunningBrokerAuthority
+    from ..scan.worker_action_executor import with_authority_interruption
     from ..scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from ..scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from ..scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
@@ -1304,6 +1307,12 @@ async def heartbeat_broker_scan_action(
     action_lease = _broker_submitted_action_lease(
         body.action_lease, plan=plan, action=action, worker_id=body.worker_id,
     )
+    # A node that does not ask before and while it runs (an older or misbehaving one) still
+    # loses the lease of an action whose authorization was withdrawn.
+    reason = await _BROKER_RUNNING_AUTHORITY.reason(
+        _pool(), scan_id=str(_row["scan_id"]), plan_digest=body.plan_digest, job=job, action=action)
+    if reason is not None:
+        raise HTTPException(status_code=409, detail=f"broker action authorization withdrawn: {reason}")
     try:
         await backend.heartbeat(action_lease)
     except (ActionLeaseLost, ScanExecutionBackendError) as exc:
@@ -1323,14 +1332,15 @@ async def broker_scan_action_authority(
 
     A fleet node has no database, so it asks here before it dispatches an action and every few
     seconds while the action runs (``BrokerActionAuthority``). The decision is the guard's own
-    (``scan_action_authority_reason``): the target must be active and the receipts must still
-    pass. ``reason`` is ``null`` while authorized, else a reason code; no row data is returned.
+    (``scan_action_authority_reason``), made through the guard's cheap poll after the first
+    check (``RunningBrokerAuthority``); the plan and job behind a lease are read once per plan.
+    ``reason`` is ``null`` while authorized, else a reason code; no row data is returned.
     """
     await _broker_authenticated_node(node_id, request)
     if action_id != body.action_id:
         raise HTTPException(status_code=409, detail="broker action path differs from body")
     async with _pool().acquire() as conn:
-        _row, _plan, job, action, _backend = await _broker_action_context(
+        row, _plan, job, action, _backend = await _broker_action_context(
             conn,
             node_id=node_id,
             lease_id=lease_id,
@@ -1339,15 +1349,10 @@ async def broker_scan_action_authority(
             plan_digest=body.plan_digest,
             action_id=body.action_id,
             action_digest=body.action_digest,
+            reuse_plan=True,
         )
-        policy = job.execution_plan.policy
-        reason, _decision = await scan_action_authority_reason(
-            conn,
-            action=action,
-            target_binding=job.target,
-            scope_receipt_id=job.target.scope_receipt_id or policy.scope_receipt_id,
-            approval_receipt_id=policy.approval_receipt_id,
-        )
+    reason = await _BROKER_RUNNING_AUTHORITY.reason(
+        _pool(), scan_id=str(row["scan_id"]), plan_digest=body.plan_digest, job=job, action=action)
     return {"reason": reason}
 
 
@@ -1386,6 +1391,13 @@ async def settle_broker_scan_action(
             != job.execution_plan.policy.approval_receipt_id
         ):
             raise ValueError("broker action receipt authority changed")
+        # The control plane's own decision, not the node's: an action whose authorization was
+        # withdrawn is recorded partial with the reason, never as a clean success.
+        withdrawn = await _BROKER_RUNNING_AUTHORITY.reason(
+            _pool(), scan_id=str(_row["scan_id"]), plan_digest=body.plan_digest, job=job, action=action)
+        if (withdrawn is not None and receipt.status in {"success", "partial"}
+                and "target_authority_interruption" not in receipt.redacted_execution):
+            receipt = with_authority_interruption(receipt, withdrawn, utc_now_iso())
         stored = await backend.settle(action_lease, receipt)
     except (ValueError, ActionLeaseLost, ScanExecutionBackendError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2984,8 +2996,14 @@ async def _broker_action_context(
     plan_digest: str,
     action_id: str | None = None,
     action_digest: str | None = None,
+    reuse_plan: bool = False,
 ) -> tuple[Any, Any, Any, Any | None, Any]:
-    """Bind one broker action call to its live outer job and persisted plan."""
+    """Bind one broker action call to its live outer job and persisted plan.
+
+    ``reuse_plan`` lets the frequent authority checks of a running action reuse the plan and job
+    already read for this lease's Scan and plan digest; a plan is immutable under its digest.
+    The lease row is always read and checked.
+    """
     row = await _broker_lease_row(
         conn,
         node_id=node_id,
@@ -3001,6 +3019,12 @@ async def _broker_action_context(
         raise HTTPException(status_code=409, detail="broker action worker differs from job lease")
     if not row.get("scan_id"):
         raise HTTPException(status_code=409, detail="broker job has no Scan owner")
+    plan_key = (str(row["scan_id"]), str(plan_digest))
+    cached = _BROKER_PLANS.get(plan_key) if reuse_plan else None
+    if cached is not None:
+        _BROKER_PLANS.move_to_end(plan_key)
+        plan, canonical_job = cached
+        return _broker_bound_action(row, plan, canonical_job, worker_id, action_id, action_digest)
     action_store = PostgresScanActionStore()
     try:
         plan = await action_store.load_plan(conn, scan_id=str(row["scan_id"]))
@@ -3031,6 +3055,19 @@ async def _broker_action_context(
         raise HTTPException(
             status_code=409, detail="broker Scan job and action plan differ",
         )
+    _BROKER_PLANS[plan_key] = (plan, canonical_job)
+    while len(_BROKER_PLANS) > 256:
+        _BROKER_PLANS.popitem(last=False)
+    return _broker_bound_action(row, plan, canonical_job, worker_id, action_id, action_digest)
+
+
+# Plans and jobs already read for a running lease, keyed by Scan and plan digest (immutable).
+_BROKER_PLANS: "OrderedDict[tuple[str, str], tuple[Any, Any]]" = OrderedDict()
+_BROKER_RUNNING_AUTHORITY = RunningBrokerAuthority()
+
+
+def _broker_bound_action(row: Any, plan: Any, canonical_job: Any, worker_id: str,
+                         action_id: str | None, action_digest: str | None) -> tuple[Any, Any, Any, Any | None, Any]:
     action = None
     if action_id is not None:
         action = next(

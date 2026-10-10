@@ -141,3 +141,59 @@ def test_the_broker_worker_runs_every_round_under_the_authority():
     assert body.count("ReceiptScanActionExecutor(") == 2
     assert body.count("authority=authority,") == 2
     assert "BrokerActionAuthority(lambda: backend, authority_request)" in body
+
+
+def test_authority_checks_reuse_the_plan_read_for_the_lease_but_always_check_the_lease(monkeypatch):
+    """The frequent authority route reads the plan and job once per plan digest; the lease row
+    (status, expiry, worker) is read and checked on every call."""
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+    from api.fleet_routes import router as fleet
+    from tests.test_scan_broker_backend import _plan as broker_plan
+
+    plan = broker_plan()
+    action = plan.actions[0]
+    lease = {"status": "leased", "lease_expires_at": fleet.utc_now() + timedelta(minutes=5),
+             "worker_id": "node-1", "scan_id": plan.scan_id}
+    loads = []
+
+    async def lease_row(_conn, **_kwargs):
+        return dict(lease)
+
+    class Store:
+        async def load_plan(self, _conn, *, scan_id):
+            loads.append(scan_id)
+            return plan
+
+    class Conn:
+        async def fetchrow(self, _query, *_args):
+            return {"status": "running", "target_id": None, "scan_job_payload": "{}"}
+
+    job = SimpleNamespace(scan_id=plan.scan_id, shard=None, target=SimpleNamespace(digest=plan.target_binding_digest),
+                          execution_plan=SimpleNamespace(digest=plan.execution_plan_digest))
+    monkeypatch.setattr(fleet, "_broker_lease_row", lease_row)
+    monkeypatch.setattr(fleet, "PostgresScanActionStore", Store)
+    monkeypatch.setattr(fleet.CanonicalScanJob, "from_payload", staticmethod(lambda _raw: job))
+    monkeypatch.setattr(fleet, "_pool", lambda: object())
+    monkeypatch.setattr(fleet, "_BROKER_PLANS", type(fleet._BROKER_PLANS)())
+
+    async def context(**kwargs):
+        return await fleet._broker_action_context(
+            Conn(), node_id="node-1", lease_id="lease-1", job_lease_token="t" * 40, worker_id="broker:node-1",
+            plan_digest=plan.plan_digest, action_id=action.action_id, action_digest=action.action_digest, **kwargs)
+
+    async def run():
+        for _ in range(4):
+            _row, bound_plan, bound_job, bound_action, _backend = await context(reuse_plan=True)
+            assert bound_plan is plan and bound_job is job and bound_action is action
+        assert len(loads) == 1
+        await context()  # other routes read the plan every time
+        assert len(loads) == 2
+        lease["status"] = "released"  # a lease that ended is refused even with the plan cached
+        try:
+            await context(reuse_plan=True)
+        except HTTPException as exc:
+            return exc.status_code
+    assert asyncio.run(run()) == 409
