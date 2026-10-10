@@ -304,6 +304,8 @@ from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
 from scan.action_authority_guard import ScanAuthorityGuard
+from scan.action_interruption import action_interrupted
+from scan.running_scan_authority import running_scan_authority
 from scan.executor import build_native_scan_execution
 from scan.stage_store import PostgresScanStageCheckpointStore
 from scan.negative_control import with_negative_controls
@@ -7721,7 +7723,8 @@ _NON_DAST_WORKER_HANDLER = NonDastWorkerHandler(NonDastWorkerServices(
     update_scan_progress=lambda *args, **kwargs: update_scan_progress(
         *args, **kwargs,
     ),
-    scan_cancel_requested=lambda scan_id: _scan_cancel_requested(scan_id),
+    # A withdrawn target authorization stops the run through the same checks as a cancel.
+    scan_cancel_requested=lambda scan_id: action_interrupted() or _scan_cancel_requested(scan_id),
     append_device_activity=lambda *args, **kwargs: _append_device_activity(
         *args, **kwargs,
     ),
@@ -8228,7 +8231,7 @@ async def run_device_web_children(
     ]
 
     for index, origin_info in enumerate(selected, start=1):
-        if _scan_cancel_requested(parent_scan_id):
+        if action_interrupted() or _scan_cancel_requested(parent_scan_id):
             child_summary["cancelled"] = True
             child_summary["truncated"] += len(selected) - index + 1
             break
@@ -8333,7 +8336,7 @@ async def run_device_web_children(
                 allow_state_changing_requests=bool(parent_options.get("allow_state_changing_requests")),
                 allow_untrusted_tls_credentials=bool(parent_options.get("allow_untrusted_tls_credentials")),
                 default_origin=index == 1,
-                cancel_check=lambda: asyncio.to_thread(_scan_cancel_requested, parent_scan_id),
+                cancel_check=lambda: asyncio.to_thread(lambda: action_interrupted() or _scan_cancel_requested(parent_scan_id)),
                 request_budget=int(child_options["custom_budget"]["request_max"]),
             )
             child_result = _apply_runtime_scope_guard_to_result(child_result, child_options)
@@ -13357,57 +13360,62 @@ async def process_scan_job(job_data: dict):
                         scan_id=scan_id,
                         job_id=job_id,
                     )
-                else:
-                    result = await run_scan(
-                        target, options, scan_id=scan_id, job_id=job_id,
-                    )
-                if device_target_id and (options or {}).get("run_kind") == "device_posture":
-                    posture_result = result.get("device_posture") if isinstance(result, dict) and isinstance(result.get("device_posture"), dict) else {}
-                    _append_device_activity(
-                        scan_id,
-                        kind="inventory",
-                        phase="device_inventory_complete",
-                        message="Device inventory completed; preparing web and API checks",
-                        progress=91,
-                        details={
-                            "confirmed_services": len(posture_result.get("services") or []),
-                            "web_origins": len(posture_result.get("web_origins") or []),
-                        },
-                    )
-                    result = await run_device_web_children(
-                        parent_scan_id=scan_id,
-                        device_target_id=device_target_id,
-                        parent_job_id=job_id,
-                        parent_options=options,
-                        result=result,
-                    )
-                    if (options or {}).get("candidate_id"):
-                        try:
-                            await prepare_device_candidate_posture_result(
-                                result=result,
-                                options=options,
-                                device_target_id=device_target_id,
-                                target=str(target or ""),
-                            )
-                        except Exception as candidate_error:
-                            result["candidate_verification"] = {
-                                "candidate_id": str((options or {}).get("candidate_id") or "") or None,
-                                "status": "inconclusive",
-                                "error": f"candidate_verifier_fault:{type(candidate_error).__name__}",
-                            }
-                    try:
-                        await correlate_device_advisory_lifecycle(
-                            result=result,
-                            device_target_id=device_target_id,
+                # Device and AI runs re-check the target's authorization before and while they run.
+                run_authority = await running_scan_authority(db_pool, options=options, device_target_id=device_target_id,
+                    ai_target_id=ai_target_id, record_event=lambda name: record_operational_event(get_redis(), name))
+                async with run_authority:
+                    if not is_deterministic_dast(options):
+                        result = await run_scan(
+                            target, options, scan_id=scan_id, job_id=job_id,
                         )
-                    except Exception as advisory_error:
-                        posture_result = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
-                        posture_result["advisory_correlation"] = {
-                            "status": "error",
-                            "error": f"advisory_correlation_fault:{type(advisory_error).__name__}",
-                            "runtime_egress": False,
-                        }
-                        result["device_posture"] = posture_result
+                    if device_target_id and (options or {}).get("run_kind") == "device_posture":
+                        posture_result = result.get("device_posture") if isinstance(result, dict) and isinstance(result.get("device_posture"), dict) else {}
+                        _append_device_activity(
+                            scan_id,
+                            kind="inventory",
+                            phase="device_inventory_complete",
+                            message="Device inventory completed; preparing web and API checks",
+                            progress=91,
+                            details={
+                                "confirmed_services": len(posture_result.get("services") or []),
+                                "web_origins": len(posture_result.get("web_origins") or []),
+                            },
+                        )
+                        result = await run_device_web_children(
+                            parent_scan_id=scan_id,
+                            device_target_id=device_target_id,
+                            parent_job_id=job_id,
+                            parent_options=options,
+                            result=result,
+                        )
+                        if (options or {}).get("candidate_id"):
+                            try:
+                                await prepare_device_candidate_posture_result(
+                                    result=result,
+                                    options=options,
+                                    device_target_id=device_target_id,
+                                    target=str(target or ""),
+                                )
+                            except Exception as candidate_error:
+                                result["candidate_verification"] = {
+                                    "candidate_id": str((options or {}).get("candidate_id") or "") or None,
+                                    "status": "inconclusive",
+                                    "error": f"candidate_verifier_fault:{type(candidate_error).__name__}",
+                                }
+                        try:
+                            await correlate_device_advisory_lifecycle(
+                                result=result,
+                                device_target_id=device_target_id,
+                            )
+                        except Exception as advisory_error:
+                            posture_result = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
+                            posture_result["advisory_correlation"] = {
+                                "status": "error",
+                                "error": f"advisory_correlation_fault:{type(advisory_error).__name__}",
+                                "runtime_egress": False,
+                            }
+                            result["device_posture"] = posture_result
+                result = await run_authority.annotate(result, scan_id=scan_id)
         except ValueError as e:
             # Validation errors (e.g., incompatible options like public+smart)
             result = {

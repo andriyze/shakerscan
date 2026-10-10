@@ -609,14 +609,28 @@ def _outage(flaky, seconds, *, settle=0.0):
 class StallingPool:
     """Fixture pool for the guard only: ``acquire`` can stay pending or be delayed.
 
-    While ``stalled``, an acquisition never completes (a pool or network that never answers);
-    ``delay`` holds every acquisition that long before the real one. ``pending`` counts
-    acquisitions still waiting, ``cancelled`` those the guard abandoned at its deadline.
+    While ``stalled``, an acquisition does not complete (a pool or network that does not
+    answer); one still waiting when the stall ends then proceeds. ``delay`` holds every
+    acquisition that long before the real one. ``pending`` counts acquisitions still waiting,
+    ``cancelled`` those the guard abandoned at its deadline.
     """
 
     def __init__(self, pool, *, delay=0.0):
-        self._pool, self.delay, self.stalled = pool, delay, False
+        self._pool, self.delay = pool, delay
+        self._answering = asyncio.Event()
+        self._answering.set()
         self.pending = self.cancelled = 0
+
+    @property
+    def stalled(self):
+        return not self._answering.is_set()
+
+    @stalled.setter
+    def stalled(self, value):
+        if value:
+            self._answering.clear()
+        else:
+            self._answering.set()
 
     def acquire(self):
         pool = self
@@ -625,8 +639,7 @@ class StallingPool:
         async def acquired():
             pool.pending += 1
             try:
-                if pool.stalled:
-                    await asyncio.Event().wait()
+                await pool._answering.wait()
                 await asyncio.sleep(pool.delay)
             except asyncio.CancelledError:
                 pool.cancelled += 1

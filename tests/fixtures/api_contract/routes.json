@@ -1262,6 +1262,13 @@
     "name": "lease_broker_job"
   },
   {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/authority",
+    "methods": [
+      "POST"
+    ],
+    "name": "broker_scan_action_authority"
+  },
+  {
     "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/cancel",
     "methods": [
       "POST"

@@ -64,6 +64,7 @@ try:
     from scan.action_plan import ScanActionPlan, ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from scan.action_store import PostgresScanActionStore
     from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
+    from scan.action_authority_guard import scan_action_authority_reason
     from scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
@@ -115,6 +116,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.action_plan import ScanActionPlan, ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from ..scan.action_store import PostgresScanActionStore
     from ..scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
+    from ..scan.action_authority_guard import scan_action_authority_reason
     from ..scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from ..scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from ..scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
@@ -1307,6 +1309,46 @@ async def heartbeat_broker_scan_action(
     except (ActionLeaseLost, ScanExecutionBackendError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"status": "running"}
+
+
+@router.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/authority")
+async def broker_scan_action_authority(
+    node_id: str,
+    lease_id: str,
+    action_id: str,
+    body: BrokerActionAuthorityRequest,
+    request: Request,
+):
+    """Re-check a running broker action's target authorization, as the local Scan guard does.
+
+    A fleet node has no database, so it asks here before it dispatches an action and every few
+    seconds while the action runs (``BrokerActionAuthority``). The decision is the guard's own
+    (``scan_action_authority_reason``): the target must be active and the receipts must still
+    pass. ``reason`` is ``null`` while authorized, else a reason code; no row data is returned.
+    """
+    await _broker_authenticated_node(node_id, request)
+    if action_id != body.action_id:
+        raise HTTPException(status_code=409, detail="broker action path differs from body")
+    async with _pool().acquire() as conn:
+        _row, _plan, job, action, _backend = await _broker_action_context(
+            conn,
+            node_id=node_id,
+            lease_id=lease_id,
+            job_lease_token=body.job_lease_token,
+            worker_id=body.worker_id,
+            plan_digest=body.plan_digest,
+            action_id=body.action_id,
+            action_digest=body.action_digest,
+        )
+        policy = job.execution_plan.policy
+        reason, _decision = await scan_action_authority_reason(
+            conn,
+            action=action,
+            target_binding=job.target,
+            scope_receipt_id=job.target.scope_receipt_id or policy.scope_receipt_id,
+            approval_receipt_id=policy.approval_receipt_id,
+        )
+    return {"reason": reason}
 
 
 @router.post("/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/result")
