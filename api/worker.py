@@ -305,7 +305,7 @@ from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
 from scan.action_authority_guard import ScanAuthorityGuard
 from scan.action_interruption import action_interrupted
-from scan.running_scan_authority import running_scan_authority
+from scan.running_scan_authority import ScanAuthorityStopped, running_scan_authority
 from scan.executor import build_native_scan_execution
 from scan.stage_store import PostgresScanStageCheckpointStore
 from scan.negative_control import with_negative_controls
@@ -13416,6 +13416,8 @@ async def process_scan_job(job_data: dict):
                             }
                             result["device_posture"] = posture_result
                 result = await run_authority.annotate(result, scan_id=scan_id)
+        except ScanAuthorityStopped as e:  # the report names the authorization stop
+            result = {'target': target, **e.report}
         except ValueError as e:
             # Validation errors (e.g., incompatible options like public+smart)
             result = {

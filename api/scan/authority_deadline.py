@@ -9,9 +9,9 @@ Scan that runs as one piece of work.
   of ``check_retry_delays``. Every attempt and retry together take at most
   ``unverified_after_seconds``; a check that does not answer by then is cancelled and the work
   is refused as ``authorization_unverified``, never as a revoke.
-* While work runs, ``watch_authorization`` polls every ``poll_seconds``. The safety deadline is
-  ``unverified_after_seconds`` after the start of the last check that confirmed the
-  authorization, not after the first failure. Each poll (pool acquisition, queries and any full
+* While work runs, ``watch_authorization`` polls about every ``poll_seconds``, sooner when the
+  last check was slow. The safety deadline is ``unverified_after_seconds`` after the start of
+  the last check that confirmed the authorization, not after the first failure. Each poll (pool acquisition, queries and any full
   re-check, as one operation) is bounded by that deadline and runs as its own task, so a
   database that never answers cannot hold the interruption back: the signal is set on time and
   the stalled poll is cancelled, releasing its connection.
@@ -97,6 +97,11 @@ async def check_before_start(authority: Any, action: Any) -> tuple[str | None, f
     return denial, confirmed_at
 
 
+def poll_floor_seconds(tolerance: float) -> float:
+    """The least time a poll is given before the deadline (1 s at the production 10 s)."""
+    return min(1.0, tolerance * 0.1)
+
+
 async def watch_authorization(
     authority: Any,
     action: Any,
@@ -106,25 +111,47 @@ async def watch_authorization(
     signal: ActionInterruption,
     on_interrupt: Callable[[str], None],
 ) -> None:
-    """Poll while work runs; on a withdrawal or a missed deadline record it on ``signal``."""
+    """Poll while work runs; on a withdrawal or a missed deadline record it on ``signal``.
+
+    Polls are scheduled so the next one is expected to answer before the deadline: the wait
+    shrinks by how long the last confirming check took and always leaves at least
+    ``poll_floor_seconds``. A slow but healthy database therefore keeps confirming (up to
+    checks of about half the tolerance), and the run is never declared unverified without a
+    poll attempted since the last confirmation. A poll still pending at the deadline is
+    abandoned; one started in the last floor window is given that floor, so the interruption
+    comes at most ``poll_floor_seconds`` after the deadline.
+    """
     tolerance = tolerance_seconds(authority)
+    floor = poll_floor_seconds(tolerance)
     loop = asyncio.get_running_loop()
+    # The check that confirmed just before this watch started ran until now.
+    expected = max(0.0, loop.time() - confirmed_at)
+    attempted = False  # a poll has started since the last confirmation
     while not stopped.is_set() and signal.reason is None:
         remaining = confirmed_at + tolerance - loop.time()
-        reason = UNVERIFIED if remaining <= 0 else None
+        reason = UNVERIFIED if remaining <= 0 and attempted else None
         if reason is None:
-            try:
-                await asyncio.wait_for(stopped.wait(), timeout=min(authority.poll_seconds, remaining))
-                return
-            except asyncio.TimeoutError:
-                pass
+            if remaining > floor + expected:
+                wait = min(authority.poll_seconds, remaining - floor - expected)
+            elif attempted:
+                wait = max(0.0, remaining)  # the last attempt was made: wait out the deadline
+            else:
+                wait = 0.0
+            if wait > 0:
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=wait)
+                    return
+                except asyncio.TimeoutError:
+                    pass
+                if attempted and wait >= remaining:
+                    continue
             started = loop.time()
-            remaining = confirmed_at + tolerance - started
-            reason = UNVERIFIED if remaining <= 0 else None
-        if reason is None:
+            attempted = True
             try:
-                reason = await bounded_check(authority.poll(action), remaining)
-                confirmed_at = started
+                reason = await bounded_check(authority.poll(action),
+                                             max(confirmed_at + tolerance - started, floor))
+                confirmed_at, attempted = started, False
+                expected = loop.time() - started
             except AuthorityCheckTimeout:
                 reason = UNVERIFIED
             except Exception:
