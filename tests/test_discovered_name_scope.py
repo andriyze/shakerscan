@@ -282,6 +282,11 @@ def test_the_ct_monitor_worker_stores_canonical_names(gungnir_worker, monkeypatc
     monkeypatch.setattr(gungnir_worker, "store_subdomain", store)
     monkeypatch.setattr(gungnir_worker.asyncio, "create_subprocess_exec", spawn)
 
+    async def added_today(_apex, _day):
+        return 0  # the per-apex daily cap reads its count from the database
+
+    monkeypatch.setattr(gungnir_worker, "count_added_today", added_today, raising=False)
+
     async def run():
         task = asyncio.create_task(gungnir_worker.run_gungnir([APEX]))
         await asyncio.sleep(0.05)

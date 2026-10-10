@@ -209,7 +209,7 @@ def test_the_worker_runs_the_normalized_domain(monkeypatch):
     monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", spawn)
     outcome = asyncio.run(worker.run_discovery("Example.COM"))
     assert seen == [("python3", worker.SCANNER_PATH, "example.com", "--subfinder", "--quick")]
-    assert outcome == {"subdomains": ["a.example.com"], "by_source": {"subfinder": 1}, "total": 1}
+    assert outcome == {"subdomains": ["a.example.com"], "name_sources": {}, "by_source": {"subfinder": 1}, "total": 1}
 
 
 def test_the_admission_module_never_creates_processes():
