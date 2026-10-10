@@ -422,6 +422,14 @@ def test_a_config_dir_without_a_usable_sibling_names_the_variable_to_set(monkeyp
         cli.state_dir()
 
 
+@pytest.mark.parametrize("variable", ["SHAKERSCAN_STATE_DIR", "SHAKERSCAN_DATA_DIR"])
+@pytest.mark.parametrize("value", ["/", "//", "/tmp/.."])
+def test_the_root_is_refused_as_the_state_or_data_directory(monkeypatch, variable, value):
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(cli.ClientError, match=f"{variable}=.* set {variable} to an absolute directory other than /"):
+        cli.state_dir() if variable == "SHAKERSCAN_STATE_DIR" else cli.data_dir()
+
+
 def test_an_unwritable_state_directory_names_the_variable_to_set(tmp_path, monkeypatch, capsys):
     locked = tmp_path / "etc"
     locked.mkdir()
@@ -545,15 +553,16 @@ def test_a_newer_record_written_meanwhile_is_never_overwritten(tmp_path, monkeyp
     real_link = os.link
 
     def raced(source, target, **kwargs):
-        Path(target).parent.mkdir(parents=True, exist_ok=True)
-        Path(target).write_text('{"from": "newer launch"}', encoding="utf-8")
+        if Path(target).parent == new:  # another launch writes the record just before the move
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            Path(target).write_text('{"from": "newer launch"}', encoding="utf-8")
         return real_link(source, target, **kwargs)
 
     monkeypatch.setattr(os, "link", raced)
     notes = _workspace.migrate_records(old, new)
     assert (new / "a.json").read_text(encoding="utf-8") == '{"from": "newer launch"}'
     assert (old / "superseded" / "a.json").read_text(encoding="utf-8") == '{"from": "old"}', "kept, set aside"
-    assert any("1 older record(s) kept in" in note for note in notes), notes
+    assert any("1 record(s) set aside in" in note and "that one is used" in note for note in notes), notes
     monkeypatch.undo()
     assert _workspace.migrate_records(old, new) == [], "reported once"
 
@@ -580,6 +589,143 @@ def test_a_copy_that_already_matches_completes_the_move(tmp_path, monkeypatch):
     notes = _workspace.migrate_records(old, new)
     assert notes == [f"moved:     1 workspace record(s) from {old} to {new}"], notes
     assert not (old / "a.json").exists()
+
+
+def test_a_second_record_set_aside_never_replaces_the_first(tmp_path):
+    old, new = _old_records(tmp_path, "a.json")
+    new.mkdir(parents=True)
+    (new / "a.json").write_text('{"from": "new"}', encoding="utf-8")
+    assert any("1 record(s) set aside in" in note for note in _workspace.migrate_records(old, new))
+    (old / "a.json").write_text('{"from": "old, again"}', encoding="utf-8")
+    notes = _workspace.migrate_records(old, new)
+    assert any("1 record(s) set aside in" in note for note in notes), notes
+    kept = sorted(path.read_text(encoding="utf-8") for path in (old / "superseded").iterdir())
+    assert kept == ['{"from": "old"}', '{"from": "old, again"}'], "both kept, neither replaced"
+    assert all(path.suffix == ".json" for path in (old / "superseded").iterdir())
+    assert (new / "a.json").read_text(encoding="utf-8") == '{"from": "new"}'
+
+
+def test_a_directory_in_the_way_under_superseded_is_no_crash(tmp_path):
+    old, new = _old_records(tmp_path, "a.json")
+    new.mkdir(parents=True)
+    (new / "a.json").write_text('{"from": "new"}', encoding="utf-8")
+    (old / "superseded" / "a.json").mkdir(parents=True)
+    notes = _workspace.migrate_records(old, new)
+    assert any("1 record(s) set aside in" in note for note in notes), notes
+    assert (old / "superseded" / "a.json").is_dir(), "left as it was"
+    [kept] = [path for path in (old / "superseded").iterdir() if path.is_file()]
+    assert kept.read_text(encoding="utf-8") == '{"from": "old"}' and not (old / "a.json").exists()
+
+
+def test_a_record_that_cannot_be_set_aside_is_reported_as_left(tmp_path, monkeypatch):
+    old, new = _old_records(tmp_path, "a.json")
+    new.mkdir(parents=True)
+    (new / "a.json").write_text('{"from": "new"}', encoding="utf-8")
+    real_link = os.link
+
+    def refused(source, target, **kwargs):
+        if Path(target).parent.name == "superseded":
+            raise PermissionError(13, "Permission denied")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "link", refused)
+    notes = _workspace.migrate_records(old, new)
+    assert notes == [f"note:      left in {old}: a.json (not plain record files, or they could not be moved)"], notes
+    assert (old / "a.json").read_text(encoding="utf-8") == '{"from": "old"}'
+
+
+def _no_links(*args, **kwargs):
+    raise OSError(18, "Invalid cross-device link")
+
+
+def test_an_interrupted_copy_never_leaves_a_partial_record(tmp_path, monkeypatch):
+    """Where hard links fail (another file system), the copy is written to a temporary file and
+    linked into place: a copy stopped part way leaves no record at the new location."""
+    old, new = _old_records(tmp_path, "a.json")
+    real_link = os.link
+    calls = []
+
+    def cross_device_then_crash(source, target, **kwargs):
+        calls.append(Path(source).name)
+        if len(calls) == 1:
+            raise OSError(18, "Invalid cross-device link")  # the record itself: another file system
+        raise KeyboardInterrupt  # stopped after the copy was written, before it was in place
+
+    monkeypatch.setattr(os, "link", cross_device_then_crash)
+    with pytest.raises(KeyboardInterrupt):
+        _workspace.migrate_records(old, new)
+    assert not (new / "a.json").exists() and list(new.iterdir()) == [], "no partial record, no temporary file"
+    monkeypatch.setattr(os, "link", real_link)
+    assert _workspace.migrate_records(old, new) == [f"moved:     1 workspace record(s) from {old} to {new}"]
+    assert (new / "a.json").read_text(encoding="utf-8") == '{"from": "old"}'
+
+
+def test_a_copy_works_without_hard_links_and_leaves_no_temporary_file(tmp_path, monkeypatch):
+    old, new = _old_records(tmp_path, "a.json")
+    monkeypatch.setattr(os, "link", _no_links)
+    assert _workspace.migrate_records(old, new) == [f"moved:     1 workspace record(s) from {old} to {new}"]
+    assert [path.name for path in new.iterdir()] == ["a.json"]
+    assert (new / "a.json").read_text(encoding="utf-8") == '{"from": "old"}' and not old.exists()
+
+
+@pytest.mark.parametrize("partial", ["", '{"from": "o'])
+@pytest.mark.parametrize("links", [True, False])
+def test_a_partial_record_left_by_an_interrupted_copy_is_replaced(tmp_path, monkeypatch, partial, links):
+    old, new = _old_records(tmp_path, "a.json")
+    new.mkdir(parents=True)
+    (new / "a.json").write_text(partial, encoding="utf-8")
+    if not links:
+        monkeypatch.setattr(os, "link", _no_links)
+    notes = _workspace.migrate_records(old, new)
+    assert notes == [f"moved:     1 workspace record(s) from {old} to {new}"], notes
+    assert (new / "a.json").read_text(encoding="utf-8") == '{"from": "old"}'
+    assert [path.name for path in new.iterdir()] == ["a.json"] and not old.exists()
+
+
+def test_a_whole_record_at_the_new_location_is_never_replaced_by_an_incomplete_one(tmp_path):
+    old, new = _old_records(tmp_path, "a.json")
+    (old / "a.json").write_text("", encoding="utf-8")
+    new.mkdir(parents=True)
+    (new / "a.json").write_text('{"from": "new"}', encoding="utf-8")
+    _workspace.migrate_records(old, new)
+    assert (new / "a.json").read_text(encoding="utf-8") == '{"from": "new"}'
+
+
+def test_a_directory_at_the_new_location_is_left_alone(tmp_path):
+    old, new = _old_records(tmp_path, "a.json")
+    (new / "a.json").mkdir(parents=True)
+    (new / "a.json" / "keep").write_text("x", encoding="utf-8")
+    _workspace.migrate_records(old, new)
+    assert (new / "a.json" / "keep").read_text(encoding="utf-8") == "x"
+    assert [path.name for path in new.iterdir()] == ["a.json"]
+
+
+def test_an_unwritable_records_directory_names_the_variable_to_set(tmp_path, monkeypatch, capsys):
+    _old_records(tmp_path, "a.json")
+    state = tmp_path / "explicit-state"
+    (state / "workspaces").mkdir(parents=True)
+    (state / "workspaces").chmod(0o500)
+    try:
+        monkeypatch.setenv("SHAKERSCAN_STATE_DIR", str(state))
+        assert cli.main(["agent", "--url", URL, "--workspace", str(tmp_path / "ws"), "--no-launch"]) == 2
+        err = capsys.readouterr().err
+        assert f"cannot use {state / 'workspaces'} for the client's state" in err, err
+        assert "set SHAKERSCAN_STATE_DIR to a writable absolute directory" in err
+        assert (tmp_path / "cfg" / "workspaces" / "a.json").is_file(), "left where it was"
+    finally:
+        (state / "workspaces").chmod(0o700)
+
+
+def test_records_that_cannot_be_written_are_left_not_raised(tmp_path):
+    old, new = _old_records(tmp_path, "a.json")
+    new.mkdir(parents=True)
+    new.chmod(0o500)
+    try:
+        notes = _workspace.migrate_records(old, new)
+    finally:
+        new.chmod(0o700)
+    assert notes == [f"note:      left in {old}: a.json (not plain record files, or they could not be moved)"], notes
+    assert (old / "a.json").is_file()
 
 
 def test_the_loser_of_a_concurrent_default_workspace_move_says_it_moved(tmp_path, monkeypatch):

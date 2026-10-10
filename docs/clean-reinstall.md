@@ -34,8 +34,9 @@ The client keeps two more directories, resolved as the client resolves them
 then beside `SHAKERSCAN_CONFIG_DIR` as `<dir>.state`/`<dir>.data`, then the defaults):
 
 - `~/.local/state/shakerscan/workspaces/`: the records `shakerscan agent` keeps of
-  each agent workspace. Plain `*.json` records (and `superseded/*.json`) are removed;
-  links are never followed or removed through, other files stay.
+  each agent workspace. Plain `*.json` files there (and in `superseded/`) that are
+  the client's records (they name its `schema_version`) are removed; links are never
+  followed or removed through, other files stay.
 - `~/.local/share/shakerscan/agent`: the default agent workspace. It may hold your
   own work, so it is kept unless `--agent-workspace` is given, and then only if it
   is a plain directory owned by you whose `AGENTS.md` starts with the note

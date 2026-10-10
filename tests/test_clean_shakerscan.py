@@ -34,6 +34,10 @@ if name in ("rm", "rmdir"):
     # so the script's final absence check runs; unittest removes the fixture later.
     if state.get("rm_failure"):
         fail()
+    if state.get("swap_dir_on_rm"):  # the directory is swapped for a link after the first removal
+        swap = pathlib.Path(state.pop("swap_dir_on_rm")); save()
+        swap.rename(swap.with_name(swap.name + ".old"))
+        swap.symlink_to(pathlib.Path(os.environ["HOME"]) / "Documents", target_is_directory=True)
     if name == "rm" and "-rf" in args:
         target = pathlib.Path(args[-1])
         root = pathlib.Path(os.environ["CLEAN_TEST_ROOT"])
@@ -367,12 +371,15 @@ class CleanShakerScanTests(unittest.TestCase):
 
     # --- the client's state (workspace records) and data (default agent workspace) ---------------
 
+    RECORD = '{\n  "schema_version": "shakerscan-workspace/v1",\n  "workspace": "/w"\n}\n'  # as the client writes
+
     def _records(self, base):
         records = base / "workspaces"
         (records / "superseded").mkdir(parents=True)
-        (records / "a.json").write_text("{}")
-        (records / "superseded" / "b.json").write_text("{}")
+        (records / "a.json").write_text(self.RECORD)
+        (records / "superseded" / "b.json").write_text(self.RECORD)
         (records / "notes.txt").write_text("retain")
+        (records / "other.json").write_text('{"not": "a client record"}')
         (records / "link.json").symlink_to(self.home / "Documents")
         return records
 
@@ -400,6 +407,7 @@ class CleanShakerScanTests(unittest.TestCase):
             self.assertIn(str(base / "superseded" / "b.json"), removed)
             self.assertNotIn(str(base / "link.json"), removed, "a link is never removed through")
             self.assertNotIn(str(base / "notes.txt"), removed)
+            self.assertNotIn(str(base / "other.json"), removed, "only the client's own records")
         self.assertNotIn(str(agent), removed)
         self.assertNotIn(str(old_agent), removed)
         self.assertIn(f"Kept agent workspace (it may hold your work; --agent-workspace removes it): {agent}", result.stdout)
@@ -454,6 +462,37 @@ class CleanShakerScanTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Client state directory must not be a symlink", result.stderr)
         self.assert_no_local_removal()
+
+    def test_a_linked_record_directory_is_never_listed_through(self):
+        target = self.root / "elsewhere"; self._records(target)
+        records = self.home / ".local" / "state" / "shakerscan" / "workspaces"
+        records.mkdir(parents=True)
+        (records / "superseded").symlink_to(target / "workspaces", target_is_directory=True)
+        result = self.run_script("--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse([path for path in self.removed() if path.startswith(str(records / "superseded"))
+                          or path.startswith(str(target))], self.removed())
+
+    def test_a_record_directory_swapped_for_a_link_mid_run_stops_the_cleanup(self):
+        records = self._records(self.home / ".local" / "state" / "shakerscan")
+        (records / "superseded" / "c.json").write_text(self.RECORD)
+        (self.home / "Documents" / "b.json").write_text(self.RECORD)
+        (self.home / "Documents" / "c.json").write_text(self.RECORD)
+        self.configure(swap_dir_on_rm=str(records / "superseded"))
+        result = self.run_script("--yes")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Record directory changed during cleanup", result.stderr)
+        self.assertEqual(len([path for path in self.removed() if "/superseded/" in path]), 1, self.removed())
+
+    def test_shared_user_state_and_data_roots_are_refused(self):
+        for variable, relative in (("SHAKERSCAN_STATE_DIR", ".local/state"), ("SHAKERSCAN_DATA_DIR", ".local/share"),
+                                   ("SHAKERSCAN_STATE_DIR", ".cache")):
+            with self.subTest(variable=variable, relative=relative):
+                (self.home / relative).mkdir(parents=True, exist_ok=True)
+                result = self.run_script("--yes", env={variable: str(self.home / relative)})
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("Refusing shared user directory", result.stderr)
+                self.assert_no_local_removal()
 
     def test_keep_client_keeps_records_and_agent_workspaces(self):
         records = self._records(self.home / ".local" / "state" / "shakerscan")

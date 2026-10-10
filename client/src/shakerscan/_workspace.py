@@ -413,34 +413,110 @@ def _same_record(source: Path, target: Path) -> bool:
         return False
 
 
-def _move_exclusive(source: Path, target: Path) -> str:
-    """Move the plain file ``source`` to ``target`` without ever replacing ``target``:
-    ``moved``, ``exists`` (``target`` was there with other content, it wins) or ``gone``
-    (another launch took ``source`` first). A hard link to the new name, then the old name
-    removed; where links do not work (another file system), an exclusive copy. A target that
-    already is the source (a move interrupted between its two steps) completes the move."""
+def _complete_record(path: Path) -> bool:
+    """Whether ``path`` is a plain file holding a whole record (a JSON object), not one a copy
+    left empty or cut short."""
     try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return False
+        return isinstance(json.loads(path.read_bytes()), dict)
+    except (OSError, ValueError):
+        return False
+
+
+def _incomplete_record(path: Path) -> bool:
+    """Whether ``path`` is a plain file that is not a whole record (empty or cut short)."""
+    try:
+        return stat.S_ISREG(path.lstat().st_mode) and not _complete_record(path)
+    except OSError:
+        return False
+
+
+def _link(source: Path, target: Path) -> None:
+    """A hard link to the entry ``source`` itself; it never replaces ``target``."""
+    try:
+        os.link(source, target, follow_symlinks=False)
+    except (NotImplementedError, TypeError):
+        os.link(source, target)
+
+
+def _place_copy(data: bytes, target: Path) -> bool:
+    """Put ``data`` at ``target`` without replacing it (False when ``target`` exists). The copy is
+    written in full to a temporary file beside ``target`` and then linked into place, so an
+    interrupted copy never leaves a partial ``target``. Only on a file system without hard links
+    is ``target`` written directly (exclusively); a partial file left that way is replaced by the
+    next launch (``_set_incomplete_aside``)."""
+    fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
         try:
-            os.link(source, target, follow_symlinks=False)
-        except (NotImplementedError, TypeError):
-            os.link(source, target)
+            _link(Path(name), target)
+            return True
+        except FileExistsError:
+            return False
+        except OSError:
+            pass
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
+        except FileExistsError:
+            return False
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return True
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def _set_incomplete_aside(target: Path) -> bool:
+    """Remove ``target``, a record a copy left incomplete, so a complete one can take its place.
+    It is renamed away first and checked again there; a complete record that arrived in between
+    is put back and kept (False)."""
+    aside = target.with_name(f".{target.name}.{uuid.uuid4().hex}.incomplete")
+    try:
+        os.rename(target, aside)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if _incomplete_record(aside):
+        aside.unlink(missing_ok=True)
+        return True
+    if _complete_record(aside):  # written in between: put it back
+        with contextlib.suppress(OSError):
+            _link(aside, target)
+            aside.unlink()
+    return False
+
+
+def _move_exclusive(source: Path, target: Path, *, retry: bool = True) -> str:
+    """Move the plain file ``source`` to ``target`` without ever replacing a complete record at
+    ``target``: ``moved``, ``exists`` (``target`` was there with other content; it is the one
+    used) or ``gone`` (another launch took ``source`` first). A hard link to the new name, then
+    the old name removed; where links do not work (another file system), a copy linked into
+    place (``_place_copy``). A target that already is the source (a move interrupted between its
+    two steps) completes the move; a target that is not a whole record (an interrupted copy) is
+    replaced by a source that is."""
+    try:
+        _link(source, target)
+        placed = True
     except FileExistsError:
-        if not _same_record(source, target):
-            return "exists"
+        placed = False
     except FileNotFoundError:
         return "gone"
     except OSError:
         try:
-            data = source.read_bytes()
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
-        except FileExistsError:
-            if not _same_record(source, target):
-                return "exists"
+            placed = _place_copy(source.read_bytes(), target)
         except FileNotFoundError:
             return "gone"
-        else:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
+    if not placed and not _same_record(source, target):
+        if retry and _complete_record(source) and _incomplete_record(target) and _set_incomplete_aside(target):
+            return _move_exclusive(source, target, retry=False)
+        return "exists"
     if not stat.S_ISREG(target.lstat().st_mode):  # source was swapped for a link in between
         target.unlink()
         return "gone"
@@ -477,12 +553,28 @@ def _rewrite_record(source: Path, target: Path, workspace: Path, notes: list[str
 SUPERSEDED = "superseded"
 
 
+def _set_aside(source: Path, aside: Path) -> bool:
+    """Keep ``source`` (the entry itself, never a link's target) under ``aside`` without
+    replacing anything there: its own name, or that name with a unique suffix when taken."""
+    for name in (source.name, f"{source.stem}.{uuid.uuid4().hex[:12]}{source.suffix}"):
+        try:
+            _link(source, aside / name)
+        except FileExistsError:
+            continue
+        with contextlib.suppress(FileNotFoundError):
+            source.unlink()
+        return True
+    return False
+
+
 def migrate_records(old: Path, new: Path) -> list[str]:
     """Move the client's workspace records from ``old`` (its configuration directory, where
     0.8.1 kept them) to ``new`` (its state directory). Links and anything that is not a plain
-    record file are left where they are; a record already at ``new`` wins, and another launch
-    moving the same records at the same time is no error. An older record that lost to a newer
-    one is kept under ``old/superseded/`` and reported once, when it is set aside."""
+    record file are left where they are, and so is a record that cannot be moved; another launch
+    moving the same records at the same time is no error. A record already at ``new`` is the one
+    used, whichever is newer (no time is compared), unless it is not a whole record (an
+    interrupted copy). The record from ``old`` that it displaced is kept under
+    ``old/superseded/``, never replacing a file there, and reported once, when it is set aside."""
     if old.is_symlink() or not old.is_dir():
         return []
     moved, left, superseded = 0, [], []
@@ -501,26 +593,31 @@ def migrate_records(old: Path, new: Path) -> list[str]:
                 _same_record(source, new / source.name):
             left.append(source.name)
             continue
-        new.mkdir(parents=True, exist_ok=True, mode=0o700)
-        outcome = _move_exclusive(source, new / source.name)
-        if outcome == "moved":
-            moved += 1
-        elif outcome == "exists" and (source.exists() or source.is_symlink()):
-            aside = old / SUPERSEDED
-            with contextlib.suppress(FileExistsError):
-                aside.mkdir(mode=0o700)
-            if aside.is_symlink() or not aside.is_dir():
-                left.append(source.name)
-                continue
-            with contextlib.suppress(FileNotFoundError):
-                os.rename(source, aside / source.name)  # the entry itself; never a link's target
+        try:
+            new.mkdir(parents=True, exist_ok=True, mode=0o700)
+            outcome = _move_exclusive(source, new / source.name)
+            if outcome == "moved":
+                moved += 1
+            elif outcome == "exists" and (source.exists() or source.is_symlink()):
+                aside = old / SUPERSEDED
+                with contextlib.suppress(FileExistsError):
+                    aside.mkdir(mode=0o700)
+                if aside.is_symlink() or not aside.is_dir() or not _set_aside(source, aside):
+                    left.append(source.name)
+                    continue
                 superseded.append(source.name)
+        except FileNotFoundError:
+            continue  # another launch moved it
+        except OSError:
+            left.append(source.name)
     notes = [f"moved:     {moved} workspace record(s) from {old} to {new}"] if moved else []
     if superseded:
-        notes.append(f"note:      {len(superseded)} older record(s) kept in {old / SUPERSEDED} "
-                     f"({', '.join(superseded[:5])}): a newer record for the same workspace is in {new}")
+        notes.append(f"note:      {len(superseded)} record(s) set aside in {old / SUPERSEDED} "
+                     f"({', '.join(superseded[:5])}): {new} already holds a record for the same workspace, "
+                     "and that one is used")
     if left:
-        notes.append(f"note:      left in {old}: {', '.join(left[:5])} (not plain record files)")
+        notes.append(f"note:      left in {old}: {', '.join(left[:5])} "
+                     "(not plain record files, or they could not be moved)")
     elif not superseded:
         with contextlib.suppress(OSError):
             old.rmdir()
