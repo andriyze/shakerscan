@@ -59,7 +59,12 @@ _REFERENCE_REWRITTEN = {
         ),
         r"\1***\3",
     ),
-    10: (re.compile(r"(?i)(\b(?:mysql|mariadb)\b[^\r\n]*?\s-p)(?!\s)(\S+)"), r"\1***"),
+    # The URL userinfo rule, with the marker exemption the other rules have.
+    9: (
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]*):(?!\[withheld:[1-9][0-9]{0,3}\]@)[^@\s/]+@"),
+        r"\1:***@",
+    ),
+    11: (re.compile(r"(?i)(\b(?:mysql|mariadb)\b[^\r\n]*?\s-p)(?!\s)(\S+)"), r"\1***"),
 }
 
 
@@ -72,9 +77,10 @@ def reference_redact_text(text: str) -> str:
 
 
 def test_the_reference_covers_every_rewritten_rule_and_keeps_the_rest():
-    assert len(redaction._TEXT_PATTERNS) == 13
+    assert len(redaction._TEXT_PATTERNS) == 14
     assert redaction._TEXT_PATTERNS[8] is redaction._mask_xml_elements
-    assert redaction._TEXT_PATTERNS[10] is redaction._mask_mysql_passwords
+    assert redaction._TEXT_PATTERNS[9] is redaction._mask_url_userinfo
+    assert redaction._TEXT_PATTERNS[11] is redaction._mask_mysql_passwords
     for index, rule in enumerate(redaction._TEXT_PATTERNS):
         assert callable(rule) or isinstance(rule, tuple)
         if index not in _REFERENCE_REWRITTEN:
@@ -112,6 +118,10 @@ _ATOMS = {
         "[withheld:1]", "[withheld:1]</password>",
         "x", " ", "\n",
     ),
+    "userinfo": (
+        "https", "redis", "a", "A1", "x+y.z-", "-", ".", "1", "_", "é", "İ", "K", "ſ", "://", ":", "/",
+        "@", "u", "pass", "[withheld:3]", "[withheld:3]@", " ", "\t", "\n", "?", "#", "token",
+    ),
 }
 
 
@@ -133,6 +143,8 @@ def test_rewritten_rules_redact_exactly_as_before(family):
     ("mysql mysql -u root -phunter2 next", "mysql mysql -u root -p*** next"),
     ("--client-secret=abc&x=1", "--client-secret=***&x=1"),
     ("étoken-password: abcdef", "étoken-password: ***"),
+    ("see https://ID:SECRET@api.example/x and redis://:pw@cache", "see https://ID:***@api.example/x and redis://:***@cache"),
+    ("https://u:[withheld:3]@h", "https://u:[withheld:3]@h"),
 ])
 def test_known_shapes(text, expected):
     assert redact_text(text) == expected
@@ -155,6 +167,9 @@ shapes = {
     "underscored name": lambda n: "token_" * n,
     "quoted hyphenated name": lambda n: '"' + "token-" * n,
     "key value pairs": lambda n: "password: abcd " * n,
+    "dotted scheme-like words": lambda n: "a." * n + "://",
+    "url separators": lambda n: "a://b:" * n,
+    "userinfo without an at sign": lambda n: "token-" * n + "://" + ":" * n,
 }
 result = {}
 for label, make in shapes.items():
