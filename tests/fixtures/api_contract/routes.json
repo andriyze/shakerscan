@@ -3294,6 +3294,13 @@
     "name": "update_target_skill"
   },
   {
+    "path": "/targets/{target_id}/skill/confirm",
+    "methods": [
+      "POST"
+    ],
+    "name": "confirm_target_skill"
+  },
+  {
     "path": "/timeline",
     "methods": [
       "GET"

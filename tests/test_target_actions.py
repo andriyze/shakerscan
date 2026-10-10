@@ -78,31 +78,79 @@ def test_invalid_or_inline_secret_inputs_fail_before_persistence(inputs):
     asyncio.run(run())
 
 
-def test_hunt_metadata_crud_obeys_saved_optout_without_requiring_network_authority(monkeypatch):
+def test_hunt_saved_action_crud_needs_the_instruction_opt_in_and_fails_closed(monkeypatch):
+    """Unit fixture: delegation is stubbed. With instruction_changes the write applies; any other
+    refusal propagates unchanged (the proposal path is exercised against PostgreSQL in
+    tests/test_saved_action_proposals_postgres.py)."""
     from api.hunt import asset_actions
     conn = ActionConnection()
     class Pool:
         def acquire(self): return conn
-    permitted = {'value':True}
+    refusal = {'value':None}
     async def require(_conn, run, name, values):
-        if not permitted['value']:
-            raise HTTPException(403,'Metadata edits disabled')
-        return {}, {'metadata_changes':True}
+        if refusal['value'] is not None:
+            raise refusal['value']
+        return {}, {'metadata_changes':False,'instruction_changes':True,'revision':3}
     monkeypatch.setattr(asset_actions, 'require_hunt_delegation', require)
     async def run():
         hunt = {'id':uuid4(),'target_id':conn.row['id'],'policy_json':{'active_testing':False}}
         values = recipe().model_dump()
         created = await execute_asset_action(Pool(), hunt, 'targets.actions.create', values)
-        assert created['ok'] and created['hunt_snapshot_unchanged']
-        assert created['actions'][0]['written_by'] == f"hunt:{hunt['id']}"
+        assert created['ok'] and created['hunt_snapshot_unchanged'] and created['applied'] is True
+        saved = created['actions'][0]
+        assert saved['written_by'] == f"hunt:{hunt['id']}"
+        assert saved['instruction_authority'] == 'target_instruction_delegation'
+        assert saved['origin'] == 'agent_delegated' and saved['delegation_revision'] == 3
         read = await execute_asset_action(Pool(), hunt, 'targets.actions.read',
-            {'action_id':created['actions'][0]['id']})
+            {'action_id':saved['id']})
         assert read['resolved_steps'][0]['input']['command'] == 'uptime'
-        permitted['value'] = False
-        with pytest.raises(HTTPException) as refusal:
+        assert read['action']['trust'] == 'operator_delegated'
+        # Any refusal other than the instruction opt-in is never turned into a proposal.
+        refusal['value'] = HTTPException(403,'Target edit is outside the Hunt asset')
+        with pytest.raises(HTTPException) as refused:
             await execute_asset_action(Pool(), hunt, 'targets.actions.delete',
-                {'action_id':created['actions'][0]['id'],'expected_revision':1})
-        assert refusal.value.status_code == 403
+                {'action_id':saved['id'],'expected_revision':1})
+        assert refused.value.status_code == 403
         assert len((await read_target_actions(conn, conn.row['id']))['actions']) == 1
     asyncio.run(run())
 
+
+@pytest.mark.parametrize('delegation', [None, {}, {'metadata_changes':True}, {'instruction_changes':'true'},
+                                        {'instruction_changes':1}, {'instruction_changes':False,'metadata_changes':True}])
+@pytest.mark.parametrize('source', ['hunt:00000000-0000-4000-8000-000000000001', '', 'planner:x', None])
+def test_a_non_operator_write_without_the_opt_in_is_refused_by_the_write_itself(delegation, source):
+    """Defence in depth: even a caller that skips the Hunt delegation check cannot write."""
+    async def run():
+        conn = ActionConnection()
+        with pytest.raises(HTTPException) as refused:
+            await write_target_action(conn, conn.row['id'], 'create', expected_revision=0, request=recipe(),
+                                      source=source, delegation=delegation)
+        assert refused.value.status_code == 403
+        assert refused.value.detail['reason_code'] == 'instruction_changes_not_delegated'
+        assert (await read_target_actions(conn, conn.row['id']))['actions'] == []
+    asyncio.run(run())
+
+
+def test_operator_writes_are_recorded_as_operator_and_trusted():
+    from api.targets.skill_trust import action_trust
+    async def run():
+        conn = ActionConnection()
+        created = await write_target_action(conn, conn.row['id'], 'create', expected_revision=0, request=recipe())
+        saved = created['actions'][0]
+        assert saved['written_by'] == 'operator:target-action-api' and saved['origin'] == 'operator'
+        assert action_trust(saved) == 'operator'
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('action,trust', [
+    ({'written_by':'operator:target-action-api'}, 'operator'),
+    ({'written_by':'operator:target-action-api','origin':'agent_unconfirmed'}, 'agent_unconfirmed'),
+    ({'written_by':'hunt:x','instruction_authority':'target_instruction_delegation'}, 'operator_delegated'),
+    ({'written_by':'hunt:x'}, 'agent_unconfirmed'),
+    ({'written_by':'hunt:x','origin':'operator'}, 'agent_unconfirmed'),
+    ({'written_by':'hunt:x','instruction_authority':'operator'}, 'agent_unconfirmed'),
+    ({'name':'x'}, 'agent_unconfirmed'), ({'written_by':None}, 'agent_unconfirmed'), ({'written_by':'Operator:x'}, 'agent_unconfirmed'),
+])
+def test_saved_action_trust_is_operator_only_for_operator_writes(action, trust):
+    from api.targets.skill_trust import action_trust
+    assert action_trust(action) == trust
