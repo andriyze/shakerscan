@@ -2207,7 +2207,7 @@ def test_canonical_scan_target_binding_freezes_dns_and_both_inferred_origins(mon
 
 
 def test_scan_binding_of_an_upgraded_target_recomputes_a_legacy_public_suffix_root(monkeypatch):
-    # A guard queued by an engine before 2.8.1 can carry the two-label root co.uk. It must not be
+    # A guard queued by an engine before 2.8.2 can carry the two-label root co.uk. It must not be
     # kept (it spans every .co.uk site) and must not leave the scan without a root either: the
     # root is recomputed from the host, and DNS binding proceeds as for any target.
     async def resolve(_url, *, subject, environment="production"):

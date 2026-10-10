@@ -139,7 +139,7 @@ async def init_db():
 
 
 async def get_monitored_domains() -> list[str]:
-    """Unique roots to watch. A legacy spanning root (co.uk, stored before 2.8.1 and not yet
+    """Unique roots to watch. A legacy spanning root (co.uk, stored before 2.8.2 and not yet
     recomputed by the startup migration) is replaced by the root each of its targets has now
     (example.co.uk), so monitoring continues for the customer and never covers the suffix."""
     async with db_pool.acquire() as conn:

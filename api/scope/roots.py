@@ -1,7 +1,7 @@
 """Scope roots (``allowed_root_domains``) that never span registrants.
 
 A root admits its whole subtree, so it must not be a public suffix (``co.uk``) or have one below
-it (``amazonaws.com``). Engines before 2.8.1 stored two-label roots (``co.uk`` for
+it (``amazonaws.com``). Engines before 2.8.2 stored two-label roots (``co.uk`` for
 ``shop.example.co.uk``) in ``targets.root_domain`` and in queued scope guards; these helpers
 drop such roots and recompute the root from the host instead, so an upgraded target keeps
 working under ``example.co.uk`` rather than failing or widening.
