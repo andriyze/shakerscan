@@ -1036,6 +1036,38 @@ def test_private_workflow_archive_hides_arbitrary_headers_bodies_and_pin_hashes(
     assert raw['response']['body'] == pin and raw['response']['sha256'] == digest
 
 
+@pytest.mark.parametrize("plane, capability, method", [
+    ("hunt", "http.request", "GET"), ("scan", "http.request", "GET"), ("scan", "dast.probe", "POST"),
+])
+def test_masked_views_carry_no_raw_body_digest(plane, capability, method):
+    """A correctly masked body exported beside the raw body's SHA-256 lets a holder of the export
+    recover a low-entropy secret offline; only raw exports keep the raw digests."""
+    request_body = json.dumps({"username": "admin", "password": "0427"})
+    response_body = json.dumps({"password": "0427"})
+    digests = {
+        "request_body_sha256": hashlib.sha256(request_body.encode()).hexdigest(),
+        "response_body_sha256": hashlib.sha256(response_body.encode()).hexdigest(),
+    }
+    row = {
+        "id": "11111111-1111-4111-8111-111111111113", "plane": plane, "capability_name": capability,
+        "method": method, "url": "https://shop.test/login", "sequence": 0,
+        "request_body": request_body, "response_body": response_body,
+        "request_body_bytes": len(request_body), "response_body_bytes": len(response_body), **digests,
+    }
+    redacted = project(row, redaction="redacted")
+    exported = json.dumps(redacted)
+    assert "0427" not in exported
+    assert redacted["request"]["sha256"] is None and redacted["response"]["sha256"] is None
+    for digest in digests.values():
+        assert digest not in exported
+    # Guessing every four-digit PIN against the export finds nothing to compare with.
+    guesses = {hashlib.sha256(json.dumps({"password": f"{pin:04d}"}).encode()).hexdigest() for pin in range(10_000)}
+    assert not any(guess in exported for guess in guesses)
+    raw = project(row, redaction="raw")
+    assert raw["request"]["sha256"] == digests["request_body_sha256"]
+    assert raw["response"]["sha256"] == digests["response_body_sha256"]
+
+
 def test_hunt_archive_recorder_preserves_workflow_privacy_marker():
     calls, record = hunt_call_recorder(hunt_run_id='hunt', hunt_action_id='action',
         capability_name='http.request', adapter='http', target_url='http://tv.test/')

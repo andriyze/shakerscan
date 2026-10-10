@@ -185,9 +185,8 @@ def test_external_and_budget_omissions_are_reported_separately_and_in_the_har(mo
     detail = document["fidelity_detail"]
     assert "1 recorded call(s) have externally stored payloads omitted from this export" in detail
     assert "1 recorded call(s) have bodies left out because this masked export reached its masking budget" in detail
-    # The external omission keeps its recorded digest; a masking omission does not.
-    assert document["transactions"][2]["response"]["sha256"] == "sha-2"
-    assert document["transactions"][1]["response"]["sha256"] is None
+    # A masked export carries no raw body digest, whether the body was shown, masked or omitted.
+    assert [item["response"]["sha256"] for item in document["transactions"]] == [None, None, None]
 
     har = reader.export_document(rows, **{**_ARGUMENTS, "export_format": "har"}, total=3, stats=_COMPLETE)
     comments = [entry["comment"] for entry in har["log"]["entries"]]

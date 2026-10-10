@@ -840,6 +840,11 @@ def _project_without_payloads(row: Mapping[str, Any], *, redaction: str) -> tupl
         # secret-named parameter or nested below a secret-named key is not under a sensitive
         # dictionary key, and a stored body is text (N39).
         item = redact_sensitive(item, redact_strings=True, scrub_text=True)
+        # The recorded digests are of the raw bodies. Beside a masked body they let anyone holding
+        # the export confirm a guess at what was masked (a four-digit PIN in a known JSON shape is
+        # 10,000 hashes away), so they stay in raw exports and private storage only.
+        for field in _BODY_FIELDS:
+            item[field + "_sha256"] = None
         # State-changing Hunt bodies can contain low-entropy pairing PINs or newly
         # issued credentials. Key-name redaction and an unsalted body digest are
         # insufficient: both the body and digest stay raw-export-only.
@@ -1087,8 +1092,9 @@ def _envelope(
         else "Known credential keys, headers, URL parameters, and common token shapes are masked; "
         "in bodies, every value under or beside a secret-named key (JSON, YAML, form fields, "
         "assignments) and every provider-format secret is withheld, as in exposure evidence; "
-        "state-changing Hunt request bodies and their digests are omitted because they may contain "
-        "low-entropy pairing secrets. Other arbitrary target-controlled bodies may still contain secrets."
+        "state-changing Hunt request bodies are omitted because they may contain low-entropy "
+        "pairing secrets; raw body digests are left out, since they could confirm a guess at a "
+        "masked value. Other arbitrary target-controlled bodies may still contain secrets."
     )
     if export_format == "har":
         # A masked HAR states that it is masked in its own log comment and creator, so it can never
