@@ -67,7 +67,15 @@ def test_operator_baseline_survives_two_hunts_history_churn_and_draft_deletion(m
             await save_authority(conn, owner, {'revision':1, 'metadata_changes':False}, recorded_by='operator:fixture')
             with pytest.raises(HTTPException, match='metadata changes'):
                 await execute_asset_action(pool, second_hunt, 'targets.skill.create',
-                    {'methodology':'A new draft', 'expected_revision':cleared['revision'], 'operator_confirmed':True})
+                    {'methodology':'A new draft', 'purpose':'knowledge', 'expected_revision':cleared['revision'],
+                     'operator_confirmed':True})
+            # Instructions need their own opt-in, whatever the metadata setting.
+            for metadata in (False, True):
+                await save_authority(conn, owner, {'revision':2, 'metadata_changes':metadata}, recorded_by='operator:fixture')
+                with pytest.raises(HTTPException) as refused:
+                    await execute_asset_action(pool, second_hunt, 'targets.skill.create',
+                        {'methodology':'A new draft', 'expected_revision':cleared['revision'], 'operator_confirmed':True})
+                assert refused.value.detail['reason_code'] == 'instruction_changes_not_delegated'
     asyncio.run(run())
 
 

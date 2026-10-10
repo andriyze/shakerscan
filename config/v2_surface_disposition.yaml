@@ -265,7 +265,7 @@ surfaces:
     disposition: KEEP_AND_SPLIT
     canonical_replacement: null
     new_writes_allowed: true
-    routes: ["/targets", "/targets/*", "/domains", "/asm/*"]
+    routes: ["/targets", "/targets/*", "/instruction-proposals", "/domains", "/asm/*"]
     files: ["api/targets/router.py"]
 
   - id: findings

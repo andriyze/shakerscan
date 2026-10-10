@@ -5,6 +5,10 @@ product vocabulary and support boundary of that release; do not rewrite old note
 current product. For current behavior use `../functionality-reference.md`, and for publication state
 use `../release-process.md` plus `RELEASES.md` at the repository root.
 
+## 2.9 line
+
+- [`2.9.0.md`](2.9.0.md) — in development on the `release/2.9.0` integration branch.
+
 ## 2.8 line
 
 - [`2.8.3.md`](2.8.3.md) — candidate prepared 2026-10-10; publication and stable promotion pending.

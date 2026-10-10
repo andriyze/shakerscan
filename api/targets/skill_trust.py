@@ -1,7 +1,8 @@
 """Trust-preserving projections for the existing versioned target instruction record.
 
-A digest proves content identity, not approval. Saved metadata delegation permits
-instruction CRUD; learned knowledge is advisory, regardless of who recorded it.
+A digest proves content identity, not approval. Only the explicit, saved instruction_changes
+opt-in permits Hunt instruction CRUD (metadata delegation does not); learned knowledge and
+instruction proposals are advisory, regardless of who recorded them.
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ def instruction_trust(document: Mapping[str, Any] | None) -> str:
     if isinstance(writer, str) and writer.startswith('operator:'):
         return 'operator'
     if isinstance(writer, str) and writer.startswith('hunt:'):
-        if document.get('instruction_authority') == 'target_metadata_delegation':
+        if document.get('instruction_authority') in {'target_instruction_delegation', 'target_metadata_delegation'}:
             return 'operator_delegated'
         return 'hunt_advisory'
     return 'unknown_advisory'

@@ -11,7 +11,7 @@ export interface TargetSkill {
   updated_at: string
   written_by?: string | null
   purpose?: 'instructions' | 'knowledge'
-  instruction_authority?: 'operator' | 'target_metadata_delegation' | 'none'
+  instruction_authority?: 'operator' | 'target_instruction_delegation' | 'target_metadata_delegation' | 'none'
   delegation_revision?: number | null
 }
 export interface TargetSkillState {

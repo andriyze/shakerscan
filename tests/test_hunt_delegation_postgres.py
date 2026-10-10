@@ -61,14 +61,28 @@ def test_saved_metadata_delegation_supports_passive_hunt_crud_and_revocation(mon
             first, second, pool, app = await setup(conn, monkeypatch)
             hunt = {'id':uuid.uuid4(), 'target_id':first, 'target_kind':'network', 'policy_json':{}}
             inputs = {'expected_revision':0,'methodology':'Prioritize services; do not reboot.'}
-            result = await execute_asset_action(pool,hunt,'targets.skill.create',inputs)
-            assert result['skill']['written_by'] == f"hunt:{hunt['id']}"
+            # Default metadata delegation covers advisory knowledge, never the instructions.
+            with pytest.raises(HTTPException) as refused:
+                await execute_asset_action(pool,hunt,'targets.skill.create',inputs)
+            assert refused.value.status_code == 403
+            assert refused.value.detail['reason_code'] == 'instruction_changes_not_delegated'
+            learned = await execute_asset_action(pool,hunt,'targets.skill.create',{**inputs,'purpose':'knowledge'})
+            assert learned['knowledge']['written_by'] == f"hunt:{hunt['id']}"
             path = f'/targets/{first}/hunt-authority'
             async with AsyncClient(transport=ASGITransport(app),base_url='http://operator') as client:
-                assert (await client.put(path,json={'expected_revision':0,'metadata_changes':True})).status_code == 200
-                await execute_asset_action(pool,hunt,'targets.skill.update',{**inputs,'expected_revision':1,'methodology':'Updated priorities'})
+                saved_metadata = await client.put(path,json={'expected_revision':0,'metadata_changes':True})
+                assert saved_metadata.status_code == 200 and saved_metadata.json()['instruction_changes'] is False
+                with pytest.raises(HTTPException) as refused:
+                    await execute_asset_action(pool,hunt,'targets.skill.create',{**inputs,'expected_revision':1})
+                assert refused.value.detail['reason_code'] == 'instruction_changes_not_delegated'
+                opted_in = await client.put(path,json={'expected_revision':1,'metadata_changes':True,'instruction_changes':True})
+                assert opted_in.status_code == 200 and opted_in.json()['instruction_changes'] is True
+                result = await execute_asset_action(pool,hunt,'targets.skill.create',{**inputs,'expected_revision':1})
+                assert result['skill']['written_by'] == f"hunt:{hunt['id']}"
+                assert result['skill']['instruction_authority'] == 'target_instruction_delegation'
+                await execute_asset_action(pool,hunt,'targets.skill.update',{**inputs,'expected_revision':2,'methodology':'Updated priorities'})
                 saved=json.loads(await conn.fetchval('SELECT metadata_json FROM targets WHERE id=$1',first))
-                assert saved['target_skill']['history'][0]['methodology'] == inputs['methodology']
+                assert saved['target_skill']['history'][-1]['methodology'] == inputs['methodology']
                 await execute_asset_action(pool,hunt,'targets.update',{'name':'Renamed'})
                 created=await execute_asset_action(pool,hunt,'targets.create',{'locator':'new.test'})
                 assert created['testing_authorized'] is False
@@ -77,14 +91,25 @@ def test_saved_metadata_delegation_supports_passive_hunt_crud_and_revocation(mon
                 with pytest.raises(HTTPException,match='outside'):
                     await execute_asset_action(pool,hunt,'targets.update',{'target_id':str(second),'name':'Forbidden'})
                 assert (await client.put(path,json={'expected_revision':0,'metadata_changes':True})).status_code == 409
-                assert (await client.put(path,json={'expected_revision':1,'metadata_changes':False})).status_code == 200
+                # The two permissions are independent: metadata off leaves the instruction opt-in in force.
+                assert (await client.put(path,json={'expected_revision':2,'metadata_changes':False,'instruction_changes':True})).status_code == 200
                 with pytest.raises(HTTPException,match='metadata changes'):
-                    await execute_asset_action(pool,hunt,'targets.skill.delete',{'expected_revision':2,'operator_confirmed':True})
+                    await execute_asset_action(pool,hunt,'targets.skill.delete',{'expected_revision':3,'purpose':'knowledge'})
+                with pytest.raises(HTTPException,match='metadata changes'):
+                    await execute_asset_action(pool,hunt,'targets.update',{'name':'Not now'})
                 assert (await execute_asset_action(pool,hunt,'targets.skill.read',{}))['skill']
-                assert (await client.put(path,json={'expected_revision':2,'metadata_changes':True})).status_code == 200
+                # An update that omits instruction_changes turns it off.
+                assert (await client.put(path,json={'expected_revision':3,'metadata_changes':True})).status_code == 200
+                with pytest.raises(HTTPException) as refused:
+                    await execute_asset_action(pool,hunt,'targets.skill.delete',{'expected_revision':3,'operator_confirmed':True})
+                assert refused.value.detail['reason_code'] == 'instruction_changes_not_delegated'
+                assert (await client.put(path,json={'expected_revision':4,'instruction_changes':True})).status_code == 200
                 await conn.execute("UPDATE targets SET url='host://changed.test' WHERE id=$1",first)
+                with pytest.raises(HTTPException) as refused:
+                    await execute_asset_action(pool,hunt,'targets.skill.delete',{'expected_revision':3})
+                assert refused.value.detail['reason_code'] == 'instruction_changes_not_delegated'
                 with pytest.raises(HTTPException,match='metadata changes'):
-                    await execute_asset_action(pool,hunt,'targets.skill.delete',{'expected_revision':2})
+                    await execute_asset_action(pool,hunt,'targets.skill.delete',{'expected_revision':3,'purpose':'knowledge'})
     asyncio.run(run())
 
 

@@ -9,12 +9,14 @@ try:
     from runtime.credential_store import PostgresCredentialProfileStore, CredentialStoreError
     from targets.asset_router import persist_host_target, HostTargetCreate
     from targets.skill import read_target_skill, write_target_skill, TargetSkillWrite
+    from targets.instruction_proposals import ProposalText, create_proposal
     import credential_api
     import request_collection_api
 except ModuleNotFoundError:
     from ..runtime.credential_store import PostgresCredentialProfileStore, CredentialStoreError
     from ..targets.asset_router import persist_host_target, HostTargetCreate
     from ..targets.skill import read_target_skill, write_target_skill, TargetSkillWrite
+    from ..targets.instruction_proposals import ProposalText, create_proposal
     from .. import credential_api, request_collection_api
 try:
     from targets.hunt_authority import require_hunt_delegation, save_authority
@@ -23,6 +25,7 @@ except ModuleNotFoundError:
 
 NAMES = frozenset({'targets.create','targets.update','credentials.grant','collections.bind',
                    'targets.skill.read','targets.skill.create','targets.skill.update','targets.skill.delete',
+                   'targets.skill.propose',
                    'targets.actions.read','targets.actions.create','targets.actions.update','targets.actions.delete'})
 
 
@@ -69,6 +72,19 @@ async def _perform_asset_action(pool, run, name, values):
         async with pool.acquire() as conn, conn.transaction():
             if name == 'targets.skill.read':
                 return {'ok':True, **await read_target_skill(conn, target_id)}
+            if name == 'targets.skill.propose':
+                # Advisory: files a pending proposal for operator review. Needs no delegation
+                # and never changes instructions, authority or this Hunt's snapshot.
+                proposal = await create_proposal(conn, target_id, ProposalText(**{
+                    key:value for key,value in values.items()
+                    if key in {'title','methodology','reason','base_revision','evidence_refs'}}),
+                    proposed_by=f"hunt:{run['id']}", hunt_run_id=uuid.UUID(str(run['id'])))
+                diff = proposal.pop('diff', None) or {}
+                proposal.pop('methodology', None)
+                proposal['diff_lines'] = {'added':diff.get('added_lines'), 'removed':diff.get('removed_lines')}
+                return {'ok':True, 'proposal':proposal,
+                        'applied':False, 'review':'An operator accepts or rejects it (shakerscan knowledge review).',
+                        'hunt_snapshot_unchanged':True}
             _, delegation = await require_hunt_delegation(conn, run, name, values)
             request = TargetSkillWrite(**{key:value for key,value in values.items()
                 if key in {'title','methodology','expected_revision','purpose'}}) if name != 'targets.skill.delete' else None

@@ -7,7 +7,6 @@ no query identifier or SQL fragment is accepted from the caller.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import json
@@ -16,6 +15,9 @@ import uuid
 
 from .endpoint_grouping import group_endpoint_rows
 from .graph_projection import project_graph_node
+from .knowledge_scope import (  # noqa: F401 - re-exported
+    COUNTED_KINDS, DEVICE_KINDS, MAX_COUNT, QUERIES, QuerySpec, _scope_where, knowledge_counts,
+)
 
 
 MAX_QUERY_ROWS = 500
@@ -25,28 +27,6 @@ class KnowledgeQueryError(ValueError):
     pass
 
 
-@dataclass(frozen=True)
-class QuerySpec:
-    table: str
-    columns: str
-    timestamp: str
-    filters: tuple[str, ...] = ()
-
-
-QUERIES = {
-    "endpoints": QuerySpec("target_endpoints", "method, path, auth_state, test_status, last_verdict, param_shape, content_type, priority_score, first_seen_at, last_seen_at", "last_seen_at", ("path_contains", "method", "test_status", "auth_state")),
-    "findings": QuerySpec("findings", "title, severity, status, tool, url, last_verification_verdict, last_seen_at", "last_seen_at", ("severity", "status", "verified_only")),
-    "hypotheses": QuerySpec("hypotheses", "family, title, status, confidence, source, dedupe_key, updated_at", "updated_at", ("family", "status")),
-    "principals": QuerySpec("target_principals", "label, role, tenant_id, auth_state, is_active, updated_at", "updated_at", ("role", "auth_state")),
-    "graph_nodes": QuerySpec("application_graph_nodes", "node_type, node_key, label, attributes, last_seen_at", "last_seen_at", ("node_type", "hunt_id")),
-    "graph_edges": QuerySpec("application_graph_edges", "src_key, edge_type, dst_key, last_seen_at", "last_seen_at"),
-    "receipts": QuerySpec("tool_receipts", "tool_name, status, redacted_argv, created_at", "created_at", ("status",)),
-    "notes": QuerySpec("tool_receipts", "metadata_json, created_at", "created_at"),
-    "scans": QuerySpec("scans", "status, progress, current_phase, findings_count, created_at", "created_at", ("status",)),
-    "collections": QuerySpec("request_collections", "name, format, request_count, safe_request_count, potentially_mutating_request_count, payload_sha256, updated_at", "updated_at"),
-    "candidates": QuerySpec("investigation_candidates", "family, canonical_locus, title, claim, claimed_severity, evidence_refs, verifier_contract_id, status, last_seen_at", "last_seen_at", ("family", "status")),
-    "services": QuerySpec("device_services", "transport, port, state, service_name, product, version, encrypted, web_origin, policy_disposition, last_seen_at", "last_seen_at", ("state",)),
-}
 
 
 def _encode(value: Mapping[str, Any]) -> str:
@@ -185,7 +165,7 @@ async def query_knowledge_page(
         raise KnowledgeQueryError(f"limit must be between 1 and {MAX_QUERY_ROWS}")
     # A device has no web endpoint/principal graph. Explicitly report unsupported,
     # rather than pretending the requested surface was examined and empty.
-    supported = {"scans", "findings", "collections", "candidates", "services"}
+    supported = DEVICE_KINDS
     if (device and kind not in supported) or (not device and kind == "services"):
         return {"ok": True, "kind": kind, "supported": False, "count": 0, "rows": [], "has_more": False, "next_cursor": None}
     spec = QUERIES[kind]
@@ -198,22 +178,7 @@ async def query_knowledge_page(
         params.append(value)
         return f"${len(params)}"
 
-    if kind in {"receipts", "notes"}:
-        where = [f"target_scope->>'target_id'={bind(str(target_id))}"]
-    else:
-        owner = bind(target_id)
-        if kind == "collections":
-            where = [f"target_collection_visible(id,{owner})"]
-        elif device and kind in {"findings", "scans", "candidates"}:
-            where = [f"target_id IN (SELECT id FROM targets WHERE id={owner} OR asset_owner_id={owner})"]
-        else:
-            where = [f"target_id={owner}"]
-    if kind == "endpoints":
-        where.append("COALESCE(test_status,'')<>'gone'")
-    if kind in {"principals", "collections"}:
-        where.append("is_active=true")
-    if kind == "notes":
-        where.append("tool_name='agent.note'")
+    where = _scope_where(kind, device, lambda name: bind(str(target_id) if name == "target_text" else target_id))
     for key, value in values.items():
         if key == "id":
             try:

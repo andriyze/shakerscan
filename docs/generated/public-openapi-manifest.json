@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 200,
+  "component_schema_count": 202,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -95,7 +95,7 @@
     "FleetScaleRequest": "78e53605ce3941f5f47a4246ccf758ce51f46bb4a1803fa9db036f563caafafe",
     "HTTPValidationError": "7373c21f1389312367e27e440140ba11d587693c56d8aa27249b36d3f58c10c6",
     "HostTargetCreate": "dfc014fd6dff26939ea9136bf251fd41a6a2633fdf622e7f55c47ab611247c39",
-    "HuntAuthorityWrite": "3f91296e51a5b995b9091b3f39a38689ada7db3c0c5eefc7b0d4b151c1f10fb2",
+    "HuntAuthorityWrite": "f55a6e9b9f9b71d6b96481930effe59f54035bb0ef942620aa745d7cc0d7a8cd",
     "HuntBoundaryHandoffRequest": "122fee03ebae8d329cb1444013f0b97e8ea7ad26d2cb80118f263ec042e1e0d9",
     "HuntBoundaryPrincipal": "2201f424ce72eb27ebf6249af74d49197b5e8a6339f70f6dba4f0cc2cf99776c",
     "HuntBudgetAmendmentRequest": "e370fa6d5eff780ab95d6f0c41842f27deb7cb7447cd7a177899e0dcc0f9c070",
@@ -149,6 +149,8 @@
     "PolicyProfileRequest": "d548181521df56813de4b960e643834b98c27afbeef0a0af4f2c31bc71440a73",
     "ProfileConfiguration": "38cdcfebb861a98f7aa6bdcf19d08fd2139dc3a8f25d95e6e7b0b6859a3a71dd",
     "ProfileWrite": "87facdddd13d1dbd0af3af6757d9b71dc2d1116744787e9ea3959b1fe05450d5",
+    "ProposalDecision": "51d5c087c00fd884161fbba0b38389f1dc98774b9c584f69c2fdcbb39922e916",
+    "ProposalText": "363b50c6a148eca4cf57ad40664cc7cdd8974f74df25119659afd9a62cb6beab",
     "RefuterReviewDeriveVerdictRequest": "9e98144281c057266c03b0b86baeb50b2a50e9621b04690839d0db7dc9c9d955",
     "RefuterReviewExecuteRequest": "fd5ae0475c78e40ee7064ee506d8a7ede2cb3cfdd8c6ab9abcfeeb4085e5c498",
     "RefuterReviewQueueRequest": "43e3d46fb0321acca0aa5a1e54a2ab78de6b901c8035c3dc40fbde2a772ec301",
@@ -196,7 +198,7 @@
     "TargetPrincipalCreate": "9c7a0099e309721b8e541f4597f6fa02a60c62957aa7ad6ff91ae36f65d3a875",
     "TargetPrincipalUpdate": "b8894477c27a718804418bfa09c98e84b5ef42830b368abd0dc5bb86930f3072",
     "TargetScanRequest": "7b7458b366da2793dbc51e5ce6dd7f7ede43d953a340229079aae42d66504983",
-    "TargetSkillDocument": "540961583ea3969ab5bc32099dab213ea357de6e33bed7488a7be97492724559",
+    "TargetSkillDocument": "bbec8c7cdd5c5eb070bc8dda28423e88eb17d17259b3fbd9df60627edf123aa1",
     "TargetSkillResponse": "6f764cdd46f3e92da38d23f102995ab46848d77c6389356840821eba36fdabf1",
     "TargetSkillWrite": "181db370cd6989a370c19918a735365b337b6f349176cd2975a5b4b781c5e22f",
     "TargetUpdate": "313dd3ba3e6b4257f431bca32ece1dc13a0d0377a117e3941c77dddc22eedb58",
@@ -206,9 +208,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "44d7d8230d72689ce7ee1b747c8164ac2436337c09ac45869a767c22766c38cf",
+  "contract_sha256": "20cb92b0aa6e751791e4f5ecaece8d3828d9e4e69f90c5067ca55a771858176f",
   "openapi": "3.1.0",
-  "operation_count": 462,
+  "operation_count": 468,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -2072,6 +2074,21 @@
         "hunts"
       ]
     },
+    "GET /instruction-proposals": {
+      "deprecated": false,
+      "operation_id": "get_all_instruction_proposals_instruction_proposals_get",
+      "parameters_sha256": "81741e7817ea6116bbaff4451d827f0221187e562731de6da39ca7704841f41a",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
     "GET /investigation/candidates": {
       "deprecated": false,
       "operation_id": "list_investigation_candidates_investigation_candidates_get",
@@ -3205,6 +3222,21 @@
       "deprecated": false,
       "operation_id": "get_hunt_authority_targets__target_id__hunt_authority_get",
       "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "GET /targets/{target_id}/instruction-proposals": {
+      "deprecated": false,
+      "operation_id": "get_target_instruction_proposals_targets__target_id__instruction_proposals_get",
+      "parameters_sha256": "a7b42329e1238fc5541db67af9797bedb9fb03a6b2ab6e21c9862850776715c1",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -6040,6 +6072,66 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "POST /targets/{target_id}/instruction-proposals": {
+      "deprecated": false,
+      "operation_id": "post_instruction_proposal_targets__target_id__instruction_proposals_post",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": "4dc3c6486bb4faa9aec5b62d89d9a7ba6f0efe40c5cf830c6f824a4bd99a9e44",
+      "response_schema_sha256": {
+        "201": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "POST /targets/{target_id}/instruction-proposals/{proposal_id}/accept": {
+      "deprecated": false,
+      "operation_id": "post_accept_instruction_proposal_targets__target_id__instruction_proposals__proposal_id__accept_post",
+      "parameters_sha256": "fc4e902d48f422ebd66244bdda2ef102eb8979e495ab78bb79fc15ecab72e41f",
+      "request_schema_sha256": "f3e6e6ea81905ce3529cb73cd1be5ad15a8eda1c2077a3aa02a83752df2902f4",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "POST /targets/{target_id}/instruction-proposals/{proposal_id}/rebase": {
+      "deprecated": false,
+      "operation_id": "post_rebase_instruction_proposal_targets__target_id__instruction_proposals__proposal_id__rebase_post",
+      "parameters_sha256": "fc4e902d48f422ebd66244bdda2ef102eb8979e495ab78bb79fc15ecab72e41f",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "POST /targets/{target_id}/instruction-proposals/{proposal_id}/reject": {
+      "deprecated": false,
+      "operation_id": "post_reject_instruction_proposal_targets__target_id__instruction_proposals__proposal_id__reject_post",
+      "parameters_sha256": "fc4e902d48f422ebd66244bdda2ef102eb8979e495ab78bb79fc15ecab72e41f",
+      "request_schema_sha256": "f3e6e6ea81905ce3529cb73cd1be5ad15a8eda1c2077a3aa02a83752df2902f4",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
     },
     "POST /targets/{target_id}/invariants": {
       "deprecated": false,
