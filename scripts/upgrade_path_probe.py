@@ -541,10 +541,11 @@ def targeted_writes(api: Api, state: dict[str, Any], report: Report, scan_deadli
     if new_target:
         write("POST /targets/{id}/authorization (new target)", "POST", f"/targets/{new_target}/authorization",
               {"approved_by": "upgrade-path-smoke", "environment": "lab"})
-        write("POST /schedules", "POST", "/schedules", {
-            "target_id": new_target, "name": "upgrade-path daily", "frequency": "daily", "time_of_day": "04:00"})
         write("POST /discovery for a target added after the upgrade", "POST",
               "/discovery?" + urllib.parse.urlencode({"root_domain": new_apex}))
+    # A schedule binds a resolvable destination: the apex host resolves to the fixture.
+    write("POST /schedules", "POST", "/schedules", {
+        "target_id": target, "name": "upgrade-path daily", "frequency": "daily", "time_of_day": "04:00"})
     write("POST /devices", "POST", "/devices", {
         "name": "upgrade-path device (upgraded)", "primary_locator": "192.0.2.11", "environment": "lab"})
     hunt = write("POST /hunts", "POST", "/hunts", {

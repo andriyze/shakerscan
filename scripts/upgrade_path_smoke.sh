@@ -30,6 +30,8 @@
 #   UPGRADE_PATH_RECEIPT  receipt path (default artifacts/upgrade-path/<baseline>-receipt.json)
 #   UPGRADE_PATH_INSTALLER_URL  hosted installer (default https://install.shakerscan.com)
 #   UPGRADE_PATH_KEEP=1   leave the stack running for inspection
+#   UPGRADE_PATH_SKIP     space-separated GET path templates the sweep must not call, for local
+#                         investigation only (the release workflow sets none; the receipt lists them)
 #   SHAKERSCAN_SMOKE_{API,UI,POSTGRES,REDIS}_PORT  pin a port (default: first free high port)
 #
 # The stack is its own Compose project on free high ports with its own HOME, so it never touches
@@ -86,6 +88,8 @@ STATE="$LOG_DIR/seed-state.json"
 mkdir -p "$LOG_DIR" "$SMOKE_HOME"
 TIMINGS=""
 STARTED="$(date +%s)"
+SKIP_ARGS=()
+for template in ${UPGRADE_PATH_SKIP:-}; do SKIP_ARGS+=(--skip "$template"); done
 
 free_port() {
     local port="$1"
@@ -260,7 +264,7 @@ python3 "$PROBE" seed --api "$API" --state "$STATE" --fixture "$FIXTURE_HOST" --
 elapsed seed "$started"
 # The previous release's own answers, for context in the receipt: a 5xx here is a defect the
 # candidate inherited, not one the upgrade introduced. It does not decide the gate.
-python3 "$PROBE" sweep --api "$API" --state "$STATE" --report "$LOG_DIR/baseline-sweep.json" \
+python3 "$PROBE" sweep --api "$API" --state "$STATE" --report "$LOG_DIR/baseline-sweep.json" ${SKIP_ARGS[@]+"${SKIP_ARGS[@]}"} \
     > "$LOG_DIR/baseline-sweep.log" 2>&1 || echo "upgrade path: note: $BASELINE_VERSION itself answers some GETs with 5xx (see the receipt)"
 
 echo "== 3. upgrade to ${CANDIDATE_VERSION:-the candidate} with the real installer"
@@ -305,7 +309,7 @@ echo "== 4. check the upgraded stack"
 started="$(date +%s)"
 CHECK_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 check_args=(--api "$API" --state "$STATE" --report "$LOG_DIR/upgraded-check.json" --expect-version "$EXPECTED_VERSION"
-    --baseline-sweep "$LOG_DIR/baseline-sweep.json")
+    --baseline-sweep "$LOG_DIR/baseline-sweep.json" ${SKIP_ARGS[@]+"${SKIP_ARGS[@]}"})
 [ -z "$CANDIDATE_SHA" ] || check_args+=(--expect-sha "$CANDIDATE_SHA")
 # This tree is the candidate only in lock mode; then every GET in its committed public contract
 # must be served and swept.
