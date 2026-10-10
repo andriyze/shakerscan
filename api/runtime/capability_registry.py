@@ -1278,9 +1278,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "artifact.inspect",
-            "Read one small redacted byte window from a target-bound public client artifact.",
+            "Read one small redacted byte window from a target-bound public client artifact. "
+            "Reserves two requests: the second is spent only when tab-separated rows need the "
+            "resource's head read to tell a database dump from plain text (once per resource).",
             "http", "passive", _HTTP_TARGETS, "artifact.inspect", "1", None,
-            {"http_requests": 1, "tool_wall_seconds": 30},
+            {"http_requests": 2, "tool_wall_seconds": 30},
             {
                 "network_reachability": True,
                 "runtime_target_binding": True,

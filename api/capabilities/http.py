@@ -23,6 +23,7 @@ from http_experiment import (
     rewrite_method_for_redirect,
     validate_next_hop,
 )
+from runtime.archive_body_masking import active_withheld_values, mask_public_http_urls
 from runtime.models import TargetBinding
 from runtime.target_bound_socket import FrozenTargetSocketFactory
 
@@ -810,4 +811,8 @@ async def execute_bound_http_request(
     if follow_redirects:
         result["redirect_chain"] = redirect_chain
         result["hops_followed"] = hops_followed
+    if active_withheld_values() is not None:
+        # Inside a Hunt worker the result is the planner's view: every public URL field's secret
+        # parameters become references (N56), for a plain GET as for a bound workflow request.
+        mask_public_http_urls(result)
     return result

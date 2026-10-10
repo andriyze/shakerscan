@@ -24,7 +24,12 @@ except ModuleNotFoundError:
 
 SCHEMA = "hunt-http-private-capture/v1"
 MAX_VALUE_BYTES = 8_192
-MAX_CAPTURE_BYTES = 65_536
+# One budget for an action's serialized private result (captures, withheld values, dump column
+# knowledge), enforced before every write. Fernet expands 65,536 plaintext bytes to about 87,500
+# characters, inside the 131,072-character limit every reader enforces.
+MAX_PRIVATE_RESULT_BYTES = 65_536
+MAX_PRIVATE_RESULT_CHARS = 131_072
+MAX_CAPTURE_BYTES = MAX_PRIVATE_RESULT_BYTES
 CAPTURE_TTL_SECONDS = 3_600
 
 
@@ -124,7 +129,7 @@ async def _captured_value(conn: Any, *, run_id: str, target: TargetBinding, bind
         WHERE id=$1 AND hunt_run_id=$2 AND capability_name='http.request'
           AND status='completed'""", uuid.UUID(source_id), uuid.UUID(run_id))
     ciphertext = str(row["private_http_result"] or "") if row else ""
-    if len(ciphertext) > 131_072 or not ciphertext.startswith("enc:fernet:"):
+    if len(ciphertext) > MAX_PRIVATE_RESULT_CHARS or not ciphertext.startswith("enc:fernet:"):
         raise ValueError("HTTP workflow response reference is unavailable")
     try:
         private = json.loads(decrypt_secret(ciphertext))
@@ -148,7 +153,6 @@ async def _captured_value(conn: Any, *, run_id: str, target: TargetBinding, bind
 
 WITHHELD_SCHEMA_KEY = "withheld"
 WITHHELD_EXPIRES_KEY = "withheld_expires_at"
-_MAX_WITHHELD_PAYLOAD_BYTES = 65_536
 # A withheld value lives as long as its Hunt does (finish and cancel clear it, a Hunt that is no
 # longer live refuses it), and never longer than this: a leaked credential found early in a long
 # Hunt must still be usable late in it.
@@ -215,7 +219,10 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
     budget = _MAX_SEEDED_CHARS
     for row in rows or ():
         try:
-            private = json.loads(decrypt_secret(str(row["private_http_result"])))
+            ciphertext = str(row["private_http_result"])
+            if len(ciphertext) > MAX_PRIVATE_RESULT_CHARS:
+                continue
+            private = json.loads(decrypt_secret(ciphertext))
             expires_at = datetime.fromisoformat(private.get(WITHHELD_EXPIRES_KEY) or private["expires_at"])
             if private.get("hunt_id") != str(run_id) or private.get("target_digest") != digest or expires_at <= now:
                 continue
@@ -278,6 +285,71 @@ def withholding_operation(
     return collecting, collector
 
 
+def _serialized(payload: Mapping[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+
+
+def _byte_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode())
+
+
+def _resolvable(value: str) -> bool:
+    try:
+        _scalar(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _fit_private_payload(
+    base: dict[str, Any], values: list[tuple[str, str]], tables: list[tuple[str, str, list[str]]],
+) -> tuple[dict[str, Any], int, int]:
+    """``(payload, values kept, table entries kept)`` within ``MAX_PRIVATE_RESULT_BYTES``.
+
+    The base (captures, expiry, accounting) is kept whole. Secret references come next, in order,
+    because a reference the planner was shown must resolve; column knowledge fills what is left
+    and is the first to be evicted, table by table."""
+    payload = dict(base)
+    budget = MAX_PRIVATE_RESULT_BYTES - _byte_size(payload) - 64  # the two keys and their braces
+    kept_values: dict[str, str] = {}
+    for key, value in values:
+        cost = _byte_size(key) + _byte_size(value) + 2
+        if cost > budget:
+            break
+        kept_values[key] = value
+        budget -= cost
+    kept_tables: dict[str, dict[str, list[str]]] = {}
+    count = 0
+    for path, table, columns in tables:
+        cost = _byte_size(table) + _byte_size(columns) + 2 + (0 if path in kept_tables else _byte_size(path) + 4)
+        if cost > budget:
+            continue
+        kept_tables.setdefault(path, {})[table] = columns
+        budget -= cost
+        count += 1
+    if kept_values:
+        payload[WITHHELD_SCHEMA_KEY] = kept_values
+    if kept_tables:
+        payload[SQL_TABLES_KEY] = kept_tables
+    # The estimate is conservative; the exact serialized size is what is checked.
+    while _byte_size(payload) > MAX_PRIVATE_RESULT_BYTES and (kept_tables or kept_values):
+        if kept_tables:
+            path = next(reversed(kept_tables))
+            kept_tables[path].popitem()
+            count -= 1
+            if not kept_tables[path]:
+                del kept_tables[path]
+            payload[SQL_TABLES_KEY] = kept_tables
+            if not kept_tables:
+                payload.pop(SQL_TABLES_KEY)
+        else:
+            kept_values.popitem()
+            payload[WITHHELD_SCHEMA_KEY] = kept_values
+            if not kept_values:
+                payload.pop(WITHHELD_SCHEMA_KEY)
+    return payload, len(kept_values), count
+
+
 async def persist_withheld_values(
     conn: Any, *, run: Mapping[str, Any], action_id: Any, target: TargetBinding,
     values: Any, status: str, observations: Any = None,
@@ -287,9 +359,10 @@ async def persist_withheld_values(
     ``values`` is ``{number: value}`` or the action's collector, of which only the values whose
     markers reached ``observations`` (the planner's view) are sealed: a workflow response reduced
     to its status shows none. Merged into the action's private result, beside any response
-    capture. A prior private result that cannot be read is kept, never overwritten, and the
-    status says so. Values past the payload bound are dropped, so their references refuse
-    rather than send something else.
+    capture, within one serialized-byte budget (``MAX_PRIVATE_RESULT_BYTES``): references first,
+    dump column knowledge with what is left. What does not fit is reported in ``not_retained``
+    and its references refuse rather than send something else. A prior private result that
+    cannot be read is kept, never overwritten, and the status says so.
     """
     if values is None:
         return {"sealed": 0, "status": "none"}
@@ -308,11 +381,12 @@ async def persist_withheld_values(
     run_id, source_id = str(run["id"]), str(uuid.UUID(str(action_id)))
     row = await conn.fetchrow("SELECT private_http_result FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2",
         uuid.UUID(source_id), uuid.UUID(run_id))
-    payload = _private_payload(run_id, source_id, target)
+    base = _private_payload(run_id, source_id, target)
     existing = str(row["private_http_result"] or "") if row else ""
     if existing:
         try:
-            prior = json.loads(decrypt_secret(existing)) if existing.startswith("enc:fernet:") else None
+            prior = (json.loads(decrypt_secret(existing))
+                     if existing.startswith("enc:fernet:") and len(existing) <= MAX_PRIVATE_RESULT_CHARS else None)
         except Exception:
             prior = None
         if not (isinstance(prior, dict) and prior.get("hunt_id") == run_id
@@ -320,36 +394,51 @@ async def persist_withheld_values(
             # Keep the response capture this action already sealed; its withheld values stay
             # withheld (shown, unreferenceable), and the planner is told why.
             return {"sealed": 0, "status": "prior_private_result_unreadable"}
-        payload = prior
-    payload[WITHHELD_EXPIRES_KEY] = (
+        base = prior
+    prior_values = base.pop(WITHHELD_SCHEMA_KEY, None) or {}
+    prior_tables = _bounded_sql_tables(base.pop(SQL_TABLES_KEY, None))
+    base[WITHHELD_EXPIRES_KEY] = (
         datetime.now(timezone.utc) + timedelta(seconds=WITHHELD_TTL_SECONDS)).isoformat()
     if context_bytes:
-        payload[CONTEXT_BYTES_KEY] = int(payload.get(CONTEXT_BYTES_KEY) or 0) + context_bytes
-    if tables:
-        # Column names learned from a dump (not secret) travel with the action, for later windows.
-        merged = _bounded_sql_tables(payload.get(SQL_TABLES_KEY))
-        for path, by_table in tables.items():
-            merged.setdefault(path, {}).update(by_table)
-        payload[SQL_TABLES_KEY] = _bounded_sql_tables(merged)
-    kept: dict[str, str] = {}
-    for number, value in sorted(values.items()):
-        payload[WITHHELD_SCHEMA_KEY] = {**kept, str(int(number)): str(value)}
-        if len(json.dumps(payload, ensure_ascii=False).encode()) > _MAX_WITHHELD_PAYLOAD_BYTES:
-            break
-        kept[str(int(number))] = str(value)
-    payload[WITHHELD_SCHEMA_KEY] = kept
+        base[CONTEXT_BYTES_KEY] = int(base.get(CONTEXT_BYTES_KEY) or 0) + context_bytes
+    if _byte_size(base) > MAX_PRIVATE_RESULT_BYTES:
+        return {"sealed": 0, "status": "no_room", "not_retained": {"values": len(values)}}
+    candidates = [(str(key), str(value)) for key, value in prior_values.items()
+                  if isinstance(value, str)]
+    # A value the resolver would refuse (``MAX_VALUE_BYTES``) is not sealed: it is reported as not
+    # retained instead of handing out a reference that cannot send.
+    candidates += [(str(int(number)), str(value)) for number, value in sorted(values.items())
+                   if str(int(number)) not in prior_values and _resolvable(str(value))]
+    merged: dict[str, dict[str, list[str]]] = {path: dict(by_table) for path, by_table in prior_tables.items()}
+    for path, by_table in tables.items():
+        merged.setdefault(path, {}).update(by_table)  # this action's knowledge is the newest
+    entries = [(path, table, columns) for path, by_table in merged.items() for table, columns in by_table.items()]
+    payload, kept_count, table_count = _fit_private_payload(base, candidates, entries)
+    kept_numbers = set(payload.get(WITHHELD_SCHEMA_KEY) or {})
+    sealed_new = sum(1 for number in values if str(int(number)) in kept_numbers)
+    serialized = _serialized(payload)
+    payload.clear()
     try:
-        sealed = encrypt_secret(json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")))
+        sealed = encrypt_secret(serialized)
     except Exception:
         sealed = None  # no encryption key: the values stay withheld and unreferenceable
     finally:
-        payload.clear()
+        serialized = ""
     if not str(sealed or "").startswith("enc:fernet:"):
         return {"sealed": 0, "status": "encryption_unavailable"}  # never stored in clear
+    if len(sealed) > MAX_PRIVATE_RESULT_CHARS:
+        return {"sealed": 0, "status": "no_room", "not_retained": {"values": len(values)}}
     await conn.execute("UPDATE hunt_actions SET private_http_result=$3 WHERE id=$1 AND hunt_run_id=$2",
         uuid.UUID(source_id), uuid.UUID(run_id), sealed)
-    status_text = "sealed" if len(kept) == len(values) else "partially_sealed"
-    return {"sealed": len(kept), "status": status_text if values else "knowledge_only"}
+    result: dict[str, Any] = {
+        "sealed": sealed_new,
+        "status": ("sealed" if sealed_new == len(values) else "partially_sealed") if values else "knowledge_only",
+    }
+    unresolvable = sum(1 for value in values.values() if not _resolvable(str(value)))
+    dropped_values, dropped_tables = len(candidates) - kept_count + unresolvable, len(entries) - table_count
+    if dropped_values or dropped_tables:
+        result["not_retained"] = {"values": dropped_values, "sql_tables": dropped_tables}
+    return result
 
 
 async def settle_private_results(
@@ -381,7 +470,7 @@ async def _withheld_value(
     row = await conn.fetchrow("""SELECT private_http_result FROM hunt_actions
         WHERE id=$1 AND hunt_run_id=$2 AND status='completed'""", uuid.UUID(source_id), uuid.UUID(run_id))
     ciphertext = str(row["private_http_result"] or "") if row else ""
-    if len(ciphertext) > 131_072 or not ciphertext.startswith("enc:fernet:"):
+    if len(ciphertext) > MAX_PRIVATE_RESULT_CHARS or not ciphertext.startswith("enc:fernet:"):
         raise ValueError("withheld value reference is unavailable in this Hunt")
     try:
         private = json.loads(decrypt_secret(ciphertext))
