@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "api"))
 
 from action_scope import evaluate_scope, receipt_to_dict, scope_roots  # noqa: E402
 from api_utils import extract_root_domain  # noqa: E402
+from scanner_tools.host_names import HOST_CANONICALIZATION  # noqa: E402
 from hunt.permission_bounds import (  # noqa: E402
     BoundError, Bounds, bounds_from_public, parse_bounds, refused_bounds,
 )
@@ -64,7 +65,11 @@ def test_a_persisted_public_suffix_bound_fails_closed_without_reinterpretation()
         "budget_multiplier": 2.0, "budget_totals": {}, "capability_flags": ["active-testing"],
         "credential_targets": ["co.uk", "app.example.com"], "ssh_host_trust_first_contact": False,
         "target_patterns": ["*.co.uk", "*.github.io:443", "*.example.co.uk"],
+        "host_canonicalization": HOST_CANONICALIZATION,
     }
+    # A row with no host-canonicalization marker is older still: its host bounds are withheld.
+    legacy = bounds_from_public({key: value for key, value in stored.items() if key != "host_canonicalization"})
+    assert legacy.target_patterns == () and not legacy.covers_target(host="shop.victim.co.uk", port=443)
     bounds = bounds_from_public(stored)
     # Every bound still reads as stored, and only the public-suffix ones match nothing.
     assert [pattern.text() for pattern in bounds.target_patterns] == stored["target_patterns"]
