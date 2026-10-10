@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
+import sys
 import uuid
 
 import pytest
@@ -30,6 +32,9 @@ from hunt.permission_grants import GrantRefused, _approvable_proposal
 from hunt.permission_reasons import KIND_CREDENTIAL_USE, KIND_PREAUTHORIZATION, KIND_TARGET_AUTHORIZE
 from hunt.permission_store import public_preauthorization, public_request, render
 from scanner_tools.host_names import HOST_CANONICALIZATION, HostNameError, canonical_host
+
+# The terminal approval script lives in scripts/, as tests/test_hunt_approve.py imports it.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 # host -> (IDNA 2008/UTS #46 ASCII, the IDNA 2003 ASCII v2.8.0 stored)
 DEVIATIONS = {
