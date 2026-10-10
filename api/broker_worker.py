@@ -72,6 +72,7 @@ class BrokerHTTPError(BrokerWorkerError):
 
     def __init__(self, status_code: int, detail: str = "") -> None:
         self.status_code = int(status_code)
+        self.detail = str(detail or "")
         super().__init__(f"broker returned HTTP {self.status_code}: {detail[:300]}")
 
 
@@ -591,7 +592,7 @@ async def _execute_broker_action_plan(
                 timeout=120,
             )
         except BrokerHTTPError as exc:
-            raise BrokerActionHTTPError(exc.status_code, str(exc)) from exc
+            raise BrokerActionHTTPError(exc.status_code, exc.detail) from exc
 
     base_path = f"/fleet/broker/nodes/{node_id}/leases/{lease_id}"
     backend = BrokerScanExecutionBackend(
@@ -629,7 +630,7 @@ async def _execute_broker_action_plan(
                 timeout=int(AUTHORITY_UNVERIFIED_AFTER_SECONDS),
             )
         except BrokerHTTPError as exc:
-            raise BrokerActionHTTPError(exc.status_code, str(exc)) from exc
+            raise BrokerActionHTTPError(exc.status_code, exc.detail) from exc
 
     # A fleet node has no database: the control plane re-checks the target's authorization
     # when it leases each action and, through this authority, before and while each one runs.

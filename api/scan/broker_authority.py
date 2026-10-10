@@ -16,6 +16,7 @@ from collections import OrderedDict
 from typing import Any
 
 from .action_authority_guard import ScanAuthorityGuard
+from .capability_result import CapabilityResultReason
 
 
 class RunningBrokerAuthority:
@@ -40,4 +41,9 @@ class RunningBrokerAuthority:
             while len(self._guards) > self._max_entries:
                 self._guards.popitem(last=False)
         self._guards.move_to_end(key)
-        return await guard.poll(action)
+        reason = await guard.poll(action)
+        if reason == CapabilityResultReason.SCOPE_INVALID.value:
+            # A deactivated target or a blocked scope can be restored; only a revoke or an
+            # expiry stays a stop. The next call checks this action afresh.
+            self._guards.pop(key, None)
+        return reason

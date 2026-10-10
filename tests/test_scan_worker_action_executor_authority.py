@@ -405,3 +405,35 @@ def test_unverified_is_declared_only_after_a_poll_was_attempted():
         return authority, interrupts
     authority, interrupts = asyncio.run(run())
     assert interrupts == [] and len(authority.polled) >= 1
+
+
+def test_the_interruption_is_recorded_at_the_deadline_before_a_stalled_poll_unwinds():
+    plan = _plan()
+    action = plan.actions[0]
+
+    class SlowToUnwind(FixtureAuthority):
+        """A poll that hangs and, once cancelled, takes 0.8 s more to release (within the grace)."""
+
+        async def poll(self, action):
+            self.polled.append(action.action_id)
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.8)
+                raise
+
+    stopped_at = {}
+
+    async def dispatch(action, _lease, _heartbeat):
+        started = time.monotonic()
+        while not action_interrupted():
+            await asyncio.sleep(0.01)
+        stopped_at["t"] = time.monotonic() - started
+        return replace(_receipt(action), status="cancelled", errors=("cancelled",))
+
+    authority = SlowToUnwind(poll_seconds=0.05, unverified_after_seconds=0.4)
+    receipt = asyncio.run(_executor(dispatch, authority).execute(
+        action, _lease(plan, action), lambda: asyncio.sleep(0)))
+    assert receipt.errors == ("authorization_unverified",)
+    # Tolerance plus at most the floor, not plus the 0.8 s the stalled poll took to unwind.
+    assert stopped_at["t"] < 0.4 + 0.04 + 0.15

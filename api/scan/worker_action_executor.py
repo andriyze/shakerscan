@@ -14,7 +14,7 @@ except (ImportError, ModuleNotFoundError):  # top-level worker imports
 
 from .action_plan import ScanAction
 from .capability_result import CapabilityResultReference, CapabilityResultReason
-from .execution_backend import ActionHeartbeat, ActionLease
+from .execution_backend import ActionAuthorityWithdrawn, ActionHeartbeat, ActionLease
 from .action_interruption import ActionInterruption, interruption_scope
 from .authority_deadline import (  # noqa: F401  (the tolerance constants are re-exported)
     AUTHORITY_CHECK_RETRY_DELAYS,
@@ -53,13 +53,20 @@ class ActionAuthority(Protocol):
 def with_authority_interruption(receipt: CapabilityReceipt, reason: str, observed_at: str | None) -> CapabilityReceipt:
     """The receipt of an action whose target authorization was withdrawn while it ran.
 
-    What it observed before the stop is kept; the receipt is partial and names the reason.
+    What it observed before the stop is kept; the receipt is partial and names ``reason`` first.
+    A stop the receipt already reported (a fleet node's own) is kept as
+    ``reported_target_authority_interruption``; ``target_authority_interruption`` is always
+    this decision, so a receipt cannot pre-empt it by naming a stop of its own.
     """
     stopped = {"reason_code": reason, "observed_at": observed_at}
+    execution = dict(receipt.redacted_execution)
+    reported = execution.pop("target_authority_interruption", None)
+    if reported is not None and reported != stopped:
+        execution["reported_target_authority_interruption"] = reported
     return replace(receipt, status="partial", partial=True,
         errors=(reason, *tuple(error for error in receipt.errors if error not in {"cancelled", reason})),
         observations=(*receipt.observations, {"kind": "target_authority_interruption", **stopped}),
-        redacted_execution={**dict(receipt.redacted_execution), "target_authority_interruption": stopped})
+        redacted_execution={**execution, "target_authority_interruption": stopped})
 
 
 class ReceiptScanActionExecutor:
@@ -100,19 +107,29 @@ class ReceiptScanActionExecutor:
     ) -> CapabilityReceipt:
         stop_heartbeats = asyncio.Event()
 
+        signal = ActionInterruption()
+        authority_interruption: str | None = None
+
         async def keep_lease_alive() -> None:
+            nonlocal authority_interruption
             interval = max(1.0, min(30.0, float(lease.lease_seconds) / 3.0))
             while not stop_heartbeats.is_set():
                 try:
                     await asyncio.wait_for(stop_heartbeats.wait(), timeout=interval)
                 except asyncio.TimeoutError:
-                    await heartbeat()
+                    try:
+                        await heartbeat()
+                    except ActionAuthorityWithdrawn as exc:
+                        # The control plane withdrew the action's authorization: stop it as
+                        # the authority monitor would, and settle what it observed.
+                        if signal.reason is None:
+                            authority_interruption = exc.reason
+                            signal.record(exc.reason)
+                        return
 
         heartbeat_task = asyncio.create_task(keep_lease_alive())
-        signal = ActionInterruption()
         monitor = None
         authority_monitor = None
-        authority_interruption: str | None = None
         check = self._credential_check if action.action_id != "finalize.report" else None
         authority = self._authority if action.action_id != "finalize.report" else None
 

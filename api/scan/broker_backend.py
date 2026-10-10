@@ -14,6 +14,7 @@ from .authority_deadline import AUTHORITY_CHECK_RETRY_DELAYS, AUTHORITY_UNVERIFI
 from .capability_result import CapabilityResultReason, CapabilityResultReference
 from .execution_backend import (
     ActionAlreadyTerminal,
+    ActionAuthorityWithdrawn,
     ActionLease,
     ActionLeaseLost,
     ScanExecutionBackendError,
@@ -37,7 +38,23 @@ class BrokerActionHTTPError(ScanExecutionBackendError):
 
     def __init__(self, status_code: int, detail: str = "") -> None:
         self.status_code = int(status_code)
+        self.detail = str(detail or "")
         super().__init__(f"broker action endpoint returned {status_code}: {detail[:300]}")
+
+
+# The control plane's heartbeat answer for an action whose target authorization was withdrawn:
+# HTTP 409 with this detail prefix and the reason code. Any other 409 is a lost lease.
+AUTHORITY_WITHDRAWN_DETAIL = "authority_withdrawn:"
+
+
+def authority_withdrawn_reason(exc: BrokerActionHTTPError) -> str | None:
+    detail = exc.detail.strip()
+    if exc.status_code != 409 or not detail.startswith(AUTHORITY_WITHDRAWN_DETAIL):
+        return None
+    try:
+        return CapabilityResultReason(detail[len(AUTHORITY_WITHDRAWN_DETAIL):]).value
+    except ValueError:
+        return None
 
 
 class BrokerScanExecutionBackend:
@@ -139,6 +156,9 @@ class BrokerScanExecutionBackend:
                 "POST", self._path(action.action_id, "heartbeat"), payload,
             )
         except BrokerActionHTTPError as exc:
+            withdrawn = authority_withdrawn_reason(exc)
+            if withdrawn is not None:
+                raise ActionAuthorityWithdrawn(withdrawn) from exc
             if exc.status_code in {401, 404, 409, 410}:
                 raise ActionLeaseLost("broker action lease authority was lost") from exc
             raise

@@ -16,6 +16,7 @@ from .capability_result import (
 )
 from .execution_backend import (
     ActionAlreadyTerminal,
+    ActionAuthorityWithdrawn,
     ActionLeaseLost,
     ScanActionExecutor,
     ScanExecutionBackend,
@@ -194,13 +195,32 @@ class ScanOrchestrator:
         validate_action_lease(lease, plan=plan, action=action)
         await self._emit(action, "running")
         try:
-            await self._backend.heartbeat(lease)
-            result = await self._executor.execute(
-                action,
-                lease,
-                lambda: self._backend.heartbeat(lease),
-            )
-            await self._backend.heartbeat(lease)
+            try:
+                await self._backend.heartbeat(lease)
+                withdrawn = None
+            except ActionAuthorityWithdrawn as exc:
+                withdrawn = exc.reason
+            if withdrawn is not None:
+                # Withdrawn before it started: blocked with the reason, nothing charged.
+                result = await self._executor.terminal_without_execution(
+                    action,
+                    lease,
+                    status=CapabilityResultStatus.BLOCKED.value,
+                    reason_code=withdrawn,
+                    charge_full_reservation=False,
+                )
+            else:
+                result = await self._executor.execute(
+                    action,
+                    lease,
+                    lambda: self._backend.heartbeat(lease),
+                )
+                try:
+                    await self._backend.heartbeat(lease)
+                except ActionAuthorityWithdrawn:
+                    # The action has finished: its receipt is settled, and the control plane
+                    # records it with the authorization stop.
+                    pass
         except ActionLeaseLost:
             result = await self._executor.terminal_without_execution(
                 action,

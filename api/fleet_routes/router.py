@@ -66,6 +66,7 @@ try:
     from scan.action_store import PostgresScanActionStore
     from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
     from scan.broker_authority import RunningBrokerAuthority
+    from scan.broker_backend import AUTHORITY_WITHDRAWN_DETAIL
     from scan.worker_action_executor import with_authority_interruption
     from scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
@@ -119,6 +120,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.action_store import PostgresScanActionStore
     from ..scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
     from ..scan.broker_authority import RunningBrokerAuthority
+    from ..scan.broker_backend import AUTHORITY_WITHDRAWN_DETAIL
     from ..scan.worker_action_executor import with_authority_interruption
     from ..scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from ..scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
@@ -1312,7 +1314,9 @@ async def heartbeat_broker_scan_action(
     reason = await _BROKER_RUNNING_AUTHORITY.reason(
         _pool(), scan_id=str(_row["scan_id"]), plan_digest=body.plan_digest, job=job, action=action)
     if reason is not None:
-        raise HTTPException(status_code=409, detail=f"broker action authorization withdrawn: {reason}")
+        # Distinguishable from a lost lease: the node settles the action as an authorization
+        # stop (``authority_withdrawn_reason``), never as an adapter failure.
+        raise HTTPException(status_code=409, detail=f"{AUTHORITY_WITHDRAWN_DETAIL}{reason}")
     try:
         await backend.heartbeat(action_lease)
     except (ActionLeaseLost, ScanExecutionBackendError) as exc:
@@ -1395,8 +1399,9 @@ async def settle_broker_scan_action(
         # withdrawn is recorded partial with the reason, never as a clean success.
         withdrawn = await _BROKER_RUNNING_AUTHORITY.reason(
             _pool(), scan_id=str(_row["scan_id"]), plan_digest=body.plan_digest, job=job, action=action)
-        if (withdrawn is not None and receipt.status in {"success", "partial"}
-                and "target_authority_interruption" not in receipt.redacted_execution):
+        # Whatever the node says about its own stop, a receipt that reports traffic for a
+        # withdrawn action carries the control plane's reason; the node's stop is kept beside it.
+        if withdrawn is not None and receipt.status in {"success", "partial"}:
             receipt = with_authority_interruption(receipt, withdrawn, utc_now_iso())
         stored = await backend.settle(action_lease, receipt)
     except (ValueError, ActionLeaseLost, ScanExecutionBackendError) as exc:
@@ -3021,10 +3026,13 @@ async def _broker_action_context(
         raise HTTPException(status_code=409, detail="broker job has no Scan owner")
     plan_key = (str(row["scan_id"]), str(plan_digest))
     cached = _BROKER_PLANS.get(plan_key) if reuse_plan else None
-    if cached is not None:
+    if cached is not None and str(await conn.fetchval(
+            "SELECT scan_action_plan_digest FROM scans WHERE id=$1", row["scan_id"]) or "") == str(plan_digest):
+        # The Scan still runs this plan (one primary-key read); otherwise read it afresh below.
         _BROKER_PLANS.move_to_end(plan_key)
         plan, canonical_job = cached
         return _broker_bound_action(row, plan, canonical_job, worker_id, action_id, action_digest)
+    _BROKER_PLANS.pop(plan_key, None)
     action_store = PostgresScanActionStore()
     try:
         plan = await action_store.load_plan(conn, scan_id=str(row["scan_id"]))

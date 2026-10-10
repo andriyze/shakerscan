@@ -132,10 +132,14 @@ offline deterministic finalizer ── findings / coverage / grade reliability
   control plane (`POST /fleet/broker/nodes/{node}/leases/{lease}/actions/{action}/authority`,
   answered by the same guard decision through its cheap poll), so a revoke stops the remote tool; a
   control plane that cannot be reached for about 10 s stops the action as `authorization_unverified`.
-  The control plane also re-checks on every action heartbeat (a withdrawn action's heartbeat is
-  refused with 409, so its lease is not extended) and when the result is settled (a result for a
-  withdrawn action is recorded partial with the reason, keeping its observations, never as a clean
-  success), so a node that does not ask cannot keep a withdrawn action alive. Device posture
+  The control plane also re-checks on every action heartbeat and when the result is settled. A
+  withdrawn action's heartbeat is refused with 409 `authority_withdrawn:<reason>`, which the node
+  treats as an authorization stop, not a lost lease: before the action starts it is settled
+  blocked with the reason and nothing charged; while it runs the tool is stopped and the receipt
+  is partial. A result reporting traffic for a withdrawn action is always recorded partial with
+  the control plane's reason, keeping its observations and any stop the node reported, never as a
+  clean success. A revoke or expiry stays a stop for the rest of the action; an out-of-scope answer
+  (a deactivated target) is checked afresh on the next poll. Device posture
   and probe scans (with their device web children) and AI scans are re-checked the same way as one
   run (`api/scan/running_scan_authority.py`), against what admitted them: the target's standing
   authorization and the approval receipt they were submitted with, each against its own scope. A

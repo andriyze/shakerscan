@@ -145,7 +145,7 @@ def test_the_broker_worker_runs_every_round_under_the_authority():
 
 def test_authority_checks_reuse_the_plan_read_for_the_lease_but_always_check_the_lease(monkeypatch):
     """The frequent authority route reads the plan and job once per plan digest; the lease row
-    (status, expiry, worker) is read and checked on every call."""
+    (status, expiry, worker) and the Scan's current plan digest are read on every call."""
     from datetime import timedelta
     from types import SimpleNamespace
 
@@ -167,9 +167,15 @@ def test_authority_checks_reuse_the_plan_read_for_the_lease_but_always_check_the
             loads.append(scan_id)
             return plan
 
+    stored = {"digest": plan.plan_digest}
+
     class Conn:
         async def fetchrow(self, _query, *_args):
             return {"status": "running", "target_id": None, "scan_job_payload": "{}"}
+
+        async def fetchval(self, query, *_args):
+            assert "scan_action_plan_digest" in query
+            return stored["digest"]
 
     job = SimpleNamespace(scan_id=plan.scan_id, shard=None, target=SimpleNamespace(digest=plan.target_binding_digest),
                           execution_plan=SimpleNamespace(digest=plan.execution_plan_digest))
@@ -191,9 +197,73 @@ def test_authority_checks_reuse_the_plan_read_for_the_lease_but_always_check_the
         assert len(loads) == 1
         await context()  # other routes read the plan every time
         assert len(loads) == 2
+        # The Scan's current plan digest no longer matches: the cached plan is dropped and the
+        # plan is read afresh (where the full digest check applies).
+        stored["digest"] = "f" * 64
+        await context(reuse_plan=True)
+        assert len(loads) == 3
+        stored["digest"] = plan.plan_digest
         lease["status"] = "released"  # a lease that ended is refused even with the plan cached
         try:
             await context(reuse_plan=True)
         except HTTPException as exc:
             return exc.status_code
     assert asyncio.run(run()) == 409
+
+
+def test_a_withdrawn_heartbeat_is_a_distinct_signal_from_a_lost_lease():
+    from api.scan.execution_backend import ActionAuthorityWithdrawn, ActionLeaseLost
+
+    plan = _plan()
+    action = plan.actions[0]
+
+    def backend(error):
+        async def request(_method, _path, _payload):
+            raise error
+        return BrokerScanExecutionBackend(plan=plan, worker_id="broker:node-1", job_lease_token="t" * 40,
+                                          base_path=BASE, request=request)
+
+    lease = _lease(plan, action)
+    lease = type(lease)(**{**lease.__dict__, "backend": "broker", "worker_id": "broker:node-1"})
+    withdrawn = backend(BrokerActionHTTPError(409, "authority_withdrawn:authorization_revoked"))
+    try:
+        asyncio.run(withdrawn.heartbeat(lease))
+    except ActionAuthorityWithdrawn as exc:
+        assert exc.reason == "authorization_revoked" and not isinstance(exc, ActionLeaseLost)
+    else:
+        raise AssertionError("a withdrawn heartbeat must raise")
+    for error in (BrokerActionHTTPError(409, "broker action lease expired"),
+                  BrokerActionHTTPError(409, "authority_withdrawn:not-a-reason"),
+                  BrokerActionHTTPError(410, "authority_withdrawn:authorization_revoked")):
+        try:
+            asyncio.run(backend(error).heartbeat(lease))
+        except ActionLeaseLost:
+            pass
+        else:
+            raise AssertionError(f"{error} must stay a lost lease")
+
+
+def test_a_withdrawn_lease_heartbeat_stops_the_action_and_keeps_its_receipt():
+    from dataclasses import replace
+
+    from api.scan.execution_backend import ActionAuthorityWithdrawn
+
+    plan = _plan()
+    action = plan.actions[0]
+    calls = []
+    heartbeats = []
+
+    async def heartbeat():
+        heartbeats.append(1)
+        raise ActionAuthorityWithdrawn("authorization_revoked")
+
+    # The node's own poll would take 30 s; the lease heartbeat (every 1.7 s) sees the withdrawal.
+    control = FixtureControlPlane(default={"reason": None})
+    executor = _executor(_long_dispatch(calls), _authority(plan, control, poll_seconds=30.0,
+                                                            unverified_after_seconds=60.0))
+    started = time.monotonic()
+    receipt = asyncio.run(executor.execute(action, replace(_lease(plan, action), lease_seconds=5), heartbeat))
+    assert time.monotonic() - started < 3.0 and heartbeats == [1]
+    assert receipt.status == "partial" and receipt.errors == ("authorization_revoked",)
+    assert receipt.redacted_execution["target_authority_interruption"]["reason_code"] == "authorization_revoked"
+    assert receipt.budget_consumed["http_requests"] == 1
