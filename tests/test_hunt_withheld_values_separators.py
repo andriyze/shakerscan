@@ -429,3 +429,54 @@ def test_hostile_values_never_reach_the_masked_exports(export_format):
         escaped = json.dumps(value, ensure_ascii=False)[1:-1]
         assert _hostile_leaks(text, value, template) == [], (export_format, form, len(value))
         assert _hostile_leaks(text, escaped, template) == [], (export_format, form, len(value))
+
+
+# --- Review of the fix: code is not a secret, and no tail at any length --------------------------
+
+@pytest.mark.parametrize("code", [
+    "tokens.map(token => token.trim())",
+    "  password => validatePassword(password),",
+    "const apiKey => fetch('/k')",
+    "$a = ['password' => $_ENV['DB_PASS'], 'token' => getToken()];",
+    "match ($x) { 'secret' => handleSecret() }",
+])
+def test_arrow_code_is_not_read_as_a_php_info_value(code):
+    """``=>`` is a separator only as ``php -i`` writes it, not in JS or PHP code."""
+    assert mask_body_text(code) == code
+
+
+@pytest.mark.parametrize(("body", "value"), [
+    ("Server=s;Password='Ab1;Cd2''Ef3Gh4TailQq';Database=App", "Ab1;Cd2'Ef3Gh4TailQq"),
+    ('Server=s;Password=Ab1"Ef3Gh4TailQq;Database=App', 'Ab1"Ef3Gh4TailQq'),
+    (json.dumps({"conn": 'Server=s;Password=Ab1&Ef3"Gh4TailQq;'}), 'Ab1&Ef3"Gh4TailQq'),
+])
+def test_plain_connection_string_values_with_quotes_are_withheld_whole(body, value):
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text(body)
+    assert "TailQq" not in masked and "Gh4" not in masked
+    assert collector.values == [value]
+
+
+def test_a_line_value_longer_than_any_bound_is_withheld_whole():
+    value = "A" * 9000 + "&TailSecretQq"
+    masked = mask_body_text(f"SECRET_KEY={value}\nDEBUG=0\n")
+    assert masked == "SECRET_KEY=***\nDEBUG=0\n"
+    inline = mask_body_text("note: api_key=" + "B" * 9000 + "TailSecretQq here")
+    assert "TailSecretQq" not in inline and inline.endswith(" here")
+
+
+def test_a_line_value_ending_in_a_bracket_keeps_it():
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text("SECRET_KEY=k3x9qv7m2p+bqeo=)\n")
+    assert masked == "SECRET_KEY=[withheld:1]\n" and collector.values == ["k3x9qv7m2p+bqeo=)"]
+
+
+def test_an_unclosed_quote_does_not_swallow_the_markup_after_it():
+    body = 'PASSWORD="abc123def\n<input name="token" value="zz">\n<p>after</p>\n'
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text(body)
+    assert "abc123def" not in masked and "<p>after</p>" in masked
+    assert "abc123def" in collector.values

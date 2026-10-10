@@ -1125,9 +1125,14 @@ _INLINE_VALUE_STOPS = frozenset("\"'<>&`")
 _LINE_VALUE_CHARS = 4096
 # The look-ahead's span (1 + 511); an inline value that fills it is read on, to the same end.
 _INLINE_LOOK_CHARS = 512
-_INLINE_VALUE_RE = re.compile(r"[^\r\n\"'<>&`]{0,%d}" % _LINE_VALUE_CHARS)
+_INLINE_VALUE_RE = re.compile(r"[^\s\"'<>&`]*")
 # A ``;``-separated pair's value: to the next ``;``, the line end, a quote or markup.
-_LISTED_VALUE_RE = re.compile(r"[^;\r\n\"'<>`]{0,4096}")
+_LISTED_VALUE_RE = re.compile(r"(?:[^;\r\n\"'<>`]|[\"'](?![ \t,}\]>/]|$))*", re.MULTILINE)
+# A quoted ``;``-separated value (``Password='a;b''c'``): a doubled quote is one quote.
+_LISTED_QUOTED = {
+    '"': re.compile(r'(?:[^"\r\n]|""){0,4096}(?=")'),
+    "'": re.compile(r"(?:[^'\r\n]|''){0,4096}(?=')"),
+}
 _LINE_HEAD_RE = re.compile(r"[ \t]*(?:(?:export|set)[ \t]+)?")
 
 
@@ -1146,7 +1151,7 @@ _AUTH_SCHEME_RE = re.compile(r"(?i)(?:bearer|basic|digest|token|negotiate|apikey
 # statement separator, trailing blanks.
 
 
-def _trimmed_value(value: str) -> str:
+def _trimmed_value(value: str, *, brackets: bool = True) -> str:
     """An unquoted value runs to the end of its line (a password may hold ``;`` or spaces), less
     a trailing comment or separator."""
     if WITHHELD_MARKER_RE.match(value):
@@ -1158,7 +1163,7 @@ def _trimmed_value(value: str) -> str:
         last = trimmed[-1]
         if last in ";, \t\r\n":
             trimmed = trimmed[:-1]
-        elif last in ")]}" and trimmed.count({")": "(", "]": "[", "}": "{"}[last]) < trimmed.count(last):
+        elif brackets and last in ")]}" and trimmed.count({")": "(", "]": "[", "}": "{"}[last]) < trimmed.count(last):
             trimmed = trimmed[:-1]
         else:
             break
@@ -1171,22 +1176,52 @@ _MULTILINE_QUOTED = {
     '"': re.compile(r'(?:\\.|[^\\"]){0,%d}(?=")' % _LINE_VALUE_CHARS, re.DOTALL),
     "'": re.compile(r"(?:\\.|[^\\']){0,%d}(?=')" % _LINE_VALUE_CHARS, re.DOTALL),
 }
+_LINE_QUOTED = {
+    '"': re.compile(r'(?:\\.|[^\\"\r\n])*(?=")'),
+    "'": re.compile(r"(?:\\.|[^\\'\r\n])*(?=')"),
+}
+# What may follow the closing quote of a value that spans lines: the end of its line.
+_QUOTE_CLOSES_LINE_RE = re.compile(r"[ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)")
 
 
 def _line_value(text: str, start: int, separator: str) -> tuple[str, str | None]:
     """The value of an assignment at the start of a line (``.env``, ``.ini``, shell): the rest
     of the line, so a ``&``, ``=``, quote or ``<`` inside a password never leaves a tail behind.
     After an opening quote the value ends at its closing quote (an escaped one does not end it),
-    on a later line if need be; then the second item is the quote (the value is exact, not
-    trimmed)."""
-    end = text.find("\n", start, start + _LINE_VALUE_CHARS)
-    value = text[start:end if end >= 0 else start + _LINE_VALUE_CHARS].rstrip("\r")
+    on a later line when that quote ends its line; then the second item is the quote (the value
+    is exact, not trimmed). A line value is not cut at any length."""
+    end = text.find("\n", start)
+    value = text[start:end if end >= 0 else len(text)].rstrip("\r")
     quote = separator.rstrip()[-1:]
     if quote in {'"', "'"}:
-        quoted = _MULTILINE_QUOTED[quote].match(text, start)
-        if quoted is not None and start + len(quoted.group(0)) < len(text):
+        quoted = _LINE_QUOTED[quote].match(text, start)
+        if quoted is not None and start + len(quoted.group(0)) < len(text) \
+                and text[start + len(quoted.group(0))] == quote:
             return quoted.group(0), quote
+        # Unclosed on its line: a dotenv value spanning lines, only when its closing quote ends a
+        # line (so a stray quote never swallows the markup that follows it).
+        spanning = _MULTILINE_QUOTED[quote].match(text, start)
+        if spanning is not None:
+            close = start + len(spanning.group(0))
+            if close < len(text) and _QUOTE_CLOSES_LINE_RE.match(text, close + 1):
+                return spanning.group(0), quote
     return value, None
+
+
+# ``php -i`` names: an environment variable (``DB_PASSWORD``) or a dotted directive
+# (``mysqli.default_pw``); a JS arrow parameter is neither.
+_PHP_INFO_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{0,80}|[A-Za-z_][\w]*(?:\.[\w]+)+")
+# A value that reads as code (a variable, a call, a member access, a closure), not as a setting.
+_CODE_VALUE_RE = re.compile(r"\$|\(|function\b|fn\b|[A-Za-z_$][\w$]*[ \t]*[(.\[]")
+
+
+def _php_info_pair(name: str, separator: str, value: str, line_start: bool) -> bool:
+    """``DB_PASSWORD => value`` as ``php -i`` prints it: at a line start, an unquoted env-style or
+    dotted directive name, and a value that does not read as code."""
+    return (
+        line_start and not separator.lstrip().startswith(("'", '"'))
+        and bool(_PHP_INFO_NAME_RE.fullmatch(name.strip())) and not _CODE_VALUE_RE.match(value)
+    )
 
 
 def mask_text_assignments(text: str) -> str:
@@ -1203,6 +1238,8 @@ def mask_text_assignments(text: str) -> str:
             continue  # an embedded array: the embedded-object pass owns it
         separator = match.group(2)
         line_start = _at_line_start(text, match.start(1))
+        if "=>" in separator and not _php_info_pair(match.group(1), separator, value, line_start):
+            continue  # a JS arrow function or a PHP array entry, not ``php -i`` output
         # ``Server=s;Password=Ab1&Cd2;``: a pair after ``;`` (a connection string, a cookie list)
         # runs to the next ``;``, blanks and ``&`` included.
         listed = match.start(1) > 0 and text[match.start(1) - 1] == ";"
@@ -1211,6 +1248,14 @@ def mask_text_assignments(text: str) -> str:
         if normalized_key_name(label) in _COOKIE_LABELS:
             value = value.split(";", 1)[0]
         elif listed:
+            quote = separator.rstrip()[-1:]
+            if quote in _LISTED_QUOTED:
+                quoted = _LISTED_QUOTED[quote].match(text, match.start(3))
+                if quoted is not None and quoted.group(0) and not WITHHELD_MARKER_RE.match(quoted.group(0)):
+                    pieces.append(text[cursor:match.start(3)])
+                    pieces.append(_withhold(quoted.group(0).replace(quote * 2, quote)))
+                    cursor = match.start(3) + len(quoted.group(0))
+                    continue
             value = _LISTED_VALUE_RE.match(text, match.start(3)).group(0)
         elif not line_start:
             if len(value) >= _INLINE_LOOK_CHARS:  # longer than the look-ahead sees: read it all
@@ -1228,7 +1273,7 @@ def mask_text_assignments(text: str) -> str:
                 pieces.append(_withhold(unescape_dotenv(value, spanning_quote)))
                 cursor = match.start(3) + len(value)
                 continue
-        value = _trimmed_value(value)
+        value = _trimmed_value(value, brackets=not line_start)
         if not value or is_location_value(label, value) or _JSON_LITERAL_VALUE_RE.fullmatch(value):
             continue
         pieces.append(text[cursor:match.start(3)])
@@ -1461,6 +1506,9 @@ def _replace_quoted(
         if (
             match.start() < cursor or not raw or not is_withheld_key(name)
             or is_location_value(name, raw) or WITHHELD_MARKER_RE.fullmatch(raw)
+            # ``;Password='a''b'``: a connection-string value, read by its own grammar (a doubled
+            # quote is one quote) in ``mask_text_assignments``.
+            or (not php and text[match.start() - 1:match.start()] == ";")
         ):
             continue
         pieces.append(text[cursor:match.start(value_group)])
