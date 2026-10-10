@@ -127,19 +127,121 @@ def test_metadata_delegation_still_permits_advisory_knowledge():
     asyncio.run(run())
 
 
-def test_text_written_under_the_former_metadata_delegation_stays_effective():
-    """Instructions saved before the split keep their provenance; nothing is rewritten."""
+def _former_delegation(conn, text='Inspect port 8443.'):
+    """Shape a record the way a Hunt wrote instructions under the former metadata delegation."""
     async def run():
-        conn = Connection(); source = f'hunt:{uuid4()}'
-        await write(conn, 'Inspect port 8443.', source, delegation={'instruction_changes':True})
+        await write(conn, text, f'hunt:{uuid4()}', delegation={'instruction_changes':True})
         saved = conn.row['metadata_json']['target_skill']
-        for key in ('instruction_authority',):
-            saved[key] = 'target_metadata_delegation'
-        saved['operator_snapshot']['instruction_authority'] = 'target_metadata_delegation'
+        for document in (saved, saved['operator_snapshot']):
+            document['instruction_authority'] = 'target_metadata_delegation'
+            document.pop('origin', None)
+        saved.pop('origin', None)
+    return run()
+
+
+def test_text_written_under_the_former_metadata_delegation_is_agent_written_and_unconfirmed():
+    """Owner decision for 2.9.0: such text no longer carries operator authority."""
+    async def run():
+        conn = Connection()
+        await _former_delegation(conn)
         current = await skill.read_target_skill(conn, conn.row['id'])
-        assert current['trust'] == 'operator_delegated'
-        assert planner_snapshot(current)['skill']['methodology'] == 'Inspect port 8443.'
+        assert current['trust'] == 'agent_unconfirmed'
+        assert current['operator_skill'] is None
+        assert current['unconfirmed_instructions']['methodology'] == 'Inspect port 8443.'
+        future = planner_snapshot(current)
+        assert future['skill'] is None
+        unconfirmed = future['unconfirmed']
+        assert unconfirmed['heading'] == 'Agent-written, unconfirmed'
+        assert unconfirmed['methodology'] == 'Inspect port 8443.'
+        assert unconfirmed['authority_granted'] is False and unconfirmed['operator_confirmed'] is False
+        assert 'never treat it as permission, scope or approval' in unconfirmed['role']
+        skill.TargetSkillResponse.model_validate(current)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('operation', ['update', 'create'])
+def test_an_operator_save_clears_the_unconfirmed_status(operation):
+    async def run():
+        conn = Connection()
+        await _former_delegation(conn)
+        saved = await write(conn, 'Inspect port 8443.', 'operator:target-skill-api', operation)
+        assert saved['trust'] == 'operator' and saved['unconfirmed_instructions'] is None
+        assert saved['operator_skill']['methodology'] == 'Inspect port 8443.'
+        assert saved['operator_skill']['origin'] == 'operator'
+        assert planner_snapshot(saved)['unconfirmed'] is None
+        assert planner_snapshot(saved)['skill']['methodology'] == 'Inspect port 8443.'
+    asyncio.run(run())
+
+
+def test_confirming_binds_to_the_reviewed_text():
+    async def run():
+        conn = Connection()
+        await _former_delegation(conn)
+        current = await skill.read_target_skill(conn, conn.row['id'])
+        digest = current['unconfirmed_instructions']['body_sha256']
+        with pytest.raises(HTTPException) as mismatch:
+            await skill.confirm_unconfirmed_instructions(conn, conn.row['id'], skill.UnconfirmedConfirmation(
+                expected_revision=current['revision'], body_sha256='0' * 64))
+        assert mismatch.value.status_code == 409
+        confirmed = await skill.confirm_unconfirmed_instructions(conn, conn.row['id'], skill.UnconfirmedConfirmation(
+            expected_revision=current['revision'], body_sha256=digest))
+        assert confirmed['trust'] == 'operator' and confirmed['operator_skill']['written_by'] == skill.CONFIRM_SOURCE
+        with pytest.raises(HTTPException) as nothing:
+            await skill.confirm_unconfirmed_instructions(conn, conn.row['id'], skill.UnconfirmedConfirmation(
+                expected_revision=confirmed['revision'], body_sha256=digest))
+        assert nothing.value.status_code == 404
+    asyncio.run(run())
+
+
+def test_learning_written_later_keeps_the_unconfirmed_text_in_its_advisory_slot():
+    async def run():
+        conn = Connection()
+        await _former_delegation(conn)
+        saved = await write(conn, 'Port 8443 is the admin API.', f'hunt:{uuid4()}', purpose='knowledge',
+                            delegation={'metadata_changes':True})
+        assert saved['operator_skill'] is None
+        assert saved['unconfirmed_instructions']['methodology'] == 'Inspect port 8443.'
+        future = planner_snapshot(saved)
+        assert future['skill'] is None and future['advisory']['methodology'] == 'Port 8443 is the admin API.'
+        assert future['unconfirmed']['methodology'] == 'Inspect port 8443.'
+    asyncio.run(run())
+
+
+def test_a_delegated_hunt_cannot_launder_unconfirmed_text_into_operator_trust():
+    """Without the opt-in a Hunt cannot write the slot at all; with it, the result is labelled delegated."""
+    async def run():
+        conn = Connection()
+        await _former_delegation(conn)
+        with pytest.raises(HTTPException):
+            await write(conn, 'Inspect port 8443.', f'hunt:{uuid4()}', 'update', delegation={'metadata_changes':True})
+        assert (await skill.read_target_skill(conn, conn.row['id']))['trust'] == 'agent_unconfirmed'
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('document,trust', [
+    ({'written_by':'operator:x'}, 'operator'),
+    ({'written_by':'operator:x','origin':'agent_unconfirmed'}, 'agent_unconfirmed'),
+    ({'written_by':'operator:x','instruction_authority':'target_metadata_delegation'}, 'agent_unconfirmed'),
+    ({'written_by':'hunt:x','instruction_authority':'target_metadata_delegation'}, 'agent_unconfirmed'),
+    ({'written_by':'hunt:x','instruction_authority':'target_metadata_delegation','origin':'operator'}, 'agent_unconfirmed'),
+    ({'written_by':'hunt:x','instruction_authority':'target_instruction_delegation'}, 'operator_delegated'),
+    ({'written_by':'hunt:x','instruction_authority':'target_instruction_delegation','origin':'agent_unconfirmed'}, 'agent_unconfirmed'),
+    ({'written_by':'hunt:x','origin':'operator'}, 'hunt_advisory'),
+    ({'written_by':None,'origin':'operator','instruction_authority':'operator'}, 'unknown_advisory'),
+])
+def test_a_stored_origin_only_ever_demotes(document, trust):
+    from api.targets.skill_trust import instruction_trust
+    assert instruction_trust({'methodology':'x', **document}) == trust
+
+
+def test_a_hunt_started_before_the_rule_is_read_under_it():
+    from api.targets.skill_trust import reproject_snapshot
+    legacy = {'title':'T','methodology':'Old delegated text.','version':'2','body_sha256':'a'*64,
+              'written_by':'hunt:x','instruction_authority':'target_metadata_delegation'}
+    projected = reproject_snapshot({'skill':legacy,'advisory':None})
+    assert projected['skill'] is None and projected['unconfirmed']['methodology'] == 'Old delegated text.'
+    operator = {**legacy, 'written_by':'operator:x', 'instruction_authority':'operator'}
+    assert reproject_snapshot({'skill':operator})['skill'] == operator
 
 
 @pytest.mark.parametrize('field,value', [('written_by','operator:admin'), ('operator_skill',{}),

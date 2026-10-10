@@ -309,5 +309,6 @@ def test_review_bindings_quotas_and_trust_labels(monkeypatch):
                 assert instructions['operator_reviewed'] is False and instructions['trust'] == 'operator_delegated'
                 assert 'no operator reviewed' in instructions['role']
                 actions = later['context_pack']['target_actions']
-                assert actions['actions'][0]['trust'] == 'hunt_advisory' and 'not operator instructions' in actions['trust_note']
+                # Saved under the explicit instruction_changes opt-in, like the instructions above.
+                assert actions['actions'][0]['trust'] == 'operator_delegated' and 'not operator instructions' in actions['trust_note']
     asyncio.run(run())

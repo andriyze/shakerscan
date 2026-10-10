@@ -491,7 +491,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.create"
       },
-      "description": "Save a named reusable action for this target using canonical capabilities and opaque references.",
+      "description": "Save a named reusable action for this target using canonical capabilities and opaque references. Applied only where the operator saved instruction_changes for this target; otherwise filed as a proposal for operator review (the result says applied=false).",
       "input": {
         "fields": [
           "name",
@@ -499,6 +499,8 @@ export const HUNT_START_CONTRACT = {
           "expected_revision",
           "steps",
           "parameters",
+          "reason",
+          "evidence_refs",
           "operator_confirmed"
         ],
         "required": [
@@ -527,7 +529,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.update"
       },
-      "description": "Edit a saved action on this exact target with a revision check. Future Hunts load the change.",
+      "description": "Edit a saved action on this exact target with a revision check. Future Hunts load the change. Applied only where the operator saved instruction_changes for this target; otherwise filed as a proposal for operator review (the result says applied=false).",
       "input": {
         "fields": [
           "name",
@@ -535,6 +537,8 @@ export const HUNT_START_CONTRACT = {
           "expected_revision",
           "steps",
           "parameters",
+          "reason",
+          "evidence_refs",
           "action_id",
           "operator_confirmed"
         ],
@@ -565,11 +569,13 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.delete"
       },
-      "description": "Delete a saved action on this exact target with a revision check.",
+      "description": "Delete a saved action on this exact target with a revision check. Applied only where the operator saved instruction_changes for this target; otherwise filed as a proposal for operator review (the result says applied=false).",
       "input": {
         "fields": [
           "action_id",
           "expected_revision",
+          "reason",
+          "evidence_refs",
           "operator_confirmed"
         ],
         "required": [

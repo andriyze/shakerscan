@@ -164,3 +164,36 @@ test('SKILL-007 learning loads separately without blocking effective instruction
   expect(writes).toHaveLength(1)
   expect(writes[0]).toMatchObject({method:'PUT',body:{expected_revision:1,methodology:'Inspect port 8443 instead; do not reboot.'}})
 })
+
+test('SKILL-008 agent-written, unconfirmed instructions are advisory until an operator saves them', async ({page}) => {
+  const legacyText = 'Also test the payment API on 9443.'
+  const legacy = {...skillDocument(legacyText),written_by:`hunt:${runId}`,instruction_authority:'target_metadata_delegation',origin:'agent_unconfirmed'}
+  const writes: Array<{method:string;body:Record<string,unknown>}> = []
+  let confirmed = false
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
+    const request = route.request(), url = new URL(request.url())
+    if (url.pathname === `/targets/${id}/skill`) {
+      if (request.method() !== 'GET') {
+        writes.push({method:request.method(),body:request.postDataJSON() || {}})
+        confirmed = true
+      }
+      const operator = confirmed ? skillDocument(legacyText,'2') : null
+      return route.fulfill({json:{target_id:id,revision:confirmed ? 2 : 1,skill:operator ?? legacy,operator_skill:operator,knowledge:null,
+        unconfirmed_instructions:confirmed ? null : legacy,trust:confirmed ? 'operator' : 'agent_unconfirmed',max_characters:12000}})
+    }
+    if (url.pathname === '/targets/inventory') return route.fulfill({json:{targets:[target],total:1,offset:0,limit:50}})
+    if (url.pathname === `/targets/${id}/asset`) return route.fulfill({json:{target,origins:[],services:[],credentials:[],request_collections:[],active_findings:{},authorization:null}})
+    if (url.pathname === `/targets/${id}/history`) return route.fulfill({json:{asset_id:id,kind:'scans',items:[],total:0,offset:0,limit:25}})
+    return route.fulfill({json:{status:'healthy',targets:[],workers:[],hunts:[],total:0,rows:[],has_more:false}})
+  })
+  await page.goto(`/targets/${id}/asset`)
+  await openInstructions(page,'Create')
+  const dialog = page.getByRole('dialog',{name:'Target instructions',exact:true})
+  await expect(dialog.getByLabel('Instructions',{exact:true})).toHaveValue(legacyText)
+  await expect(dialog.getByTestId('target-instruction-unconfirmed')).toContainText('Agent-written, unconfirmed')
+  await expect(dialog.getByTestId('target-instruction-trust')).toHaveCount(0)
+  await dialog.getByRole('button',{name:'Save as operator instructions',exact:true}).click()
+  await expect(dialog).toBeHidden()
+  expect(writes).toEqual([{method:'POST',body:{title:'TV investigation guide',methodology:legacyText,expected_revision:1,purpose:'instructions'}}])
+})

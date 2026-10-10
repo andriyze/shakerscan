@@ -1,7 +1,7 @@
 import {API_URL, getApiErrorMessage} from './apiConfig'
 
 export interface TargetActionStep {capability:string; input:Record<string,unknown>; description?:string}
-export interface TargetAction {id:string;target_id:string;name:string;instructions:string;steps:TargetActionStep[];parameters:Record<string,{type:'string'|'integer'|'boolean';description?:string;default?:unknown}>;revision:number;body_sha256:string;updated_at:string;written_by:string}
+export interface TargetAction {id:string;target_id:string;name:string;instructions:string;steps:TargetActionStep[];parameters:Record<string,{type:'string'|'integer'|'boolean';description?:string;default?:unknown}>;revision:number;body_sha256:string;updated_at:string;written_by:string;trust?:'operator'|'operator_delegated'|'agent_unconfirmed'}
 export interface TargetActions {target_id:string;revision:number;actions:TargetAction[];max_actions:number;authority_granted:false}
 async function request(id:string, suffix='', init?:RequestInit):Promise<TargetActions> {
   const response = await fetch(`${API_URL}/targets/${encodeURIComponent(id)}/actions${suffix}`, {cache:'no-store',...init})
