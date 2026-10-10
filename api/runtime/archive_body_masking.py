@@ -1123,6 +1123,9 @@ _TEXT_ASSIGNMENT_RE = re.compile(
 _INLINE_VALUE_STOPS = frozenset("\"'<>&`")
 # The longest line value withheld as one (a value on a longer line is cut here).
 _LINE_VALUE_CHARS = 4096
+# The look-ahead's span (1 + 511); an inline value that fills it is read on, to the same end.
+_INLINE_LOOK_CHARS = 512
+_INLINE_VALUE_RE = re.compile(r"[^\r\n\"'<>&`]{0,%d}" % _LINE_VALUE_CHARS)
 # A ``;``-separated pair's value: to the next ``;``, the line end, a quote or markup.
 _LISTED_VALUE_RE = re.compile(r"[^;\r\n\"'<>`]{0,4096}")
 _LINE_HEAD_RE = re.compile(r"[ \t]*(?:(?:export|set)[ \t]+)?")
@@ -1162,18 +1165,28 @@ def _trimmed_value(value: str) -> str:
     return trimmed
 
 
-def _line_value(text: str, start: int, separator: str) -> str:
+# A quoted line value: up to its closing quote, escapes honoured (``\"`` does not end it), on a
+# later line when it runs on past its own (a dotenv ``KEY="first\nsecond"``), bounded.
+_MULTILINE_QUOTED = {
+    '"': re.compile(r'(?:\\.|[^\\"]){0,%d}(?=")' % _LINE_VALUE_CHARS, re.DOTALL),
+    "'": re.compile(r"(?:\\.|[^\\']){0,%d}(?=')" % _LINE_VALUE_CHARS, re.DOTALL),
+}
+
+
+def _line_value(text: str, start: int, separator: str) -> tuple[str, str | None]:
     """The value of an assignment at the start of a line (``.env``, ``.ini``, shell): the rest
     of the line, so a ``&``, ``=``, quote or ``<`` inside a password never leaves a tail behind.
-    After an opening quote the value ends at the matching quote on the line."""
+    After an opening quote the value ends at its closing quote (an escaped one does not end it),
+    on a later line if need be; then the second item is the quote (the value is exact, not
+    trimmed)."""
     end = text.find("\n", start, start + _LINE_VALUE_CHARS)
     value = text[start:end if end >= 0 else start + _LINE_VALUE_CHARS].rstrip("\r")
     quote = separator.rstrip()[-1:]
     if quote in {'"', "'"}:
-        close = value.find(quote)
-        if close >= 0:
-            value = value[:close]
-    return value
+        quoted = _MULTILINE_QUOTED[quote].match(text, start)
+        if quoted is not None and start + len(quoted.group(0)) < len(text):
+            return quoted.group(0), quote
+    return value, None
 
 
 def mask_text_assignments(text: str) -> str:
@@ -1200,11 +1213,21 @@ def mask_text_assignments(text: str) -> str:
         elif listed:
             value = _LISTED_VALUE_RE.match(text, match.start(3)).group(0)
         elif not line_start:
+            if len(value) >= _INLINE_LOOK_CHARS:  # longer than the look-ahead sees: read it all
+                value = _INLINE_VALUE_RE.match(text, match.start(3)).group(0)
             # Inline (prose, a query, a header list): the value ends at the first blank.
             scheme = _AUTH_SCHEME_RE.match(value)
             value = (scheme.group(0) if scheme else re.split(r"[ \t]", value, maxsplit=1)[0])
         else:
-            value = _line_value(text, match.start(3), separator)
+            value, spanning_quote = _line_value(text, match.start(3), separator)
+            if spanning_quote:
+                if (not value or WITHHELD_MARKER_RE.fullmatch(value) or value == MASK
+                        or is_location_value(label, value)):
+                    continue  # withheld already (the quoted pass), empty, or a URL named as one
+                pieces.append(text[cursor:match.start(3)])
+                pieces.append(_withhold(unescape_dotenv(value, spanning_quote)))
+                cursor = match.start(3) + len(value)
+                continue
         value = _trimmed_value(value)
         if not value or is_location_value(label, value) or _JSON_LITERAL_VALUE_RE.fullmatch(value):
             continue
