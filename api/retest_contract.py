@@ -1113,6 +1113,11 @@ async def _run_schema_migrations_once(pool) -> None:
 
     Called from both API and worker startup. Uses pg_advisory_lock so only one
     process actually executes the DDL statements.
+
+    This is the frozen baseline: ``targets.asset_migration.run_unified_startup`` skips it once a
+    database is converted, so a schema change or data migration added here never reaches an
+    upgraded install. Add new ones to the always-run section of ``run_unified_startup``
+    (tests/test_schema_baseline_frozen.py refuses a new statement here).
     """
     async with pool.acquire() as conn:
         await assert_base_schema(conn)
@@ -1275,20 +1280,6 @@ async def _run_schema_migrations_once(pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_targets_asm_enabled
                 ON targets(asm_enabled) WHERE asm_enabled = true
-            """)
-
-            # Engines before 2.8.2 stored two-label roots (co.uk for shop.example.co.uk), which
-            # span registrants; recompute them from each URL under the Public Suffix List.
-            try:
-                from scope.roots import recompute_spanning_target_roots
-            except ModuleNotFoundError:
-                from api.scope.roots import recompute_spanning_target_roots
-            await recompute_spanning_target_roots(conn)
-
-            # Who requested a Targets-page discovery run (POST /discovery, 2.8.2).
-            await conn.execute("""
-                ALTER TABLE discovery_runs
-                ADD COLUMN IF NOT EXISTS requested_by TEXT
             """)
 
             # Recurring schedules now have a first-class kind. Existing
@@ -5043,15 +5034,6 @@ async def _run_schema_migrations_once(pool) -> None:
                 from targets.asset_inputs_migration import migrate_asset_inputs
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
-
-            # Targets whose stored host the one canonicalizer now refuses: rewrite a numeric
-            # spelling with one reading, flag the rest (targets/host_canonical_repair.py).
-            async with conn.transaction():
-                try:
-                    from targets.host_canonical_repair import repair_target_host_spellings
-                except ModuleNotFoundError:
-                    from api.targets.host_canonical_repair import repair_target_host_spellings
-                await repair_target_host_spellings(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 
