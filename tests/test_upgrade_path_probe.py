@@ -156,6 +156,7 @@ def test_identity_requires_the_candidate_version_revision_and_a_uniform_fleet():
 class FakeApi(BaseHTTPRequestHandler):
     discovery_status = 200
     standing = True
+    missing_scan = False
 
     def log_message(self, *args):
         return
@@ -178,6 +179,8 @@ class FakeApi(BaseHTTPRequestHandler):
         if path in ("/targets", "/scans", "/findings"):
             return self._send(200, {"total": 5})
         if path.startswith("/scans/"):
+            if FakeApi.missing_scan and path == f"/scans/{STATE['scan_id']}":
+                return self._send(404, {"detail": "not found"})
             return self._send(200, {"status": "completed"})
         if path.endswith("/authorization"):
             return self._send(200, {"authorization": {"standing": FakeApi.standing,
@@ -250,3 +253,42 @@ def test_check_fails_on_the_wrong_version(fake_api):
     assert probe.main(["check", "--api", base, "--state", str(state), "--report", str(report),
                        "--expect-version", "2.8.3"]) == 1
     assert json.loads(report.read_text(encoding="utf-8"))["checks"]["candidate identity"] == "fail"
+
+
+def test_a_seeded_read_that_worked_before_the_upgrade_must_still_work():
+    baseline = {"/targets/{target_id}": 200, "/scans/{scan_id}": 200, "/gone/{scan_id}": 200, "/x/{scan_id}": 404}
+    upgraded = {"/targets/{target_id}": 200, "/scans/{scan_id}": 404, "/x/{scan_id}": 404}
+    assert probe.seeded_regressions(baseline, upgraded) == [
+        "GET /scans/{scan_id}: 200 before the upgrade, 404 after"]
+
+
+def test_a_rewritten_field_is_a_change():
+    assert probe.snapshot_changes({"url": "http://a", "name": "n"}, {"url": "http://a", "name": None}) == [
+        "name: 'n' -> None"]
+    assert probe.snapshot_changes({"url": "http://a"}, {"url": "http://a", "extra": 1}) == []
+
+
+def test_a_previous_release_that_made_no_hunt_record_fails_the_check(fake_api):
+    base, state, report = fake_api
+    state.write_text(json.dumps(dict(STATE, hunt_id=None, hunt_seed="refused 422")), encoding="utf-8")
+    assert probe.main(["check", "--api", base, "--state", str(state), "--report", str(report),
+                       "--expect-version", "2.8.2"]) == 1
+    assert json.loads(report.read_text(encoding="utf-8"))["checks"]["seeded Hunt record"] == "fail"
+
+
+def test_lost_seeded_reads_fail_against_the_baseline_sweep(fake_api, tmp_path):
+    base, state, report = fake_api
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"sweep": {"seeded_statuses": {"/targets/{target_id}": 200}}}), encoding="utf-8")
+    assert probe.main(["check", "--api", base, "--state", str(state), "--report", str(report),
+                       "--expect-version", "2.8.2", "--baseline-sweep", str(baseline)]) == 0
+    baseline.write_text(json.dumps({"sweep": {"seeded_statuses": {"/compare": 200, "/scans/{scan_id}": 200}}}),
+                        encoding="utf-8")
+    FakeApi.missing_scan = True
+    try:
+        code = probe.main(["check", "--api", base, "--state", str(state), "--report", str(report),
+                           "--expect-version", "2.8.2", "--baseline-sweep", str(baseline)])
+    finally:
+        FakeApi.missing_scan = False
+    assert code == 1
+    assert json.loads(report.read_text(encoding="utf-8"))["checks"]["seeded GETs still read their records"] == "fail"
