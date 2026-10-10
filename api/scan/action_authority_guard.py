@@ -12,8 +12,10 @@ the same decision, from the same function:
 * while it runs, a cheap poll every ``poll_seconds``: one round trip that reads the rows the
   decision depends on, by primary key. When any of them changed, the approval reached its
   expiry, or ``full_recheck_seconds`` passed, the full check runs again. A poll that fails is
-  reported to the caller, which interrupts only after ``unverified_after_seconds`` of
-  continuous failure, as ``authorization_unverified`` (never as a revoke);
+  reported to the caller, which interrupts the action as ``authorization_unverified`` (never as
+  a revoke) once ``unverified_after_seconds`` pass without a successful confirmation. The
+  caller bounds each check as a whole (acquisition, queries, full check) by that deadline and
+  cancels one that is still pending, so a hung database cannot hold the interruption back;
 * once authority is withdrawn the guard stays withdrawn for the rest of the Scan: every later
   action is blocked without traffic and the report says why (``annotate``).
 
@@ -125,9 +127,10 @@ class ScanAuthorityGuard:
     record_event: Callable[[str], Any] | None = None
     poll_seconds: float = 2.0
     full_recheck_seconds: float = 30.0
-    # How long polls may keep failing (database unreachable) before the running action is
-    # interrupted as authorization_unverified, and the retries before a pre-dispatch check
-    # fails closed. Read by ReceiptScanActionExecutor.
+    # How long a running action may go without a successful confirmation (database
+    # unreachable or not answering) before it is interrupted as authorization_unverified; also
+    # the bound on a pre-dispatch check and its retries before it fails closed. Read by
+    # ReceiptScanActionExecutor.
     unverified_after_seconds: float = 10.0
     check_retry_delays: tuple[float, ...] = (0.5, 1.0, 2.0)
     reason: str | None = None
