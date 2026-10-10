@@ -366,6 +366,12 @@ _HOSTILE_FORMS = {
     "sql insert": lambda v: TABLE + "INSERT INTO `users` VALUES (1,'bob','" + v.replace("'", "''") + "');\n",
     "sql copy": lambda v: ("COPY public.users (id, username, password) FROM stdin;\n1\tbob\t"
                            + _copy_field(v) + "\n\\.\n"),
+    # Backslash-escaped quotes, the way minified JavaScript and PHP write them, after a ``;``.
+    "js minified": lambda v: "!function(){};var apiKey=" + json.dumps(v, ensure_ascii=False) + ";var b=2;",
+    "php single-quoted": lambda v: ("<?php $a=1;$password='" + v.replace("\\", "\\\\").replace("'", "\\'")
+                                    + "';\n"),
+    "connection string with blanks": lambda v: (
+        "Server=s; Database=App; Password='" + v.replace("\n", " ").replace("'", "''") + "'; Encrypt=True\n"),
     "redirect link": lambda v: ('<a href="/cb?access_token=' + urllib.parse.quote(v, safe="")
                                 + '&amp;state=fixture-state">continue</a>'),
 }
@@ -480,3 +486,46 @@ def test_an_unclosed_quote_does_not_swallow_the_markup_after_it():
         masked = mask_body_text(body)
     assert "abc123def" not in masked and "<p>after</p>" in masked
     assert "abc123def" in collector.values
+
+
+@pytest.mark.parametrize("body", [
+    '!function(){};var apiKey="Qx7vKp\\"Wz9kLmTy3mNb";',
+    '(0);const client_secret="Qx7vKp\\"Wz9kLm&Ty3mNb";',
+    "var a=1;password='Qx7vKp\\'Wz9kLmTy3mNb';var b=2;",
+    'n.x=1;apiKey:"Qx7vKp\\"Wz9kLmTy3mNb",y:2',
+    '<?php $a=1;$password="Qx7vKp\\"Wz9kLmTy3mNb";',
+    'Server=s;Password="Qx7vKp"Wz9kLmTy3mNb;Database=App',
+])
+def test_escaped_quotes_after_a_semicolon_are_withheld_whole(body):
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text(body)
+    assert _leaked(masked, ("Qx7v", "Wz9k", "Ty3m", "3mNb")) == [], masked
+    assert any("Wz9kLm" in value and "Qx7vKp" in value for value in collector.values)
+
+
+@pytest.mark.parametrize("body", [
+    "Server=s; Database=App; Password=Ab1&Cd2Tail; Encrypt=True",
+    json.dumps({"ConnectionStrings": {"Default": "Server=s; Database=App; Password=Ab1&Cd2Tail; Encrypt=True"}}),
+])
+def test_connection_strings_with_blanks_after_the_separator_are_withheld_whole(body):
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text(body)
+    assert "Cd2Tail" not in masked and "Encrypt=True" in masked
+    assert collector.values == ["Ab1&Cd2Tail"]
+
+
+@pytest.mark.parametrize(("body", "kept"), [
+    ("$_SERVER['DB_PASSWORD'] => Ab1&Cd2Tail\n$_ENV['DB_PASSWORD'] => Ab1&Cd2Tail\n$_SERVER['HOME'] => /root\n",
+     "/root"),
+    ("services:\n  app:\n    environment:\n      - DB_PASSWORD=Ab1&Cd2Tail\n      - DEBUG=0\n", "DEBUG=0"),
+    ("class JConfig {\n\tpublic $password = 'Ab1&Cd2Tail';\n\tpublic $user = 'joomla';\n}", "joomla"),
+    (" " * 40 + "SECRET_KEY=Ab1&Cd2Tail\n", "SECRET_KEY="),
+])
+def test_php_info_superglobals_compose_lists_php_properties_and_deep_indents(body, kept):
+    collector = masking.WithheldValues(ACTION)
+    with masking.collecting_withheld_values(collector):
+        masked = mask_body_text(body)
+    assert "Cd2Tail" not in masked and kept in masked
+    assert collector.values == ["Ab1&Cd2Tail"]

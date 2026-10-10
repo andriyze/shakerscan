@@ -1128,17 +1128,36 @@ _INLINE_LOOK_CHARS = 512
 _INLINE_VALUE_RE = re.compile(r"[^\s\"'<>&`]*")
 # A ``;``-separated pair's value: to the next ``;``, the line end, a quote or markup.
 _LISTED_VALUE_RE = re.compile(r"(?:[^;\r\n\"'<>`]|[\"'](?![ \t,}\]>/]|$))*", re.MULTILINE)
+# What may follow the closing quote of a quoted ``;``-separated value: the next pair, the end of
+# the line or of an enclosing string. Anything else (``Password="a"b;``) means the quote was part
+# of an unquoted value, which then runs to the next ``;``.
+_LISTED_CLOSE_RE = re.compile(r"[ \t]*(?:;|\r?\n|$|[\"',}\]>])")
+
+
+def _after_list_separator(text: str, position: int) -> bool:
+    """Whether ``position`` starts a pair of a ``;``-separated list (``Server=s; Password=...``):
+    only blanks, at most a few, stand between it and a ``;``."""
+    cursor = position - 1
+    while cursor >= 0 and position - cursor <= 8 and text[cursor] in " \t":
+        cursor -= 1
+    return cursor >= 0 and text[cursor] == ";"
+
+
 # A quoted ``;``-separated value (``Password='a;b''c'``): a doubled quote is one quote.
 _LISTED_QUOTED = {
     '"': re.compile(r'(?:[^"\r\n]|""){0,4096}(?=")'),
     "'": re.compile(r"(?:[^'\r\n]|''){0,4096}(?=')"),
 }
-_LINE_HEAD_RE = re.compile(r"[ \t]*(?:(?:export|set)[ \t]+)?")
+# Blanks, a YAML list marker (``- DB_PASSWORD=...`` in a compose ``environment:`` list) and
+# ``export``/``set`` may precede a line's assignment.
+_LINE_HEAD_RE = re.compile(r"[ \t]*(?:-[ \t]+)?(?:(?:export|set)[ \t]+)?")
+_LINE_HEAD_LOOKBACK = 256
 
 
 def _at_line_start(text: str, position: int) -> bool:
-    """Whether only blanks (or ``export``) precede ``position`` on its line; a bounded look-back."""
-    window_start = max(0, position - 32)
+    """Whether only blanks (a list marker, ``export``) precede ``position`` on its line; a bounded
+    look-back."""
+    window_start = max(0, position - _LINE_HEAD_LOOKBACK)
     prefix = text[window_start:position]
     newline = prefix.rfind("\n")
     if newline < 0 and window_start > 0:
@@ -1224,6 +1243,24 @@ def _php_info_pair(name: str, separator: str, value: str, line_start: bool) -> b
     )
 
 
+# ``php -i`` prints each variable again under its superglobal: ``$_SERVER['DB_PASSWORD'] => value``.
+_PHP_INFO_SUPERGLOBAL_RE = re.compile(
+    r"(?m)^([ \t]*\$_(?:SERVER|ENV|GET|POST|COOKIE|REQUEST)\[['\"]([^'\"\]\r\n]{1,120})['\"]\][ \t]*=>[ \t]*)"
+    r"([^\r\n]*)")
+
+
+def mask_php_info_superglobals(text: str) -> str:
+    """Withhold the value of a secret-named ``$_SERVER['NAME'] => value`` line."""
+    def replace(match: re.Match[str]) -> str:
+        value = match.group(3).rstrip()
+        if (not value or not is_withheld_key(match.group(2)) or WITHHELD_MARKER_RE.fullmatch(value)
+                or value == MASK or is_location_value(match.group(2), value)):
+            return match.group(0)
+        return match.group(1) + _withhold(value) + match.group(3)[len(value):]
+
+    return _PHP_INFO_SUPERGLOBAL_RE.sub(replace, text)
+
+
 def mask_text_assignments(text: str) -> str:
     """Withhold the value of every secret-named assignment or labelled value in free text."""
     pieces: list[str] = []
@@ -1242,7 +1279,7 @@ def mask_text_assignments(text: str) -> str:
             continue  # a JS arrow function or a PHP array entry, not ``php -i`` output
         # ``Server=s;Password=Ab1&Cd2;``: a pair after ``;`` (a connection string, a cookie list)
         # runs to the next ``;``, blanks and ``&`` included.
-        listed = match.start(1) > 0 and text[match.start(1) - 1] == ";"
+        listed = _after_list_separator(text, match.start(1))
         if value[:1] in _INLINE_VALUE_STOPS and not (line_start or listed):
             continue  # inline, ``token=&next=`` holds no value
         if normalized_key_name(label) in _COOKIE_LABELS:
@@ -1251,7 +1288,9 @@ def mask_text_assignments(text: str) -> str:
             quote = separator.rstrip()[-1:]
             if quote in _LISTED_QUOTED:
                 quoted = _LISTED_QUOTED[quote].match(text, match.start(3))
-                if quoted is not None and quoted.group(0) and not WITHHELD_MARKER_RE.match(quoted.group(0)):
+                closes = quoted is not None and (
+                    _LISTED_CLOSE_RE.match(text, match.start(3) + len(quoted.group(0)) + 1) is not None)
+                if closes and quoted.group(0) and not WITHHELD_MARKER_RE.match(quoted.group(0)):
                     pieces.append(text[cursor:match.start(3)])
                     pieces.append(_withhold(quoted.group(0).replace(quote * 2, quote)))
                     cursor = match.start(3) + len(quoted.group(0))
@@ -1470,7 +1509,7 @@ def mask_encoded_assignments(text: str) -> str:
 
 _QUOTED_VALUE = r"""(["'`])((?:\\.|(?!\{q})[^\\\r\n]){{0,4096}})\{q}"""
 _QUOTED_ASSIGNMENT_RE = re.compile(
-    r"(?<![A-Za-z0-9_.\-<$])([\"']?)((?:[A-Za-z][A-Za-z0-9_\-]{0,40}[ \t]){0,2}[A-Za-z_][A-Za-z0-9_.\-]{0,80})\1"
+    r"(?<![A-Za-z0-9_.\-<])([\"']?)((?:[A-Za-z][A-Za-z0-9_\-]{0,40}[ \t]){0,2}[A-Za-z_][A-Za-z0-9_.\-]{0,80})\1"
     # A PHP array entry may put its value on the next line (``'password' =>\n    '...'``).
     r"[ \t]*(?:=>[ \t]*(?:\r?\n[ \t]{0,64})?|:=|[:=])[ \t]*" + _QUOTED_VALUE.format(q=3)
 )
@@ -1506,9 +1545,13 @@ def _replace_quoted(
         if (
             match.start() < cursor or not raw or not is_withheld_key(name)
             or is_location_value(name, raw) or WITHHELD_MARKER_RE.fullmatch(raw)
-            # ``;Password='a''b'``: a connection-string value, read by its own grammar (a doubled
-            # quote is one quote) in ``mask_text_assignments``.
-            or (not php and text[match.start() - 1:match.start()] == ";")
+            # ``;Password='a''b'`` (a doubled quote) or ``;Password="a"b;`` (a quote inside an
+            # unquoted value): a connection-string value, read by its own grammar in
+            # ``mask_text_assignments``. Any other quoted value (``var a=1;apiKey="a\"b";``) keeps
+            # this pass's escape-aware reading.
+            or (not php and _after_list_separator(text, match.start())
+                and (text[match.end(value_group) + 1:match.end(value_group) + 2] == quote
+                     or _LISTED_CLOSE_RE.match(text, match.end(value_group) + 1) is None))
         ):
             continue
         pieces.append(text[cursor:match.start(value_group)])
@@ -2562,6 +2605,7 @@ def _mask_text_passes(text: str) -> str:
     text = mask_quoted_assignments(text)
     text = mask_embedded_objects(text)
     text = mask_encoded_assignments(text)
+    text = mask_php_info_superglobals(text)
     return mask_text_assignments(text)
 
 
