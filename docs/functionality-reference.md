@@ -130,8 +130,12 @@ offline deterministic finalizer ── findings / coverage / grade reliability
   bounded by the same 10 s, retries included. Broker actions are re-checked when each one is
   leased and, with the same timing, before and while it runs on a fleet node: the node asks the
   control plane (`POST /fleet/broker/nodes/{node}/leases/{lease}/actions/{action}/authority`,
-  answered by the same guard decision), so a revoke stops the remote tool; a control plane that
-  cannot be reached for about 10 s stops the action as `authorization_unverified`. Device posture
+  answered by the same guard decision through its cheap poll), so a revoke stops the remote tool; a
+  control plane that cannot be reached for about 10 s stops the action as `authorization_unverified`.
+  The control plane also re-checks on every action heartbeat (a withdrawn action's heartbeat is
+  refused with 409, so its lease is not extended) and when the result is settled (a result for a
+  withdrawn action is recorded partial with the reason, keeping its observations, never as a clean
+  success), so a node that does not ask cannot keep a withdrawn action alive. Device posture
   and probe scans (with their device web children) and AI scans are re-checked the same way as one
   run (`api/scan/running_scan_authority.py`), against what admitted them: the target's standing
   authorization and the approval receipt they were submitted with, each against its own scope. A

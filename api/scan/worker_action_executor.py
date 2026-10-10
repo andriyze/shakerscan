@@ -50,6 +50,18 @@ class ActionAuthority(Protocol):
     async def poll(self, action: ScanAction) -> str | None: ...
 
 
+def with_authority_interruption(receipt: CapabilityReceipt, reason: str, observed_at: str | None) -> CapabilityReceipt:
+    """The receipt of an action whose target authorization was withdrawn while it ran.
+
+    What it observed before the stop is kept; the receipt is partial and names the reason.
+    """
+    stopped = {"reason_code": reason, "observed_at": observed_at}
+    return replace(receipt, status="partial", partial=True,
+        errors=(reason, *tuple(error for error in receipt.errors if error not in {"cancelled", reason})),
+        observations=(*receipt.observations, {"kind": "target_authority_interruption", **stopped}),
+        redacted_execution={**dict(receipt.redacted_execution), "target_authority_interruption": stopped})
+
+
 class ReceiptScanActionExecutor:
     """Turn canonical capability dispatch into lease-bound receipts.
 
@@ -186,11 +198,7 @@ class ReceiptScanActionExecutor:
         if authority_interruption is not None and signal.reason == authority_interruption and denial is None:
             # Authorization was withdrawn while the action ran: what it observed before the
             # stop is kept, and the receipt says it is partial and why.
-            stopped = {"reason_code": authority_interruption, "observed_at": signal.observed_at}
-            receipt = replace(receipt, status="partial", partial=True,
-                errors=(authority_interruption, *tuple(error for error in receipt.errors if error != "cancelled")),
-                observations=(*receipt.observations, {"kind": "target_authority_interruption", **stopped}),
-                redacted_execution={**dict(receipt.redacted_execution), "target_authority_interruption": stopped})
+            receipt = with_authority_interruption(receipt, authority_interruption, signal.observed_at)
         elif signal.reason is not None and denial is None and not self._user_cancelled():
             interruption = {"reason_code": signal.reason, "last_authority_check_at": signal.last_confirmed_at,
                 "observed_at": signal.observed_at, "continuous_identity_proven": False}

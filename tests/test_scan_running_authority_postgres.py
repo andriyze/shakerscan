@@ -423,21 +423,42 @@ def _broker_control_plane(monkeypatch, pool, scan):
     async def authenticated(_node_id, _request):
         return None
 
+    from scan.broker_authority import RunningBrokerAuthority
+
     async def action_context(_conn, **kwargs):
         action = next(item for item in scan.plan.actions if item.action_id == kwargs["action_id"])
         job = SimpleNamespace(target=scan.binding, execution_plan=SimpleNamespace(policy=scan.policy))
-        return None, scan.plan, job, action, None
+        return {"scan_id": scan.scan_id}, scan.plan, job, action, backend
 
+    backend = FixtureBrokerBackend()
     monkeypatch.setattr(fleet, "_broker_authenticated_node", authenticated)
     monkeypatch.setattr(fleet, "_broker_action_context", action_context)
+    monkeypatch.setattr(fleet, "_broker_submitted_action_lease", lambda raw, **_kwargs: dict(raw))
     monkeypatch.setattr(fleet, "_pool", lambda: pool)
+    monkeypatch.setattr(fleet, "_BROKER_RUNNING_AUTHORITY", RunningBrokerAuthority())
 
     async def request(method, path, payload):
         assert method == "POST" and path.endswith("/authority")
         _, _, _, _, node_id, _, lease_id, _, action_id, _ = path.split("/")
         return await fleet.broker_scan_action_authority(
             node_id, lease_id, action_id, fleet.BrokerActionAuthorityRequest(**payload), None)
+    request.backend = backend
     return request
+
+
+class FixtureBrokerBackend:
+    """Fixture control-plane backend: records heartbeats and the receipts it is asked to settle."""
+
+    def __init__(self):
+        self.heartbeats, self.settled = 0, []
+
+    async def heartbeat(self, _lease):
+        self.heartbeats += 1
+
+    async def settle(self, _lease, receipt):
+        from types import SimpleNamespace
+        self.settled.append(receipt)
+        return SimpleNamespace(canonical_dict=lambda: {"status": receipt.status})
 
 
 def _broker_authority(scan, request, **timing):
@@ -685,4 +706,106 @@ def test_an_approval_with_an_expiry_that_passes_stops_the_run_as_expired(templat
                                                              device_id=device_id, receipt=None, options=options,
                                                              poll_seconds=0.3)
             assert authority.reason == "authorization_expired"
+    asyncio.run(run())
+
+
+def _broker_body(scan, action, **extra):
+    return {"job_lease_token": "t" * 40, "worker_id": "broker:node-1", "plan_digest": scan.plan.plan_digest,
+            "action_id": action.action_id, "action_digest": action.action_digest, **extra}
+
+
+def _broker_receipt(scan, action, **changes):
+    from datetime import datetime, timezone
+    from runtime.receipts import CapabilityReceipt
+    now = datetime.now(timezone.utc).isoformat()
+    values = dict(
+        capability_name=action.capability_name, adapter_name="fixture", adapter_version="1",
+        target_id=str(scan.target_id), scan_id=str(scan.scan_id), worker_id="broker:node-1",
+        scope_receipt_id=scan.binding.scope_receipt_id, approval_receipt_id=scan.policy.approval_receipt_id,
+        status="success", input_digest=action.action_digest, parser_version="fixture/v1", started_at=now,
+        finished_at=now, budget_reserved=action.requested_budget,
+        budget_consumed={"http_requests": 1, "tool_wall_seconds": 1},
+        observations=({"kind": "http_response", "status_code": 200},))
+    values.update(changes)
+    return CapabilityReceipt(**values)
+
+
+def test_a_heartbeat_for_a_withdrawn_action_loses_its_lease_on_the_control_plane(template_database, monkeypatch):
+    """A node that never asks (older or misbehaving) cannot keep a withdrawn action alive."""
+    from fastapi import HTTPException
+    import fleet_routes.router as fleet
+    from tests.test_scan_local_revocation_postgres import _scan
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            request = _broker_control_plane(monkeypatch, pool, scan)
+            active = scan.plan.actions[1]
+            body = fleet.BrokerActionLeaseRequest(**_broker_body(scan, active, action_lease={}))
+            heartbeat = fleet.heartbeat_broker_scan_action
+            assert await heartbeat("node-1", "lease-1", active.action_id, body, None) == {"status": "running"}
+            await scan.revoke()
+            with pytest.raises(HTTPException) as lost:
+                await heartbeat("node-1", "lease-1", active.action_id, body, None)
+            assert lost.value.status_code == 409 and "authorization_revoked" in lost.value.detail
+            assert request.backend.heartbeats == 1  # the withdrawn heartbeat did not extend the lease
+    asyncio.run(run())
+
+
+def test_a_result_settled_after_a_revoke_is_recorded_partial_not_succeeded(template_database, monkeypatch):
+    import fleet_routes.router as fleet
+    from tests.test_scan_local_revocation_postgres import _scan
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            request = _broker_control_plane(monkeypatch, pool, scan)
+            settle = fleet.settle_broker_scan_action
+            first, active, later = scan.plan.actions[0], scan.plan.actions[1], scan.plan.actions[2]
+            # Before the revoke a success is settled as the node reported it.
+            body = fleet.BrokerActionResultRequest(**_broker_body(
+                scan, first, action_lease={}, receipt=_broker_receipt(scan, first).public_dict()))
+            await settle("node-1", "lease-1", first.action_id, body, None)
+            assert request.backend.settled[-1].status == "success"
+            await scan.revoke()
+            # A node that kept running reports success with what it found: the control plane
+            # keeps the observations and records the receipt partial with the reason.
+            body = fleet.BrokerActionResultRequest(**_broker_body(
+                scan, active, action_lease={}, receipt=_broker_receipt(scan, active).public_dict()))
+            await settle("node-1", "lease-1", active.action_id, body, None)
+            settled = request.backend.settled[-1]
+            assert settled.status == "partial" and settled.partial
+            assert settled.errors[0] == "authorization_revoked"
+            assert settled.redacted_execution["target_authority_interruption"]["reason_code"] == "authorization_revoked"
+            assert {"kind": "http_response", "status_code": 200} in settled.observations
+            # A node that stopped on its own already says so; its receipt is kept as it is.
+            honest = _broker_receipt(scan, later, status="partial", partial=True, errors=("authorization_revoked",),
+                                     redacted_execution={"target_authority_interruption": {
+                                         "reason_code": "authorization_revoked", "observed_at": None}})
+            body = fleet.BrokerActionResultRequest(**_broker_body(
+                scan, later, action_lease={}, receipt=honest.public_dict()))
+            await settle("node-1", "lease-1", later.action_id, body, None)
+            assert request.backend.settled[-1].receipt_hash == honest.receipt_hash
+    asyncio.run(run())
+
+
+def test_the_authority_route_polls_cheaply_after_its_first_check(template_database, monkeypatch):
+    from tests.test_scan_local_revocation_postgres import CountingPool, _scan
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            counted = CountingPool(pool)
+            request = _broker_control_plane(monkeypatch, counted, scan)
+            authority = _broker_authority(scan, request)
+            active = scan.plan.actions[1]
+            assert await authority.check(active) is None
+            after_first = dict(counted.statements_by_kind)
+            for _ in range(5):
+                assert await authority.poll(active) is None
+            # Each later poll is one statement: the guard's fingerprint, no full re-check.
+            assert counted.statements_by_kind["fingerprint"] - after_first["fingerprint"] == 5
+            assert counted.statements_by_kind["other"] == after_first["other"]
+            await scan.revoke()
+            assert await authority.poll(active) == "authorization_revoked"
     asyncio.run(run())
