@@ -398,3 +398,50 @@ def test_post_discovery_answers_on_a_converted_2_8_1_installation_after_restart(
                 'SELECT requested_by FROM discovery_runs WHERE id=$1',
                 uuid.UUID(answer['discovery_id'])) == 'local-operator'
     asyncio.run(run())
+
+
+def test_findings_routes_answer_through_the_cli_bridge_and_the_main_route(monkeypatch):
+    """``GET /api/v1/findings?scan_id=`` (the installed CLI's findings command) called the main
+    route without ``not_seen_within_days``, so a ``Query`` object reached SQL and it answered 500.
+    Both routes, served over HTTP on a migrated database, list the scan's finding."""
+    async def run():
+        import asyncpg
+        import httpx
+        from fastapi import FastAPI
+
+        async with startup_database() as conn:
+            api_root = str(Path(__file__).resolve().parents[1] / 'api')
+            if api_root not in sys.path:
+                sys.path.insert(0, api_root)
+            module = importlib.import_module('retest_contract')
+            await module.run_schema_migrations(BoundConnectionPool(conn))
+            target = await conn.fetchval("INSERT INTO targets(url) VALUES('https://cli-findings.test') RETURNING id")
+            scan = await conn.fetchval(
+                "INSERT INTO scans(target_id,target_url,status) VALUES($1,'https://cli-findings.test','completed') "
+                "RETURNING id", target)
+            await conn.execute(
+                "INSERT INTO findings(target_id,scan_id,fingerprint,title,severity,status) "
+                "VALUES($1,$2,'cli-findings-1','CLI bridge finding','low','active')", target, scan)
+            pool = await asyncpg.create_pool(os.environ['TARGET_ASSET_TEST_DATABASE_URL'],
+                                             database=await conn.fetchval('SELECT current_database()'),
+                                             min_size=1, max_size=2)
+            try:
+                findings = importlib.import_module('finding_routes.router')
+                operations = importlib.import_module('operations.router')
+                monkeypatch.setattr(findings, '_pool_provider', lambda: pool)
+                monkeypatch.setattr(operations, '_pool_provider', lambda: pool)
+                app = FastAPI()
+                app.include_router(findings.router)
+                app.include_router(operations.router)
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://t') as client:
+                    cli = await client.get('/api/v1/findings', params={'scan_id': str(scan)})
+                    main = await client.get('/findings', params={'scan_id': str(scan)})
+                for answer in (cli, main):
+                    assert answer.status_code == 200, answer.text
+                    body = answer.json()
+                    rows = body['findings'] if isinstance(body, dict) else body
+                    assert [row['title'] for row in rows] == ['CLI bridge finding']
+                assert cli.headers.get('Deprecation') == 'true'
+            finally:
+                await pool.close()
+    asyncio.run(run())

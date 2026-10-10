@@ -7452,6 +7452,7 @@ async def _arsenal_dispatch_hypothesis_situation_report(p: dict[str, Any]) -> di
         limit=_int_or_none(p.get("limit")) or 5,
         target_id=p.get("target_id"),
         requester=p.get("requester"),
+        include_graph=True,
     )
 
 
@@ -7599,6 +7600,7 @@ async def _arsenal_dispatch_evidence_export_bundle(p: dict[str, Any]) -> dict[st
         retention_class=p.get("retention_class"),
         limit=_int_or_none(p.get("limit")) or 200,
         record_event=bool(p.get("record_event")),
+        export_format="json",
     )
 
 
@@ -7607,6 +7609,7 @@ async def _arsenal_dispatch_evidence_instance_list(p: dict[str, Any]) -> dict[st
         finding_id=p.get("finding_id"),
         tool_receipt_id=p.get("tool_receipt_id"),
         limit=_int_or_none(p.get("limit")) or 50,
+        summary_only=False,
     )
 
 
