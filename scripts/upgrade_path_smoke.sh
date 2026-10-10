@@ -122,8 +122,9 @@ elapsed() {
 }
 
 diagnose() {
-    echo "== containers"; docker ps -a --filter "label=com.docker.compose.project=$PROJECT" \
-        --format '{{.Names}}	{{.Status}}	{{.Image}}' 2>&1
+    echo "== docker"; docker version --format 'server {{.Server.Version}}' 2>&1
+    echo "== containers"; docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | xargs -r docker inspect \
+        --format '{{.Name}}	{{.State.Status}}	{{.Config.Image}}	{{.Image}}' 2>&1
     echo "== api health"; curl -sS -m 10 "$API/health" 2>&1 | head -c 3000; echo
     for service in api worker; do
         echo "== logs $service (errors)"
@@ -294,15 +295,28 @@ docker network connect --alias "$FIXTURE_HOST" --alias "app.$APEX" "${PROJECT}_d
     fail "could not reattach the fixture"
 # Every ShakerScan container of the project runs one of the candidate's locked digests, and the
 # api, ui and worker are among them; postgres, redis and the proxy are not release images.
-locked="$(sed -n 's/^[A-Z_]*_IMAGE=//p' "$RUNTIME/release-image-lock.env")"
-running="$(docker ps --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}} {{.Image}}')"
-while read -r name image; do
-    case "$image" in
-        shakerscan/*|*/shakerscan/*) grep -qxF "$image" <<< "$locked" || fail "$name runs $image, not a candidate digest" ;;
+# `docker ps` prints a digest-pinned reference as the bare repository on some Docker versions
+# (GitHub's runners), so the comparison is by image ID: the ID each container runs must be the ID
+# of a locked reference, and the reference it was created from must not be a mutable tag.
+locked_ids="$(sed -n 's/^[A-Z_]*_IMAGE=//p' "$RUNTIME/release-image-lock.env" | while read -r ref; do
+    docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || echo "missing:$ref"; done)"
+grep -q '^missing:' <<< "$locked_ids" && fail "a locked image is not present locally: $(grep '^missing:' <<< "$locked_ids" | head -n 1)"
+running=""
+for container in $(docker ps -q --filter "label=com.docker.compose.project=$PROJECT"); do
+    read -r name service ref id <<< "$(docker inspect --format \
+        '{{.Name}} {{index .Config.Labels "com.docker.compose.service"}} {{.Config.Image}} {{.Image}}' "$container")"
+    name="${name#/}"
+    running="$running$service $name $ref $id"$'\n'
+    case "$ref" in
+        shakerscan/*|*/shakerscan/*)
+            grep -qxF "$id" <<< "$locked_ids" || fail "$name ($service) runs $ref ($id), not a candidate digest"
+            case "${ref##*/}" in *:*) case "$ref" in *@sha256:*) ;; *) fail "$name ($service) was created from the tag $ref" ;; esac ;; esac
+            ;;
     esac
-done <<< "$running"
+done
+printf '%s' "$running" > "$LOG_DIR/candidate-containers.txt"
 for service in api ui worker; do
-    grep -q "^$PROJECT-$service-1 " <<< "$running" || fail "the upgraded stack has no running $service"
+    grep -q "^$service " <<< "$running" || fail "the upgraded stack has no running $service"
 done
 
 echo "== 4. check the upgraded stack"
