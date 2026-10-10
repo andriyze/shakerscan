@@ -88,8 +88,14 @@ def _host(url: str) -> tuple[urllib.parse.SplitResult, str] | None:
     return (parsed, host) if host else None
 
 
-def _with_host(parsed: urllib.parse.SplitResult, host: str) -> str:
-    netloc = host + (f":{parsed.port}" if parsed.port else "")
+def _with_host(parsed: urllib.parse.SplitResult, host: str) -> str | None:
+    """The URL with ``host`` in place, or None when its stored port cannot be read
+    (``http://127.1:99999/``): such a row is flagged, never rewritten, and never stops startup."""
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    netloc = host + (f":{port}" if port else "")
     return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
@@ -117,12 +123,15 @@ async def repair_target_host_spellings(conn: Any) -> dict[str, list[str]]:
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
         address = unambiguous_ipv4(host)
-        if address is not None:
+        repaired_url = _with_host(parsed, address) if address is not None else None
+        if address is not None and repaired_url is None:
+            refusal = f"{refusal}; its port cannot be read, so it was not rewritten"
+        if repaired_url is not None:
             try:
                 async with conn.transaction():  # a savepoint: a duplicate canonical row is flagged
                     await conn.execute(
                         "UPDATE targets SET url=$2, metadata_json=$3::jsonb WHERE id=$1",
-                        row["id"], _with_host(parsed, address),
+                        row["id"], repaired_url,
                         json.dumps({**metadata, REPAIR_KEY: {
                             "from": host, "to": address,
                             "note": "The numeric spelling had one reading; re-authorize this target.",
