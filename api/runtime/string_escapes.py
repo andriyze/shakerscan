@@ -115,6 +115,26 @@ def unescape_php(text: str, quote: str) -> str:
     return _PHP_DOUBLE_RE.sub(_php_double_escape, text)
 
 
+# dotenv (python-dotenv, Docker Compose): a double-quoted value decodes ``\\ \' \" \a \b \f \n
+# \r \t \v`` and keeps any other backslash; a single-quoted one decodes only ``\\`` and ``\'``.
+_DOTENV_DOUBLE = {
+    "\\": "\\", "'": "'", '"': '"', "a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r",
+    "t": "\t", "v": "\v",
+}
+_DOTENV_DOUBLE_RE = re.compile(r"\\([\\'\"abfnrtv])")
+
+
+def unescape_dotenv(text: str, quote: str) -> str:
+    """A dotenv value's quoted content, by its quote."""
+    if "\\" not in text:
+        return text
+    if quote == "'":
+        return _PHP_SINGLE_RE.sub(lambda match: match.group(1), text)
+    if quote == '"':
+        return _DOTENV_DOUBLE_RE.sub(lambda match: _DOTENV_DOUBLE[match.group(1)], text)
+    return text
+
+
 # PostgreSQL COPY text format: ``\b \f \n \r \t \v``, ``\digits`` (one to three octal digits)
 # and ``\xdigits`` (one or two hex digits) are bytes in the dump's encoding; any other
 # backslashed character is itself.
@@ -144,4 +164,4 @@ def unescape_copy_text(field: str) -> str:
     return out.decode("utf-8", errors="replace")
 
 
-__all__ = ["unescape_copy_text", "unescape_js", "unescape_php", "unescape_yaml_double"]
+__all__ = ["unescape_copy_text", "unescape_dotenv", "unescape_js", "unescape_php", "unescape_yaml_double"]

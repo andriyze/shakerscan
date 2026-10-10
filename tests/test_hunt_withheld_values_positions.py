@@ -98,20 +98,20 @@ def test_copy_block_positions_follow_what_was_read():
     audit_end = document.index(b"\\.\n")
     tables: dict[str, list[str]] = {}
     masking.track_copy_blocks(tables, 0, document[:4_096])  # a head read: audit is open
-    assert masking.copy_block_at(tables, 2_000) == "audit"
+    assert masking.copy_block_at(tables, 2_000) == "public.audit"
     assert masking.copy_block_at(tables, 50_000) is None  # past what was read: not known
     masking.track_copy_blocks(tables, 4_096, document[4_096:8_192])  # a contiguous read
-    assert masking.copy_block_at(tables, 8_000) == "audit"
+    assert masking.copy_block_at(tables, 8_000) == "public.audit"
     # A read that shows audit's end and the users header: users is open from its first row.
     masking.track_copy_blocks(tables, audit_end - 100, document[audit_end - 100:users_rows + 500])
-    assert masking.copy_block_at(tables, users_rows + 100) == "users"
+    assert masking.copy_block_at(tables, users_rows + 100) == "public.users"
     assert masking.copy_block_at(tables, audit_end + 2) is None  # between the blocks
 
 
 def test_rows_known_inside_their_block_keep_exact_columns_and_others_fail_closed():
     header = "COPY public.audit (id, email, name, note) FROM stdin;\n"
     rows = "".join(f"{i}\ta{i}@fixture.test\tAlice Smith {i}\tFx{i}Note!q\n" for i in range(50))
-    tables: dict[str, list[str]] = {"copy:audit": ["id", "email", "name", "note"]}
+    tables: dict[str, list[str]] = {"copy:public.audit": ["id", "email", "name", "note"]}
     masking.track_copy_blocks(tables, 0, (header + rows).encode())
     window = rows[len(rows) // 2:]
     position = len(header) + len(rows) // 2
@@ -492,7 +492,7 @@ def test_verdicts_and_new_columns_outlive_older_knowledge(encryption_key):
         f"table_{index}": [f"column_{index}_{column}" for column in range(60)] for index in range(200)}}
     collector.sql_seeded = copy.deepcopy(collector.sql_tables)
     collector.sql_tables["/new.sql"] = {
-        "\0head": ["dump"], "\0copy_open": ["users", "120", "65536"],
+        "\0head": ["dump"], "\0copy_blocks": ["public.users", "120", "65536"],
         "users": ["id", "email", "password"]}
     collector.sql_tables["/old.sql"]["table_0"] = ["id", "password"]  # relearned this action
     conn = _ActionRows()

@@ -69,7 +69,9 @@ try:
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import MASK, is_sensitive_key
 
-from .string_escapes import unescape_copy_text, unescape_js, unescape_php, unescape_yaml_double
+from .string_escapes import (
+    unescape_copy_text, unescape_dotenv, unescape_js, unescape_php, unescape_yaml_double,
+)
 
 _MASKED_JSON_VALUE = json.dumps(MASK)
 
@@ -106,6 +108,14 @@ _MIN_FOUND_VALUE_CHARS = 6
 # one matches anywhere, inside longer strings too (``aHunter2pass``, ``Hunter2pass9``).
 _WHOLE_TOKEN_BELOW_CHARS = 10
 _MAX_EDGE_VALUE_CHARS = 512
+
+
+def _encodable(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def withheld_preview(value: str) -> str:
@@ -157,10 +167,11 @@ class WithheldValues:
         minimum = _MIN_FOUND_VALUE_CHARS if found else _MIN_KNOWN_VALUE_CHARS
         for value in values or ():
             text = str(value)
-            # Sealed exactly as found, but a target echoes a value with surrounding whitespace
-            # trimmed as often as not (``Welcome back, <value>!``): both forms are searched for.
+            # A target echoes a value with surrounding whitespace trimmed as often as not
+            # (``Welcome back, <value>!``): both forms are searched for, and an echo is withheld
+            # (and referenced) as the form that was echoed.
             for form in dict.fromkeys((text, text.strip())):
-                if len(form) >= minimum and form not in target:
+                if len(form) >= minimum and form not in target and _encodable(form):
                     target.append(form)
         self._known_scrubbers = None
 
@@ -184,10 +195,13 @@ class WithheldValues:
             return value.strip()  # already withheld by an earlier pass: keep its reference
         if (
             not value or value == MASK or len(value) > MAX_WITHHELD_VALUE_CHARS
+            or not _encodable(value)
             or len(json.dumps(value, ensure_ascii=False).encode()) > MAX_WITHHELD_VALUE_BYTES
             or WITHHELD_MARKER_RE.search(value)
         ):
-            return MASK  # withheld, but no reference: the resolver could not send it
+            # Withheld, but no reference: the resolver could not send it (too long, or a lone
+            # surrogate such as a decoded ``\ud800``, which no request can carry).
+            return MASK
         number = self._numbers.get(value)
         if number is None:
             if len(self.values) >= self.limit:
@@ -793,9 +807,9 @@ def _yaml_line(line: str) -> tuple[int, bool, str | None, str | None, int]:
 
 
 def _scalar(text: str) -> tuple[int, int, str, str]:
-    """``(start, end, raw value, quote)`` of a YAML/INI/dotenv scalar: a quoted string decoded by
-    YAML's rules (double-quoted escapes, ``''`` in single quotes), or an unquoted value without
-    its trailing comment."""
+    """``(start, end, raw value, quote)`` of a YAML scalar: a quoted string decoded by YAML's rules
+    (double-quoted escapes, ``''`` in single quotes), or an unquoted value without its trailing
+    comment."""
     leading = len(text) - len(text.lstrip())
     body = text[leading:]
     if body[:1] in {'"', "'"}:
@@ -1177,9 +1191,30 @@ def _plain_url_value(value: str) -> bool:
     )
 
 
+# The password of an absolute URL's userinfo (``https://user:<password>@host/``), at its start.
+_URL_USERINFO_PASSWORD_RE = re.compile(
+    r"[A-Za-z][A-Za-z0-9+.\-]{0,30}://[^/?#@:\s]{0,256}:([^/?#@\s]{1,1024})@"
+)
+
+
+def _mask_url_userinfo(url: str) -> str:
+    match = _URL_USERINFO_PASSWORD_RE.match(url)
+    if match is None:
+        return url
+    raw = urllib.parse.unquote(match.group(1))
+    if WITHHELD_MARKER_RE.fullmatch(raw) or raw == MASK:
+        return url
+    return url[:match.start(1)] + _withhold(raw) + url[match.end(1):]
+
+
 def mask_url_secrets(url: Any) -> Any:
-    """Withhold the values of secret query/fragment parameters in one URL."""
-    if not isinstance(url, str) or "=" not in url:
+    """Withhold the values of secret query/fragment parameters in one URL, and the password of
+    its userinfo."""
+    if not isinstance(url, str):
+        return url
+    if "@" in url:
+        url = _mask_url_userinfo(url)
+    if "=" not in url:
         return url
 
     def replace(match: re.Match[str]) -> str:
@@ -1305,14 +1340,21 @@ def _replace_quoted(
     text: str, pattern: re.Pattern[str], name_group: int, value_group: int, *, php: bool = False,
 ) -> str:
     """Each value is decoded by its language's string grammar: PHP for ``define`` and for
-    ``'key' => '...'`` array entries, JavaScript/JSON/Python for every other assignment."""
+    ``'key' => '...'`` array entries, dotenv for a one-word ``KEY="..."`` at a line start (an
+    ``.env`` file), JavaScript/JSON for every other assignment."""
     pieces: list[str] = []
     cursor = 0
     for match in pattern.finditer(text):
         name = re.sub(r"[ \t]+", "_", match.group(name_group))
         quote = match.group(value_group - 1)
-        if php or "=>" in text[match.end(name_group):match.start(value_group - 1)]:
+        operator = text[match.end(name_group):match.start(value_group - 1)].strip(" \t\"'")
+        if php or operator == "=>":
             raw = unescape_php(match.group(value_group), quote)
+        elif (
+            operator == "=" and _at_line_start(text, match.start())
+            and len(re.sub(r"^export[ \t]+", "", match.group(name_group)).split()) == 1
+        ):
+            raw = unescape_dotenv(match.group(value_group), quote)
         else:
             raw = unescape_js(match.group(value_group))
         if (
@@ -1395,7 +1437,7 @@ _MARKUP_NAME_ATTRIBUTES = frozenset({
 _MARKUP_VALUE_ATTRIBUTES = frozenset({"value", "content", "default", "val", "data"})
 
 
-_SHORT_SECRET_NAMES = frozenset({"pw", "db_pw", "user_pw", "passwd_hash"})
+_SHORT_SECRET_NAMES = frozenset({"pw", "db_pw", "user_pw", "passwd_hash", "pw_hash", "pwd_hash", "pass_hash"})
 
 
 def _names_secret(name: str) -> bool:
@@ -1544,10 +1586,15 @@ def mask_table_cells(text: str) -> str:
 # prefix (``ak_``, ``st_``, ``sk_live_``) or a long mixed-class token. UUIDs and hex digests (a git
 # SHA, a SHA-256) are identifiers, not keys, and stay visible (N56).
 
+# One part of a table name: a quoted identifier (``"api-keys"``, ``"My ""Keys"""``, `` `t` ``,
+# ``[t]``) or a bare one; a name is up to three dotted parts (``db.schema.table``).
+_SQL_NAME_PART = r'(?:"(?:[^"\n]|""){1,128}"|`[^`\n]{1,128}`|\[[^\]\n]{1,128}\]|[\w$]{1,64})'
+_SQL_NAME = rf"(?:{_SQL_NAME_PART}\.){{0,2}}{_SQL_NAME_PART}"
+_SQL_NAME_PART_RE = re.compile(r'"((?:[^"\n]|""){1,128})"|`([^`\n]{1,128})`|\[([^\]\n]{1,128})\]|([\w$]{1,64})')
 _SQL_STATEMENT_RE = re.compile(
     r"(?i)\b(?:(CREATE[ \t\r\n]{1,16}TABLE)(?:[ \t\r\n]{1,16}IF[ \t\r\n]{1,16}NOT[ \t\r\n]{1,16}EXISTS)?"
     r"|(INSERT)(?:[ \t\r\n]{1,16}IGNORE)?[ \t\r\n]{1,16}INTO|(COPY))[ \t\r\n]{1,16}"
-    r"((?:[`\"\[]?[\w$]{1,64}[`\"\]]?\.){0,2}[`\"\[]?[\w$]{1,64}[`\"\]]?)[ \t\r\n]{0,16}"
+    r"(" + _SQL_NAME + r")[ \t\r\n]{0,16}"
 )
 _SQL_TOKEN_RE = re.compile(
     r"'(?:[^'\\]|\\.|'')*'?|\"(?:[^\"\\]|\\.)*\"?|`[^`]*`?|[(),;]|[^\s'\"`(),;]+|\s+"
@@ -1575,8 +1622,24 @@ _HEX_DIGEST_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _MAX_SQL_TABLES = 256
 
 
+def _sql_name_parts(token: str) -> list[str]:
+    parts = []
+    for match in _SQL_NAME_PART_RE.finditer(token.strip()):
+        quoted, backticked, bracketed, bare = match.groups()
+        parts.append(quoted.replace('""', '"') if quoted is not None else backticked or bracketed or bare)
+    return parts
+
+
 def _sql_identifier(token: str) -> str:
-    return token.strip().split(".")[-1].strip("`\"[]")
+    """A column's name: the last part of the token, unquoted."""
+    parts = _sql_name_parts(token)
+    return parts[-1] if parts else token.strip().strip("`\"[]")
+
+
+def _sql_table_name(token: str) -> str:
+    """A table's key in carried knowledge: every part (schema included), unquoted and case-folded,
+    so ``auth.users`` and ``public.users`` never share columns."""
+    return ".".join(part.lower() for part in _sql_name_parts(token)) or token.strip().lower()
 
 
 def looks_like_key_literal(value: str) -> bool:
@@ -1724,8 +1787,10 @@ def _sql_rows(
 
 
 # Where COPY blocks are known to be open, by byte position in the resource, per resource:
-# ``[table, opened, until, ...]`` (see ``track_copy_blocks``).
-OPEN_COPY_KEY = "\0copy_open"
+# ``[table, opened, until, ...]`` with schema-qualified table names (see ``track_copy_blocks``),
+# and the resource version those positions were read from.
+OPEN_COPY_KEY = "\0copy_blocks"
+COPY_RESOURCE_KEY = "\0copy_resource"
 
 
 def copy_field_value(field: str) -> str | None:
@@ -1796,7 +1861,9 @@ def _copy_rows(
 _COPY_RUN_LINES = 3
 
 
-_COPY_HEADER_RE = re.compile(r"(?i)\bCOPY[ \t]+[\w.\"]{1,200}[ \t]*(?:\([^)]{0,4096}\))?[ \t]*FROM[ \t]+stdin")
+_COPY_HEADER_RE = re.compile(
+    r"(?i)\bCOPY[ \t]{1,16}" + _SQL_NAME + r"[ \t]{0,16}(?:\([^)]{0,4096}\))?[ \t]{0,16}FROM[ \t]{1,16}stdin"
+)
 _COPY_END_RE = re.compile(r"(?m)^\\\.\r?$")
 
 
@@ -1809,7 +1876,7 @@ _DUMP_HEAD_RE = re.compile(
 # Not line-anchored: an archive-format dump's table of contents holds its statements as
 # length-prefixed strings, so no newline precedes them.
 _DUMP_STATEMENT_RE = re.compile(
-    r"\bCOPY[ \t]{1,16}[^\s()]{1,200}[ \t]{0,16}\([^()]{0,4096}\)[ \t]{0,16}FROM[ \t]{1,16}stdin\b"
+    r"\bCOPY[ \t]{1,16}" + _SQL_NAME + r"[ \t]{0,16}\([^()]{0,4096}\)[ \t]{0,16}FROM[ \t]{1,16}stdin\b"
     r"|\bCREATE[ \t]{1,16}(?:UNLOGGED[ \t]{1,16})?TABLE\b"
 )
 # pg_dump's archive formats: custom (``-Fc``) starts with ``PGDMP``; tar (``-Ft``) is a tar of
@@ -1865,50 +1932,85 @@ def _copy_evidence(text: str, end: int, tables: dict[str, list[str]], tabs: int)
 _MAX_COPY_BLOCKS = 8
 # A pg_dump COPY header at a line start, in text decoded one character per byte.
 _COPY_BLOCK_HEADER_RE = re.compile(
-    r"(?im)^COPY[ \t]{1,16}((?:[`\"\[]?[\w$]{1,64}[`\"\]]?\.){0,2}[`\"\[]?[\w$]{1,64}[`\"\]]?)"
+    r"(?im)^COPY[ \t]{1,16}(" + _SQL_NAME + r")"
     r"[ \t]{0,16}(?:\([^()\n]{0,4096}\))?[ \t]{0,16}FROM[ \t]{1,16}stdin[^\n]{0,64}\n"
 )
 
 
-def _copy_blocks(tables: dict[str, list[str]]) -> list[tuple[str, int, int]]:
+def _copy_blocks(tables: dict[str, list[str]]) -> dict[int, tuple[str, int]]:
+    """``{opened: (table, until)}``, oldest first."""
     raw = tables.get(OPEN_COPY_KEY) or []
-    blocks: list[tuple[str, int, int]] = []
+    blocks: dict[int, tuple[str, int]] = {}
     for index in range(0, len(raw) - 2, 3):
         try:
-            blocks.append((str(raw[index]), int(raw[index + 1]), int(raw[index + 2])))
+            blocks[int(raw[index + 1])] = (str(raw[index]), int(raw[index + 2]))
         except (TypeError, ValueError):
             continue
     return blocks
 
 
-def track_copy_blocks(tables: dict[str, list[str]], start: int, data: bytes) -> None:
+def _same_resource(tables: dict[str, list[str]], resource: str | None) -> bool:
+    known = tables.get(COPY_RESOURCE_KEY)
+    return resource is None or known is None or known == [resource]
+
+
+def track_copy_blocks(
+    tables: dict[str, list[str]], start: int, data: bytes, *, resource: str | None = None,
+) -> None:
     """Record which COPY block each byte range of a resource is known to lie inside.
 
     ``data`` is the resource's bytes from ``start``. A block is ``(table, opened, until)``: its
     rows start at byte ``opened`` (just past its header) and no ``\\.`` precedes ``until``. A
-    read that starts inside a known range continues it; a header in view opens a new one. A
-    row whose block is not known this way never takes a table's columns (``copy_block_at``)."""
+    read that starts inside a known range continues it; a header in view opens a new one (or
+    confirms one, keeping the larger known extent). A read that ends inside a line that may
+    still become a block's end (between its ``\\`` and its ``.``) is known only up to that
+    line's start. A row
+    whose block is not known this way never takes a table's columns (``copy_block_at``).
+
+    ``resource`` identifies the resource's version (its size, its ETag) when the response says;
+    positions recorded for another version are dropped. One pass, at most ``_MAX_COPY_BLOCKS``
+    blocks kept (the most recently seen)."""
+    if not _same_resource(tables, resource):
+        tables.pop(OPEN_COPY_KEY, None)
+    if resource is not None:
+        tables[COPY_RESOURCE_KEY] = [resource]
     text = data.decode("latin-1")  # one character per byte: positions are byte offsets
-    end = start + len(data)
+    last_line = text.rfind("\n") + 1
+    # A last line cut short that may still become ``\.`` is not known to be a row.
+    known_end = start + (last_line if "\\.\r".startswith(text[last_line:]) and last_line < len(text)
+                         else len(text))
     ends = [match.start() for match in _COPY_END_RE.finditer(text)]
-    first_end = start + ends[0] if ends else end
-    blocks = [
-        (table, opened, max(until, first_end) if opened <= start <= until else until)
-        for table, opened, until in _copy_blocks(tables)
-    ]
+    first_end = start + ends[0] if ends else known_end
+    blocks: dict[int, tuple[str, int]] = {}
+    for opened, (table, until) in _copy_blocks(tables).items():
+        blocks[opened] = (table, max(until, first_end) if opened <= start <= until else until)
     for header in _COPY_BLOCK_HEADER_RE.finditer(text):
-        close = bisect.bisect_left(ends, header.end())
-        until = start + ends[close] if close < len(ends) else end
+        table = _sql_table_name(header.group(1))
         opened = start + header.end()
-        blocks = [block for block in blocks if block[1] != opened]
-        blocks.append((_sql_identifier(header.group(1)).lower(), opened, until))
+        close = bisect.bisect_left(ends, header.end())
+        if close < len(ends):
+            until = start + ends[close]
+        else:
+            previous = blocks.get(opened)
+            until = max(known_end, previous[1]) if previous and previous[0] == table else known_end
+        blocks.pop(opened, None)
+        blocks[opened] = (table, until)
+        if len(blocks) > _MAX_COPY_BLOCKS:
+            del blocks[next(iter(blocks))]
+    while len(blocks) > _MAX_COPY_BLOCKS:
+        del blocks[next(iter(blocks))]
     if blocks:
-        tables[OPEN_COPY_KEY] = [str(item) for block in blocks[-_MAX_COPY_BLOCKS:] for item in block]
+        tables[OPEN_COPY_KEY] = [
+            str(item) for opened, (table, until) in blocks.items() for item in (table, opened, until)]
 
 
-def copy_block_at(tables: dict[str, list[str]], position: int) -> str | None:
+def copy_block_at(
+    tables: dict[str, list[str]], position: int, *, resource: str | None = None,
+) -> str | None:
     """The table whose COPY rows are known to continue at byte ``position``, or ``None``."""
-    names = {table for table, opened, until in _copy_blocks(tables) if opened <= position <= until}
+    if not _same_resource(tables, resource):
+        return None
+    names = {table for opened, (table, until) in _copy_blocks(tables).items() if opened <= position <= until}
     return names.pop() if len(names) == 1 else None
 
 
@@ -1946,7 +2048,8 @@ def _mask_orphan_copy(
     columns = carried if carried is not None and len(carried) == tabs + 1 else None
     for index, (line_start, line) in enumerate(lines):
         if line.rstrip("\r") == "\\.":
-            break  # the block ended: what follows is not its rows
+            columns = None  # the block ended: rows after it (no header in view) are not its rows
+            continue
         if "\t" not in line:
             continue
         cursor = _copy_line(text, line_start, line, columns, pieces, cursor, partial_head=index == 0)
@@ -2052,7 +2155,7 @@ def mask_sql_values(text: str) -> str:
         statement = _SQL_STATEMENT_RE.search(text, position)
         if statement is None:
             break
-        table = _sql_identifier(statement.group(4)).lower()
+        table = _sql_table_name(statement.group(4))
         after = statement.end()
         if statement.group(1):
             columns, end = _sql_columns(text, after)
@@ -2132,6 +2235,47 @@ def _is_json_text(text: str) -> bool:
     return text.lstrip()[:1] in {"{", "["} and not _INI_SECTION_RE.match(text)
 
 
+_INI_SECTION_AT_RE = re.compile(r"[ \t\r\n]{0,4096}\[[^\[\]\"{}:,\r\n]{1,200}\][ \t]*(?:\r?\n|\Z)")
+_BLANKS_RE = re.compile(r"\s*")
+
+
+def _json_value_end(text: str, position: int) -> int:
+    """Where the JSON value opening at ``position`` closes (the text's end if it never does)."""
+    depth = 0
+    for match in _JSON_TOKEN_RE.finditer(text, position):
+        token = match.group(0)
+        if token in ("{", "["):
+            depth += 1
+        elif token in ("}", "]"):
+            depth -= 1
+            if depth <= 0:
+                return match.end()
+    return len(text)
+
+
+def _mask_json_led(text: str, depth: int, *, window: bool = False) -> str:
+    """A text that opens with a JSON value: each top-level JSON value is masked as JSON, and what
+    follows a closed one (a log line after ``[timestamp]``, a config file after ``{}``, a phpinfo
+    table after a CSS rule) by the text passes. ``window``: the text was cut from a resource at
+    an arbitrary offset, so a ``{`` or ``[`` at its start proves nothing about its format; the
+    text passes run over the JSON values too."""
+    pieces: list[str] = []
+    position = 0
+    while position < len(text):
+        lead = _BLANKS_RE.match(text, position).end()
+        if lead >= len(text):
+            pieces.append(text[position:])
+            break
+        if text[lead] not in "{[" or _INI_SECTION_AT_RE.match(text, position):
+            pieces.append(_mask_text_passes(text[position:]))
+            break
+        end = _json_value_end(text, lead)
+        chunk = mask_json_text(text[position:end], _depth=depth)
+        pieces.append(_mask_text_passes(chunk) if window else chunk)
+        position = end
+    return "".join(pieces)
+
+
 # Every pass is linear, but masking is still CPU work for whoever asks for the masked view, and
 # a masked view never shows what it did not mask. A body longer than this is withheld whole. The
 # ceiling is above the archive's default 10 MB capture limit, so it only meets a body that a
@@ -2172,13 +2316,14 @@ def _mask_text_passes(text: str) -> str:
     return mask_text_assignments(text)
 
 
-def mask_body_text(text: str, *, _depth: int = 0) -> str:
-    """Every masking pass that applies to one body's text."""
+def mask_body_text(text: str, *, _depth: int = 0, window: bool = False) -> str:
+    """Every masking pass that applies to one body's text. ``window``: the text is a window cut
+    from a resource at an arbitrary offset (``_mask_json_led``)."""
     if len(text) > MAX_MASKED_BODY_CHARS:
         return withheld_body_notice(len(text))
     text = _mask_known_values(text)
     if _is_json_text(text):
-        text = mask_json_text(text, _depth=_depth)
+        text = _mask_json_led(text, _depth, window=window)
     else:
         text = _mask_text_passes(text)
     return mask_provider_secrets(text)
@@ -2189,7 +2334,7 @@ def _mask_nested_text(text: str, depth: int) -> str:
     if depth >= _MAX_NESTED_DEPTH or len(text) < 6 or not _NESTED_FORMAT_HINT_RE.search(text):
         return text
     if _is_json_text(text):
-        return mask_json_text(text, _depth=depth + 1)
+        return _mask_json_led(text, depth + 1)
     return _mask_text_passes(text)
 
 
@@ -2215,6 +2360,7 @@ __all__ = [
     "URL_BEARING_HEADERS",
     "bounded_public_url",
     "copy_block_at",
+    "COPY_RESOURCE_KEY",
     "track_copy_blocks",
     "mask_url_secrets",
     "scrub_known_values",
