@@ -10,6 +10,7 @@ repeat sightings still deduplicate, and useless for guessing anywhere else.
 from __future__ import annotations
 
 import hashlib
+import sys
 
 import pytest
 from cryptography.fernet import Fernet
@@ -29,17 +30,25 @@ def _install(monkeypatch, key: str | None, tmp_path=None) -> None:
         monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY_FILE", "/dev/null/no-such-dir/key")
     else:
         monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY", key)
-    reset = getattr(secret_material, "_reset_installation_keys", None)
-    if reset is not None:
-        reset()
+    _reset_every_copy()
+
+
+def _reset_every_copy() -> None:
+    """Forget the resolved keys in every loaded copy of the module. The scan adapter imports it
+    as ``capabilities.secret_material`` when ``api/`` is on the path, a second module object with
+    its own cache: a key an earlier test resolved there must not survive into these tests."""
+    for name in ("api.capabilities.secret_material", "capabilities.secret_material"):
+        module = sys.modules.get(name)
+        reset = getattr(module, "_reset_installation_keys", None)
+        if reset is not None:
+            reset()
 
 
 @pytest.fixture(autouse=True)
 def _forget_keys():
+    _reset_every_copy()
     yield
-    reset = getattr(secret_material, "_reset_installation_keys", None)
-    if reset is not None:
-        reset()
+    _reset_every_copy()
 
 
 def _published_constant_salt(value: str) -> str:
