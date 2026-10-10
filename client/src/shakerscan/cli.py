@@ -93,7 +93,7 @@ ENV_DATA_DIR = "SHAKERSCAN_DATA_DIR"
 def _client_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path:
     """The client's ``state`` or ``data`` directory, first match wins:
 
-    1. ``$SHAKERSCAN_STATE_DIR`` / ``$SHAKERSCAN_DATA_DIR`` (must be absolute);
+    1. ``$SHAKERSCAN_STATE_DIR`` / ``$SHAKERSCAN_DATA_DIR`` (must be absolute, and not ``/``);
     2. ``$XDG_STATE_HOME/shakerscan`` / ``$XDG_DATA_HOME/shakerscan`` (ignored unless absolute,
        as the XDG specification says);
     3. with ``$SHAKERSCAN_CONFIG_DIR`` set (an isolated profile), beside it:
@@ -111,6 +111,9 @@ def _client_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path:
     if value:
         if not Path(value).is_absolute():
             raise ClientError(f"{explicit} must be an absolute path, not {value!r}")
+        if not Path(os.path.normpath(value)).name:
+            raise ClientError(f"{explicit}={value} cannot hold the client's {kind}; set {explicit} to an absolute "
+                              "directory other than /")
         return Path(value)
     value = environ.get(xdg) or ""
     if value and Path(value).is_absolute():
@@ -126,21 +129,23 @@ def _client_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path:
     return Path.home().joinpath(*fallback) / "shakerscan"
 
 
-def ensure_client_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path:
-    """The client's ``state`` or ``data`` directory, created (owner-only) if needed; one that
-    cannot be created or written is a ClientError naming the variable to set."""
+def ensure_client_dir(kind: str, environ: Mapping[str, str] | None = None, child: str = "") -> Path:
+    """The client's ``state`` or ``data`` directory (or ``child`` inside it), created
+    (owner-only) if needed; one that cannot be created or written is a ClientError naming the
+    variable to set."""
     path = _client_dir(kind, environ)
     variable = ENV_STATE_DIR if kind == "state" else ENV_DATA_DIR
-    try:
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if not os.access(path, os.W_OK | os.X_OK):
-            raise PermissionError(13, "Permission denied")
-    except OSError as exc:
-        raise ClientError(
-            f"cannot use {path} for the client's {kind} ({exc.strerror or exc}); set {variable} to a writable "
-            "absolute directory"
-        ) from exc
-    return path
+    for directory in (path, path / child) if child else (path,):
+        try:
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not os.access(directory, os.W_OK | os.X_OK):
+                raise PermissionError(13, "Permission denied")
+        except OSError as exc:
+            raise ClientError(
+                f"cannot use {directory} for the client's {kind} ({exc.strerror or exc}); set {variable} to a "
+                "writable absolute directory"
+            ) from exc
+    return path / child if child else path
 
 
 def state_dir(environ: Mapping[str, str] | None = None) -> Path:
@@ -799,7 +804,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
         raise ClientError(f"{agent} is not on this PATH; install it, or pass --no-launch to prepare the "
                           "workspace. Nothing was pre-authorized and no agent was started.")
     allowed = launch_preauthorization(args, url, token_file)
-    records = ensure_client_dir("state") / "workspaces"
+    records = ensure_client_dir("state", child="workspaces")
     notes: list[str] = _workspace.migrate_records(config_dir() / "workspaces", records)
     if args.workspace:
         workspace = Path(args.workspace).expanduser().resolve()

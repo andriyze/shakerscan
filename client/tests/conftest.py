@@ -11,3 +11,5 @@ def _hermetic_client_home(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("SHAKERSCAN_CONFIG_DIR", str(base / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(base / "state"))
     monkeypatch.setenv("XDG_DATA_HOME", str(base / "data"))
+    for name in ("SHAKERSCAN_STATE_DIR", "SHAKERSCAN_DATA_DIR"):
+        monkeypatch.delenv(name, raising=False)

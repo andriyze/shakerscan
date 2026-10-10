@@ -30,9 +30,10 @@ Options:
 Deletes project containers, labeled volumes (including PostgreSQL/Redis/MinIO),
 networks, and the verified runtime, including its evidence, secrets and backups.
 Client cleanup removes only config.json, token, the client's agent-workspace
-records (*.json under its state directory) and this runtime's launcher; other
-client-directory files and package-manager-owned commands are retained. The
-default agent workspace is kept unless --agent-workspace is given.
+records (the *.json files it wrote under its state directory) and this
+runtime's launcher; other client-directory files and package-manager-owned
+commands are retained. The default agent workspace is kept unless
+--agent-workspace is given.
 External storage, external volumes, host-wide /etc, /opt, /var/lib integrations,
 systemd/WireGuard configuration and backups outside the runtime are NOT removed.
 Run as the installation owner. Docker must be reachable; a failed inventory is
@@ -102,7 +103,7 @@ safe_dir() {
       die "Refusing unsafe directory: $path" ;;
   esac
   case "$HOME_CANON/" in "$path/"*) die "Refusing HOME or its ancestor: $path" ;; esac
-  for protected in .config .local .local/bin Desktop Documents Downloads Library; do
+  for protected in .config .local .local/bin .local/state .local/share .cache Desktop Documents Downloads Library; do
     resolved=$(canonical_dir "$HOME_CANON/$protected")
     [ "$path" != "$resolved" ] || die "Refusing shared user directory: $path"
   done
@@ -153,6 +154,12 @@ check_client_dir() {
   safe_dir "$canon"
   case "$INSTALL_DIR/" in "$canon/"*) die "$what directory must not contain the runtime" ;; esac
   if [ -d "$canon" ]; then [ -O "$canon" ] || die "$what directory is not owned by the current user"; fi
+}
+
+# A workspace record the client wrote: a plain file naming the client's record schema.
+is_client_record() {
+  [ -f "$1" ] && [ ! -L "$1" ] &&
+    grep -Eq -e '"schema_version"[[:space:]]*:[[:space:]]*"shakerscan-workspace/' -- "$1" 2>/dev/null
 }
 
 check_agent_workspace() {
@@ -304,17 +311,19 @@ validate_paths
 PHASE=local
 # Client config is deliberately NOT recursively removed. Unknown files survive.
 if [ "$PURGE_CLIENT" -eq 1 ]; then
-  # Records: plain *.json files only (a link is never followed or removed through), then the
-  # directories if they are empty.
+  # Records: plain *.json files the client wrote only (a link is never followed or removed
+  # through; other JSON files stay), then the directories if they are empty.
   for dir in "${RECORD_DIRS[@]}"; do
     [ -d "$dir" ] && [ ! -L "$dir" ] || continue
     for sub in "$dir/superseded" "$dir"; do
       [ -d "$sub" ] && [ ! -L "$sub" ] || continue
-      for record in "$sub"/*.json; do
-        if [ -f "$record" ] && [ ! -L "$record" ]; then
+      # find does not follow a linked start point (-P), and lists plain files only.
+      while IFS= read -r -d '' record; do
+        [ ! -L "$sub" ] || die "Record directory changed during cleanup: $sub"
+        if is_client_record "$record"; then
           rm -f -- "$record" || die "Cannot remove workspace record: $record"
         fi
-      done
+      done < <(find "$sub" -maxdepth 1 -type f -name '*.json' -print0)
       if ! rmdir -- "$sub"; then echo "Retained record directory (other files or permissions): $sub"; fi
     done
   done

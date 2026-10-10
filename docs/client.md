@@ -277,7 +277,8 @@ first match wins: `SHAKERSCAN_STATE_DIR` / `SHAKERSCAN_DATA_DIR`; `$XDG_STATE_HO
 `<dir>.data`, so an isolated profile stays isolated); `~/.local/state/shakerscan` /
 `~/.local/share/shakerscan` (macOS too). Every path must be absolute (a relative XDG value is
 ignored, as the XDG specification says). A directory that cannot be created or written, or a
-`SHAKERSCAN_CONFIG_DIR` without a usable sibling (such as `/`), stops `shakerscan agent` with an
+`SHAKERSCAN_CONFIG_DIR` without a usable sibling (such as `/`), or `/` as
+`SHAKERSCAN_STATE_DIR` or `SHAKERSCAN_DATA_DIR`, stops `shakerscan agent` with an
 error naming the variable to set. `scripts/clean-shakerscan.sh` removes the records, and the
 default agent workspace only with `--agent-workspace` (docs/clean-reinstall.md). Kit files and hook entries the kit no longer ships are removed (a kit file you changed
 is kept and named); your own files stay. `opencode.json` with comments or trailing commas is read
