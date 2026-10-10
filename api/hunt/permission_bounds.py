@@ -195,7 +195,10 @@ def refused_bounds(value: Mapping[str, Any]) -> list[dict[str, str]]:
     """The stored host bounds that name a public suffix and therefore cover nothing."""
     refused: list[dict[str, str]] = []
     for item in value.get("target_patterns") or ():
-        pattern = _stored_host_pattern(str(item))
+        try:
+            pattern = _stored_host_pattern(str(item))
+        except BoundError:
+            continue  # a spelling that no longer parses is withheld and reported by stored_bounds
         if pattern.refused:
             refused.append({"bound": f"{KIND_TARGET_AUTHORIZE}:{item}", "message": (
                 f"{pattern.refused}. This pre-authorization was stored before public suffixes were "
