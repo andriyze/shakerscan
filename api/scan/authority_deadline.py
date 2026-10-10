@@ -48,11 +48,13 @@ def tolerance_seconds(authority: Any) -> float:
     return float(getattr(authority, "unverified_after_seconds", AUTHORITY_UNVERIFIED_AFTER_SECONDS))
 
 
-async def bounded_check(check: Awaitable[str | None], timeout: float) -> str | None:
+async def bounded_check(check: Awaitable[str | None], timeout: float,
+                        on_timeout: Callable[[], None] | None = None) -> str | None:
     """Run one whole check under one deadline that does not depend on the check returning.
 
-    A check still pending at the deadline raises ``AuthorityCheckTimeout`` on time; it is then
-    cancelled and given a short grace to release its connection, so no task is left behind.
+    A check still pending at the deadline calls ``on_timeout`` at once (so an interruption is
+    recorded on time), is then cancelled and given a short grace to release its connection, so
+    no task is left behind, and raises ``AuthorityCheckTimeout``.
     """
     task = asyncio.ensure_future(check)
     try:
@@ -63,6 +65,8 @@ async def bounded_check(check: Awaitable[str | None], timeout: float) -> str | N
         raise
     if task in done:
         return task.result()
+    if on_timeout is not None:
+        on_timeout()
     task.cancel()
     await asyncio.wait({task}, timeout=AUTHORITY_CHECK_CANCEL_GRACE_SECONDS)
     if task.done() and not task.cancelled():
@@ -147,9 +151,16 @@ async def watch_authorization(
                     continue
             started = loop.time()
             attempted = True
+
+            def unverified_now() -> None:
+                # Recorded at the deadline, before the stalled poll is unwound.
+                if signal.reason is None:
+                    signal.record(UNVERIFIED)
+                    on_interrupt(UNVERIFIED)
             try:
                 reason = await bounded_check(authority.poll(action),
-                                             max(confirmed_at + tolerance - started, floor))
+                                             max(confirmed_at + tolerance - started, floor),
+                                             on_timeout=unverified_now)
                 confirmed_at, attempted = started, False
                 expected = loop.time() - started
             except AuthorityCheckTimeout:

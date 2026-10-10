@@ -69,7 +69,12 @@ SELECT (SELECT row(a.status, a.revoked_at, a.expires_at, a.approved_by, a.denial
           FROM device_targets d WHERE d.id = $2) AS device,
        (SELECT row(i.is_active, i.endpoint_url)::text
           FROM ai_targets i WHERE i.id = $2) AS ai_target,
-       (SELECT row(o.is_active, o.url)::text FROM targets o WHERE o.id = $3) AS authority_owner
+       (SELECT row(o.is_active, o.url)::text FROM targets o WHERE o.id = $3) AS authority_owner,
+       -- The target whose standing authorization this one currently resolves to (itself, or
+       -- the asset it inherits from): an ownership or inheritance change is seen at the next
+       -- poll rather than the next periodic full check.
+       (SELECT target_effective_authorization_target(t.id) FROM targets t WHERE t.id = $2)
+           AS effective_authority
 """
 
 

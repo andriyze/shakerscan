@@ -778,14 +778,18 @@ def test_a_result_settled_after_a_revoke_is_recorded_partial_not_succeeded(templ
             assert settled.errors[0] == "authorization_revoked"
             assert settled.redacted_execution["target_authority_interruption"]["reason_code"] == "authorization_revoked"
             assert {"kind": "http_response", "status_code": 200} in settled.observations
-            # A node that stopped on its own already says so; its receipt is kept as it is.
-            honest = _broker_receipt(scan, later, status="partial", partial=True, errors=("authorization_revoked",),
-                                     redacted_execution={"target_authority_interruption": {
-                                         "reason_code": "authorization_revoked", "observed_at": None}})
+            # A node's own stop record does not decide the outcome: a success that claims one
+            # is still recorded partial with the control plane's reason, and what the node
+            # reported is kept beside it.
+            claimed = {"reason_code": "authorization_unverified", "observed_at": "2000-01-01T00:00:00+00:00"}
+            bypass = _broker_receipt(scan, later, redacted_execution={"target_authority_interruption": claimed})
             body = fleet.BrokerActionResultRequest(**_broker_body(
-                scan, later, action_lease={}, receipt=honest.public_dict()))
+                scan, later, action_lease={}, receipt=bypass.public_dict()))
             await settle("node-1", "lease-1", later.action_id, body, None)
-            assert request.backend.settled[-1].receipt_hash == honest.receipt_hash
+            settled = request.backend.settled[-1]
+            assert settled.status == "partial" and settled.errors[0] == "authorization_revoked"
+            assert settled.redacted_execution["target_authority_interruption"]["reason_code"] == "authorization_revoked"
+            assert settled.redacted_execution["reported_target_authority_interruption"] == claimed
     asyncio.run(run())
 
 
@@ -808,4 +812,211 @@ def test_the_authority_route_polls_cheaply_after_its_first_check(template_databa
             assert counted.statements_by_kind["other"] == after_first["other"]
             await scan.revoke()
             assert await authority.poll(active) == "authorization_revoked"
+    asyncio.run(run())
+
+
+# --- Fleet end to end: the node's orchestrator, executor and HTTPS backend over the real routes ---
+
+def _broker_plan(scan_id):
+    """The revocation suite's plan, eligible for broker placement."""
+    from scan.action_plan import ScanAction, ScanActionPlan
+    from tests.test_scan_local_revocation_postgres import _active_plan
+    plan = _active_plan(scan_id)
+    placement = {"eligible_backends": ["local", "broker"], "adapter_name": "fixture", "adapter_version": "1"}
+    actions = tuple(ScanAction(
+        action_id=a.action_id, stage=a.stage, ordinal=a.ordinal, capability_name=a.capability_name,
+        capability_args=dict(a.capability_args), target_binding_digest=a.target_binding_digest,
+        input_binding_digest=a.input_binding_digest, requested_budget=dict(a.requested_budget),
+        placement=placement, dependencies=tuple(a.dependencies), required=a.required,
+        supporting=a.supporting, output_schema=a.output_schema) for a in plan.actions)
+    return ScanActionPlan(scan_id=plan.scan_id, execution_plan_digest=plan.execution_plan_digest,
+                          target_binding_digest=plan.target_binding_digest, actions=actions)
+
+
+class _FleetNode:
+    """A fleet node wired to the real control-plane routes in process.
+
+    The node side is real (``ScanOrchestrator``, ``ReceiptScanActionExecutor``,
+    ``BrokerScanExecutionBackend``, ``BrokerActionAuthority``); the control-plane side is the
+    real lease, heartbeat, authority and result routes over a ``PostgresScanExecutionBackend``.
+    Only node authentication and the job-lease lookup are fixtures, and HTTP is replaced by
+    calling the route: an ``HTTPException`` becomes the status and detail the node would see.
+    """
+
+    def __init__(self, monkeypatch, pool, scan, *, node_poll_seconds=30.0, lease_seconds=5):
+        from types import SimpleNamespace
+        import fleet_routes.router as fleet
+        from scan.broker_authority import RunningBrokerAuthority
+        from scan.execution_backend import PostgresScanExecutionBackend
+        self.fleet, self.scan, self.after_lease = fleet, scan, None
+        self.calls: list[str] = []
+
+        async def authenticated(_node_id, _request):
+            return None
+
+        async def action_context(_conn, **kwargs):
+            action = next(item for item in scan.plan.actions if item.action_id == kwargs["action_id"])
+            job = SimpleNamespace(target=scan.binding, execution_plan=SimpleNamespace(policy=scan.policy), shard=None)
+            backend = PostgresScanExecutionBackend(pool=pool, plan=scan.plan, worker_id="broker:node-1",
+                                                   backend_name="broker", lease_seconds=lease_seconds)
+            return {"scan_id": scan.scan_id}, scan.plan, job, action, backend
+
+        monkeypatch.setattr(fleet, "_broker_authenticated_node", authenticated)
+        monkeypatch.setattr(fleet, "_broker_action_context", action_context)
+        monkeypatch.setattr(fleet, "_pool", lambda: pool)
+        monkeypatch.setattr(fleet, "_BROKER_RUNNING_AUTHORITY", RunningBrokerAuthority())
+        self.node_poll_seconds = node_poll_seconds
+
+    async def request(self, method, path, payload):
+        from fastapi import HTTPException
+        from fastapi.responses import JSONResponse
+        from scan.broker_backend import BrokerActionHTTPError
+        fleet = self.fleet
+        parts = path.split("/")
+        node_id, lease_id, action_id, operation = parts[4], parts[6], parts[8], parts[9]
+        self.calls.append(operation)
+        routes = {
+            "lease": (fleet.lease_broker_scan_action, fleet.BrokerActionAuthorityRequest),
+            "heartbeat": (fleet.heartbeat_broker_scan_action, fleet.BrokerActionLeaseRequest),
+            "result": (fleet.settle_broker_scan_action, fleet.BrokerActionResultRequest),
+            "authority": (fleet.broker_scan_action_authority, fleet.BrokerActionAuthorityRequest),
+        }
+        route, model = routes[operation]
+        try:
+            response = await route(node_id, lease_id, action_id, model(**payload), None)
+        except HTTPException as exc:
+            raise BrokerActionHTTPError(exc.status_code, str(exc.detail)) from None
+        if isinstance(response, JSONResponse):
+            raise BrokerActionHTTPError(response.status_code, "")
+        if operation == "lease" and self.after_lease is not None:
+            hook, self.after_lease = self.after_lease, None
+            await hook()
+        return response
+
+    def orchestrator(self, dispatcher):
+        from scan.broker_backend import BrokerActionAuthority, BrokerScanExecutionBackend
+        from scan.orchestrator import ScanOrchestrator
+        from scan.worker_action_executor import ReceiptScanActionExecutor
+        backend = BrokerScanExecutionBackend(plan=self.scan.plan, worker_id="broker:node-1", job_lease_token="t" * 40,
+                                             base_path="/fleet/broker/nodes/node-1/leases/lease-1",
+                                             request=self.request)
+        authority = BrokerActionAuthority(lambda: backend, self.request, poll_seconds=self.node_poll_seconds)
+        executor = ReceiptScanActionExecutor(
+            scan_id=str(self.scan.scan_id), target_id=str(self.scan.target_id), worker_id="broker:node-1",
+            dispatcher=dispatcher, scope_receipt_id=self.scan.binding.scope_receipt_id,
+            approval_receipt_id=self.scan.policy.approval_receipt_id, authority=authority)
+        return ScanOrchestrator(backend=backend, executor=executor)
+
+
+def _as_node(dispatcher, scan):
+    """The fixture dispatcher's receipts, as a node reports them (its worker and receipts)."""
+    from dataclasses import replace
+
+    async def dispatch(action, lease, heartbeat):
+        receipt = await dispatcher(action, lease, heartbeat)
+        return replace(receipt, worker_id="broker:node-1", scope_receipt_id=scan.binding.scope_receipt_id,
+                       approval_receipt_id=scan.policy.approval_receipt_id)
+    return dispatch
+
+
+def test_a_revoke_seen_by_the_node_heartbeat_settles_an_authorization_stop_not_an_adapter_failure(
+        template_database, monkeypatch):
+    from tests.test_scan_local_revocation_postgres import FixtureToolDispatcher, _scan
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool, plan=_broker_plan)
+            node = _FleetNode(monkeypatch, pool, scan)  # the node's own poll is 30 s: the heartbeat sees it
+
+            async def revoke_soon():
+                await asyncio.sleep(0.3)
+                assert await scan.revoke() == 1
+
+            dispatcher = FixtureToolDispatcher(str(scan.target_id), str(scan.scan_id),
+                                               long_actions=frozenset({"templates.active"}),
+                                               during={"templates.active": revoke_soon})
+            active = scan.plan.actions[1]
+            started = time.monotonic()
+            settled = await node.orchestrator(_as_node(dispatcher, scan))._execute_action(plan=scan.plan, action=active)
+            returncode, exited_at = dispatcher.process_exits["templates.active"]
+            assert returncode is not None and returncode < 0 and exited_at - started < 3.0
+            assert settled.status.value == "partial" and settled.reason_code.value == "authorization_revoked"
+            assert settled.budget_consumed["http_requests"] == 1  # what ran, not the full reservation
+            assert "heartbeat" in node.calls
+            actions = await scan.actions()
+            assert actions["templates.active"] == ("partial", "authorization_revoked")
+            assert await scan.held_reservations() == 0
+    asyncio.run(run())
+
+
+def test_a_revoke_between_lease_and_start_settles_blocked_without_charge(template_database, monkeypatch):
+    from tests.test_scan_local_revocation_postgres import FixtureToolDispatcher, _scan
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool, plan=_broker_plan)
+            node = _FleetNode(monkeypatch, pool, scan)
+
+            async def revoke():
+                assert await scan.revoke() == 1
+            node.after_lease = revoke
+            dispatcher = FixtureToolDispatcher(str(scan.target_id), str(scan.scan_id))
+            active = scan.plan.actions[1]
+            settled = await node.orchestrator(_as_node(dispatcher, scan))._execute_action(plan=scan.plan, action=active)
+            assert dispatcher.dispatched == []
+            assert settled.status.value == "blocked" and settled.reason_code.value == "authorization_revoked"
+            assert set(settled.budget_consumed.values()) == {0}
+            assert await scan.held_reservations() == 0
+    asyncio.run(run())
+
+
+def test_an_action_that_finished_before_the_revoke_was_seen_is_settled_partial_with_its_findings(
+        template_database, monkeypatch):
+    from tests.test_scan_local_revocation_postgres import FixtureToolDispatcher, _scan
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool, plan=_broker_plan)
+            node = _FleetNode(monkeypatch, pool, scan)
+
+            async def revoke():
+                assert await scan.revoke() == 1
+            # Revoked as the action returns: neither the node's poll nor its lease heartbeat saw it.
+            dispatcher = FixtureToolDispatcher(str(scan.target_id), str(scan.scan_id),
+                                               after={"templates.active": revoke})
+            active = scan.plan.actions[1]
+            settled = await node.orchestrator(_as_node(dispatcher, scan))._execute_action(plan=scan.plan, action=active)
+            assert dispatcher.dispatched == ["templates.active"]
+            assert settled.status.value == "partial" and settled.reason_code.value == "authorization_revoked"
+            assert settled.budget_consumed["http_requests"] == 1
+            assert await scan.held_reservations() == 0
+    asyncio.run(run())
+
+
+def test_a_restorable_out_of_scope_answer_is_rechecked_but_a_revoke_stays(template_database, monkeypatch):
+    from tests.test_scan_local_revocation_postgres import _scan
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            request = _broker_control_plane(monkeypatch, pool, scan)
+            authority = _broker_authority(scan, request)
+            active = scan.plan.actions[1]
+            assert await authority.check(active) is None
+            async with pool.acquire() as conn:
+                await conn.execute("UPDATE targets SET is_active=false WHERE id=$1", scan.target_id)
+            assert await request("POST", f"/fleet/broker/nodes/node-1/leases/lease-1/actions/{active.action_id}/authority",
+                                 _broker_body(scan, active)) == {"reason": "scope_invalid"}
+            async with pool.acquire() as conn:
+                await conn.execute("UPDATE targets SET is_active=true WHERE id=$1", scan.target_id)
+            # Reactivated: the control plane checks afresh instead of answering from a stop.
+            assert await request("POST", f"/fleet/broker/nodes/node-1/leases/lease-1/actions/{active.action_id}/authority",
+                                 _broker_body(scan, active)) == {"reason": None}
+            await scan.revoke()
+            path = f"/fleet/broker/nodes/node-1/leases/lease-1/actions/{active.action_id}/authority"
+            assert await request("POST", path, _broker_body(scan, active)) == {"reason": "authorization_revoked"}
+            async with pool.acquire() as conn:  # a new authorization does not undo the stop
+                await conn.execute("UPDATE approval_receipts SET status='active', revoked_at=NULL WHERE id=$1",
+                                   uuid.UUID(scan.policy.approval_receipt_id))
+            assert await request("POST", path, _broker_body(scan, active)) == {"reason": "authorization_revoked"}
     asyncio.run(run())

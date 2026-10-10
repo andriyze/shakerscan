@@ -76,6 +76,18 @@ class ActionLeaseLost(ScanExecutionBackendError):
     """The worker lost exclusive action authority during execution."""
 
 
+class ActionAuthorityWithdrawn(ScanExecutionBackendError):
+    """The control plane refused a heartbeat because the target's authorization was withdrawn.
+
+    Not a lost lease: the action's receipt is still settled, as an authorization stop
+    (``reason`` is a ``CapabilityResultReason`` value), never as an adapter failure.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"broker action authorization withdrawn: {reason}")
+
+
 def _uuid(value: Any, *, name: str) -> str:
     try:
         return str(uuid.UUID(str(value)))
