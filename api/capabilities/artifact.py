@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 import urllib.parse
 from typing import Any, Callable, Mapping
 
@@ -25,14 +26,14 @@ except ModuleNotFoundError:
 try:
     from runtime.archive_body_masking import (
         HEAD_VERDICT_KEY, MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
-        copy_evidence, holds_withheld_material, looks_like_dump_head, mask_body_text, mask_sql_values,
-        scrub_known_values, tab_row_run,
+        copy_block_at, copy_evidence, holds_withheld_material, looks_like_dump_head, mask_body_text,
+        mask_sql_values, scrub_known_values, tab_row_run, track_copy_blocks,
     )
 except ModuleNotFoundError:
     from api.runtime.archive_body_masking import (
         HEAD_VERDICT_KEY, MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
-        copy_evidence, holds_withheld_material, looks_like_dump_head, mask_body_text, mask_sql_values,
-        scrub_known_values, tab_row_run,
+        copy_block_at, copy_evidence, holds_withheld_material, looks_like_dump_head, mask_body_text,
+        mask_sql_values, scrub_known_values, tab_row_run, track_copy_blocks,
     )
 try:
     from capabilities.secret_material import keyed_body_digest
@@ -210,49 +211,99 @@ _NEAR_CONTEXT_BYTES = 65_536
 
 
 HEAD_PROBE_BYTES = 65_536
+# A head that could not be read is asked for at most this many times per resource per Hunt;
+# until it is read, the resource's tab-separated rows fail closed.
+MAX_HEAD_ATTEMPTS = 2
+# Both of an inspect's requests share the wall time artifact.inspect reserves
+# (``tool_wall_seconds`` in the capability registry); the head read gets what the window read
+# left, and is not made with less than this.
+INSPECT_WALL_SECONDS = 30
+_MIN_HEAD_READ_SECONDS = 5
+
+
+def _learn_head(
+    collector: WithheldValues, tables: dict[str, list[str]], resource: str, head: bytes,
+    headers: dict[str, str],
+) -> None:
+    """Remember whether a resource's head reads as a dump; a dump head also teaches its COPY and
+    CREATE TABLE columns and where its COPY blocks open."""
+    text = head.decode("utf-8", errors="replace")
+    if not (looks_like_dump_head(text) or _served_as_dump(headers)):
+        tables[HEAD_VERDICT_KEY] = ["text"]
+        return
+    tables[HEAD_VERDICT_KEY] = ["dump"]
+    collector.sql_dump_like = True
+    track_copy_blocks(tables, 0, head)
+    learner = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=0)
+    learner.sql_tables, learner.sql_path, learner.sql_dump_like = collector.sql_tables, resource, True
+    with collecting_withheld_values(learner):
+        mask_sql_values(text)  # the head's column lists, for this and later windows
+
+
+def _metadata_recorder(recorder: Callable[[dict[str, Any]], None] | None):
+    """The archive records that the head was read, not its bytes: the planner never asked for
+    them (the row keeps the request and the response's status and headers)."""
+    if recorder is None:
+        return None
+
+    def record(captured: dict[str, Any]) -> None:
+        recorder({
+            **captured, "response_body": None, "response_body_sha256": None,
+            "response_body_bytes": None, "response_body_truncated": False,
+            "response_digest_scope": None, "fidelity": "wire_request_metadata",
+        })
+
+    return record
 
 
 async def _check_resource_head(
     target_url: str, path: str, target: TargetBinding, offset: int, span: bytes,
     transaction_recorder: Callable[[dict[str, Any]], None] | None,
+    *, span_start: int = 0, deadline: float | None = None,
 ) -> int:
     """Whether tab-separated rows in a window are a dump's COPY rows, when nothing in view says:
     read the resource's head (``HEAD_PROBE_BYTES``) once per resource per Hunt and remember the
     verdict. Returns the extra requests made (0 or 1); artifact.inspect reserves 2 for this.
 
-    A dump head also teaches its COPY/CREATE TABLE columns. A head that reads as plain text keeps
-    the rows visible (a TSV export stays a TSV export). A failed head read fails closed for this
-    window only."""
+    ``span`` is what the inspect already read, from byte ``span_start``: when that is the
+    resource's first byte, the head is already in hand and is not read again. A dump head also
+    teaches its COPY/CREATE TABLE columns. A head that reads as plain text keeps the rows visible
+    (a TSV export stays a TSV export). A head that cannot be read fails closed, and is asked for
+    at most ``MAX_HEAD_ATTEMPTS`` times per resource per Hunt; so is a head read for which the
+    inspect has too little of its reserved wall time left."""
     collector = active_withheld_values()
     if collector is None or offset <= 0 or collector.sql_dump_like:
         return 0
     resource = _resource_path(path)
     tables = collector.sql_tables.setdefault(resource, {})
-    verdict = tables.get(HEAD_VERDICT_KEY)
-    if verdict is not None:
+    verdict = tables.get(HEAD_VERDICT_KEY) or []
+    if verdict in (["dump"], ["text"]):
         collector.sql_dump_like = verdict == ["dump"]
         return 0
     text = span.decode("utf-8", errors="replace")
     tabs = tab_row_run(text)
     if tabs is None or copy_evidence(text, tables, tabs):
         return 0
+    if span_start == 0:
+        _learn_head(collector, tables, resource, span[:HEAD_PROBE_BYTES], {})
+        return 0
+    attempts = 0
+    if verdict[:1] == ["unreadable"] and len(verdict) > 1 and str(verdict[1]).isdigit():
+        attempts = int(verdict[1])
+    remaining = (deadline - time.monotonic()) if deadline is not None else INSPECT_WALL_SECONDS
+    if attempts >= MAX_HEAD_ATTEMPTS or remaining < _MIN_HEAD_READ_SECONDS:
+        collector.sql_dump_like = True  # unknown: fail closed without another request
+        return 0
     result, private = await _fetch_artifact(
         target_url, path=path, target=target, offset=0, length=HEAD_PROBE_BYTES,
-        transaction_recorder=transaction_recorder,
+        transaction_recorder=_metadata_recorder(transaction_recorder),
+        timeout_seconds=min(INSPECT_WALL_SECONDS, int(remaining)),
     )
     if not result.get("ok") or private is None or private.status_code not in {200, 206}:
-        collector.sql_dump_like = True  # unknown: fail closed, and ask again next time
+        tables[HEAD_VERDICT_KEY] = ["unreadable", str(attempts + 1)]
+        collector.sql_dump_like = True  # unknown: fail closed
         return 1
-    head = private.body()[:HEAD_PROBE_BYTES].decode("utf-8", errors="replace")
-    if looks_like_dump_head(head) or _served_as_dump(private.headers()):
-        tables[HEAD_VERDICT_KEY] = ["dump"]
-        collector.sql_dump_like = True
-        learner = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=0)
-        learner.sql_tables, learner.sql_path, learner.sql_dump_like = collector.sql_tables, resource, True
-        with collecting_withheld_values(learner):
-            mask_sql_values(head)  # the head's column lists, for this and later windows
-    else:
-        tables[HEAD_VERDICT_KEY] = ["text"]
+    _learn_head(collector, tables, resource, private.body()[:HEAD_PROBE_BYTES], private.headers())
     return 1
 
 
@@ -277,45 +328,64 @@ def _window_recorder(recorder: Callable[[dict[str, Any]], None] | None, lead: in
     return record
 
 
-def _context_secrets(context: bytes, body: bytes) -> list[str]:
+def _copy_block_at(position: int | None) -> str | None:
+    """The COPY table whose rows the action's resource is known to continue at ``position``."""
+    collector = active_withheld_values()
+    if collector is None or position is None or not collector.sql_path:
+        return None
+    return copy_block_at(collector.sql_tables.get(collector.sql_path) or {}, position)
+
+
+def _context_secrets(context: bytes, body: bytes, start: int | None = None) -> list[str]:
     """Every value the masking withholds near the window, read with the context before it.
 
     The whole span is read first for its column names (kept on the action's collector for later
     windows of the dump); the values are then collected from the near context and the window,
-    whose rows are parsed with those columns."""
+    whose rows are parsed with those columns. ``start`` is the context's byte offset in the
+    resource: it says which COPY block, if any, each text starts inside."""
     collector = active_withheld_values()
     shared = (collector.sql_tables, collector.sql_path) if collector is not None else ({}, "context")
+    near = context[-_NEAR_CONTEXT_BYTES:]
     if len(context) > _NEAR_CONTEXT_BYTES:
         learner = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=0)
         learner.sql_tables, learner.sql_path = shared
         learner.sql_dump_like = bool(collector and collector.sql_dump_like)
+        learner.copy_block = _copy_block_at(start)
         with collecting_withheld_values(learner):
             mask_sql_values(context.decode("utf-8", errors="replace"))
     probe = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=16_384)
     probe.sql_tables, probe.sql_path = shared
     probe.sql_dump_like = bool(collector and collector.sql_dump_like)
+    probe.copy_block = _copy_block_at(None if start is None else start + len(context) - len(near))
     with collecting_withheld_values(probe):
-        mask_body_text((context[-_NEAR_CONTEXT_BYTES:] + body).decode("utf-8", errors="replace"))
+        mask_body_text((near + body).decode("utf-8", errors="replace"))
     return probe.values
 
 
-def _masked_window_text(body: bytes, context: bytes = b"") -> str:
+def _masked_window_text(body: bytes, context: bytes = b"", start: int | None = None) -> str:
     """The whole window, masked before anything is cut from it.
 
     The body masking every masked archive view applies (N56): SQL dump rows, markup key/value
     pairs, phpinfo-style table cells, assignments and provider formats. Inside a Hunt worker the
     withheld values become ``[withheld:n]`` markers the planner can bind by reference. With
     ``context`` (the bytes before an offset window) the secrets of the whole span are withheld
-    from the window too, whole or cut by its start.
+    from the window too, whole or cut by its start. ``start`` is the byte offset of ``context``
+    (of ``body`` when there is none) in the resource.
     """
     text = body.decode("utf-8", errors="replace")
-    known = _context_secrets(context, body) if context else []
+    known = _context_secrets(context, body, start) if context else []
     collector = active_withheld_values()
     if known and collector is not None:
         collector.bind_known(known, found=True)
     elif known:
         text = scrub_known_values(text, known, MASK)
-    text = mask_body_text(text)
+    if collector is not None:
+        collector.copy_block = _copy_block_at(None if start is None else start + len(context))
+    try:
+        text = mask_body_text(text)
+    finally:
+        if collector is not None:
+            collector.copy_block = None
     text = _JWT_RE.sub(_jwt_replacement, text)
     text = re.sub(r"(?i)(bearer\s+)(?!\[withheld:)[a-z0-9._~+/=-]+", r"\1<redacted>", text)
     return str(_shared_redact_text(text))
@@ -354,6 +424,7 @@ async def _fetch_artifact(
     offset: int,
     length: int,
     transaction_recorder: Callable[[dict[str, Any]], None] | None,
+    timeout_seconds: int = INSPECT_WALL_SECONDS,
 ) -> tuple[dict[str, Any], WorkerPrivateHTTPResponse | None]:
     captured: list[WorkerPrivateHTTPResponse] = []
     end = offset + length - 1
@@ -368,7 +439,7 @@ async def _fetch_artifact(
         target=target,
         allow_write=False,
         transaction_recorder=transaction_recorder,
-        timeout_seconds=30,
+        timeout_seconds=timeout_seconds,
         allow_bound_origin_redirects=True,
         private_response_sink=captured.append,
         response_body_limit=max(length, MAX_PUBLIC_TEXT),
@@ -393,6 +464,7 @@ async def inspect_target_artifact(
         collector.sql_dump_like = bool(_SQL_DUMP_PATH_RE.search(urllib.parse.urlsplit(path).path or path))
     context_start = max(0, offset - _context_bytes(path))
     lead = offset - context_start
+    deadline = time.monotonic() + INSPECT_WALL_SECONDS
     result, private = await _fetch_artifact(
         target_url, path=path, target=target, offset=context_start, length=lead + length,
         transaction_recorder=_window_recorder(transaction_recorder, lead),
@@ -432,13 +504,18 @@ async def inspect_target_artifact(
         collector.sql_dump_like = True
     context = private.body()[:lead]
     received = private.body()[lead:]
+    if collector is not None and collector.sql_path:
+        # Where COPY blocks open and end in what was read, by byte position in the resource.
+        track_copy_blocks(collector.sql_tables.setdefault(collector.sql_path, {}), context_start,
+                          context + received[:length])
     requests = 1 + await _check_resource_head(
-        target_url, path, target, offset, context + received[:length], transaction_recorder)
+        target_url, path, target, offset, context + received[:length], transaction_recorder,
+        span_start=context_start, deadline=deadline)
     body = received[:length]
     resource_bytes = _resource_bytes(private)
     terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]
     raw_text = body.decode("utf-8", errors="replace")
-    masked_text = _masked_window_text(body, context)
+    masked_text = _masked_window_text(body, context, context_start)
     text_sample = masked_text[:MAX_PUBLIC_TEXT]
     # Counted over the masked window: a count over raw bytes recovers a withheld value one
     # guessed character at a time.

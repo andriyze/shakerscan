@@ -589,7 +589,7 @@ def test_public_url_fields_withhold_secret_parameters_in_the_nested_shape():
 def test_executor_adapter_observation_carries_no_raw_url_secret(monkeypatch):
     """D02: the executor writes ``response.final_url``; a plain GET with redirects, run as the worker
     runs it (executor -> adapter -> observation), shows no raw key, code, token or signature."""
-    from capabilities.http import execute_bound_http_request
+    from api.capabilities.http import execute_bound_http_request
     from capabilities.inline import HttpRequestExecutionAdapter
     from runtime.capability_registry import CAPABILITY_REGISTRY
     from runtime.hunt_http_exchange import withholding_operation

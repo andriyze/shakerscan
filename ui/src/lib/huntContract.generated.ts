@@ -1353,7 +1353,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/artifact.inspect"
       },
-      "description": "Read one small redacted byte window from a target-bound public client artifact. Reserves two requests: the second is spent only when tab-separated rows need the resource's head read to tell a database dump from plain text (once per resource).",
+      "description": "Read one small redacted byte window from a target-bound public client artifact. Reserves two requests: the second is spent only when tab-separated rows need the resource's head read to tell a database dump from plain text (once per resource; a failed read is retried once). Both requests share the 30-second wall-time reservation.",
       "input": {
         "fields": [
           "path",

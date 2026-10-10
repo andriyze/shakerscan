@@ -1280,7 +1280,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "artifact.inspect",
             "Read one small redacted byte window from a target-bound public client artifact. "
             "Reserves two requests: the second is spent only when tab-separated rows need the "
-            "resource's head read to tell a database dump from plain text (once per resource).",
+            "resource's head read to tell a database dump from plain text (once per resource; a "
+            "failed read is retried once). Both requests share the 30-second wall-time reservation.",
             "http", "passive", _HTTP_TARGETS, "artifact.inspect", "1", None,
             {"http_requests": 2, "tool_wall_seconds": 30},
             {
