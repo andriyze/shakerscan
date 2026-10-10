@@ -16,7 +16,7 @@ generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by de
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image | Model Intake Image |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2.8.2 | pending candidate | pending | pending | pending | pending | pending |
+| 2.8.2 | `f866d239788acb032423c583f7fe79e72806a85f` | `shakerscan/shakerscan-scanner:2.8.2` (`sha256:f91acb5c7553cfc59c3cd8bde836fd6cb96377a9001af3454ebb66952bc85663`) | `shakerscan/shakerscan-api:2.8.2` (`sha256:7ba2eb6ad452bdfd07fc80f11e34960a53d77e771af9ca490852562d7e0bf0a3`) | `shakerscan/shakerscan-ui:2.8.2` (`sha256:87a8204c2bdc782597c92b4d34c0132cc5a3f3b8dc5efb696dd6171f4a847b24`) | `shakerscan/shakerscan-model-intake-signer:2.8.2` (`sha256:ddb04f7d90f7f38fe0334ab29b80a51134671955096b9630d9a78a4fa2dd52ab`) | `shakerscan/shakerscan-model-intake:2.8.2` (`sha256:3bc73b347680b5413b64ed9d765ff63b47750f4c79e1906efc0849452601c5db`) |
 | 2.8.1 | `6849c6530ab2dfdfee9cd29cb66fb17a603aa487` | `shakerscan/shakerscan-scanner:2.8.1` (`sha256:503cfcba25deaeb63a4ce603b3ae62645009e05f089a5c18b00ca195fefc385e`) | `shakerscan/shakerscan-api:2.8.1` (`sha256:87acb3dc2dc4e860c333f75060368b9e363a2cf252f6d10929362a719558e76c`) | `shakerscan/shakerscan-ui:2.8.1` (`sha256:81b65f4c97efe429dcc5627e8cd77a3864d36a03be23434e4159070bf05d73dc`) | `shakerscan/shakerscan-model-intake-signer:2.8.1` (`sha256:e39832394c40cb763e3ecd772230a7b39d9b75db1ccb5d243ab27b085ac7139a`) | `shakerscan/shakerscan-model-intake:2.8.1` (`sha256:8515b12f0a98d232c630f5676f9cfed27c2293fd6657338c36e2e1ef80a911e0`) |
 | 2.8.0 | `d87c9f88bf8ba5feea40e947d83ce0d17cfe079f` | `shakerscan/shakerscan-scanner:2.8.0` (`sha256:467776ac82783df0915cfdceb54f808ebea7a23f4e7fbdf234035876449a10f5`) | `shakerscan/shakerscan-api:2.8.0` (`sha256:7b1f979daf81f0fefbc584ef800b837d2130eb15dbc4df5ade5af19b2d6aada0`) | `shakerscan/shakerscan-ui:2.8.0` (`sha256:34d23d6fe639a49d9b6dd8b037cd8bff267629d5f3273aeaab1b6cc0ea109826`) | `shakerscan/shakerscan-model-intake-signer:2.8.0` (`sha256:d0cbf23f9c64bed3f2246e2761805ca06da3a60af99ceff725b24a8246d59dc0`) | `shakerscan/shakerscan-model-intake:2.8.0` (`sha256:4e5b2f696ab569d3d2a00719e747ad009adf1072760482abbcd09f569135f52a`) |
 | 2.7.1 | `d1b20759f28c151c271a5de4c60e1cfad287c74d` | `shakerscan/shakerscan-scanner:2.7.1` (`sha256:ac895d3c2d045e90060584133dbd1ff79e47a3adf98db0f601bc862ea8eb62fc`) | `shakerscan/shakerscan-api:2.7.1` (`sha256:6a891d5f4ed34fb291e0e50b3578903df9df69a2f154321a7989eb2db33fc39d`) | `shakerscan/shakerscan-ui:2.7.1` (`sha256:972c681dc427d7f918915d3e0ecdcb17c53dbdc74240da21fa052a2e5aa6d833`) | `shakerscan/shakerscan-model-intake-signer:2.7.1` (`sha256:59f6a98b0d273df02c2bf95bc1c4535e42aad0deefa6c405ab3ca6cccaefe18c`) | `shakerscan/shakerscan-model-intake:2.7.1` (`sha256:559fe2ba4ada8f9d5d1fd1831bee24081c05c9cecee5b4abda025d732a3e6966`) |
@@ -93,13 +93,13 @@ The release process itself is documented once, in
 checks, one immutable **Release candidate** build per exact SHA, **Promote release** by digest,
 public smoke, and a separate stable-channel bump. This file is only the provenance ledger.
 
-Version 2.8.2 is the pending candidate. It is a fixes-only patch: Hunt withholds target secrets it
+Version 2.8.2 is a fixes-only patch: Hunt withholds target secrets it
 finds and binds them by reference, masked archive exports are bounded and carry no raw body digest,
 Hunt bounds use one strict IDNA 2008/UTS #46 spelling, scope respects public-suffix boundaries, the
 running-scan authorization re-check gains a deadline and covers device, AI and fleet work, and
 client 0.8.2 hardens its state and data directories.
 See [`docs/releases/2.8.2.md`](docs/releases/2.8.2.md) for scope, upgrade notes and validation state.
-The candidate has not been published or promoted.
+2.8.2 is published but was not promoted to the stable channel: its release acceptance found defects.
 
 Ledger rules:
 
