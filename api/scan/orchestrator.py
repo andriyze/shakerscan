@@ -221,6 +221,17 @@ class ScanOrchestrator:
                     # The action has finished: its receipt is settled, and the control plane
                     # records it with the authorization stop.
                     pass
+        except ActionAuthorityWithdrawn as exc:
+            # A withdrawal that escaped the executor (which turns one seen while the action
+            # runs into a partial receipt) is still an authorization stop, never an adapter
+            # failure: settled blocked with the reason, the reservation not charged in full.
+            result = await self._executor.terminal_without_execution(
+                action,
+                lease,
+                status=CapabilityResultStatus.BLOCKED.value,
+                reason_code=exc.reason,
+                charge_full_reservation=False,
+            )
         except ActionLeaseLost:
             result = await self._executor.terminal_without_execution(
                 action,

@@ -1020,3 +1020,36 @@ def test_a_restorable_out_of_scope_answer_is_rechecked_but_a_revoke_stays(templa
                                    uuid.UUID(scan.policy.approval_receipt_id))
             assert await request("POST", path, _broker_body(scan, active)) == {"reason": "authorization_revoked"}
     asyncio.run(run())
+
+
+def test_an_adapter_heartbeating_itself_on_a_fleet_node_settles_an_authorization_stop(template_database,
+                                                                                         monkeypatch):
+    from dataclasses import replace
+    from scan.action_interruption import action_interrupted
+    from tests.test_scan_local_revocation_postgres import _scan
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool, plan=_broker_plan)
+            # Long lease and a 30 s node poll: only the adapter's own heartbeat can see the revoke.
+            node = _FleetNode(monkeypatch, pool, scan, lease_seconds=60)
+            steps = []
+
+            async def dispatch(action, _lease, heartbeat):
+                for step in range(200):
+                    if step == 3:
+                        assert await scan.revoke() == 1
+                    if action_interrupted():
+                        return replace(_broker_receipt(scan, action), status="cancelled", errors=("cancelled",))
+                    await heartbeat()
+                    steps.append(step)
+                    await asyncio.sleep(0.02)
+                return _broker_receipt(scan, action)
+
+            active = scan.plan.actions[1]
+            settled = await node.orchestrator(dispatch)._execute_action(plan=scan.plan, action=active)
+            assert steps == [0, 1, 2, 3]
+            assert settled.status.value == "partial" and settled.reason_code.value == "authorization_revoked"
+            assert settled.budget_consumed["http_requests"] == 1
+            assert await scan.held_reservations() == 0
+    asyncio.run(run())

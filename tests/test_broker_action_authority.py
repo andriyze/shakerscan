@@ -267,3 +267,98 @@ def test_a_withdrawn_lease_heartbeat_stops_the_action_and_keeps_its_receipt():
     assert receipt.status == "partial" and receipt.errors == ("authorization_revoked",)
     assert receipt.redacted_execution["target_authority_interruption"]["reason_code"] == "authorization_revoked"
     assert receipt.budget_consumed["http_requests"] == 1
+
+
+class _WithdrawingBackend:
+    """Fixture orchestrator backend (``FakeBackend``) whose heartbeat reports a withdrawal once
+    ``state["revoked"]`` is set, as ``BrokerScanExecutionBackend.heartbeat`` does."""
+
+    def __new__(cls, plan, state):
+        from tests.test_scan_orchestrator import FakeBackend
+        from api.scan.execution_backend import ActionAuthorityWithdrawn
+
+        class Backend(FakeBackend):
+            async def heartbeat(self, lease):
+                if state.get("revoked"):
+                    raise ActionAuthorityWithdrawn("authorization_revoked")
+                self.heartbeats.append(lease.action.action_id)
+        return Backend(plan, "broker")
+
+
+def _orchestrate(backend, executor, plan):
+    """The receipt the orchestrator settles (the fixture backend stores it as given)."""
+    from api.scan.capability_result import CapabilityResultError
+    from api.scan.orchestrator import ScanOrchestrator
+    action = plan.actions[0]
+    try:
+        asyncio.run(ScanOrchestrator(backend=backend, executor=executor)._execute_action(plan=plan, action=action))
+    except CapabilityResultError:
+        pass  # the fixture backend returns the raw receipt, which the orchestrator then validates
+    return backend.results[action.action_id]
+
+
+def test_an_adapter_heartbeating_from_its_own_dispatch_is_stopped_as_an_authorization_stop():
+    from dataclasses import replace
+
+    from api.scan.action_interruption import action_interrupted
+    from tests.test_worker_action_executor import _receipt
+    from tests.test_scan_worker_action_executor_authority import FixtureAuthority
+
+    plan = _plan()
+    state = {}
+    seen = []
+
+    async def dispatch(action, _lease, heartbeat):
+        # As capability adapters do: heartbeat the lease from inside the run.
+        for step in range(100):
+            if step == 5:
+                state["revoked"] = True
+            if action_interrupted():
+                return replace(_receipt(action), status="cancelled", errors=("cancelled",),
+                               budget_consumed={"http_requests": 1})
+            await heartbeat()  # must not raise the withdrawal into the adapter
+            seen.append(step)
+            await asyncio.sleep(0.01)
+        return _receipt(action)
+
+    backend = _WithdrawingBackend(plan, state)
+    settled = _orchestrate(backend, _executor_for(dispatch, FixtureAuthority(poll_seconds=5)), plan)
+    assert settled.status == "partial" and settled.errors[0] == "authorization_revoked"
+    assert settled.redacted_execution["target_authority_interruption"]["reason_code"] == "authorization_revoked"
+    assert settled.budget_consumed["http_requests"] == 1 and len(seen) == 6
+
+
+def test_a_withdrawal_escaping_the_executor_is_settled_as_an_authorization_stop():
+    from api.scan.execution_backend import ActionAuthorityWithdrawn
+
+    plan = _plan()
+
+    class Escaping:
+        def __init__(self, inner):
+            self._inner = inner
+
+        async def execute(self, action, lease, heartbeat):
+            raise ActionAuthorityWithdrawn("authorization_expired")
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    executor = Escaping(_executor_for(lambda *_a: None, None))
+    settled = _orchestrate(_WithdrawingBackend(plan, {}), executor, plan)
+    assert settled.status == "blocked" and settled.errors == ("authorization_expired",)
+    assert set(settled.budget_consumed.values()) == {0}  # not charged in full
+
+
+def test_only_authorization_stop_reasons_count_as_a_withdrawal():
+    from api.scan.broker_backend import authority_withdrawn_reason
+    for reason in ("authorization_revoked", "authorization_expired", "scope_invalid", "authorization_unverified"):
+        assert authority_withdrawn_reason(BrokerActionHTTPError(409, f"authority_withdrawn:{reason}")) == reason
+    for reason in ("cancelled", "adapter_failed", "timed_out", ""):
+        assert authority_withdrawn_reason(BrokerActionHTTPError(409, f"authority_withdrawn:{reason}")) is None
+
+
+def _executor_for(dispatch, authority):
+    from api.scan.worker_action_executor import ReceiptScanActionExecutor
+    from tests.test_scan_orchestrator import SCAN_ID
+    return ReceiptScanActionExecutor(scan_id=SCAN_ID, target_id="target-1", worker_id="local-worker-1",
+                                     dispatcher=dispatch, authority=authority)
