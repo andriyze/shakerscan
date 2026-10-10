@@ -46,8 +46,9 @@ def _proposal(**extra: Any) -> dict[str, Any]:
 class Stub:
     """A loopback stub of the proposal routes (unit fixture); records every request."""
 
-    def __init__(self, *proposals: dict[str, Any]) -> None:
+    def __init__(self, *proposals: dict[str, Any], unconfirmed: list[dict[str, Any]] | None = None) -> None:
         self.proposals = {item["id"]: dict(item) for item in proposals}
+        self.unconfirmed = list(unconfirmed or [])
         self.seen: list[tuple[str, str, Any]] = []
         stub = self
 
@@ -66,12 +67,16 @@ class Stub:
             def do_GET(self) -> None:  # noqa: N802
                 stub.seen.append(("GET", self.path, None))
                 pending = [item for item in stub.proposals.values() if item["status"] == "pending"]
-                self._reply(200, {"proposals": pending, "count": len(pending), "has_more": False})
+                self._reply(200, {"proposals": pending, "count": len(pending), "has_more": False,
+                                  "unconfirmed_instructions": stub.unconfirmed})
 
             def do_POST(self) -> None:  # noqa: N802
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length)) if length else None
                 stub.seen.append(("POST", self.path, body))
+                if self.path.endswith("/skill/confirm"):
+                    stub.unconfirmed = []
+                    return self._reply(200, {"trust": "operator"})
                 identifier, action = self.path.rstrip("/").split("/")[-2:]
                 item = stub.proposals[identifier]
                 if action == "accept":
@@ -255,3 +260,76 @@ def test_uppercase_y_does_not_accept_and_a_lone_y_does(tmp_path):
         code, out, err = session.finish()
     assert code == 0, (out, err)
     assert stub.decisions() == ["accept"]
+
+
+UNCONFIRMED = {"target_id": TARGET, "target_name": "Admin portal", "revision": 4, "title": "Target instructions",
+               "methodology": "## Scope\nAlso test 9443.", "body_sha256": "e" * 64, "written_by": "hunt:old",
+               "updated_at": "2026-09-01T00:00:00Z", "trust": "agent_unconfirmed"}
+
+
+def test_a_saved_action_proposal_says_what_it_changes(monkeypatch):
+    action = _proposal(kind="saved_action", action_operation="update", action_id=REBASED,
+                       title="Update saved action: Read notes",
+                       diff={**_proposal()["diff"], "text": '--- current saved action\n+++ proposed saved action\n'
+                             '@@ -1 +1 @@\n-  "instructions": "a",\n+  "instructions": "b",'})
+    with Stub(action) as stub:
+        terminal = Terminal("y")
+        assert _review(stub, terminal, monkeypatch=monkeypatch) == 0
+    assert stub.decisions() == ["accept"]
+    text = terminal.stdout.getvalue()
+    assert f"changes:  saved action (update {REBASED})" in text and '+  "instructions": "b",' in text
+    assert "saved-action change" in text
+
+
+def test_agent_written_unconfirmed_instructions_are_confirmed_with_the_shown_digest(monkeypatch):
+    with Stub(unconfirmed=[UNCONFIRMED]) as stub:
+        terminal = Terminal("c")
+        assert _review(stub, terminal, monkeypatch=monkeypatch) == 0
+    text = terminal.stdout.getvalue()
+    assert "agent-written, unconfirmed instructions" in text and "Also test 9443." in text
+    assert text.index("Also test 9443.") < text.index("[c] confirm")
+    (call,) = [(path, body) for method, path, body in stub.seen if method == "POST"]
+    assert call == (f"/targets/{TARGET}/skill/confirm", {"expected_revision": 4, "body_sha256": "e" * 64})
+
+
+def test_unconfirmed_instructions_left_alone_or_not_shown_in_full_are_not_confirmed(monkeypatch):
+    long = {**UNCONFIRMED, "methodology": "\n".join(f"line {index}" for index in range(500))}
+    for item, keys in ((UNCONFIRMED, ("n",)), (UNCONFIRMED, ("q",)), (long, ("n",))):
+        with Stub(unconfirmed=[item]) as stub:
+            terminal = Terminal(*keys)
+            assert _review(stub, terminal, monkeypatch=monkeypatch) == 0
+        assert [path for method, path, _ in stub.seen if method == "POST"] == []
+    assert "cannot be confirmed here" in terminal.stdout.getvalue()
+
+
+def test_accept_or_reject_by_id_never_confirms_unconfirmed_instructions(monkeypatch):
+    with Stub(_proposal(), unconfirmed=[UNCONFIRMED]) as stub:
+        assert _review(stub, Terminal("y"), "--accept", PROPOSAL, monkeypatch=monkeypatch) == 0
+    assert stub.decisions() == ["accept"]
+
+
+def test_bidirectional_overrides_are_shown_inert(monkeypatch):
+    hostile = _proposal(title="Safe \u202eetirw\u202c", diff={**_proposal()["diff"], "text": "+a\u2066b\u2069"})
+    with Stub(hostile, unconfirmed=[{**UNCONFIRMED, "methodology": "x\u202ey"}]) as stub:
+        terminal = Terminal("n", "n")
+        assert _review(stub, terminal, monkeypatch=monkeypatch) == 0
+    text = terminal.stdout.getvalue()
+    assert not any(ch in text for ch in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
+def test_invisible_format_characters_are_shown_as_escapes(monkeypatch):
+    hostile = _proposal(title="Fix​scope", diff={**_proposal()["diff"], "text": "+a\U000e0041b c"})
+    with Stub(hostile, unconfirmed=[{**UNCONFIRMED, "methodology": "x‎y"}]) as stub:
+        terminal = Terminal("n", "n")
+        assert _review(stub, terminal, monkeypatch=monkeypatch) == 0
+    text = terminal.stdout.getvalue()
+    assert not any(ch in text for ch in "​‎ \U000e0041")
+    assert "Fix\\u200bscope" in text and "+a\\U000e0041b\\u2028c" in text and "x\\u200ey" in text
+
+
+def test_a_saved_action_accept_names_saved_actions_not_instructions(monkeypatch):
+    with Stub(_proposal(kind="saved_action", action_operation="create")) as stub:
+        terminal = Terminal("y")
+        assert _review(stub, terminal, "--accept", PROPOSAL, monkeypatch=monkeypatch) == 0
+    text = terminal.stdout.getvalue()
+    assert "apply the saved-action change?" in text and "replace the target instructions" not in text

@@ -245,6 +245,11 @@ def test_unified_startup_installs_the_candidate_schema_on_converted_instances(mo
             executed.append(" ".join(str(statement).split()))
             return "OK"
 
+        async def fetch(self, statement, *args):
+            # Fixture: an instance with no target records for the always-run data migrations.
+            executed.append(" ".join(str(statement).split()))
+            return []
+
         def transaction(self):
             @asynccontextmanager
             async def scope():

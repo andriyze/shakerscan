@@ -22,13 +22,21 @@ def asset_capability_specs(spec, schema, kinds):
                 'input':{'type':'object'},'description':{'type':'string','maxLength':240}}}},
         'parameters':{'type':'object','maxProperties':16},
     }
+    review_note = {
+        'reason':{'type':'string','maxLength':2000,
+                  'description':'Why the change helps; shown to the operator when the change is filed for review.'},
+        'evidence_refs':{'type':'array','maxItems':20,'uniqueItems':True,'items':{'type':'string','format':'uuid'},
+                         'description':'Ids of Hunt actions or receipts, findings, candidates or scans on this target’s asset.'},
+    }
+    reviewed = (' Applied only where the operator saved instruction_changes for this target; otherwise filed as '
+                'a proposal for operator review (the result says applied=false).')
     definitions = (
-        ('targets.actions.create','Save a named reusable action for this target using canonical capabilities and opaque references.',
-         action_text,('name','steps','expected_revision')),
-        ('targets.actions.update','Edit a saved action on this exact target with a revision check. Future Hunts load the change.',
-         {**action_text,'action_id':identifier},('action_id','name','steps','expected_revision')),
-        ('targets.actions.delete','Delete a saved action on this exact target with a revision check.',
-         {'action_id':identifier,'expected_revision':revision},('action_id','expected_revision')),
+        ('targets.actions.create','Save a named reusable action for this target using canonical capabilities and opaque references.'+reviewed,
+         {**action_text,**review_note},('name','steps','expected_revision')),
+        ('targets.actions.update','Edit a saved action on this exact target with a revision check. Future Hunts load the change.'+reviewed,
+         {**action_text,**review_note,'action_id':identifier},('action_id','name','steps','expected_revision')),
+        ('targets.actions.delete','Delete a saved action on this exact target with a revision check.'+reviewed,
+         {'action_id':identifier,'expected_revision':revision,**review_note},('action_id','expected_revision')),
         ('targets.skill.create','Create this target’s advisory knowledge (purpose=knowledge), or its instructions where the operator opted in with instruction_changes. Used by future Hunts; grants no testing authority.',
          skill_text,('methodology','expected_revision')),
         ('targets.skill.update','Update this target’s advisory knowledge, or its instructions where the operator opted in with instruction_changes, with a revision check. This Hunt’s startup snapshot is unchanged.',

@@ -218,6 +218,8 @@ class DeviceTargetCreate(BaseModel):
             raise ValueError('edit target instructions through /targets/{id}/skill with a revision check')
         if value and 'hunt_authority' in value:
             raise ValueError('edit Hunt permissions through /targets/{id}/hunt-authority with a revision check')
+        if value and 'hunt_actions' in value:
+            raise ValueError('edit saved actions through /targets/{id}/actions with a revision check')
         return value
 
 
@@ -243,6 +245,8 @@ class DeviceTargetUpdate(BaseModel):
             raise ValueError('edit target instructions through /targets/{id}/skill with a revision check')
         if value and 'hunt_authority' in value:
             raise ValueError('edit Hunt permissions through /targets/{id}/hunt-authority with a revision check')
+        if value and 'hunt_actions' in value:
+            raise ValueError('edit saved actions through /targets/{id}/actions with a revision check')
         return value
 
 

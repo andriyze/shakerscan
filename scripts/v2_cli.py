@@ -1224,12 +1224,13 @@ def build_parser() -> argparse.ArgumentParser:
         _approval().add_arguments(products.add_parser(command, help=text), command)
 
     knowledge = products.add_parser(
-        "knowledge", help="Review proposed changes to target instructions in your own terminal",
+        "knowledge", help="Review proposed changes to target instructions and saved actions in your own terminal",
     )
     knowledge_commands = knowledge.add_subparsers(dest="knowledge_command", required=True)
     review = knowledge_commands.add_parser(
         "review",
-        help="Show each pending instruction proposal as a diff and decide it with a keypress",
+        help=("Show each pending instruction or saved-action proposal as a diff, and agent-written instructions "
+              "no operator confirmed, and decide each with a keypress"),
     )
     review.add_argument("target_id", nargs="?", help="only this target's proposals (default: every target)")
     decided = review.add_mutually_exclusive_group()
@@ -1395,17 +1396,31 @@ def _run_approval(args: argparse.Namespace, client: ApiClient) -> int:
 
 # --- knowledge review --------------------------------------------------------------------------
 #
-# Instruction proposals are suggestions (often from a Hunt) to replace a target's instructions.
+# Proposals are suggestions (often from a Hunt) to replace a target's instructions or to create,
+# change or delete one of its saved actions. Instructions a Hunt wrote that no operator confirmed
+# are listed too: confirming saves them, unchanged, as operator instructions.
 # Deciding one is the person's act, at their own terminal, with the same keypress hardening as
 # `approve --watch`: only a lone key decides; an arrow key, an escape sequence or a paste never does.
 
 KNOWLEDGE_DIFF_LINES = 400
-_CONTROL = {code: "?" for code in [*range(0x00, 0x09), *range(0x0B, 0x20), *range(0x7F, 0xA0)]}
+# C0/C1 controls, DEL and bidirectional overrides/isolates, which could reorder the diff on screen.
+_CONTROL = {code: "?" for code in [*range(0x00, 0x09), *range(0x0B, 0x20), *range(0x7F, 0xA0),
+                                   *range(0x202A, 0x202F), *range(0x2066, 0x206A)]}
+
+
+def _invisible(character: str) -> bool:
+    import unicodedata
+    return unicodedata.category(character) in {"Cf", "Zl", "Zp"}
 
 
 def _shown(value: Any) -> str:
-    """Proposal text is written by a Hunt: never let it move the cursor or rewrite the screen."""
-    return str(value if value is not None else "").translate(_CONTROL)
+    """Proposal text is written by a Hunt: never let it move the cursor or rewrite the screen.
+
+    Invisible format characters (zero-width, direction marks, tag characters) and line separators
+    are shown as visible escapes, so what the person reads is what would be applied."""
+    text = str(value if value is not None else "").translate(_CONTROL)
+    return "".join((f"\\u{ord(ch):04x}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08x}") if _invisible(ch) else ch
+                   for ch in text)
 
 
 def _fully_shown(proposal: Mapping[str, Any]) -> bool:
@@ -1417,9 +1432,14 @@ def _render_proposal(proposal: Mapping[str, Any]) -> str:
     target = proposal.get("target_name") or proposal.get("target_url") or proposal.get("target_id")
     proposal = {key: (_shown(value) if isinstance(value, str) else value) for key, value in proposal.items()}
     target = _shown(target)
+    kind = "saved action" if proposal.get("kind") == "saved_action" else "instructions"
+    if kind == "saved action":
+        kind += f" ({proposal.get('action_operation')}" + (
+            f" {proposal.get('action_id')})" if proposal.get("action_id") else ")")
     lines = [
         "",
         f"proposal {proposal.get('id')}  target {target} ({proposal.get('target_id')})",
+        f"  changes:  {kind}",
         f"  title:    {proposal.get('title')}",
         f"  from:     {proposal.get('proposed_by')}  at {proposal.get('created_at')}",
         f"  reason:   {proposal.get('reason')}",
@@ -1443,13 +1463,63 @@ def _proposal_path(proposal: Mapping[str, Any], action: str) -> str:
             f"{urllib.parse.quote(str(proposal['id']), safe='')}/{action}")
 
 
-def _pending_proposals(send: Any, target_id: str | None) -> list[dict[str, Any]]:
+def _pending_review(send: Any, target_id: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     path = (f"/targets/{urllib.parse.quote(target_id, safe='')}/instruction-proposals?status=pending"
             if target_id else "/instruction-proposals?status=pending")
     status, body = send("GET", path)
     if not 200 <= status < 300 or not isinstance(body, Mapping):
         raise _approval().ApprovalError(f"could not list instruction proposals: HTTP {status}: {body}")
-    return [dict(item) for item in body.get("proposals") or [] if isinstance(item, Mapping)]
+    return ([dict(item) for item in body.get("proposals") or [] if isinstance(item, Mapping)],
+            [dict(item) for item in body.get("unconfirmed_instructions") or [] if isinstance(item, Mapping)])
+
+
+def _pending_proposals(send: Any, target_id: str | None) -> list[dict[str, Any]]:
+    return _pending_review(send, target_id)[0]
+
+
+def _render_unconfirmed(item: Mapping[str, Any]) -> tuple[str, bool]:
+    """(what is shown, whether it was shown in full) for agent-written, unconfirmed instructions."""
+    target = _shown(item.get("target_name") or item.get("target_url") or item.get("target_id"))
+    text = _shown(item.get("methodology")).splitlines()
+    lines = [
+        "",
+        f"agent-written, unconfirmed instructions  target {target} ({item.get('target_id')})",
+        f"  written by: {_shown(item.get('written_by'))}  at {_shown(item.get('updated_at'))}",
+        f"  title:      {_shown(item.get('title'))}  (revision {item.get('revision')})",
+        "  Hunts receive this text only as advisory notes. Confirming saves it, unchanged, as the target's "
+        "operator instructions.",
+        "  text:",
+    ]
+    lines.extend("    " + line for line in text[:KNOWLEDGE_DIFF_LINES])
+    complete = len(text) <= KNOWLEDGE_DIFF_LINES
+    if not complete:
+        lines.append(f"    ... cut here; read it in GET /targets/{item.get('target_id')}/skill. It cannot be "
+                     "confirmed here because it was not shown in full.")
+    return "\n".join(lines), complete
+
+
+def _review_unconfirmed(send: Any, terminal: Any, item: dict[str, Any]) -> str:
+    shown, complete = _render_unconfirmed(item)
+    terminal.say(shown)
+    if not complete:
+        terminal.key("  [n] not now  [q] quit: ", "nq")
+        return "skipped"
+    choice = terminal.key("  [c] confirm as operator instructions  [n] not now  [q] quit: ", "cnq")
+    if choice == "q":
+        return "quit"
+    if choice != "c":
+        terminal.say("  left unconfirmed")
+        return "skipped"
+    path = f"/targets/{urllib.parse.quote(str(item['target_id']), safe='')}/skill/confirm"
+    # Bound to the text that was shown: the server refuses any other text or revision.
+    status, body = send("POST", path, {"expected_revision": item.get("revision"),
+                                       "body_sha256": item.get("body_sha256")})
+    if 200 <= status < 300:
+        terminal.say("  confirmed: these are now the target's operator instructions")
+        return "accepted"
+    detail = body.get("detail") if isinstance(body, Mapping) else body
+    terminal.say(f"  not confirmed: HTTP {status}: {_shown(detail)}")
+    return "failed"
 
 
 def _decide_proposal(send: Any, terminal: Any, proposal: Mapping[str, Any], action: str,
@@ -1476,7 +1546,9 @@ def _review_one(send: Any, terminal: Any, proposal: dict[str, Any], note: str | 
         elif not _fully_shown(proposal):
             prompt, choices = "  [n] not now  [r] reject  [q] quit: ", "nrq"
         elif only == "accept":
-            prompt, choices = "  Accept it and replace the target instructions? [y] yes  [n] no: ", "yn"
+            prompt, choices = (("  Accept it and apply the saved-action change? [y] yes  [n] no: "
+                                if proposal.get("kind") == "saved_action"
+                                else "  Accept it and replace the target instructions? [y] yes  [n] no: "), "yn")
         elif only == "reject":
             prompt, choices = "  Reject it? [r] reject  [n] no: ", "rn"
         else:
@@ -1497,8 +1569,13 @@ def _review_one(send: Any, terminal: Any, proposal: dict[str, Any], note: str | 
         if choice == "y" and not proposal.get("stale") and _fully_shown(proposal):
             ok, body = _decide_proposal(send, terminal, proposal, "accept", note)
             if ok:
-                revision = ((body or {}).get("instructions") or {}).get("revision") if isinstance(body, Mapping) else None
-                terminal.say(f"  accepted: the target instructions are now revision {revision}")
+                applied = body if isinstance(body, Mapping) else {}
+                if proposal.get("kind") == "saved_action":
+                    revision = (applied.get("saved_actions") or {}).get("revision")
+                    terminal.say(f"  accepted: the target's saved actions are now revision {revision}")
+                else:
+                    revision = (applied.get("instructions") or {}).get("revision")
+                    terminal.say(f"  accepted: the target instructions are now revision {revision}")
                 return "accepted"
             return "failed"
         if choice == "r":
@@ -1519,17 +1596,20 @@ def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
     try:
         terminal.require("shakerscan knowledge review")
         wanted = args.accept or args.reject
-        proposals = _pending_proposals(send, args.target_id)
+        proposals, unconfirmed = _pending_review(send, args.target_id)
         if wanted:
+            unconfirmed = []
             proposals = [item for item in proposals if str(item.get("id")) == str(wanted).strip().lower()]
             if not proposals:
                 raise approval.ApprovalError(f"no pending instruction proposal {wanted}"
                                              + (f" on target {args.target_id}" if args.target_id else ""))
-        if not proposals:
+        if not proposals and not unconfirmed:
             terminal.say("no pending instruction proposals")
             return 0
-        terminal.say(f"{len(proposals)} pending instruction proposal(s). Accepting one replaces the target's "
-                     "instructions for future Hunts; nothing here grants testing authority.")
+        terminal.say(f"{len(proposals)} pending proposal(s). Accepting one replaces the target's instructions, "
+                     "or applies the saved-action change, for future Hunts; nothing here grants testing authority.")
+        if unconfirmed:
+            terminal.say(f"{len(unconfirmed)} target(s) have agent-written, unconfirmed instructions.")
         if client.api_token is None:
             terminal.say("This engine has no accounts: anyone who can reach its API could decide. "
                          "The keypress below is the only check.")
@@ -1544,6 +1624,12 @@ def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
                 failures += outcome == "failed"
                 if outcome == "quit":
                     terminal.say("stopped; the remaining proposals stay pending")
+                    return 1 if failures else 0
+            for item in unconfirmed:
+                outcome = _review_unconfirmed(send, terminal, item)
+                failures += outcome == "failed"
+                if outcome == "quit":
+                    terminal.say("stopped; the remaining instructions stay unconfirmed")
                     break
         return 1 if failures else 0
     except approval.ApprovalError as exc:

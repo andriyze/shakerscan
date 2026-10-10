@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 202,
+  "component_schema_count": 203,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -198,19 +198,20 @@
     "TargetPrincipalCreate": "9c7a0099e309721b8e541f4597f6fa02a60c62957aa7ad6ff91ae36f65d3a875",
     "TargetPrincipalUpdate": "b8894477c27a718804418bfa09c98e84b5ef42830b368abd0dc5bb86930f3072",
     "TargetScanRequest": "7b7458b366da2793dbc51e5ce6dd7f7ede43d953a340229079aae42d66504983",
-    "TargetSkillDocument": "bbec8c7cdd5c5eb070bc8dda28423e88eb17d17259b3fbd9df60627edf123aa1",
-    "TargetSkillResponse": "6f764cdd46f3e92da38d23f102995ab46848d77c6389356840821eba36fdabf1",
+    "TargetSkillDocument": "2997d2d9ae9fa6a7f4935c066b2d3c688486a9c8aa71f82c8560b1dbd9688ed9",
+    "TargetSkillResponse": "70f7bf881ff25d5db1eec2ff0a238a3192df7cd028594fabd30d902815cda683",
     "TargetSkillWrite": "181db370cd6989a370c19918a735365b337b6f349176cd2975a5b4b781c5e22f",
     "TargetUpdate": "313dd3ba3e6b4257f431bca32ece1dc13a0d0377a117e3941c77dddc22eedb58",
     "ToolReceiptRequest": "eb4ea7d29512451b66a7c85cb5dca9a0fd725719a4759cbe214027723d883886",
+    "UnconfirmedConfirmation": "4971d88b6ccab6f3f0b16aaf4c01ef2ef3c3cca9a1fa4b2fb161ebb3dfd9f0fe",
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "ValidationPolicy": "992d13e084c36df0e6701ccd04a7f13d8b1aaaea89be7ab1c28dd623bd6f3096",
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "20cb92b0aa6e751791e4f5ecaece8d3828d9e4e69f90c5067ca55a771858176f",
+  "contract_sha256": "52765a0b566a0a6433d8cd335349e98fe0e35f2fe2f9e08ffc06f10302648c40",
   "openapi": "3.1.0",
-  "operation_count": 468,
+  "operation_count": 469,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -2077,7 +2078,7 @@
     "GET /instruction-proposals": {
       "deprecated": false,
       "operation_id": "get_all_instruction_proposals_instruction_proposals_get",
-      "parameters_sha256": "81741e7817ea6116bbaff4451d827f0221187e562731de6da39ca7704841f41a",
+      "parameters_sha256": "af3d6b2ecc40ac0e82546ac1385b2cb586f277194a2e2f34e9d0df31e2a8c489",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -3236,7 +3237,7 @@
     "GET /targets/{target_id}/instruction-proposals": {
       "deprecated": false,
       "operation_id": "get_target_instruction_proposals_targets__target_id__instruction_proposals_get",
-      "parameters_sha256": "a7b42329e1238fc5541db67af9797bedb9fb03a6b2ab6e21c9862850776715c1",
+      "parameters_sha256": "106cb94fc27b3c7eeffbd28814c4e66f689c13e6bc459dd0dddadb37b035647a",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -6285,6 +6286,21 @@
       "request_schema_sha256": "1bbde1f0b8b9e0af41b73c04eac6adfa756c55c55f8701983a421690ca72eb5b",
       "response_schema_sha256": {
         "201": "cd500422d024a17a348092ae4aaf8a4f8d679e03713c7a274862106be175e465",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "POST /targets/{target_id}/skill/confirm": {
+      "deprecated": false,
+      "operation_id": "confirm_target_skill_targets__target_id__skill_confirm_post",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": "0d6ded56d51c0493659a953e128be61b93902a995ae40cf899148e0bebee4f06",
+      "response_schema_sha256": {
+        "200": "cd500422d024a17a348092ae4aaf8a4f8d679e03713c7a274862106be175e465",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
       },
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",

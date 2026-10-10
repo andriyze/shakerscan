@@ -3278,6 +3278,8 @@ class TargetUpdate(BaseModel):
             raise ValueError("edit target instructions through /targets/{id}/skill with a revision check")
         if value and "hunt_authority" in value:
             raise ValueError("edit Hunt permissions through /targets/{id}/hunt-authority with a revision check")
+        if value and "hunt_actions" in value:
+            raise ValueError("edit saved actions through /targets/{id}/actions with a revision check")
         if value and ({"declared", "created_via"} & set(value)):
             # Provenance that subdomain discovery admission reads: set only when a target is added
             # (POST /targets, POST /targets/hosts) or created by automation, never edited here.

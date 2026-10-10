@@ -80,6 +80,8 @@ async def save_authority(conn, row, values: dict, *, recorded_by: str):
 
 
 INSTRUCTION_SKILL_WRITES = frozenset({'targets.skill.create', 'targets.skill.update', 'targets.skill.delete'})
+# Saved actions shape future Hunts exactly like instructions, so they share the same opt-in.
+SAVED_ACTION_WRITES = frozenset({'targets.actions.create', 'targets.actions.update', 'targets.actions.delete'})
 
 
 def skill_write_purpose(values) -> str:
@@ -88,7 +90,16 @@ def skill_write_purpose(values) -> str:
     return 'instructions' if purpose is None else str(purpose)
 
 
-def instruction_changes_refusal() -> HTTPException:
+def instruction_changes_refusal(kind: str = 'instructions') -> HTTPException:
+    if kind == 'saved_action':
+        return HTTPException(403, {
+            'error': 'instruction_changes_not_delegated',
+            'reason_code': 'instruction_changes_not_delegated',
+            'message': ('This Hunt may not change this target’s saved actions directly. Without the '
+                        'operator’s instruction_changes setting a saved-action write is filed as a '
+                        'proposal that an operator reviews (shakerscan knowledge review).'),
+            'operator_setting': 'instruction_changes',
+        })
     return HTTPException(403, {
         'error': 'instruction_changes_not_delegated',
         'reason_code': 'instruction_changes_not_delegated',
@@ -108,6 +119,10 @@ async def require_hunt_delegation(conn, run, name, values):
         # Instructions are operator guidance: their own opt-in, independent of metadata changes.
         if not authority['instruction_changes']:
             raise instruction_changes_refusal()
+        return row, authority
+    if name in SAVED_ACTION_WRITES:
+        if not authority['instruction_changes']:
+            raise instruction_changes_refusal('saved_action')
         return row, authority
     if name.startswith('targets.') and not authority['metadata_changes']:
         raise HTTPException(403, 'Enable Hunt metadata changes in this target’s Hunt permissions')

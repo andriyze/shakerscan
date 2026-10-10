@@ -34,12 +34,24 @@ test('operator save clears the advisory state without requiring another edit', (
 })
 test('empty state is not an instruction', () => {
   assert.deepEqual(targetInstructionState(null), {
-    editable: null, operator: null, advisory: false, exists: false, needsOperatorSave: false,
+    editable: null, operator: null, unconfirmed: false, advisory: false, exists: false, needsOperatorSave: false,
   })
 })
 
+test('agent-written, unconfirmed instructions are advisory and offered for an operator save', () => {
+  const legacy = {...draft, instruction_authority: 'target_metadata_delegation', origin: 'agent_unconfirmed'}
+  const learned = {methodology: 'Port 8443 is an API', written_by: 'hunt:example', purpose: 'knowledge'}
+  const state = targetInstructionState({skill: learned, operator_skill: null, unconfirmed_instructions: legacy,
+                                        knowledge: learned, trust: 'hunt_advisory'})
+  assert.equal(state.editable, legacy)
+  assert.equal(state.operator, null)
+  assert.equal(state.unconfirmed, true)
+  assert.equal(state.advisory, true)
+  assert.equal(state.exists, false)
+  assert.equal(state.needsOperatorSave, true)
+})
 test('delegated instruction edits are already effective without a second UI save', () => {
-  const instruction = {...draft, instruction_authority: 'target_metadata_delegation'}
+  const instruction = {...draft, instruction_authority: 'target_instruction_delegation'}
   const state = targetInstructionState({skill: instruction, operator_skill: instruction, trust:'operator_delegated'})
   assert.equal(state.editable, instruction)
   assert.equal(state.advisory, false)

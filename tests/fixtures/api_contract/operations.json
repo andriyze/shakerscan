@@ -2325,6 +2325,11 @@
     "operation_id": "update_target_skill_targets__target_id__skill_put"
   },
   {
+    "path": "/targets/{target_id}/skill/confirm",
+    "method": "post",
+    "operation_id": "confirm_target_skill_targets__target_id__skill_confirm_post"
+  },
+  {
     "path": "/timeline",
     "method": "get",
     "operation_id": "mission_timeline_timeline_get"
