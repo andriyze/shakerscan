@@ -38,7 +38,7 @@ This document records only the current product boundary and genuinely unfinished
   `payload_omitted`, and a single body over 16 Mi characters is left out too. Each call says
   why in `payload_omitted_reasons` (`external_read_budget`, `masking_budget`, `header_budget`,
   `over_masking_limit`, or `masking_failed` for a payload that could not be masked safely), a
-  body left out by masking carries no digest, the fidelity is partial, and a masked HAR states
+  masked export or view carries no raw body digest (only a raw export does), the fidelity is partial, and a masked HAR states
   it in the entry's comment. No such payload is ever shown unmasked, and an export is always
   strict UTF-8 JSON (a lone surrogate becomes U+FFFD). Headers and bodies are redacted and
   encoded in two worker processes that import only the masking code, never on the API event
