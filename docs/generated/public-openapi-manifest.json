@@ -206,9 +206,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "fe88660308bed888b51ebccf8f759e1903e7923a672ee348ab53f1302f01c021",
+  "contract_sha256": "44d7d8230d72689ce7ee1b747c8164ac2436337c09ac45869a767c22766c38cf",
   "openapi": "3.1.0",
-  "operation_count": 461,
+  "operation_count": 462,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -4538,6 +4538,19 @@
       "operation_id": "lease_broker_job_fleet_broker_nodes__node_id__lease_post",
       "parameters_sha256": "b2866d597a87d4f4a61b93796fd0900d67de12bcbd17d44651ebb364e1a9c18d",
       "request_schema_sha256": "a194b770a6bdd9ac15d8286709797bc50951aabd0dfa14cac88c96726ee3c298",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": []
+    },
+    "POST /fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/authority": {
+      "deprecated": false,
+      "operation_id": "broker_scan_action_authority_fleet_broker_nodes__node_id__leases__lease_id__actions__action_id__authority_post",
+      "parameters_sha256": "3c5d87fab59cbb397840cd0993ba1b3d18ef56a767d3389e80ddc4f68759f2d6",
+      "request_schema_sha256": "64d6c4277512949e02a68bf071d3d65946f0f7550b6e4fa2ec23c1022d5a3778",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"

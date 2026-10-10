@@ -67,6 +67,8 @@ SELECT (SELECT row(a.status, a.revoked_at, a.expires_at, a.approved_by, a.denial
           FROM targets t WHERE t.id = $2) AS target,
        (SELECT row(d.is_active, d.primary_locator)::text
           FROM device_targets d WHERE d.id = $2) AS device,
+       (SELECT row(i.is_active, i.endpoint_url)::text
+          FROM ai_targets i WHERE i.id = $2) AS ai_target,
        (SELECT row(o.is_active, o.url)::text FROM targets o WHERE o.id = $3) AS authority_owner
 """
 
@@ -81,8 +83,9 @@ async def scan_action_authority_reason(
 ) -> tuple[str | None, ActionAuthorityDecision | None]:
     """``(None, None)`` when allowed, else ``(CapabilityResultReason value, decision)``.
 
-    The target must still be active, as the broker requires at ``fleet_routes/router.py``
-    (``_revalidate_broker_action_authority``), and the receipts must pass
+    The target (a web target, a connected device or an AI target) must still be active, as the
+    broker requires at ``fleet_routes/router.py`` (``_revalidate_broker_action_authority``), and
+    the receipts must pass
     ``revalidate_scan_action_authority`` exactly as they do for Hunt and broker actions.
     """
     target_id = _uuid(getattr(target_binding, "target_id", None))
@@ -91,6 +94,8 @@ async def scan_action_authority_reason(
         active = await conn.fetchval("SELECT is_active FROM targets WHERE id=$1", target_id)
         if active is None:
             active = await conn.fetchval("SELECT is_active FROM device_targets WHERE id=$1", target_id)
+        if active is None:
+            active = await conn.fetchval("SELECT is_active FROM ai_targets WHERE id=$1", target_id)
     if active is not True:
         return CapabilityResultReason.SCOPE_INVALID.value, ActionAuthorityDecision.REJECTED_SCOPE
     decision = await revalidate_scan_action_authority(
@@ -227,30 +232,42 @@ class ScanAuthorityGuard:
             except Exception:  # an observability sink never changes the decision
                 pass
 
-    async def annotate(self, report: dict[str, Any], *, scan_id: str) -> dict[str, Any]:
+    async def annotate(self, report: dict[str, Any], *, scan_id: str, interrupted: str | None = None,
+                       interrupted_action: str | None = None) -> dict[str, Any]:
         """Record on the Scan report that it stopped because authorization was withdrawn.
 
         ``not_run_actions`` is every action the Scan did not run after the stop: those this
         guard refused and those blocked because a refused action was their prerequisite.
         Findings recorded before the stop are kept; the report is partial, never complete.
+
+        A Scan that runs as one piece of work (``running_scan_authority``) also passes the
+        reason it was stopped for as ``interrupted``: when the guard is not withdrawn that is
+        ``authorization_unverified``, and the report names that stop instead, never a revoke.
         """
-        if self.reason is None:
+        reason = self.reason or interrupted
+        if reason is None:
             return report
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT action_id FROM scan_capability_actions
-                    WHERE scan_id=$1 AND status='blocked' AND reason_code = ANY($2::text[])
-                    ORDER BY ordinal, action_id""",
-                uuid.UUID(str(scan_id)),
-                [*sorted({item.value for item in _REASONS.values()}),
-                 CapabilityResultReason.DEPENDENCY_FAILED.value],
-            )
+        stop_reason = AUTHORIZATION_WITHDRAWN if self.reason is not None else reason
+        rows: list[Any] = []
+        if self.reason is not None:
+            # An unverified stop is reported without another query: the database has just
+            # failed to answer, and only a withdrawal blocks later actions.
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT action_id FROM scan_capability_actions
+                        WHERE scan_id=$1 AND status='blocked' AND reason_code = ANY($2::text[])
+                        ORDER BY ordinal, action_id""",
+                    uuid.UUID(str(scan_id)),
+                    [*sorted({item.value for item in _REASONS.values()}),
+                     CapabilityResultReason.DEPENDENCY_FAILED.value],
+                )
         not_run = list(dict.fromkeys([*self.blocked_actions, *(str(row["action_id"]) for row in rows)]))
+        interrupted_actions = [*self.interrupted_actions, *([interrupted_action] if interrupted_action else [])]
         stop = {
-            "stop_reason": AUTHORIZATION_WITHDRAWN,
-            "reason_code": self.reason,
-            "observed_at": self.withdrawn_at,
-            "interrupted_actions": list(dict.fromkeys(self.interrupted_actions)),
+            "stop_reason": stop_reason,
+            "reason_code": reason,
+            "observed_at": self.withdrawn_at or _now().isoformat(),
+            "interrupted_actions": list(dict.fromkeys(interrupted_actions)),
             "not_run_actions": not_run,
         }
         coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
@@ -262,7 +279,7 @@ class ScanAuthorityGuard:
         report["coverage"] = {
             **coverage,
             "status": status,
-            "reasons": [*reasons, *([] if AUTHORIZATION_WITHDRAWN in reasons else [AUTHORIZATION_WITHDRAWN])],
+            "reasons": [*reasons, *([] if stop_reason in reasons else [stop_reason])],
         }
         metadata = report.get("scan_metadata") if isinstance(report.get("scan_metadata"), dict) else {}
         reliability = [str(item) for item in metadata.get("grade_reliability_reasons") or () if str(item).strip()]
@@ -272,9 +289,9 @@ class ScanAuthorityGuard:
             "status": status,
             "partial": status == "partial",
             "grade_reliable": False,
-            "grade_reliability_reasons": [*reliability, *([] if AUTHORIZATION_WITHDRAWN in reliability
-                                                          else [AUTHORIZATION_WITHDRAWN])],
-            "stop_reason": AUTHORIZATION_WITHDRAWN,
+            "grade_reliability_reasons": [*reliability, *([] if stop_reason in reliability
+                                                          else [stop_reason])],
+            "stop_reason": stop_reason,
             "authority_stop": stop,
         }
         return report

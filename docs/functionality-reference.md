@@ -127,11 +127,20 @@ offline deterministic finalizer ── findings / coverage / grade reliability
   be reached the check is retried; about 10 s without a successful confirmation (an outage, or a
   pool acquisition or query that never answers, which is cancelled) stops the action as
   `authorization_unverified`, which is not reported as a revoke. The check before an action is
-  bounded by the same 10 s, retries included. Broker actions are re-checked when
-  each one is leased, not while running on a node. Not yet re-checked while running: device
-  posture, probe and web-DAST runs and AI scans (the `run_scan` path), device web children, finding
-  retests, and broker actions already running on a node; these rely on the authorization checked
-  when they were admitted or started.
+  bounded by the same 10 s, retries included. Broker actions are re-checked when each one is
+  leased and, with the same timing, before and while it runs on a fleet node: the node asks the
+  control plane (`POST /fleet/broker/nodes/{node}/leases/{lease}/actions/{action}/authority`,
+  answered by the same guard decision), so a revoke stops the remote tool; a control plane that
+  cannot be reached for about 10 s stops the action as `authorization_unverified`. Device posture
+  and probe scans (with their device web children) and AI scans bound to a receipt (the target's
+  standing authorization or the approval receipt they were submitted with) are re-checked the
+  same way as one run (`api/scan/running_scan_authority.py`): a revoke, an expiry or a deactivated
+  device or AI target stops the scanner through its own stop checks. A scanner that returns keeps
+  what it found and its report reads partial and names the stop; one that ends with an error, or
+  has not stopped 5 s later and is cancelled, fails the scan with the authorization reason. A
+  device or AI scan submitted without any receipt has no revocable authorization and is not
+  re-checked. Not yet re-checked while
+  running: finding retests, which rely on the authorization checked when they were queued.
 - **Compatibility scanner** (`scanner/scanner.py`, `scanner/scanner_tools/`): supplies migrated detector
   implementations behind registered adapters. Its historical phase waterfall and mode flags are not
   V2 orchestration authority and must not be used to add a new Scan engine.
@@ -1877,8 +1886,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 471 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 392 | `api/**/*.py` |
+| Public REST operations | 472 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 393 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2079,6 +2088,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/findings/{finding_id}/evidence` | `list_finding_evidence` |
 | `POST` | `/fleet/acceptance/lease-probe` | `run_fleet_acceptance_lease_probe` |
 | `POST` | `/fleet/broker/nodes/{node_id}/lease` | `lease_broker_job` |
+| `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/authority` | `broker_scan_action_authority` |
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/cancel` | `cancel_broker_scan_action` |
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/heartbeat` | `heartbeat_broker_scan_action` |
 | `POST` | `/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/lease` | `lease_broker_scan_action` |

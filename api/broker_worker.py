@@ -40,7 +40,9 @@ from scan.action_plan import ScanActionPlan, ScanActionPlanError
 from scan.continuation import MAX_SCAN_PLAN_REVISION
 from scan.continuation_rounds import round_progress_window
 from scan.continuation import ScanContinuationError, ScanPlanRevision
+from scan.authority_deadline import AUTHORITY_UNVERIFIED_AFTER_SECONDS
 from scan.broker_backend import (
+    BrokerActionAuthority,
     BrokerActionHTTPError,
     BrokerScanExecutionBackend,
 )
@@ -614,8 +616,25 @@ async def _execute_broker_action_plan(
         cancelled=lambda: _scan_cancel_requested(scan_id),
         private_inputs=private_inputs,
     )
-    # No ``authority`` here: a fleet node has no database. The control plane re-checks the
-    # target's authorization when it leases each action (``_revalidate_broker_action_authority``).
+
+    async def authority_request(
+        method: str, path: str, payload: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any] | None:
+        # Short transport timeout: the executor bounds each check by its own deadline, and a
+        # check it abandons must not keep a request thread alive for minutes.
+        try:
+            return await asyncio.to_thread(
+                api_request, state, method, path,
+                dict(payload) if payload is not None else None,
+                timeout=int(AUTHORITY_UNVERIFIED_AFTER_SECONDS),
+            )
+        except BrokerHTTPError as exc:
+            raise BrokerActionHTTPError(exc.status_code, str(exc)) from exc
+
+    # A fleet node has no database: the control plane re-checks the target's authorization
+    # when it leases each action and, through this authority, before and while each one runs.
+    # One authority spans every continuation round, so a withdrawal stays for the whole Scan.
+    authority = BrokerActionAuthority(lambda: backend, authority_request)
     executor = ReceiptScanActionExecutor(
         scan_id=scan_id,
         target_id=target.target_id,
@@ -623,6 +642,7 @@ async def _execute_broker_action_plan(
         dispatcher=dispatcher,
         scope_receipt_id=target.scope_receipt_id,
         approval_receipt_id=dispatcher.policy.approval_receipt_id,
+        authority=authority,
     )
 
     def action_activity_callback(
@@ -750,6 +770,7 @@ async def _execute_broker_action_plan(
             dispatcher=dispatcher,
             scope_receipt_id=target.scope_receipt_id,
             approval_receipt_id=dispatcher.policy.approval_receipt_id,
+            authority=authority,
         )
         terminal = plan.actions[-1].action_id == "finalize.report"
         progress_start, progress_end = (90, 95) if terminal else round_progress_window(plan_revision.revision)

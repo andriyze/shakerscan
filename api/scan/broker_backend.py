@@ -10,7 +10,8 @@ except (ImportError, ModuleNotFoundError):
     from ..runtime.receipts import CapabilityReceipt
 
 from .action_plan import ScanAction, ScanActionPlan
-from .capability_result import CapabilityResultReference
+from .authority_deadline import AUTHORITY_CHECK_RETRY_DELAYS, AUTHORITY_UNVERIFIED_AFTER_SECONDS
+from .capability_result import CapabilityResultReason, CapabilityResultReference
 from .execution_backend import (
     ActionAlreadyTerminal,
     ActionLease,
@@ -269,6 +270,15 @@ class BrokerScanExecutionBackend:
             )
         return manifest
 
+    def authority_request(self, action: ScanAction) -> tuple[str, dict[str, Any]]:
+        """Path and body that ask the control plane whether ``action`` is still authorized."""
+        expected = self._action(action.action_id)
+        if expected.action_digest != action.action_digest:
+            raise ScanExecutionBackendError(
+                "broker action differs from the immutable Scan plan"
+            )
+        return self._path(action.action_id, "authority"), self._authority(action)
+
     async def cancellation_requested(self) -> bool:
         response = await self._request(
             "POST", f"{self._base_path}/cancel-status",
@@ -285,7 +295,56 @@ class BrokerScanExecutionBackend:
         return response["cancel_requested"]
 
 
+class BrokerActionAuthority:
+    """A running broker action's target authorization, re-checked by the control plane.
+
+    A fleet node has no database, so this is the node side of ``ScanAuthorityGuard``: the
+    executor calls ``check`` before dispatch and ``poll`` every ``poll_seconds`` while the action
+    runs, with the same deadlines as the local guard (``authority_deadline``), and the control
+    plane answers with the guard's own decision. A withdrawal stops the running tool and, as
+    locally, stays for the rest of the Scan. A control plane that cannot be reached is unknown:
+    the request raises and the executor reports ``authorization_unverified`` once the tolerance
+    passes, never a revoke.
+    """
+
+    def __init__(
+        self,
+        backend: Callable[[], BrokerScanExecutionBackend],
+        request: BrokerActionRequest,
+        *,
+        poll_seconds: float = 2.0,
+        unverified_after_seconds: float = AUTHORITY_UNVERIFIED_AFTER_SECONDS,
+        check_retry_delays: tuple[float, ...] = AUTHORITY_CHECK_RETRY_DELAYS,
+    ) -> None:
+        self._backend = backend
+        self._request = request
+        self.poll_seconds = poll_seconds
+        self.unverified_after_seconds = unverified_after_seconds
+        self.check_retry_delays = check_retry_delays
+        self.reason: str | None = None
+
+    async def check(self, action: ScanAction) -> str | None:
+        return await self._ask(action)
+
+    async def poll(self, action: ScanAction) -> str | None:
+        return await self._ask(action)
+
+    async def _ask(self, action: ScanAction) -> str | None:
+        if self.reason is not None:
+            return self.reason
+        path, payload = self._backend().authority_request(action)
+        response = await self._request("POST", path, payload)
+        if not isinstance(response, Mapping) or set(response) != {"reason"}:
+            raise ScanExecutionBackendError("broker action authority response is invalid")
+        if response["reason"] is None:
+            return None
+        # An unknown code raises: unknown is unverified, never a revoke.
+        self.reason = CapabilityResultReason(str(response["reason"])).value
+        return self.reason
+
+
 __all__ = [
+    "BrokerActionAuthority",
     "BrokerActionHTTPError",
     "BrokerActionRequest",
     "BrokerScanExecutionBackend",

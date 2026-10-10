@@ -890,6 +890,11 @@
     "operation_id": "lease_broker_job_fleet_broker_nodes__node_id__lease_post"
   },
   {
+    "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/authority",
+    "method": "post",
+    "operation_id": "broker_scan_action_authority_fleet_broker_nodes__node_id__leases__lease_id__actions__action_id__authority_post"
+  },
+  {
     "path": "/fleet/broker/nodes/{node_id}/leases/{lease_id}/actions/{action_id}/cancel",
     "method": "post",
     "operation_id": "cancel_broker_scan_action_fleet_broker_nodes__node_id__leases__lease_id__actions__action_id__cancel_post"
