@@ -14,7 +14,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
 
-from .skill_trust import instruction_trust, planner_snapshot
+from .skill_trust import instruction_trust, known_authority, planner_snapshot
 from .metadata_row import target_metadata_row as _target
 
 try:
@@ -98,7 +98,9 @@ def _validated_snapshot(row: Any, saved: dict, value: Any) -> dict | None:
     if not isinstance(value, dict):
         return None
     try:
-        parsed = TargetSkillDocument.model_validate(value)
+        # A later engine's authority value reads as ``none``; its extra fields are ignored.
+        parsed = TargetSkillDocument.model_validate(
+            {**value, 'instruction_authority': known_authority(value.get('instruction_authority', 'none'))})
         revision = int(parsed.version)
         text = TargetSkillWrite(title=parsed.title, methodology=parsed.methodology,
                                expected_revision=revision)
@@ -111,11 +113,12 @@ def _validated_snapshot(row: Any, saved: dict, value: Any) -> dict | None:
     return parsed.model_dump()
 
 
-def _operator_skill(row: Any, saved: dict, current: dict | None) -> dict | None:
+def _operator_skill(row: Any, saved: dict, current: dict | None, marked: dict | None = None) -> dict | None:
     # Once the snapshot key exists, explicit null is a tombstone. Never resurrect
     # a deleted operator instruction by mining the revision history.
     if 'operator_snapshot' not in saved:
-        return current if instruction_trust(current) in {'operator', 'operator_delegated'} else None
+        return current if instruction_trust(marked if marked is not None else current) in {
+            'operator', 'operator_delegated'} else None
     value = saved.get('operator_snapshot')
     if not isinstance(value, dict) or instruction_trust(value) not in {'operator', 'operator_delegated'}:
         return None
@@ -135,16 +138,19 @@ def _public(row: Any) -> dict[str, Any]:
             'updated_at': saved['updated_at'],
             'written_by': saved.get('written_by'),
             'purpose': saved.get('purpose', 'instructions'),
-            'instruction_authority': saved.get('instruction_authority', 'none'),
+            'instruction_authority': known_authority(saved.get('instruction_authority', 'none')),
             'delegation_revision': saved.get('delegation_revision'),
         }
+    # The trust decision also reads a later engine's ``origin`` mark (it only demotes); the
+    # document served keeps this engine's shape.
+    marked = {**skill, 'origin': saved.get('origin')} if skill else None
     knowledge = (_validated_snapshot(row, saved, saved.get('knowledge_snapshot'))
                  if 'knowledge_snapshot' in saved else
-                 skill if instruction_trust(skill) in {'hunt_advisory', 'unknown_advisory'} else None)
+                 skill if instruction_trust(marked) in {'hunt_advisory', 'unknown_advisory'} else None)
     return {'target_id': str(row['id']), 'revision': revision, 'skill': skill,
             'max_characters': MAX_TARGET_SKILL_CHARACTERS,
-            'operator_skill': _operator_skill(row, saved, skill), 'knowledge': knowledge,
-            'trust': instruction_trust(skill)}
+            'operator_skill': _operator_skill(row, saved, skill, marked), 'knowledge': knowledge,
+            'trust': instruction_trust(marked)}
 
 
 async def read_target_skill(conn: Any, target_id: Any) -> dict[str, Any]:
