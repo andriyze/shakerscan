@@ -1,0 +1,164 @@
+name: Upgrade path
+
+# Installs a previous published release with the real installer, seeds it through the public API,
+# upgrades it to a candidate's runtime files and exact image digests with the real installer, and
+# then calls every GET route in the API's OpenAPI document plus targeted writes
+# (scripts/upgrade_path_smoke.sh). Any 5xx fails. It upgrades from the stable channel and from the
+# newest published release between stable and the candidate, when that differs. The release
+# candidate calls this before certifying; a pull request that changes the gate runs it against the
+# newest candidate built on main.
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit whose tree is installed
+        required: true
+        type: string
+      receipt_artifact:
+        description: This run's uncertified release-candidate receipt artifact
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - 'scripts/upgrade_path_smoke.sh'
+      - 'scripts/upgrade_path_probe.py'
+      - '.github/workflows/upgrade-path.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: upgrade-path-${{ github.ref }}-${{ inputs.candidate_sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  baselines:
+    name: Choose the releases to upgrade from
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      versions: ${{ steps.select.outputs.versions }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Stable channel plus the newest published release below the candidate
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          published="$(gh release list -R "$REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --limit 100 --json tagName --jq '.[].tagName')"
+          versions="$(python3 scripts/upgrade_path_probe.py baselines \
+            --stable "$(tr -d '[:space:]' < install/STABLE_VERSION)" \
+            --candidate "$(tr -d '[:space:]' < VERSION)" --published "$published" \
+            | jq -Rnc '[inputs | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))]')"
+          jq -e 'length >= 1' <<< "$versions" > /dev/null
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+          echo "Upgrading from: $versions"
+
+  upgrade-path:
+    name: Upgrade ${{ matrix.baseline }} with data to the candidate
+    needs: baselines
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        baseline: ${{ fromJSON(needs.baselines.outputs.versions) }}
+    env:
+      # True only when the read-only Docker Hub secrets exist; forks and Dependabot get false
+      # and keep pulling anonymously.
+      HAS_DH_READ: ${{ secrets.DOCKERHUB_READ_USERNAME != '' && secrets.DOCKERHUB_READ_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Download this run's candidate receipt
+        if: ${{ inputs.receipt_artifact != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ${{ inputs.receipt_artifact }}
+          path: artifacts/candidate
+
+      - name: Download the newest candidate built on main
+        if: ${{ inputs.receipt_artifact == '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          run_id="$(gh run list -R "$REPOSITORY" --workflow build-on-main.yml --branch main --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId')"
+          [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "no successful build-on-main run" >&2; exit 1; }
+          artifact="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/artifacts" \
+            --jq '[.artifacts[] | select(.name | startswith("release-candidate-uncertified-"))][0].name')"
+          gh run download "$run_id" -R "$REPOSITORY" -n "$artifact" -D artifacts/candidate
+
+      - name: Write the candidate image lock
+        shell: bash
+        # Repository names for this step only: the launcher reads SCANNER_IMAGE and the rest as
+        # operator overrides that win over the lock (see installed-upgrade.yml).
+        env:
+          SCANNER_IMAGE: shakerscan/shakerscan-scanner
+          API_IMAGE: shakerscan/shakerscan-api
+          UI_IMAGE: shakerscan/shakerscan-ui
+          SIGNER_IMAGE: shakerscan/shakerscan-model-intake-signer
+          MODEL_INTAKE_IMAGE: shakerscan/shakerscan-model-intake
+        run: |
+          receipt=artifacts/candidate/release-candidate-receipt.json
+          {
+            echo "SCANNER_IMAGE=${SCANNER_IMAGE}@$(jq -r '.images.scanner' "$receipt")"
+            echo "API_IMAGE=${API_IMAGE}@$(jq -r '.images.api' "$receipt")"
+            echo "UI_IMAGE=${UI_IMAGE}@$(jq -r '.images.ui' "$receipt")"
+            echo "SIGNER_IMAGE=${SIGNER_IMAGE}@$(jq -r '.images.signer' "$receipt")"
+            echo "MODEL_INTAKE_IMAGE=${MODEL_INTAKE_IMAGE}@$(jq -r '.images.model_intake' "$receipt")"
+            echo "RUNTIME_MANIFEST_SHA256=$(sha256sum install/MANIFEST.sha256 | cut -d' ' -f1)"
+          } > artifacts/candidate/release-image-lock.env
+          grep -Ec '^[A-Z_]+_IMAGE=shakerscan/[a-z-]+@sha256:[0-9a-f]{64}$' artifacts/candidate/release-image-lock.env | grep -qx 5
+          cat artifacts/candidate/release-image-lock.env
+
+      # No mirror.gcr.io, as in installed-upgrade.yml: this job pulls shakerscan/* release images,
+      # for which the mirror served manifests but not every blob. It relies on the read-only login.
+
+      - name: Free runner disk for two release image sets
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af > /dev/null
+          df -h /
+
+      # Authenticated, read-only Docker Hub pulls avoid the anonymous pull rate limit (429
+      # toomanyrequests). Skipped, so pulls stay anonymous, when the read secrets are absent.
+      - name: Log in to Docker Hub for read-only pulls
+        if: env.HAS_DH_READ == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          username: ${{ secrets.DOCKERHUB_READ_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
+
+      - name: Install ${{ matrix.baseline }}, seed it, upgrade to the candidate and sweep the API
+        env:
+          BASELINE_VERSION: ${{ matrix.baseline }}
+          CANDIDATE_IMAGE_LOCK: artifacts/candidate/release-image-lock.env
+          # The exact revision is known only for a release candidate; a pull request installs
+          # this tree with the newest images built on main.
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          UPGRADE_PATH_RECEIPT: ${{ github.workspace }}/artifacts/upgrade-path/${{ matrix.baseline }}-receipt.json
+        run: bash scripts/upgrade_path_smoke.sh
+
+      - name: Keep the receipt and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: upgrade-path-${{ matrix.baseline }}-${{ inputs.candidate_sha || github.sha }}
+          path: artifacts/upgrade-path
+          if-no-files-found: warn
+          retention-days: 14

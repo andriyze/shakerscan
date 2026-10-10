@@ -5,7 +5,6 @@ import yaml
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from scripts import verify_installed_runtime
 
-
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATE = ROOT / ".github" / "workflows" / "release-candidate.yml"
 PROMOTION = ROOT / ".github" / "workflows" / "release.yml"
@@ -207,3 +206,39 @@ def test_the_installed_upgrade_runs_the_locked_images_not_inherited_overrides():
     script = (ROOT / "scripts" / "installed_upgrade_smoke.sh").read_text(encoding="utf-8")
     cleared = script.index("unset " + " ".join(LAUNCHER_IMAGE_OVERRIDES))
     assert cleared < script.index('note "1. install')
+
+
+def test_certification_requires_the_seeded_upgrade_path_sweep():
+    """A clean install runs every schema statement; an upgraded database runs only the startup
+    migrations. 2.8.2 added a column on the fresh-database path only, so every upgraded install
+    answered POST /discovery with 500 while the clean-install smoke passed. The upgrade-path gate
+    (seeded previous release -> candidate, every GET plus the main writes) blocks certification.
+    """
+    document = yaml.safe_load(CANDIDATE.read_text(encoding="utf-8"))
+    jobs = document["jobs"]
+    assert jobs["upgrade-path"]["uses"] == "./.github/workflows/upgrade-path.yml"
+    assert set(jobs["upgrade-path"]["needs"]) == {"meta", "merge"}
+    assert "upgrade-path" in jobs["certify"]["needs"]
+    assert "needs.upgrade-path.result == 'success'" in jobs["certify"]["if"]
+    called = yaml.safe_load((ROOT / ".github" / "workflows" / "upgrade-path.yml").read_text(encoding="utf-8"))
+    job = called["jobs"]["upgrade-path"]
+    # Every baseline must pass: one failed upgrade source is not outvoted by another.
+    assert job["strategy"]["fail-fast"] is False
+    assert "fromJSON(needs.baselines.outputs.versions)" in job["strategy"]["matrix"]["baseline"]
+    run_steps = [step for step in job["steps"] if "scripts/upgrade_path_smoke.sh" in step.get("run", "")]
+    assert len(run_steps) == 1
+    assert run_steps[0]["env"]["CANDIDATE_IMAGE_LOCK"] == "artifacts/candidate/release-image-lock.env"
+    assert not set(LAUNCHER_IMAGE_OVERRIDES) & set(run_steps[0]["env"])
+    for scope in (called.get("env") or {}, job.get("env") or {}):
+        assert not set(LAUNCHER_IMAGE_OVERRIDES) & set(scope)
+    # The job never holds a write token or the push credentials.
+    assert called["permissions"] == {"contents": "read", "actions": "read"}
+    # YAML 1.1 reads the bare key `on` as True.
+    assert "pull_request_target" not in called.get("on", called.get(True))
+    for step in job["steps"] + called["jobs"]["baselines"]["steps"]:
+        if step.get("uses", "").startswith("actions/checkout"):
+            assert step["with"]["persist-credentials"] is False
+    script = (ROOT / "scripts" / "upgrade_path_smoke.sh").read_text(encoding="utf-8")
+    assert script.index("unset " + " ".join(LAUNCHER_IMAGE_OVERRIDES)) < script.index("== 1. install")
+    # The candidate goes in through this tree's real installer, not a file copy.
+    assert 'SHAKERSCAN_RAW_BASE="file://$ROOT"' in script and 'sh "$SMOKE_ROOT/candidate-index.sh"' in script
