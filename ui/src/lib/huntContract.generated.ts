@@ -780,7 +780,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/knowledge.check_experiment"
       },
-      "description": "Look up what is recorded about one exact experiment on this target (every condition equal) before repeating it. Nothing is skipped automatically while applicability is unknown.",
+      "description": "Look up what is recorded about one exact experiment on this target (every condition equal) before repeating it. skip is true only for an applicable experiment_completed_negative whose conditions match a plain request (no query, headers or body) your own cited http.request made: method, route (placeholders only for ids, each covered by a named object), objects in the path, its session_ref as the only principal or anonymous, a technique starting with http.request, and no other condition fields. Unknown is never unchanged. Skip is advice, never a block.",
       "input": {
         "fields": [
           "conditions"
@@ -802,6 +802,34 @@ export const HUNT_START_CONTRACT = {
         "alternate_adapters": [],
         "binary": null,
         "name": "knowledge.check_experiment"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/knowledge.changes"
+      },
+      "description": "What changed on this target since a point, from existing records (endpoint inventory, Scans, earlier http.request responses, services, subdomain discovery, findings, Hunts), with the interpretations each change affects and the significance rules. Sends no traffic and starts nothing.",
+      "input": {
+        "fields": [
+          "since",
+          "limit"
+        ],
+        "required": []
+      },
+      "name": "knowledge.changes",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "knowledge.changes",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "knowledge.changes"
       }
     },
     {

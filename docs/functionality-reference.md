@@ -152,27 +152,8 @@ offline deterministic finalizer ── findings / coverage / grade reliability
   error, or has not stopped 5 s later and is cancelled, fails the scan with a report naming the
   authorization stop. Only runs admitted with a receipt are watched: a device probe or a
   `confirm_authorized` posture scan without a standing authorization or approval receipt, and an
-  AI scan without an approval receipt, are not re-checked while running. Finding retests are
-  re-checked the same way (`running_retest_authority`): each records, when it is queued, the web
-  target, the target's current authorization and the approval receipt the request named
-  (`finding_verifications.admitted_authority`), and is watched against them before and while it
-  runs. The replayed host (`original_url`) must be covered by the scope that admits it (the
-  approval named, else the target's authorization) at admission (400 `replay_url_out_of_scope`)
-  and while it runs, under the strict host rule every admission uses
-  (`action_scope.receipt_scope_covers_host`); the target's authorization is also checked against
-  the target's current host. Requests and redirect hops outside that scope are refused
-  (`scanner_tools/destination_guard.py`: HTTP steps follow redirects hop by hop; every headless browser
-  context opened during a retest sends all traffic, WebSockets included, through a local egress
-  proxy (one request per plain-HTTP connection) with service workers blocked and WebRTC disabled;
-  the rule is by host name, not resolved address (DNS rebinding is not caught), and ports are not
-  constrained)
-  and the retest then records `inconclusive`. Workers and
-  fleet nodes on an earlier image run retests without this watch. A stopped retest is `failed` with verdict `error`,
-  `retry_class` `authorization` and `artifacts.authority_stop` (`GET /retests/...` returns it as
-  `authority_stop` and `stop_reason`); it never records fixed, still vulnerable or false positive. A
-  retest queued without either receipt is not watched; one queued by an earlier engine is bound
-  to the target's authorization when it starts. Hunt `candidate.verify` is a Hunt action (one
-  bounded workflow, checked at dispatch), not a finding retest, and is not watched while it runs.
+  AI scan without an approval receipt, are not re-checked while running. Not yet re-checked while
+  running: finding retests, which rely on the authorization checked when they were queued.
 - **Compatibility scanner** (`scanner/scanner.py`, `scanner/scanner_tools/`): supplies migrated detector
   implementations behind registered adapters. Its historical phase waterfall and mode flags are not
   V2 orchestration authority and must not be used to add a new Scan engine.
@@ -1918,8 +1899,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 486 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 405 | `api/**/*.py` |
+| Public REST operations | 487 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 406 | `api/**/*.py` |
 | Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2407,6 +2388,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets/{target_id}/invariants/{contract_id}/retire` | `retire_target_invariant_contract` |
 | `GET` | `/targets/{target_id}/invariants/{contract_id}/verification-plan` | `get_target_invariant_verification_plan` |
 | `POST` | `/targets/{target_id}/inventory/hypotheses` | `generate_endpoint_inventory_hypotheses` |
+| `GET` | `/targets/{target_id}/knowledge/changes` | `get_target_knowledge_changes` |
 | `GET` | `/targets/{target_id}/negative-results` | `get_target_negative_results` |
 | `POST` | `/targets/{target_id}/network-scans` | `start_target_network_scan` |
 | `GET` | `/targets/{target_id}/posture` | `get_target_posture` |
