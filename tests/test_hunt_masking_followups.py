@@ -305,8 +305,6 @@ def test_a_masked_export_carries_no_plain_digest_of_the_raw_body():
            "response_body": body, "response_body_sha256": plain, "metadata_json": {}}
     masked = json.dumps(export_document([row], export_format="transactions", redaction="redacted",
                                         owner={"hunt_id": ACTION}, total=1))
-    raw = json.dumps(export_document([row], export_format="transactions", redaction="raw",
-                                     owner={"hunt_id": ACTION}, total=1))
     assert plain not in masked and TOKEN not in masked
     assert '"sha256": null' in masked
 
