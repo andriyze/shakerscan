@@ -35,8 +35,10 @@ except ModuleNotFoundError:
     from ..runtime.browser_login_contract import browser_login_action_arguments
 try:
     from capabilities.exposure_probe import exposure_first_slice_hold
+    from capabilities.graphql_probe import graphql_first_slice_hold
 except ModuleNotFoundError:
     from ..capabilities.exposure_probe import exposure_first_slice_hold
+    from ..capabilities.graphql_probe import graphql_first_slice_hold
 from .capability_execution import SCAN_BASE_ORIGIN_CAPABILITIES, scan_discovery_reservation
 from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .execution import ScanExecutionPlan
@@ -74,6 +76,7 @@ _BATCH_CAPABILITIES = frozenset({
     "exposure.verify_batch",
     "nosqli.verify_batch",
     "authz_surface.verify_batch",
+    "graphql.verify_batch",
 })
 # (slice_size, reservation) per capability, derived per profile from two measured
 # tables rather than hand-tuned absolutes.
@@ -113,6 +116,10 @@ _BATCH_ATTEMPT_COSTS: Mapping[str, Mapping[str, int]] = {
     # fields per candidate (16 requests).
     "nosqli.verify_batch": {"http_requests": 16, "state_changing_requests": 16, "tool_wall_seconds": 12},
     "authz_surface.verify_batch": {"http_requests": 8, "tool_wall_seconds": 6},
+    # Per manifest entry: most entries are not GraphQL routes and cost nothing; a GraphQL
+    # route costs at most six GETs. The conventional locations are held separately for the
+    # first slice (graphql_first_slice_hold).
+    "graphql.verify_batch": {"http_requests": 1, "tool_wall_seconds": 1},
 }
 _BATCH_WALL_SHARE: Mapping[str, float] = {
     "xss.verify_batch": 0.12,
@@ -126,6 +133,7 @@ _BATCH_WALL_SHARE: Mapping[str, float] = {
     "exposure.verify_batch": 0.05,
     "nosqli.verify_batch": 0.05,
     "authz_surface.verify_batch": 0.05,
+    "graphql.verify_batch": 0.02,
 }
 # A discovered candidate manifest can mix query and body entries while its public
 # reference reveals only a count. Every verifier slice therefore carries one
@@ -1096,6 +1104,7 @@ class ScanActionPlanCompiler:
         sensitive_exposure = enabled("sensitive_exposure")
         nosqli = active and enabled("nosqli")
         authz_surface = active and enabled("authz_surface")
+        graphql = active and enabled("graphql")
         template_actions_expected = (
             (scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions)
             or (scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions)
@@ -1455,6 +1464,7 @@ class ScanActionPlanCompiler:
                     "exposure.verify_batch": 15,
                     "nosqli.verify_batch": 20,
                     "authz_surface.verify_batch": 15,
+                    "graphql.verify_batch": 15,
                 }[blueprint.capability_name]
                 budget = {
                     name: max(
@@ -1475,6 +1485,14 @@ class ScanActionPlanCompiler:
                 ):
                     # The first slice also reads the whole seed list; hold it explicitly.
                     for name, amount in exposure_first_slice_hold(slice_count).items():
+                        budget[name] = max(int(budget.get(name, 0)), amount)
+                if (
+                    blueprint.capability_name == "graphql.verify_batch"
+                    and isinstance(raw_slice, Mapping)
+                    and int(raw_slice.get("start") or 0) == 0
+                ):
+                    # The first slice also checks the conventional GraphQL locations.
+                    for name, amount in graphql_first_slice_hold(slice_count).items():
                         budget[name] = max(int(budget.get(name, 0)), amount)
                 if (
                     policy.allow_state_changing_http
@@ -1987,6 +2005,18 @@ class ScanActionPlanCompiler:
                 manifest_ref=candidate_ref,
                 dependencies=active_dependencies,
                 required="nosqli" in explicitly_requested,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
+        if scope in {"full", "endpoint"} and graphql and not defer_manifest_actions:
+            add_manifest_batches(
+                "verify.graphql",
+                "verify_candidates",
+                "graphql.verify_batch",
+                {"endpoint_manifest_ref": endpoint_ref or None},
+                manifest_ref=endpoint_ref,
+                dependencies=active_dependencies,
+                required="graphql" in explicitly_requested,
                 minimum_batches=1,
                 reserve_dependency_slots=int(authz_will_run),
             )

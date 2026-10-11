@@ -16,6 +16,7 @@ from .action_plan import ScanAction
 from .capability_result import CapabilityResultReference, CapabilityResultReason
 from .execution_backend import ActionAuthorityWithdrawn, ActionHeartbeat, ActionLease
 from .action_interruption import ActionInterruption, interruption_scope
+from .scan_deadline import SCAN_TIME_LIMIT, ScanDeadline
 from .authority_deadline import (  # noqa: F401  (the tolerance constants are re-exported)
     AUTHORITY_CHECK_RETRY_DELAYS,
     AUTHORITY_UNVERIFIED_AFTER_SECONDS,
@@ -70,6 +71,19 @@ def with_authority_interruption(receipt: CapabilityReceipt, reason: str, observe
         redacted_execution={**execution, "target_authority_interruption": stopped})
 
 
+def with_time_limit_interruption(receipt: CapabilityReceipt, observed_at: str | None) -> CapabilityReceipt:
+    """The receipt of an action stopped because the Scan reached its time limit.
+
+    What it observed before the stop is kept; the receipt is partial and names
+    ``scan_time_limit`` first. It is not a timeout of the action's own wall.
+    """
+    stopped = {"reason_code": SCAN_TIME_LIMIT, "observed_at": observed_at}
+    return replace(receipt, status="partial", partial=True, timed_out=False,
+        errors=(SCAN_TIME_LIMIT, *tuple(error for error in receipt.errors
+                                        if error not in {"cancelled", SCAN_TIME_LIMIT})),
+        redacted_execution={**dict(receipt.redacted_execution), "scan_time_limit": stopped})
+
+
 class ReceiptScanActionExecutor:
     """Turn canonical capability dispatch into lease-bound receipts.
 
@@ -89,6 +103,7 @@ class ReceiptScanActionExecutor:
         credential_check: Callable[[ScanAction], Awaitable[str | None]] | None = None,
         user_cancelled: Callable[[], bool] = lambda: False,
         authority: ActionAuthority | None = None,
+        deadline: ScanDeadline | None = None,
     ) -> None:
         self._scan_id = str(scan_id)
         self._target_id = str(target_id)
@@ -99,6 +114,7 @@ class ReceiptScanActionExecutor:
         self._credential_check = credential_check
         self._user_cancelled = user_cancelled
         self._authority = authority
+        self._deadline = deadline
 
     async def execute(
         self,
@@ -106,6 +122,13 @@ class ReceiptScanActionExecutor:
         lease: ActionLease,
         heartbeat: ActionHeartbeat,
     ) -> CapabilityReceipt:
+        deadline = self._deadline if action.action_id != "finalize.report" else None
+        if deadline is not None and deadline.reached():
+            # The Scan's time is up before this action started: it is not started, and
+            # nothing is charged. The finalizer reports it as work the limit cut off.
+            deadline.record_not_run(action.action_id)
+            return await self.terminal_without_execution(action, lease,
+                status="timed_out", reason_code=SCAN_TIME_LIMIT, charge_full_reservation=False)
         stop_heartbeats = asyncio.Event()
 
         signal = ActionInterruption()
@@ -113,13 +136,41 @@ class ReceiptScanActionExecutor:
         # Cancels a dispatch that keeps running after its authorization was withdrawn, once
         # it has had ``HARD_STOP_GRACE_SECONDS`` to stop through its own checks.
         hard_stop: Any = None
+        # The hard stop can be moved only while the dispatch runs inside it; a stop observed
+        # after the dispatch returned changes nothing about what the action did.
+        dispatch_open = dispatch_done = False
         grace = float(getattr(self._authority, "hard_stop_grace_seconds", HARD_STOP_GRACE_SECONDS))
 
         def authority_stopped(reason: str) -> None:
             nonlocal authority_interruption
             authority_interruption = reason
-            if hard_stop is not None:
+            if hard_stop is not None and dispatch_open:
                 hard_stop.reschedule(asyncio.get_running_loop().time() + grace)
+
+        # Set when the Scan's time limit stopped this action while it ran.
+        time_limit_interruption = False
+        time_limit_grace = float(getattr(deadline, "stop_grace_seconds", grace))
+
+        def time_limit_stopped() -> None:
+            nonlocal time_limit_interruption
+            if authority_interruption is not None or time_limit_interruption or dispatch_done:
+                return  # an authorization stop governs this action, or it already finished
+            time_limit_interruption = True
+            signal.record(SCAN_TIME_LIMIT)
+            if hard_stop is not None and dispatch_open:
+                hard_stop.reschedule(asyncio.get_running_loop().time() + time_limit_grace)
+
+        async def watch_deadline() -> None:
+            assert deadline is not None
+            while not stop_heartbeats.is_set():
+                remaining = deadline.remaining_seconds()
+                if remaining <= 0:
+                    time_limit_stopped()
+                    return
+                try:
+                    await asyncio.wait_for(stop_heartbeats.wait(), timeout=min(remaining, 5.0))
+                except asyncio.TimeoutError:
+                    pass
 
         async def guarded_heartbeat() -> bool:
             """Heartbeat the lease; ``False`` once the action's authorization was withdrawn.
@@ -155,6 +206,7 @@ class ReceiptScanActionExecutor:
         heartbeat_task = asyncio.create_task(keep_lease_alive())
         monitor = None
         authority_monitor = None
+        deadline_monitor = None
         check = self._credential_check if action.action_id != "finalize.report" else None
         authority = self._authority if action.action_id != "finalize.report" else None
 
@@ -203,25 +255,39 @@ class ReceiptScanActionExecutor:
                         authority_monitor = asyncio.create_task(watch_authorization(
                             authority, action, confirmed_at=confirmed_at, stopped=stop_heartbeats,
                             signal=signal, on_interrupt=authorization_interrupted))
+                    if deadline is not None:
+                        deadline_monitor = asyncio.create_task(watch_deadline())
                     try:
                         async with asyncio.timeout(None) as hard_stop:
-                            if authority_interruption is not None:  # stopped before dispatch
-                                authority_stopped(authority_interruption)
-                            result = await self._dispatcher(action, lease, adapter_heartbeat)
+                            dispatch_open = True
+                            try:
+                                if authority_interruption is not None:  # stopped before dispatch
+                                    authority_stopped(authority_interruption)
+                                elif time_limit_interruption:
+                                    hard_stop.reschedule(
+                                        asyncio.get_running_loop().time() + time_limit_grace)
+                                result = await self._dispatcher(action, lease, adapter_heartbeat)
+                            finally:
+                                dispatch_open, dispatch_done = False, True
                     except TimeoutError:
                         if hard_stop is None or not hard_stop.expired():
                             raise  # the adapter's own timeout, not this stop
                         # The adapter ignored the stop: what it did is unknown, so the action
-                        # fails with the authorization reason and keeps its full reservation.
+                        # fails with the stop's reason and keeps its full reservation.
                         hard_stopped = True
                         result = await self.terminal_without_execution(action, lease,
-                            status="failed", reason_code=str(authority_interruption),
+                            status="failed",
+                            reason_code=str(authority_interruption or SCAN_TIME_LIMIT),
                             charge_full_reservation=True)
+                    # The time limit concerns the dispatch only: the closing checks below must
+                    # not relabel an action that finished in time.
+                    await stop_task(deadline_monitor)
+                    deadline_monitor = None
                     if check is not None and not hard_stopped:
                         await check_authority()
         finally:
             stop_heartbeats.set()
-            for task in (monitor, authority_monitor):
+            for task in (monitor, authority_monitor, deadline_monitor):
                 await stop_task(task)
             await heartbeat_task
         if isinstance(result, CapabilityReceipt):
@@ -250,8 +316,17 @@ class ReceiptScanActionExecutor:
             raise WorkerActionExecutionError(
                 "worker receipt differs from immutable action authority"
             )
+        stopped_at_time_limit = (
+            time_limit_interruption and signal.reason == SCAN_TIME_LIMIT and denial is None
+        )
+        if stopped_at_time_limit and deadline is not None:
+            deadline.record_interrupted(action.action_id)
         if hard_stopped:
             pass  # settled failed with the reason and its full reservation, as an unknown outcome
+        elif stopped_at_time_limit:
+            # The Scan reached its time limit while the action ran: what it observed before
+            # the stop is kept, and the receipt says it is partial and why.
+            receipt = with_time_limit_interruption(receipt, signal.observed_at)
         elif authority_interruption is not None and signal.reason == authority_interruption and denial is None:
             # Authorization was withdrawn while the action ran: what it observed before the
             # stop is kept, and the receipt says it is partial and why.

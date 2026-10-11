@@ -34,6 +34,7 @@ from runtime.scan_credentials import (
 )
 from scan.capability_result import (
     CapabilityReceiptReference,
+    CapabilityResultReason,
     CapabilityResultReference,
     CapabilityResultStatus,
 )
@@ -1560,6 +1561,84 @@ def test_database_neutral_finalizer_reads_only_durable_results_and_observations(
     assert receipt.status == "success"
     assert receipt.observations[0]["kind"] == "scan_report"
     assert receipt.redacted_execution["target_traffic"] is False
+
+
+def test_a_cancelled_scan_report_keeps_what_its_settled_actions_confirmed():
+    """Cancellation settles the finalizer cancelled; the worker still reports what ran."""
+    from scan.cancelled_report import is_kept_cancelled_report, mark_cancelled_scan_report
+
+    templates = _action("passive.templates.r01", "templates.passive_batch", 0)
+    later = _action("baseline.http", "http.request", 1)
+    final = _action(
+        "finalize.report", "scan.finalize", 2,
+        dependencies=(templates.action_id, later.action_id),
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(templates, later, final),
+    )
+
+    def settled(action, status, reason=None, manifest=True):
+        return CapabilityResultReference(
+            action_id=action.action_id, action_digest=action.action_digest,
+            capability_name=action.capability_name,
+            adapter_name=str(action.placement["adapter_name"]),
+            adapter_version=str(action.placement["adapter_version"]),
+            output_schema=action.output_schema, status=status,
+            partial=False, timed_out=False, reason_code=reason,
+            receipt_ref=CapabilityReceiptReference(
+                receipt_id=str(uuid.uuid4()), receipt_hash="d" * 64,
+            ),
+            observation_manifest_ref=ObservationManifestReference(
+                manifest_id=str(uuid.uuid4()), sha256="b" * 64, count=1, size_bytes=10,
+                object_key=f"scan/test/{action.action_id}.json", manifest_digest="c" * 64,
+            ) if manifest else None,
+            budget_reserved=action.requested_budget,
+            budget_consumed={name: 0 for name in action.requested_budget},
+        )
+
+    backend = Backend(
+        results={
+            templates.action_id: settled(templates, CapabilityResultStatus.SUCCESS),
+            later.action_id: settled(
+                later, CapabilityResultStatus.CANCELLED, CapabilityResultReason.CANCELLED,
+                manifest=False,
+            ),
+            final.action_id: settled(
+                final, CapabilityResultStatus.CANCELLED, CapabilityResultReason.CANCELLED,
+                manifest=False,
+            ),
+        },
+        observations={templates.action_id: ({
+            "kind": "template_match",
+            "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers",
+            "severity": "info",
+            "matched_at": "https://app.example.test/",
+            "matcher_name": "x-frame-options",
+        },)},
+    )
+    report = mark_cancelled_scan_report(
+        asyncio.run(_dispatcher(plan, backend).build_scan_report())
+    )
+
+    assert [finding["title"] for finding in report["findings"]] == [
+        "Missing HTTP response header: X-Frame-Options",
+    ]
+    assert report["coverage"]["status"] == "cancelled"
+    assert report["scan_metadata"]["cancelled"] is True
+    assert is_kept_cancelled_report(report)
+
+
+def test_a_scan_report_is_not_built_while_an_action_is_unsettled():
+    baseline = _action("baseline.http", "http.request", 0)
+    final = _action("finalize.report", "scan.finalize", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(baseline, final),
+    )
+    with pytest.raises(Exception, match="not terminal"):
+        asyncio.run(_dispatcher(plan, Backend()).build_scan_report())
 
 
 @pytest.mark.parametrize("action_id", ["baseline.http", "baseline.security_txt"])
