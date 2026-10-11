@@ -39,6 +39,7 @@ from __future__ import annotations
 import base64
 import bisect
 import codecs
+import copy
 import html
 import html.entities
 import json
@@ -1707,32 +1708,68 @@ def mask_before_cut(text: str, after: str, mask: Any) -> str:
     if not after:
         return mask(text)
     collector = _COLLECTOR.get()
+    before = len(collector.values) if collector is not None else 0
     whole = mask(text + after)
     numbered = len(collector.values) if collector is not None else 0
+    # What the whole text taught (SQL dump columns, where COPY blocks are) stands: the cut text
+    # alone, a CREATE TABLE cut mid-list, must not replace it for this or a later window.
+    learned = _sql_state(collector)
     try:
         alone = mask(text)
     finally:
         if collector is not None:
             collector.forget_after(numbered)
+            _restore_sql_state(collector, learned)
     common = 0
     limit = min(len(whole), len(alone))
     while common < limit and whole[common] == alone[common]:
         common += 1
     if common == len(alone):
-        return alone
-    prefix, _straddled = _cut_outside_withheld(whole, common)
-    return prefix + MASK
+        shown = alone
+    else:
+        prefix, _straddled = _cut_outside_withheld(whole, common)
+        shown = prefix + MASK
+    if collector is not None:
+        # Values only what follows the cut held are forgotten: they were never shown, and must
+        # not use up the collector's references or say how many secrets lie past the window.
+        new = [number for number in collector.shown_numbers(shown) if number > before]
+        collector.forget_after(max([before, *new]))
+    return shown
+
+
+def _sql_state(collector: "WithheldValues | None") -> Any:
+    if collector is None:
+        return None
+    return (copy.deepcopy(collector.sql_tables), collector.sql_path, collector.sql_dump_like,
+            collector.copy_block)
+
+
+def _restore_sql_state(collector: "WithheldValues", state: Any) -> None:
+    tables, collector.sql_path, collector.sql_dump_like, collector.copy_block = state
+    # In place: a learner elsewhere may share this mapping.
+    collector.sql_tables.clear()
+    collector.sql_tables.update(tables)
 
 
 def decode_cut(text: bytes, after: bytes, encoding: str = "utf-8") -> tuple[str, str]:
     """``text`` and the ``after`` that follows its cut, decoded as one: a character the cut split
     begins ``after``, so ``text`` holds no replacement character the whole text does not."""
     try:
-        decoder = codecs.getincrementaldecoder(encoding or "utf-8")(errors="replace")
+        name = encoding if codecs.lookup(encoding or "utf-8")._is_text_encoding else "utf-8"
     except LookupError:
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    head = decoder.decode(bytes(text))
-    return head, decoder.decode(bytes(after), final=True)
+        name = "utf-8"
+    try:
+        decoder = codecs.getincrementaldecoder(name)(errors="replace")
+        head = decoder.decode(bytes(text))
+        return head, decoder.decode(bytes(after), final=True)
+    except (UnicodeError, ValueError, TypeError, AssertionError):
+        # A codec the target named that cannot decode this incrementally (UTF-16 without a byte
+        # order mark): each part on its own. A character split by the cut then reads as two
+        # replacement characters, and the cut text's ends where the whole text's does not.
+        try:
+            return bytes(text).decode(name, errors="replace"), bytes(after).decode(name, errors="replace")
+        except (UnicodeError, ValueError, TypeError, AssertionError):
+            return bytes(text).decode("utf-8", errors="replace"), bytes(after).decode("utf-8", errors="replace")
 
 
 def mask_cut_bytes(text: bytes, after: bytes, mask: Any, encoding: str = "utf-8") -> str:

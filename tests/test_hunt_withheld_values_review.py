@@ -167,13 +167,17 @@ def _inspect(monkeypatch, body: str, *, collector=None, search_terms=()):
     return asyncio.run(run())["observation"]
 
 
-def test_window_digest_is_keyed_when_anything_was_withheld(monkeypatch):
+def test_window_digest_is_always_keyed(monkeypatch):
+    """Keyed whether or not anything was withheld (2.9.0): a window the masking found nothing in
+    can still hold a secret it did not recognise, as ``body_sha256`` (#395)."""
     secret_body = "DB_PASSWORD=Fx_Window_Pw_77\n"
     observation = _inspect(monkeypatch, secret_body, collector=masking.WithheldValues(ACTION))
     assert observation["window_sha256"].startswith("hmac-sha256-")
     assert observation["window_sha256"] != hashlib.sha256(secret_body.encode()).hexdigest()
     plain = _inspect(monkeypatch, "hello world\n")
-    assert plain["window_sha256"] == hashlib.sha256(b"hello world\n").hexdigest()
+    assert plain["window_sha256"].startswith("hmac-sha256-")
+    assert plain["window_sha256"] != hashlib.sha256(b"hello world\n").hexdigest()
+    assert _inspect(monkeypatch, "hello world\n")["window_sha256"] == plain["window_sha256"]
 
 
 def test_response_body_digest_is_always_keyed_and_memory_hard():

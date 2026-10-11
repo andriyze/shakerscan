@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -30,9 +31,6 @@ MAX_STEPS = 4
 MAX_BODY_BYTES = 32_768
 MAX_REQUEST_JSON_BYTES = 16_384
 MAX_RESPONSE_SAMPLE = 2_000
-# A reader takes up to this much past MAX_BODY_BYTES: what follows the cut is read to mask the
-# text before it (``mask_before_cut``), never shown.
-MAX_READ_BYTES = MAX_BODY_BYTES + CUT_LOOKAHEAD_CHARS
 MAX_EXTRACTS_PER_STEP = 8
 MAX_VARIABLES = 20
 VARIABLE_PATTERN = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]{0,63})\}")
@@ -355,14 +353,44 @@ def _partial_range(response: httpx.Response) -> str | None:
     """The byte range a response holds when it is part of a resource (``bytes 40-99/500``, a
     multipart range, a 206 that does not say), else ``None``."""
     content_range = str(response.headers.get("content-range") or "")
-    if response.status_code != 206 and not content_range:
-        return None
+    if response.status_code != 206:
+        return None  # a 416 or a HEAD names a range but holds no part of one
     match = _CONTENT_RANGE_RE.match(content_range)
     if match and match.group(3) != "*":
         first, last, total = (int(match.group(index)) for index in (1, 2, 3))
         if first == 0 and last + 1 >= total:
             return None
     return f"bytes {match.group(1)}-{match.group(2)}" if match else "a byte range"
+
+
+# A lookahead waits at most this long for bytes past the ceiling: a stream that pauses there (a
+# long poll, server-sent events, a tarpit) costs the request no more than this.
+LOOKAHEAD_WAIT_SECONDS = 0.5
+
+
+async def read_capped_body(response: httpx.Response) -> tuple[bytes, bytes]:
+    """A streamed body up to one byte past ``MAX_BODY_BYTES``, and what follows it up to
+    ``CUT_LOOKAHEAD_CHARS`` bytes: read only to mask the body where it is cut, within
+    ``LOOKAHEAD_WAIT_SECONDS``; a pause, an error or the end there ends the lookahead only."""
+    body = bytearray()
+    lookahead = bytearray()
+    chunks = response.aiter_bytes().__aiter__()
+    async for chunk in chunks:
+        room = MAX_BODY_BYTES + 1 - len(body)
+        body.extend(chunk[:room])
+        lookahead.extend(chunk[room:][:CUT_LOOKAHEAD_CHARS])
+        if len(body) > MAX_BODY_BYTES:
+            break
+    if len(body) > MAX_BODY_BYTES and len(lookahead) < CUT_LOOKAHEAD_CHARS:
+        try:
+            async with asyncio.timeout(LOOKAHEAD_WAIT_SECONDS):
+                async for chunk in chunks:
+                    lookahead.extend(chunk[:CUT_LOOKAHEAD_CHARS - len(lookahead)])
+                    if len(lookahead) >= CUT_LOOKAHEAD_CHARS:
+                        break
+        except (TimeoutError, httpx.HTTPError):
+            pass  # the body is complete without it; the masking cuts at the safe boundary
+    return bytes(body), bytes(lookahead)
 
 
 def _scrub_sample(value: str) -> str:
@@ -412,7 +440,7 @@ def response_summary(
     cut it. Both are read only to mask the bounded text where it is cut, and never shown."""
     truncated = len(body) > MAX_BODY_BYTES
     bounded = body[:MAX_BODY_BYTES]
-    after = (body[MAX_BODY_BYTES:] + bytes(lookahead or b""))[:MAX_READ_BYTES - MAX_BODY_BYTES]
+    after = (body[MAX_BODY_BYTES:] + bytes(lookahead or b""))[:CUT_LOOKAHEAD_CHARS]
     text, after_text = decode_cut(bounded, after, response.encoding or "utf-8")
     parsed_json: Any = None
     try:
@@ -467,8 +495,7 @@ def response_summary(
         "content_type": str(response.headers.get("content-type") or "")[:200],
         "content_length": len(bounded),
         "content_length_header": int(response.headers["content-length"]) if str(response.headers.get("content-length") or "").isdigit() else None,
-        # What follows the ceiling past its first byte is read to mask the cut, not observed.
-        "bytes_observed": min(len(body), MAX_BODY_BYTES + 1),
+        "bytes_observed": len(body),
         # Keyed whether or not anything was withheld (see ``_body_digest``); the name is kept for
         # the readers that compare it.
         "body_sha256": _body_digest(bounded),
@@ -684,24 +711,15 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                 )
                 attempted_requests += 1
                 response = await client.send(request, stream=True)
-                chunks: list[bytes] = []
-                received = 0
                 try:
-                    async for chunk in response.aiter_bytes():
-                        remaining = MAX_READ_BYTES - received
-                        if remaining <= 0:
-                            break
-                        chunks.append(chunk[:remaining])
-                        received += min(len(chunk), remaining)
-                        if received >= MAX_READ_BYTES:
-                            break
+                    body, lookahead = await read_capped_body(response)
                 finally:
                     await response.aclose()
-                body = b"".join(chunks)
                 elapsed_ms = round((time.perf_counter() - started) * 1000)
                 summary = response_summary(
                     response,
                     body,
+                    lookahead=lookahead,
                     selected_json_paths=step["select_json"],
                     selected_headers=step["select_headers"],
                     elapsed_ms=elapsed_ms,

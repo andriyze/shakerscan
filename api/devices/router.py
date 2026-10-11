@@ -3327,6 +3327,8 @@ def _device_planner_response_headers(headers: dict[str, str]) -> dict[str, str]:
     raw = {str(key).lower(): value for key, value in headers.items()}
     return {
         key: value if value == "<redacted>" or str(key).lower() not in raw
+        # A Location is already the public URL (every query value redacted): masked as it is.
+        else masked_header_value(key, value, 1000) if str(key).lower() == "location"
         else masked_header_value(key, raw[str(key).lower()], 1000)
         for key, value in public.items()
     }

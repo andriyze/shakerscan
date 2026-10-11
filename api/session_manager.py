@@ -549,11 +549,12 @@ class InteractiveSession:
                                 val = await el.get_attribute(attribute)
                             else:
                                 val = await el.text_content()
-                            values.append(val)
+                            # Masked as a body is: a value can be a token or a password.
+                            values.append(mask_body_text(val) if isinstance(val, str) else val)
                         result["values"] = values
                     else:
-                        # Extract page content
-                        result["html"] = await page.content()
+                        # Extract page content, masked whole (a pre-filled credential field).
+                        result["html"] = mask_body_text(await page.content())
 
                 else:
                     return {"success": False, "error": f"Unknown action: {action_type}"}

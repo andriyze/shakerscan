@@ -62,7 +62,8 @@ def test_a_value_the_cut_splits_is_withheld_whole_and_its_reference_binds_it_exa
     shown, collector = _hunt(
         masking.mask_before_cut, WEB_CONFIG[:cut], WEB_CONFIG[cut:], masking.mask_body_text)
     assert WEB_VALUE[:4] not in shown and shown.endswith("value=\"***")
-    assert collector.values == [WEB_VALUE]  # the whole value; no piece is referenced
+    # Withheld whole with no reference: no piece is referenced, and nothing past the cut is.
+    assert collector.values == []
     assert masking.mask_before_cut(WEB_CONFIG[:cut], WEB_CONFIG[cut:], masking.mask_body_text) \
         == shown
 
@@ -124,7 +125,7 @@ def test_the_body_ceiling_cuts_after_masking():
     summary, collector = _hunt(response_summary, response, body)
     assert WEB_VALUE[:4] not in summary["body_sample"]
     assert all(value == WEB_VALUE for value in collector.values)  # no piece is referenced
-    assert summary["truncated"] is True and summary["bytes_observed"] == MAX_BODY_BYTES + 1
+    assert summary["truncated"] is True and summary["bytes_observed"] == len(body)
 
 
 def test_http_request_reads_what_follows_the_ceiling_to_mask_it(monkeypatch):
@@ -389,3 +390,102 @@ def test_hostile_url_passwords_through_the_scanner_redactor():
             assert hostile._url_leaks(shown, password, written, template) == [], (text, shown)
             if text.startswith("{"):
                 assert json.loads(shown)["e"] == "me@ex.com"
+
+
+# --- Review of the fix ------------------------------------------------------------------------
+
+def test_the_cut_text_alone_never_replaces_what_the_whole_text_taught():
+    """A window ending inside a CREATE TABLE column list: the columns the whole text names are
+    kept for the next window of the dump, not the cut list (``password`` read as ``p``)."""
+    import copy
+
+    dump = "-- dump\nCREATE TABLE users (id int, name text, password text);\n"
+    full = dump + "INSERT INTO users VALUES (1,'bob','Zq9vLmT4pRw2');\n"
+    cut = dump.index("password") + 1
+    first = masking.WithheldValues(ACTION)
+    first.sql_path, first.sql_dump_like = "/backup.sql", True
+    with masking.collecting_withheld_values(first):
+        masking.mask_before_cut(full[:cut], full[cut:], masking.mask_body_text)
+    later = masking.WithheldValues(ACTION)
+    later.sql_path, later.sql_dump_like = "/backup.sql", True
+    later.sql_tables = copy.deepcopy(first.sql_tables)
+    with masking.collecting_withheld_values(later):
+        shown = masking.mask_body_text(full[full.index("INSERT"):], window=True)
+    assert "Zq9vLmT4pRw2" not in shown
+
+
+def test_values_only_past_the_cut_are_not_numbered():
+    body = "A_TOKEN=Qx7vKpWz9kLmTy3m\n" + "x" * 50 + "\nB_TOKEN=Wz9kLmTy3mNbPb8n\nC_SECRET=Ty3mNbPb8nVcRc2h\n"
+    cut = body.index("xxx") + 10
+    shown, collector = _hunt(masking.mask_before_cut, body[:cut], body[cut:], masking.mask_body_text)
+    assert shown.startswith("A_TOKEN=[withheld:1]") and collector.values == ["Qx7vKpWz9kLmTy3m"]
+
+
+@pytest.mark.parametrize("charset", ["utf-16", "utf-32", "base64", "no-such-codec"])
+def test_a_charset_the_target_names_never_breaks_the_summary(charset):
+    body = "DB_PASSWORD=Qx7vKpWz9kLmTy3m\n".encode("utf-16-le") if charset.startswith("utf") else b"x=1"
+    response = httpx.Response(200, headers={"content-type": f"text/plain; charset={charset}"}, content=body)
+    summary = response_summary(response, body)
+    assert "Qx7vKpWz9kLmTy3m" not in json.dumps(summary)
+
+
+def test_a_stream_that_pauses_after_the_ceiling_costs_only_the_lookahead_wait():
+    import time
+
+    from api.http_experiment import LOOKAHEAD_WAIT_SECONDS, read_capped_body
+
+    class Paused(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"x" * (MAX_BODY_BYTES + 100)
+            await asyncio.sleep(30)
+            yield b"never"
+
+    async def run():
+        response = httpx.Response(200, stream=Paused())
+        started = time.perf_counter()
+        body, lookahead = await read_capped_body(response)
+        return body, lookahead, time.perf_counter() - started
+
+    body, lookahead, elapsed = asyncio.run(run())
+    assert len(body) == MAX_BODY_BYTES + 1 and len(lookahead) == 99
+    assert elapsed < LOOKAHEAD_WAIT_SECONDS + 1
+
+
+def test_the_executor_lookahead_never_spends_the_request_deadline(monkeypatch):
+    import time
+
+    from api.capabilities.http import _read_bounded_response
+
+    class Paused:
+        async def aiter_bytes(self):
+            yield b"x" * (MAX_BODY_BYTES + 100)
+            await asyncio.sleep(30)
+            yield b"never"
+
+    async def run():
+        lookahead = bytearray()
+        started = time.perf_counter()
+        result = await _read_bounded_response(
+            Paused(), deadline=time.perf_counter() + 10, lookahead=lookahead, lookahead_limit=16_384)
+        return result, lookahead, time.perf_counter() - started
+
+    (body, _digest, observed, truncated, exceeded), lookahead, elapsed = asyncio.run(run())
+    assert truncated and not exceeded and observed == MAX_BODY_BYTES + 1
+    assert len(body) == MAX_BODY_BYTES and len(lookahead) == 100 and elapsed < 2
+
+
+def test_device_location_keeps_its_public_url_redaction():
+    from api.devices import router as device_router
+
+    headers = device_router._device_planner_response_headers(
+        {"Location": "http://admin:pw@10.0.0.1/login.htm?sid=AbCdEf123456Gh&x=1"})
+    assert "AbCdEf123456Gh" not in headers["Location"] and "pw@" not in headers["Location"]
+
+
+def test_interactive_extract_masks_values_and_page_content():
+    """The interactive session's extract action (its page needs a browser): read as source."""
+    from api import session_manager
+
+    source = open(session_manager.__file__, encoding="utf-8").read()
+    assert 'values.append(mask_body_text(val) if isinstance(val, str) else val)' in source
+    assert 'result["html"] = mask_body_text(await page.content())' in source

@@ -16,6 +16,7 @@ import urllib.parse
 import action_scope
 import agent_tools
 from http_experiment import (
+    LOOKAHEAD_WAIT_SECONDS,
     MAX_BODY_BYTES,
     MAX_REDIRECT_HOPS,
     REDIRECT_STATUSES,
@@ -99,29 +100,44 @@ async def _read_bounded_response(
     ``lookahead`` receives up to ``lookahead_limit`` bytes past the body: read only to mask the
     body where it is cut, never recorded or digested.
     """
+    import httpx
+
     retained = bytearray()
     observed = bytearray()
     truncated = False
     deadline_exceeded = False
     remaining_seconds = max(0.001, deadline - time.perf_counter())
+    chunks = response.aiter_bytes().__aiter__()
     try:
         async with asyncio.timeout(remaining_seconds):
-            async for chunk in response.aiter_bytes():
+            async for chunk in chunks:
                 remaining_observation = max(0, body_limit + 1 - len(observed))
                 if remaining_observation:
                     observed.extend(chunk[:remaining_observation])
                 remaining_body = max(0, body_limit - len(retained))
                 if remaining_body:
                     retained.extend(chunk[:remaining_body])
-                if lookahead is not None and len(lookahead) < lookahead_limit and len(chunk) > remaining_body:
-                    lookahead.extend(chunk[remaining_body:remaining_body + lookahead_limit - len(lookahead)])
+                if lookahead is not None and len(chunk) > remaining_body:
+                    lookahead.extend(chunk[remaining_body:][:max(0, lookahead_limit - len(lookahead))])
                 if len(observed) > body_limit:
                     truncated = True
-                    if lookahead is None or len(lookahead) >= lookahead_limit:
-                        break
+                    break
     except TimeoutError:
         truncated = True
         deadline_exceeded = True
+    if truncated and not deadline_exceeded and lookahead is not None and len(lookahead) < lookahead_limit:
+        # Within its own short wait, and never past the request deadline: a stream that pauses
+        # after the ceiling (a long poll, server-sent events) ends the lookahead, not the request.
+        wait = min(LOOKAHEAD_WAIT_SECONDS, deadline - time.perf_counter())
+        if wait > 0:
+            try:
+                async with asyncio.timeout(wait):
+                    async for chunk in chunks:
+                        lookahead.extend(chunk[:lookahead_limit - len(lookahead)])
+                        if len(lookahead) >= lookahead_limit:
+                            break
+            except (TimeoutError, OSError, httpx.HTTPError):
+                pass  # the body is complete without it; the masking cuts at a safe boundary
     digest = hashlib.sha256(bytes(observed)).hexdigest()
     return bytes(retained), digest, len(observed), truncated, deadline_exceeded
 

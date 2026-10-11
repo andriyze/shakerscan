@@ -134,6 +134,39 @@ def test_rewritten_rules_redact_exactly_as_before(family):
         assert redact_text(text) == reference_redact_text(text), repr(text)
 
 
+# The userinfo regex rule 9 replaced, for the differential below.
+_OLD_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]*):(?!\[withheld:[1-9][0-9]{0,3}\]@)[^@\s/]+@")
+
+
+def _intended_userinfo_difference(text: str) -> bool:
+    """Where the shared reader differs from the old regex by design: a reference (the regex split
+    one at its own ``:``), a run with more than one ``@`` (a password ends at the authority's last
+    one), a ``#`` (it ends an authority), a quote (a quoted URL ends at its own quote)."""
+    return "[withheld:" in text or "#" in text or any(char in text for char in "\"'`") or any(
+        run.count("@") > 1 for run in re.split(r"\s", text))
+
+
+def test_the_userinfo_rule_differs_from_the_old_regex_only_where_intended():
+    rng = random.Random("r2-userinfo-differential")
+    atoms = _ATOMS["userinfo"] + ('"', "'")
+    differing = 0
+    for _ in range(3_000):
+        text = "".join(rng.choice(atoms) for _ in range(rng.randint(1, 40)))
+        new = redact_text(text)
+        assert "[withheld:***" not in new, repr(text)  # never splits a reference
+        before = text
+        for index, rule in enumerate(redaction._TEXT_PATTERNS):
+            if index == 9:
+                before = _OLD_USERINFO_RE.sub(r"\1:***@", before)
+            else:
+                pattern, replacement = _REFERENCE_REWRITTEN.get(index, rule)
+                before = pattern(before) if replacement is None else pattern.sub(replacement, before)
+        if new != before:
+            differing += 1
+            assert _intended_userinfo_difference(text), repr(text)
+    assert differing  # the generator reaches the differences
+
+
 @pytest.mark.parametrize("text, expected", [
     ('Content-Disposition: form-data; name="password"\r\n\r\nhunter2\r\n--b--',
      'Content-Disposition: form-data; name="password"\r\n\r\n***\r\n--b--'),

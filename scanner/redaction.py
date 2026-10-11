@@ -6,8 +6,10 @@ module, ``api/api.py`` and ``scanner/scanner_tools/model_intake.py`` each carrie
 their own ``SENSITIVE_*`` key-set and the two diverged (only Model Intake covered
 the AWS/Azure/GCP keys). They now both consume :data:`SENSITIVE_KEYS` here.
 
-This module is intentionally a leaf (stdlib only) so it is cheap to import from
-both ``api`` and ``scanner`` without circular-import risk.
+This module imports only the standard library at import time, so it is cheap to import from
+both ``api`` and ``scanner`` without circular-import risk. One rule, the URL userinfo password,
+is the Hunt body masking's reader (``runtime.archive_body_masking``), imported when a text first
+holds an ``@``: it ships beside this module in every image and in the host installer's files.
 
 Note: ``api/ai_verifier.py`` keeps its own, more aggressive ``[REDACTED]``
 provider-bound redactor (different sentinel and purpose: what is safe to send to
