@@ -203,7 +203,7 @@
     "TargetPrincipalUpdate": "b8894477c27a718804418bfa09c98e84b5ef42830b368abd0dc5bb86930f3072",
     "TargetScanRequest": "7b7458b366da2793dbc51e5ce6dd7f7ede43d953a340229079aae42d66504983",
     "TargetSkillDocument": "2997d2d9ae9fa6a7f4935c066b2d3c688486a9c8aa71f82c8560b1dbd9688ed9",
-    "TargetSkillResponse": "70f7bf881ff25d5db1eec2ff0a238a3192df7cd028594fabd30d902815cda683",
+    "TargetSkillResponse": "9c1385adc8751fba9847ec09e149ca485314e5ca3c2495077a54c88958881f51",
     "TargetSkillWrite": "181db370cd6989a370c19918a735365b337b6f349176cd2975a5b4b781c5e22f",
     "TargetUpdate": "313dd3ba3e6b4257f431bca32ece1dc13a0d0377a117e3941c77dddc22eedb58",
     "ToolReceiptRequest": "eb4ea7d29512451b66a7c85cb5dca9a0fd725719a4759cbe214027723d883886",
@@ -213,7 +213,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "e48066f939adf9822720eb4c454598a2bdbeeb9924fc3116409fcd9311b1dcd9",
+  "contract_sha256": "0f1852d3f02a8bead80280fac7a9234a98c8b526710fb99fcc75eca4760e13fd",
   "openapi": "3.1.0",
   "operation_count": 476,
   "operations": {

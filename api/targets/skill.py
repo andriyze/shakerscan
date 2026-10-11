@@ -64,6 +64,9 @@ class TargetSkillResponse(BaseModel):
     unconfirmed_instructions: TargetSkillDocument | None = None
     trust: Literal['none', 'operator', 'operator_delegated', 'agent_unconfirmed',
                    'hunt_advisory', 'unknown_advisory'] = 'none'
+    # Set when an operator retracted the knowledge note holding this text: Hunts do not receive it
+    # (an operator restores it by saving knowledge again).
+    knowledge_withheld: dict | None = None
 
 
 class TargetSkillWrite(BaseModel):
@@ -167,11 +170,30 @@ def _public(row: Any) -> dict[str, Any]:
     knowledge = (_validated_snapshot(row, saved, saved.get('knowledge_snapshot'))
                  if 'knowledge_snapshot' in saved else
                  skill if instruction_trust(skill) in {'hunt_advisory', 'unknown_advisory'} else None)
+    withheld = saved.get('knowledge_withheld')
+    withheld = (dict(withheld) if isinstance(withheld, dict) and knowledge is not None
+                and withheld.get('body_sha256') == knowledge.get('body_sha256') else None)
     return {'target_id': str(row['id']), 'revision': revision, 'skill': skill,
             'max_characters': MAX_TARGET_SKILL_CHARACTERS,
             'operator_skill': _operator_skill(row, saved, skill), 'knowledge': knowledge,
             'unconfirmed_instructions': _unconfirmed_skill(row, saved, skill),
-            'trust': instruction_trust(skill)}
+            'trust': instruction_trust(skill), 'knowledge_withheld': withheld}
+
+
+def hunt_view(saved: dict[str, Any]) -> dict[str, Any]:
+    """The skill record as a Hunt may read it: withheld knowledge text left out."""
+    withheld = saved.get('knowledge_withheld')
+    if not withheld:
+        return saved
+    view = dict(saved)
+    sha = withheld.get('body_sha256')
+    for key in ('knowledge', 'skill'):
+        document = view.get(key)
+        if (isinstance(document, dict) and document.get('body_sha256') == sha
+                and (key == 'knowledge' or document.get('purpose') == 'knowledge')):
+            view[key] = None
+    view['knowledge_withheld'] = {'withheld': True, 'reason': 'An operator retracted this knowledge text.'}
+    return view
 
 
 async def read_target_skill(conn: Any, target_id: Any) -> dict[str, Any]:
@@ -209,6 +231,10 @@ async def write_target_skill(conn: Any, target_id: Any, operation: str,
             raise HTTPException(422, 'Unsupported target skill operation')
         saved = {'revision': current['revision'] + 1,
                  'updated_at': datetime.now(timezone.utc).isoformat(), 'written_by': source, 'purpose': purpose}
+        # An operator's retraction of knowledge text holds until an operator saves knowledge again.
+        withheld = _saved(row).get('knowledge_withheld')
+        if isinstance(withheld, dict) and not (operator and purpose == 'knowledge'):
+            saved['knowledge_withheld'] = withheld
         history = object_history(row)
         if current['skill'] is not None:
             history.append(current['skill'])
@@ -250,7 +276,7 @@ async def attach_target_skill_snapshot(conn: Any, target_id: Any, context: dict,
     from .hunt_authority import read_hunt_authority
     context['hunt_authority'] = await read_hunt_authority(conn, target_id)
     saved = await read_target_skill(conn, target_id)
-    context['target_skill'] = planner_snapshot(saved)
+    context['target_skill'] = planner_snapshot(hunt_view(saved))
     from .actions import read_target_actions
     actions = await read_target_actions(conn, target_id)
     context['target_actions'] = {**actions, 'actions':[{

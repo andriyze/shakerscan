@@ -9,7 +9,7 @@ from pydantic import ValidationError
 try:
     from runtime.credential_store import PostgresCredentialProfileStore, CredentialStoreError
     from targets.asset_router import persist_host_target, HostTargetCreate
-    from targets.skill import read_target_skill, write_target_skill, TargetSkillWrite
+    from targets.skill import hunt_view, read_target_skill, write_target_skill, TargetSkillWrite
     from targets.instruction_proposals import (ActionProposalNote, ProposalText, create_action_proposal,
                                                create_proposal)
     import credential_api
@@ -17,7 +17,7 @@ try:
 except ModuleNotFoundError:
     from ..runtime.credential_store import PostgresCredentialProfileStore, CredentialStoreError
     from ..targets.asset_router import persist_host_target, HostTargetCreate
-    from ..targets.skill import read_target_skill, write_target_skill, TargetSkillWrite
+    from ..targets.skill import hunt_view, read_target_skill, write_target_skill, TargetSkillWrite
     from ..targets.instruction_proposals import (ActionProposalNote, ProposalText, create_action_proposal,
                                                  create_proposal)
     from .. import credential_api, request_collection_api
@@ -125,7 +125,7 @@ async def _perform_asset_action(pool, run, name, values):
     if name.startswith('targets.skill.'):
         async with pool.acquire() as conn, conn.transaction():
             if name == 'targets.skill.read':
-                return {'ok':True, **await read_target_skill(conn, target_id)}
+                return {'ok':True, **hunt_view(await read_target_skill(conn, target_id))}
             if name == 'targets.skill.propose':
                 # Advisory: files a pending proposal for operator review. Needs no delegation
                 # and never changes instructions, authority or this Hunt's snapshot.
@@ -142,9 +142,9 @@ async def _perform_asset_action(pool, run, name, values):
             _, delegation = await require_hunt_delegation(conn, run, name, values)
             request = TargetSkillWrite(**{key:value for key,value in values.items()
                 if key in {'title','methodology','expected_revision','purpose'}}) if name != 'targets.skill.delete' else None
-            return {'ok':True, **await write_target_skill(conn, target_id, name.rsplit('.',1)[-1],
+            return {'ok':True, **hunt_view(await write_target_skill(conn, target_id, name.rsplit('.',1)[-1],
                 expected_revision=values['expected_revision'], request=request,
-                source=f"hunt:{run['id']}", delegation=delegation, purpose=values.get('purpose','instructions')),
+                source=f"hunt:{run['id']}", delegation=delegation, purpose=values.get('purpose','instructions'))),
                 'hunt_snapshot_unchanged':True}
     if name not in {'targets.create', 'targets.update'} and not policy.get('active_testing'):
         raise HTTPException(403,'The Hunt has no active target-management authority')

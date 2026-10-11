@@ -298,13 +298,6 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 # are marked agent-written and unconfirmed (advisory until an operator saves them).
                 from .instruction_origin_migration import mark_unconfirmed_agent_writes
                 await mark_unconfirmed_agent_writes(conn)
-                # Idempotent, on every startup: each target's advisory knowledge text is also one
-                # note among its interpretations; the knowledge slot itself is never rewritten.
-                try:
-                    from hunt.interpretations import import_knowledge_notes
-                except ModuleNotFoundError:
-                    from api.hunt.interpretations import import_knowledge_notes
-                await import_knowledge_notes(conn)
                 # Idempotent: a dismissal whose finding's status changed elsewhere (also by an
                 # earlier engine after a rollback) no longer counts as an active dismissal.
                 try:
@@ -327,6 +320,15 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                     signal_repair_cancellations,
                 )
             _changed, cancelled = await rebuild_or_cancel(conn)
+            # Also after the schema commits, still under the lock: each target's advisory knowledge
+            # text is also one note among its interpretations (the slot itself is never rewritten).
+            # Committed in small batches, so a target row is locked for one batch at most, and
+            # resumable: an interrupted start leaves done targets done and the rest for the next one.
+            try:
+                from hunt.interpretations import import_knowledge_notes
+            except ModuleNotFoundError:
+                from api.hunt.interpretations import import_knowledge_notes
+            await import_knowledge_notes(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
         # Redis only after the lock is released, off the event loop and bounded: an unreachable

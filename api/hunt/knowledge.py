@@ -218,8 +218,8 @@ async def query_knowledge_page(
                 where.append(f"attributes->>'hunt_id'={bind(hunt_id)}")
         elif key == "text_contains":
             placeholder = bind(value.lower())
-            # A retracted entry's text is withheld from Hunts, so it never matches a search either.
-            where.append(f"(status<>'retracted' AND (strpos(lower(title),{placeholder})>0 "
+            # Retracted and superseded text is withheld from Hunts, so it never matches a search either.
+            where.append(f"(status NOT IN ('retracted','superseded') AND (strpos(lower(title),{placeholder})>0 "
                          f"OR strpos(lower(body),{placeholder})>0))")
         elif key == "path_contains":
             where.append(f"path ILIKE '%'||{bind(value)}||'%'")
