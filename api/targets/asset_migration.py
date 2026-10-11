@@ -242,6 +242,12 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                     "ALTER TABLE discovery_runs ADD COLUMN IF NOT EXISTS requested_by TEXT")
                 from .instruction_proposal_schema import INSTRUCTION_PROPOSAL_SCHEMA_SQL
                 await conn.execute(INSTRUCTION_PROPOSAL_SCHEMA_SQL)
+                # What a finding retest was admitted with, re-checked while it runs (2.9.0).
+                try:
+                    from scan.retest_authority import FINDING_VERIFICATION_AUTHORITY_SQL
+                except ModuleNotFoundError:
+                    from api.scan.retest_authority import FINDING_VERIFICATION_AUTHORITY_SQL
+                await conn.execute(FINDING_VERIFICATION_AUTHORITY_SQL)
                 # Data migrations added after the conversion must run here: the baseline above
                 # never runs again on a converted database. Each is marker-gated.
                 try:

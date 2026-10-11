@@ -1548,7 +1548,12 @@ CREATE TABLE finding_verifications (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    -- The target and receipts the retest was admitted with, re-checked while it runs
+    -- (api/scan/retest_authority.py; also added on every start by the unified startup). NULL for
+    -- a retest an earlier engine queued.
+    admitted_authority JSONB
 );
 
 -- ============================================================

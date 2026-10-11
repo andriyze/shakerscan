@@ -41,6 +41,7 @@ try:
         normalize_retest_type, parse_json_field, validate_retest_job_payload,
     )
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
+    from scan.retest_authority import admitted_authority, admitted_authority_json, approval_covers_destination
 except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import (
         SEVERITY_ORDER, _clean_string_list, _int_or_none, _iso_or_none,
@@ -56,6 +57,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         normalize_retest_type, parse_json_field, validate_retest_job_payload,
     )
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
+    from ..scan.retest_authority import admitted_authority, admitted_authority_json, approval_covers_destination
 
 
 from .hunt_scope import candidate_hunt_predicate, finding_hunt_predicate
@@ -1012,12 +1014,20 @@ async def retest_finding(
             target_id=finding_data.get("target_id"),
             action_name="finding.retest",
         )
+        replay_url = str(retest_inputs.get("original_url") or retest_inputs["target_url"])
+        if approval_context and not await approval_covers_destination(
+            conn, approval_context.get("approval_receipt_id"), replay_url,
+        ):
+            # The replay is sent to original_url; the approval must cover that host too, as the
+            # running check requires.
+            raise HTTPException(status_code=400, detail="Approval receipt scope does not cover the replay URL host")
 
         retest_id, job_id = await enqueue_finding_retest(
             conn,
             finding_data,
             retest_inputs,
             requested_by=request.requested_by or "api",
+            approval_receipt_id=approval_context.get("approval_receipt_id") if approval_context else None,
         )
 
     job_data = build_retest_job_payload(
@@ -1278,6 +1288,15 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                     "reason": f"approval_receipt_invalid:{exc.detail}",
                 })
                 continue
+            replay_url = str(retest_inputs.get("original_url") or retest_inputs["target_url"])
+            if approval_context and not await approval_covers_destination(
+                conn, approval_context.get("approval_receipt_id"), replay_url,
+            ):
+                skipped.append({
+                    "finding_id": str(finding_data["id"]),
+                    "reason": "approval_receipt_invalid:replay_url_out_of_scope",
+                })
+                continue
 
             try:
                 retest_id, job_id = await enqueue_finding_retest(
@@ -1285,6 +1304,9 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
                     finding_data,
                     retest_inputs,
                     requested_by=request.requested_by or "api",
+                    approval_receipt_id=(
+                        approval_context.get("approval_receipt_id") if approval_context else None
+                    ),
                 )
             except HTTPException as exc:
                 detail = exc.detail if isinstance(exc.detail, dict) else {}
@@ -1880,6 +1902,7 @@ async def enqueue_finding_retest(
     inputs: dict[str, Any],
     requested_by: str = "api",
     auth_context: dict[str, str] | None = None,
+    approval_receipt_id: str | None = None,
 ):
     """Create at most one active retest per finding across API replicas."""
     lock_key = f"finding-retest:{finding['id']}"
@@ -1908,6 +1931,7 @@ async def enqueue_finding_retest(
             inputs,
             requested_by=requested_by,
             auth_context=auth_context,
+            approval_receipt_id=approval_receipt_id,
         )
     finally:
         try:
@@ -1924,8 +1948,13 @@ async def _enqueue_finding_retest_unlocked(
     inputs: dict[str, Any],
     requested_by: str = "api",
     auth_context: dict[str, str] | None = None,
+    approval_receipt_id: str | None = None,
 ):
-    """Insert a queued retest while the per-finding advisory lock is held."""
+    """Insert a queued retest while the per-finding advisory lock is held.
+
+    The retest is bound to what it is admitted with: the target's current authorization and the
+    approval receipt the request named (``admitted_authority``), re-checked while it runs.
+    """
     retest_id = uuid.uuid4()
     job_id = str(uuid.uuid4())
     replay_commands = build_replay_commands(inputs)
@@ -1965,10 +1994,10 @@ async def _enqueue_finding_retest_unlocked(
         INSERT INTO finding_verifications (
             id, finding_id, scan_id, target_id, job_id, requested_by, status,
             finding_type, target_url, original_url, param, payload, method, request_body,
-            replay_commands, auth_context, campaign_id
+            replay_commands, auth_context, campaign_id, admitted_authority
         ) VALUES (
             $1, $2, $3, $4, $5, $6, 'queued',
-            $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+            $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb
         )
     """,
         retest_id,
@@ -1987,6 +2016,9 @@ async def _enqueue_finding_retest_unlocked(
         json.dumps(replay_commands) if replay_commands else None,
         auth_ctx_json,
         uuid.UUID(str(campaign_id)) if campaign_id else None,
+        admitted_authority_json(await admitted_authority(
+            conn, target_id=finding.get("target_id"), approval_receipt_id=approval_receipt_id,
+        )),
     )
 
     await conn.execute("""

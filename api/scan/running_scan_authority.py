@@ -29,6 +29,11 @@ expiry that was set and passed, ``scope_invalid`` for a deactivated target, a bl
 target host the scope no longer covers, a standing receipt the target no longer stands behind,
 or a receipt that no longer exists.
 
+Finding retests run the same way (``running_retest_authority``): one replay against a web
+target, watched against the receipts recorded when it was admitted (``retest_authority``), the
+target's authorization and the approval receipt the request named. A stopped retest records no
+verdict.
+
 Which runs are watched: only runs admitted with at least one receipt. A device probe or a
 ``confirm_authorized`` posture scan submitted without a standing authorization or an approval
 receipt, and an AI scan submitted without an approval receipt, have no revocable authorization
@@ -56,6 +61,9 @@ from .capability_result import CapabilityResultReason
 
 _RUN_KINDS = frozenset({"device_posture", "device_probe",
                         "ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget"})
+# A finding retest replays its proof against a web target as one piece of work
+# (``running_retest_authority``).
+RETEST_RUN_KIND = "finding_retest"
 _SCOPE = CapabilityResultReason.SCOPE_INVALID.value
 
 
@@ -70,6 +78,10 @@ class RunAuthorityAction:
 @dataclass(frozen=True)
 class _RunTarget:
     target_id: str
+    # The host admission checked a per-run approval against, when it is not the asset's own
+    # (a finding retest's destination). A standing authorization is always checked against
+    # the asset's current host, as the gate checks it.
+    host: str | None = None
 
 
 class ScanAuthorityStopped(ValueError):
@@ -79,11 +91,11 @@ class ScanAuthorityStopped(ValueError):
     coverage and metadata name the authorization stop.
     """
 
-    def __init__(self, reason: str, *, before_start: bool) -> None:
+    def __init__(self, reason: str, *, before_start: bool, subject: str = "Scan") -> None:
         self.reason = reason
         self.before_start = before_start
         when = "before it started" if before_start else "while it ran"
-        super().__init__(f"Scan stopped {when}: target authorization check returned {reason}")
+        super().__init__(f"{subject} stopped {when}: target authorization check returned {reason}")
         self.report: dict[str, Any] = {"error": str(self), "findings": [],
                                        "result": {"score": None, "grade": None}}
 
@@ -133,6 +145,8 @@ async def _asset_state(conn: Any, run_kind: str, asset_id: uuid.UUID) -> tuple[b
     if run_kind.startswith("device_"):
         row = _row(await conn.fetchrow(
             "SELECT is_active, primary_locator AS locator FROM device_targets WHERE id=$1", asset_id))
+    elif run_kind == RETEST_RUN_KIND:
+        row = _row(await conn.fetchrow("SELECT is_active, url AS locator FROM targets WHERE id=$1", asset_id))
     else:
         row = _row(await conn.fetchrow(
             "SELECT is_active, endpoint_url AS locator FROM ai_targets WHERE id=$1", asset_id))
@@ -143,17 +157,16 @@ async def _asset_state(conn: Any, run_kind: str, asset_id: uuid.UUID) -> tuple[b
 
 async def _standing_still_current(conn: Any, asset_id: uuid.UUID, approval_id: uuid.UUID) -> bool:
     try:
-        from ..target_authorization import standing_authorization_is_current
-        from ..devices.network_authorization import network_authorization_snapshot
+        from ..target_authorization import current_target_authorization, standing_authorization_is_current
     except (ImportError, ModuleNotFoundError):
-        from target_authorization import standing_authorization_is_current
-        from devices.network_authorization import network_authorization_snapshot
+        from target_authorization import current_target_authorization, standing_authorization_is_current
     if await standing_authorization_is_current(conn, asset_id, approval_id):
         return True
     # Admission accepted the receipt the asset's current authorization resolves to, which may
-    # be inherited from another asset.
-    snapshot = await network_authorization_snapshot(conn, asset_id)
-    return bool(snapshot) and snapshot.get("approval_receipt_id") == str(approval_id)
+    # be inherited from another asset (a device binds only one without an expiry; a retest
+    # binds whichever the target has, and its expiry is checked above).
+    current = await current_target_authorization(conn, asset_id)
+    return bool(current) and str(current.get("approval_receipt_id") or "") == str(approval_id)
 
 
 async def admitted_authority_reason(
@@ -173,6 +186,8 @@ async def admitted_authority_reason(
     """
     asset_id = uuid.UUID(str(target_binding.target_id))
     active, host = await _asset_state(conn, action.run_kind, asset_id)
+    if not standing and getattr(target_binding, "host", None):
+        host = str(target_binding.host)
     if active is not True:
         return _SCOPE, ActionAuthorityDecision.REJECTED_SCOPE
     approval_id = uuid.UUID(str(approval_receipt_id))
@@ -239,10 +254,11 @@ class RunningScanAuthority:
     """``async with`` around a run: checked before it starts and polled while it runs."""
 
     def __init__(self, guard: _Receipts | None, action: RunAuthorityAction | None, *,
-                 grace_seconds: float = HARD_STOP_GRACE_SECONDS) -> None:
+                 grace_seconds: float = HARD_STOP_GRACE_SECONDS, subject: str = "Scan") -> None:
         self.guard = guard if action is not None else None
         self.action = action
         self.grace_seconds = grace_seconds
+        self.subject = subject
         self.reason: str | None = None
         self._signal = ActionInterruption()
         self._scope: Any = None
@@ -252,7 +268,7 @@ class RunningScanAuthority:
 
     async def _stopped_error(self, reason: str, *, before_start: bool) -> ScanAuthorityStopped:
         self.reason = reason
-        error = ScanAuthorityStopped(reason, before_start=before_start)
+        error = ScanAuthorityStopped(reason, before_start=before_start, subject=self.subject)
         error.report = await self.annotate(error.report, scan_id="")
         return error
 
@@ -326,19 +342,69 @@ async def running_scan_authority(
         receipts.append((approval, False))
     if run_kind not in _RUN_KINDS or asset_id is None or not receipts:
         return RunningScanAuthority(None, None)
+    return _watched(pool, RunAuthorityAction(run_kind), _RunTarget(str(asset_id)), receipts,
+                    record_event=record_event, **guard_kwargs)
 
+
+def _watched(pool: Any, action: RunAuthorityAction, target: _RunTarget,
+             receipts: list[tuple[uuid.UUID, bool]], *, record_event: Callable[[str], Any] | None,
+             subject: str = "Scan", grace_seconds: float = HARD_STOP_GRACE_SECONDS,
+             **guard_kwargs: Any) -> RunningScanAuthority:
     def decide(is_standing: bool):
         async def reason(conn: Any, **kwargs: Any):
             return await admitted_authority_reason(conn, standing=is_standing, **kwargs)
         return reason
 
     guards = [
-        ScanAuthorityGuard(pool=pool, target_binding=_RunTarget(str(asset_id)), scope_receipt_id=None,
+        ScanAuthorityGuard(pool=pool, target_binding=target, scope_receipt_id=None,
                            approval_receipt_id=str(receipt), record_event=record_event,
                            decide=decide(is_standing), **guard_kwargs)
         for receipt, is_standing in receipts
     ]
-    return RunningScanAuthority(_Receipts(guards), RunAuthorityAction(run_kind))
+    return RunningScanAuthority(_Receipts(guards), action, grace_seconds=grace_seconds, subject=subject)
+
+
+def retest_authority_receipts(admitted: Mapping[str, Any] | None) -> list[tuple[uuid.UUID, bool]]:
+    """The receipts a retest was admitted with: ``(receipt id, is the standing authorization)``."""
+    admitted = admitted or {}
+    receipts: list[tuple[uuid.UUID, bool]] = []
+    standing = _uuid(admitted.get("standing_receipt_id"))
+    if standing is not None:
+        receipts.append((standing, True))
+    approval = _uuid(admitted.get("approval_receipt_id"))
+    if approval is not None and approval != standing:
+        receipts.append((approval, False))
+    return receipts
+
+
+async def running_retest_authority(
+    pool: Any,
+    *,
+    admitted: Mapping[str, Any] | None,
+    destination: str | None,
+    record_event: Callable[[str], Any] | None = None,
+    **guard_kwargs: Any,
+) -> RunningScanAuthority:
+    """The authority for one finding retest, watched exactly as a device or AI run is.
+
+    ``admitted`` is what the retest was admitted with (``retest_authority.admitted_authority``):
+    the web target and, when it had them, its standing authorization and the approval receipt
+    the request named. A retest admitted with neither has nothing revocable and is not watched,
+    as a passive local Scan without a receipt is not. ``destination`` is the URL the retest
+    replays against, the host admission checked a named approval receipt against.
+    """
+    admitted = admitted or {}
+    receipts = retest_authority_receipts(admitted)
+    target_id = _uuid(admitted.get("target_id"))
+    if not receipts:
+        return RunningScanAuthority(None, None)
+    parsed = urllib.parse.urlparse(destination if destination and "://" in destination
+                                   else f"https://{destination or ''}")
+    # A retest bound to receipts whose target is gone has nothing left to be authorized for:
+    # the nil id names no row, so the check refuses it as ``scope_invalid`` before any traffic.
+    target = _RunTarget(str(target_id or uuid.UUID(int=0)), host=parsed.hostname or None)
+    return _watched(pool, RunAuthorityAction(RETEST_RUN_KIND, action_id="finding.retest"), target,
+                    receipts, record_event=record_event, subject="Retest", **guard_kwargs)
 
 
 def _uuid(value: Any) -> uuid.UUID | None:

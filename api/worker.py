@@ -305,7 +305,20 @@ from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
 from scan.action_authority_guard import ScanAuthorityGuard
 from scan.action_interruption import action_interrupted
-from scan.running_scan_authority import ScanAuthorityStopped, running_scan_authority
+from scan.running_scan_authority import ScanAuthorityStopped, running_retest_authority, running_scan_authority
+from scan.retest_authority import (
+    admitted_authority,
+    admitted_authority_json,
+    approval_covers_destination,
+    retest_authority_stop,
+)
+from worker_handlers.retest_authority import (
+    ai_replay_authority_stop,
+    open_retest_authority,
+    retest_stop_status,
+    scan_stopped_by_authority,
+    settle_retest_authority_stop,
+)
 from scan.executor import build_native_scan_execution
 from scan.stage_store import PostgresScanStageCheckpointStore
 from scan.negative_control import with_negative_controls
@@ -4882,7 +4895,11 @@ async def finalize_ai_finding_retest(
         finding for finding in findings if isinstance(finding, dict) and _ai_finding_matches_retest(finding, replay_plan)
     ]
     ai_errors = ai_gate.get("errors") if isinstance(ai_gate.get("errors"), list) else []
-    if error:
+    stopped = ai_replay_authority_stop(result, error)
+    authority_stop = stopped[0] if stopped else None
+    if stopped:
+        status, result_status, verdict, verdict_reason, confidence = "failed", "error", "error", stopped[1], None
+    elif error:
         status = "failed"
         result_status = "error"
         verdict = "error"
@@ -4920,6 +4937,8 @@ async def finalize_ai_finding_retest(
         "transcripts": (ai_gate.get("transcripts") or [])[:5] if isinstance(ai_gate, dict) else [],
         "coverage_matrix": ai_gate.get("coverage_matrix") if isinstance(ai_gate, dict) else None,
     }
+    if authority_stop is not None:
+        artifacts["authority_stop"] = authority_stop
     async with db_pool.acquire() as conn:
         await conn.execute(
             """
@@ -6014,6 +6033,10 @@ async def run_finding_retest(verification: dict) -> dict:
             # Skip AI step here — handled by the AI verifier tier in process_finding_retest_job
             if step == "ai_reasoning":
                 continue
+            # Authorization withdrawn while the retest runs: no further step is sent
+            # (running_retest_authority records the stop; the result is discarded).
+            if action_interrupted():
+                break
 
             steps_tried.append(step)
             try:
@@ -6236,6 +6259,8 @@ async def process_finding_retest_job(job_data: dict):
         )
         if requested_mode in {"ai", "deterministic"}:
             requeued_payload["mode"] = requested_mode
+        # A retest an earlier engine queued is bound at start to the approval its message names.
+        requeued_payload.update({k: job_data[k] for k in ("approval_receipt_id", "scope_receipt_id") if job_data.get(k)})
         requeued_payload["slot_wait_started_at"] = wait_started_at.isoformat()
         requeued_payload["slot_wait_cycles"] = wait_cycles
         backoff_seconds = _slot_wait_backoff_seconds(wait_cycles)
@@ -6350,181 +6375,202 @@ async def process_finding_retest_job(job_data: dict):
                     verification["candidate_id"], verification["id"],
                 )
 
-            # Check if this is a forced AI-only retest (mode=ai from API)
-            ai_runtime = _load_runtime_ai_settings()
-            force_ai = requested_mode == "ai"
-            ai_verify_enabled = bool(ai_runtime.get("ai_verify_enabled"))
-            ai_verify_url = str(ai_runtime.get("ai_verify_url") or ai_runtime.get("ai_url") or "")
-            ai_verify_api_key = str(ai_runtime.get("ai_verify_api_key") or ai_runtime.get("ai_api_key") or "")
-            ai_verify_model = str(ai_runtime.get("ai_verify_model") or ai_runtime.get("ai_model") or AI_VERIFY_MODEL)
-            ai_verify_fallback_model = str(
-                ai_runtime.get("ai_verify_model_fallback")
-                or ai_runtime.get("ai_model_fallback")
-                or AI_VERIFY_FALLBACK_MODEL
-            )
-            _retest_policy = VerificationPolicy.from_env(overrides=ai_runtime)
-            ai_verify_min_severity = _retest_policy.ai_escalation_min_severity
-            ai_config_ready = bool(ai_verify_enabled and ai_verify_url and ai_verify_api_key)
+            # The retest re-checks its authorization before and while it runs, as a device or
+            # AI run does (running_retest_authority). A stop records no verdict.
+            authority_stop: dict[str, Any] | None = None
+            try:
+                run_authority = await open_retest_authority(
+                    db_pool, verification, job_data, watch=running_retest_authority,
+                    record_event=lambda name: record_operational_event(get_redis(), name))
+                async with run_authority:
+                    # Check if this is a forced AI-only retest (mode=ai from API)
+                    ai_runtime = _load_runtime_ai_settings()
+                    force_ai = requested_mode == "ai"
+                    ai_verify_enabled = bool(ai_runtime.get("ai_verify_enabled"))
+                    ai_verify_url = str(ai_runtime.get("ai_verify_url") or ai_runtime.get("ai_url") or "")
+                    ai_verify_api_key = str(ai_runtime.get("ai_verify_api_key") or ai_runtime.get("ai_api_key") or "")
+                    ai_verify_model = str(ai_runtime.get("ai_verify_model") or ai_runtime.get("ai_model") or AI_VERIFY_MODEL)
+                    ai_verify_fallback_model = str(
+                        ai_runtime.get("ai_verify_model_fallback")
+                        or ai_runtime.get("ai_model_fallback")
+                        or AI_VERIFY_FALLBACK_MODEL
+                    )
+                    _retest_policy = VerificationPolicy.from_env(overrides=ai_runtime)
+                    ai_verify_min_severity = _retest_policy.ai_escalation_min_severity
+                    ai_config_ready = bool(ai_verify_enabled and ai_verify_url and ai_verify_api_key)
 
-            # Tier 1: Deterministic proof (fast, free) — skip if forced AI
-            if force_ai and not ai_config_ready:
-                result = {
-                    "status": "failed",
-                    "result_status": "error",
-                    "verdict": "error",
-                    "verdict_reason": "AI verification requested but AI verifier is not configured",
-                    "deterministic_exhausted": True,
-                    "has_ai_step": True,
-                    "verification_mode": "ai_driven",
-                    "confidence": None,
-                    "proof": None,
-                    "replay_commands": [],
-                    "artifacts": {},
-                    "attempt_ladder": [],
-                    "attempts_exhausted": True,
-                    "retry_class": "config",
-                    "retryable": False,
-                    "message": "AI retest requested but AI verifier is disabled or missing credentials",
-                    "error_message": "AI verifier not configured",
-                }
-            elif not force_ai:
-                result = await run_finding_retest(dict(verification))
-                if requested_mode == "deterministic" and result.get("verdict") != "exploited":
-                    result["has_ai_step"] = False
-                    result["attempts_exhausted"] = bool(result.get("deterministic_exhausted"))
-            else:
-                result = {
-                    "status": "completed",
-                    "result_status": "inconclusive",
-                    "verdict": "inconclusive",
-                    "verdict_reason": "Skipped deterministic tier (mode=ai)",
-                    "deterministic_exhausted": True,
-                    "has_ai_step": True,
-                    "verification_mode": "ai_driven",
-                    "confidence": None,
-                    "proof": None,
-                    "replay_commands": [],
-                    "artifacts": {},
-                    "attempt_ladder": [],
-                    "retry_class": "none",
-                    "retryable": False,
-                }
+                    # Tier 1: Deterministic proof (fast, free) — skip if forced AI
+                    if force_ai and not ai_config_ready:
+                        result = {
+                            "status": "failed",
+                            "result_status": "error",
+                            "verdict": "error",
+                            "verdict_reason": "AI verification requested but AI verifier is not configured",
+                            "deterministic_exhausted": True,
+                            "has_ai_step": True,
+                            "verification_mode": "ai_driven",
+                            "confidence": None,
+                            "proof": None,
+                            "replay_commands": [],
+                            "artifacts": {},
+                            "attempt_ladder": [],
+                            "attempts_exhausted": True,
+                            "retry_class": "config",
+                            "retryable": False,
+                            "message": "AI retest requested but AI verifier is disabled or missing credentials",
+                            "error_message": "AI verifier not configured",
+                        }
+                    elif not force_ai:
+                        result = await run_finding_retest(dict(verification))
+                        if requested_mode == "deterministic" and result.get("verdict") != "exploited":
+                            result["has_ai_step"] = False
+                            result["attempts_exhausted"] = bool(result.get("deterministic_exhausted"))
+                    else:
+                        result = {
+                            "status": "completed",
+                            "result_status": "inconclusive",
+                            "verdict": "inconclusive",
+                            "verdict_reason": "Skipped deterministic tier (mode=ai)",
+                            "deterministic_exhausted": True,
+                            "has_ai_step": True,
+                            "verification_mode": "ai_driven",
+                            "confidence": None,
+                            "proof": None,
+                            "replay_commands": [],
+                            "artifacts": {},
+                            "attempt_ladder": [],
+                            "retry_class": "none",
+                            "retryable": False,
+                        }
 
-            # Tier 2: AI-driven verification — escalate when deterministic didn't prove it
-            ai_result = None
-            ai_failure_error: str | None = None
-            still_vulnerable_deterministic = result.get("verdict") == "exploited"
-            should_try_ai = (
-                not still_vulnerable_deterministic
-                and requested_mode != "deterministic"
-                and (result.get("has_ai_step") or force_ai)
-                and ai_config_ready
-            )
+                    # Tier 2: AI-driven verification — escalate when deterministic didn't prove it
+                    ai_result = None
+                    ai_failure_error: str | None = None
+                    still_vulnerable_deterministic = result.get("verdict") == "exploited"
+                    should_try_ai = (
+                        not still_vulnerable_deterministic
+                        and requested_mode != "deterministic"
+                        and (result.get("has_ai_step") or force_ai)
+                        and ai_config_ready
+                    )
 
-            finding_severity = str(verification.get("severity") or "").lower()
-            if not finding_severity and verification.get("finding_id"):
-                # Look up severity from the finding itself
-                f_row = await conn.fetchrow("SELECT severity FROM findings WHERE id = $1", verification["finding_id"])
-                finding_severity = str(f_row["severity"]).lower() if f_row else ""
+                    finding_severity = str(verification.get("severity") or "").lower()
+                    if not finding_severity and verification.get("finding_id"):
+                        # Look up severity from the finding itself
+                        f_row = await conn.fetchrow("SELECT severity FROM findings WHERE id = $1", verification["finding_id"])
+                        finding_severity = str(f_row["severity"]).lower() if f_row else ""
 
-            severity_ok = force_ai or (
-                SEVERITY_ORDER.get(finding_severity, 0)
-                >= SEVERITY_ORDER.get(ai_verify_min_severity, SEVERITY_ORDER["high"])
-            )
+                    severity_ok = force_ai or (
+                        SEVERITY_ORDER.get(finding_severity, 0)
+                        >= SEVERITY_ORDER.get(ai_verify_min_severity, SEVERITY_ORDER["high"])
+                    )
 
-            if should_try_ai and severity_ok:
-                circuit_state = _get_ai_circuit_state(r, utc_now())
-                if circuit_state.get("is_open"):
-                    open_until = circuit_state.get("open_until")
-                    open_until_text = open_until.isoformat() if isinstance(open_until, datetime) else "unknown"
-                    ai_failure_error = f"AI verification bypassed: circuit open until {open_until_text}"
-                    result.update({
-                        "status": "completed",
-                        "result_status": "inconclusive",
-                        "verdict": "inconclusive",
-                        "verdict_reason": ai_failure_error,
-                        "message": ai_failure_error,
-                        "retry_class": "transient",
-                        "retryable": True,
-                        "attempts_exhausted": False,
-                    })
-                    if force_ai:
-                        result["verification_mode"] = "ai_driven"
-                    print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
-                else:
-                    try:
-                        from ai_verifier import ai_verify_finding, AI_VERIFIABLE_TYPES
-
-                        finding_type = str(verification.get("finding_type") or "")
-                        if finding_type in AI_VERIFIABLE_TYPES:
-                            auth_ctx = parse_json_field(verification.get("auth_context"))
-                            target = str(verification.get("target_url") or "")
-
-                            print(
-                                f"[retest:{job_id[:8]}] Escalating to AI verification "
-                                f"(budget={RETEST_AI_BUDGET_SECONDS}s)",
-                                flush=True,
-                            )
-                            ai_result = await asyncio.wait_for(
-                                ai_verify_finding(
-                                    finding=dict(verification),
-                                    auth_context=auth_ctx if auth_ctx else None,
-                                    ai_url=ai_verify_url,
-                                    ai_api_key=ai_verify_api_key,
-                                    model=ai_verify_model,
-                                    fallback_models=ai_verify_fallback_model or None,
-                                    target_url=target,
-                                ),
-                                timeout=RETEST_AI_BUDGET_SECONDS,
-                            )
-
-                            if ai_result and ai_result.get("error"):
-                                ai_failure_error = str(ai_result.get("error"))
-                            if ai_result:
-                                result = _merge_ai_result_into_retest_result(result, ai_result)
+                    # A retest whose authorization was withdrawn sends no AI-driven traffic.
+                    if should_try_ai and severity_ok and not action_interrupted():
+                        circuit_state = _get_ai_circuit_state(r, utc_now())
+                        if circuit_state.get("is_open"):
+                            open_until = circuit_state.get("open_until")
+                            open_until_text = open_until.isoformat() if isinstance(open_until, datetime) else "unknown"
+                            ai_failure_error = f"AI verification bypassed: circuit open until {open_until_text}"
+                            result.update({
+                                "status": "completed",
+                                "result_status": "inconclusive",
+                                "verdict": "inconclusive",
+                                "verdict_reason": ai_failure_error,
+                                "message": ai_failure_error,
+                                "retry_class": "transient",
+                                "retryable": True,
+                                "attempts_exhausted": False,
+                            })
+                            if force_ai:
+                                result["verification_mode"] = "ai_driven"
+                            print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
                         else:
-                            ai_failure_error = f"AI verifier does not support finding_type={finding_type}"
-                    except asyncio.TimeoutError:
-                        ai_failure_error = (
-                            f"AI verification timeout: exceeded {RETEST_AI_BUDGET_SECONDS}s budget"
-                        )
-                        ai_result = {
-                            "verdict": "inconclusive",
-                            "confidence": None,
-                            "reasoning": ai_failure_error,
-                            "error": ai_failure_error,
-                        }
-                        result = _merge_ai_result_into_retest_result(result, ai_result)
-                        print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
-                    except ImportError:
-                        ai_failure_error = "AI verifier module not available"
-                        print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
-                    except Exception as ai_err:
-                        ai_failure_error = f"AI verification error: {type(ai_err).__name__}: {ai_err}"
-                        ai_result = {
-                            "verdict": "inconclusive",
-                            "confidence": None,
-                            "reasoning": ai_failure_error,
-                            "error": ai_failure_error,
-                        }
-                        result = _merge_ai_result_into_retest_result(result, ai_result)
-                        print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
+                            try:
+                                from ai_verifier import ai_verify_finding, AI_VERIFIABLE_TYPES
 
-                    if ai_failure_error and _is_retryable_ai_error(ai_failure_error):
-                        opened, error_count = _register_ai_circuit_failure(r, ai_failure_error, utc_now())
-                        result["retry_class"] = "transient"
-                        result["retryable"] = True
-                        result["attempts_exhausted"] = False
-                        if opened:
-                            print(
-                                f"[retest:{job_id[:8]}] AI circuit opened after {error_count} retryable errors",
-                                flush=True,
-                            )
-                    elif ai_failure_error and not _is_retryable_ai_error(ai_failure_error):
-                        # Non-retryable AI error: don't trip circuit breaker
-                        pass
-                    elif ai_result and not ai_result.get("error"):
-                        _clear_ai_circuit_state(r)
+                                finding_type = str(verification.get("finding_type") or "")
+                                if finding_type in AI_VERIFIABLE_TYPES:
+                                    auth_ctx = parse_json_field(verification.get("auth_context"))
+                                    target = str(verification.get("target_url") or "")
+
+                                    print(
+                                        f"[retest:{job_id[:8]}] Escalating to AI verification "
+                                        f"(budget={RETEST_AI_BUDGET_SECONDS}s)",
+                                        flush=True,
+                                    )
+                                    ai_result = await asyncio.wait_for(
+                                        ai_verify_finding(
+                                            finding=dict(verification),
+                                            auth_context=auth_ctx if auth_ctx else None,
+                                            ai_url=ai_verify_url,
+                                            ai_api_key=ai_verify_api_key,
+                                            model=ai_verify_model,
+                                            fallback_models=ai_verify_fallback_model or None,
+                                            target_url=target,
+                                        ),
+                                        timeout=RETEST_AI_BUDGET_SECONDS,
+                                    )
+
+                                    if ai_result and ai_result.get("error"):
+                                        ai_failure_error = str(ai_result.get("error"))
+                                    if ai_result:
+                                        result = _merge_ai_result_into_retest_result(result, ai_result)
+                                else:
+                                    ai_failure_error = f"AI verifier does not support finding_type={finding_type}"
+                            except asyncio.TimeoutError:
+                                ai_failure_error = (
+                                    f"AI verification timeout: exceeded {RETEST_AI_BUDGET_SECONDS}s budget"
+                                )
+                                ai_result = {
+                                    "verdict": "inconclusive",
+                                    "confidence": None,
+                                    "reasoning": ai_failure_error,
+                                    "error": ai_failure_error,
+                                }
+                                result = _merge_ai_result_into_retest_result(result, ai_result)
+                                print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
+                            except ImportError:
+                                ai_failure_error = "AI verifier module not available"
+                                print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
+                            except Exception as ai_err:
+                                ai_failure_error = f"AI verification error: {type(ai_err).__name__}: {ai_err}"
+                                ai_result = {
+                                    "verdict": "inconclusive",
+                                    "confidence": None,
+                                    "reasoning": ai_failure_error,
+                                    "error": ai_failure_error,
+                                }
+                                result = _merge_ai_result_into_retest_result(result, ai_result)
+                                print(f"[retest:{job_id[:8]}] {ai_failure_error}", flush=True)
+
+                            if ai_failure_error and _is_retryable_ai_error(ai_failure_error):
+                                opened, error_count = _register_ai_circuit_failure(r, ai_failure_error, utc_now())
+                                result["retry_class"] = "transient"
+                                result["retryable"] = True
+                                result["attempts_exhausted"] = False
+                                if opened:
+                                    print(
+                                        f"[retest:{job_id[:8]}] AI circuit opened after {error_count} retryable errors",
+                                        flush=True,
+                                    )
+                            elif ai_failure_error and not _is_retryable_ai_error(ai_failure_error):
+                                # Non-retryable AI error: don't trip circuit breaker
+                                pass
+                            elif ai_result and not ai_result.get("error"):
+                                _clear_ai_circuit_state(r)
+                if run_authority.reason is not None:
+                    authority_stop = retest_authority_stop(run_authority.reason, before_start=False)
+            except ScanAuthorityStopped as stopped:
+                authority_stop = retest_authority_stop(stopped.reason, before_start=stopped.before_start)
+            if authority_stop is not None:
+                await settle_retest_authority_stop(db_pool, verification, authority_stop, attempt=attempt,
+                                                   mode=requested_mode, finish_campaign=asm_inventory.finish_campaign)
+                r.hset(retest_key, mapping=retest_stop_status(authority_stop, attempt=attempt))
+                r.expire(retest_key, 86400)
+                print(f"[retest:{job_id[:8]}] Retest {verification_id} stopped: "
+                      f"{authority_stop['stop_reason']} ({authority_stop['reason_code']})", flush=True)
+                return
 
             # Deterministic fallback: if AI was unavailable and deterministic tier
             # found partial evidence, promote from inconclusive → likely_vulnerable.
@@ -6874,6 +6920,9 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             "SELECT options FROM scans WHERE id = $1", uuid.UUID(scan_id)
         )
         scan_options = parse_json_field(scan_row["options"]) if scan_row else {}
+        scan_approval = (scan_options or {}).get("approval_receipt_id")
+        if await scan_stopped_by_authority(conn, scan_id):  # its retests would be refused at start
+            return {"queued": 0, "skipped": 0}
         auth_ctx = extract_auth_context(scan_options)
         auth_ctx_json = json.dumps(auth_ctx) if auth_ctx else None
 
@@ -6942,25 +6991,31 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             if finding_type not in SUPPORTED_RETEST_TYPES or not effective_target:
                 skipped += 1
                 continue
+            # Bound to the Scan's approval, a retest whose replay host it does not cover is not queued.
+            if scan_approval and not await approval_covers_destination(
+                    conn, scan_approval, str(inferred.get("original_url") or effective_target)):
+                skipped += 1
+                continue
 
             replay_commands = build_replay_commands(inferred)
             verification_id = uuid.uuid4()
             job_id = str(uuid.uuid4())
+            retest_target_id = finding.get("target_id") or (uuid.UUID(target_id) if target_id else None)
 
             await conn.execute("""
                 INSERT INTO finding_verifications (
                     id, finding_id, scan_id, target_id, job_id, requested_by, status,
                     finding_type, target_url, original_url, param, payload, method, request_body,
-                    replay_commands, auth_context
+                    replay_commands, auth_context, admitted_authority
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, 'queued',
-                    $7, $8, $9, $10, $11, $12, $13, $14, $15
+                    $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb
                 )
             """,
                 verification_id,
                 finding["id"],
                 finding.get("scan_id"),
-                finding.get("target_id") or (uuid.UUID(target_id) if target_id else None),
+                retest_target_id,
                 job_id,
                 AUTO_RETEST_REQUESTED_BY,
                 finding_type,
@@ -6972,6 +7027,12 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
                 inferred.get("request_body") or None,
                 json.dumps(replay_commands) if replay_commands else None,
                 auth_ctx_json,
+                # Bound to the target's authorization and the source Scan's approval receipt,
+                # re-checked while the retest runs.
+                admitted_authority_json(await admitted_authority(
+                    conn, target_id=retest_target_id,
+                    approval_receipt_id=scan_approval,
+                )),
             )
 
             await conn.execute("""
