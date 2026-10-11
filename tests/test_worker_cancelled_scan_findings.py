@@ -297,3 +297,23 @@ def test_a_work_round_cancelled_before_its_finalizer_reports_over_a_compiled_rev
         asyncio.run(cancelled_report.cancelled_scan_report(
             Dispatcher(), scan_id=SCAN_ID, load_allocation=no_allocation, runtime="runtime",
         ))
+
+
+def test_a_report_over_an_unstored_revision_says_so(monkeypatch):
+    """Review of #399: the compiled finalize-only revision is never stored; the report must not
+    send a reader to look for it."""
+    import scan.cancelled_report as cancelled_report
+    from types import SimpleNamespace
+
+    class Dispatcher:
+        async def build_scan_report(self, *, plan=None, plan_revision=None):
+            return {"findings": [], "coverage": {}, "canonical_action_execution": {
+                "finalization_action": {"action_id": "finalize.report", "status": "success"},
+                "status_matrix": {"finalize.report": "success"}}}
+
+    report = asyncio.run(cancelled_report.build_cancelled_scan_report(
+        Dispatcher(), scan_id=SCAN_ID, finalization=("plan", SimpleNamespace(revision=3)),
+    ))
+    assert report["canonical_action_execution"]["plan_revision_stored"] is False
+    stored = asyncio.run(cancelled_report.build_cancelled_scan_report(Dispatcher(), scan_id=SCAN_ID))
+    assert "plan_revision_stored" not in stored["canonical_action_execution"]

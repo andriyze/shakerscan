@@ -84,6 +84,11 @@ async def build_cancelled_scan_report(
         else:
             plan, revision = finalization
             report = await dispatcher.build_scan_report(plan=plan, plan_revision=revision)
+            # Its finalize-only revision was compiled for this report and never stored: a
+            # reader must not look for it among the Scan's stored revisions.
+            execution = report.get("canonical_action_execution")
+            if isinstance(execution, dict):
+                execution["plan_revision_stored"] = False
     except Exception as exc:
         print(
             f"[scan] cancelled scan {str(scan_id)[:8]} report could not be built "

@@ -2979,7 +2979,11 @@ class DatabaseNeutralScanActionDispatcher:
             for item in await load_attempts(action.action_id) if isinstance(item, Mapping)
         }
         manifest_digest = endpoints.reference().manifest_digest
-        candidates = list(graphql_seed_endpoint_urls(origin[0])) if start == 0 else []
+        seeds = list(graphql_seed_endpoint_urls(origin[0]))
+        # The conventional locations are checked once, by the first slice; a later slice that
+        # discovered one of them does not check it again.
+        candidates = list(seeds) if start == 0 else []
+        seen_seeds = set() if start == 0 else set(seeds)
         # A slice entry that is not a GraphQL route was never this family's work: recorded as
         # inapplicable so coverage does not count it as an unattempted candidate.
         inapplicable: list[Mapping[str, Any]] = []
@@ -2989,7 +2993,8 @@ class DatabaseNeutralScanActionDispatcher:
             except (ScanWorkManifestError, KeyError):
                 url = ""
             if url and is_graphql_endpoint_url(url):
-                candidates.append(graphql_endpoint_of(url))
+                if graphql_endpoint_of(url) not in seen_seeds:
+                    candidates.append(graphql_endpoint_of(url))
             else:
                 inapplicable.append({
                     "kind": "candidate_inapplicable", "family": "graphql",
