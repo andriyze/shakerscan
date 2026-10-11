@@ -565,6 +565,46 @@ def _decode_json_value(value: Any) -> Any:
     return value
 
 
+def receipt_scope_covers_host(host: Any, scope: Any) -> bool:
+    """Whether a scope receipt covers a host, under the strict spelling the client connects to.
+
+    The one rule for admission and for re-checks while work runs: the host and every scope
+    entry are canonicalized by ``_canonical_host`` (strict IDNA 2008 / UTS #46, IP literals in
+    their canonical form, a refused spelling is no host), and only ``scope_roots`` that are not
+    public suffixes widen the scope.
+    """
+    candidate = _canonical_host(str(host or "").strip().strip("[]"))
+    if not candidate or not isinstance(scope, dict) and not hasattr(scope, "get"):
+        return False
+    normalized = _decode_json_value(scope.get("normalized_scope")) or {}
+    allowed_hosts = _decode_json_value(scope.get("allowed_hosts")) or []
+    allowed_roots = _decode_json_value(scope.get("allowed_root_domains")) or []
+    normalized_host = _canonical_host(normalized.get("host")) if isinstance(normalized, dict) else ""
+    if normalized_host and candidate == normalized_host:
+        return True
+    for allowed in allowed_hosts if isinstance(allowed_hosts, list) else []:
+        if candidate == _canonical_host(str(allowed or "").strip().strip("[]")):
+            return True
+    roots = scope_roots(_canonical_host(root) for root in (allowed_roots if isinstance(allowed_roots, list) else []))
+    return any(candidate == root or candidate.endswith(f".{root}") for root in roots)
+
+
+def url_host_for_scope(url: Any) -> str | None:
+    """The host a URL connects to, or None for a URL whose authority is ambiguous.
+
+    A backslash or whitespace in the authority is read differently by clients (a browser treats
+    ``\\`` as a path separator), so such a URL has no host any scope can cover.
+    """
+    text = str(url or "").strip()
+    parsed = urllib.parse.urlsplit(text if "://" in text else f"https://{text}")
+    if any(char in parsed.netloc for char in "\\ \t\r\n"):
+        return None
+    try:
+        return parsed.hostname or None
+    except ValueError:
+        return None
+
+
 def runtime_scope_guard_from_scope(scope: dict[str, Any]) -> dict[str, Any]:
     """Build the non-secret scope contract queued workers must re-check."""
     normalized = _decode_json_value(scope.get("normalized_scope")) or {}

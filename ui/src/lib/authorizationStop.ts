@@ -26,6 +26,13 @@ const RETEST_REASONS: Record<string, string> = {
   scope_invalid: 'The target was deactivated or removed, or the approved scope does not cover it or the replayed URL',
 }
 
+// What to do before retesting, per cause.
+const RETEST_NEXT_STEP: Record<string, string> = {
+  authorization_revoked: 'Authorize the target again before retesting.',
+  authorization_expired: 'Renew the approval before retesting.',
+  scope_invalid: 'Check that the target is active and that its authorization or the approval covers the URL the retest replays.',
+}
+
 // The same causes as the end of a sentence that starts "stopped because ...".
 const BECAUSE: Record<string, string> = {
   authorization_revoked: 'the target’s authorization was revoked',
@@ -72,7 +79,7 @@ function stopNotice(stopReason: unknown, stopValue: unknown, work: StoppedWork):
     ? `Findings recorded before the stop are kept; coverage is partial${notRun.length
       ? ` and ${notRun.length} action${notRun.length === 1 ? '' : 's'} did not run` : ''}.`
     : 'No verdict was recorded: a partial retest neither shows the finding fixed nor still vulnerable. '
-      + 'Authorize the target again before retesting.'
+      + (RETEST_NEXT_STEP[code] ?? 'Check the target’s authorization before retesting.')
   return {
     title: `${work} stopped: authorization withdrawn`,
     detail: `${cause} ${when}, so it stopped. ${outcome}`,

@@ -77,11 +77,12 @@ class RunAuthorityAction:
 
 @dataclass(frozen=True)
 class _RunTarget:
-    target_id: str
-    # The host admission checked a per-run approval against, when it is not the asset's own
-    # (a finding retest's destination). A standing authorization is always checked against
-    # the asset's current host, as the gate checks it.
-    host: str | None = None
+    # None for a finding retest whose finding has no target: only its approval is watched.
+    target_id: str | None
+    # A finding retest's replay host, checked by the receipt whose scope admitted it ("" for a
+    # replay URL with no host any scope can cover). A standing authorization is also always
+    # checked against the asset's current host, as the gate checks it.
+    destination: str | None = None
 
 
 class ScanAuthorityStopped(ValueError):
@@ -113,31 +114,14 @@ def _json(value: Any) -> Any:
     return value
 
 
-def _canonical_host(value: Any) -> str:
-    host = str(value or "").strip().strip("[]").lower().rstrip(".")
-    try:
-        return host.encode("idna").decode("ascii")
-    except UnicodeError:
-        return host
-
-
 def _host_in_admitted_scope(host: str, scope: Mapping[str, Any]) -> bool:
-    """The admission rule (``_host_matches_receipt_scope``): normalized host, hosts or roots."""
-    candidate = _canonical_host(host)
-    if not candidate:
-        return False
-    normalized = _json(scope.get("normalized_scope")) or {}
-    if isinstance(normalized, dict) and candidate == _canonical_host(normalized.get("host")):
-        return True
-    hosts = _json(scope.get("allowed_hosts")) or []
-    if any(candidate == _canonical_host(item) for item in (hosts if isinstance(hosts, list) else [])):
-        return True
-    roots = _json(scope.get("allowed_root_domains")) or []
-    for root in roots if isinstance(roots, list) else []:
-        root_host = _canonical_host(root)
-        if root_host and (candidate == root_host or candidate.endswith("." + root_host)):
-            return True
-    return False
+    """The admission rule: ``action_scope.receipt_scope_covers_host`` (strict spelling, IP
+    literals canonical, public-suffix roots cover nothing), shared with every admission."""
+    try:
+        from ..action_scope import receipt_scope_covers_host
+    except (ImportError, ModuleNotFoundError):
+        from action_scope import receipt_scope_covers_host
+    return receipt_scope_covers_host(host, dict(scope))
 
 
 async def _asset_state(conn: Any, run_kind: str, asset_id: uuid.UUID) -> tuple[bool | None, str]:
@@ -184,12 +168,22 @@ async def admitted_authority_reason(
     from the Scan options) and the asset's current host, so a revoke, an expiry that was set, a
     deactivated asset or a host the scope no longer covers stops the run.
     """
-    asset_id = uuid.UUID(str(target_binding.target_id))
-    active, host = await _asset_state(conn, action.run_kind, asset_id)
-    if not standing and getattr(target_binding, "host", None):
-        host = str(target_binding.host)
-    if active is not True:
-        return _SCOPE, ActionAuthorityDecision.REJECTED_SCOPE
+    target_id = getattr(target_binding, "target_id", None)
+    destination = getattr(target_binding, "destination", None)
+    asset_id = uuid.UUID(str(target_id)) if target_id else None
+    hosts: list[str] = []
+    if asset_id is not None:
+        active, host = await _asset_state(conn, action.run_kind, asset_id)
+        if active is not True:
+            return _SCOPE, ActionAuthorityDecision.REJECTED_SCOPE
+        # A per-run approval that admitted a replay destination is checked against that host,
+        # not the asset's; a standing authorization always against the asset's current host.
+        if standing or destination is None:
+            hosts.append(host)
+    elif standing:
+        return _SCOPE, ActionAuthorityDecision.REJECTED_MISSING
+    if destination is not None:
+        hosts.append(destination)
     approval_id = uuid.UUID(str(approval_receipt_id))
     approval = _row(await conn.fetchrow(
         "SELECT status, revoked_at, expires_at, scope_receipt_id FROM approval_receipts WHERE id=$1",
@@ -209,7 +203,8 @@ async def admitted_authority_reason(
         str(approval.get("scope_receipt_id") or "")))
     if not scope:
         return _SCOPE, ActionAuthorityDecision.REJECTED_MISSING
-    if str(scope.get("verdict") or "") == "blocked" or not _host_in_admitted_scope(host, scope):
+    if str(scope.get("verdict") or "") == "blocked" or not hosts or not all(
+            _host_in_admitted_scope(item, scope) for item in hosts):
         return _SCOPE, ActionAuthorityDecision.REJECTED_SCOPE
     if standing and not await _standing_still_current(conn, asset_id, approval_id):
         return _SCOPE, ActionAuthorityDecision.REJECTED_SCOPE
@@ -346,7 +341,7 @@ async def running_scan_authority(
                     record_event=record_event, **guard_kwargs)
 
 
-def _watched(pool: Any, action: RunAuthorityAction, target: _RunTarget,
+def _watched(pool: Any, action: RunAuthorityAction, target: _RunTarget | Callable[[uuid.UUID], _RunTarget],
              receipts: list[tuple[uuid.UUID, bool]], *, record_event: Callable[[str], Any] | None,
              subject: str = "Scan", grace_seconds: float = HARD_STOP_GRACE_SECONDS,
              **guard_kwargs: Any) -> RunningScanAuthority:
@@ -356,7 +351,8 @@ def _watched(pool: Any, action: RunAuthorityAction, target: _RunTarget,
         return reason
 
     guards = [
-        ScanAuthorityGuard(pool=pool, target_binding=target, scope_receipt_id=None,
+        ScanAuthorityGuard(pool=pool, target_binding=target(receipt) if callable(target) else target,
+                           scope_receipt_id=None,
                            approval_receipt_id=str(receipt), record_event=record_event,
                            decide=decide(is_standing), **guard_kwargs)
         for receipt, is_standing in receipts
@@ -387,22 +383,30 @@ async def running_retest_authority(
 ) -> RunningScanAuthority:
     """The authority for one finding retest, watched exactly as a device or AI run is.
 
-    ``admitted`` is what the retest was admitted with (``retest_authority.admitted_authority``):
-    the web target and, when it had them, its standing authorization and the approval receipt
-    the request named. A retest admitted with neither has nothing revocable and is not watched,
-    as a passive local Scan without a receipt is not. ``destination`` is the URL the retest
-    replays against, the host admission checked a named approval receipt against.
+    ``admitted`` is what the retest was admitted with (``retest_authority.admit_retest``): the web
+    target (none for a finding without one), its authorization and the approval receipt the
+    request named, and which of them admitted the replay destination. A retest admitted with
+    neither receipt has nothing revocable and is not watched, as a passive local Scan without a
+    receipt is not. ``destination`` is the URL the retest replays against: the receipt that
+    admitted it keeps checking its host, under the strict spelling admission used.
     """
+    try:
+        from ..action_scope import url_host_for_scope
+    except (ImportError, ModuleNotFoundError):
+        from action_scope import url_host_for_scope
     admitted = admitted or {}
     receipts = retest_authority_receipts(admitted)
-    target_id = _uuid(admitted.get("target_id"))
     if not receipts:
         return RunningScanAuthority(None, None)
-    parsed = urllib.parse.urlparse(destination if destination and "://" in destination
-                                   else f"https://{destination or ''}")
-    # A retest bound to receipts whose target is gone has nothing left to be authorized for:
-    # the nil id names no row, so the check refuses it as ``scope_invalid`` before any traffic.
-    target = _RunTarget(str(target_id or uuid.UUID(int=0)), host=parsed.hostname or None)
+    target_id = _uuid(admitted.get("target_id"))
+    host = url_host_for_scope(destination) or ""
+    # The receipt that admitted the destination; an earlier record without one names the
+    # approval when there is one, else the target's authorization.
+    covering = _uuid(admitted.get("destination_receipt_id")) or receipts[-1][0]
+
+    def target(receipt: uuid.UUID) -> _RunTarget:
+        return _RunTarget(str(target_id) if target_id else None,
+                          destination=host if receipt == covering else None)
     return _watched(pool, RunAuthorityAction(RETEST_RUN_KIND, action_id="finding.retest"), target,
                     receipts, record_event=record_event, subject="Retest", **guard_kwargs)
 

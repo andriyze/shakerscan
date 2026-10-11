@@ -307,17 +307,17 @@ from scan.action_authority_guard import ScanAuthorityGuard
 from scan.action_interruption import action_interrupted
 from scan.running_scan_authority import ScanAuthorityStopped, running_retest_authority, running_scan_authority
 from scan.retest_authority import (
-    admitted_authority,
+    admit_retest,
     admitted_authority_json,
-    approval_covers_destination,
     retest_authority_stop,
 )
 from worker_handlers.retest_authority import (
     ai_replay_authority_stop,
+    cut_short_by_destination,
     open_retest_authority,
-    retest_stop_status,
+    record_retest_stop,
     scan_stopped_by_authority,
-    settle_retest_authority_stop,
+    settle_published_stop,
 )
 from scan.executor import build_native_scan_execution
 from scan.stage_store import PostgresScanStageCheckpointStore
@@ -6564,10 +6564,8 @@ async def process_finding_retest_job(job_data: dict):
             except ScanAuthorityStopped as stopped:
                 authority_stop = retest_authority_stop(stopped.reason, before_start=stopped.before_start)
             if authority_stop is not None:
-                await settle_retest_authority_stop(db_pool, verification, authority_stop, attempt=attempt,
-                                                   mode=requested_mode, finish_campaign=asm_inventory.finish_campaign)
-                r.hset(retest_key, mapping=retest_stop_status(authority_stop, attempt=attempt))
-                r.expire(retest_key, 86400)
+                await record_retest_stop(db_pool, r, retest_key, verification, authority_stop, attempt=attempt,
+                                         mode=requested_mode, finish_campaign=asm_inventory.finish_campaign)
                 print(f"[retest:{job_id[:8]}] Retest {verification_id} stopped: "
                       f"{authority_stop['stop_reason']} ({authority_stop['reason_code']})", flush=True)
                 return
@@ -6585,6 +6583,7 @@ async def process_finding_retest_job(job_data: dict):
                     result["result_status"] = _result_status_for_verdict(result["verdict"])
                     print(f"[retest:{job_id[:8]}] Promoted inconclusive → likely_vulnerable (partial deterministic evidence)", flush=True)
 
+            result = cut_short_by_destination(result, run_authority.refused)
             # Final consistency guard before persistence: never write a
             # low-confidence "false_positive" (single enforcement point).
             result = _enforce_verdict_invariants(result)
@@ -6991,16 +6990,18 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
             if finding_type not in SUPPORTED_RETEST_TYPES or not effective_target:
                 skipped += 1
                 continue
-            # Bound to the Scan's approval, a retest whose replay host it does not cover is not queued.
-            if scan_approval and not await approval_covers_destination(
-                    conn, scan_approval, str(inferred.get("original_url") or effective_target)):
+            # Bound to the target's authorization and the Scan's approval; a retest whose replay
+            # host the admitting scope does not cover is not queued.
+            retest_target_id = finding.get("target_id") or (uuid.UUID(target_id) if target_id else None)
+            admitted, out_of_scope = await admit_retest(conn, target_id=retest_target_id, approval_receipt_id=scan_approval,
+                                                        destination=inferred.get("original_url") or effective_target)
+            if out_of_scope is not None:
                 skipped += 1
                 continue
 
             replay_commands = build_replay_commands(inferred)
             verification_id = uuid.uuid4()
             job_id = str(uuid.uuid4())
-            retest_target_id = finding.get("target_id") or (uuid.UUID(target_id) if target_id else None)
 
             await conn.execute("""
                 INSERT INTO finding_verifications (
@@ -7027,12 +7028,7 @@ async def queue_auto_retests_for_scan(scan_id: str, target_id: str | None, targe
                 inferred.get("request_body") or None,
                 json.dumps(replay_commands) if replay_commands else None,
                 auth_ctx_json,
-                # Bound to the target's authorization and the source Scan's approval receipt,
-                # re-checked while the retest runs.
-                admitted_authority_json(await admitted_authority(
-                    conn, target_id=retest_target_id,
-                    approval_receipt_id=scan_approval,
-                )),
+                admitted_authority_json(admitted),
             )
 
             await conn.execute("""
@@ -7135,6 +7131,9 @@ async def reap_stale_retests(now: datetime | None = None) -> dict[str, int]:
                 f"(>{RETEST_RUNNING_STALE_SECONDS}s)."
             )
 
+            if await settle_published_stop(db_pool, r, row, finish_campaign=asm_inventory.finish_campaign):
+                failed += 1  # stopped by its authorization, settled now rather than requeued
+                continue
             if _stale_retest_should_requeue(attempt_count):
                 new_job_id = str(uuid.uuid4())
                 next_attempt = attempt_count + 1

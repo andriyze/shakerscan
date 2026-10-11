@@ -115,3 +115,12 @@ test('a retest refused before it started says so, and names its own scope cause'
     authority_stop: { reason_code: 'scope_invalid' } })
   assert.match(scope.detail, /does not cover it or the replayed URL while this retest was running/)
 })
+
+test('a retest stop names the next step that fits its cause', () => {
+  const notice = (code) => retestAuthorizationStopNotice({ stop_reason: 'authorization_withdrawn',
+    authority_stop: { reason_code: code } }).detail
+  assert.match(notice('authorization_revoked'), /Authorize the target again/)
+  assert.match(notice('authorization_expired'), /Renew the approval/)
+  assert.match(notice('scope_invalid'), /covers the URL the retest replays/)
+  assert.doesNotMatch(notice('scope_invalid'), /Authorize the target again/)
+})

@@ -38,7 +38,7 @@ try:
     from hunt.run_service import agent_tools
     from retest_contract import build_retest_job_payload, normalize_retest_type, validate_retest_job_payload
     from runtime.models import TargetBinding
-    from scan.retest_authority import admitted_authority, admitted_authority_json
+    from scan.retest_authority import admit_retest, admitted_authority_json
     from serialization import row_to_dict
     from workflow_experiment import WorkflowContractError
     from arsenal_routes import router as _arsenal_routes
@@ -57,7 +57,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..hunt.run_service import agent_tools
     from ..retest_contract import build_retest_job_payload, normalize_retest_type, validate_retest_job_payload
     from ..runtime.models import TargetBinding
-    from ..scan.retest_authority import admitted_authority, admitted_authority_json
+    from ..scan.retest_authority import admit_retest, admitted_authority_json
     from ..serialization import row_to_dict
     from ..workflow_experiment import WorkflowContractError
     from ..arsenal_routes import router as _arsenal_routes
@@ -1936,6 +1936,12 @@ async def _agent_auto_queue_dast_retests(
                 approval_context = await _validate_approval_receipt_for_action(
                     conn, approval_receipt_id, target_url=target_for_retest,
                     target_id=str(target_uuid), action_name="finding.retest")
+                admitted, out_of_scope = await admit_retest(
+                    conn, target_id=target_uuid,
+                    approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+                    destination=target_for_retest)
+                if out_of_scope is not None:
+                    continue  # the replay host is outside the scope that admits it
                 retest_id, job_id = uuid.uuid4(), str(uuid.uuid4())
                 await conn.execute(
                     """INSERT INTO finding_verifications (
@@ -1950,10 +1956,7 @@ async def _agent_auto_queue_dast_retests(
                     rtype, target_for_retest, context.get("parameter"), context.get("payload"),
                     str(context.get("method") or "GET").upper(),
                     str(candidate["verifier_contract_id"] or f"web.{rtype}"),
-                    admitted_authority_json(await admitted_authority(
-                        conn, target_id=target_uuid,
-                        approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
-                    )),
+                    admitted_authority_json(admitted),
                 )
                 await conn.execute(
                     """UPDATE investigation_candidates

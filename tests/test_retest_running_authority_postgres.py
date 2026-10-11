@@ -61,6 +61,9 @@ class FakeRedis:
     def set(self, *_args, **_kwargs):
         return True
 
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
 
 class FixtureProver:
     """A replay that holds a ``sleep`` process open and never checks a stop, like the provers."""
@@ -123,8 +126,8 @@ async def _web_target(pool, *, authorize=True, url=URL):
         finding_id = await conn.fetchval(
             """INSERT INTO findings (target_id, fingerprint, title, severity, tool, url, evidence)
                VALUES ($1, $2, 'Reflected XSS', 'high', 'dalfox', $3, $4::jsonb) RETURNING id""",
-            target_id, uuid.uuid4().hex, f"{URL}/search?q=1",
-            json.dumps({"type": "xss", "param": "q", "url": f"{URL}/search?q=1"}))
+            target_id, uuid.uuid4().hex, f"{url}/search?q=1",
+            json.dumps({"type": "xss", "param": "q", "url": f"{url}/search?q=1"}))
     return target_id, finding_id, standing
 
 
@@ -570,7 +573,8 @@ def test_an_approval_that_does_not_cover_the_replayed_host_is_refused_at_admissi
             approval = await _approval(pool, target_id, host="other.fixture.test")
             with pytest.raises(findings.HTTPException) as refused:
                 await _admit(pool, _fixtures, finding_id, approval=approval)
-            assert refused.value.status_code == 400 and "replay URL" in str(refused.value.detail)
+            assert refused.value.status_code == 400
+            assert refused.value.detail["error"] == "replay_url_out_of_scope"
             async with pool.acquire() as conn:
                 assert await conn.fetchval("SELECT count(*) FROM finding_verifications") == 0
     asyncio.run(run())
@@ -641,4 +645,306 @@ def test_an_earlier_engines_retest_is_refused_when_the_target_moved_and_its_bind
             admitted = json.loads(row["admitted_authority"])
             assert admitted["legacy"] is True
             assert admitted["standing_receipt_id"] == str(standing["approval_receipt_id"])
+    asyncio.run(run())
+
+
+# Regression tests for the review of the first version (scope spelling, replay destination,
+# target-less findings, earlier engines' retests, a settle that fails).
+
+class RecordingProver(FixtureProver):
+    """Records the URL each replay step is sent to."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.urls: list[str] = []
+
+    async def __call__(self, *args, **kwargs):
+        self.urls.append(args[0] if args else kwargs.get("url"))
+        return await super().__call__(*args, **kwargs)
+
+
+async def _admit_url(pool, redis, finding_id, *, approval=None, original_url=None):
+    previous = _configure_routes(pool, redis)
+    try:
+        response = await findings.retest_finding(
+            str(finding_id), findings.FindingRetestRequest(
+                requested_by="ui", approval_receipt_id=approval, original_url=original_url),
+            mode="deterministic")
+    finally:
+        _restore_routes(previous)
+    return response, redis.queued[-1][1]
+
+
+@pytest.mark.parametrize("approved_host,replay_url", [
+    ("fass.example", "http://faß.example/search?q=1"),  # IDNA 2003 maps it; clients connect elsewhere
+    ("fixture.co.uk", "http://sub.evil.co.uk/search?q=1"),  # a public-suffix root covers nothing
+    ("retest.fixture.test", "http://evil.example\\@retest.fixture.test/search?q=1"),  # ambiguous authority
+])
+def test_an_approval_admits_only_the_strict_spelling_of_the_replay_host(
+        template_database, monkeypatch, _fixtures, approved_host, replay_url):
+    async def run():
+        async with scan_database(template_database) as pool:
+            target_id, finding_id, _ = await _web_target(pool, authorize=False)
+            approval = await _approval(pool, target_id, host=approved_host)
+            if "co.uk" in replay_url:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """UPDATE scope_receipts SET allowed_root_domains='["co.uk"]'::jsonb
+                            WHERE id=(SELECT scope_receipt_id FROM approval_receipts WHERE id=$1)""",
+                        uuid.UUID(approval))
+            with pytest.raises(findings.HTTPException) as refused:
+                await _admit_url(pool, _fixtures, finding_id, approval=approval, original_url=replay_url)
+            assert refused.value.status_code == 400
+            assert refused.value.detail["error"] == "replay_url_out_of_scope"
+    asyncio.run(run())
+
+
+def test_the_running_check_and_admission_share_the_strict_host_rule():
+    from scan.running_scan_authority import _host_in_admitted_scope
+    import action_scope
+    assert not _host_in_admitted_scope("faß.example", {"allowed_hosts": ["fass.example"]})
+    assert not _host_in_admitted_scope("sub.evil.co.uk", {"allowed_root_domains": ["co.uk"]})
+    assert _host_in_admitted_scope("2001:DB8::0001", {"allowed_hosts": ["2001:db8::1"]})
+    assert _host_in_admitted_scope("good.example.", {"allowed_hosts": ["good.example"]})
+    assert action_scope.url_host_for_scope("https://evil.example\\@good.example/x") is None
+    import api as api_module  # noqa: F401 - the admission helper delegates to the same rule
+    assert "receipt_scope_covers_host" in Path(ROOT / "api" / "api.py").read_text(encoding="utf-8")
+
+
+def test_a_retest_bound_only_to_the_target_authorization_cannot_replay_another_host(
+        template_database, monkeypatch, _fixtures):
+    async def run():
+        async with scan_database(template_database) as pool:
+            monkeypatch.setattr(worker, "db_pool", pool)
+            _target_id, finding_id, _ = await _web_target(pool)
+            with pytest.raises(findings.HTTPException) as refused:
+                await _admit_url(pool, _fixtures, finding_id, original_url="http://elsewhere.invalid/search?q=1")
+            assert refused.value.detail["error"] == "replay_url_out_of_scope"
+            assert "target's authorization" in refused.value.detail["message"]
+            # Bulk skips it with the reason.
+            previous = _configure_routes(pool, _fixtures)
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute("UPDATE findings SET url='http://elsewhere.invalid/x', "
+                                       "evidence='{\"type\":\"xss\",\"param\":\"q\"}'::jsonb WHERE id=$1", finding_id)
+                response = await findings.bulk_retest_findings(findings.FindingsBulkRetestRequest(
+                    finding_ids=[str(finding_id)], mode="deterministic"))
+            finally:
+                _restore_routes(previous)
+            assert response["queued"] == []
+            assert response["skipped"][0]["reason"] == "replay_url_out_of_scope"
+    asyncio.run(run())
+
+
+def test_a_row_whose_replay_destination_left_the_scope_is_refused_while_running(
+        template_database, monkeypatch, _fixtures):
+    """The destination is re-checked on every poll against the scope that admitted it."""
+    async def run():
+        async with scan_database(template_database) as pool:
+            monkeypatch.setattr(worker, "db_pool", pool)
+            _target_id, finding_id, _ = await _web_target(pool)
+            response, job = await _admit(pool, _fixtures, finding_id)
+            async with pool.acquire() as conn:  # a row edited after admission
+                await conn.execute("UPDATE finding_verifications SET original_url='http://elsewhere.invalid/x' "
+                                   "WHERE id=$1", uuid.UUID(response["retest_id"]))
+            prover = RecordingProver(seconds=0.1)
+            _use_prover(monkeypatch, prover)
+            await worker.process_finding_retest_job(job)
+            assert prover.calls == 0
+            row, finding = await _verification(pool, response["retest_id"])
+            _assert_no_verdict(row, finding, reason_code="scope_invalid")
+    asyncio.run(run())
+
+
+def test_a_redirect_off_the_scope_is_refused_and_the_retest_records_no_fix(
+        template_database, monkeypatch, _fixtures):
+    async def run():
+        async with scan_database(template_database) as pool:
+            monkeypatch.setattr(worker, "db_pool", pool)
+            _target_id, finding_id, _ = await _web_target(pool)
+            sent: list[str] = []
+
+            async def fetch_once(url, *args, **kwargs):
+                sent.append(url)
+                if "elsewhere" in url:
+                    return {"status_code": 200, "headers": {}, "body": "", "final_url": url, "error": None}
+                return {"status_code": 302, "headers": {"location": "http://elsewhere.invalid/landing"},
+                        "body": "", "final_url": url, "error": None}
+            monkeypatch.setattr(proof_of_exploit, "_fetch_once", fetch_once)
+
+            async def prover(url, *args, **kwargs):
+                await proof_of_exploit.fetch_with_capture(url)
+                return proof_of_exploit.ExploitProof(proven=False)
+            _use_prover(monkeypatch, prover)
+            response, job = await _admit(pool, _fixtures, finding_id)
+            await worker.process_finding_retest_job(job)
+            assert sent and all("elsewhere" not in url for url in sent)
+            row, finding = await _verification(pool, response["retest_id"])
+            assert row["verdict"] == "inconclusive" and finding["last_verification_verdict"] == "inconclusive"
+            artifacts = json.loads(row["artifacts"]) if isinstance(row["artifacts"], str) else row["artifacts"]
+            assert artifacts["refused_destinations"] == ["elsewhere.invalid"]
+    asyncio.run(run())
+
+
+def test_fetch_without_a_guard_is_unchanged_and_with_one_checks_every_hop(monkeypatch):
+    from scanner_tools.destination_guard import destination_guard
+    calls = []
+
+    async def fetch_once(url, method, data, headers, timeout, follow, *rest):
+        calls.append((url, method, follow))
+        if url.endswith("/a"):
+            return {"status_code": 303, "headers": {"location": "/b"}, "final_url": url}
+        return {"status_code": 200, "headers": {}, "final_url": url}
+    monkeypatch.setattr(proof_of_exploit, "_fetch_once", fetch_once)
+    asyncio.run(proof_of_exploit.fetch_with_capture("http://ok.test/a", method="POST", data="x"))
+    assert calls == [("http://ok.test/a", "POST", True)]  # curl follows, as before
+    calls.clear()
+
+    async def guarded():
+        with destination_guard(lambda url: "ok.test" in url) as guard:
+            result = await proof_of_exploit.fetch_with_capture("http://ok.test/a", method="POST", data="x")
+            refused = await proof_of_exploit.fetch_with_capture("http://bad.test/a")
+            return result, refused, guard.refused
+    result, refused, hosts = asyncio.run(guarded())
+    assert calls == [("http://ok.test/a", "POST", False), ("http://ok.test/b", "GET", False)]
+    assert result["status_code"] == 200 and refused["error"] == "destination_out_of_scope"
+    assert hosts == ["bad.test"]
+
+
+def test_a_targetless_finding_with_an_approval_is_watched_by_that_approval(template_database, monkeypatch, _fixtures):
+    async def run():
+        async with scan_database(template_database) as pool:
+            monkeypatch.setattr(worker, "db_pool", pool)
+            async with pool.acquire() as conn:
+                finding_id = await conn.fetchval(
+                    """INSERT INTO findings (target_id, fingerprint, title, severity, tool, url, evidence)
+                       VALUES (NULL, $1, 'Reflected XSS', 'high', 'dalfox', $2, $3::jsonb) RETURNING id""",
+                    uuid.uuid4().hex, f"{URL}/search?q=1",
+                    json.dumps({"type": "xss", "param": "q", "url": f"{URL}/search?q=1"}))
+            approval = await _approval(pool, None)
+            prover = RecordingProver(seconds=0.6, proven=True)
+            _use_prover(monkeypatch, prover)
+            _timing(monkeypatch, poll_seconds=0.2)
+            response, job = await _admit_url(pool, _fixtures, finding_id, approval=approval)
+            await worker.process_finding_retest_job(job)
+            row, _ = await _verification(pool, response["retest_id"])
+            assert row["status"] == "completed" and row["verdict"] == "exploited" and prover.calls >= 1
+
+            # The same, revoked mid-run: stopped as revoked, never "target deactivated".
+            response, job = await _admit_url(pool, _fixtures, finding_id, approval=approval)
+            prover = RecordingProver()
+            _use_prover(monkeypatch, prover)
+            _timing(monkeypatch, poll_seconds=0.2, grace_seconds=0.5)
+
+            async def revoke_soon():
+                while prover.calls == 0:
+                    await asyncio.sleep(0.05)
+                async with pool.acquire() as conn:
+                    await conn.execute("UPDATE approval_receipts SET status='revoked', revoked_at=NOW() WHERE id=$1",
+                                       uuid.UUID(approval))
+            hook = asyncio.create_task(revoke_soon())
+            await worker.process_finding_retest_job(job)
+            await hook
+            row, finding = await _verification(pool, response["retest_id"])
+            _assert_no_verdict(row, finding, reason_code="authorization_revoked")
+    asyncio.run(run())
+
+
+def test_an_earlier_engines_retest_is_not_revived_by_authorizing_the_target_again(
+        template_database, monkeypatch, _fixtures):
+    async def run():
+        async with scan_database(template_database) as pool:
+            monkeypatch.setattr(worker, "db_pool", pool)
+            target_id, finding_id, _ = await _web_target(pool)
+            response, job = await _admit(pool, _fixtures, finding_id)
+            async with pool.acquire() as conn:
+                await conn.execute("UPDATE finding_verifications SET admitted_authority=NULL WHERE id=$1",
+                                   uuid.UUID(response["retest_id"]))
+            await _revoke(pool, target_id)
+            async with pool.acquire() as conn:
+                await target_authorization.authorize_target(conn, target_id, approved_by="fixture-owner")
+            prover = RecordingProver(seconds=0.1)
+            _use_prover(monkeypatch, prover)
+            await worker.process_finding_retest_job(job)
+            assert prover.calls == 0
+            row, finding = await _verification(pool, response["retest_id"])
+            _assert_no_verdict(row, finding, reason_code="authorization_revoked")
+    asyncio.run(run())
+
+
+def test_an_earlier_engines_reaped_retest_keeps_the_approval_its_operation_recorded(
+        template_database, monkeypatch, _fixtures):
+    """A 2.8.x retest running at the upgrade is requeued by the reaper without its message."""
+    async def run():
+        async with scan_database(template_database) as pool:
+            monkeypatch.setattr(worker, "db_pool", pool)
+            target_id, finding_id, _ = await _web_target(pool, authorize=False)
+            approval = await _approval(pool, target_id)
+            response, _job = await _admit(pool, _fixtures, finding_id, approval=approval)
+            async with pool.acquire() as conn:
+                await conn.execute("UPDATE finding_verifications SET admitted_authority=NULL WHERE id=$1",
+                                   uuid.UUID(response["retest_id"]))
+                await conn.execute(
+                    """INSERT INTO command_results (command, status, risk_tier, approval_receipt_id, result_json,
+                                                    created_by, operator_message)
+                       VALUES ('finding.retest', 'retest_scheduled', 'active', $1, $2::jsonb, 'ui', 'queued')""",
+                    uuid.UUID(approval), json.dumps({"retest_id": response["retest_id"]}))
+            requeued = worker.build_retest_job_payload(
+                job_id=_job["job_id"], verification_id=response["retest_id"], finding_id=str(finding_id),
+                submitted_at=datetime.now(timezone.utc).isoformat(), trigger="stale_watchdog_requeue")
+            prover = RecordingProver()
+            _use_prover(monkeypatch, prover)
+            _timing(monkeypatch, poll_seconds=0.2, grace_seconds=0.5)
+
+            async def revoke_soon():
+                while prover.calls == 0:
+                    await asyncio.sleep(0.05)
+                async with pool.acquire() as conn:
+                    await conn.execute("UPDATE approval_receipts SET status='revoked', revoked_at=NOW() WHERE id=$1",
+                                       uuid.UUID(approval))
+            hook = asyncio.create_task(revoke_soon())
+            await worker.process_finding_retest_job(requeued)
+            await hook
+            row, finding = await _verification(pool, response["retest_id"])
+            assert json.loads(row["admitted_authority"])["approval_receipt_id"] == approval
+            _assert_no_verdict(row, finding, reason_code="authorization_revoked")
+    asyncio.run(run())
+
+
+def test_a_stop_whose_settle_failed_is_settled_by_the_reaper_not_requeued(template_database, monkeypatch, _fixtures):
+    from worker_handlers import retest_authority as handler
+    async def run():
+        async with scan_database(template_database) as pool:
+            monkeypatch.setattr(worker, "db_pool", pool)
+            target_id, finding_id, _ = await _web_target(pool)
+            response, job = await _admit(pool, _fixtures, finding_id)
+            prover = RecordingProver()
+            _use_prover(monkeypatch, prover)
+            _timing(monkeypatch, poll_seconds=0.2, grace_seconds=0.5)
+            monkeypatch.setattr(handler, "SETTLE_RETRY_DELAYS", (0.0, None))
+            real_once = handler._settle_once
+
+            async def failing_once(*_a, **_k):
+                raise OSError("database unreachable")
+            monkeypatch.setattr(handler, "_settle_once", failing_once)
+
+            async def revoke_soon():
+                while prover.calls == 0:
+                    await asyncio.sleep(0.05)
+                await _revoke(pool, target_id)
+            hook = asyncio.create_task(revoke_soon())
+            with pytest.raises(OSError):
+                await worker.process_finding_retest_job(job)
+            await hook
+            row, _ = await _verification(pool, response["retest_id"])
+            assert row["status"] == "running"
+            monkeypatch.setattr(handler, "_settle_once", real_once)
+            async with pool.acquire() as conn:
+                await conn.execute("UPDATE finding_verifications SET started_at=NOW() - INTERVAL '2 days' WHERE id=$1",
+                                   uuid.UUID(response["retest_id"]))
+            before = len(_fixtures.queued)
+            counts = await worker.reap_stale_retests(now=datetime.now(timezone.utc) + timedelta(days=1))
+            assert counts["failed"] == 1 and len(_fixtures.queued) == before
+            row, finding = await _verification(pool, response["retest_id"])
+            _assert_no_verdict(row, finding, reason_code="authorization_revoked")
     asyncio.run(run())
