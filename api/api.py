@@ -15064,22 +15064,12 @@ def _canonical_receipt_host(value: Any) -> str:
 
 
 def _host_matches_receipt_scope(host: str, scope: dict[str, Any]) -> bool:
-    candidate = _canonical_receipt_host(host)
-    normalized = _decode_json_value(scope.get("normalized_scope")) or {}
-    allowed_hosts = _decode_json_value(scope.get("allowed_hosts")) or []
-    allowed_roots = _decode_json_value(scope.get("allowed_root_domains")) or []
-    normalized_host = _canonical_receipt_host(normalized.get("host") if isinstance(normalized, dict) else "")
-    if normalized_host and candidate == normalized_host:
-        return True
-    for allowed in allowed_hosts if isinstance(allowed_hosts, list) else []:
-        if candidate == _canonical_receipt_host(allowed):
-            return True
-    for root_host in _scope_roots(  # a public-suffix root covers nothing
-        _canonical_receipt_host(root) for root in (allowed_roots if isinstance(allowed_roots, list) else [])
-    ):
-        if candidate == root_host or candidate.endswith(f".{root_host}"):
-            return True
-    return False
+    # The one rule, shared with the re-checks of running work (action_scope).
+    try:
+        from action_scope import receipt_scope_covers_host
+    except ModuleNotFoundError:
+        from .action_scope import receipt_scope_covers_host
+    return receipt_scope_covers_host(host, scope)
 
 
 def _policy_requests_active_testing(policy: Any) -> bool:

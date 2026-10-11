@@ -269,9 +269,17 @@ class InteractiveSession:
 
     async def _create_user_context(self, user_name: str) -> BrowserContext:
         """Create a new browser context for a user."""
+        try:
+            from scanner_tools.destination_guard import guarded_context_options
+        except ImportError:
+            async def guarded_context_options():
+                return {}
         context = await self._browser.new_context(
             ignore_https_errors=True,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            # A finding retest's destination guard, when this session runs inside one: all of
+            # its traffic through the guard's egress proxy (redirect hops and WebSockets too).
+            **await guarded_context_options(),
         )
 
         # Set up network interception
@@ -282,11 +290,21 @@ class InteractiveSession:
 
         # Global route handler to block cross-origin requests (SSRF prevention)
         # This catches redirects, form submissions, and any other navigation
+        # A finding retest's replay destination guard, when this session runs inside one.
+        try:
+            from scanner_tools.destination_guard import current_guard
+        except ImportError:
+            current_guard = lambda: None  # noqa: E731
+        destination_guard = current_guard()
+
         async def route_handler(route):
             request_url = route.request.url
             # Allow data/blob/about URLs (inline resources)
             if request_url.startswith(("data:", "blob:", "about:")):
                 await route.continue_()
+                return
+            if destination_guard is not None and not destination_guard.check(request_url):
+                await route.abort("blockedbyclient")
                 return
 
             # Always allow same-origin

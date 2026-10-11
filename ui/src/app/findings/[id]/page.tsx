@@ -4,7 +4,7 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 
 import { startHuntV2Native } from '@/lib/huntV2'
 import { useEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
-import { BrainCircuit, ExternalLink, Loader2, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, BrainCircuit, ExternalLink, Loader2, ShieldCheck } from 'lucide-react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import {
@@ -32,6 +32,7 @@ import {
 import { FINDING_STATUSES, RETEST_VERDICT_LABELS, type FindingSourceType } from '@/lib/constants'
 import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/lib/evidence-parser'
 import { canonicalFindingProofVerified } from '@/lib/findingProof'
+import { retestAuthorizationStopNotice } from '@/lib/authorizationStop'
 import { formatRelativeTime } from '@/lib/format'
 import { findingObservation, hostOf, pathOf, verificationSource } from '@/lib/findingObservation'
 import { ANALYST_VERDICTS, FINDING_STATUS_LABELS, verdictChangeMessage, verdictOptionLabel, verdictRequestStatus, type AnalystVerdict } from '@/lib/analystVerdict'
@@ -1027,6 +1028,21 @@ function FindingDetailContent() {
                             : 'N/A'}
                         </div>
                       </div>
+                      {(() => {
+                        const stop = retestAuthorizationStopNotice(entry)
+                        return stop && (
+                          <div className="mt-2 rounded-sm border border-red-500/50 bg-red-950/30 p-2" data-testid="retest-authorization-stop">
+                            <div className="flex items-start gap-2">
+                              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-300" aria-hidden="true" />
+                              <div className="min-w-0">
+                                <div className="font-semibold text-white">{stop.title}</div>
+                                <div className="mt-1 text-gray-300">{stop.detail}</div>
+                                {stop.observedAt && <div className="mt-1 text-gray-500">Observed at {stop.observedAt}</div>}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })()}
                       {entry.verification_mode && (
                         <div className="mt-1 text-gray-400">
                           mode: {entry.verification_mode.replaceAll('_', ' ')}

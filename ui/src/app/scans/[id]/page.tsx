@@ -20,6 +20,7 @@ import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
 import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, isProvenFinding, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
+import { failedScanHeadline } from '@/lib/authorizationStop'
 
 const SCAN_REPORT_TABS = ['findings', 'posture', 'coverage', 'release', 'activity']
 
@@ -1648,13 +1649,6 @@ function ShardContextBanner({ scan }: { scan: any }) {
 // any partial baseline/discovery data was recovered, that there is no final
 // score/grade, and what to do next. Rendered above any results.
 function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialResults: boolean }) {
-  const failurePhase = String(
-    scan?.result?.scan_metadata?.terminated_at_phase ||
-    scan?.current_phase ||
-    ''
-  )
-    .replace(/_/g, ' ')
-    .trim()
   const rawFailureMessage = String(
     scan?.result?.scan_metadata?.terminated_reason ||
     scan?.error_message ||
@@ -1681,9 +1675,7 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
         <div className="min-w-0">
           <h2 className="text-red-300 font-semibold">{isShard ? 'Shard failed' : 'Scan failed'}</h2>
           <p className="text-red-200/90 text-sm mt-1">
-            {failurePhase
-              ? <>This {isShard ? 'shard' : 'scan'} stopped during the <span className="font-medium">{failurePhase}</span> phase and did not finish.</>
-              : `This ${isShard ? 'shard' : 'scan'} stopped before it finished.`}
+            {failedScanHeadline(scan, isShard ? 'shard' : 'scan')}
           </p>
           <p className="text-red-200/70 text-sm mt-1">{failureMessage}</p>
           {legacyLogExcerpt && (
