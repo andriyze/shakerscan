@@ -70,7 +70,7 @@ ASSURANCE_COMPONENTS: tuple[tuple[str, int], ...] = (
 # ran" on a Scan whose XSS verifier had attempted its only candidate. sensitive_exposure is
 # read-only (it runs in passive Scans too), so its reads earn no active-verification credit.
 ACTIVE_VERIFIER_FAMILIES = frozenset({
-    "xss", "sqli", "nosqli", "authz_surface", "bola",
+    "xss", "sqli", "nosqli", "authz_surface", "bola", "graphql",
 })
 
 

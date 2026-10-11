@@ -57,6 +57,10 @@ _REASON_LABELS = {
     "scope_invalid": "Target scope no longer matched the approved scope",
     "cancelled": "The scan was cancelled",
     "timed_out": "The action, or one of its attempts, reached its wall-clock time limit",
+    "scan_time_limit": (
+        "The scan reached its time limit (max_duration_seconds); the action was stopped or "
+        "never started, and findings confirmed before the stop are kept"
+    ),
     "http_request_budget_exhausted": (
         "The action used up its HTTP request allowance before it finished"
     ),

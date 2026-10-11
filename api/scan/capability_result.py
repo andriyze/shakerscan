@@ -86,6 +86,9 @@ class CapabilityResultReason(str, Enum):
     # endpoints that answered too slowly to finish the pack even on a retry sized for a slow
     # endpoint. The receipt names each one (`template_slow_endpoint` observations).
     SLOW_ENDPOINTS = "slow_endpoints"
+    # The Scan reached its configured max_duration_seconds: the action was stopped while it
+    # ran (what it observed is kept, partial) or never started (timed out, nothing charged).
+    SCAN_TIME_LIMIT = "scan_time_limit"
 
 
 # The reason naming each non-time budget dimension an action can run out of.

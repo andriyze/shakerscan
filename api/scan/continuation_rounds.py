@@ -288,7 +288,11 @@ def compile_continuation_round(
         raise ScanContinuationError("cannot append work after the finalizer")
     if not set(action.action_id for action in parent_plan.actions) <= set(parent_results):
         raise ScanContinuationError("continuation is missing a terminal parent action receipt")
-    if any(result.status.value == "cancelled" for result in parent_results.values()):
+    # A cancelled Scan gets no more work; a finalize-only revision adds none (it only lets the
+    # report of what already settled be built, see scan.cancelled_report).
+    if not finalize_only and any(
+        result.status.value == "cancelled" for result in parent_results.values()
+    ):
         raise ScanContinuationError("cancelled Scan cannot continue")
     root_results = {key: parent_results[key] for key in allocation.parent_action_ids}
     # The receipts of resumable slices name the least wall their unfinished candidates need;
@@ -482,6 +486,46 @@ async def materialize_local_scan_continuation(
     revision_number: int = 1, include_finalizer: bool = True, finalize_only: bool = False,
 ) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
     """Compile with the shared planner and persist one local continuation transaction."""
+    prepared = await prepare_local_scan_continuation(
+        runtime, parent_plan=parent_plan, allocation=allocation, parent_results=parent_results,
+        revision_number=revision_number, include_finalizer=include_finalizer,
+        finalize_only=finalize_only,
+    )
+    if prepared is None:
+        return None
+    dispatcher = runtime.dispatcher
+    async with runtime.db_pool.acquire() as conn:
+        async with conn.transaction():
+            store = runtime.manifest_store_factory()
+            for manifest in prepared.manifests:
+                await store.persist(conn, manifest=manifest)
+            await runtime.action_store_factory().amend_plan(
+                conn, parent_plan=parent_plan, amended_plan=prepared.plan,
+                allocation=allocation, revision=prepared.revision,
+            )
+            await conn.execute(
+                """
+                UPDATE scans SET options=options || $2::jsonb
+                WHERE id=$1 AND status NOT IN ('cancelled','cancelling')
+                """,
+                uuid.UUID(dispatcher.scan_id), json.dumps(prepared.options),
+            )
+    dispatcher.options.update(prepared.options)
+    runtime.record_event("continuation_compiled")
+    return prepared.plan, prepared.revision
+
+
+async def prepare_local_scan_continuation(
+    runtime: ContinuationRuntime, *, parent_plan: ScanActionPlan,
+    allocation: ScanContinuationAllocation,
+    parent_results: Mapping[str, CapabilityResultReference],
+    revision_number: int = 1, include_finalizer: bool = True, finalize_only: bool = False,
+) -> PreparedContinuation | None:
+    """Compile one continuation revision with the shared planner; nothing is persisted.
+
+    A cancelled Scan's plan is frozen, so its report is built over a finalize-only revision
+    compiled here and never stored.
+    """
     dispatcher = runtime.dispatcher
     observations = {
         action_id: await dispatcher._observations(action_id)
@@ -502,27 +546,7 @@ async def materialize_local_scan_continuation(
         revision_number=revision_number, include_finalizer=include_finalizer,
         finalize_only=finalize_only,
     )
-    if prepared is None:
-        return None
-    async with runtime.db_pool.acquire() as conn:
-        async with conn.transaction():
-            store = runtime.manifest_store_factory()
-            for manifest in prepared.manifests:
-                await store.persist(conn, manifest=manifest)
-            await runtime.action_store_factory().amend_plan(
-                conn, parent_plan=parent_plan, amended_plan=prepared.plan,
-                allocation=allocation, revision=prepared.revision,
-            )
-            await conn.execute(
-                """
-                UPDATE scans SET options=options || $2::jsonb
-                WHERE id=$1 AND status NOT IN ('cancelled','cancelling')
-                """,
-                uuid.UUID(dispatcher.scan_id), json.dumps(prepared.options),
-            )
-    dispatcher.options.update(prepared.options)
-    runtime.record_event("continuation_compiled")
-    return prepared.plan, prepared.revision
+    return prepared
 
 
 def _cancelled(orchestration: Any) -> bool:
@@ -618,6 +642,7 @@ __all__ = [
     "compile_next_continuation",
     "load_continuation_request_manifests",
     "materialize_local_scan_continuation",
+    "prepare_local_scan_continuation",
     "round_progress_window",
     "run_continuation_rounds",
     "select_continuation_actions",

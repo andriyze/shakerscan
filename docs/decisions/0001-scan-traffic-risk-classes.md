@@ -2,7 +2,8 @@
 
 - Status: accepted
 - Date: 2026-08-23
-- Amended: 2026-10-07 (read-only exposure checks are passive)
+- Amended: 2026-10-07 (read-only exposure checks are passive), 2026-10-10 (the
+  fixed GraphQL reads among them)
 - Scope: deterministic Scan V2
 
 ## Decision
@@ -19,6 +20,12 @@ immutable content-discovery wordlist, execute the reviewed passive Nuclei ID
 allowlist, run the reviewed exposure checks (`exposure.verify_batch`: GETs of a
 fixed seed list and of endpoints discovery already reached, redirects off, no
 input varied), and replay explicitly selected safe-read collection requests.
+The exposure checks' fixed GraphQL reads are the same class: one reviewed
+introspection document sent over GET (a GraphQL GET carries only a query
+operation, and this one selects only the `__schema` meta field) to fixed
+GraphQL paths and to discovered GraphQL routes, and a browser request for fixed
+IDE paths. GraphQL documents that exercise a hypothesis (a misspelt field,
+repeated aliases) are active (`graphql.verify_batch`), though still GET-only.
 
 Requesting a fixed sensitive path such as `/.env` is the same traffic as a
 wordlist entry; what makes it a verified finding is the file-type proof applied

@@ -990,7 +990,14 @@ class PostgresScanExecutionBackend:
             receipt, CapabilityResultReason.TIMED_OUT,
         ) not in {*BUDGET_EXHAUSTION_REASONS.values(), CapabilityResultReason.SLOW_ENDPOINTS}:
             status = CapabilityResultStatus.TIMED_OUT
-            reason = CapabilityResultReason.TIMED_OUT
+            # An action the Scan's own time limit kept from starting says so; any other
+            # wall-clock stop is the action's own timeout.
+            reason = (
+                CapabilityResultReason.SCAN_TIME_LIMIT
+                if self._receipt_reason(receipt, CapabilityResultReason.TIMED_OUT)
+                is CapabilityResultReason.SCAN_TIME_LIMIT
+                else CapabilityResultReason.TIMED_OUT
+            )
         elif raw_status == "partial" or receipt.partial or receipt.timed_out or raw_status == "timed_out":
             # Partial, or a batch that also saw a timed-out attempt but states that a
             # non-time ceiling (requests, mutations) is what actually stopped it, or that the
