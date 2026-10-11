@@ -18,7 +18,6 @@ import asyncio
 import html
 import json
 import random
-import re
 import sys
 from pathlib import Path
 
@@ -70,59 +69,242 @@ PUBLISHED_DIGESTS = {
 }
 
 
-# Every plain digest left in the modules that build planner, agent, finding or evidence output,
-# with why it is not a digest of target response data. A new one fails until it is keyed or
-# listed here with its reason.
+# Every plain hashlib.sha256/md5/sha1 call in the modules that build planner, agent, finding,
+# evidence or export output (and the stores that hold them), found by AST, so a call split over
+# lines is found too. Each one is listed by file and function with why it is not a digest of
+# target response text. A new one fails until it is keyed or listed with its reason.
 _SCANNED = ("api/capabilities", "api/hunt", "api/scan", "api/devices", "api/device_agent.py",
             "api/workflow_experiment.py", "api/http_experiment.py", "api/runtime/request_replay_executor.py",
-            "scanner/scanner_tools")
-_RESPONSE_WORDS = re.compile(r"(?i)body|response|output|content|message|doc|text|value|chunk|window|sample|result")
-_PLAIN_DIGEST = re.compile(r"hashlib\.(?:sha256|md5|sha1)\((?P<argument>[^\n]{0,120})")
+            "scanner/scanner_tools", "api/evidence_storage.py", "api/runtime/observation_store.py",
+            "api/runtime/sealed_inputs.py")
+REASONS = {
+    "integrity": "integrity of stored or transported content, compared with its own recorded digest",
+    "finding": "a finding or record identity built from engine fields (title, URL, host, ids)",
+    "canonical": "a canonical digest of an engine-built record (plan, manifest, attempt, proof)",
+    "request": "a digest of request-side input the planner or operator supplied, never response text",
+    "model": "model intake artifacts, keys and statements, not target responses",
+    "public": "public material (certificates, host keys) whose digest is its fingerprint",
+    "protocol": "the protocol requires it (HIBP k-anonymity SHA-1, PKCE S256)",
+    "inprocess": "compared within one process and never published",
+    "redacted": "the digest of text already redacted (or value-free) and shown beside it",
+    "token": "a server-issued lease or idempotency token, matched by its digest",
+    "compat": "matches digests recorded before 2.9.0 (comparison only, never published)",
+}
 ALLOWED_PLAIN_DIGESTS = {
-    ("api/capabilities/artifact.py", "hashlib.sha256(window)"): "the archive row's own digest (masked exports key it)",
-    ("api/capabilities/sqli_proof.py", "hashlib.sha256(value)"): "helper used for the request URL only",
-    ("api/capabilities/browser.py", "hashlib.sha256(body)"): "the request body the planner supplied",
-    ("api/hunt/permission_grants.py", "hashlib.sha256(value.encode"): "an operator grant value, not a response",
-    ("api/hunt/skills.py", "hashlib.sha256(body.encode"): "operator instruction text",
-    ("api/scan/capability_result.py", "hashlib.sha256(json.dumps("): "an engine result manifest",
-    ("api/hunt/knowledge.py", "hashlib.sha256(json.dumps("): "advisory knowledge fields",
-    ("api/hunt/interaction_router.py", "hashlib.sha256(body.encode"): "planner-written instructions and actions",
-    ("api/scan/report_rebuild.py", "hashlib.sha256(content)"): "integrity check against a stored digest",
-    ("api/device_agent.py", "hashlib.sha256(content)"): "integrity check of an operator upload",
-    ("scanner/scanner_tools/sarif_output.py", "hashlib.sha256("): "SARIF location fingerprints",
-    ("scanner/scanner_tools/model_intake_sandbox.py", "hashlib.sha256(json.dumps("): "model intake (not a target)",
-    ("scanner/scanner_tools/model_intake_admission.py", "hashlib.sha256(message)"): "model intake signatures",
-    ("scanner/scanner_tools/model_intake.py", "hashlib.sha256(model_card_bytes)"): "model intake artifacts",
-    ("scanner/scanner_tools/model_intake_evaluation.py", "hashlib.sha256(json.dumps("): "model intake",
-    ("scanner/scanner_tools/model_intake_scanners.py", "hashlib.sha256(text.encode())"): "model intake",
-    ("scanner/scanner_tools/model_intake_scanners.py", "hashlib.sha256(value)"): "model intake",
-    ("scanner/scanner_tools/discovery.py", "hashlib.md5(path.encode())"): "a temporary file name",
-    ("scanner/scanner_tools/race_condition_tests.py", "hashlib.md5(body.encode())"): "counted in-process, never published",
-    ("scanner/scanner_tools/common.py", "hashlib.sha256(captured.encode("): "the digest of redacted text shown beside it",
-    ("scanner/scanner_tools/vendor_risk.py", "hashlib.md5(result.target.encode())"): "a finding id from the target URL",
+    ("api/capabilities/artifact.py", "_window_recorder"): "integrity",
+    ("api/capabilities/artifact.py", "record"): "integrity",
+    ("api/capabilities/auth.py", "_session_evidence_digest"): "redacted",
+    ("api/capabilities/authz.py", "_identity_digest"): "finding",
+    ("api/capabilities/authz.py", "authz_route_inventory_digest"): "canonical",
+    ("api/capabilities/authz_modes.py", "verify_function_authorization"): "request",
+    ("api/capabilities/authz_selected.py", "request_digest"): "canonical",
+    ("api/capabilities/browser.py", "_execute_browser_action"): "request",
+    ("api/capabilities/browser.py", "prepare"): "request",
+    ("api/capabilities/browser_login_action.py", "prepare"): "request",
+    ("api/capabilities/browser_steps.py", "browser_surface"): "redacted",
+    ("api/capabilities/http.py", "_read_bounded_response"): "integrity",
+    ("api/capabilities/nosqli_verify.py", "execute"): "request",
+    ("api/capabilities/sqli_proof.py", "_sha256"): "request",
+    ("api/capabilities/ssh_command_worker.py", "execute"): "request",
+    ("api/capabilities/ssh_transport.py", "connect"): "public",
+    ("api/capabilities/tls.py", "_certificate_chain_summary"): "public",
+    ("api/capabilities/tls.py", "inspect_tls_origin"): "public",
+    ("api/device_agent.py", "_read_local_intel_snapshot"): "integrity",
+    ("api/devices/collection_environments.py", "hydrate_environment"): "request",
+    ("api/devices/router.py", "_execute_device_capability_operation"): "canonical",
+    ("api/devices/router.py", "_verify_device_control_authorization_candidate"): "canonical",
+    ("api/devices/router.py", "_verify_device_firmware_candidate"): "canonical",
+    ("api/devices/worker_inputs.py", "hydrate_device_request_collections"): "request",
+    ("api/evidence_storage.py", "_hydrate_s3_evidence"): "integrity",
+    ("api/evidence_storage.py", "_inline_content_digests"): "integrity",
+    ("api/evidence_storage.py", "_s3_signed_headers"): "integrity",
+    ("api/evidence_storage.py", "hydrate_evidence_content"): "integrity",
+    ("api/evidence_storage.py", "serialize_evidence_content"): "integrity",
+    ("api/hunt/authorization_evidence.py", "attributed_outcome"): "token",
+    ("api/hunt/authorization_evidence.py", "digest"): "canonical",
+    ("api/hunt/authz_findings.py", "authz_finding_records"): "finding",
+    ("api/hunt/boundary_discovery.py", "build_boundary_discovery"): "canonical",
+    ("api/hunt/budget_amendments.py", "apply_budget_amendment"): "token",
+    ("api/hunt/capability_reservations.py", "hunt_capability_action_digest"): "canonical",
+    ("api/hunt/coverage_ledger.py", "coverage_fingerprint"): "finding",
+    ("api/hunt/deterministic_findings.py", "_verified_xss_fingerprint"): "finding",
+    ("api/hunt/endpoint_grouping.py", "as_row"): "finding",
+    ("api/hunt/finding_actions.py", "create_hunt_finding"): "finding",
+    ("api/hunt/fragment_xss_proof.py", "hunt_browser_xss_proof_adapter"): "request",
+    ("api/hunt/interaction_router.py", "_execute_hunt_capability_lifecycle"): "request",
+    ("api/hunt/interaction_router.py", "_hunt_confirmed_shell_capability_input"): "request",
+    ("api/hunt/interaction_router.py", "_hunt_redacted_capability_input"): "request",
+    ("api/hunt/investigation_memory.py", "key"): "finding",
+    ("api/hunt/knowledge.py", "_endpoint_group_page"): "request",
+    ("api/hunt/knowledge.py", "query_knowledge_page"): "request",
+    ("api/hunt/permission_bounds.py", "digest"): "canonical",
+    ("api/hunt/permission_grants.py", "_key_digest"): "canonical",
+    ("api/hunt/permission_store.py", "canonical_digest"): "canonical",
+    ("api/hunt/planner_lease.py", "accepts"): "token",
+    ("api/hunt/planner_lease.py", "write_lease"): "token",
+    ("api/hunt/skills.py", "build_skill_spec"): "request",
+    ("api/hunt/skills.py", "read_skill_body"): "request",
+    ("api/hunt/ssh_routing.py", "worker_key"): "finding",
+    ("api/hunt/ssh_routing.py", "worker_queue"): "canonical",
+    ("api/hunt/ssh_stream.py", "stream_ssh_command"): "request",
+    ("api/runtime/observation_store.py", "load"): "integrity",
+    ("api/runtime/observation_store.py", "persist"): "integrity",
+    ("api/runtime/sealed_inputs.py", "open_private_input"): "integrity",
+    ("api/runtime/sealed_inputs.py", "seal_private_input"): "integrity",
+    ("api/scan/action_adapter.py", "_authz_surface_batch"): "canonical",
+    ("api/scan/action_adapter.py", "_batch_candidate_id"): "canonical",
+    ("api/scan/action_adapter.py", "_exposure_probe_batch"): "canonical",
+    ("api/scan/action_adapter.py", "_external"): "canonical",
+    ("api/scan/action_adapter.py", "_external_batch"): "canonical",
+    ("api/scan/action_adapter.py", "_nosqli_verify_batch"): "canonical",
+    ("api/scan/action_adapter.py", "_request_mutation_batch"): "canonical",
+    ("api/scan/action_adapter.py", "_sqli_proof_batch"): "canonical",
+    ("api/scan/action_adapter.py", "_xss_browser_proof_batch"): "canonical",
+    ("api/scan/action_adapter.py", "run_stage"): "canonical",
+    ("api/scan/action_plan.py", "_digest"): "canonical",
+    ("api/scan/action_plan.py", "digest_input_bindings"): "canonical",
+    ("api/scan/capability_execution.py", "scan_capability_action_digest"): "canonical",
+    ("api/scan/capability_result.py", "__post_init__"): "canonical",
+    ("api/scan/continuation.py", "_digest"): "canonical",
+    ("api/scan/execution.py", "digest"): "canonical",
+    ("api/scan/execution_backend.py", "_token_hash"): "token",
+    ("api/scan/executor.py", "_digest"): "canonical",
+    ("api/scan/external_process.py", "_canonical_digest"): "canonical",
+    ("api/scan/finalizer.py", "_finding_identity"): "finding",
+    ("api/scan/finalizer.py", "finalize_scan_report"): "integrity",
+    ("api/scan/finding_identity.py", "_untemplated_fingerprint"): "finding",
+    ("api/scan/finding_identity.py", "canonical_finding_fingerprint"): "finding",
+    ("api/scan/finding_identity.py", "finding_identity_keys"): "finding",
+    ("api/scan/finding_reconciliation.py", "legacy_finding_fingerprint"): "finding",
+    ("api/scan/jobs.py", "payload_digest"): "canonical",
+    ("api/scan/jobs.py", "scan_job_options_digest"): "canonical",
+    ("api/scan/negative_control.py", "negative_control_entries"): "request",
+    ("api/scan/parallel_compiler.py", "_digest"): "canonical",
+    ("api/scan/parallel_compiler.py", "_work_partition_digest"): "canonical",
+    ("api/scan/parallel_compiler.py", "parallel_action_occurrence_id"): "canonical",
+    ("api/scan/parallel_inputs.py", "_owner_slot"): "canonical",
+    ("api/scan/parity.py", "_finding_identity"): "finding",
+    ("api/scan/parity.py", "build_scan_semantic_parity_artifact"): "canonical",
+    ("api/scan/placement_transport.py", "_read_private_file"): "integrity",
+    ("api/scan/placement_transport.py", "write_private_placement_bundle"): "integrity",
+    ("api/scan/report_rebuild.py", "rebuild_scan_report"): "integrity",
+    ("api/scan/sqli_stages.py", "stage_attempt_id"): "canonical",
+    ("api/scan/stage_store.py", "_history_digest"): "canonical",
+    ("api/scan/stage_store.py", "stage_row_digest"): "canonical",
+    ("api/scan/stages/__init__.py", "_history_digest"): "canonical",
+    ("api/scan/work_manifests.py", "_digest"): "canonical",
+    ("api/workflow_experiment.py", "_create_object_readback"): "compat",
+    ("api/workflow_experiment.py", "_value_fingerprint"): "inprocess",
+    ("scanner/scanner_tools/access_control_checks.py", "authz_resource_replay_test"): "finding",
+    ("scanner/scanner_tools/access_control_checks.py", "check_bola"): "finding",
+    ("scanner/scanner_tools/access_control_checks.py", "check_bola_enumeration"): "finding",
+    ("scanner/scanner_tools/access_control_checks.py", "check_bola_multi_user"): "finding",
+    ("scanner/scanner_tools/access_control_checks.py", "check_mass_assignment"): "finding",
+    ("scanner/scanner_tools/access_control_checks.py", "check_vertical_privilege_escalation"): "finding",
+    ("scanner/scanner_tools/access_control_checks.py", "format_findings_for_scanner"): "finding",
+    ("scanner/scanner_tools/access_control_checks.py", "smart_auth_access_test"): "finding",
+    ("scanner/scanner_tools/access_control_checks.py", "smart_bola_test"): "finding",
+    ("scanner/scanner_tools/asn_discovery.py", "_generate_findings"): "finding",
+    ("scanner/scanner_tools/breach_check.py", "check_password_pwned"): "protocol",
+    ("scanner/scanner_tools/breach_check.py", "generate_breach_findings"): "finding",
+    ("scanner/scanner_tools/build_fingerprint.py", "hash_source_files"): "integrity",
+    ("scanner/scanner_tools/common.py", "_output_artifact"): "redacted",
+    ("scanner/scanner_tools/common.py", "_record_subprocess_receipt"): "redacted",
+    ("scanner/scanner_tools/critical_checks.py", "test_default_credentials"): "finding",
+    ("scanner/scanner_tools/deduplication_engine.py", "consolidate_graphql_findings"): "finding",
+    ("scanner/scanner_tools/deduplication_engine.py", "generate_grouping_key"): "finding",
+    ("scanner/scanner_tools/device_advisories.py", "load_verified_snapshot"): "integrity",
+    ("scanner/scanner_tools/device_application.py", "_application_finding"): "finding",
+    ("scanner/scanner_tools/device_control_plane.py", "_control_plane_finding"): "finding",
+    ("scanner/scanner_tools/device_evidence.py", "_stable_id"): "finding",
+    ("scanner/scanner_tools/device_postman.py", "resolve_requests"): "request",
+    ("scanner/scanner_tools/device_postman.py", "validate_and_summarize"): "request",
+    ("scanner/scanner_tools/device_posture.py", "evaluate_service_policy"): "finding",
+    ("scanner/scanner_tools/device_request_formats.py", "_digest"): "canonical",
+    ("scanner/scanner_tools/device_request_formats.py", "_request_id"): "canonical",
+    ("scanner/scanner_tools/device_shell.py", "shell_plan_digest"): "canonical",
+    ("scanner/scanner_tools/device_web.py", "_dir_discovery_findings"): "finding",
+    ("scanner/scanner_tools/device_web.py", "_request"): "public",
+    ("scanner/scanner_tools/device_web.py", "_request_finding"): "finding",
+    ("scanner/scanner_tools/device_web.py", "_run_imported_requests"): "request",
+    ("scanner/scanner_tools/device_web.py", "_security_header_findings"): "finding",
+    ("scanner/scanner_tools/device_web.py", "add"): "finding",
+    ("scanner/scanner_tools/device_web.py", "run_pinned_device_web_scan"): "finding",
+    ("scanner/scanner_tools/discovery.py", "_run_ffuf_on_path"): "request",
+    ("scanner/scanner_tools/discovery.py", "enhanced_tech_fingerprinting"): "finding",
+    ("scanner/scanner_tools/finding_validator.py", "generate_finding_fingerprint"): "finding",
+    ("scanner/scanner_tools/model_intake.py", "_acquire_huggingface_repository_snapshot"): "model",
+    ("scanner/scanner_tools/model_intake.py", "_generate_aibom"): "model",
+    ("scanner/scanner_tools/model_intake.py", "_inspect_safetensors"): "model",
+    ("scanner/scanner_tools/model_intake.py", "_normalize_huggingface_manifest"): "model",
+    ("scanner/scanner_tools/model_intake.py", "_public_key_sha256"): "model",
+    ("scanner/scanner_tools/model_intake.py", "run_model_intake_scan"): "model",
+    ("scanner/scanner_tools/model_intake_acquisition.py", "_hash_file"): "model",
+    ("scanner/scanner_tools/model_intake_acquisition.py", "download_http_to_quarantine"): "model",
+    ("scanner/scanner_tools/model_intake_acquisition.py", "quarantine_local_file"): "model",
+    ("scanner/scanner_tools/model_intake_adapter_self_test.py", "_sha256_json"): "model",
+    ("scanner/scanner_tools/model_intake_admission.py", "_public_key_fingerprint"): "model",
+    ("scanner/scanner_tools/model_intake_admission.py", "build_technical_candidate"): "model",
+    ("scanner/scanner_tools/model_intake_admission.py", "sign_statement"): "model",
+    ("scanner/scanner_tools/model_intake_admission.py", "verify_package"): "model",
+    ("scanner/scanner_tools/model_intake_attestation.py", "_public_key_fingerprint"): "model",
+    ("scanner/scanner_tools/model_intake_attestation.py", "verify_dsse_in_toto"): "model",
+    ("scanner/scanner_tools/model_intake_evaluation.py", "_digest"): "model",
+    ("scanner/scanner_tools/model_intake_licenses.py", "_digest"): "model",
+    ("scanner/scanner_tools/model_intake_runtime.py", "_sha256"): "model",
+    ("scanner/scanner_tools/model_intake_runtime.py", "_tensor_ref"): "model",
+    ("scanner/scanner_tools/model_intake_safetensors_runtime.py", "_sha256"): "model",
+    ("scanner/scanner_tools/model_intake_safetensors_selftest.py", "_digest"): "model",
+    ("scanner/scanner_tools/model_intake_sandbox.py", "_request_binding"): "model",
+    ("scanner/scanner_tools/model_intake_sandbox.py", "_sha256_json"): "model",
+    ("scanner/scanner_tools/model_intake_sandbox.py", "inspect_quarantine_object"): "model",
+    ("scanner/scanner_tools/model_intake_scanners.py", "_default_external_parser"): "model",
+    ("scanner/scanner_tools/model_intake_scanners.py", "_hash_path"): "model",
+    ("scanner/scanner_tools/model_intake_scanners.py", "_output_digest"): "model",
+    ("scanner/scanner_tools/model_intake_scanners.py", "_parse_external_scanner"): "model",
+    ("scanner/scanner_tools/model_intake_scanners.py", "_sha256_json"): "model",
+    ("scanner/scanner_tools/model_intake_scanners.py", "run_builtin_secret_scan"): "model",
+    ("scanner/scanner_tools/model_intake_scanners.py", "run_external_scanner"): "model",
+    ("scanner/scanner_tools/network_services.py", "_generate_findings"): "finding",
+    ("scanner/scanner_tools/oauth_tests.py", "generate_pkce_pair"): "protocol",
+    ("scanner/scanner_tools/race_condition_tests.py", "analyze_race_responses"): "inprocess",
+    ("scanner/scanner_tools/request_replay.py", "_sha256"): "request",
+    ("scanner/scanner_tools/sarif_output.py", "create_result"): "finding",
+    ("scanner/scanner_tools/sarif_output.py", "generate_finding_fingerprint"): "finding",
+    ("scanner/scanner_tools/scan_delta.py", "extract_finding_id"): "finding",
+    ("scanner/scanner_tools/smtp_scanner.py", "_generate_smtp_findings"): "finding",
+    ("scanner/scanner_tools/ssh_scanner.py", "_execute_ssh_shell_plan"): "request",
+    ("scanner/scanner_tools/ssh_scanner.py", "ssh_host_key_fingerprint"): "public",
+    ("scanner/scanner_tools/vendor_risk.py", "generate_vendor_findings"): "finding",
 }
 
 
-def _plain_digests():
-    files = []
+def _plain_digest_calls():
+    """(file, enclosing function) of every plain hashlib digest call in _SCANNED."""
+    found = set()
     for root in _SCANNED:
         path = ROOT / root
-        files.extend(sorted(path.rglob("*.py")) if path.is_dir() else [path])
-    for path in files:
-        relative = str(path.relative_to(ROOT))
-        for line in path.read_text(encoding="utf-8").splitlines():
-            for match in _PLAIN_DIGEST.finditer(line):
-                if _RESPONSE_WORDS.search(match.group("argument")):
-                    yield relative, match.group(0)
+        for source in (sorted(path.rglob("*.py")) if path.is_dir() else [path]):
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            for function in ast.walk(tree):
+                if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for call in ast.walk(function):
+                    if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                            and call.func.attr in {"sha256", "md5", "sha1"}
+                            and isinstance(call.func.value, ast.Name) and call.func.value.id == "hashlib"):
+                        found.add((str(source.relative_to(ROOT)), function.name))
+    return found
 
 
-def test_every_plain_digest_of_response_like_data_is_keyed_or_listed():
-    unlisted = sorted({
-        (path, text) for path, text in _plain_digests()
-        if not any(path == allowed_path and text.startswith(prefix)
-                   for allowed_path, prefix in ALLOWED_PLAIN_DIGESTS)
-    })
-    assert unlisted == []
+def test_every_plain_digest_is_keyed_or_listed_with_its_reason():
+    found = _plain_digest_calls()
+    assert sorted(found - set(ALLOWED_PLAIN_DIGESTS)) == []
+    assert all(reason in REASONS for reason in ALLOWED_PLAIN_DIGESTS.values())
+
+
+def test_the_allowlist_holds_no_stale_entry():
+    assert sorted(set(ALLOWED_PLAIN_DIGESTS) - _plain_digest_calls()) == []
 
 
 @pytest.mark.parametrize("module", sorted(PUBLISHED_DIGESTS))
@@ -276,8 +458,13 @@ def test_an_extracted_value_rendered_into_a_path_is_not_shown():
 
 # --- Review of the follow-up ------------------------------------------------------------------
 
-def test_the_guard_reads_real_digests():
-    assert len(list(_plain_digests())) >= len(ALLOWED_PLAIN_DIGESTS) // 2
+def test_the_guard_finds_a_multi_line_call(tmp_path, monkeypatch):
+    module = tmp_path / "api" / "capabilities"
+    module.mkdir(parents=True)
+    (module / "probe.py").write_text("import hashlib\n\ndef f(response):\n    return hashlib.sha256(\n        response.body\n    ).hexdigest()\n")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_SCANNED", ("api/capabilities",))
+    assert _plain_digest_calls() == {("api/capabilities/probe.py", "f")}
 
 
 def test_a_masked_export_carries_no_plain_digest_of_the_raw_body():
@@ -411,3 +598,95 @@ def test_a_record_with_a_broken_url_shaped_description_exports():
     for redaction in ("redacted", "raw"):
         export_document([row], export_format="transactions", redaction=redaction,
                         owner={"hunt_id": ACTION}, total=1)
+
+
+# --- Review of #405 (09c352b7) ----------------------------------------------------------------
+
+def test_proof_events_are_digested_cheaply_and_boundedly():
+    import time
+
+    from api.capabilities import browser
+
+    events: list[dict] = []
+    started = time.perf_counter()
+    for index in range(2_000):
+        events.append({"message_sha256": browser._event_digest(events, f"log {index}")})
+    assert time.perf_counter() - started < 1.0  # HMAC, never scrypt, per event
+    digested = [event["message_sha256"] for event in events if event["message_sha256"]]
+    assert len(digested) == browser.MAX_DIGESTED_PROOF_EVENTS
+    assert all(item.startswith("hmac-sha256-") for item in digested)
+
+
+@pytest.mark.parametrize("module, function", [
+    ("api.capabilities.request_mutation", "_body_sha256"),
+])
+def test_per_probe_digests_are_hmac(module, function):
+    import importlib
+    import types
+
+    helper = getattr(importlib.import_module(module), function)
+    assert helper(types.SimpleNamespace(response_body=TOKEN.encode())).startswith("hmac-sha256-")
+
+
+def test_withheld_jwts_carry_only_keyed_digests():
+    import base64
+
+    def segment(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+    token = ".".join((segment({"alg": "HS256"}), segment({"role": "anon"}), "signaturebytes"))
+    import hashlib
+
+    plain = hashlib.sha256(token.encode()).hexdigest()
+    analysis = artifact_capability.analyze_javascript_bytes(f'const t="{token}";'.encode())
+    assert plain not in json.dumps(analysis)
+    assert analysis["jwt_observations"][0]["token_sha256"].startswith("hmac-sha256-")
+    marker = artifact_capability._jwt_replacement(artifact_capability._JWT_RE.search(token))
+    assert plain[:16] not in marker and marker.startswith("<jwt:")
+
+
+def test_resource_ids_carry_only_keyed_digests():
+    source = (ROOT / "api/capabilities/authz_selected.py").read_text() + (ROOT / "api/capabilities/authz.py").read_text() \
+        + (ROOT / "api/hunt/authorization_service.py").read_text()
+    assert "resource_id_sha256\": hashlib" not in source and "resource_id_sha256=hashlib" not in source
+    assert source.count("keyed_body_digest(") >= 4
+
+
+@pytest.mark.parametrize("query", [
+    "?API%5FKEY={s}", "?token+={s}", "?%74oken={s}", "?Api-Key={s}", "?x=1&token={s}", "?client_secret={s}",
+    "/p;token={s}",
+])
+@pytest.mark.parametrize("base", ["http://h:99999", "http://[::1", "http://h:80"])
+def test_url_redaction_reads_parameter_names_as_a_server_does(base, query):
+    from scanner.redaction import redact_url_credentials
+
+    assert TOKEN not in redact_url_credentials(base + "/" + query.format(s=TOKEN))
+
+
+@pytest.mark.parametrize("text", [
+    'html = "<input type=\\"password\\" value=\\"Hn4tGhPb8nVcQ\\">";',
+    'html = "\\u003cinput type=\\u0022password\\u0022 value=\\u0022Hn4tGhPb8nVcQ\\u0022\\u003e";',
+    "&lt;input type=&quot;password&quot; value=&quot;Hn4tGhPb8nVcQ&quot;&gt;",
+    "el.innerHTML = '<input type=\"password\" value=\"Hn4tGhPb8nVcQ\">';",
+])
+def test_escaped_password_inputs_are_withheld(text):
+    for shown in (masking.mask_body_text(text), _hunt(masking.mask_body_text, text)[0]):
+        assert "Hn4tGhPb8nVcQ" not in shown, shown
+
+
+def test_two_unreferenceable_selected_values_still_read_as_a_change():
+    """A value over the reference size limit is ``***`` inside a Hunt; it carries its keyed
+    digest, so two such values in one experiment still compare different."""
+    from api.http_experiment import compare_summaries
+
+    collector = masking.WithheldValues(ACTION)
+    summaries = []
+    for value in ("Bearer Aa1" + TOKEN * 300, "Bearer Bb2" + TOKEN * 300):  # one over-limit credential each
+        body = json.dumps({"v": value}).encode()
+        with masking.collecting_withheld_values(collector):
+            summaries.append(response_summary(httpx.Response(200, headers={"content-type": "application/json"},
+                                                             content=body), body, selected_json_paths=["$.v"]))
+    first, second = summaries
+    assert first["selected_json"]["$.v"].startswith("Bearer *** (withheld scrypt-")
+    assert TOKEN not in json.dumps(first["selected_json"])
+    assert compare_summaries(first, second)["selected_json_changed"]

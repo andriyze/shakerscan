@@ -21,6 +21,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
+try:  # the module the code under test imports (one installation key per module copy)
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:
+    from api.capabilities.secret_material import keyed_body_digest
 from api.hunt.authorization_evidence import AuthorizationWorkflowError, canonical_action_id, digest
 from api.hunt.authorization_router import authorization_service, router
 from api.hunt.authorization_service import AuthorizationInvestigationService
@@ -138,7 +142,7 @@ class CanonicalWorkerBoundary:
         observation = dict(kind="authz_differential", proof_state="verified", proof_type="cross_principal_replay",
                            method="GET", principal_contexts_distinct=True,
                            object_absent_from_secondary_listing=True, responses_equivalent=True,
-                           resource_id_sha256=hashlib.sha256(observed_id.encode()).hexdigest(),
+                           resource_id_sha256=keyed_body_digest(observed_id.encode()),
                            producer_url=proof_url(observed_baseline, base_origin=ORIGIN),
                            consumer_url=proof_url(observed_object, base_origin=ORIGIN, object_id=observed_id),
                            owner_status=200, attacker_status=200)

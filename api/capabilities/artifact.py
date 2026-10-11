@@ -7,6 +7,10 @@ executor so scope, DNS pinning, redirects, archiving, and cancellation keep one 
 
 from __future__ import annotations
 
+try:
+    from capabilities.secret_material import keyed_short_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_short_digest
 import base64
 import hashlib
 import json
@@ -108,10 +112,11 @@ def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[st
         if truncated and match.end() >= len(text):
             continue
         token = match.group(1)
-        digest = hashlib.sha256(token.encode("ascii", errors="ignore")).hexdigest()
-        if digest in seen_tokens:
+        if token in seen_tokens:
             continue
-        seen_tokens.add(digest)
+        seen_tokens.add(token)
+        # Keyed: a plain digest of a JWT lets anyone crack a weak HS256 secret offline.
+        digest = keyed_body_digest(token.encode("ascii", errors="ignore"))
         segments = token.split(".")
         header = _b64_json(segments[0]) or {}
         payload = _b64_json(segments[1]) or {}
@@ -179,7 +184,7 @@ def _jwt_replacement(match: re.Match[str]) -> str:
     collector = active_withheld_values()
     if collector is not None:
         return collector.marker(token)
-    return f"<jwt:sha256:{hashlib.sha256(token.encode()).hexdigest()[:16]}>"
+    return f"<jwt:{keyed_short_digest(token.encode())}>"
 
 
 # A window read at an offset is masked with up to this much of what precedes it: a dump's column

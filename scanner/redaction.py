@@ -376,11 +376,15 @@ def mask_secret(value: str) -> str:
     return f"{value[:4]}...{value[-4:]}"
 
 
-_SENSITIVE_QUERY_VALUE_RE = re.compile(
-    r"(?i)([?&;#](?:" + "|".join(
-        "[-_]".join(re.escape(part) for part in key.replace("_", "-").split("-"))
-        for key in sorted(SENSITIVE_QUERY_KEYS, key=len, reverse=True)
-    ) + r")=)[^&#\s\"'<>]*")
+# One query or path parameter (``?a=b``, ``&a=b``, ``;a=b``) of text ``urllib`` cannot parse.
+_QUERY_PARAMETER_RE = re.compile(r"([?&;#])([^=&;#\s\"'<>?]{1,200})=([^&;#\s\"'<>]*)")
+
+
+def _sensitive_query_name(raw: str) -> bool:
+    """A parameter name as a server reads it: percent- and plus-decoded (``API%5FKEY``,
+    ``%74oken``, ``token+``), case and ``-``/``_`` folded, stray punctuation trimmed."""
+    name = urllib.parse.unquote_plus(raw).strip().strip("=").strip().lower().replace("_", "-")
+    return name in SENSITIVE_QUERY_KEYS or is_sensitive_key(name)
 
 
 def redact_url_credentials(value: str) -> str:
@@ -391,16 +395,23 @@ def redact_url_credentials(value: str) -> str:
     masked by the text rules instead (the userinfo reader and the sensitive query names).
     """
     try:
-        return _redact_parsed_url_credentials(value)
+        redacted = _redact_parsed_url_credentials(value)
     except ValueError:
         return _redact_unparsed_url_credentials(value)
+    # The text rules over the parsed result too: a ``;name=value`` path parameter, a password
+    # behind an unencoded ``#`` that ``urllib`` reads as a fragment.
+    return _redact_unparsed_url_credentials(redacted) if "://" in value else redacted
 
 
 def _redact_unparsed_url_credentials(value: str) -> str:
     """The text rules for what ``urllib`` cannot parse: a userinfo password and the value of
     every sensitive query parameter are withheld (erring to withholding)."""
     value = _mask_url_userinfo(value)
-    return _SENSITIVE_QUERY_VALUE_RE.sub(lambda match: match.group(1) + MASK, value)
+    return _QUERY_PARAMETER_RE.sub(
+        lambda match: (f"{match.group(1)}{match.group(2)}={MASK}"
+                       if match.group(3) and _sensitive_query_name(match.group(2)) else match.group(0)),
+        value,
+    )
 
 
 def _redact_parsed_url_credentials(value: str) -> str:
@@ -420,7 +431,7 @@ def _redact_parsed_url_credentials(value: str) -> str:
     query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     if query_pairs:
         redacted_pairs = [
-            (key, MASK if key.strip().lower().replace("_", "-") in SENSITIVE_QUERY_KEYS else item)
+            (key, MASK if item and _sensitive_query_name(key) else item)
             for key, item in query_pairs
         ]
         query = urllib.parse.urlencode(redacted_pairs, doseq=True)

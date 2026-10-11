@@ -410,6 +410,16 @@ async def read_capped_body(response: httpx.Response) -> tuple[bytes, bytes, bool
     return bytes(body), bytes(lookahead), ended
 
 
+def _hunt_selected_value(value: Any) -> Any:
+    """A selected value inside a Hunt: withheld parts are references. One the collector cannot
+    reference (over its size or count limit) is ``***``; it carries its keyed digest, so two
+    different values still compare different."""
+    masked = mask_selected_value(withhold_url_userinfo(value))
+    if isinstance(masked, str) and isinstance(value, str) and "***" in masked:
+        return f"{masked} (withheld {_body_digest(value.encode('utf-8'))})"
+    return masked
+
+
 def _compared_value(value: Any) -> Any:
     """A selected value outside a Hunt: as it is, or, where the masking would withhold anything
     in it, ``***`` and its keyed digest, so two different secrets still compare different."""
@@ -498,7 +508,7 @@ def response_summary(
     for path in selected_json_paths or []:
         try:
             value = _json_path_get(parsed_json, path)
-            selected_json[path] = mask_selected_value(withhold_url_userinfo(value)) if in_hunt else _compared_value(value)
+            selected_json[path] = _hunt_selected_value(value) if in_hunt else _compared_value(value)
         except ExperimentContractError:
             selected_json[path] = None
     # A URL-bearing header's secret parameters are withheld (inside a Hunt) before it is cut; any

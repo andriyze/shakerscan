@@ -8,9 +8,9 @@ scan. Redirects are observed but never allowed to change the connected host.
 from __future__ import annotations
 
 try:
-    from capabilities.secret_material import keyed_response_digest
+    from capabilities.secret_material import keyed_body_digest
 except ModuleNotFoundError:  # package import layout
-    from api.capabilities.secret_material import keyed_response_digest
+    from api.capabilities.secret_material import keyed_body_digest
 import asyncio
 import hashlib
 import ipaddress
@@ -1007,7 +1007,7 @@ async def _run_imported_requests(
                 "status": int(response.get("status") or 0),
                 "response_headers": _public_response_headers(dict(response.get("headers") or {})),
                 "response_body_bytes": len(response_body),
-                "response_sha256": keyed_response_digest(response_body),
+                "response_sha256": keyed_body_digest(response_body),
                 "truncated": bool(response.get("truncated")),
                 "elapsed_ms": response.get("elapsed_ms"),
             }
@@ -1112,8 +1112,8 @@ async def _run_imported_requests(
                                 "authenticated_status": observation["status"],
                                 "anonymous_status": int(anonymous.get("status") or 0),
                                 "response_match": True,
-                                "authenticated_body_sha256": keyed_response_digest(response_body),
-                                "anonymous_body_sha256": keyed_response_digest(anonymous_body),
+                                "authenticated_body_sha256": keyed_body_digest(response_body),
+                                "anonymous_body_sha256": keyed_body_digest(anonymous_body),
                                 "negative_control_status": int(negative.get("status") or 0),
                                 "negative_control_differs": negative_differs,
                                 "generic_response_shell": not negative_differs,

@@ -12,9 +12,9 @@ import time
 from typing import Any, Mapping, Sequence
 import urllib.parse
 try:
-    from capabilities.secret_material import keyed_response_digest
+    from capabilities.secret_material import keyed_body_digest
 except ModuleNotFoundError:  # package import layout
-    from api.capabilities.secret_material import keyed_response_digest
+    from api.capabilities.secret_material import keyed_body_digest
 
 try:
     from capabilities.authentication_proof import successful_token_signals
@@ -345,8 +345,8 @@ class SQLiProofAdapter:
         verified = proof_contract is not None
         hashes = [{
             "control_request_sha256": control_request.digest_dict()["body_sha256"] if control_request.body else _sha256(control_request.url.encode()),
-            "control_response_sha256": keyed_response_digest(control.response_body),
-            "payload_response_sha256": keyed_response_digest(payload.response_body),
+            "control_response_sha256": keyed_body_digest(control.response_body),
+            "payload_response_sha256": keyed_body_digest(payload.response_body),
             "control_status": control.status_code,
             "payload_status": payload.status_code,
         } for control, payload in proof_pairs]

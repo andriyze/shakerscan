@@ -5,6 +5,10 @@ Uses Paramiko to detect authentication methods supported by SSH servers.
 Reports password authentication as a medium severity finding per CIS/NIST guidance.
 """
 
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
 import asyncio
 import base64
 import hashlib
@@ -145,8 +149,8 @@ def _collect_ssh_host_review(
             "exit_status": exit_status,
             "stdout": redact_text(decoded_stdout),
             "stderr": redact_text(decoded_stderr),
-            "stdout_sha256": hashlib.sha256(raw_stdout).hexdigest(),
-            "stderr_sha256": hashlib.sha256(raw_stderr).hexdigest(),
+            "stdout_sha256": keyed_body_digest(raw_stdout),
+            "stderr_sha256": keyed_body_digest(raw_stderr),
             "truncated": bundle_truncated,
             "duration_ms": int((time.monotonic() - started) * 1000),
         })
@@ -253,8 +257,8 @@ def _execute_ssh_shell_plan(transport: Any, raw_plan: dict[str, Any]) -> dict[st
             "exit_status": exit_status,
             "stdout": redact_text(raw_stdout.decode("utf-8", errors="replace").replace("\x00", "")),
             "stderr": redact_text(raw_stderr.decode("utf-8", errors="replace").replace("\x00", "")),
-            "stdout_sha256": hashlib.sha256(raw_stdout).hexdigest(),
-            "stderr_sha256": hashlib.sha256(raw_stderr).hexdigest(),
+            "stdout_sha256": keyed_body_digest(raw_stdout),
+            "stderr_sha256": keyed_body_digest(raw_stderr),
             "truncated": truncated,
             "duration_ms": int((time.monotonic() - started) * 1000),
         })

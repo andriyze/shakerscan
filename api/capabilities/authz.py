@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
 import hashlib
 import json
 import math
@@ -369,7 +373,7 @@ async def verify_target_bound_object_authorization(
                 base_origin=target.allowed_origins[0],
                 object_id=object_id,
             ),
-            "resource_id_sha256": hashlib.sha256(object_id.encode()).hexdigest(),
+            "resource_id_sha256": keyed_body_digest(object_id.encode()),
             "object_id_key": str(evidence.get("object_id_key") or "")[:120],
             "object_id_location": str(
                 evidence.get("object_id_location") or ""

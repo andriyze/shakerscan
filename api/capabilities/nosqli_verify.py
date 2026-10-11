@@ -19,9 +19,9 @@ import time
 from typing import Any, Mapping
 import urllib.parse
 try:
-    from capabilities.secret_material import keyed_response_digest
+    from capabilities.secret_material import keyed_body_digest
 except ModuleNotFoundError:  # package import layout
-    from api.capabilities.secret_material import keyed_response_digest
+    from api.capabilities.secret_material import keyed_body_digest
 
 try:
     from capabilities.authentication_proof import successful_token_signals
@@ -171,7 +171,7 @@ def _succeeded(result: ReplayTransportResult) -> bool:
 
 def _fingerprint(result: ReplayTransportResult) -> tuple[int | None, int, str]:
     return (
-        result.status_code, len(result.response_body), keyed_response_digest(result.response_body),
+        result.status_code, len(result.response_body), keyed_body_digest(result.response_body),
     )
 
 
@@ -347,8 +347,8 @@ class NoSQLiVerifyAdapter:
                     "response_pairs": [{
                         "literal_status": literal.status_code,
                         "operator_status": payload.status_code,
-                        "literal_response_sha256": keyed_response_digest(literal.response_body),
-                        "operator_response_sha256": keyed_response_digest(payload.response_body),
+                        "literal_response_sha256": keyed_body_digest(literal.response_body),
+                        "operator_response_sha256": keyed_body_digest(payload.response_body),
                     } for literal, payload in pairs],
                     "session_state_discarded": request_class == "safe_authentication",
                     "secret_values_visible": False,

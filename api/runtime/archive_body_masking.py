@@ -1099,6 +1099,45 @@ _CLOSED_QUOTE_RES = {quote: re.compile(quote + "[^" + quote + "]*" + quote) for 
 _MAX_INPUT_TAG_CHARS = 65_536
 
 
+# An ``<input type="password" value="...">`` written inside a string: its brackets and quotes
+# escaped for JavaScript (``\"``, ``\u0022``, ``\x22``) or HTML (``&quot;``, ``&lt;``).
+_ESCAPED_OPEN_RE = re.compile(r"(?i)(?:<|&lt;|\\u003c|\\x3c)input\b")
+_ESCAPED_CLOSE_RE = re.compile(r"(?i)&gt;|\\u003e|\\x3e|>")
+_ESCAPED_QUOTE = r"(?:\\\\?[\"']|&quot;|&#0*3[49];|&#x0*2[27];|&apos;|\\u0022|\\u0027|\\x22|\\x27)"
+_ESCAPED_TYPE_RE = re.compile(r"(?i)\btype\s*=\s*" + _ESCAPED_QUOTE + r"?\s*password\s*" + _ESCAPED_QUOTE + r"?")
+_ESCAPED_VALUE_RE = re.compile(
+    r"(?i)(\bvalue\s*=\s*)(" + _ESCAPED_QUOTE + r")(.*?)(\2)", re.S)
+_MAX_ESCAPED_TAG_CHARS = 4_096
+
+
+def _mask_escaped_password_inputs(text: str) -> str:
+    """Withhold the value of a password input written escaped inside a string (above). Each
+    escaped tag is read once, up to its escaped ``>`` within ``_MAX_ESCAPED_TAG_CHARS``."""
+    lowered = text.lower()
+    if "password" not in lowered or not any(mark in lowered for mark in ("&lt;", "\\u003c", "\\x3c", '\\"', "&quot;")):
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    for opening in _ESCAPED_OPEN_RE.finditer(text):
+        if opening.start() < cursor:
+            continue
+        closing = _ESCAPED_CLOSE_RE.search(text, opening.end(), opening.end() + _MAX_ESCAPED_TAG_CHARS)
+        end = closing.start() if closing else min(len(text), opening.end() + _MAX_ESCAPED_TAG_CHARS)
+        if not _ESCAPED_TYPE_RE.search(text, opening.end(), end):
+            continue
+        for value in _ESCAPED_VALUE_RE.finditer(text, opening.end(), end):
+            inner = value.group(3)
+            if not inner or inner == MASK or WITHHELD_MARKER_RE.fullmatch(inner):
+                continue
+            pieces.extend((text[cursor:value.start(3)], _withhold(html.unescape(inner))))
+            cursor = value.end(3)
+        cursor = max(cursor, opening.start())
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _mask_password_inputs(text: str) -> str:
     """Withhold the value of every ``<input type="password">``: quote-aware, so a quoted value
     holding ``>`` or a tag longer than the attribute reader's bound is read whole. A password
@@ -1194,7 +1233,7 @@ def mask_html_fields(text: str) -> str:
         start = match.start(1) - match.start(0)
         return match.group(0)[:start] + "".join(pieces) + match.group(0)[start + len(body):]
 
-    return _HTML_TAG_RE.sub(tag, _mask_password_inputs(text))
+    return _HTML_TAG_RE.sub(tag, _mask_escaped_password_inputs(_mask_password_inputs(text)))
 
 
 # --- JSON fragments embedded in text (inline scripts, logs) ------------------------------------

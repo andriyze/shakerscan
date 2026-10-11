@@ -20,9 +20,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 try:
-    from capabilities.secret_material import keyed_response_digest
+    from capabilities.secret_material import keyed_body_digest
 except ModuleNotFoundError:  # package import layout
-    from api.capabilities.secret_material import keyed_response_digest
+    from api.capabilities.secret_material import keyed_body_digest
 
 try:
     from defusedxml import ElementTree as ET
@@ -343,7 +343,7 @@ async def enrich_ssdp_descriptions(
                     "auth_required": int(result.get("status") or 0) in {401, 403},
                     "response_headers": _public_response_headers(dict(result.get("headers") or {})),
                     "body_bytes": len(body),
-                    "body_sha256": keyed_response_digest(body),
+                    "body_sha256": keyed_body_digest(body),
                     "truncated": bool(result.get("truncated")),
                     "elapsed_ms": result.get("elapsed_ms"),
                     "descriptor": descriptor,
@@ -616,7 +616,7 @@ async def discover_device_application_surface(
                         "auth_required": auth_required,
                         "response_headers": _public_response_headers(dict(response.get("headers") or {})),
                         "body_bytes": len(response_body),
-                        "body_sha256": keyed_response_digest(response_body),
+                        "body_sha256": keyed_body_digest(response_body),
                         "truncated": bool(response.get("truncated")),
                         "elapsed_ms": response.get("elapsed_ms"),
                         "source": "device_api_catalog",

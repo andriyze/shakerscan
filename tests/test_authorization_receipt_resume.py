@@ -16,6 +16,10 @@ import uuid
 import pytest
 
 from api.capabilities.authz_selected import compare_selected_objects, request_digest
+try:  # the module the code under test imports (one installation key per module copy)
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:
+    from api.capabilities.secret_material import keyed_body_digest
 from api.hunt.authorization_evidence import AuthorizationWorkflowError, attributed_outcome, digest
 from api.hunt.authorization_receipt import receipt_backed_action
 from api.hunt.authorization_repository import PostgresAuthorizationRepository
@@ -104,8 +108,8 @@ def evidence(*, denied=False, expected="denied"):
         "receipt_json": receipt.public_dict()}
     proposal = {"hunt_id": HUNT, "baseline_kind": "own_object", "expected_access": expected,
         "capture_sha256": request_digest(SELECTED), "baseline_sha256": request_digest(OWN),
-        "resource_id_sha256": hashlib.sha256(b"101").hexdigest(),
-        "baseline_resource_id_sha256": hashlib.sha256(b"202").hexdigest()}
+        "resource_id_sha256": keyed_body_digest(b"101"),
+        "baseline_resource_id_sha256": keyed_body_digest(b"202")}
     attempt = {"action_id": ACTION, "input_digest": digest(INPUT), "idempotency_key": KEY}
     return action, reservation, proposal, attempt, transactions
 
