@@ -137,7 +137,7 @@ async def refresh_applicability(conn: Any, target_id: Any, *, device: bool, ids:
             return {"refreshed": False, "reason": "another applicability refresh of this target is running"}
         params: list[Any] = [target]
         where = [scope, "status='active'", "dependencies <> '{}'::jsonb",
-                 "applicability IN ('applicable','unknown')"]
+                 "applicability IN ('applicable','unknown','needs_revalidation')"]
         if ids is not None:
             params.append([uuid.UUID(str(item)) for item in ids][:20])
             where.append(f"id = ANY(${len(params)}::uuid[])")
@@ -152,17 +152,21 @@ async def refresh_applicability(conn: Any, target_id: Any, *, device: bool, ids:
             owner = str(row["target_id"])
             observer = observers.setdefault(owner, Observer(conn, owner))
             recorded = _json(row["dependencies"], {}) or {}
-            state, changes, incomparable = await evaluate(observer, recorded)
-            if state == row["applicability"]:
+            state, changes, incomparable = await evaluate(observer, recorded, finding_id=row["finding_id"])
+            # needs_revalidation only ever moves on to historical; nothing moves back.
+            if state == row["applicability"] or (row["applicability"] == "needs_revalidation"
+                                                  and state != "historical"):
                 continue
             reason = _reason(state, changes, incomparable, recorded)
             if row["negative_state"] == "finding_dismissed" and state in {"needs_revalidation", "historical"}:
                 reopened += await _reopen_dismissal(conn, row, reason)
                 continue
-            # needs_revalidation and historical are never overwritten.
+            # Guarded again in the statement: historical is final, needs_revalidation only becomes historical.
             await conn.execute("""UPDATE target_interpretations SET applicability=$2, applicability_reason=$3::jsonb,
                     applicability_changed_at=NOW()
-                WHERE id=$1 AND status='active' AND applicability IN ('applicable','unknown')""",
+                WHERE id=$1 AND status='active'
+                  AND (applicability IN ('applicable','unknown')
+                       OR (applicability='needs_revalidation' AND $2='historical'))""",
                 row["id"], state, json.dumps(reason, default=str))
             moved += 1
         if rows:
@@ -172,7 +176,8 @@ async def refresh_applicability(conn: Any, target_id: Any, *, device: bool, ids:
         _last_refresh[key] = time.monotonic()
         if len(_last_refresh) > 10_000:
             _last_refresh.clear()
-    return {"refreshed": True, "evaluated": len(rows), "changed_state": moved, "reopened_dismissals": reopened,
+    return {"refreshed": True, "evaluated": len(rows), "evaluated_ids": [str(row["id"]) for row in rows],
+            "changed_state": moved, "reopened_dismissals": reopened,
             "at_most": MAX_EVALUATED}
 
 
@@ -196,7 +201,7 @@ async def resolve_since(conn: Any, target_id: Any, since: Any, *, device: bool,
     text = str(since or "last_hunt").strip()
     if len(text) > 100:
         raise ChangeQueryError(SINCE_HELP)
-    hunt_scope = asset_scope("COALESCE(device_target_id, target_id)")
+    hunt_scope = f"({asset_scope('target_id')} OR {asset_scope('device_target_id')})"
     if text == "last_hunt":
         current = None
         if current_hunt_id:
@@ -211,7 +216,7 @@ async def resolve_since(conn: Any, target_id: Any, since: Any, *, device: bool,
         return {"kind": "last_hunt", "hunt_id": str(row["id"]), "at": row["created_at"], "resolved": True,
                 "note": "From the start of that Hunt, so anything it may not have seen is included."}
     if text == "release":
-        rows = await conn.fetch(f"""SELECT id, completed_at, result->'discovery' AS discovery,
+        rows = await conn.fetch("""SELECT id, completed_at, result->'discovery' AS discovery,
                 NULL::jsonb AS certificate, NULL::jsonb AS addresses FROM scans
             WHERE (target_id=$1 OR device_target_id=$1)
               AND status='completed' AND completed_at IS NOT NULL AND COALESCE(scan_role,'') <> 'shard'
@@ -438,24 +443,72 @@ async def _knowledge(conn: Any, target: uuid.UUID, at: datetime, *, device: bool
 
 
 REPORT_CACHE_SECONDS = 10.0
-_report_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+#: Both caches together hold at most this many serialized bytes in one process (oldest evicted).
+CACHE_MAX_BYTES = 16 * 1024 * 1024
+
+
+class _BoundedCache:
+    """Time-limited, byte-bounded, insertion-ordered cache for one process."""
+
+    def __init__(self, ttl: Any, max_bytes: int):
+        self._ttl, self._max = ttl, max_bytes
+        self._items: dict[str, tuple[float, int, dict[str, Any]]] = {}
+        self._bytes = 0
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        item = self._items.get(key)
+        if item is None or time.monotonic() - item[0] >= self._ttl():
+            return None
+        return item[2]
+
+    def put(self, key: str, value: dict[str, Any]) -> None:
+        size = len(json.dumps(value, default=str))
+        if size > self._max:
+            return
+        old = self._items.pop(key, None)
+        if old is not None:
+            self._bytes -= old[1]
+        while self._items and self._bytes + size > self._max:
+            _, evicted, _ = self._items.pop(next(iter(self._items)))
+            self._bytes -= evicted
+        self._items[key] = (time.monotonic(), size, value)
+        self._bytes += size
+
+
+_report_cache = _BoundedCache(lambda: REPORT_CACHE_SECONDS, CACHE_MAX_BYTES // 2)
+
+
+def _cache_key(since: Any) -> str | None:
+    """Only the finite ``since`` forms are cached; an arbitrary time is computed each time (and
+    each computation is bounded), so varying it cannot grow the cache."""
+    text = str(since or "last_hunt").strip()
+    if text in {"last_hunt", "release"}:
+        return text
+    kind, _, value = text.partition(":")
+    if kind in {"scan", "hunt"}:
+        try:
+            return f"{kind}:{uuid.UUID(value)}"
+        except ValueError:
+            return None
+    return None
 
 
 async def target_changes(conn: Any, target_id: Any, *, device: bool, since: Any = "last_hunt",
                          current_hunt_id: Any = None, limit: int = MAX_LISTED) -> dict[str, Any]:
     """What changed on this asset since a point, from existing records, and the knowledge it affects.
 
-    The same report (target, scope, since, caller Hunt, limit) is built at most once per
-    ``REPORT_CACHE_SECONDS`` in this process; repeated calls return it (``built_at`` says when)."""
-    key = json.dumps([str(target_id), device, str(since), str(current_hunt_id), int(limit)])
-    cached = _report_cache.get(key)
-    if cached is not None and time.monotonic() - cached[0] < REPORT_CACHE_SECONDS:
-        return cached[1]
+    A report for ``last_hunt``, ``release``, a Scan or a Hunt is built at most once per
+    ``REPORT_CACHE_SECONDS`` in this process for the same target, scope, caller Hunt and limit;
+    repeated calls return it (``built_at`` says when)."""
+    since_key = _cache_key(since)
+    key = json.dumps([str(target_id), device, since_key, str(current_hunt_id), int(limit)]) if since_key else None
+    cached = _report_cache.get(key) if key else None
+    if cached is not None:
+        return cached
     report = await _target_changes(conn, target_id, device=device, since=since, current_hunt_id=current_hunt_id,
                                    limit=limit)
-    if len(_report_cache) > 5_000:
-        _report_cache.clear()
-    _report_cache[key] = (time.monotonic(), report)
+    if key:
+        _report_cache.put(key, report)
     return report
 
 
@@ -491,7 +544,7 @@ async def _target_changes(conn: Any, target_id: Any, *, device: bool, since: Any
     sections["services"] = await _services(conn, target, at)
     sections["subdomains"] = await _subdomains(conn, target, at, names_allowed=current_hunt_id is None)
     sections["findings"] = await _findings(conn, target, at)
-    hunt_scope = asset_scope("COALESCE(device_target_id, target_id)")
+    hunt_scope = f"({asset_scope('target_id')} OR {asset_scope('device_target_id')})"
     hunts = await conn.fetch(f"""SELECT id, status, created_at FROM hunt_runs WHERE {hunt_scope} AND created_at > $2
         AND ($3::uuid IS NULL OR id <> $3) ORDER BY created_at DESC LIMIT 11""", target, at,
         uuid.UUID(str(current_hunt_id)) if current_hunt_id else None)
@@ -508,7 +561,7 @@ async def _target_changes(conn: Any, target_id: Any, *, device: bool, since: Any
 
 
 BRIEFING_CACHE_SECONDS = 30.0
-_briefing_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_briefing_cache = _BoundedCache(lambda: BRIEFING_CACHE_SECONDS, CACHE_MAX_BYTES // 2)
 
 
 async def briefing_changes(conn: Any, target_id: Any, *, device: bool, hunt_id: Any) -> dict[str, Any]:
@@ -518,12 +571,10 @@ async def briefing_changes(conn: Any, target_id: Any, *, device: bool, hunt_id: 
     ``BRIEFING_CACHE_SECONDS`` in this process (it says when it was computed)."""
     key = f"{target_id}:{hunt_id}:{int(device)}"
     cached = _briefing_cache.get(key)
-    if cached is not None and time.monotonic() - cached[0] < BRIEFING_CACHE_SECONDS:
-        return cached[1]
+    if cached is not None:
+        return cached
     section = await _briefing_changes(conn, target_id, device=device, hunt_id=hunt_id)
-    if len(_briefing_cache) > 10_000:
-        _briefing_cache.clear()
-    _briefing_cache[key] = (time.monotonic(), section)
+    _briefing_cache.put(key, section)
     return section
 
 

@@ -44,7 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from .experiment_conditions import freeze, thaw
 from .knowledge_withheld import withheld_digests
 from .knowledge_changes import safe_refresh
-from .knowledge_dependencies import capture, decide, public_dependencies
+from .knowledge_dependencies import Observer, canonical_origin, capture, decide, public_dependencies, reobserved
 from .interpretation_schema import (  # noqa: F401 - re-exported
     DISMISSAL_REASONS, INTERPRETATION_SCHEMA_SQL, KINDS, MAX_BODY_CHARACTERS, MAX_NOTE_CHARACTERS,
     MAX_TITLE_CHARACTERS, NEGATIVE_STATES, PROVENANCES, STATUSES,
@@ -77,7 +77,7 @@ RAN_ACTION_STATES = frozenset({"completed", "partial"})
 #: Condition fields (design: principals and roles, objects, operation and method, inputs, service,
 #: environment and deployment fingerprint, technique and tool version, application state, budget).
 CONDITION_LISTS = ("principals", "roles", "objects")
-CONDITION_TEXTS = ("operation", "method", "route", "service", "environment", "deployment_fingerprint",
+CONDITION_TEXTS = ("origin", "operation", "method", "route", "service", "environment", "deployment_fingerprint",
                    "technique", "tool_version")
 CONDITION_OBJECTS = ("inputs", "application_state", "budget")
 CONDITION_FIELDS = frozenset(CONDITION_LISTS + CONDITION_TEXTS + CONDITION_OBJECTS)
@@ -233,6 +233,13 @@ def validate_conditions(raw: Any, *, required: bool, experiment: bool = False) -
             result[field] = sorted(cleaned)
     for field in CONDITION_TEXTS:
         if field in raw:
+            if field == "origin":
+                # One exact origin: scheme, host and port (the default port is dropped).
+                origin = canonical_origin(raw[field]) if isinstance(raw[field], str) else None
+                if origin is None:
+                    raise ValueError("conditions.origin must be one origin, scheme://host[:port], with no path")
+                result[field] = origin
+                continue
             value = _condition_text(raw[field], field)
             result[field] = value.upper() if field == "method" else value
     for field in CONDITION_OBJECTS:
@@ -416,13 +423,16 @@ def applicability(row: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def reuse_decision(entry: Mapping[str, Any], requested_key: str) -> dict[str, Any]:
+def reuse_decision(entry: Mapping[str, Any], requested_key: str, *, evaluated: bool = False,
+                   reobservation: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Whether an identical experiment may be skipped because of ``entry``.
 
     Only an active ``experiment_completed_negative`` with exactly the requested experiment key,
-    applicable as just evaluated, whose conditions are bound to the request its cited action
-    actually made, and whose dependencies include the deployment and the route, allows a skip.
-    The skip is advice: nothing blocks the experiment, and an operator can always ask for it again.
+    evaluated during this call (``evaluated``) and applicable, whose conditions are bound to the
+    request its cited action actually made, whose dependencies include the deployment, the route and
+    a response, and whose conditions were positively observed again since the asking Hunt started
+    (``reobservation``; evidence, not age) allows a skip. Not contradicted is not enough. The skip
+    is advice: nothing blocks the experiment, and an operator can always ask for it again.
     """
     if entry.get("negative_state") != "experiment_completed_negative" or entry.get("status") != "active":
         return {"skip": False, "reason": "not an active completed negative experiment"}
@@ -439,7 +449,14 @@ def reuse_decision(entry: Mapping[str, Any], requested_key: str) -> dict[str, An
     types = {item.get("type") for item in dependencies.get("items") or ()}
     if not {"deployment", "endpoint", "response"} <= types or dependencies.get("unobserved"):
         return {"skip": False, "reason": "the deployment, route or response this result depends on was not observed"}
+    if not evaluated:
+        return {"skip": False, "reason": "applicability was not evaluated during this check; nothing is reused "
+                                         "without a current evaluation"}
+    if not reobservation or reobservation.get("observed") is not True:
+        return {"skip": False, "reason": (reobservation or {}).get("reason")
+                or "not observed again since this Hunt started; run it", "reobservation": reobservation}
     return {"skip": True, "applicable_as_of": _iso(entry.get("applicability_checked_at")),
+            "reobserved": dict(reobservation),
             "override": ("Advice, not a block: run the experiment anyway when there is a reason to; an operator "
                          "can always ask for it again.")}
 
@@ -736,8 +753,9 @@ async def _identical(conn: Any, target: Any, key: str, *, exclude: Any = None) -
              "reuse": reuse_decision(dict(row), key)} for row in rows]
 
 
-async def check_experiment(conn: Any, target_id: Any, conditions: Any) -> dict[str, Any]:
-    """What is recorded about one exact experiment, and whether it may be skipped (evaluated now)."""
+async def check_experiment(conn: Any, target_id: Any, conditions: Any, *, hunt_run_id: Any = None) -> dict[str, Any]:
+    """What is recorded about one exact experiment, and whether it may be skipped (evaluated now,
+    and only with fresh evidence since the asking Hunt started)."""
     try:
         exact = validate_conditions(conditions, required=True)
     except ValueError as exc:
@@ -750,19 +768,32 @@ async def check_experiment(conn: Any, target_id: Any, conditions: Any) -> dict[s
     if candidates:
         # The reuse answer is evaluated now, never taken from an earlier evaluation.
         evaluated = await safe_refresh(conn, row["id"], device=False, ids=[item["id"] for item in candidates])
-    prior = await _identical(conn, row["id"], key)
-    if candidates and not evaluated.get("refreshed"):
-        # Without a current evaluation nothing is reused (another evaluation was running, or it failed).
-        for item in prior:
-            if item["reuse"]["skip"]:
-                item["reuse"] = {"skip": False, "reason": "applicability could not be evaluated now; nothing is "
-                                                          "reused without a current evaluation"}
+    # Only entries this call actually evaluated count as current (a row another evaluation holds
+    # is skipped there, and must not be answered from its stored state).
+    current = set(evaluated.get("evaluated_ids") or []) if evaluated.get("refreshed") else set()
+    anchor = None
+    if hunt_run_id is not None:
+        anchor = await conn.fetchval("SELECT created_at FROM hunt_runs WHERE id=$1", uuid.UUID(str(hunt_run_id)))
+    observer = Observer(conn, row["id"])
+    rows = await conn.fetch("""SELECT * FROM target_interpretations
+        WHERE target_id=$1 AND experiment_key=$2 AND status='active'
+        ORDER BY created_at DESC, id DESC LIMIT 20""", row["id"], key)
+    prior = []
+    for entry in rows:
+        reobservation = None
+        if str(entry["id"]) in current and entry["applicability"] == "applicable":
+            reobservation = await reobserved(observer, _loads(entry["dependencies"], {}) or {}, anchor)
+        prior.append({"id": str(entry["id"]), "negative_state": entry["negative_state"], "status": entry["status"],
+                      "written_by": entry["written_by"], "created_at": _iso(entry["created_at"]),
+                      "reuse": reuse_decision(dict(entry), key, evaluated=str(entry["id"]) in current,
+                                              reobservation=reobservation)})
     return {"experiment_key": key, "conditions": exact, "identical": prior,
             "skip": any(item["reuse"]["skip"] for item in prior),
             "conditions_semantics": CONDITIONS_SEMANTICS,
             "note": ("Only an identical experiment (every condition equal, on this target) is matched, and only an "
-                     "applicable result bound to the request its cited action made may be skipped. A negative "
-                     "result says nothing about other principals, objects, methods, services or deployments.")}
+                     "applicable result bound to the request its cited action made, and observed again unchanged "
+                     "since this Hunt started, may be skipped. A negative result says nothing about other origins, "
+                     "principals, objects, methods, services or deployments.")}
 
 
 def _operator_only(actor: str) -> None:
@@ -877,7 +908,7 @@ _DISMISSAL_STATUS = {"false_positive": "false_positive", "duplicate": "false_pos
 
 async def _finding_on_asset(conn: Any, target: Any, finding_id: uuid.UUID, *, lock: bool) -> Any:
     finding = await conn.fetchrow(f"""SELECT id, target_id, device_target_id, title, tool, url, severity,
-            status, analyst_verdict, last_verification_verdict, last_seen_at
+            status, analyst_verdict, last_verification_verdict, last_seen_at, resurfaced_count
         FROM findings WHERE id=$1
           AND target_asset_access_owner(target_id)=target_asset_access_owner($2){' FOR UPDATE' if lock else ''}""",
         finding_id, target)
@@ -916,7 +947,8 @@ async def dismiss_finding(conn: Any, target_id: Any, finding_id: Any, request: D
                                       request.reason, identifier, "set")
         await _refresh_finding_owner_counts(conn, [updated])
         dependencies = await capture(conn, row["id"], kind="negative_result", negative_state="finding_dismissed",
-                                     conditions={}, finding=dict(finding))
+                                     conditions={},
+                                     finding={**dict(finding), "dismissal_reason": request.reason})
         state = decide(dependencies, [], [])
         title = f"Dismissed ({request.reason}): {finding['title'] or 'finding'}"[:MAX_TITLE_CHARACTERS]
         if _unsafe(title):  # scanner-written titles are shown as they are only when they are reviewable

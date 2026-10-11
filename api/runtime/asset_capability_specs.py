@@ -34,7 +34,9 @@ def asset_capability_specs(spec, schema, kinds):
     conditions = {'type':'object','additionalProperties':False,
         'description':'The exact conditions: no wildcards, patterns, “all”, “any” or “every”. A negative result needs '
                       'operation (or method and route) and principals, objects or inputs; an experiment result also its technique.',
-        'properties':{'principals':exact,'roles':exact,'objects':exact,'operation':text,'method':text,'route':text,
+        'properties':{'principals':exact,'roles':exact,'objects':exact,'origin':{**text,'description':
+                      'scheme://host[:port] the request went to; required for a reusable experiment result'},
+                      'operation':text,'method':text,'route':text,
                       'service':text,'environment':text,'deployment_fingerprint':text,'technique':text,
                       'tool_version':text,'inputs':{'type':'object'},'application_state':{'type':'object'},
                       'budget':{'type':'object'}}}
@@ -93,10 +95,11 @@ def asset_capability_specs(spec, schema, kinds):
          ('kind','title')),
         ('knowledge.check_experiment',('Look up what is recorded about one exact experiment on this target (every '
          'condition equal) before repeating it. skip is true only for an applicable experiment_completed_negative '
-         'whose conditions match a plain request (no query, headers or body) your own cited http.request made: '
-         'method, route (placeholders only for ids, each covered by a named object), objects in the path, its '
+         'whose conditions match a plain request (only method, path, origin and session_ref) your own cited '
+         'http.request made: the origin, method, route (each placeholder filled by exactly one named object), its '
          'session_ref as the only principal or anonymous, a technique starting with http.request, and no other '
-         'condition fields. Unknown is never unchanged. Skip is advice, never a block.'),
+         'condition fields; and only when that request (or a Scan of the same deployment and route) was observed '
+         'again, unchanged, since this Hunt started. Unknown is never unchanged. Skip is advice, never a block.'),
          {'conditions':conditions},('conditions',)),
         ('knowledge.changes',('What changed on this target since a point, from existing records (endpoint inventory, '
          'Scans, earlier http.request responses, services, subdomain discovery, findings, Hunts), with the '
