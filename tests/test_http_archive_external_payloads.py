@@ -10,6 +10,7 @@ for the two tables, whose result columns are taken from the reader's own SELECT.
 import hashlib
 import json
 import re
+import secrets
 import sys
 import uuid
 
@@ -21,10 +22,13 @@ from runtime.http_archive_reader import export_document, read_transactions
 
 HUNT = "22222222-2222-4222-8222-222222222222"
 TARGET = "33333333-3333-4333-8333-333333333333"
+# A 54-character random marker both large payloads carry: a short word such as "orders" or
+# "xxxx" can occur in base64 ciphertext by chance, so the at-rest checks look for this instead.
+MARKER = "plain-" + secrets.token_hex(24)
 # Larger than the 32 KiB inline ceiling, so the store writes it to a file.
-LARGE_BODY = ('{"orders": [' + ",".join(f'{{"id": {n}, "note": "café résumé"}}' for n in range(1100)) + "]}")
+LARGE_BODY = ('{"marker": "' + MARKER + '", "orders": [' + ",".join(f'{{"id": {n}, "note": "café résumé"}}' for n in range(1100)) + "]}")
 assert 40 * 1024 <= len(LARGE_BODY.encode()) < 64 * 1024
-LARGE_HEADER = "x" * (40 * 1024)
+LARGE_HEADER = MARKER + "x" * (40 * 1024 - len(MARKER))
 
 
 def _blobs():
@@ -139,9 +143,19 @@ async def test_externally_stored_body_and_headers_round_trip_through_every_expor
     assert len(external) == 2, "the 40 KiB body and the 40 KiB header map are both externalized"
     assert all(item["content"] is None for item in external)
     files = _external_files(tmp_path)
-    assert len(files) == 2 and not any("orders" in f.read_text() or "xxxx" in f.read_text() for f in files), (
-        "externalized payloads stay sealed at rest"
-    )
+    assert len(files) == 2
+    revealed = []
+    for path in files:
+        text = path.read_text()
+        # Externalized payloads stay sealed at rest: an envelope holding only a Fernet token,
+        # which decrypts with this install's key back to exactly what was archived.
+        sealed = json.loads(text)
+        assert set(sealed) == {"schema_version", "ciphertext"} and _blobs().is_envelope(sealed)
+        assert sealed["ciphertext"].startswith("enc:fernet:")
+        assert MARKER not in text
+        revealed.append(json.loads(_blobs().reveal(sealed)))
+    assert LARGE_BODY in revealed
+    assert {"accept": "application/json", "x-trace": LARGE_HEADER} in revealed
 
     rows = await read_transactions(db, hunt_run_id=HUNT, results_dir=tmp_path)
     assert len(rows) == 1 and "payload_unavailable" not in rows[0]
