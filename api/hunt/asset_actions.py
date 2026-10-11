@@ -49,8 +49,21 @@ async def execute_asset_action(pool, run, name, values):
     return result
 
 
+#: Writes refused once an operator retracted this Hunt's entries (proposals and reads remain).
+QUARANTINED_WRITES = frozenset({'knowledge.record', 'targets.skill.create', 'targets.skill.update',
+                                'targets.skill.delete', 'targets.actions.create', 'targets.actions.update',
+                                'targets.actions.delete'})
+
+
 async def _perform_asset_action(pool, run, name, values):
     target_id = uuid.UUID(str(run.get('device_target_id') or run['target_id']))
+    if name in QUARANTINED_WRITES:
+        from .interpretations import hunt_quarantined
+        async with pool.acquire() as conn:
+            if await hunt_quarantined(conn, run['id']):
+                raise HTTPException(403, {'error':'hunt_entries_retracted', 'reason_code':'hunt_entries_retracted',
+                    'message':'An operator retracted this Hunt\u2019s entries; it can no longer write interpretations, '
+                              'knowledge, instructions or saved actions. Propose changes with targets.skill.propose.'})
     policy = run.get('policy_json') or {}
     if isinstance(policy,str):
         policy = json.loads(policy)

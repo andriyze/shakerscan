@@ -17,6 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, f
 from .skill_trust import (AGENT_UNCONFIRMED, EFFECTIVE_TRUST, action_trust, instruction_trust, known_authority,
                           known_origin, planner_snapshot)
 from .metadata_row import target_metadata_row as _target
+try:
+    from hunt.knowledge_withheld import withheld_digests
+except ModuleNotFoundError:  # package import
+    from ..hunt.knowledge_withheld import withheld_digests
 
 try:
     from runtime.asset_capability_specs import MAX_TARGET_SKILL_CHARACTERS
@@ -170,9 +174,10 @@ def _public(row: Any) -> dict[str, Any]:
     knowledge = (_validated_snapshot(row, saved, saved.get('knowledge_snapshot'))
                  if 'knowledge_snapshot' in saved else
                  skill if instruction_trust(skill) in {'hunt_advisory', 'unknown_advisory'} else None)
-    withheld = saved.get('knowledge_withheld')
-    withheld = (dict(withheld) if isinstance(withheld, dict) and knowledge is not None
-                and withheld.get('body_sha256') == knowledge.get('body_sha256') else None)
+    # Every knowledge text an operator withheld, by digest: the current text is withheld when its
+    # digest is among them (hunt/interpretations.py withheld_digests).
+    withheld = (withheld_digests(saved.get('knowledge_withheld')).get(knowledge.get('body_sha256'))
+                if knowledge is not None else None)
     return {'target_id': str(row['id']), 'revision': revision, 'skill': skill,
             'max_characters': MAX_TARGET_SKILL_CHARACTERS,
             'operator_skill': _operator_skill(row, saved, skill), 'knowledge': knowledge,
@@ -231,10 +236,13 @@ async def write_target_skill(conn: Any, target_id: Any, operation: str,
             raise HTTPException(422, 'Unsupported target skill operation')
         saved = {'revision': current['revision'] + 1,
                  'updated_at': datetime.now(timezone.utc).isoformat(), 'written_by': source, 'purpose': purpose}
-        # An operator's retraction of knowledge text holds until an operator saves knowledge again.
-        withheld = _saved(row).get('knowledge_withheld')
-        if isinstance(withheld, dict) and not (operator and purpose == 'knowledge'):
-            saved['knowledge_withheld'] = withheld
+        # Withheld knowledge texts stay withheld through any write; an operator saving a knowledge
+        # text lifts the withholding of exactly that text.
+        withheld = withheld_digests(_saved(row).get('knowledge_withheld'))
+        if operator and purpose == 'knowledge' and request is not None:
+            withheld.pop(hashlib.sha256(request.methodology.encode('utf-8')).hexdigest(), None)
+        if withheld:
+            saved['knowledge_withheld'] = {'digests': withheld}
         history = object_history(row)
         if current['skill'] is not None:
             history.append(current['skill'])
