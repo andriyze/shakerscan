@@ -161,9 +161,11 @@ offline deterministic finalizer ── findings / coverage / grade reliability
   and while it runs, under the strict host rule every admission uses
   (`action_scope.receipt_scope_covers_host`); the target's authorization is also checked against
   the target's current host. Requests and redirect hops outside that scope are refused
-  (`scanner_tools/destination_guard.py`: HTTP steps follow redirects hop by hop; headless browser
-  contexts send all traffic, WebSockets included, through a local egress proxy with service
-  workers blocked; the rule is by host name, not resolved address, and ports are not constrained)
+  (`scanner_tools/destination_guard.py`: HTTP steps follow redirects hop by hop; every headless browser
+  context opened during a retest sends all traffic, WebSockets included, through a local egress
+  proxy (one request per plain-HTTP connection) with service workers blocked and WebRTC disabled;
+  the rule is by host name, not resolved address (DNS rebinding is not caught), and ports are not
+  constrained)
   and the retest then records `inconclusive`. Workers and
   fleet nodes on an earlier image run retests without this watch. A stopped retest is `failed` with verdict `error`,
   `retry_class` `authorization` and `artifacts.authority_stop` (`GET /retests/...` returns it as

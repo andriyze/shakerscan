@@ -6583,7 +6583,7 @@ async def process_finding_retest_job(job_data: dict):
                     result["result_status"] = _result_status_for_verdict(result["verdict"])
                     print(f"[retest:{job_id[:8]}] Promoted inconclusive → likely_vulnerable (partial deterministic evidence)", flush=True)
 
-            result = cut_short_by_destination(result, run_authority.refused)
+            result = cut_short_by_destination(result, run_authority)
             # Final consistency guard before persistence: never write a
             # low-confidence "false_positive" (single enforcement point).
             result = _enforce_verdict_invariants(result)

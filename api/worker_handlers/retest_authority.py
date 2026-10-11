@@ -138,6 +138,10 @@ class RetestWatch:
     def refused(self) -> list[str]:
         return list(self._guard.refused) if self._guard is not None else []
 
+    @property
+    def incidents(self) -> list[str]:
+        return list(self._guard.incidents) if self._guard is not None else []
+
     async def __aenter__(self) -> "RetestWatch":
         self._guard = self._scope.__enter__()
         try:
@@ -154,9 +158,14 @@ class RetestWatch:
             self._scope.__exit__(None, None, None)
 
 
-def cut_short_by_destination(result: dict[str, Any], refused: list[str]) -> dict[str, Any]:
+def cut_short_by_destination(result: dict[str, Any], watch: Any) -> dict[str, Any]:
     """A replay that had requests or redirects refused is inconclusive unless it proved the
-    finding (proof from allowed traffic stands): it shows neither a fix nor a false positive."""
+    finding (proof from allowed traffic stands): it shows neither a fix nor a false positive.
+    Failures of the browser egress proxy are kept on the artifacts (host and error class)."""
+    refused, incidents = list(getattr(watch, "refused", []) or []), list(getattr(watch, "incidents", []) or [])
+    if incidents:
+        artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+        result = {**result, "artifacts": {**artifacts, "destination_guard_incidents": incidents}}
     if not refused or str(result.get("verdict") or "") == "exploited":
         return result
     reason = ("The replay was redirected or sent outside the approved scope and those requests were "
