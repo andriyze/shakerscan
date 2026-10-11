@@ -13,20 +13,20 @@ import urllib.parse
 
 import pytest
 
-from api.capabilities import graphql_probe as gql
-from api.capabilities.exposure_probe import (
+from capabilities import graphql_probe as gql
+from capabilities.exposure_probe import (
     EXPOSURE_PROOF_CONTRACTS,
     classify_exposure,
     graphql_seed_probes,
     is_sensitive_exposure_class,
 )
-from api.proof_contracts import CANONICAL_PROOF_CONTRACTS
-from api.scan.action_plan import ScanActionPlan
-from api.scan.finalizer import finalize_scan_report
-from scanner.scanner_tools.remediation_kb import get_remediation_for_exposure_class
-from tests.test_scan_finalizer import _result_with_observation_count
+from proof_contracts import CANONICAL_PROOF_CONTRACTS
+from scan.finalizer import finalize_scan_report
+from scanner_tools.remediation_kb import get_remediation_for_exposure_class
 from tests.graphql_fixtures import DVGA_GRAPHIQL, DVGA_INTROSPECTION, SPA_SHELL
-from tests.test_scan_orchestrator import SCAN_ID, _action
+from tests.test_scan_action_adapter import _action as _adapter_action
+from tests.toplevel_scan_fixtures import plan as _plan
+from tests.toplevel_scan_fixtures import result_with_observations as _result_with_observation_count
 
 def _json(document) -> bytes:
     return json.dumps(document).encode()
@@ -189,8 +189,8 @@ def test_graphql_classes_have_contracts_and_guidance():
 def _observation(url: str, body: bytes, content_type: str) -> dict:
     from types import SimpleNamespace
 
-    from api.runtime.receipts import redact_receipt_value
-    from api.scan.action_adapter import _exposure_observation
+    from runtime.receipts import redact_receipt_value
+    from scan.action_adapter import _exposure_observation
 
     signature = classify_exposure(path=url, status=200, headers={"Content-Type": content_type},
                                   body=body)
@@ -202,10 +202,9 @@ def _observation(url: str, body: bytes, content_type: str) -> dict:
 
 def test_findings_are_reported_on_the_endpoint_with_the_request_as_evidence():
     request_url = gql.graphql_request_url("https://app.example.test/graphql", gql.INTROSPECTION_QUERY)
-    probe = _action("verify.exposure", 0, capability_name="exposure.verify_batch")
-    final = _action("finalize.report", 1, dependencies=(probe.action_id,))
-    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
-                          target_binding_digest="a" * 64, actions=(probe, final))
+    probe = _adapter_action("verify.exposure", "exposure.verify_batch", 0)
+    final = _adapter_action("finalize.report", "scan.finalize", 1, dependencies=(probe.action_id,))
+    plan = _plan(probe, final)
     report = finalize_scan_report(
         plan=plan, target_url="https://app.example.test",
         action_results={probe.action_id: _result_with_observation_count(probe, 2)},

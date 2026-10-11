@@ -11638,6 +11638,7 @@ async def _execute_reserved_deterministic_scan(
             if authority.withdrawn and not kwargs.get("finalize_only"):
                 return None  # no further work rounds once authorization is withdrawn
             if deadline is not None and not kwargs.get("finalize_only") and deadline.reached():
+                deadline.record_refused_round()  # reported as a time-limit stop
                 return None  # nor once the Scan has reached its time limit
             return await _materialize_local_scan_continuation(
                 allocation=continuation_allocation,
