@@ -212,11 +212,23 @@ def compare_response(item: Mapping[str, Any], newer: Mapping[str, Any] | None, *
     if not newer:
         return []
     before, changes = item["observed"], []
+    # Recorded before completeness was kept, or a truncated body on either side: the key set and the
+    # body cannot be compared (unknown, never unchanged).
+    whole = before.get("body_complete") is True and newer.get("body_complete") is True
     for field in ("status", "media_type", "json_keys_sha256"):
+        if field == "json_keys_sha256" and not whole:
+            changes.append(_change(item, field, INCOMPARABLE, None, None,
+                                   note="a body over the capture limit (or of unknown completeness) has no key set"))
+            continue
         if before.get(field) != newer.get(field):
             changes.append(_change(item, field, SIGNIFICANT, before.get(field), newer.get(field),
                                    observed_by=newer.get("action_id"), observed_at=newer.get("completed_at")))
     old_format, new_format = digest_format(recorded_body), digest_format(newer_body)
+    if not whole:
+        if body_significant or (old_format and new_format and recorded_body != newer_body):
+            changes.append(_change(item, "body_digest", INCOMPARABLE, old_format, new_format,
+                                   note="a prefix digest of a truncated body says nothing about the rest"))
+        return changes
     if old_format and new_format:
         if old_format != new_format:
             changes.append(_change(item, "body_digest", INCOMPARABLE, old_format, new_format,
@@ -353,10 +365,15 @@ def _response_view(row: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     status = response.get("status")
     keys = response.get("json_keys")
+    # A body over the capture limit is digested as a prefix (body_digest_scope "prefix") and its JSON
+    # does not parse: neither its digest nor its key set says anything about the rest of the body.
+    complete = response.get("body_digest_scope") == "complete" and response.get("truncated") is not True
     return {"action_id": str(row["id"]) if row.get("id") else None, "completed_at": _iso(row.get("completed_at")),
             "status": status if isinstance(status, int) else None,
             "media_type": media_type(response.get("content_type")),
-            "json_keys_sha256": _sha(sorted(str(key) for key in keys)) if isinstance(keys, list) else None,
+            "body_complete": complete,
+            "json_keys_sha256": (_sha(sorted(str(key) for key in keys)) if isinstance(keys, list) and complete
+                                 else None),
             "body_digest_format": digest_format(response.get("body_sha256")),
             "_body": response.get("body_sha256")}
 
@@ -921,6 +938,9 @@ async def reobserved(observer: Observer, recorded: Mapping[str, Any], anchor: An
             continue
         found, count = await _response_changes(observer, item, after=moment, exclude=item["observed"].get("action_id"),
                                                body_significant=True)
+        if any(change["significance"] == INCOMPARABLE for change in found):
+            return {"observed": False, "reason": "the repeated request could not be compared in full (a truncated "
+                                                 "body, or digests of different formats)"}
         if found:
             return {"observed": False, "reason": "the same request answered differently after this Hunt started"}
         if count:
