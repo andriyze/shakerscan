@@ -35,7 +35,7 @@ def asset_capability_specs(spec, schema, kinds):
         'description':'The exact conditions: no wildcards, patterns, “all”, “any” or “every”. A negative result needs '
                       'operation (or method and route) and principals, objects or inputs; an experiment result also its technique.',
         'properties':{'principals':exact,'roles':exact,'objects':exact,'origin':{**text,'description':
-                      'scheme://host[:port] the request went to; required for a reusable experiment result'},
+                      'scheme://host or scheme://host:port the request went to; required for a reusable experiment result'},
                       'operation':text,'method':text,'route':text,
                       'service':text,'environment':text,'deployment_fingerprint':text,'technique':text,
                       'tool_version':text,'inputs':{'type':'object'},'application_state':{'type':'object'},
