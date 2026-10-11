@@ -38,6 +38,7 @@ try:
     from hunt.run_service import agent_tools
     from retest_contract import build_retest_job_payload, normalize_retest_type, validate_retest_job_payload
     from runtime.models import TargetBinding
+    from scan.retest_authority import admit_retest, admitted_authority_json
     from serialization import row_to_dict
     from workflow_experiment import WorkflowContractError
     from arsenal_routes import router as _arsenal_routes
@@ -56,6 +57,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..hunt.run_service import agent_tools
     from ..retest_contract import build_retest_job_payload, normalize_retest_type, validate_retest_job_payload
     from ..runtime.models import TargetBinding
+    from ..scan.retest_authority import admit_retest, admitted_authority_json
     from ..serialization import row_to_dict
     from ..workflow_experiment import WorkflowContractError
     from ..arsenal_routes import router as _arsenal_routes
@@ -1934,19 +1936,27 @@ async def _agent_auto_queue_dast_retests(
                 approval_context = await _validate_approval_receipt_for_action(
                     conn, approval_receipt_id, target_url=target_for_retest,
                     target_id=str(target_uuid), action_name="finding.retest")
+                admitted, out_of_scope = await admit_retest(
+                    conn, target_id=target_uuid,
+                    approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+                    destination=target_for_retest)
+                if out_of_scope is not None:
+                    continue  # the replay host is outside the scope that admits it
                 retest_id, job_id = uuid.uuid4(), str(uuid.uuid4())
                 await conn.execute(
                     """INSERT INTO finding_verifications (
                            id, finding_id, candidate_id, target_id, job_id, requested_by,
                            status, finding_type, target_url, original_url, param, payload,
-                           method, verification_mode, contract_id, contract_version, proof_basis
+                           method, verification_mode, contract_id, contract_version, proof_basis,
+                           admitted_authority
                        ) VALUES ($1,NULL,$2,$3,$4,$5,'queued',$6,$7,$7,$8,$9,$10,
                                  'deterministic',$11,'deterministic-retest/v1',
-                                 'candidate_native_deterministic_retest')""",
+                                 'candidate_native_deterministic_retest',$12::jsonb)""",
                     retest_id, candidate["id"], target_uuid, job_id, created_by[:120],
                     rtype, target_for_retest, context.get("parameter"), context.get("payload"),
                     str(context.get("method") or "GET").upper(),
                     str(candidate["verifier_contract_id"] or f"web.{rtype}"),
+                    admitted_authority_json(admitted),
                 )
                 await conn.execute(
                     """UPDATE investigation_candidates
