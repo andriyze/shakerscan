@@ -313,6 +313,15 @@ def _require_candidate_writable_hunt(run: Mapping[str, Any]) -> None:
         ))
 
 
+def _require_unquarantined_hunt(run: Any) -> None:
+    """A Hunt whose entries an operator retracted records no more candidate text."""
+    from .interpretations import QUARANTINE_MESSAGE, notes_quarantined
+    if notes_quarantined(dict(run).get("notes")):
+        raise HTTPException(status_code=403, detail={"error": "hunt_entries_retracted",
+                                                     "reason_code": "hunt_entries_retracted",
+                                                     "message": QUARANTINE_MESSAGE})
+
+
 class HuntCandidateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     family: str = Field(min_length=1, max_length=80)
@@ -1295,6 +1304,7 @@ async def create_hunt_candidate(hunt_id: str, request: HuntCandidateRequest):
         async with conn.transaction():
             run = await _hunt_run_or_404(conn, hunt_id, for_update=True)
             _require_candidate_writable_hunt(run)
+            _require_unquarantined_hunt(run)
             used = _hunt_json(run["budget_used_json"], {})
             budget = _hunt_json(run["budget_json"], {})
             if int(used.get("candidates") or 0) >= int(budget.get("max_candidates") or 0):
@@ -1377,6 +1387,7 @@ async def update_hunt_candidate(
             async with conn.transaction():
                 run = await _hunt_run_or_404(conn, str(hunt_uuid), for_update=True)
                 _require_candidate_writable_hunt(run)
+                _require_unquarantined_hunt(run)
                 await _require_candidate_evidence(conn, run, request.evidence_refs)
                 result = await investigation_candidates.update_candidate_for_hunt(
                     conn,

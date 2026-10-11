@@ -477,7 +477,8 @@ def _iso(value: Any) -> Any:
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
-def public_interpretation(row: Mapping[str, Any], *, audience: Literal["hunt", "operator"]) -> dict[str, Any]:
+def public_interpretation(row: Mapping[str, Any], *, audience: Literal["hunt", "operator"],
+                          withheld: Any = frozenset()) -> dict[str, Any]:
     """One entry as a reader receives it.
 
     For Hunts: no free text of a retracted or superseded entry (history only, marked), and an
@@ -516,6 +517,14 @@ def public_interpretation(row: Mapping[str, Any], *, audience: Literal["hunt", "
                   else "agent_interpretation"),
         "is_proof": False, "authority_granted": False,
     }
+    knowledge_withheld = (written_by == KNOWLEDGE_IMPORT_WRITER and bool(withheld)
+                          and (result["subject"] or {}).get("body_sha256") in withheld)
+    if audience == "hunt" and knowledge_withheld and result["status"] not in {"retracted", "superseded"}:
+        # The same text an operator withheld in the knowledge slot (a later write of it included).
+        result.pop("conditions_semantics", None)
+        result.update(title=None, body="", status_note=None, subject=None,
+                      text_withheld="An operator withheld this knowledge text from Hunts.")
+        return result
     if audience == "hunt" and result["status"] in {"retracted", "superseded"}:
         # Every free-text field goes: title, body, note, conditions, subject and labels.
         result.pop("conditions_semantics", None)
@@ -820,17 +829,26 @@ async def retract_interpretation(conn: Any, target_id: Any, entry_id: Any, *, ac
         # Knowledge notes share one writer (system:knowledge-import); their author is the writer of
         # the mirrored text (subject.written_by), so the chain never crosses to another author's text.
         author = (_loads(entry["subject"], {}) or {}).get("written_by") if entry["written_by"] == KNOWLEDGE_IMPORT_WRITER else None
-        rows = await conn.fetch("""WITH RECURSIVE chain(id) AS (
-                SELECT $1::uuid
-                UNION
-                SELECT i.id FROM target_interpretations i JOIN chain c ON i.supersedes=c.id OR i.id=(
-                    SELECT supersedes FROM target_interpretations WHERE id=c.id)
-                WHERE i.target_id=$4 AND i.written_by=$5
-                  AND ($6::text IS NULL OR i.subject->>'written_by'=$6))
-            UPDATE target_interpretations SET status='retracted', status_changed_by=$2,
-                status_changed_at=NOW(), status_note=$3
-            WHERE id IN (SELECT id FROM chain) AND status IN ('active','superseded') RETURNING *""",
-            identifier, actor, note, row["id"], entry["written_by"], author)
+        if author and str(author).startswith("hunt:"):
+            # Every version of knowledge text that Hunt wrote, also past operator versions between
+            # them; never an operator's or another Hunt's version.
+            rows = await conn.fetch("""UPDATE target_interpretations SET status='retracted', status_changed_by=$2,
+                    status_changed_at=NOW(), status_note=$3
+                WHERE target_id=$4 AND written_by=$5 AND subject->>'written_by'=$6
+                  AND (id=$1 OR status IN ('active','superseded')) RETURNING *""",
+                identifier, actor, note, row["id"], entry["written_by"], author)
+        else:
+            rows = await conn.fetch("""WITH RECURSIVE chain(id) AS (
+                    SELECT $1::uuid
+                    UNION
+                    SELECT i.id FROM target_interpretations i JOIN chain c ON i.supersedes=c.id OR i.id=(
+                        SELECT supersedes FROM target_interpretations WHERE id=c.id)
+                    WHERE i.target_id=$4 AND i.written_by=$5
+                      AND ($6::text IS NULL OR i.subject->>'written_by'=$6))
+                UPDATE target_interpretations SET status='retracted', status_changed_by=$2,
+                    status_changed_at=NOW(), status_note=$3
+                WHERE id IN (SELECT id FROM chain) AND status IN ('active','superseded') RETURNING *""",
+                identifier, actor, note, row["id"], entry["written_by"], author)
         await _withhold_knowledge(conn, row["id"], rows, actor=actor, note=note)
         saved = next(item for item in rows if item["id"] == identifier)
         result = public_interpretation(saved, audience="operator")
@@ -839,6 +857,19 @@ async def retract_interpretation(conn: Any, target_id: Any, entry_id: Any, *, ac
 
 
 RETRACTED_HUNT_NOTE = "entries_retracted"
+
+
+QUARANTINE_MESSAGE = ("An operator retracted this Hunt\u2019s entries; for the rest of its run it can no longer "
+                      "write text that later Hunts or operators read (interpretations, knowledge, instructions, "
+                      "saved actions, target names, findings or candidates). Propose changes with "
+                      "targets.skill.propose.")
+
+
+def notes_quarantined(notes: Any) -> bool:
+    """Whether a Hunt's notes record that an operator retracted its entries."""
+    items = _loads(notes, [])
+    return isinstance(items, list) and any(isinstance(item, Mapping) and item.get("kind") == RETRACTED_HUNT_NOTE
+                                           for item in items)
 
 
 async def hunt_quarantined(conn: Any, hunt_id: Any) -> bool:
@@ -1292,10 +1323,19 @@ async def import_knowledge_notes(conn: Any, *, batch: int = IMPORT_BATCH, after_
     return changed
 
 
+async def target_withheld_digests(conn: Any, target_ids: list[Any]) -> dict[str, frozenset[str]]:
+    """Each target's withheld knowledge digests (``knowledge_withheld``), for Hunt reads of notes."""
+    if not target_ids:
+        return {}
+    rows = await conn.fetch("""SELECT id, metadata_json->'target_skill'->'knowledge_withheld' AS withheld
+        FROM targets WHERE id = ANY($1::uuid[])""", [uuid.UUID(str(item)) for item in set(target_ids)])
+    return {str(row["id"]): frozenset(withheld_digests(_loads(row["withheld"], None))) for row in rows}
+
+
 __all__ = [
     "AGENT_ROLE", "DismissalInput", "INTERPRETATION_SCHEMA_SQL", "InterpretationError", "InterpretationInput",
     "MAX_PER_HUNT", "StatusNote", "applicability", "briefing_section", "check_experiment", "clean_text",
     "dismiss_finding", "experiment_key", "import_knowledge_notes", "mirror_knowledge_note", "negative_results",
-    "operator_list", "public_interpretation", "record_interpretation", "reopen_finding", "retract_interpretation",
+    "operator_list", "public_interpretation", "target_withheld_digests", "record_interpretation", "reopen_finding", "retract_interpretation",
     "retract_run", "reuse_decision", "unknown_records", "validate_conditions",
 ]

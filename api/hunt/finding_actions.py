@@ -128,7 +128,7 @@ async def _refuse_operator_decided(conn: Any, finding_id: uuid.UUID) -> None:
 
 async def _locked_run(conn: Any, hunt_id: uuid.UUID) -> Any:
     run = await conn.fetchrow(
-        """SELECT id, status, target_kind, target_id, device_target_id, context_pack
+        """SELECT id, status, target_kind, target_id, device_target_id, context_pack, notes
            FROM hunt_runs WHERE id=$1 FOR UPDATE""",
         hunt_id,
     )
@@ -137,6 +137,13 @@ async def _locked_run(conn: Any, hunt_id: uuid.UUID) -> Any:
     if str(run["status"]) not in {"active", "awaiting_planner"}:
         raise HuntFindingActionError(f"Hunt is {run['status']}")
     return run
+
+
+def _refuse_quarantined(run: Any) -> None:
+    """A Hunt whose entries an operator retracted writes no more finding text."""
+    from .interpretations import QUARANTINE_MESSAGE, notes_quarantined
+    if notes_quarantined(dict(run).get("notes")):
+        raise HuntFindingActionError(QUARANTINE_MESSAGE)
 
 
 def _target_url(run: Any) -> str:
@@ -189,6 +196,7 @@ async def create_hunt_finding(
     async with pool.acquire() as conn:
         async with conn.transaction():
             run = await _locked_run(conn, hunt_uuid)
+            _refuse_quarantined(run)
             evidence_action_ids = await _require_evidence_actions(
                 conn,
                 hunt_id=hunt_uuid,
@@ -295,6 +303,7 @@ async def update_hunt_finding(
     async with pool.acquire() as conn:
         async with conn.transaction():
             run = await _locked_run(conn, hunt_uuid)
+            _refuse_quarantined(run)
             evidence_action_ids = await _require_evidence_actions(
                 conn,
                 hunt_id=hunt_uuid,
