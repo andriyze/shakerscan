@@ -260,8 +260,12 @@ async def query_knowledge_page(
         elif key == "text_contains":
             placeholder = bind(value.lower())
             # Retracted and superseded text is withheld from Hunts, so it never matches a search either.
+            # Nor does knowledge text an operator withheld (target_skill.knowledge_withheld).
             where.append(f"(status NOT IN ('retracted','superseded') AND (strpos(lower(title),{placeholder})>0 "
-                         f"OR strpos(lower(body),{placeholder})>0))")
+                         f"OR strpos(lower(body),{placeholder})>0) AND NOT (written_by='system:knowledge-import' "
+                         "AND EXISTS (SELECT 1 FROM targets withheld WHERE withheld.id=target_interpretations.target_id "
+                         "AND withheld.metadata_json->'target_skill'->'knowledge_withheld'->'digests' "
+                         "? (target_interpretations.subject->>'body_sha256'))))")
         elif key == "path_contains":
             where.append(f"path ILIKE '%'||{bind(value)}||'%'")
         elif key == "verified_only":
@@ -311,6 +315,9 @@ async def query_knowledge_page(
     if kind == "graph_nodes":
         rows = [project_graph_node(row) for row in rows]
     if kind == "interpretations":
-        from .interpretations import public_interpretation
-        rows = [public_interpretation(row, audience="hunt") for row in rows]
+        from .interpretations import KNOWLEDGE_IMPORT_WRITER, public_interpretation, target_withheld_digests
+        mirrored = [row["target_id"] for row in rows if row.get("written_by") == KNOWLEDGE_IMPORT_WRITER]
+        withheld = await target_withheld_digests(conn, mirrored) if mirrored else {}
+        rows = [public_interpretation(row, audience="hunt", withheld=withheld.get(str(row["target_id"]), frozenset()))
+                for row in rows]
     return {"ok": True, "kind": kind, "supported": True, "count": len(rows), "rows": rows, "has_more": has_more, "next_cursor": next_cursor}

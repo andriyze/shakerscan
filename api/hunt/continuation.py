@@ -7,8 +7,10 @@ except ModuleNotFoundError:
 
 
 async def prior_handoff(conn,target_id):
+    # A Hunt whose entries an operator retracted hands nothing over to later Hunts.
     row = await conn.fetchrow('''SELECT id,status,final_debrief,completed_at FROM hunt_runs
         WHERE target_id=$1 AND final_debrief IS NOT NULL AND final_debrief<>'{}'::jsonb
+          AND NOT (COALESCE(notes,'[]'::jsonb) @> '[{"kind":"entries_retracted"}]'::jsonb)
         ORDER BY completed_at DESC NULLS LAST,updated_at DESC LIMIT 1''',target_id)
     if not row:
         return {'available':False,'reason':'no_prior_debrief'}

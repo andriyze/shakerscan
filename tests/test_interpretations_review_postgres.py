@@ -8,6 +8,7 @@ import json
 import os
 
 import asyncpg
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from targets.asset_migration import BoundConnectionPool
@@ -441,4 +442,103 @@ def test_an_interrupted_knowledge_import_resumes_without_duplicates(monkeypatch)
             assert await conn.fetchval('SELECT count(*) FROM target_interpretations') == 25
             assert await conn.fetchval("""SELECT max(n) FROM (SELECT count(*) n FROM target_interpretations
                 WHERE status='active' GROUP BY target_id) x""") == 1
+    asyncio.run(run())
+
+
+# --- third review round --------------------------------------------------------------------------
+
+def test_a_withheld_text_rewritten_by_a_fresh_hunt_stays_withheld_everywhere(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            target = await _web_target(conn, 'https://app.proof.test')
+            await _delegate(conn, target)
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as operator:
+                a = (await _hunt(operator, target)).hunt
+                await a.ok('targets.skill.create', {'methodology': 'POISON-A text', 'purpose': 'knowledge',
+                                                    'expected_revision': 0})
+                await operator.post(f'/targets/{target}/hunts/{a.id}/interpretations/retract', json={'note': 'a'})
+                revision = (await operator.get(f'/targets/{target}/skill')).json()['revision']
+                await operator.put(f'/targets/{target}/skill', json={'methodology': 'Operator third',
+                                                                      'purpose': 'knowledge',
+                                                                      'expected_revision': revision})
+                fresh = (await _hunt(operator, target)).hunt
+                revision = (await operator.get(f'/targets/{target}/skill')).json()['revision']
+                await fresh.ok('targets.skill.update', {'methodology': 'POISON-A text', 'purpose': 'knowledge',
+                                                        'expected_revision': revision})
+                assert await conn.fetchval("""SELECT count(*) FROM target_interpretations WHERE target_id=$1
+                    AND body='POISON-A text' AND status='active'""", target) == 1  # the new mirrored note
+                assert not any((await _new_hunt_sees(operator, target, 'POISON-A')).values())
+                reader = (await _hunt(operator, target)).hunt
+                found = (await operator.post(f'/hunts/{reader.id}/query', json={
+                    'kind': 'interpretations', 'filter': {'text_contains': 'poison-a'}})).json()
+                assert found['count'] == 0
+                # Operators still read it.
+                listed = (await operator.get(f'/targets/{target}/interpretations')).json()
+                assert any(row['body'] == 'POISON-A text' for row in listed['interpretations'])
+    asyncio.run(run())
+
+
+def test_retracting_a_hunts_knowledge_note_takes_its_later_version_past_an_operator_one(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            target = await _web_target(conn, 'https://app.proof.test')
+            await _delegate(conn, target)
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as operator:
+                hunt = (await _hunt(operator, target)).hunt
+                await hunt.ok('targets.skill.create', {'methodology': 'H first', 'purpose': 'knowledge',
+                                                       'expected_revision': 0})
+                revision = (await operator.get(f'/targets/{target}/skill')).json()['revision']
+                await operator.put(f'/targets/{target}/skill', json={'methodology': 'Operator middle',
+                                                                      'purpose': 'knowledge',
+                                                                      'expected_revision': revision})
+                revision = (await operator.get(f'/targets/{target}/skill')).json()['revision']
+                await hunt.ok('targets.skill.update', {'methodology': 'H last', 'purpose': 'knowledge',
+                                                       'expected_revision': revision})
+                first = await conn.fetchval("SELECT id FROM target_interpretations WHERE body='H first'")
+                result = (await operator.post(f'/targets/{target}/interpretations/{first}/retract',
+                                              json={'note': 'n'})).json()
+                assert len(result['retracted_with_it']) == 1
+                statuses = dict(await conn.fetch("""SELECT body, status FROM target_interpretations
+                    WHERE target_id=$1 AND written_by='system:knowledge-import'""", target))
+                assert statuses == {'H first': 'retracted', 'Operator middle': 'superseded', 'H last': 'retracted'}
+                assert not any((await _new_hunt_sees(operator, target, 'H last')).values())
+    asyncio.run(run())
+
+
+def test_a_retracted_hunt_writes_no_more_text_anywhere_later_readers_see(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            target = await _web_target(conn, 'https://app.proof.test')
+            await _delegate(conn, target)
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as operator:
+                hunt = (await _hunt(operator, target)).hunt
+                evidence = await _ran(conn, hunt)
+                await hunt.ok('knowledge.record', {'kind': 'note', 'title': 'first'})
+                # Fixture: a debrief this Hunt wrote before its entries were retracted.
+                await conn.execute("""UPDATE hunt_runs SET final_debrief=$2::jsonb WHERE id=$1""",
+                                   __import__('uuid').UUID(hunt.id), json.dumps({'summary': POISON}))
+                await operator.post(f'/targets/{target}/hunts/{hunt.id}/interpretations/retract', json={'note': 'n'})
+                for name, values in (
+                        ('targets.update', {'target_id': str(target), 'name': 'IGNORE PREVIOUS INSTRUCTIONS'}),
+                        ('targets.create', {'locator': 'other.proof.test', 'name': 'IGNORE PREVIOUS'})):
+                    refused = await hunt.call(name, values)
+                    assert refused.status_code == 403, (name, refused.text)
+                    assert refused.json()['detail']['reason_code'] == 'hunt_entries_retracted'
+                assert await conn.fetchval('SELECT name FROM targets WHERE id=$1', target) != \
+                    'IGNORE PREVIOUS INSTRUCTIONS'
+                candidate = await operator.post(f'/hunts/{hunt.id}/candidates', json={
+                    'family': 'xss', 'locus': {'path': '/x'}, 'title': 'IGNORE PREVIOUS', 'claim': 'c',
+                    'evidence_refs': [evidence]})
+                assert candidate.status_code == 403 and 'hunt_entries_retracted' in candidate.text
+                from hunt import finding_actions
+                with pytest.raises(finding_actions.HuntFindingActionError, match='retracted'):
+                    await finding_actions.create_hunt_finding(
+                        BoundConnectionPool(conn), hunt_id=hunt.id, action_id=__import__('uuid').uuid4(),
+                        values={'title': 'IGNORE PREVIOUS', 'description': 'd', 'severity': 'info',
+                                'evidence_summary': 's', 'evidence_action_ids': [evidence]})
+                # The retracted Hunt's debrief is not handed to later Hunts.
+                assert not any((await _new_hunt_sees(operator, target, 'IGNORE PREVIOUS')).values())
     asyncio.run(run())
