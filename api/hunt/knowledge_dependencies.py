@@ -53,6 +53,9 @@ SIGNIFICANCE_RULES: dict[str, str] = {
     "endpoint": ("significant when every inventory row of the route is retired as gone (or the route is "
                  "deleted from the inventory); a route first appearing in the inventory, a new auth state "
                  "or a new parameter shape is minor (the inventory learned more)"),
+    "reuse": ("applicable is not safe to skip: a skip needs the same plain request (method, path, origin, "
+              "session) repeated by a Hunt after the asking Hunt started, every response unchanged, body digest "
+              "included; Scans and the inventory never authorise a skip"),
     "response": ("compared with every later http.request of the same plain request (method, origin, path "
                  "without query, session; nothing else in the request): a different status code, media type or "
                  "JSON key set in any of them is significant; a different body digest is significant for a "
@@ -376,10 +379,13 @@ def canonical_origin(value: Any) -> str | None:
     except ValueError:
         return None
     scheme = parts.scheme.lower()
-    host = (parts.hostname or "").rstrip(".").lower()
-    if scheme not in {"http", "https"} or not host or parts.username is not None or parts.password is not None \
-            or parts.path not in {"", "/"} or parts.query or parts.fragment:
+    host = (parts.hostname or "").lower()
+    # A trailing dot is refused, not folded: "host." and "host" are compared as written elsewhere.
+    if scheme not in {"http", "https"} or not host or host.endswith(".") or parts.username is not None \
+            or parts.password is not None or parts.path not in {"", "/"} or parts.query or parts.fragment:
         return None
+    if ":" in host:  # an IPv6 literal keeps its brackets
+        host = f"[{host}]"
     if port is None or (scheme, port) in {("https", 443), ("http", 80)}:
         return f"{scheme}://{host}"
     return f"{scheme}://{host}:{port}"
@@ -452,7 +458,8 @@ class Observer:
         if distinct:
             # Every distinct (request, response) pair after the point: a later change is never
             # hidden behind later unchanged requests, however many there are.
-            sql = f"""SELECT DISTINCT a.input_summary, t.url AS default_origin,
+            sql = f"""SELECT DISTINCT jsonb_build_object('input', a.input_summary->'input') AS input_summary,
+                    t.url AS default_origin,
                     jsonb_build_object('observations', jsonb_path_query_array(
                         a.result_summary, '$.observations[*] ? (@.kind == "http_observation")')) AS result_summary,
                     NULL::uuid AS id, NULL::timestamptz AS completed_at
@@ -895,44 +902,31 @@ async def evaluate(observer: Observer, recorded: Mapping[str, Any], *,
 
 
 async def reobserved(observer: Observer, recorded: Mapping[str, Any], anchor: Any) -> dict[str, Any]:
-    """Whether a negative result's conditions were positively observed again after ``anchor`` (the
-    start of the Hunt asking), with nothing that differs. Evidence, not age: a later observation is
-    required, however recent the entry is.
+    """Whether a negative result's bound request was made again after ``anchor`` (the start of the
+    Hunt asking) and answered exactly as recorded. Evidence, not age.
 
-    Accepted: the bound request itself was made again (by any Hunt on the asset) after the anchor and
-    every such response equals the recorded one, body included; or a Scan of the same target
-    completed after the anchor recorded exactly the recorded technologies and banners, and the
-    endpoint inventory saw the route after the anchor.
+    Only the same plain request identity (method, path, origin, session) repeated by a Hunt counts,
+    and every such response must equal the recorded one, body digest included. Scans and the
+    endpoint inventory never re-observe the behaviour under test: they feed applicability (and
+    needs_revalidation), never a skip.
     """
     moment = _time(anchor)
     if moment is None or not isinstance(recorded, Mapping):
         return {"observed": False, "reason": "no Hunt context to re-observe from"}
     binding = recorded.get("binding") if isinstance(recorded.get("binding"), Mapping) else {}
-    items = list(recorded.get("items") or ())
-    for item in items:
+    for item in recorded.get("items") or ():
         if item.get("type") != "response" or item.get("origin") != binding.get("origin") \
                 or item.get("path") != binding.get("path") or item.get("method") != binding.get("method") \
                 or (item.get("session_ref") or None) != binding.get("session_ref"):
             continue
         found, count = await _response_changes(observer, item, after=moment, exclude=item["observed"].get("action_id"),
                                                body_significant=True)
-        if count and not found:
-            return {"observed": True, "by": "the same request after this Hunt started", "responses": count}
         if found:
             return {"observed": False, "reason": "the same request answered differently after this Hunt started"}
-    deployment = next((item for item in items if item.get("type") == "deployment"), None)
-    endpoint = next((item for item in items if item.get("type") == "endpoint" and item.get("method")), None)
-    if deployment is not None and endpoint is not None:
-        scan = await observer.deployment(after=moment)
-        route = await observer.endpoint(endpoint.get("method"), endpoint["path"])
-        last_seen = route.get("_last_seen_at")
-        if scan is not None and scan.get("technologies") == deployment["observed"].get("technologies") \
-                and scan.get("server_banners_sha256") == deployment["observed"].get("server_banners_sha256") \
-                and route.get("present") and last_seen is not None and _time(last_seen) > moment:
-            return {"observed": True, "by": "a Scan after this Hunt started saw the same deployment and route",
-                    "scan_id": scan.get("scan_id")}
-    return {"observed": False, "reason": "not observed again since this Hunt started: repeat the request (or a "
-                                         "Scan must see the same deployment and route) before it can be reused"}
+        if count:
+            return {"observed": True, "by": "the same request after this Hunt started", "responses": count}
+    return {"observed": False, "reason": "the bound request was not repeated since this Hunt started: repeat the "
+                                         "same plain request (method, path, origin, session) before it can be reused"}
 
 
 def public_dependencies(recorded: Any) -> dict[str, Any]:

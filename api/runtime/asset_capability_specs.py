@@ -98,8 +98,8 @@ def asset_capability_specs(spec, schema, kinds):
          'whose conditions match a plain request (only method, path, origin and session_ref) your own cited '
          'http.request made: the origin, method, route (each placeholder filled by exactly one named object), its '
          'session_ref as the only principal or anonymous, a technique starting with http.request, and no other '
-         'condition fields; and only when that request (or a Scan of the same deployment and route) was observed '
-         'again, unchanged, since this Hunt started. Unknown is never unchanged. Skip is advice, never a block.'),
+         'condition fields; and only when that same request was repeated since this Hunt started and every response '
+         'was unchanged, body included. Applicable is not safe to skip; skip is rare by design and only advice.'),
          {'conditions':conditions},('conditions',)),
         ('knowledge.changes',('What changed on this target since a point, from existing records (endpoint inventory, '
          'Scans, earlier http.request responses, services, subdomain discovery, findings, Hunts), with the '

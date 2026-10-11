@@ -118,7 +118,7 @@ def test_a_bound_applicable_negative_is_reused_until_a_significant_change_and_st
                 # Applicable is not enough: nothing has observed it again since this Hunt started.
                 answer = await _check(hunt, _negative(evidence)['conditions'])
                 assert answer['skip'] is False
-                assert 'not observed again' in answer['identical'][0]['reuse']['reason']
+                assert 'not repeated' in answer['identical'][0]['reuse']['reason']
                 # The same request, repeated in this Hunt, answers exactly the same: now it may be reused.
                 await _request(conn, hunt.id)
                 answer = await _check(hunt, _negative(evidence)['conditions'])
