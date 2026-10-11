@@ -11,11 +11,14 @@ whenever anything inside it was shortened:
 * the objective;
 * an effective authority summary: scope, granted permissions, target delegation, approval
   requirements and budget;
-* counts: knowledge available on the target, pending instruction proposals, unresolved work.
+* counts: knowledge available on the target, pending instruction proposals, unresolved work;
+* interpretations: counts by kind and negative state, reopened dismissals, and a few headlines
+  (open next steps, inconclusive experiments). Titles quoted from the target are withheld here.
 
 Counts are read live (``with_live_briefing``) where a connection is at hand: the start response,
-``GET /hunts/{id}`` and the summary query. Proposal text and advisory knowledge text never appear
-here; only their counts and how to read them.
+``GET /hunts/{id}`` and the summary query. Proposal text, advisory knowledge text and interpretation
+bodies never appear here; only their counts and how to read them. Interpretation headlines carry
+short agent-written titles, labelled as advisory and cut first when the briefing is over its limit.
 """
 from __future__ import annotations
 
@@ -219,6 +222,12 @@ def bound_briefing(briefing: dict[str, Any], limit: int = MAX_BRIEFING_BYTES) ->
         return briefing
     result = json.loads(json.dumps(briefing, default=str))
     trimmed = result.setdefault("trimmed", [])
+    # Interpretation headlines (agent-written titles) give way first; their counts stay.
+    interpretations = result.get("interpretations") if isinstance(result.get("interpretations"), dict) else {}
+    for key in INTERPRETATION_HEADLINES:
+        if _size(result) > limit and interpretations.get(key):
+            interpretations[key] = []
+            trimmed.append(f"interpretations.{key} removed to fit the size limit; query kind=interpretations")
     unconfirmed = result.get("unconfirmed_instructions") or {}
     # Advisory text gives way before operator guidance does.
     for key in ("text", "leading_text"):
@@ -332,7 +341,12 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
             "counts_capped_at": 1000,
         }
 
+    async def interpretations() -> dict[str, Any]:
+        from .interpretations import briefing_section
+        return await briefing_section(conn, target, device=device)
+
     await section("knowledge", knowledge)
+    await section("interpretations", interpretations)
     await section("proposals", proposals)
     await section("unresolved", unresolved)
     await section("delegation", delegation)
@@ -350,6 +364,7 @@ async def with_live_briefing(conn: Any, result: dict[str, Any], row: Mapping[str
     if isinstance(knowledge, dict) and isinstance(knowledge.get("counts"), dict):
         knowledge = {**knowledge, "advisory_notes": _advisory_notes(row)}
     briefing["knowledge"] = knowledge
+    briefing["interpretations"] = _bounded_interpretations(live.get("interpretations"), briefing)
     briefing["proposals"] = live.get("proposals")
     briefing["unresolved"] = live.get("unresolved")
     delegation = live.get("delegation")
@@ -360,6 +375,23 @@ async def with_live_briefing(conn: Any, result: dict[str, Any], row: Mapping[str
     briefing["live"] = {"included": True}
     result["briefing"] = bound_briefing(briefing)
     return result
+
+
+INTERPRETATION_HEADLINES = ("open_next_steps", "inconclusive_experiments")
+
+
+def _bounded_interpretations(section: Any, briefing: dict[str, Any]) -> Any:
+    """Interpretation counts and headlines within their own share of the budget; cuts are stated."""
+    from .interpretations import BRIEFING_SECTION_BYTES
+    if not isinstance(section, dict) or _size(section) <= BRIEFING_SECTION_BYTES:
+        return section
+    section = dict(section)
+    for key in INTERPRETATION_HEADLINES:
+        if _size(section) > BRIEFING_SECTION_BYTES and section.get(key):
+            section[key] = []
+            briefing.setdefault("trimmed", []).append(
+                f"interpretations.{key} removed to fit the section's size limit; query kind=interpretations")
+    return section
 
 
 def _advisory_notes(row: Mapping[str, Any]) -> dict[str, Any]:

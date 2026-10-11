@@ -148,6 +148,8 @@ MERGE_PLAIN_TABLES: list[str] = [
     "finding_exceptions", "finding_verifications", "model_intake_admissions",
     "refuter_reviews", "research_episodes", "scan_campaigns", "scans", "schedules",
     "target_invariant_contracts",
+    # Interpretations (and finding dismissals) and instruction proposals follow their target.
+    "target_interpretations", "target_instruction_proposals",
 ]
 
 

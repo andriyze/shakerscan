@@ -157,7 +157,7 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
                     assert result['observation']['subject_target_id'] == str(home)
                     continue
                 if name in {'targets.skill.propose', 'targets.actions.create', 'targets.actions.update',
-                            'targets.actions.delete'}:
+                            'targets.actions.delete', 'knowledge.record', 'knowledge.check_experiment'}:
                     # Advisory and authority-free: an opt-out does not stop it, its own input checks do.
                     # Saved-action writes without instruction_changes become proposals the same way.
                     with pytest.raises(HTTPException) as invalid:

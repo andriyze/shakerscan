@@ -2533,3 +2533,50 @@ CREATE INDEX IF NOT EXISTS idx_target_instruction_proposals_hunt
     ON target_instruction_proposals(hunt_run_id) WHERE hunt_run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_target_instruction_proposals_pending
     ON target_instruction_proposals(created_at) WHERE status = 'pending';
+
+-- Attributed interpretations and narrow negative results (api/hunt/interpretations.py).
+-- The same definition the startup migration installs.
+CREATE TABLE IF NOT EXISTS target_interpretations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('observation','hypothesis','explanation','next_step','note','negative_result')),
+    negative_state TEXT CHECK (negative_state IS NULL OR negative_state IN ('experiment_completed_negative','experiment_inconclusive','hypothesis_refuted','finding_dismissed')),
+    title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
+    body TEXT NOT NULL DEFAULT '' CHECK (length(body) <= 12000),
+    provenance TEXT NOT NULL CHECK (provenance IN ('observed','inferred','quoted_from_target')),
+    written_by TEXT NOT NULL CHECK (written_by ~ '^(hunt|operator|system):' AND length(written_by) <= 200),
+    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
+    agent_label TEXT CHECK (agent_label IS NULL OR length(agent_label) <= 80),
+    model_label TEXT CHECK (model_label IS NULL OR length(model_label) <= 120),
+    observed_at TIMESTAMPTZ,
+    evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(evidence_refs) = 'array'),
+    conditions JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(conditions) = 'object'),
+    conditions_sha256 TEXT NOT NULL CHECK (conditions_sha256 ~ '^[0-9a-f]{64}$'),
+    experiment_key TEXT CHECK (experiment_key IS NULL OR experiment_key ~ '^[0-9a-f]{64}$'),
+    subject JSONB CHECK (subject IS NULL OR jsonb_typeof(subject) = 'object'),
+    finding_id UUID REFERENCES findings(id) ON DELETE CASCADE,
+    dismissal_reason TEXT CHECK (dismissal_reason IS NULL OR dismissal_reason IN ('false_positive','accepted_risk','duplicate')),
+    supersedes UUID REFERENCES target_interpretations(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','superseded','retracted','reopened')),
+    status_changed_by TEXT CHECK (status_changed_by IS NULL OR length(status_changed_by) <= 200),
+    status_changed_at TIMESTAMPTZ,
+    status_note TEXT CHECK (status_note IS NULL OR length(status_note) <= 2000),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT target_interpretations_negative_shape CHECK ((kind = 'negative_result') = (negative_state IS NOT NULL)),
+    CONSTRAINT target_interpretations_dismissal_is_human CHECK (
+        (negative_state = 'finding_dismissed') IS NOT TRUE
+        OR (written_by LIKE 'operator:%' AND hunt_run_id IS NULL AND finding_id IS NOT NULL
+            AND dismissal_reason IS NOT NULL)),
+    CONSTRAINT target_interpretations_dismissal_fields CHECK (
+        negative_state = 'finding_dismissed' OR (finding_id IS NULL AND dismissal_reason IS NULL)),
+    CONSTRAINT target_interpretations_reopen_shape CHECK (
+        status <> 'reopened' OR negative_state = 'finding_dismissed')
+);
+CREATE INDEX IF NOT EXISTS idx_target_interpretations_target
+    ON target_interpretations(target_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_target_interpretations_hunt
+    ON target_interpretations(hunt_run_id) WHERE hunt_run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_target_interpretations_experiment
+    ON target_interpretations(target_id, experiment_key) WHERE experiment_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_target_interpretations_one_dismissal
+    ON target_interpretations(finding_id) WHERE negative_state = 'finding_dismissed' AND status = 'active';

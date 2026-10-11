@@ -21403,6 +21403,11 @@ def test_bulk_finding_update_reports_rows_actually_changed(monkeypatch):
             assert len(ids) == 2  # duplicate request ID is de-duplicated
             return [{"id": ids[0], "target_id": None, "device_target_id": None}]  # second UUID does not exist
 
+        async def execute(self, query, *args):
+            # A status change ends any recorded dismissal of the changed findings.
+            assert "target_interpretations" in query
+            return "UPDATE 0"
+
     class Acquire:
         async def __aenter__(self):
             return Conn()
