@@ -5386,7 +5386,10 @@ def test_device_http_request_is_pinned_bounded_and_rate_limited():
     assert "_device_request_pinned_http" in branch
     assert '"redirects_followed": False' in branch
     assert "body_sha256" in branch and "body_preview" in branch
-    assert "_device_public_response_headers" in branch
+    # The public header choice, each value masked whole before it is cut (2.9.0).
+    assert "_device_planner_response_headers" in branch
+    assert "_device_public_response_headers" in definition_source("_device_planner_response_headers")
+    assert "keyed_response_digest(body)" in branch
     assert "_device_agent_add_evidence" in branch
 
 

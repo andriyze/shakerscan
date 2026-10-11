@@ -22,6 +22,7 @@ from http_experiment import (
     _mapping_contains_control_character,
     _origin,
     _render_variables,
+    read_capped_body,
     _semantically_populated,
     _sensitive_name,
     _sensitive_object_key,
@@ -1481,23 +1482,15 @@ async def execute_workflow(
                     request_count += 1
                     request_started = time.perf_counter()
                     http_response = await client.send(request, stream=True)
-                    chunks: list[bytes] = []
-                    received = 0
                     try:
-                        async for chunk in http_response.aiter_bytes():
-                            remaining = MAX_BODY_BYTES + 1 - received
-                            if remaining <= 0:
-                                break
-                            chunks.append(chunk[:remaining])
-                            received += min(len(chunk), remaining)
-                            if received > MAX_BODY_BYTES:
-                                break
+                        body, lookahead, ended = await read_capped_body(http_response)
                     finally:
                         await http_response.aclose()
-                    body = b"".join(chunks)
                     response = response_summary(
                         http_response,
                         body,
+                        lookahead=lookahead,
+                        lookahead_complete=ended,
                         selected_json_paths=step.get("select_json") or [],
                         elapsed_ms=round((time.perf_counter() - request_started) * 1000),
                     )

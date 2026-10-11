@@ -16,6 +16,7 @@ import urllib.parse
 import action_scope
 import agent_tools
 from http_experiment import (
+    LOOKAHEAD_WAIT_SECONDS,
     MAX_BODY_BYTES,
     MAX_REDIRECT_HOPS,
     REDIRECT_STATUSES,
@@ -24,7 +25,8 @@ from http_experiment import (
     validate_next_hop,
 )
 from runtime.archive_body_masking import (
-    URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, mask_public_http_urls,
+    CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
+    mask_public_http_urls,
 )
 from runtime.models import TargetBinding
 from runtime.target_bound_socket import FrozenTargetSocketFactory
@@ -86,6 +88,9 @@ async def _read_bounded_response(
     *,
     deadline: float,
     body_limit: int = MAX_BODY_BYTES,
+    lookahead: bytearray | None = None,
+    lookahead_limit: int = 0,
+    lookahead_state: dict[str, bool] | None = None,
 ) -> tuple[bytes, str, int, bool, bool]:
     """Read at most one byte past ``body_limit`` under one absolute deadline.
 
@@ -93,27 +98,54 @@ async def _read_bounded_response(
     timeout forever. The outer asyncio deadline bounds total occupation, while observing one
     byte past the body ceiling proves truncation without draining an unbounded response.
     Returned length and digest describe observed bytes; ``truncated`` says they are a prefix.
+    ``lookahead`` receives up to ``lookahead_limit`` bytes past the body: read only to mask the
+    body where it is cut, never recorded or digested. ``lookahead_state["complete"]`` says whether
+    the stream ended within what was read; when it did not, the masking withholds what the cut
+    may have split.
     """
+    import httpx
+
     retained = bytearray()
     observed = bytearray()
     truncated = False
     deadline_exceeded = False
     remaining_seconds = max(0.001, deadline - time.perf_counter())
+    chunks = response.aiter_bytes().__aiter__()
     try:
         async with asyncio.timeout(remaining_seconds):
-            async for chunk in response.aiter_bytes():
+            async for chunk in chunks:
                 remaining_observation = max(0, body_limit + 1 - len(observed))
                 if remaining_observation:
                     observed.extend(chunk[:remaining_observation])
                 remaining_body = max(0, body_limit - len(retained))
                 if remaining_body:
                     retained.extend(chunk[:remaining_body])
+                if lookahead is not None and len(chunk) > remaining_body:
+                    lookahead.extend(chunk[remaining_body:][:max(0, lookahead_limit - len(lookahead))])
                 if len(observed) > body_limit:
                     truncated = True
                     break
     except TimeoutError:
         truncated = True
         deadline_exceeded = True
+    ended = False
+    if truncated and not deadline_exceeded and lookahead is not None and len(lookahead) < lookahead_limit:
+        # Within its own short wait, and never past the request deadline: a stream that pauses
+        # after the ceiling (a long poll, server-sent events) ends the lookahead, not the request.
+        wait = min(LOOKAHEAD_WAIT_SECONDS, deadline - time.perf_counter())
+        if wait > 0:
+            try:
+                async with asyncio.timeout(wait):
+                    async for chunk in chunks:
+                        lookahead.extend(chunk[:lookahead_limit - len(lookahead)])
+                        if len(lookahead) >= lookahead_limit:
+                            break
+                    else:
+                        ended = True
+            except (TimeoutError, OSError, httpx.HTTPError):
+                pass  # a pause or an error past the ceiling ends the lookahead, not the request
+    if lookahead_state is not None:
+        lookahead_state["complete"] = not truncated or ended
     digest = hashlib.sha256(bytes(observed)).hexdigest()
     return bytes(retained), digest, len(observed), truncated, deadline_exceeded
 
@@ -547,6 +579,8 @@ async def execute_bound_http_request(
     last_connect_error: Exception | None = None
     response = None
     body = b""
+    body_lookahead = bytearray()
+    lookahead_state: dict[str, bool] = {"complete": True}
     final_url = url
     request_deadline = time.perf_counter() + max(0.001, float(timeout))
     try:
@@ -608,6 +642,7 @@ async def execute_bound_http_request(
                         "all frozen target addresses failed before connect"
                     ) from last_connect_error
                 request_view["pinned_address"] = pinned_address
+                del body_lookahead[:]  # this hop's own
                 try:
                     (
                         body,
@@ -619,6 +654,9 @@ async def execute_bound_http_request(
                         response,
                         deadline=request_deadline,
                         body_limit=max(1, min(int(response_body_limit), MAX_PRIVATE_BODY_BYTES)),
+                        lookahead=body_lookahead,
+                        lookahead_limit=CUT_LOOKAHEAD_CHARS,
+                        lookahead_state=lookahead_state,
                     )
                 finally:
                     await response.aclose()
@@ -770,6 +808,9 @@ async def execute_bound_http_request(
     summary = response_summary(
         response,
         body,
+        lookahead=bytes(body_lookahead),
+        lookahead_complete=lookahead_state["complete"],
+        body_truncated=bool(body_truncated),
         selected_headers=[
             str(name).strip().lower()
             for name in selected_headers or []

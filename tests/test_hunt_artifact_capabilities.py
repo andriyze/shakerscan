@@ -92,7 +92,8 @@ def test_artifact_window_redacts_jwt_and_reports_range_decision(monkeypatch):
         target=binding,
     ))
 
-    assert seen["headers"] == {"Range": "bytes=0-99"}  # window 10-99 plus its preceding context
+    # window 10-99, its preceding context, and the lookahead that masks its end
+    assert seen["headers"] == {"Range": f"bytes=0-{99 + 16_384}"}
     assert result["ok"] is True
     sample = result["observation"]["text_sample"]
     assert "***" in sample

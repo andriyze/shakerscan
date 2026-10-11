@@ -49,6 +49,10 @@ try:
     from scanner_tools.request_collections import validate_request_collection as validate_device_request_collection
     from runtime.credential_migration import LegacyCredentialMigrationError
     from runtime.credential_store import CredentialStoreError
+    from runtime.archive_body_masking import (
+        bounded_masked_text, mask_body_text, mask_cut_bytes, masked_header_value,
+    )
+    from capabilities.secret_material import keyed_response_digest
     from scanner_tools import device_advisories, device_shell
     from scanner_tools.device_safety import safety_profile_catalog, validate_safety_request
     from scanner_tools.device_posture import DEVICE_PROFILES, normalize_device_locator
@@ -74,6 +78,10 @@ except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.request_collections import validate_request_collection as validate_device_request_collection
     from ..runtime.credential_migration import LegacyCredentialMigrationError
     from ..runtime.credential_store import CredentialStoreError
+    from ..runtime.archive_body_masking import (
+        bounded_masked_text, mask_body_text, mask_cut_bytes, masked_header_value,
+    )
+    from ..capabilities.secret_material import keyed_response_digest
     from ..secret_store import decrypt_secret, encrypt_secret, encryption_enabled
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from scanner.redaction import redact_text
@@ -2801,7 +2809,7 @@ async def _execute_device_capability_operation(
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"device origin request failed: {type(exc).__name__}") from exc
         raw_body = bytes(response.get("body") or b"")
-        body = raw_body[:16 * 1024]
+        body = raw_body[:DEVICE_HTTP_BODY_BYTES]
         try:
             reason_phrase = http.HTTPStatus(int(response.get("status") or 0)).phrase
         except ValueError:
@@ -2814,13 +2822,15 @@ async def _execute_device_capability_operation(
             "pinned_address": origin["connect_address"],
             "status": int(response.get("status") or 0),
             "reason": reason_phrase,
-            "headers": _device_public_response_headers(dict(response.get("headers") or {})),
-            "body_sha256": hashlib.sha256(body).hexdigest(),
+            "headers": _device_planner_response_headers(dict(response.get("headers") or {})),
+            # Keyed: a plain digest is an offline guessing oracle for whatever the body holds.
+            "body_sha256": keyed_response_digest(body),
             "body_bytes": len(raw_body),
             "body_truncated": len(raw_body) > len(body) or bool(response.get("truncated")),
             "body_preview": _redact_device_http_body_preview(
-                args["path"],
-                body.decode("utf-8", "replace"),
+                args["path"], body, raw_body[len(body):],
+                # The transport's own cap cut the body: what follows is not all there is.
+                after_complete=not response.get("truncated"),
             ),
             "redirects_followed": False,
             "elapsed_ms": response.get("elapsed_ms"),
@@ -3313,8 +3323,28 @@ def _redact_hunt_path_query(value: Any) -> str:
     )[:2_000]
 
 
-def _redact_device_http_body_preview(path: str, preview: str) -> str:
-    """Remove request query values reflected by a device from its body preview."""
+DEVICE_HTTP_BODY_BYTES = 16 * 1024
+
+
+def _device_planner_response_headers(headers: dict[str, str]) -> dict[str, str]:
+    """The public response headers (``public_device_response_headers`` chooses which), each
+    value masked whole before it is cut: a CSP ``report-uri`` token, a userinfo password."""
+    public = _device_public_response_headers(headers)
+    raw = {str(key).lower(): value for key, value in headers.items()}
+    return {
+        key: value if value == "<redacted>" or str(key).lower() not in raw
+        # A Location is already the public URL (every query value redacted): masked as it is.
+        else masked_header_value(key, value, 1000) if str(key).lower() == "location"
+        else masked_header_value(key, raw[str(key).lower()], 1000)
+        for key, value in public.items()
+    }
+
+
+def _redact_device_http_body_preview(path: str, body: bytes | str, after: bytes = b"", *,
+                                     after_complete: bool = True) -> str:
+    """The body preview the device agent's model reads: request query values the device
+    reflects, then the body masking every planner view applies (``mask_body_text``), over the
+    whole read body and what followed it before anything is cut."""
     try:
         query_pairs = urllib.parse.parse_qsl(
             urllib.parse.urlsplit(str(path or "")).query,
@@ -3322,11 +3352,18 @@ def _redact_device_http_body_preview(path: str, preview: str) -> str:
         )[:50]
     except ValueError:
         query_pairs = []
-    safe = str(preview or "")
-    for _, value in sorted(query_pairs, key=lambda item: len(item[1]), reverse=True):
-        if value:
-            safe = safe.replace(value, "<redacted>")
-    return redact_text(safe)[:device_agent.DEVICE_HTTP_REQUEST_BODY_PREVIEW_BYTES]
+    reflected = sorted({value for _, value in query_pairs if value}, key=len, reverse=True)
+
+    def mask(text: str) -> str:
+        for value in reflected:
+            text = text.replace(value, "<redacted>")
+        return redact_text(mask_body_text(text))
+
+    data = body.encode("utf-8") if isinstance(body, str) else bytes(body)
+    return bounded_masked_text(mask_cut_bytes(data, after, mask, after_complete=after_complete),
+                               device_agent.DEVICE_HTTP_REQUEST_BODY_PREVIEW_BYTES)
+
+
 async def _verify_device_firmware_candidate(
     *, device_target_id: uuid.UUID, candidate_id: uuid.UUID, created_by: str,
 ) -> dict[str, Any]:

@@ -324,7 +324,8 @@ async def _read_response(reader: asyncio.StreamReader, timeout: float, *, expect
                 body += await asyncio.wait_for(reader.readexactly(wanted - len(body)), timeout=timeout)
             except asyncio.IncompleteReadError as exc:
                 body += exc.partial
-        truncated = expected > MAX_RESPONSE_BYTES or len(body) > MAX_RESPONSE_BYTES
+        # A body the peer closed short of its Content-Length is cut, not complete.
+        truncated = expected > MAX_RESPONSE_BYTES or len(body) > MAX_RESPONSE_BYTES or len(body) < wanted
     elif "chunked" in headers.get("transfer-encoding", "").lower():
         chunks = bytearray()
         while len(chunks) <= MAX_RESPONSE_BYTES:
@@ -336,6 +337,7 @@ async def _read_response(reader: asyncio.StreamReader, timeout: float, *, expect
             try:
                 size = int(size_text, 16)
             except ValueError:
+                truncated = True  # a malformed chunk line: what follows was not read
                 break
             if size == 0:
                 break
@@ -356,16 +358,20 @@ async def _read_response(reader: asyncio.StreamReader, timeout: float, *, expect
         truncated = truncated or len(body) > MAX_RESPONSE_BYTES
     else:
         chunks = bytearray(body)
+        # Only the peer's close ends such a body: a pause ends the read, and what was read is
+        # reported as cut, so the masking does not treat the cut text as the whole body.
+        ended = False
         while len(chunks) <= MAX_RESPONSE_BYTES:
             try:
                 chunk = await asyncio.wait_for(reader.read(min(64 * 1024, MAX_RESPONSE_BYTES + 1 - len(chunks))), timeout=0.5)
             except asyncio.TimeoutError:
                 break
             if not chunk:
+                ended = True
                 break
             chunks.extend(chunk)
         body = bytes(chunks)
-        truncated = len(body) > MAX_RESPONSE_BYTES
+        truncated = len(body) > MAX_RESPONSE_BYTES or not ended
     return status, headers, body[:MAX_RESPONSE_BYTES], truncated
 
 
