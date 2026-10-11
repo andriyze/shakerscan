@@ -376,11 +376,34 @@ def mask_secret(value: str) -> str:
     return f"{value[:4]}...{value[-4:]}"
 
 
+_SENSITIVE_QUERY_VALUE_RE = re.compile(
+    r"(?i)([?&;#](?:" + "|".join(
+        "[-_]".join(re.escape(part) for part in key.replace("_", "-").split("-"))
+        for key in sorted(SENSITIVE_QUERY_KEYS, key=len, reverse=True)
+    ) + r")=)[^&#\s\"'<>]*")
+
+
 def redact_url_credentials(value: str) -> str:
     """Mask userinfo passwords and sensitive query params in a reference URL.
 
-    Non-URL strings are returned unchanged.
+    Non-URL strings are returned unchanged. Total: text that only looks like a URL
+    (``scheme://host[:port]``, ``http://[::1``, a port out of range) is never an error; it is
+    masked by the text rules instead (the userinfo reader and the sensitive query names).
     """
+    try:
+        return _redact_parsed_url_credentials(value)
+    except ValueError:
+        return _redact_unparsed_url_credentials(value)
+
+
+def _redact_unparsed_url_credentials(value: str) -> str:
+    """The text rules for what ``urllib`` cannot parse: a userinfo password and the value of
+    every sensitive query parameter are withheld (erring to withholding)."""
+    value = _mask_url_userinfo(value)
+    return _SENSITIVE_QUERY_VALUE_RE.sub(lambda match: match.group(1) + MASK, value)
+
+
+def _redact_parsed_url_credentials(value: str) -> str:
     parsed = urllib.parse.urlparse(value)
     if not parsed.scheme or not parsed.netloc:
         return value

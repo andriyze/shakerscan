@@ -350,3 +350,64 @@ def test_prose_and_roles_are_not_read_as_credentials(text):
 def test_a_bearer_credential_in_a_selected_value_is_withheld():
     assert TOKEN not in masking.mask_selected_string(f"Bearer {TOKEN}")
     assert "abcDEF123456xyz" not in masking.mask_selected_string("Bearer abcDEF123456xyz")
+
+
+# --- Redaction is total: text shaped like a broken URL never raises --------------------------
+
+_URL_ATOMS = ("x://", "scheme://", "http://", "https://", "redis://", "host", "[", "]", ":", "port", "[::1",
+              "@", "u:pw", ":99999", ":abc", "/", "?", "#", "token=", "access_token=", "&", "%", "%40",
+              "%5B", " ", "\n", '"', "'", "{", "}", "é", "\x00")
+BROKEN_URLS = [
+    "x://host[", "scheme://host[:port]", "http://[::1", "http://u:pw@h:99999/?token=abc",
+    "http://u:pw@h:abc/", "The origin must be scheme://host[:port] with nothing else.",
+    "origin: scheme://host[:port] of the service", "http://[::1]:99999/x?token=a",
+]
+
+
+def _hostile_url_strings(count: int, seed: int) -> list[str]:
+    rng = random.Random(seed)
+    return BROKEN_URLS + ["".join(rng.choice(_URL_ATOMS) for _ in range(rng.randint(1, 24)))
+                          for _ in range(count)]
+
+
+def test_redaction_entry_points_never_raise_on_url_shaped_text():
+    import api.api as api_module
+    from scanner.redaction import redact_sensitive, redact_text, redact_url_credentials
+    from scanner.scanner_tools.url_redaction import redact_url
+
+    entry_points = (
+        redact_url_credentials, redact_text, redact_url,
+        lambda text: redact_sensitive({"description": text, "nested": [text]}, redact_strings=True, scrub_text=True),
+        api_module._redact_agent_payload, api_module._redact_agent_text,
+        masking.mask_body_text, masking.mask_url_secrets, masking.withhold_url_userinfo,
+        lambda text: masking.bounded_public_url(text, 200),
+        masking.mask_url_userinfo_redacted,
+    )
+    for text in _hostile_url_strings(3_000, seed=4051):
+        for entry in entry_points:
+            entry(text)  # raises nothing
+        with masking.collecting_withheld_values(masking.WithheldValues(ACTION)):
+            masking.mask_body_text(text)
+            masking.bounded_public_url(text, 200)
+
+
+def test_an_unparseable_url_still_has_its_credentials_withheld():
+    from scanner.redaction import redact_url_credentials
+
+    shown = redact_url_credentials("http://u:Pw0rdSecret9@h:99999/?access_token=Tk0123456789&x=1")
+    assert "Pw0rdSecret9" not in shown and "Tk0123456789" not in shown and "x=1" in shown
+
+
+def test_a_record_with_a_broken_url_shaped_description_exports():
+    from api.runtime.http_archive_reader import export_document
+
+    row = {"id": "00000000-0000-4000-8000-0000000009ba", "plane": "hunt", "sequence": 0,
+           "hunt_run_id": ACTION, "hunt_action_id": ACTION, "capability_name": "http.request",
+           "method": "GET", "url": "https://h.fixture.test/x", "status_code": 200,
+           "request_headers": {"x-origin": "scheme://host[:port]"}, "request_body": None,
+           "response_headers": {"link": "<http://[::1>; rel=next"},
+           "response_body": "origin: scheme://host[:port] http://u:pw@h:99999/",
+           "metadata_json": {"description": "The origin must be scheme://host[:port]"}}
+    for redaction in ("redacted", "raw"):
+        export_document([row], export_format="transactions", redaction=redaction,
+                        owner={"hunt_id": ACTION}, total=1)
