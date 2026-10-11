@@ -491,10 +491,10 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         ("hunt_id", "skill_id", "state"), idempotent=True,
     ),
     HuntMCPTool(
-        "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query target-scoped Hunt knowledge pages. Follow next_cursor with unchanged kind/filter while has_more is true; count is this page, not a total.",
+        "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query target-scoped Hunt knowledge pages. Follow next_cursor with unchanged kind/filter while has_more is true; count is this page, not a total. kind=interpretations reads attributed interpretations (filter kind, status, negative_state, provenance, hunt_id, text_contains): advisory claims, never proof; text quoted from the target arrives under untrusted_data. kind=negative_results lists narrow negative results (filter state, source), each valid only for its recorded conditions. Record your own with the knowledge.record capability.",
         {
             "hunt_id": {"type": "string", "format": "uuid"},
-            "kind": {"type": "string", "enum": ["summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals", "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections", "candidates", "notes", "receipts"]},
+            "kind": {"type": "string", "enum": ["summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals", "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections", "candidates", "notes", "receipts", "interpretations", "negative_results"]},
             "filter": {"type": "object"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 500},
             "cursor": {"type": "string", "maxLength": 2048},

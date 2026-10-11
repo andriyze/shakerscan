@@ -29,6 +29,9 @@ QUERIES = {
     "scans": QuerySpec("scans", "status, progress, current_phase, findings_count, created_at", "created_at", ("status",)),
     "collections": QuerySpec("request_collections", "name, format, request_count, safe_request_count, potentially_mutating_request_count, payload_sha256, updated_at", "updated_at"),
     "candidates": QuerySpec("investigation_candidates", "family, canonical_locus, title, claim, claimed_severity, evidence_refs, verifier_contract_id, status, last_seen_at", "last_seen_at", ("family", "status")),
+    # Attributed interpretations and recorded negative results (hunt/interpretations.py); rows are
+    # projected for Hunts: retracted text withheld, target-quoted text inside an untrusted envelope.
+    "interpretations": QuerySpec("target_interpretations", "target_id, kind, negative_state, title, body, provenance, written_by, hunt_run_id, agent_label, model_label, observed_at, evidence_refs, conditions, conditions_sha256, experiment_key, subject, finding_id, dismissal_reason, supersedes, status, status_changed_by, status_changed_at, status_note, created_at", "created_at", ("kind", "status", "negative_state", "provenance", "hunt_id", "text_contains")),
     "services": QuerySpec("device_services", "transport, port, state, service_name, product, version, encrypted, web_origin, policy_disposition, last_seen_at", "last_seen_at", ("state",)),
 }
 
@@ -39,7 +42,7 @@ COUNTED_KINDS = ("endpoints", "findings", "hypotheses", "principals", "graph_nod
                  "scans", "collections", "candidates", "services")
 #: Counts stop here; a capped count is reported as at least this many.
 MAX_COUNT = 1000
-DEVICE_KINDS = frozenset({"scans", "findings", "collections", "candidates", "services"})  # supported by query_knowledge_page
+DEVICE_KINDS = frozenset({"scans", "findings", "collections", "candidates", "services", "interpretations"})  # supported by query_knowledge_page
 
 
 def _scope_where(kind: str, device: bool, bind: Any) -> list[str]:
@@ -49,7 +52,7 @@ def _scope_where(kind: str, device: bool, bind: Any) -> list[str]:
     owner = bind("target")
     if kind == "collections":
         where = [f"target_collection_visible(id,{owner})"]
-    elif device and kind in {"findings", "scans", "candidates"}:
+    elif device and kind in {"findings", "scans", "candidates", "interpretations"}:
         where = [f"target_id IN (SELECT id FROM targets WHERE id={owner} OR asset_owner_id={owner})"]
     else:
         where = [f"target_id={owner}"]

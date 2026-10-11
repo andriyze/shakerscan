@@ -737,6 +737,76 @@ export const HUNT_START_CONTRACT = {
     {
       "call": {
         "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/knowledge.record"
+      },
+      "description": "Record one attributed interpretation of this target: an observation, hypothesis, explanation, next_step or note, or a narrow negative_result (experiment_completed_negative, experiment_inconclusive or hypothesis_refuted). Cite existing records in evidence_refs (required for observations, explanations and negative results) and the exact conditions a negative result covers; never broaden it. Advisory: it is not proof, changes no finding and grants nothing. Only an operator dismisses a finding. At most 200 per Hunt.",
+      "input": {
+        "fields": [
+          "kind",
+          "negative_state",
+          "title",
+          "body",
+          "provenance",
+          "evidence_refs",
+          "conditions",
+          "subject",
+          "supersedes",
+          "observed_at",
+          "agent",
+          "model"
+        ],
+        "required": [
+          "kind",
+          "title"
+        ]
+      },
+      "name": "knowledge.record",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "knowledge.record",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "knowledge.record"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/knowledge.check_experiment"
+      },
+      "description": "Look up what is recorded about one exact experiment on this target (every condition equal) before repeating it. Nothing is skipped automatically while applicability is unknown.",
+      "input": {
+        "fields": [
+          "conditions"
+        ],
+        "required": [
+          "conditions"
+        ]
+      },
+      "name": "knowledge.check_experiment",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "knowledge.check_experiment",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "knowledge.check_experiment"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/targets.create"
       },
       "description": "Register a hostname or IP as a canonical target without testing it.",

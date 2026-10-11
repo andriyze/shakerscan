@@ -13,6 +13,8 @@ import json
 from typing import Any, Mapping
 import uuid
 
+from fastapi import HTTPException
+
 from .endpoint_grouping import group_endpoint_rows
 from .graph_projection import project_graph_node
 from .knowledge_scope import (  # noqa: F401 - re-exported
@@ -59,7 +61,7 @@ def _filter_values(spec: QuerySpec, supplied: Mapping[str, Any]) -> dict[str, An
             if not isinstance(raw, str) or len(raw) > 500:
                 raise KnowledgeQueryError(f"{key} must be a bounded string")
             value = raw.strip()
-            if key not in {"id", "path_contains"}:
+            if key not in {"id", "path_contains", "text_contains"}:
                 value = value.upper() if key == "method" else value.lower()
             if value:
                 values[key] = value
@@ -148,6 +150,26 @@ async def query_knowledge_page(
             return await query_service_knowledge(conn, target_id=target_id, device=device, filters=filters, limit=limit, cursor=cursor)
         except ValueError as exc:
             raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "negative_results":
+        from .interpretations import negative_results
+        supplied = dict(filters or {})
+        unknown = set(supplied) - {"state", "source"}
+        if unknown:
+            raise KnowledgeQueryError("Unsupported knowledge filters: " + ", ".join(sorted(unknown)))
+        if cursor is not None:
+            raise KnowledgeQueryError("negative_results is one bounded page; narrow it with filter.state or filter.source")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_ROWS:
+            raise KnowledgeQueryError(f"limit must be between 1 and {MAX_QUERY_ROWS}")
+        for key, value in supplied.items():
+            if value is not None and (not isinstance(value, str) or len(value) > 80):
+                raise KnowledgeQueryError(f"{key} must be a bounded string")
+        try:
+            return await negative_results(conn, target_id, device=device, audience="hunt",
+                                          state=supplied.get("state"), source=supplied.get("source"),
+                                          limit=min(limit, 50))
+        except HTTPException as exc:
+            detail = exc.detail.get("message") if isinstance(exc.detail, dict) else exc.detail
+            raise KnowledgeQueryError(str(detail)) from exc
     if kind == "endpoint_groups":
         values = _filter_values(QUERIES["endpoints"], filters or {})
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_ROWS:
@@ -190,7 +212,15 @@ async def query_knowledge_page(
                 hunt_id = str(uuid.UUID(value))
             except ValueError as exc:
                 raise KnowledgeQueryError("hunt_id must be a UUID") from exc
-            where.append(f"attributes->>'hunt_id'={bind(hunt_id)}")
+            if kind == "interpretations":
+                where.append(f"written_by={bind('hunt:' + hunt_id)}")
+            else:
+                where.append(f"attributes->>'hunt_id'={bind(hunt_id)}")
+        elif key == "text_contains":
+            placeholder = bind(value.lower())
+            # A retracted entry's text is withheld from Hunts, so it never matches a search either.
+            where.append(f"(status<>'retracted' AND (strpos(lower(title),{placeholder})>0 "
+                         f"OR strpos(lower(body),{placeholder})>0))")
         elif key == "path_contains":
             where.append(f"path ILIKE '%'||{bind(value)}||'%'")
         elif key == "verified_only":
@@ -239,4 +269,7 @@ async def query_knowledge_page(
         row.pop("page_timestamp", None)
     if kind == "graph_nodes":
         rows = [project_graph_node(row) for row in rows]
+    if kind == "interpretations":
+        from .interpretations import public_interpretation
+        rows = [public_interpretation(row, audience="hunt") for row in rows]
     return {"ok": True, "kind": kind, "supported": True, "count": len(rows), "rows": rows, "has_more": has_more, "next_cursor": next_cursor}
