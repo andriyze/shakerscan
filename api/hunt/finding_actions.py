@@ -20,7 +20,9 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 
 _SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
-_STATUSES = frozenset({"active", "resolved", "false_positive", "accepted_risk"})
+# A Hunt may withdraw or restore its own unverified claim; dismissing a finding as a false positive
+# or an accepted risk is an operator's triage decision (targets/interpretation_routes.py).
+_STATUSES = frozenset({"active", "resolved"})
 _EDITABLE_FIELDS = frozenset({"title", "description", "severity", "notes", "status"})
 
 
@@ -109,6 +111,19 @@ async def _require_evidence_actions(
             "Evidence actions must be completed or partial actions from this Hunt"
         )
     return [str(value) for value in action_ids]
+
+
+async def _refuse_operator_decided(conn: Any, finding_id: uuid.UUID) -> None:
+    """An operator dismissed (or reopened) this finding: a Hunt no longer changes or deletes it."""
+    decided = await conn.fetchval(
+        """SELECT 1 FROM target_interpretations
+           WHERE finding_id=$1 AND negative_state='finding_dismissed' LIMIT 1""",
+        finding_id,
+    )
+    if decided:
+        raise HuntFindingActionError(
+            "An operator made a triage decision on this finding; a Hunt cannot change or delete it"
+        )
 
 
 async def _locked_run(conn: Any, hunt_id: uuid.UUID) -> Any:
@@ -295,6 +310,7 @@ async def update_hunt_finding(
             )
             if finding is None:
                 raise HuntFindingActionError("Finding was not created by this Hunt")
+            await _refuse_operator_decided(conn, finding_uuid)
             if finding["last_verified_at"] is not None or int(finding["verification_count"] or 0) > 0:
                 raise HuntFindingActionError(
                     "A finding with deterministic verification history cannot be edited by Hunt"
@@ -369,6 +385,7 @@ async def delete_hunt_finding(
                 current_action_id=action_uuid,
                 values=values.get("evidence_action_ids") or (),
             )
+            await _refuse_operator_decided(conn, finding_uuid)
             deleted = await conn.fetchrow(
                 """DELETE FROM findings
                    WHERE id=$1 AND hunt_run_id=$2

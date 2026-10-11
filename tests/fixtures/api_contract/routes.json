@@ -3063,6 +3063,20 @@
     "name": "enable_device_profile"
   },
   {
+    "path": "/targets/{target_id}/findings/{finding_id}/dismiss",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_dismiss_finding"
+  },
+  {
+    "path": "/targets/{target_id}/findings/{finding_id}/reopen",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_reopen_finding"
+  },
+  {
     "path": "/targets/{target_id}/graph",
     "methods": [
       "GET"
@@ -3098,6 +3112,13 @@
     "name": "put_hunt_authority"
   },
   {
+    "path": "/targets/{target_id}/hunts/{hunt_id}/interpretations/retract",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_retract_hunt_interpretations"
+  },
+  {
     "path": "/targets/{target_id}/instruction-proposals",
     "methods": [
       "GET"
@@ -3131,6 +3152,27 @@
       "POST"
     ],
     "name": "post_reject_instruction_proposal"
+  },
+  {
+    "path": "/targets/{target_id}/interpretations",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_interpretations"
+  },
+  {
+    "path": "/targets/{target_id}/interpretations",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_target_interpretation"
+  },
+  {
+    "path": "/targets/{target_id}/interpretations/{entry_id}/retract",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_retract_interpretation"
   },
   {
     "path": "/targets/{target_id}/invariants",
@@ -3187,6 +3229,13 @@
       "POST"
     ],
     "name": "generate_endpoint_inventory_hypotheses"
+  },
+  {
+    "path": "/targets/{target_id}/negative-results",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_negative_results"
   },
   {
     "path": "/targets/{target_id}/network-scans",

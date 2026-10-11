@@ -1918,8 +1918,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 479 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 399 | `api/**/*.py` |
+| Public REST operations | 486 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 405 | `api/**/*.py` |
 | Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1936,7 +1936,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 110 | `db/init.sql` + migrations |
+| Durable tables | 111 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2383,16 +2383,22 @@ for the profile contract, invocation, limits and acceptance gates.
 | `PATCH` | `/targets/{target_id}/credential-profiles/{profile_id}` | `update_target_credential_profile` |
 | `POST` | `/targets/{target_id}/credential-profiles/{profile_id}/rotate` | `rotate_target_credential_profile` |
 | `POST` | `/targets/{target_id}/device-profile` | `enable_device_profile` |
+| `POST` | `/targets/{target_id}/findings/{finding_id}/dismiss` | `post_dismiss_finding` |
+| `POST` | `/targets/{target_id}/findings/{finding_id}/reopen` | `post_reopen_finding` |
 | `GET` | `/targets/{target_id}/graph` | `get_application_graph` |
 | `POST` | `/targets/{target_id}/graph/hypotheses` | `generate_application_graph_hypotheses` |
 | `GET` | `/targets/{target_id}/history` | `get_asset_history` |
 | `GET` | `/targets/{target_id}/hunt-authority` | `get_hunt_authority` |
 | `PUT` | `/targets/{target_id}/hunt-authority` | `put_hunt_authority` |
+| `POST` | `/targets/{target_id}/hunts/{hunt_id}/interpretations/retract` | `post_retract_hunt_interpretations` |
 | `GET` | `/targets/{target_id}/instruction-proposals` | `get_target_instruction_proposals` |
 | `POST` | `/targets/{target_id}/instruction-proposals` | `post_instruction_proposal` |
 | `POST` | `/targets/{target_id}/instruction-proposals/{proposal_id}/accept` | `post_accept_instruction_proposal` |
 | `POST` | `/targets/{target_id}/instruction-proposals/{proposal_id}/rebase` | `post_rebase_instruction_proposal` |
 | `POST` | `/targets/{target_id}/instruction-proposals/{proposal_id}/reject` | `post_reject_instruction_proposal` |
+| `GET` | `/targets/{target_id}/interpretations` | `get_target_interpretations` |
+| `POST` | `/targets/{target_id}/interpretations` | `post_target_interpretation` |
+| `POST` | `/targets/{target_id}/interpretations/{entry_id}/retract` | `post_retract_interpretation` |
 | `GET` | `/targets/{target_id}/invariants` | `list_target_invariant_contracts` |
 | `POST` | `/targets/{target_id}/invariants` | `create_target_invariant_contract` |
 | `POST` | `/targets/{target_id}/invariants/compile` | `compile_target_invariant_rule` |
@@ -2401,6 +2407,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets/{target_id}/invariants/{contract_id}/retire` | `retire_target_invariant_contract` |
 | `GET` | `/targets/{target_id}/invariants/{contract_id}/verification-plan` | `get_target_invariant_verification_plan` |
 | `POST` | `/targets/{target_id}/inventory/hypotheses` | `generate_endpoint_inventory_hypotheses` |
+| `GET` | `/targets/{target_id}/negative-results` | `get_target_negative_results` |
 | `POST` | `/targets/{target_id}/network-scans` | `start_target_network_scan` |
 | `GET` | `/targets/{target_id}/posture` | `get_target_posture` |
 | `GET` | `/targets/{target_id}/principal-matrix` | `list_target_principal_matrix` |
@@ -3343,6 +3350,7 @@ Scan feature or a second orchestration engine.
 | `target_endpoint_expectations` | `api/retest_contract.py` |
 | `target_endpoints` | `db/init.sql` |
 | `target_instruction_proposals` | `db/init.sql` |
+| `target_interpretations` | `db/init.sql` |
 | `target_invariant_contracts` | `api/retest_contract.py` |
 | `target_principal_provisioning_attempts` | `api/retest_contract.py` |
 | `target_principals` | `api/retest_contract.py` |

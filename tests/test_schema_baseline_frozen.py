@@ -150,7 +150,8 @@ def _startup_source() -> str:
     raise AssertionError("run_unified_startup moved; update this guard")
 
 
-@pytest.mark.parametrize("called", ["mark_unconfirmed_agent_writes", "recompute_spanning_target_roots"])
+@pytest.mark.parametrize("called", ["mark_unconfirmed_agent_writes", "recompute_spanning_target_roots",
+                                    "import_knowledge_notes", "reconcile_dismissals"])
 def test_always_run_migrations_are_not_behind_a_conditional(called):
     """The always-run section runs on every start: a migration inside an ``if`` (such as the
     "not yet converted" branch) would again reach fresh installs only."""
@@ -166,3 +167,13 @@ def test_the_proposal_schema_is_installed_by_the_always_run_path():
     assert "INSTRUCTION_PROPOSAL_SCHEMA_SQL" in startup
     for entry in baseline_entries():
         assert "target_instruction_proposals" not in entry and "mark_unconfirmed_agent_writes" not in entry
+
+
+def test_the_interpretation_schema_is_installed_by_the_always_run_path():
+    startup = _startup_source()
+    assert "INTERPRETATION_SCHEMA_SQL" in startup
+    init_sql = (ROOT / "db" / "init.sql").read_text(encoding="utf-8")
+    from hunt.interpretation_schema import INTERPRETATION_SCHEMA_SQL
+    assert INTERPRETATION_SCHEMA_SQL.strip() in init_sql  # a fresh install gets the same definition
+    for entry in baseline_entries():
+        assert "target_interpretations" not in entry and "import_knowledge_notes" not in entry
