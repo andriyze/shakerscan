@@ -284,7 +284,8 @@ def test_mcp_query_tool_offers_interpretations_and_negative_results():
     {"principals": ["\uff41\uff4c\uff4c"]}, {"principals": ["\u0430ny"]}, {"principals": ["every user"]},
     {"principals": ["allusers"]}, {"objects": ["%admin%"]}, {"route": "/api/.+"},
     {"operation": "entire application"}, {"objects": ["every endpoint"]}, {"objects": ["invoice:[0-9]"]},
-    {"objects": ["a|b"]}, {"route": "/api/*/items"}, {"inputs": {"all": "x"}},
+    {"objects": ["a|b"]}, {"route": "/api/*/items"}, {"inputs": {"all": "x"}}, {"method": "GET|POST"},
+    {"method": "*"}, {"route": "api/*"}, {"principals": ["\u2217"]}, {"objects": ["invoice\u2026"]},
 ])
 def test_review_broadening_probes_are_refused(broad):
     with pytest.raises(ValueError, match="names a set it did not test"):
@@ -312,7 +313,8 @@ def test_retracted_conditions_subject_and_labels_are_withheld_from_hunts():
            "subject": {"type": "interpretation", "id": "y"}, "evidence_refs": []}
     shown = public_interpretation(row, audience="hunt")
     assert "IGNORE" not in json.dumps(shown, default=str)
-    assert shown["conditions"] == {} and shown["subject"] is None and shown["conditions_sha256"] == "c" * 64
+    assert shown["conditions"] == {} and shown["subject"] is None
+    assert shown["conditions_sha256"] is None and shown["experiment_key"] is None  # no guessing oracle
 
 
 def test_knowledge_document_accepts_only_text_matching_its_digest():
@@ -329,3 +331,25 @@ def test_knowledge_document_accepts_only_text_matching_its_digest():
                 {"target_skill": {**good, "purpose": "instructions"}},  # legacy instructions are not knowledge
                 {"target_skill": {**good}}):
         assert knowledge_document(bad) is None, bad
+
+
+@pytest.mark.parametrize("literal", [
+    {"method": "M-SEARCH"}, {"method": "propfind"}, {"principals": ["O'Brien, Pat"]}, {"roles": ["admin, viewer"]},
+    {"route": "api/users/all"}, {"route": "/api/users/all?page=2&sort=name"}, {"objects": ["{a,b}"]},
+    {"objects": ["1..100"]}, {"objects": ["/api/users/all"]}, {"route": "/api/a%2Fb"},
+])
+def test_legitimate_exact_literals_are_accepted_and_labelled_as_literals(literal):
+    exact = validate_conditions({**EXACT, **literal}, required=True, experiment=True)
+    row = {"id": uuid.uuid4(), "target_id": uuid.uuid4(), "kind": "negative_result",
+           "negative_state": "experiment_completed_negative", "title": "t", "provenance": "observed",
+           "written_by": "operator:me", "status": "active", "conditions": exact, "evidence_refs": []}
+    shown = public_interpretation(row, audience="hunt")
+    assert "exact literals" in shown["conditions_semantics"] and "never as a set, range or pattern" in \
+        shown["conditions_semantics"]
+
+
+def test_withheld_digests_reads_both_shapes():
+    from hunt.knowledge_withheld import withheld_digests
+    assert withheld_digests({"digests": {"a": {"note": "x"}, "b": "bad"}}) == {"a": {"note": "x"}}
+    assert withheld_digests({"body_sha256": "c", "note": "y"}) == {"c": {"body_sha256": "c", "note": "y"}}
+    assert withheld_digests(None) == {} and withheld_digests("x") == {}
