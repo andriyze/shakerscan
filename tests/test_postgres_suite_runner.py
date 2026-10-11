@@ -165,10 +165,11 @@ def test_ci_requires_the_postgres_job_and_the_candidate_certifies_with_it():
     assert "run_postgres_suite.py --cross-check artifacts/v2-full-python.xml" in aggregate
     candidate = yaml.safe_load(
         (WORKFLOWS / "release-candidate.yml").read_text(encoding="utf-8"))["jobs"]
-    assert "postgres-suite" in candidate["certify"]["needs"]
+    # The validate job runs the suite in its own checkout of the candidate meta verified on main.
+    assert "postgres-suite" not in candidate
     certify = "\n".join(step.get("run", "") for step in candidate["certify"]["steps"])
     assert "run_postgres_suite.py --verify" in certify and "--cross-check" in certify
-    candidate_run = "\n".join(step.get("run", "") for step in candidate["postgres-suite"]["steps"])
+    candidate_run = "\n".join(step.get("run", "") for step in candidate["validate"]["steps"])
     assert "scripts/run_postgres_suite.py" in candidate_run and "--withhold" not in candidate_run
 
 
@@ -178,10 +179,11 @@ def test_ci_databases_are_the_production_images_and_checkouts_keep_no_token():
     compose = (ROOT / "docker-compose.release.yml").read_text(encoding="utf-8")
     images = {name: re.search(rf"\$\{{{name}_IMAGE:-([^}}]+)\}}", compose)[1]
               for name in ("POSTGRES", "REDIS")}
-    for workflow, job in (("python-suite.yml", "postgres"), ("release-candidate.yml", "postgres-suite")):
+    for workflow, job in (("python-suite.yml", "postgres"), ("release-candidate.yml", "validate")):
         spec = yaml.safe_load((WORKFLOWS / workflow).read_text(encoding="utf-8"))["jobs"][job]
-        assert spec["services"]["redis"]["image"] == "mirror.gcr.io/library/" + images["REDIS"]
         run = "\n".join(step.get("run", "") for step in spec["steps"])
         assert "mirror.gcr.io/library/" + images["POSTGRES"] in run
+        redis = "mirror.gcr.io/library/" + images["REDIS"]
+        assert redis in run or spec["services"]["redis"]["image"] == redis
         checkouts = [step for step in spec["steps"] if step.get("uses", "").startswith("actions/checkout@")]
         assert checkouts and all(step["with"]["persist-credentials"] is False for step in checkouts)
