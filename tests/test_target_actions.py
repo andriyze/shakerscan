@@ -20,6 +20,11 @@ class ActionConnection(Connection):
             self.row['metadata_json']['hunt_actions'] = json.loads(args[0])
         return deepcopy(self.row)
 
+    async def fetchval(self, query, *args):
+        # Whether an operator retracted the Hunt's entries (hunt/interpretations.py): not here.
+        assert 'entries_retracted' in query, query
+        return None
+
 
 def recipe(revision=0, **values):
     return TargetActionWrite(name='Check uptime', steps=[{'capability':'ssh.exec',
