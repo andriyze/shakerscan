@@ -433,9 +433,11 @@ refused. `experiment_inconclusive`
 suppresses nothing and is unfinished work; `hypothesis_refuted` refutes one hypothesis only. Only an
 operator dismisses a finding. Before repeating an experiment, call `knowledge.check_experiment`:
 `skip` is true only for an applicable result whose conditions are what one of your own cited plain
-`http.request` actions asked (no query, headers or body; method; route with placeholders only for ids,
-each covered by a named object; its `session_ref` as the only principal or `anonymous`; a technique
-starting with `http.request`; no other condition fields); it is advice, never a block. Every entry carries `applicability` (`applicable`,
+`http.request` actions asked (only method, path, origin and session_ref recorded; name the `origin`;
+each route placeholder filled by exactly one named object; its `session_ref` as the only principal or
+`anonymous`; a technique starting with `http.request`; no other condition fields), and only after
+that request (or a Scan of the same deployment and route) was observed again, unchanged, since your
+Hunt started; it is advice, never a block. Every entry carries `applicability` (`applicable`,
 `needs_revalidation`, `historical`, `unknown`) from the records it depends on; unknown is never
 unchanged and age changes nothing. Start a continuing investigation with `knowledge.changes`
 (`since`: `last_hunt`, `release`, `scan:<id>`, `hunt:<id>` or a time): what changed from existing
