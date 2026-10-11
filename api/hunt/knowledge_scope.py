@@ -52,7 +52,11 @@ def _scope_where(kind: str, device: bool, bind: Any) -> list[str]:
     owner = bind("target")
     if kind == "collections":
         where = [f"target_collection_visible(id,{owner})"]
-    elif device and kind in {"findings", "scans", "candidates", "interpretations"}:
+    elif device and kind == "interpretations":
+        # Members the asset currently owns (the access owner), not historical relationships.
+        where = [f"target_id IN (SELECT id FROM targets WHERE id={owner} OR (asset_owner_id={owner} "
+                 f"AND target_asset_access_owner(id)={owner}))"]
+    elif device and kind in {"findings", "scans", "candidates"}:
         where = [f"target_id IN (SELECT id FROM targets WHERE id={owner} OR asset_owner_id={owner})"]
     else:
         where = [f"target_id={owner}"]

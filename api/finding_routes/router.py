@@ -1528,15 +1528,6 @@ async def _resolve_finding_mutation_id(
     return None
 
 
-async def _reconcile_dismissals(conn: Any, finding_ids: list[Any]) -> None:
-    """A status change here ends an operator's recorded dismissal (hunt/interpretations.py)."""
-    try:
-        from hunt.dismissal_status import reconcile_dismissals
-    except ModuleNotFoundError:  # package import
-        from ..hunt.dismissal_status import reconcile_dismissals
-    await reconcile_dismissals(conn, finding_ids)
-
-
 @router.patch("/findings/{finding_id:path}")
 async def update_finding(
     finding_id: str,
@@ -1573,7 +1564,6 @@ async def update_finding(
         if not result:
             raise HTTPException(status_code=404, detail="Finding not found")
         await _refresh_finding_owner_counts(conn, [result])
-        await _reconcile_dismissals(conn, [result["id"]])
 
     return finding_update_response(result)
 
@@ -1714,7 +1704,6 @@ async def bulk_update_findings(request: BulkFindingUpdateRequest):
             RETURNING id, target_id, device_target_id
         """, request.status, request.notes, ids)
         await _refresh_finding_owner_counts(conn, updated_rows)
-        await _reconcile_dismissals(conn, [row["id"] for row in updated_rows])
 
     return {
         'updated': len(updated_rows),
