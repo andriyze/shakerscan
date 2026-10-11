@@ -157,11 +157,12 @@ def test_required_python_suite_fails_unless_every_shard_ran_and_passed():
     run = _step(shards, "Run this shard of the complete partitioned Python suite")["run"]
     assert f'--shard "${{{{ matrix.shard }}}}/{count}"' in run
     suite = workflow["jobs"]["python-suite"]
-    assert set(suite["needs"]) == {"python-shard", "static-gates"}
+    assert set(suite["needs"]) == {"python-shard", "static-gates", "postgres"}
     assert suite["if"] == "${{ always() }}"
-    require = _step(suite, "Require every shard and the static gates to pass")
+    require = _step(suite, "Require every shard, the static gates and the PostgreSQL job to pass")
     assert require["env"] == {"SHARDS": "${{ needs.python-shard.result }}",
-                              "STATIC_GATES": "${{ needs.static-gates.result }}"}
+                              "STATIC_GATES": "${{ needs.static-gates.result }}",
+                              "POSTGRES": "${{ needs.postgres.result }}"}
     assert "exit 1" in require["run"] and "if" not in require
     merge_step = _step(suite, "Prove the shards ran the complete partitioned Python suite once")
     assert f"--merge-shards {count}" in merge_step["run"]

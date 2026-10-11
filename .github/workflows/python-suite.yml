@@ -11,6 +11,10 @@ name: Python suite
 # shard manifests cover the whole partition exactly once
 # (scripts/run_complete_python_suite.py --merge-shards); it then publishes the same single
 # v2-full-python.xml report the release candidate reuses.
+#
+# The shards have no database, so database-backed tests skip there. The `postgres` job runs every
+# one of them against real PostgreSQL and Redis and fails on any skip for a missing database
+# (scripts/run_postgres_suite.py); `python-suite` requires it and cross-checks the two reports.
 on:
   pull_request:
   # The merge queue tests the combined result once, so a sibling merge no longer forces every
@@ -121,10 +125,90 @@ jobs:
           python scripts/check_surface_dispositions.py
           python scripts/check_scan_target_transport.py
 
+  # Every database-backed test (scripts/run_postgres_suite.py discovers them) against a real
+  # PostgreSQL and Redis. The shards above have no database, so these tests skip there; this job
+  # fails when any of them skips for a missing database, and the python-suite job then proves
+  # that every test the shards skipped for a missing database passed here.
+  postgres:
+    name: python-suite postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      redis:
+        image: mirror.gcr.io/library/redis:7
+        ports:
+          - 127.0.0.1:6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: changes
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}"
+          head="${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "python_mode=full" >> "$GITHUB_OUTPUT"
+          else
+            python3 scripts/ci_smoke_scope.py --base "$base" --head "$head" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        if: steps.changes.outputs.python_mode == 'full'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+      - name: Install the locked candidate dependency set
+        if: steps.changes.outputs.python_mode == 'full'
+        run: python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+      - name: Start the disposable PostgreSQL fixture
+        if: steps.changes.outputs.python_mode == 'full'
+        run: |
+          # A labelled, auto-removed, loopback-only container: the dump/restore acceptance
+          # inspects exactly these properties before it touches the database.
+          container="python-suite-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker run --detach --rm --name "$container" \
+            --label shakerscan.assurance_restore_fixture=true \
+            --publish 127.0.0.1::5432 \
+            --env POSTGRES_HOST_AUTH_METHOD=trust \
+            mirror.gcr.io/library/postgres:18
+          port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$container")
+          echo "PG_CONTAINER=$container" >> "$GITHUB_ENV"
+          echo "PG_URL=postgresql://postgres@127.0.0.1:${port}" >> "$GITHUB_ENV"
+          for attempt in $(seq 1 30); do
+            if docker exec "$container" pg_isready -U postgres -q; then exit 0; fi
+            sleep 2
+          done
+          echo 'The disposable PostgreSQL fixture did not become ready' >&2
+          exit 1
+      - name: Run every database-backed test with no database skips
+        if: steps.changes.outputs.python_mode == 'full'
+        run: |
+          python scripts/run_postgres_suite.py --artifacts-dir artifacts \
+            --postgres-url "$PG_URL" --redis-url redis://127.0.0.1:6379 \
+            --postgres-container "$PG_CONTAINER"
+      - name: Upload the database-backed JUnit report and manifest
+        if: always() && steps.changes.outputs.python_mode == 'full'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: python-suite-postgres-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: |
+            artifacts/postgres-python.xml
+            artifacts/postgres-manifest.json
+          if-no-files-found: error
+          retention-days: 14
+
   # The required status check. It always reports, and passes only when every shard and the static
-  # gates passed and the shards together ran the complete suite exactly once.
+  # gates passed, the shards together ran the complete suite exactly once, and the PostgreSQL job ran
+  # every test the shards skipped for a missing database.
   python-suite:
-    needs: [python-shard, static-gates]
+    needs: [python-shard, static-gates, postgres]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -146,14 +230,15 @@ jobs:
       - name: Skip for metadata-only changes
         if: steps.changes.outputs.python_mode == 'skip'
         run: echo "No Python-visible change; the complete suite is not required."
-      - name: Require every shard and the static gates to pass
+      - name: Require every shard, the static gates and the PostgreSQL job to pass
         env:
           SHARDS: ${{ needs.python-shard.result }}
           STATIC_GATES: ${{ needs.static-gates.result }}
+          POSTGRES: ${{ needs.postgres.result }}
         run: |
-          echo "shards: $SHARDS; static gates: $STATIC_GATES"
-          if [[ "$SHARDS" != success || "$STATIC_GATES" != success ]]; then
-            echo "::error::a Python suite shard or the static gates did not pass"
+          echo "shards: $SHARDS; static gates: $STATIC_GATES; postgres: $POSTGRES"
+          if [[ "$SHARDS" != success || "$STATIC_GATES" != success || "$POSTGRES" != success ]]; then
+            echo "::error::a Python suite shard, the static gates or the PostgreSQL job did not pass"
             exit 1
           fi
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -170,6 +255,15 @@ jobs:
       - name: Prove the shards ran the complete partitioned Python suite once
         if: always() && steps.changes.outputs.python_mode == 'full'
         run: python scripts/run_complete_python_suite.py --artifacts-dir artifacts --merge-shards 4
+      - name: Collect the database-backed report
+        if: always() && steps.changes.outputs.python_mode == 'full'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: python-suite-postgres-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          path: artifacts
+      - name: Prove every test the shards skipped for a missing database passed with one
+        if: always() && steps.changes.outputs.python_mode == 'full'
+        run: python scripts/run_postgres_suite.py --cross-check artifacts/v2-full-python.xml artifacts/postgres-python.xml
       - name: Install the focused UI test runner
         if: steps.changes.outputs.python_mode == 'ui'
         run: python -m pip install --disable-pip-version-check pytest==9.1.1

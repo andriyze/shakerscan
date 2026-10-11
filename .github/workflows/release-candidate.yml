@@ -498,6 +498,71 @@ jobs:
           python3 -m pip install --disable-pip-version-check pip-audit==2.10.1
           python3 -m pip_audit --no-deps --disable-pip -r scanner/requirements.lock
 
+  # Every database-backed test of the exact candidate source against real PostgreSQL and Redis.
+  # The validate job's suite has no database, so these tests skip there; certification requires
+  # this job, re-verifies its report and cross-checks it against the validate report.
+  postgres-suite:
+    name: Run database-backed tests of the exact candidate
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    services:
+      redis:
+        image: mirror.gcr.io/library/redis:7
+        ports:
+          - 127.0.0.1:6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout approved candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.meta.outputs.candidate_sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+      - name: Install the locked candidate dependency set
+        run: python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+      - name: Start the disposable PostgreSQL fixture
+        run: |
+          container="candidate-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker run --detach --rm --name "$container" \
+            --label shakerscan.assurance_restore_fixture=true \
+            --publish 127.0.0.1::5432 \
+            --env POSTGRES_HOST_AUTH_METHOD=trust \
+            mirror.gcr.io/library/postgres:18
+          port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$container")
+          echo "PG_CONTAINER=$container" >> "$GITHUB_ENV"
+          echo "PG_URL=postgresql://postgres@127.0.0.1:${port}" >> "$GITHUB_ENV"
+          for attempt in $(seq 1 30); do
+            if docker exec "$container" pg_isready -U postgres -q; then exit 0; fi
+            sleep 2
+          done
+          echo 'The disposable PostgreSQL fixture did not become ready' >&2
+          exit 1
+      - name: Run every database-backed test with no database skips
+        run: |
+          python scripts/run_postgres_suite.py --artifacts-dir artifacts \
+            --postgres-url "$PG_URL" --redis-url redis://127.0.0.1:6379 \
+            --postgres-container "$PG_CONTAINER"
+      - name: Upload the database-backed report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: source-postgres-${{ needs.meta.outputs.candidate_sha }}
+          path: |
+            artifacts/postgres-python.xml
+            artifacts/postgres-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
   # Build each architecture on a NATIVE runner (no QEMU emulation — that is what
   # blew past the 6h job limit, and katana's CGO dep cannot cross-compile). Each
   # job pushes by digest; the manifest lists are assembled in the merge job.
@@ -1209,12 +1274,12 @@ jobs:
 
   certify:
     name: Certify final manifest digests
-    needs: [meta, merge, installed-upgrade, upgrade-path]
+    needs: [meta, merge, installed-upgrade, upgrade-path, postgres-suite]
     # Same reason as vulnerability-scan: certification must run whenever the manifests were
     # created, whether the images were built here or reused from build-on-main. A candidate that
     # cannot upgrade a real installed stable release (and roll back), or whose API fails on an
     # upgraded database holding data, is not certified.
-    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.merge.result == 'success' && needs.installed-upgrade.result == 'success' && needs.upgrade-path.result == 'success' }}
+    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.merge.result == 'success' && needs.installed-upgrade.result == 'success' && needs.upgrade-path.result == 'success' && needs.postgres-suite.result == 'success' }}
     runs-on: ubuntu-latest
     # Certification runs the thorough Juice Shop benchmark, whose wall ceiling is the thorough
     # profile's max_tool_wall_seconds (180 min in 2.2.0), plus the installed-stack E2E, both
@@ -1244,6 +1309,18 @@ jobs:
         with:
           name: source-contracts-${{ needs.meta.outputs.candidate_sha }}
           path: artifacts/certification
+
+      - name: Download the exact-source database-backed report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: source-postgres-${{ needs.meta.outputs.candidate_sha }}
+          path: artifacts/certification
+
+      - name: Require every database-backed test to have run with its database
+        run: |
+          python3 scripts/run_postgres_suite.py --verify artifacts/certification/postgres-python.xml
+          python3 scripts/run_postgres_suite.py --cross-check \
+            artifacts/certification/v2-full-python.xml artifacts/certification/postgres-python.xml
 
       - name: Download candidate-bound external acceptance receipts
         env:
