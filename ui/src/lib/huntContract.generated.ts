@@ -780,7 +780,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/knowledge.check_experiment"
       },
-      "description": "Look up what is recorded about one exact experiment on this target (every condition equal) before repeating it. skip is true only for an applicable experiment_completed_negative whose conditions match a plain request (only method, path, origin and session_ref) your own cited http.request made: the origin, method, route (each placeholder filled by exactly one named object), its session_ref as the only principal or anonymous, a technique starting with http.request, and no other condition fields; and only when that same request was repeated since this Hunt started and every response was unchanged, body included. Applicable is not safe to skip; skip is rare by design and only advice.",
+      "description": "Look up what is recorded about one exact experiment on this target (every condition equal) before repeating it. skip is true only for an applicable experiment_completed_negative whose conditions match a plain request (only method, path, origin and session_ref) your own cited http.request made: the origin, method, route (each placeholder filled by exactly one named object), its session_ref (or its recorded principal identity profile:<id>@v<version>/<slot>/<label>) as the only principal or anonymous, a technique starting with http.request, and no other condition fields; and only when that same request was repeated since this Hunt started and every response was unchanged, body included. Applicable is not safe to skip; skip is rare by design and only advice.",
       "input": {
         "fields": [
           "conditions"
@@ -830,6 +830,35 @@ export const HUNT_START_CONTRACT = {
         "alternate_adapters": [],
         "binary": null,
         "name": "knowledge.changes"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/knowledge.continue"
+      },
+      "description": "Continue investigating this target after its latest release: what changed since the release (an operator-declared marker, else the latest Scan-detected deployment change), what is still applicable, what needs revalidation or was not re-observed since the release, what is unfinished and which dismissals were reopened, with the next experiments ranked by fixed rules and checked against this Hunt’s current authority. Reads existing records only: sends no traffic, starts nothing, grants nothing; a passive refresh is only offered for an operator to approve.",
+      "input": {
+        "fields": [
+          "since",
+          "limit",
+          "after"
+        ],
+        "required": []
+      },
+      "name": "knowledge.continue",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "knowledge.continue",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "knowledge.continue"
       }
     },
     {

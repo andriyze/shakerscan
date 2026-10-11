@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import os
 import time
 from pathlib import Path
@@ -1140,6 +1141,7 @@ def build_parser() -> argparse.ArgumentParser:
             "summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals",
             "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections",
             "candidates", "notes", "receipts", "interpretations", "negative_results", "changes",
+            "continue",
         ),
     )
     hunt_query.add_argument("--filter", metavar="FILE", help="JSON object; use - for stdin")
@@ -1253,6 +1255,31 @@ def build_parser() -> argparse.ArgumentParser:
     changes.add_argument("--since", default="last_hunt",
                          help="last_hunt (default), release, scan:<id>, hunt:<id>, or an ISO-8601 time with a time zone")
     changes.add_argument("--json", action="store_true", help="print the raw API answer")
+    proceed = knowledge_commands.add_parser(
+        "continue",
+        help=("Continue investigating a target after its latest release: what changed, what still applies, what "
+              "needs re-testing, and the next experiments ranked (read-only; --refresh offers a passive Scan)"),
+    )
+    proceed.add_argument("target_id", help="the target to continue")
+    proceed.add_argument("--since", default="release",
+                         help="release (default), release:<marker id>, last_hunt, scan:<id>, hunt:<id>, or an ISO time")
+    proceed.add_argument("--refresh", action="store_true",
+                         help="after showing the report, offer the passive refresh it proposes and start it only "
+                              "after a keypress")
+    proceed.add_argument("--json", action="store_true", help="print the raw API answer")
+    pages = proceed.add_mutually_exclusive_group()
+    pages.add_argument("--after", default=None, help="the next_after cursor of a previous page")
+    pages.add_argument("--all", action="store_true",
+                       help="every page of ranked experiments (starts again if the set changes while reading)")
+    release = knowledge_commands.add_parser(
+        "release", help="Declare that a target was released (the point `continue` starts from), after a keypress",
+    )
+    release.add_argument("target_id")
+    release.add_argument("--label", default=None, help="a short label, for example the version")
+    release.add_argument("--at", default=None, help="when it was released (ISO-8601 with a time zone; default now)")
+    releases = knowledge_commands.add_parser("releases", help="List the releases declared for a target (read-only)")
+    releases.add_argument("target_id")
+    releases.add_argument("--json", action="store_true", help="print the raw API answer")
     dismiss = knowledge_commands.add_parser(
         "dismiss", help="Dismiss a finding (false positive, accepted risk or duplicate) after a keypress",
     )
@@ -1396,6 +1423,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return _run_knowledge_show(args, client)
             if args.knowledge_command == "changes":
                 return _run_knowledge_changes(args, client)
+            if args.knowledge_command == "continue":
+                return _run_knowledge_continue(args, client)
+            if args.knowledge_command == "release":
+                return _run_knowledge_release(args, client)
+            if args.knowledge_command == "releases":
+                return _run_knowledge_releases(args, client)
             if args.knowledge_command in {"dismiss", "reopen"}:
                 return _run_knowledge_decision(args, client)
             return _run_knowledge_review(args, client)
@@ -1771,6 +1804,229 @@ def _run_knowledge_changes(args: argparse.Namespace, client: ApiClient) -> int:
                      + (f" ({causes})" if causes else "")))
     print("Changes come from existing records (Scans, the endpoint inventory, earlier requests, discovery); "
           "nothing was sent to the target.")
+    return 0
+
+
+def _suggestion_line(item: Mapping[str, Any]) -> str:
+    values = item.get("input") if isinstance(item.get("input"), Mapping) else None
+    route = item.get("route") if isinstance(item.get("route"), Mapping) else None
+    who = item.get("principal") or values.get("session_ref") if values else None
+    what = (f"{values.get('method')} {values.get('path')}" + (f" as {who}" if who else "")
+            if values else f"{route.get('method')} {route.get('path')} (state-changing; ask the operator)"
+            if route and item.get("state_changing")
+            else f"{route.get('method')} {route.get('path')} (choose an object)" if route
+            else "the identical experiment from its recorded conditions")
+    basis = item.get("basis") if isinstance(item.get("basis"), Mapping) else {}
+    authority = (item.get("authority") or {}).get("status")
+    return _shown(f"  {item.get('rank'):>3}. [{item.get('rule')}] {item.get('capability') or 'agent chooses'}: {what}"
+                  f"  ({basis.get('type')} {basis.get('id')}; authority {authority})"
+                  + ("  REQUIRED RE-TEST" if item.get("required_retest") else ""))
+
+
+def _run_knowledge_continue(args: argparse.Namespace, client: ApiClient) -> int:
+    """``shakerscan knowledge continue TARGET``: read-only; agents may run it too. ``--refresh`` starts
+    the offered passive refresh only after a lone keypress at the person's own terminal."""
+    target = _quoted(args.target_id)
+    reports: list[Any] = []
+    restarts = 0
+    after = args.after
+    try:
+        while True:
+            params = {"since": str(args.since)[:100], **({"after": after} if after else {})}
+            report = client.request("GET", f"/targets/{target}/knowledge/continue?{urllib.parse.urlencode(params)}")
+            nxt = ((report or {}).get("next_experiments") or {}) if isinstance(report, Mapping) else {}
+            if args.all and nxt.get("changed_since_cursor") and restarts < 3:
+                # The candidates changed between pages: read them all again from the first page.
+                restarts += 1
+                reports, after = [], None
+                continue
+            reports.append(report)
+            after = nxt.get("next_after")
+            if not args.all or not isinstance(after, str) or len(reports) >= 1000:
+                break
+    except CliError as exc:
+        print(f"shakerscan knowledge continue: {exc}", file=sys.stderr)
+        return 2
+    report = reports[0]
+    if args.json or not isinstance(report, Mapping):
+        print(json.dumps(reports if args.all else report, indent=2, sort_keys=True))
+    else:
+        _print_continue(args.target_id, report)
+        for later in reports[1:]:
+            _print_continue_page(later)
+    if not args.refresh:
+        return 0
+    return _offer_refresh(args, client, report if isinstance(report, Mapping) else {})
+
+
+def _print_continue(target_id: str, report: Mapping[str, Any]) -> None:
+    since = report.get("since") or {}
+    origin = {"declared": "declared by an operator", "scan_detected": "detected by Scans"}.get(since.get("source"), "")
+    print(_shown(f"Continue on target {target_id} after the release of {since.get('at') or 'unknown'}"
+                 + (f" ({origin}" + (f": {since.get('label')}" if since.get("label") else "") + ")" if origin else "")))
+    if not since.get("resolved"):
+        print(_shown(f"  {since.get('note') or 'No release point.'}"))
+    sections = (report.get("changes") or {}).get("sections") or {}
+    endpoints = sections.get("endpoints") or {}
+    deployment = sections.get("deployment") or {}
+    print(f"  changes: endpoints added {(endpoints.get('added') or {}).get('count', 0)}, removed "
+          f"{(endpoints.get('removed') or {}).get('count', 0)}; authentication surface changed: "
+          f"{'yes' if (endpoints.get('auth_surface') or {}).get('significant') else 'no'}; deployment changed: "
+          f"{'yes' if deployment.get('significant') else 'no' if deployment.get('compared') else 'not compared'}")
+    for change in deployment.get("changes") or []:
+        print(_shown(f"    deployment {change.get('field')}: {change.get('before')} -> {change.get('after')}"))
+    counts = (report.get("knowledge") or {}).get("counts") or {}
+    print("  knowledge: " + ", ".join(f"{name.replace('_', ' ')} {counts.get(name, 0)}" for name in (
+        "still_applicable", "needs_revalidation", "not_reobserved_since_release", "historical",
+        "inconclusive_experiments", "open_next_steps", "reopened_for_review")))
+    for item in (report.get("knowledge") or {}).get("reopened_for_review") or []:
+        print(_shown(f"    reopened dismissal {item.get('id')} (finding {item.get('finding_id')}): decide with "
+                     "shakerscan knowledge dismiss|reopen"))
+    nxt = report.get("next_experiments") or {}
+    required = nxt.get("required_retests") or {}
+    print(f"  next experiments (ranked by fixed rules; required re-tests: {required.get('total', 0)}, outside "
+          f"authority: {required.get('outside_authority', 0)}):")
+    if required.get("at_least"):
+        print(_shown("    totals are a lower bound: " + "; ".join(str(r) for r in required.get("incomplete_because") or [])))
+    for item in nxt.get("items") or []:
+        print(_suggestion_line(item))
+    for item in nxt.get("outside_authority") or []:
+        print(_suggestion_line(item) + _shown(f"  [outside authority: {(item.get('authority') or {}).get('reason')}]"))
+    _print_unlisted(nxt)
+    refresh = (report.get("freshness") or {}).get("refresh") or {}
+    for offer in refresh.get("offers") or []:
+        print(_shown(f"  offered refresh: {offer.get('kind')} ({offer.get('why')}); run with --refresh to decide"))
+    print("Read from existing records; nothing was sent to the target. Paths and versions are data from the target.")
+
+
+def _print_unlisted(nxt: Mapping[str, Any]) -> None:
+    unlisted = nxt.get("unlisted") or {}
+    if nxt.get("changed_since_cursor"):
+        print("    the candidates changed while paging: run again (or with --all) to see everything")
+    if nxt.get("next_after"):
+        print(_shown(f"    not shown yet: {unlisted.get('runnable', 0)} runnable ({unlisted.get('required_runnable', 0)} "
+                     f"required), {unlisted.get('outside_authority', 0)} outside authority "
+                     f"({unlisted.get('required_outside_authority', 0)} required); --after {nxt['next_after']} "
+                     "or --all"))
+
+
+def _print_continue_page(report: Mapping[str, Any]) -> None:
+    nxt = report.get("next_experiments") or {} if isinstance(report, Mapping) else {}
+    print("  next page:")
+    for item in nxt.get("items") or []:
+        print(_suggestion_line(item))
+    for item in nxt.get("outside_authority") or []:
+        print(_suggestion_line(item) + _shown(f"  [outside authority: {(item.get('authority') or {}).get('reason')}]"))
+    _print_unlisted(nxt)
+
+
+def _offer_refresh(args: argparse.Namespace, client: ApiClient, report: Mapping[str, Any]) -> int:
+    offers = ((report.get("freshness") or {}).get("refresh") or {}).get("offers") or []
+    if not offers:
+        print("no refresh is needed: the records are newer than the release")
+        return 0
+    approval = _approval()
+    send = _approval_send(client)
+    terminal = approval.Terminal()
+    try:
+        terminal.require("shakerscan knowledge continue --refresh")
+        failures = 0
+        with terminal.keypresses():
+            for offer in offers:
+                request = offer.get("request") if isinstance(offer.get("request"), Mapping) else {}
+                terminal.say(_shown(f"{offer.get('kind')}: {offer.get('why')}"))
+                terminal.say(_shown(f"  {request.get('method')} {request.get('path')}  traffic: {offer.get('traffic')}"))
+                body = request.get("body")
+                checked = _passive_refresh(offer.get("kind"), request)
+                if checked is None:
+                    terminal.say("  not a passive Scan or discovery request this command can start; skipped")
+                    continue
+                terminal.say(_shown(f"  {checked}"))
+                if terminal.key("  [s] start  [n] skip: ", "sn") != "s":
+                    terminal.say("  skipped")
+                    continue
+                status, answer = send("POST", str(request["path"]), body if isinstance(body, Mapping) else None)
+                if not 200 <= status < 300:
+                    failures += 1
+                    terminal.say(_shown(f"  not started: HTTP {status}: {answer}"))
+                    continue
+                ident = (answer or {}).get("scan_id") or (answer or {}).get("id") if isinstance(answer, Mapping) else None
+                terminal.say(_shown(f"  started{f' ({ident})' if ident else ''}"))
+        return 1 if failures else 0
+    except approval.ApprovalError as exc:
+        print(f"shakerscan knowledge continue --refresh: {exc}", file=sys.stderr)
+        return 2
+
+
+_DISCOVERY_PATH = re.compile(r"^/discovery\?root_domain=[A-Za-z0-9.-]{1,253}$")
+
+
+def _passive_refresh(kind: Any, request: Mapping[str, Any]) -> str | None:
+    """What a refresh offer would do, if it is exactly a passive Scan of one http(s) URL
+    (``POST /scans`` with only target, target_kind and ``policy: {active_testing: false}``) or a passive
+    discovery of one apex (``POST /discovery?root_domain=...`` without a body); otherwise None."""
+    if request.get("method") != "POST":
+        return None
+    body = request.get("body")
+    if kind == "passive_scan" and request.get("path") == "/scans" and isinstance(body, Mapping) \
+            and set(body) <= {"target", "target_kind", "policy"} and body.get("policy") == {"active_testing": False} \
+            and body.get("target_kind", "web") in {"web", "api"} \
+            and isinstance(body.get("target"), str) and body["target"].startswith(("https://", "http://")):
+        return f"passive Scan of {body['target']} (no active testing)"
+    if kind == "passive_discovery" and body is None and _DISCOVERY_PATH.match(str(request.get("path") or "")):
+        return f"passive subdomain discovery of {str(request['path']).split('=', 1)[1]} (nothing sent to the target)"
+    return None
+
+
+def _run_knowledge_release(args: argparse.Namespace, client: ApiClient) -> int:
+    """``shakerscan knowledge release TARGET``: the release point `continue` starts from. Declared by
+    the person with a keypress (a pipe, such as an agent's tool shell, is refused)."""
+    approval = _approval()
+    send = _approval_send(client)
+    terminal = approval.Terminal()
+    payload: dict[str, Any] = {}
+    if args.label is not None:
+        payload["label"] = args.label
+    if args.at is not None:
+        payload["released_at"] = args.at
+    try:
+        terminal.require("shakerscan knowledge release")
+        terminal.say(_shown(f"declare a release of target {args.target_id}"
+                            + (f" labelled {args.label!r}" if args.label else "")
+                            + f" at {args.at or 'now'}"))
+        terminal.say("`continue` then starts from this point; applicability still follows the records, and nothing "
+                     "is suppressed or granted.")
+        with terminal.keypresses():
+            choice = terminal.key("  [r] declare  [n] cancel: ", "rn")
+        if choice != "r":
+            terminal.say("  nothing changed")
+            return 0
+        status, body = send("POST", f"/targets/{_quoted(args.target_id)}/knowledge/releases", payload)
+        if not 200 <= status < 300:
+            detail = body.get("detail") if isinstance(body, Mapping) else body
+            terminal.say(_shown(f"  not declared: HTTP {status}: {detail}"))
+            return 1
+        terminal.say(_shown(f"  declared release {(body or {}).get('id')} at {(body or {}).get('released_at')}"))
+        return 0
+    except approval.ApprovalError as exc:
+        print(f"shakerscan knowledge release: {exc}", file=sys.stderr)
+        return 2
+
+
+def _run_knowledge_releases(args: argparse.Namespace, client: ApiClient) -> int:
+    try:
+        listed = client.request("GET", f"/targets/{_quoted(args.target_id)}/knowledge/releases")
+    except CliError as exc:
+        print(f"shakerscan knowledge releases: {exc}", file=sys.stderr)
+        return 2
+    if args.json or not isinstance(listed, Mapping):
+        print(json.dumps(listed, indent=2, sort_keys=True))
+        return 0
+    rows = listed.get("releases") or []
+    print(_shown(f"{len(rows)} declared release(s) on target {args.target_id} (newest first):"))
+    for item in rows:
+        print(_shown(f"  {item.get('released_at')}  {item.get('label') or '(no label)'}  by {item.get('declared_by')}"
+                     f"  {item.get('id')}"))
     return 0
 
 

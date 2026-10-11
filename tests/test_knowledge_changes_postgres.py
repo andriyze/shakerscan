@@ -10,7 +10,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import asyncpg
 import pytest
@@ -61,11 +61,34 @@ def recorded_input(raw):
             'input': _hunt_redacted_capability_input('http.request', raw)}
 
 
+async def _session(conn, hunt_id, session, *, profile=None, slot='primary', label=None, version=1):
+    """Fixture: the session store's record of a Hunt session (metadata only; headers are a placeholder).
+    The principal identity is (profile, slot, label); by default each session id has its own profile
+    (a distinct principal), and a test names ``profile`` to make two sessions the same principal."""
+    target = await conn.fetchval('SELECT COALESCE(target_id, device_target_id) FROM hunt_runs WHERE id=$1',
+                                 UUID(hunt_id))
+    profile = profile or uuid5(UUID(int=0x5E55), f'{target}:{session}')
+    await conn.execute("""INSERT INTO credential_profiles(id,target_kind,target_id,name,auth_kind,principal_slot,
+            principal_label,configuration_json,rotated_at,created_at,updated_at)
+        VALUES($1,'web',$2,$3,'json_login',$4,$5,'{}'::jsonb,NOW(),NOW(),NOW()) ON CONFLICT DO NOTHING""",
+        profile, target, f'fixture-{profile}', slot, label)
+    await conn.execute("""INSERT INTO auth_sessions(id,owner_kind,owner_id,target_kind,target_id,target_binding_digest,
+            profile_id,profile_version,principal_slot,principal_label,auth_kind,encrypted_headers,status,
+            established_at,expires_at,refresh_after,evidence_receipt_digest,source_action_id)
+        VALUES($1,'hunt',$2,'web',$3,$4,$5,$6,$7,$8,'json_login','enc:fernet:fixture','active',
+            NOW()-interval '1 minute',NOW()+interval '1 day',NOW()+interval '1 hour',$4,$9)
+        ON CONFLICT DO NOTHING""",
+        UUID(str(session)), UUID(hunt_id), target, 'a' * 64, profile, version, slot, label, uuid4())
+    return profile
+
+
 async def _request(conn, hunt_id, *, path='/api/invoices/17', status=403, keys=('error',), digest='1' * 64,
                    session=SESSION, method='GET', at=None, scope='complete', **extra):
     """Fixture: a finished http.request action of a Hunt. Its input summary is written through the
     real redaction step; the response summary stands in for what the capability returned."""
     action = uuid4()
+    if session:
+        await _session(conn, hunt_id, session)
     raw = {'method': method, 'path': path, **({'session_ref': session} if session else {}), **extra}
     observations = [{'kind': 'http_observation', 'request': {'method': method},
                      'response': {'status': status, 'content_type': 'application/json; charset=utf-8',

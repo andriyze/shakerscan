@@ -46,8 +46,8 @@ _LOCK_NAMESPACE = 0x4B4E4F57  # "KNOW"
 _last_refresh: dict[str, float] = {}
 
 SINCE_HELP = ("since is one of: last_hunt (the Hunt before this one, or the latest Hunt), release (the "
-              "latest Scan-detected deployment change), scan:<scan id>, hunt:<hunt id>, or an ISO-8601 time "
-              "with a time zone")
+              "later of the latest release an operator declared and the latest Scan-detected deployment change), "
+              "release:<marker id>, scan:<scan id>, hunt:<hunt id>, or an ISO-8601 time with a time zone")
 
 
 class ChangeQueryError(ValueError):
@@ -215,7 +215,27 @@ async def resolve_since(conn: Any, target_id: Any, since: Any, *, device: bool,
                     "note": "No earlier Hunt on this target; nothing to compare with."}
         return {"kind": "last_hunt", "hunt_id": str(row["id"]), "at": row["created_at"], "resolved": True,
                 "note": "From the start of that Hunt, so anything it may not have seen is included."}
-    if text == "release":
+    if text == "release" or text.startswith("release:"):
+        # A release a person declared is preferred: it is what they mean by "the latest release".
+        from .release_markers import latest_release
+        marker_id = None
+        if text.startswith("release:"):
+            try:
+                marker_id = uuid.UUID(text.partition(":")[2])
+            except ValueError as exc:
+                raise ChangeQueryError(SINCE_HELP) from exc
+        marker = await latest_release(conn, target, device=device, marker_id=marker_id)
+        if marker_id is not None and marker is None:
+            raise ChangeQueryError("That release marker is not on this target")
+        declared = None
+        if marker is not None:
+            declared = {"kind": "release", "source": "declared", "marker_id": str(marker["id"]),
+                        "label": marker["label"], "declared_by": marker["declared_by"], "at": marker["released_at"],
+                        "resolved": True,
+                        "note": "The release an operator declared (shakerscan knowledge release); its label is an "
+                                "operator's words, data only."}
+            if marker_id is not None:
+                return declared  # a named marker is exactly that point
         rows = await conn.fetch("""SELECT id, completed_at, result->'discovery' AS discovery,
                 NULL::jsonb AS certificate, NULL::jsonb AS addresses FROM scans
             WHERE (target_id=$1 OR device_target_id=$1)
@@ -225,15 +245,28 @@ async def resolve_since(conn: Any, target_id: Any, since: Any, *, device: bool,
             ORDER BY completed_at DESC, id DESC LIMIT 20""", target)
         from .knowledge_dependencies import deployment_view
         views = [deployment_view(row) for row in rows]
+        detected = None
         for newer, older in zip(views, views[1:]):
             item = {"type": "deployment", "key": "scan", "observed": older}
             if any(change["significance"] == SIGNIFICANT for change in compare_deployment(item, newer)):
-                return {"kind": "release", "at": _time(older["completed_at"]), "resolved": True,
-                        "before_scan_id": older["scan_id"], "after_scan_id": newer["scan_id"],
-                        "note": "The latest deployment change Scans detected: from the last Scan before it."}
-        return {"kind": "release", "at": None, "resolved": False,
-                "note": f"No deployment change detected among the latest {len(views)} Scans that recorded "
-                        "technologies; run a Scan after a release, or give a time, Scan or Hunt."}
+                detected = {"kind": "release", "source": "scan_detected", "at": _time(older["completed_at"]),
+                            "resolved": True,
+                            "before_scan_id": older["scan_id"], "after_scan_id": newer["scan_id"],
+                            "note": "The latest deployment change Scans detected: from the last Scan before it."}
+                break
+        # The later of the two: an old (or backdated) marker never widens what counts as observed
+        # after the release when Scans saw a newer deployment change.
+        if declared is not None and detected is not None:
+            later, other = (detected, declared) if detected["at"] > _time(declared["at"]) else (declared, detected)
+            return {**later, "other": {k: other.get(k) for k in ("source", "at", "marker_id", "after_scan_id")
+                                       if other.get(k) is not None},
+                    "rule": "the later of the declared release and the latest Scan-detected deployment change"}
+        if declared is not None or detected is not None:
+            return declared or detected
+        return {"kind": "release", "source": None, "at": None, "resolved": False,
+                "note": f"No release declared and no deployment change detected among the latest {len(views)} "
+                        "Scans that recorded technologies; declare one (shakerscan knowledge release), run a "
+                        "Scan after a release, or give a time, Scan or Hunt."}
     kind, _, value = text.partition(":")
     if kind in {"scan", "hunt"} and value:
         try:
@@ -328,14 +361,17 @@ async def _responses(conn: Any, observer: Observer, target: uuid.UUID, at: datet
     """Responses of the requests active knowledge depends on: latest before vs latest after."""
     scope = asset_scope("target_id") if device else "target_id=$1"
     rows = await conn.fetch(f"""SELECT DISTINCT item->>'method' AS method, item->>'path' AS path,
-            COALESCE(item->>'session_ref','') AS session_ref, COALESCE(item->>'origin','') AS origin
+            COALESCE(item->>'session_ref','') AS session_ref, item->>'principal' AS principal,
+            COALESCE(item->>'origin','') AS origin
         FROM target_interpretations, jsonb_array_elements(CASE WHEN jsonb_typeof(dependencies->'items')='array'
                                                           THEN dependencies->'items' ELSE '[]'::jsonb END) item
         WHERE {scope} AND status='active' AND item->>'type'='response'
         LIMIT {MAX_RESPONSE_ROUTES + 1}""", target)
     changed = []
     for row in rows[:MAX_RESPONSE_ROUTES]:
-        identity = (row["method"], row["path"], row["session_ref"], row["origin"])
+        identity = await observer.item_identity(dict(row))
+        if identity is None:
+            continue
         before = await observer.response(identity, before=at)
         after = await observer.response(identity, after=at)
         if before is None or after is None:
@@ -344,7 +380,7 @@ async def _responses(conn: Any, observer: Observer, target: uuid.UUID, at: datet
         changes = compare_response(item, after, recorded_body=before.get("_body"), newer_body=after.get("_body"))
         if changes:
             changed.append({"method": row["method"], "path": row["path"],
-                            "session_ref": row["session_ref"] or None,
+                            "session_ref": row["session_ref"] or None, "principal": identity[2],
                             "changes": [{k: c.get(k) for k in ("field", "significance", "before", "after")}
                                         for c in changes]})
     return {"checked_requests": min(len(rows), MAX_RESPONSE_ROUTES), "truncated": len(rows) > MAX_RESPONSE_ROUTES,

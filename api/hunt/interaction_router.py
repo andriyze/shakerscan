@@ -282,6 +282,9 @@ class HuntQueryRequest(BaseModel):
         "interpretations", "negative_results",
         # What changed since a point (filter.since), with the interpretations it affects.
         "changes",
+        # Continue after the latest release (filter.since, default release): what changed, what is
+        # known and needs re-testing, and the next experiments ranked within this Hunt's authority.
+        "continue",
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
@@ -397,7 +400,7 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
     result["rows"] = [
         _arsenal_routes._redact_agent_payload(_json_safe_row(row)) for row in result["rows"]
     ]
-    if request.kind == "changes":
+    if request.kind in {"changes", "continue"}:
         result = _arsenal_routes._redact_agent_payload(_json_safe_row(result))
     return {"hunt_id": hunt_id, **result}
 

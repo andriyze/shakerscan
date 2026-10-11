@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 207,
+  "component_schema_count": 208,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -106,7 +106,7 @@
     "HuntCapabilityRequest": "0048d34cbebc4635761f66c0b54ca394a513e170ad6b043fc394ed4b4398414b",
     "HuntCoverageAngleRequest": "0efdcfdea799e578bf07cd2e75d573aed321425d34dea44a0ea5913b555cfb51",
     "HuntFinishRequest": "a1b31b0b8ab44686e0049d9f83d07ad12fcf749bc9d68f93424a6abaff3fee1b",
-    "HuntQueryRequest": "8c5e4e2e94629e00cfbc7d2824fbb7d53aaf458119bb332d2815e612f287b25e",
+    "HuntQueryRequest": "081b7f511539f41c0215b798e77894925436e844df1388f21d8172c72f7084f5",
     "HuntSkillBindRequest": "89c12e18f3f55a126cb209590bca6163c97e3300b987c1173fafeff762ed13ac",
     "HuntSkillSuggestionRequest": "12f4bced74b87bcfaa23c429aaa6c8851a80d6325a57706dafb2614952e49487",
     "HuntSkillUsageRequest": "9a1b268fd05dfd816f0295f80103c06e6e6b0f52104085cbacba08ccdb88e5af",
@@ -157,6 +157,7 @@
     "RefuterReviewExecuteRequest": "fd5ae0475c78e40ee7064ee506d8a7ede2cb3cfdd8c6ab9abcfeeb4085e5c498",
     "RefuterReviewQueueRequest": "43e3d46fb0321acca0aa5a1e54a2ab78de6b901c8035c3dc40fbde2a772ec301",
     "RefuterReviewRequest": "b40887480d50a6922c91e7cc9dba00714ad9ed9a79cab2a9edcb655dd87724c0",
+    "ReleaseMarkerInput": "be9fd37eb66ee0742102c3fe365e6a9cb68b18da346f4b9087bd9c1186f195c9",
     "RequestCollectionBindingUpsert": "ee604306ff8249facc7811555835a19cf365869d4b3f8f86be44d3948c460ceb",
     "RequestCollectionCreate": "10f877194304c9c36a40164f8034e92ba608af4ad284101f162bf2b0080fb308",
     "RequestCollectionEnvironmentCreate": "4ac96d282e56c2101376826e2644edf3b1bc36d275a7c4b79d57ef96d4f7b72d",
@@ -213,9 +214,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "691a2b0096403425a7046f6ed25a88392801eec1f28c7049098103f7dac84520",
+  "contract_sha256": "4461d108822d1c2d492577523e7bfa6b9b58c729cf45810573136dc2a817ee63",
   "openapi": "3.1.0",
-  "operation_count": 477,
+  "operation_count": 480,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -3309,6 +3310,36 @@
         "targets"
       ]
     },
+    "GET /targets/{target_id}/knowledge/continue": {
+      "deprecated": false,
+      "operation_id": "get_target_knowledge_continue_targets__target_id__knowledge_continue_get",
+      "parameters_sha256": "391a97925c12ebc8f6e59d2ba7ef66152f34f4b9f860745ccbad44ff02928db8",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "GET /targets/{target_id}/knowledge/releases": {
+      "deprecated": false,
+      "operation_id": "get_target_releases_targets__target_id__knowledge_releases_get",
+      "parameters_sha256": "f1ced4e99fef9eae5f4b20d63e08f9ac8de2da9cf92b39c99b44945f2daaebbf",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
     "GET /targets/{target_id}/negative-results": {
       "deprecated": false,
       "operation_id": "get_target_negative_results_targets__target_id__negative_results_get",
@@ -6335,6 +6366,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "POST /targets/{target_id}/knowledge/releases": {
+      "deprecated": false,
+      "operation_id": "post_target_release_targets__target_id__knowledge_releases_post",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": "1644d44dc95135da8e1e784ae989a513bf84d65f2400c0973bdaca60f04e0387",
+      "response_schema_sha256": {
+        "201": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
     },
     "POST /targets/{target_id}/network-scans": {
       "deprecated": false,
