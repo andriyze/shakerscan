@@ -22,6 +22,8 @@ from tests.test_interpretations_postgres import _hunt, _web_target
 from tests.test_instruction_proposals_postgres import _prepared
 from tests.test_target_asset_startup_postgres import startup_database
 
+OTHER = str(UUID(int=0xB0B))
+
 
 async def _setup(conn, monkeypatch, route='/api/invoices/{id}'):
     app_module = await _prepared(conn, monkeypatch)
@@ -177,7 +179,7 @@ def test_p2_2_an_entry_another_evaluation_holds_is_never_reused(monkeypatch):
     asyncio.run(run())
 
 
-def test_p2_5_reuse_needs_a_fresh_observation_a_scan_can_provide_it(monkeypatch):
+def test_p2_5_reuse_needs_the_same_request_repeated_scans_never_authorise_a_skip(monkeypatch):
     async def run():
         async with startup_database() as conn:
             app_module, target = await _setup(conn, monkeypatch)
@@ -187,17 +189,77 @@ def test_p2_5_reuse_needs_a_fresh_observation_a_scan_can_provide_it(monkeypatch)
                 await first.ok('knowledge.record', _negative(evidence))
                 await _request(conn, first.id)
                 assert (await _check(first, _negative(evidence)['conditions']))['skip'] is True
-                # A later Hunt has not observed anything yet: the same applicable entry is not reused.
+                # A later Hunt has not repeated it: the same applicable entry is not reused.
                 second = (await _hunt(operator, target)).hunt
                 answer = await _check(second, _negative(evidence)['conditions'])
-                assert answer['skip'] is False and 'not observed again' in answer['identical'][0]['reuse']['reason']
-                # A Scan after that Hunt started saw the same deployment and the route: re-observed.
+                assert answer['skip'] is False and 'not repeated' in answer['identical'][0]['reuse']['reason']
+                # A Scan of the same deployment and an inventory sighting of the route (which a Hunt's own
+                # crawl can cause) re-observe nothing about the behaviour under test.
                 await _scan(conn, target, tech={'Express': '4.18'},
                             at=datetime.now(timezone.utc) + timedelta(seconds=1))
                 await conn.execute("UPDATE target_endpoints SET last_seen_at=NOW() + interval '2 seconds'")
+                assert (await _check(second, _negative(evidence)['conditions']))['skip'] is False
+                # Requests that differ in session, method or origin (another port, a trailing dot) are not
+                # the same request.
+                await _request(conn, second.id, session=OTHER)
+                await _request(conn, second.id, method='HEAD')
+                await _request(conn, second.id, origin=ORIGIN + ':8443')
+                await _request(conn, second.id, origin=ORIGIN + '.')
+                assert (await _check(second, _negative(evidence)['conditions']))['skip'] is False
+                # The same request repeated in this Hunt, unchanged: reused.
+                await _request(conn, second.id)
                 answer = await _check(second, _negative(evidence)['conditions'])
                 assert answer['skip'] is True
-                assert answer['identical'][0]['reuse']['reobserved']['by'].startswith('a Scan')
+                assert answer['identical'][0]['reuse']['reobserved']['by'].startswith('the same request')
+    asyncio.run(run())
+
+
+def test_round2_another_port_negative_is_not_reobserved_by_a_scan_of_the_default_service(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module, target = await _setup(conn, monkeypatch)
+            async with _client(app_module) as operator:
+                first = (await _hunt(operator, target)).hunt
+                port = ORIGIN + ':8443'
+                evidence = await _request(conn, first.id, origin=port)
+                negative = _negative(evidence, origin=port)
+                entry = (await first.ok('knowledge.record', negative))['result']['interpretation']
+                assert entry['dependencies']['binding']['bound'] is True
+                second = (await _hunt(operator, target)).hunt
+                await _scan(conn, target, tech={'Express': '4.18'},
+                            at=datetime.now(timezone.utc) + timedelta(seconds=1))
+                await conn.execute("UPDATE target_endpoints SET last_seen_at=NOW() + interval '2 seconds'")
+                await _request(conn, second.id)  # the default origin, not :8443
+                assert (await _check(second, negative['conditions']))['skip'] is False
+    asyncio.run(run())
+
+
+def test_round2_identical_repeats_with_ledger_digests_do_not_trip_the_distinct_cap(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module, target = await _setup(conn, monkeypatch)
+            async with _client(app_module) as operator:
+                hunt = (await _hunt(operator, target)).hunt
+                start = datetime.now(timezone.utc) - timedelta(minutes=30)
+                await conn.execute('UPDATE hunt_runs SET created_at=$2 WHERE id=$1', UUID(hunt.id),
+                                   start - timedelta(minutes=1))
+                evidence = await _request(conn, hunt.id, at=start)
+                entry = (await hunt.ok('knowledge.record', _negative(evidence)))['result']['interpretation']
+                observations = [{'kind': 'http_observation', 'request': {'method': 'GET'},
+                                 'response': {'status': 403, 'content_type': 'application/json; charset=utf-8',
+                                              'json_keys': ['error'], 'body_sha256': '1' * 64}}]
+                rows = []
+                for index in range(1001):
+                    summary = recorded_input({'method': 'GET', 'path': '/api/invoices/17', 'session_ref': SESSION})
+                    # Each recorded action has its own input digest and idempotency key digest.
+                    summary.update(input_digest=uuid4().hex * 2, idempotency_key_sha256=uuid4().hex * 2)
+                    rows.append((uuid4(), UUID(hunt.id), json.dumps(summary), json.dumps({'observations': observations}),
+                                 start + timedelta(seconds=1, milliseconds=index)))
+                await conn.executemany("""INSERT INTO hunt_actions(id,hunt_run_id,capability_name,status,input_summary,
+                    result_summary,completed_at) VALUES($1,$2,'http.request','completed',$3::jsonb,$4::jsonb,$5)""", rows)
+                answer = await _check(hunt, _negative(evidence)['conditions'])
+                assert (await _entry(conn, entry['id']))['applicability'] == 'applicable'
+                assert answer['skip'] is True
     asyncio.run(run())
 
 
@@ -253,4 +315,28 @@ def test_p2_3_p2_4_dismissals_reopen_on_regression_never_on_noise_and_follow_mer
             async with _client(app_module) as operator:
                 await operator.get(f'/targets/{target}/negative-results')
             assert (await _entry(conn, dismissal))['status'] == 'active'
+    asyncio.run(run())
+
+
+def test_round2_a_merge_never_resuppresses_a_finding_whose_dismissal_was_reopened(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module, target = await _setup(conn, monkeypatch)
+            duplicate = await _web_target(conn, 'https://dup.changes.test')
+            fingerprint = uuid4().hex
+            survivor = await conn.fetchval("""INSERT INTO findings(target_id,fingerprint,title,severity,tool,url)
+                VALUES($1,$2,'X','medium','nuclei','https://app.changes.test/s') RETURNING id""", target, fingerprint)
+            merged = await conn.fetchval("""INSERT INTO findings(target_id,fingerprint,title,severity,tool,url)
+                VALUES($1,$2,'X','medium','nuclei','https://app.changes.test/s') RETURNING id""", duplicate,
+                fingerprint)  # fixture: the same scanner finding on a duplicate target
+            await conn.execute("UPDATE findings SET updated_at=NOW() - interval '1 day' WHERE id=$1", survivor)
+            async with _client(app_module) as operator:
+                assert (await operator.post(f'/targets/{duplicate}/findings/{merged}/dismiss',
+                                            json={'reason': 'false_positive', 'note': 'n'})).status_code == 200
+                assert (await operator.patch(f'/findings/{merged}', json={'status': 'active'})).status_code == 200
+            from target_dedupe import merge_target_group
+            await merge_target_group(conn, target, [duplicate])
+            assert await conn.fetchval('SELECT status FROM findings WHERE id=$1', survivor) == 'active'
+            assert await conn.fetchval("""SELECT status FROM target_interpretations
+                WHERE negative_state='finding_dismissed' AND finding_id=$1""", survivor) == 'reopened'
     asyncio.run(run())

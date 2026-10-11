@@ -36,7 +36,8 @@ def _significance(changes):
 
 def test_every_dependency_type_has_a_published_rule_and_age_is_never_one():
     assert set(SIGNIFICANCE_RULES) == {"endpoint", "response", "deployment", "auth_surface", "service", "finding",
-                                       "subject", "age"}
+                                       "subject", "age", "reuse"}
+    assert "Scans and the inventory never authorise a skip" in SIGNIFICANCE_RULES["reuse"]
     assert SIGNIFICANCE_RULES["age"].startswith("never")
 
 
@@ -231,6 +232,9 @@ def test_experiment_conditions_are_bound_only_to_what_the_cited_request_was():
     assert service_key("443") is None and service_key("tcp/70000") is None
     assert canonical_origin("https://user@app.example") is None and canonical_origin("ftp://a") is None
     assert canonical_origin("http://App.Example:80") == "http://app.example"
+    assert canonical_origin("https://app.example.") is None  # a trailing dot is refused, never folded
+    assert canonical_origin("https://[2001:db8::1]:8443") == "https://[2001:db8::1]:8443"
+    assert canonical_origin("http://[::1]") == "http://[::1]"
 
 
 def _negative(**extra):
