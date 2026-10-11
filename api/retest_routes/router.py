@@ -121,6 +121,14 @@ def public_retest_row(row: Any) -> dict[str, Any]:
         if mode == "ai_driven" and result.get("verdict")
         else "execution_result"
     )
+    # A retest stopped because of its authorization while it ran (worker
+    # ``_settle_retest_authority_stop``): named, never a verdict. The admission record (receipt
+    # ids) stays internal.
+    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+    stop = artifacts.get("authority_stop") if isinstance(artifacts.get("authority_stop"), dict) else None
+    result["authority_stop"] = stop
+    result["stop_reason"] = stop.get("stop_reason") if stop else None
+    result.pop("admitted_authority", None)
     primary_endpoint, tested_endpoints = _tested_scope(result)
     result["primary_tested_endpoint"] = primary_endpoint
     result["tested_endpoints"] = tested_endpoints

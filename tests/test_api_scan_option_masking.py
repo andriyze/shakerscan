@@ -3337,7 +3337,12 @@ def test_enqueue_finding_retest_creates_campaign(monkeypatch):
     assert calls["campaign"]["target_id"] == str(target_id)
     assert calls["campaign"]["mode"] == api_module.asm_inventory.CAMPAIGN_FINDING_RETEST
     insert = next(args for query, args in conn.executions if "INSERT INTO finding_verifications" in query)
-    assert insert[-1] == campaign_id
+    assert insert[-2] == campaign_id
+    # The retest is bound to what it was admitted with; this target has no authorization and
+    # the request named no approval receipt, so nothing is revocable.
+    admitted = json.loads(insert[-1])
+    assert admitted["target_id"] == str(target_id)
+    assert admitted["standing_receipt_id"] is None and admitted["approval_receipt_id"] is None
 
 
 def test_enqueue_finding_retest_advisory_lock_rejects_active_and_unlocks():
