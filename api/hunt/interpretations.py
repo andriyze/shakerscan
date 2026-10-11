@@ -430,9 +430,10 @@ def reuse_decision(entry: Mapping[str, Any], requested_key: str, *, evaluated: b
     Only an active ``experiment_completed_negative`` with exactly the requested experiment key,
     evaluated during this call (``evaluated``) and applicable, whose conditions are bound to the
     request its cited action actually made, whose dependencies include the deployment, the route and
-    a response, and whose conditions were positively observed again since the asking Hunt started
-    (``reobservation``; evidence, not age) allows a skip. Not contradicted is not enough. The skip
-    is advice: nothing blocks the experiment, and an operator can always ask for it again.
+    a response, and whose bound request was repeated by a Hunt since the asking Hunt started with every
+    response unchanged (``reobservation``; evidence, not age) allows a skip. Applicable is not safe to
+    skip, and Scans never authorise one. The skip is advice: nothing blocks the experiment, and an
+    operator can always ask for it again.
     """
     if entry.get("negative_state") != "experiment_completed_negative" or entry.get("status") != "active":
         return {"skip": False, "reason": "not an active completed negative experiment"}
@@ -791,9 +792,9 @@ async def check_experiment(conn: Any, target_id: Any, conditions: Any, *, hunt_r
             "skip": any(item["reuse"]["skip"] for item in prior),
             "conditions_semantics": CONDITIONS_SEMANTICS,
             "note": ("Only an identical experiment (every condition equal, on this target) is matched, and only an "
-                     "applicable result bound to the request its cited action made, and observed again unchanged "
-                     "since this Hunt started, may be skipped. A negative result says nothing about other origins, "
-                     "principals, objects, methods, services or deployments.")}
+                     "applicable result bound to the request its cited action made, and that same request repeated "
+                     "unchanged since this Hunt started, may be skipped (rarely, by design). A negative result "
+                     "says nothing about other origins, principals, objects, methods, services or deployments.")}
 
 
 def _operator_only(actor: str) -> None:
