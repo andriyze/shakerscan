@@ -247,7 +247,8 @@ def test_round2_identical_repeats_with_ledger_digests_do_not_trip_the_distinct_c
                 entry = (await hunt.ok('knowledge.record', _negative(evidence)))['result']['interpretation']
                 observations = [{'kind': 'http_observation', 'request': {'method': 'GET'},
                                  'response': {'status': 403, 'content_type': 'application/json; charset=utf-8',
-                                              'json_keys': ['error'], 'body_sha256': '1' * 64}}]
+                                              'json_keys': ['error'], 'body_sha256': '1' * 64,
+                                              'body_digest_scope': 'complete', 'truncated': False}}]
                 rows = []
                 for index in range(1001):
                     summary = recorded_input({'method': 'GET', 'path': '/api/invoices/17', 'session_ref': SESSION})
@@ -339,4 +340,23 @@ def test_round2_a_merge_never_resuppresses_a_finding_whose_dismissal_was_reopene
             assert await conn.fetchval('SELECT status FROM findings WHERE id=$1', survivor) == 'active'
             assert await conn.fetchval("""SELECT status FROM target_interpretations
                 WHERE negative_state='finding_dismissed' AND finding_id=$1""", survivor) == 'reopened'
+    asyncio.run(run())
+
+
+def test_round3_a_large_response_digested_as_a_prefix_is_never_reused(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module, target = await _setup(conn, monkeypatch)
+            async with _client(app_module) as operator:
+                hunt = (await _hunt(operator, target)).hunt
+                # A list over the capture limit: a prefix digest, and JSON that did not parse (no keys).
+                evidence = await _request(conn, hunt.id, status=200, keys=(), scope='prefix',
+                                          at=datetime.now(timezone.utc) - timedelta(seconds=30))
+                entry = (await hunt.ok('knowledge.record', _negative(evidence)))['result']['interpretation']
+                # Repeated: same status, same prefix digest, same empty keys; another tenant's rows may sit
+                # after the first 32 KiB.
+                await _request(conn, hunt.id, status=200, keys=(), scope='prefix')
+                answer = await _check(hunt, _negative(evidence)['conditions'])
+                assert answer['skip'] is False
+                assert (await _entry(conn, entry['id']))['applicability'] == 'unknown'
     asyncio.run(run())
