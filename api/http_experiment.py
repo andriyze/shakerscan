@@ -13,13 +13,13 @@ import httpx
 
 try:
     from runtime.archive_body_masking import (
-        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
-        mask_body_text, mask_url_userinfo, withhold_url_userinfo,
+        CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
+        decode_cut, mask_before_cut, mask_body_text, mask_url_userinfo, withhold_url_userinfo,
     )
 except ModuleNotFoundError:  # package import layout
     from api.runtime.archive_body_masking import (
-        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
-        mask_body_text, mask_url_userinfo, withhold_url_userinfo,
+        CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
+        decode_cut, mask_before_cut, mask_body_text, mask_url_userinfo, withhold_url_userinfo,
     )
 
 
@@ -30,6 +30,9 @@ MAX_STEPS = 4
 MAX_BODY_BYTES = 32_768
 MAX_REQUEST_JSON_BYTES = 16_384
 MAX_RESPONSE_SAMPLE = 2_000
+# A reader takes up to this much past MAX_BODY_BYTES: what follows the cut is read to mask the
+# text before it (``mask_before_cut``), never shown.
+MAX_READ_BYTES = MAX_BODY_BYTES + CUT_LOOKAHEAD_CHARS
 MAX_EXTRACTS_PER_STEP = 8
 MAX_VARIABLES = 20
 VARIABLE_PATTERN = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]{0,63})\}")
@@ -345,6 +348,23 @@ def _masked_body(value: str, *, window: bool = False) -> str:
     return re.sub(r"(?i)(bearer\s+)(?!\[withheld:)[a-z0-9._~+/=-]+", r"\1<redacted>", text)
 
 
+_CONTENT_RANGE_RE = re.compile(r"\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$", re.I)
+
+
+def _partial_range(response: httpx.Response) -> str | None:
+    """The byte range a response holds when it is part of a resource (``bytes 40-99/500``, a
+    multipart range, a 206 that does not say), else ``None``."""
+    content_range = str(response.headers.get("content-range") or "")
+    if response.status_code != 206 and not content_range:
+        return None
+    match = _CONTENT_RANGE_RE.match(content_range)
+    if match and match.group(3) != "*":
+        first, last, total = (int(match.group(index)) for index in (1, 2, 3))
+        if first == 0 and last + 1 >= total:
+            return None
+    return f"bytes {match.group(1)}-{match.group(2)}" if match else "a byte range"
+
+
 def _scrub_sample(value: str) -> str:
     # Masked before it is cut, so a value is never split by the sample's end.
     return _masked_body(value)[:MAX_RESPONSE_SAMPLE]
@@ -386,10 +406,14 @@ def response_summary(
     selected_json_paths: list[str] | None = None,
     selected_headers: list[str] | None = None,
     elapsed_ms: int | None = None,
+    lookahead: bytes = b"",
 ) -> dict[str, Any]:
+    """``body`` may run past ``MAX_BODY_BYTES``; ``lookahead`` is what followed it when a reader
+    cut it. Both are read only to mask the bounded text where it is cut, and never shown."""
     truncated = len(body) > MAX_BODY_BYTES
     bounded = body[:MAX_BODY_BYTES]
-    text = bounded.decode(response.encoding or "utf-8", errors="replace")
+    after = (body[MAX_BODY_BYTES:] + bytes(lookahead or b""))[:MAX_READ_BYTES - MAX_BODY_BYTES]
+    text, after_text = decode_cut(bounded, after, response.encoding or "utf-8")
     parsed_json: Any = None
     try:
         parsed_json = json.loads(text)
@@ -425,14 +449,26 @@ def response_summary(
         bool(range_start and int(range_start.group(1)) > 0)
         or (parsed_json is None and text.lstrip()[:1] in ("{", "["))
     )
-    masked_text = _masked_body(text, window=window)
-    body_sample = masked_text[:MAX_RESPONSE_SAMPLE]
+    partial = _partial_range(response)
+    if partial is not None:
+        # The request chose where the server cuts: a label just before the window, or a closing
+        # quote just after it, is outside what the masking can read, and the value between shows
+        # as plain text. artifact.inspect reads a window with what surrounds it.
+        body_sample = (
+            f"[ranged body withheld: {partial} is part of a resource, and the masking cannot read "
+            "what lies outside it; artifact.inspect reads a window (offset, max_bytes) with its "
+            "surroundings]"
+        )
+    else:
+        masked_text = mask_before_cut(text, after_text, lambda value: _masked_body(value, window=window))
+        body_sample = masked_text[:MAX_RESPONSE_SAMPLE]
     summary = {
         "status": response.status_code,
         "content_type": str(response.headers.get("content-type") or "")[:200],
         "content_length": len(bounded),
         "content_length_header": int(response.headers["content-length"]) if str(response.headers.get("content-length") or "").isdigit() else None,
-        "bytes_observed": len(body),
+        # What follows the ceiling past its first byte is read to mask the cut, not observed.
+        "bytes_observed": min(len(body), MAX_BODY_BYTES + 1),
         # Keyed whether or not anything was withheld (see ``_body_digest``); the name is kept for
         # the readers that compare it.
         "body_sha256": _body_digest(bounded),
@@ -652,12 +688,12 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                 received = 0
                 try:
                     async for chunk in response.aiter_bytes():
-                        remaining = MAX_BODY_BYTES + 1 - received
+                        remaining = MAX_READ_BYTES - received
                         if remaining <= 0:
                             break
                         chunks.append(chunk[:remaining])
                         received += min(len(chunk), remaining)
-                        if received > MAX_BODY_BYTES:
+                        if received >= MAX_READ_BYTES:
                             break
                 finally:
                     await response.aclose()

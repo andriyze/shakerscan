@@ -15850,6 +15850,8 @@ async def _execute_authz_replay_plan(
                 else replay.get("status") if isinstance(replay, dict) else None
             )
             matched = _authz_observation_matches_expectation(observed_status, expected)
+            # Shown to the caller and stored in the campaign action: masked whole, before any cut.
+            shown = masked_endpoint_response(replay) if isinstance(replay, dict) else {}
             observation = {
                 "method": method,
                 "path": endpoint,
@@ -15872,8 +15874,8 @@ async def _execute_authz_replay_plan(
                 "response": {
                     "status": observed_status,
                     "status_text": replay.get("status_text") if isinstance(replay, dict) else None,
-                    "headers": replay.get("headers") if isinstance(replay, dict) else {},
-                    "body_sample": replay.get("body") if isinstance(replay, dict) else None,
+                    "headers": shown.get("headers") or {},
+                    "body_sample": shown.get("body"),
                 },
             }
             if isinstance(replay, dict) and replay.get("error"):
@@ -20705,7 +20707,7 @@ async def scale_workers(request: WorkerScaleRequest):
 # ============================================================
 
 # Import session manager
-from session_manager import InteractiveSessionManager, InteractiveSession
+from session_manager import InteractiveSessionManager, InteractiveSession, masked_endpoint_response
 
 
 

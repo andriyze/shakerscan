@@ -29,6 +29,50 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
+try:
+    from runtime.archive_body_masking import (
+        CUT_LOOKAHEAD_CHARS, mask_before_cut, mask_body_text, masked_header_value,
+    )
+except ModuleNotFoundError:  # package import layout
+    from api.runtime.archive_body_masking import (
+        CUT_LOOKAHEAD_CHARS, mask_before_cut, mask_body_text, masked_header_value,
+    )
+
+# The body text a tested endpoint's result shows, masked before it is cut.
+TEST_ENDPOINT_BODY_CHARS = 5000
+# Response headers that carry a credential: never shown.
+_CREDENTIAL_RESPONSE_HEADERS = frozenset({
+    "set-cookie", "set-cookie2", "authorization", "proxy-authorization", "www-authenticate",
+    "proxy-authenticate", "authentication-info", "proxy-authentication-info",
+})
+
+
+def masked_endpoint_response(result: dict[str, Any]) -> dict[str, Any]:
+    """A tested endpoint's response as its callers (the operator, an agent, a stored replay
+    observation) see it: the body masked as every planner view masks one (``mask_body_text``) over
+    the text read and what followed it before it is cut; every header masked whole before it is
+    cut, credential headers withheld; the parsed JSON body masked the same way."""
+    body = result.get("body")
+    shown = None
+    if isinstance(body, str):
+        shown = mask_before_cut(
+            body[:TEST_ENDPOINT_BODY_CHARS],
+            body[TEST_ENDPOINT_BODY_CHARS:TEST_ENDPOINT_BODY_CHARS + CUT_LOOKAHEAD_CHARS],
+            mask_body_text,
+        )
+    headers = {
+        str(name): "<redacted>" if str(name).lower() in _CREDENTIAL_RESPONSE_HEADERS
+        else masked_header_value(name, value, 1000)
+        for name, value in dict(result.get("headers") or {}).items()
+    }
+    parsed = None
+    if result.get("json") is not None:
+        try:
+            parsed = json.loads(mask_body_text(json.dumps(result.get("json"), ensure_ascii=False)))
+        except (TypeError, ValueError):
+            parsed = None  # not shown when its masked text is no longer JSON
+    return {"body": shown, "headers": headers, "json": parsed}
+
 # Try playwright import - it's optional for session management
 try:
     from playwright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -1067,7 +1111,7 @@ class InteractiveSession:
                 try:
                     # Execute fetch via browser
                     result = await page.evaluate("""
-                        async ({url, options}) => {
+                        async ({url, options, bodyChars, lookahead}) => {
                             try {
                                 const response = await fetch(url, options);
                                 const text = await response.text();
@@ -1077,7 +1121,8 @@ class InteractiveSession:
                                     status: response.status,
                                     statusText: response.statusText,
                                     headers: Object.fromEntries(response.headers.entries()),
-                                    body: text.substring(0, 5000),
+                                    // and what follows it, read to mask the body where it is cut
+                                    body: text.substring(0, bodyChars + lookahead),
                                     json: json,
                                     ok: response.ok
                                 };
@@ -1085,7 +1130,8 @@ class InteractiveSession:
                                 return { error: e.message };
                             }
                         }
-                    """, {"url": url, "options": fetch_options})
+                    """, {"url": url, "options": fetch_options, "bodyChars": TEST_ENDPOINT_BODY_CHARS,
+                          "lookahead": CUT_LOOKAHEAD_CHARS})
                 finally:
                     # Restore original allowed origins
                     self._user_allowed_origins[user_key] = original_allowed
@@ -1101,6 +1147,7 @@ class InteractiveSession:
                         "as_user": as_user
                     }
 
+                masked = masked_endpoint_response(result)
                 return {
                     "success": True,
                     "endpoint": endpoint,
@@ -1108,9 +1155,9 @@ class InteractiveSession:
                     "as_user": as_user,
                     "status": result.get("status"),
                     "status_text": result.get("statusText"),
-                    "headers": result.get("headers", {}),
-                    "body": result.get("body"),
-                    "json": result.get("json"),
+                    "headers": masked["headers"],
+                    "body": masked["body"],
+                    "json": masked["json"],
                     "accessible": result.get("ok", False)
                 }
 

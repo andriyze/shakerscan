@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from scanner import redaction
+from api.runtime.archive_body_masking import mask_url_userinfo_redacted
 from scanner.redaction import (
     _NOT_WITHHELD_MARKER,
     _NOT_WITHHELD_QUOTED,
@@ -59,11 +60,10 @@ _REFERENCE_REWRITTEN = {
         ),
         r"\1***\3",
     ),
-    # The URL userinfo rule, with the marker exemption the other rules have.
-    9: (
-        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]*):(?!\[withheld:[1-9][0-9]{0,3}\]@)[^@\s/]+@"),
-        r"\1:***@",
-    ),
+    # The URL userinfo rule is the Hunt body masking's reader since the 2.9.0 masking review: the
+    # regex it replaced matched across compact JSON strings (``"http://a","p":"x:y@z"`` lost a
+    # quote), stopped a password at its first ``@`` and split references (``[withheld:***@``).
+    9: (mask_url_userinfo_redacted, None),
     11: (re.compile(r"(?i)(\b(?:mysql|mariadb)\b[^\r\n]*?\s-p)(?!\s)(\S+)"), r"\1***"),
 }
 
@@ -72,12 +72,12 @@ def reference_redact_text(text: str) -> str:
     """``redact_text`` (no known values) as the rule table stood before R2."""
     for index, rule in enumerate(redaction._TEXT_PATTERNS):
         pattern, replacement = _REFERENCE_REWRITTEN.get(index, rule)
-        text = pattern.sub(replacement, text)
+        text = pattern(text) if replacement is None else pattern.sub(replacement, text)
     return text
 
 
 def test_the_reference_covers_every_rewritten_rule_and_keeps_the_rest():
-    assert len(redaction._TEXT_PATTERNS) == 14
+    assert len(redaction._TEXT_PATTERNS) == 13
     assert redaction._TEXT_PATTERNS[8] is redaction._mask_xml_elements
     assert redaction._TEXT_PATTERNS[9] is redaction._mask_url_userinfo
     assert redaction._TEXT_PATTERNS[11] is redaction._mask_mysql_passwords
@@ -145,6 +145,12 @@ def test_rewritten_rules_redact_exactly_as_before(family):
     ("étoken-password: abcdef", "étoken-password: ***"),
     ("see https://ID:SECRET@api.example/x and redis://:pw@cache", "see https://ID:***@api.example/x and redis://:***@cache"),
     ("https://u:[withheld:3]@h", "https://u:[withheld:3]@h"),
+    # Compact JSON: a quoted URL ends at its own quote, a password at the authority's last ``@``.
+    ('{"u":"http://a","p":"x:y@z"}', '{"u":"http://a","p":"x:y@z"}'),
+    ('{"a":"https://x","t":"k:v","e":"me@ex.com"}', '{"a":"https://x","t":"k:v","e":"me@ex.com"}'),
+    ('{"a":"redis://:pa@ss@host"}', '{"a":"redis://:***@host"}'),
+    ('{"a":"https://user:p%2Fw@host"}', '{"a":"https://user:***@host"}'),
+    ("postgres://app:s3cret@db/x", "postgres://app:***@db/x"),
 ])
 def test_known_shapes(text, expected):
     assert redact_text(text) == expected

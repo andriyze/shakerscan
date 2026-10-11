@@ -421,7 +421,7 @@ def test_a_head_already_in_hand_is_not_read_again(monkeypatch, encryption_key):
     _range_server(monkeypatch, document, seen)
     conn = _RecentFirstRows()
     result = _inspect_action(conn, "/export.tsv", 1_000)
-    assert seen == [(0, 1_000 + 16_384 - 1)]  # the window's own read starts at byte 0
+    assert seen == [(0, 1_000 + 16_384 + 16_384 - 1)]  # the window's own read (and lookahead) starts at byte 0
     assert result["budget_consumed"]["http_requests"] == 1
     assert "[withheld:" not in result["observation"]["text_sample"]
     _inspect_action(conn, "/export.tsv", 300_000)  # the verdict is remembered

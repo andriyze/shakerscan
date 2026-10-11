@@ -15,6 +15,7 @@ from http_experiment import (
     ALLOWED_METHODS,
     FORBIDDEN_HEADERS,
     MAX_BODY_BYTES,
+    MAX_READ_BYTES,
     ExperimentContractError,
     _bounded_json_size,
     _contains_control_character,
@@ -1485,12 +1486,12 @@ async def execute_workflow(
                     received = 0
                     try:
                         async for chunk in http_response.aiter_bytes():
-                            remaining = MAX_BODY_BYTES + 1 - received
+                            remaining = MAX_READ_BYTES - received
                             if remaining <= 0:
                                 break
                             chunks.append(chunk[:remaining])
                             received += min(len(chunk), remaining)
-                            if received > MAX_BODY_BYTES:
+                            if received >= MAX_READ_BYTES:
                                 break
                     finally:
                         await http_response.aclose()

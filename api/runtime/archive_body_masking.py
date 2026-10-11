@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import base64
 import bisect
+import codecs
 import html
 import html.entities
 import json
@@ -211,6 +212,14 @@ class WithheldValues:
             number = len(self.values)
             self._numbers[value] = number
         return f"[withheld:{number}]"
+
+    def forget_after(self, count: int) -> None:
+        """Forget every value numbered after ``count`` (a provisional masking's: none was shown)."""
+        for value in self.values[count:]:
+            self._numbers.pop(value, None)
+        for number in [number for number in self._fingerprints if number > count]:
+            del self._fingerprints[number]
+        del self.values[count:]
 
     def shown_numbers(self, *texts: str | None) -> list[int]:
         numbers: set[int] = set()
@@ -1572,6 +1581,20 @@ def _userinfo_value(raw: str, encoded: bool, quote: str | None, markup: bool) ->
     return _url_decoded(_url_decoded(raw) if encoded else raw)
 
 
+def mask_url_userinfo_redacted(text: Any) -> Any:
+    """``mask_url_userinfo`` with every password ``***``, never a reference, whether or not a Hunt
+    is collecting: the scanner's free-text redactor (``redaction.redact_text``) runs it, and its
+    output carries no withheld-value entries. Read as written (a quoted URL ends at its own
+    unescaped quote, so it never spans two JSON strings), then in decoded strings."""
+    if not isinstance(text, str) or ("@" not in text and "%40" not in text):
+        return text
+    token = _COLLECTOR.set(None)
+    try:
+        return mask_url_userinfo(mask_url_userinfo(text, form="escaped"))
+    finally:
+        _COLLECTOR.reset(token)
+
+
 def withhold_url_userinfo(value: Any) -> Any:
     """``mask_url_userinfo`` over every string in ``value`` (a mapping, a list, a string): a
     masked export's URL, headers and metadata, before the shared redactor, whose own userinfo rule
@@ -1636,6 +1659,25 @@ def bounded_public_url(value: Any, limit: int) -> Any:
     return prefix + MASK
 
 
+def masked_header_value(name: Any, value: Any, limit: int) -> str:
+    """One response header's value for a public result, masked whole before it is cut: a
+    URL-bearing header's secret parameters and userinfo password (a CSP ``report-uri`` token),
+    any other header's userinfo password and provider-format secrets. A cut that would split what
+    was withheld ends in ``***``. Inside a Hunt a withheld value is a reference."""
+    text = str(value if value is not None else "")
+    if str(name).strip().lower() in URL_BEARING_HEADERS:
+        text = mask_url_secrets(text)
+    text = mask_provider_secrets(mask_url_userinfo(text))
+    if len(text) <= limit:
+        return text
+    prefix, straddled = _cut_outside_withheld(text, limit)
+    if not straddled:
+        return prefix
+    if len(prefix) + len(MASK) > limit:
+        prefix, _straddled = _cut_outside_withheld(text, limit - len(MASK))
+    return prefix + MASK
+
+
 _WITHHELD_SPAN_RE = re.compile(r"\[withheld:[1-9][0-9]{0,3}\]|\*\*\*")
 
 
@@ -1645,6 +1687,59 @@ def _cut_outside_withheld(text: str, end: int) -> tuple[str, bool]:
         if span.start() < end < span.end():
             return text[:span.start()], True
     return text[:end], False
+
+
+# A cut can split a value, and masked alone the text before it may show the piece the cut left:
+# an attribute whose closing quote is past the cut, a provider token missing its tail. Up to this
+# much of what follows a cut is read with the text to mask it, and never shown.
+CUT_LOOKAHEAD_CHARS = 16_384
+
+
+def mask_before_cut(text: str, after: str, mask: Any) -> str:
+    """``text``, which a cut ended before ``after``, masked as ``text + after`` is masked.
+
+    ``mask`` is the caller's whole masking of one text. The result is the longest prefix of the
+    masking of ``text + after`` that the masking of ``text`` alone also shows: a value the cut
+    splits is withheld whole (the result ends in ``***`` there), and nothing of ``after`` is
+    shown. Both passes are linear; with no ``after`` this is ``mask(text)``. Inside a Hunt a
+    reference binds the whole value: the masking of the whole text numbers it first, and what the
+    masking of the cut text alone withheld beyond it (a piece of a value) is forgotten."""
+    if not after:
+        return mask(text)
+    collector = _COLLECTOR.get()
+    whole = mask(text + after)
+    numbered = len(collector.values) if collector is not None else 0
+    try:
+        alone = mask(text)
+    finally:
+        if collector is not None:
+            collector.forget_after(numbered)
+    common = 0
+    limit = min(len(whole), len(alone))
+    while common < limit and whole[common] == alone[common]:
+        common += 1
+    if common == len(alone):
+        return alone
+    prefix, _straddled = _cut_outside_withheld(whole, common)
+    return prefix + MASK
+
+
+def decode_cut(text: bytes, after: bytes, encoding: str = "utf-8") -> tuple[str, str]:
+    """``text`` and the ``after`` that follows its cut, decoded as one: a character the cut split
+    begins ``after``, so ``text`` holds no replacement character the whole text does not."""
+    try:
+        decoder = codecs.getincrementaldecoder(encoding or "utf-8")(errors="replace")
+    except LookupError:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    head = decoder.decode(bytes(text))
+    return head, decoder.decode(bytes(after), final=True)
+
+
+def mask_cut_bytes(text: bytes, after: bytes, mask: Any, encoding: str = "utf-8") -> str:
+    """``mask_before_cut`` of a body cut at a byte offset, ``after`` bounded by
+    ``CUT_LOOKAHEAD_CHARS``."""
+    head, tail = decode_cut(text, bytes(after[:CUT_LOOKAHEAD_CHARS * 4]), encoding)
+    return mask_before_cut(head, tail[:CUT_LOOKAHEAD_CHARS], mask)
 
 
 def mask_public_http_urls(result: dict[str, Any]) -> dict[str, Any]:
@@ -2861,6 +2956,7 @@ __all__ = [
     "track_copy_blocks",
     "mask_url_secrets",
     "mask_url_userinfo",
+    "mask_url_userinfo_redacted",
     "withhold_url_userinfo",
     "scrub_known_values",
     "withheld_body_notice",
@@ -2877,6 +2973,11 @@ __all__ = [
     "withheld_preview",
     "is_withheld_key",
     "mask_body_text",
+    "mask_before_cut",
+    "masked_header_value",
+    "mask_cut_bytes",
+    "decode_cut",
+    "CUT_LOOKAHEAD_CHARS",
     "mask_credential_shaped",
     "mask_embedded_objects",
     "mask_html_fields",

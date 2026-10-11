@@ -277,7 +277,8 @@ def test_execute_experiment_caps_response_while_streaming_and_closes_stream():
         transport=httpx.MockTransport(handler),
     ))
 
-    assert all(stream.yielded == 4 for stream in streams)
+    # 32 KB and the masking's lookahead after it (``MAX_READ_BYTES``), never the whole stream.
+    assert all(stream.yielded == -(-experiment.MAX_READ_BYTES // 10_000) for stream in streams)
     assert all(stream.closed for stream in streams)
     assert all(item["response"]["truncated"] for item in result["observations"])
     assert all(item["response"]["bytes_observed"] == experiment.MAX_BODY_BYTES + 1 for item in result["observations"])

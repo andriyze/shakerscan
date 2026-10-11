@@ -24,7 +24,8 @@ from http_experiment import (
     validate_next_hop,
 )
 from runtime.archive_body_masking import (
-    URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, mask_public_http_urls,
+    CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
+    mask_public_http_urls,
 )
 from runtime.models import TargetBinding
 from runtime.target_bound_socket import FrozenTargetSocketFactory
@@ -86,6 +87,8 @@ async def _read_bounded_response(
     *,
     deadline: float,
     body_limit: int = MAX_BODY_BYTES,
+    lookahead: bytearray | None = None,
+    lookahead_limit: int = 0,
 ) -> tuple[bytes, str, int, bool, bool]:
     """Read at most one byte past ``body_limit`` under one absolute deadline.
 
@@ -93,6 +96,8 @@ async def _read_bounded_response(
     timeout forever. The outer asyncio deadline bounds total occupation, while observing one
     byte past the body ceiling proves truncation without draining an unbounded response.
     Returned length and digest describe observed bytes; ``truncated`` says they are a prefix.
+    ``lookahead`` receives up to ``lookahead_limit`` bytes past the body: read only to mask the
+    body where it is cut, never recorded or digested.
     """
     retained = bytearray()
     observed = bytearray()
@@ -108,9 +113,12 @@ async def _read_bounded_response(
                 remaining_body = max(0, body_limit - len(retained))
                 if remaining_body:
                     retained.extend(chunk[:remaining_body])
+                if lookahead is not None and len(lookahead) < lookahead_limit and len(chunk) > remaining_body:
+                    lookahead.extend(chunk[remaining_body:remaining_body + lookahead_limit - len(lookahead)])
                 if len(observed) > body_limit:
                     truncated = True
-                    break
+                    if lookahead is None or len(lookahead) >= lookahead_limit:
+                        break
     except TimeoutError:
         truncated = True
         deadline_exceeded = True
@@ -547,6 +555,7 @@ async def execute_bound_http_request(
     last_connect_error: Exception | None = None
     response = None
     body = b""
+    body_lookahead = bytearray()
     final_url = url
     request_deadline = time.perf_counter() + max(0.001, float(timeout))
     try:
@@ -608,6 +617,7 @@ async def execute_bound_http_request(
                         "all frozen target addresses failed before connect"
                     ) from last_connect_error
                 request_view["pinned_address"] = pinned_address
+                del body_lookahead[:]  # this hop's own
                 try:
                     (
                         body,
@@ -619,6 +629,8 @@ async def execute_bound_http_request(
                         response,
                         deadline=request_deadline,
                         body_limit=max(1, min(int(response_body_limit), MAX_PRIVATE_BODY_BYTES)),
+                        lookahead=body_lookahead,
+                        lookahead_limit=CUT_LOOKAHEAD_CHARS,
                     )
                 finally:
                     await response.aclose()
@@ -770,6 +782,7 @@ async def execute_bound_http_request(
     summary = response_summary(
         response,
         body,
+        lookahead=bytes(body_lookahead),
         selected_headers=[
             str(name).strip().lower()
             for name in selected_headers or []

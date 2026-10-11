@@ -25,15 +25,19 @@ except ModuleNotFoundError:
 
 try:
     from runtime.archive_body_masking import (
-        HEAD_VERDICT_KEY, MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
-        copy_block_at, copy_evidence, holds_withheld_material, looks_like_dump_head, mask_body_text,
-        mask_sql_values, scrub_known_values, tab_row_run, track_copy_blocks,
+        CUT_LOOKAHEAD_CHARS, HEAD_VERDICT_KEY, MASK, WithheldValues, active_withheld_values,
+        collecting_withheld_values, copy_block_at, copy_evidence, decode_cut,
+        looks_like_dump_head, mask_before_cut, mask_body_text, mask_sql_values, mask_url_secrets,
+        masked_header_value, scrub_known_values,
+        tab_row_run, track_copy_blocks,
     )
 except ModuleNotFoundError:
     from api.runtime.archive_body_masking import (
-        HEAD_VERDICT_KEY, MASK, WithheldValues, active_withheld_values, collecting_withheld_values,
-        copy_block_at, copy_evidence, holds_withheld_material, looks_like_dump_head, mask_body_text,
-        mask_sql_values, scrub_known_values, tab_row_run, track_copy_blocks,
+        CUT_LOOKAHEAD_CHARS, HEAD_VERDICT_KEY, MASK, WithheldValues, active_withheld_values,
+        collecting_withheld_values, copy_block_at, copy_evidence, decode_cut,
+        looks_like_dump_head, mask_before_cut, mask_body_text, mask_sql_values, mask_url_secrets,
+        masked_header_value, scrub_known_values,
+        tab_row_run, track_copy_blocks,
     )
 try:
     from capabilities.secret_material import keyed_body_digest
@@ -64,18 +68,43 @@ def _b64_json(segment: str) -> dict[str, Any] | None:
 
 def _bounded_claim(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
-        return str(value)[:300] if isinstance(value, str) else value
+        # Masked whole, then cut: an ``iss`` URL's userinfo password, a token in an ``aud``.
+        return _masked_string(value, 300) if isinstance(value, str) else value
     if isinstance(value, list):
         return [_bounded_claim(item) for item in value[:20]]
     return None
 
 
-def analyze_javascript_bytes(body: bytes) -> dict[str, Any]:
-    """Return high-value static signals without exposing token material."""
+def _masked_string(value: str, limit: int) -> str:
+    """One string a static analysis extracted, masked as a body is, then cut outside anything
+    withheld."""
+    masked = mask_body_text(value)
+    if len(masked) <= limit:
+        return masked
+    return masked_header_value("", masked, limit)
+
+
+# A source map named inline (``data:...;base64,``) holds the sources themselves: only its kind is
+# shown, never its text.
+_INLINE_SOURCE_MAP_RE = re.compile(r"(?i)^data:")
+
+
+def _source_map_reference(value: str) -> str:
+    if _INLINE_SOURCE_MAP_RE.match(value):
+        return f"<inline source map: {len(value)} characters>"
+    return str(_shared_redact_text(_masked_string(mask_url_secrets(value), 500)))
+
+
+def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[str, Any]:
+    """Return high-value static signals without exposing token material. Every extracted string
+    (a route, a claim, a source map URL) is masked as a body is. ``truncated``: the body is a
+    prefix, and a token its end cuts is not a token (its reference would bind a piece)."""
     text = body.decode("utf-8", errors="replace")
     jwt_observations: list[dict[str, Any]] = []
     seen_tokens: set[str] = set()
     for match in _JWT_RE.finditer(text):
+        if truncated and match.end() >= len(text):
+            continue
         token = match.group(1)
         digest = hashlib.sha256(token.encode("ascii", errors="ignore")).hexdigest()
         if digest in seen_tokens:
@@ -114,22 +143,21 @@ def analyze_javascript_bytes(body: bytes) -> dict[str, Any]:
         if len(jwt_observations) >= 20:
             break
 
-    routes = sorted(set(_ROUTE_RE.findall(text)))[:200]
-    source_maps = sorted({
-        str(_shared_redact_text(value))
-        for value in _SOURCE_MAP_RE.findall(text)
-    })[:20]
+    # A route can carry a value (``/api/reset;token=...``, a provider key in a path segment).
+    routes = sorted({_masked_string(route, 500) for route in set(_ROUTE_RE.findall(text))})[:200]
+    source_maps = sorted({_source_map_reference(value) for value in _SOURCE_MAP_RE.findall(text)})[:20]
     supabase_origins = sorted(set(_SUPABASE_RE.findall(text)))[:20]
     sink_names = (
         "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(",
         "new Function", "postMessage", "localStorage", "sessionStorage",
     )
     sinks = [name.rstrip("(") for name in sink_names if name in text]
-    withheld = bool(jwt_observations) or holds_withheld_material(text)
     return {
         "schema_version": "javascript-static-analysis/v1",
         "bytes_analyzed": len(body),
-        "content_sha256": keyed_body_digest(body) if withheld else hashlib.sha256(body).hexdigest(),
+        # Keyed whatever the masking found: a plain digest is an offline guessing oracle for any
+        # secret in the bundle, recognised or not.
+        "content_sha256": keyed_body_digest(body),
         "routes": routes,
         "jwt_observations": jwt_observations,
         "supabase_origins": supabase_origins,
@@ -312,22 +340,28 @@ async def _check_resource_head(
     return 1
 
 
-def _window_recorder(recorder: Callable[[dict[str, Any]], None] | None, lead: int):
-    """The archive keeps the requested window only: the context bytes before it are read to mask
-    the window, never stored (the archived row says its body is the window)."""
-    if recorder is None or not lead:
+def _window_recorder(recorder: Callable[[dict[str, Any]], None] | None, lead: int, length: int):
+    """The archive keeps the requested window only: the context bytes before it and the bytes
+    after it are read to mask the window, never stored (the archived row says its body is the
+    window)."""
+    if recorder is None:
         return recorder
 
     def record(captured: dict[str, Any]) -> None:
         body = captured.get("response_body")
-        if isinstance(body, (bytes, bytearray)) and int(captured.get("status_code") or 0) == 206:
-            window = bytes(body)[lead:]
-            captured = {
-                **captured, "response_body": window,
-                "response_body_sha256": hashlib.sha256(window).hexdigest(),
-                "response_body_bytes": len(window),
-                "response_digest_scope": "window", "fidelity": "wire_request_window",
-            }
+        if isinstance(body, (bytes, bytearray)):
+            ranged = int(captured.get("status_code") or 0) == 206
+            window = bytes(body)[lead:lead + length] if ranged else bytes(body)[:lead + length]
+            if window != bytes(body):
+                captured = {
+                    **captured, "response_body": window,
+                    "response_body_sha256": hashlib.sha256(window).hexdigest(),
+                    "response_body_bytes": len(window),
+                    **({"response_digest_scope": "window", "fidelity": "wire_request_window"}
+                       if ranged else {"response_digest_scope": "prefix",
+                                                 "response_body_truncated": True,
+                                                 "fidelity": "wire_request_prefix"}),
+                }
         recorder(captured)
 
     return record
@@ -369,33 +403,39 @@ def _context_secrets(context: bytes, body: bytes, start: int | None = None) -> l
     return probe.values
 
 
-def _masked_window_text(body: bytes, context: bytes = b"", start: int | None = None) -> str:
+def _masked_window_text(body: bytes, context: bytes = b"", start: int | None = None,
+                        after: bytes = b"") -> str:
     """The whole window, masked before anything is cut from it.
 
     The body masking every masked archive view applies (N56): SQL dump rows, markup key/value
     pairs, phpinfo-style table cells, assignments and provider formats. Inside a Hunt worker the
     withheld values become ``[withheld:n]`` markers the planner can bind by reference. With
     ``context`` (the bytes before an offset window) the secrets of the whole span are withheld
-    from the window too, whole or cut by its start. ``start`` is the byte offset of ``context``
-    (of ``body`` when there is none) in the resource.
+    from the window too, whole or cut by its start. With ``after`` (the bytes after the window)
+    a value the window's end cuts is withheld whole (``mask_before_cut``). ``start`` is the byte
+    offset of ``context`` (of ``body`` when there is none) in the resource.
     """
-    text = body.decode("utf-8", errors="replace")
+    text, tail = decode_cut(body, after)
     known = _context_secrets(context, body, start) if context else []
     collector = active_withheld_values()
     if known and collector is not None:
         collector.bind_known(known, found=True)
-    elif known:
-        text = scrub_known_values(text, known, MASK)
-    if collector is not None:
-        collector.copy_block = _copy_block_at(None if start is None else start + len(context))
-    try:
-        text = mask_body_text(text, window=(start or 0) + len(context) > 0)
-    finally:
+
+    def mask(value: str) -> str:
+        if known and collector is None:
+            value = scrub_known_values(value, known, MASK)
         if collector is not None:
-            collector.copy_block = None
-    text = _JWT_RE.sub(_jwt_replacement, text)
-    text = re.sub(r"(?i)(bearer\s+)(?!\[withheld:)[a-z0-9._~+/=-]+", r"\1<redacted>", text)
-    return str(_shared_redact_text(text))
+            collector.copy_block = _copy_block_at(None if start is None else start + len(context))
+        try:
+            value = mask_body_text(value, window=(start or 0) + len(context) > 0)
+        finally:
+            if collector is not None:
+                collector.copy_block = None
+        value = _JWT_RE.sub(_jwt_replacement, value)
+        value = re.sub(r"(?i)(bearer\s+)(?!\[withheld:)[a-z0-9._~+/=-]+", r"\1<redacted>", value)
+        return str(_shared_redact_text(value))
+
+    return mask_before_cut(text, tail[:CUT_LOOKAHEAD_CHARS], mask)
 
 
 def _redacted_text_sample(body: bytes) -> str:
@@ -491,9 +531,11 @@ async def inspect_target_artifact(
     context_start = max(0, offset - _context_bytes(path))
     lead = offset - context_start
     deadline = time.monotonic() + INSPECT_WALL_SECONDS
+    # And up to CUT_LOOKAHEAD_CHARS after it: a value the window's end cuts is withheld whole.
     result, private = await _fetch_artifact(
-        target_url, path=path, target=target, offset=context_start, length=lead + length,
-        transaction_recorder=_window_recorder(transaction_recorder, lead),
+        target_url, path=path, target=target, offset=context_start,
+        length=lead + length + CUT_LOOKAHEAD_CHARS,
+        transaction_recorder=_window_recorder(transaction_recorder, lead, length),
     )
     if collector is not None and lead > CONTEXT_BYTES:
         collector.context_bytes_used += lead
@@ -541,13 +583,12 @@ async def inspect_target_artifact(
     body = received[:length]
     resource_bytes = _resource_bytes(private)
     terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]
-    raw_text = body.decode("utf-8", errors="replace")
-    masked_text = _masked_window_text(body, context, context_start)
+    masked_text = _masked_window_text(body, context, context_start,
+                                      received[length:length + CUT_LOOKAHEAD_CHARS])
     text_sample = masked_text[:MAX_PUBLIC_TEXT]
     # Counted over the masked window: a count over raw bytes recovers a withheld value one
     # guessed character at a time.
     lowered = masked_text.lower()
-    withheld = masked_text != raw_text
     observation = {
         "kind": "artifact_observation",
         "path": path,
@@ -563,8 +604,9 @@ async def inspect_target_artifact(
         ),
         # search_matches counts the returned window only, never the rest of the resource.
         "search_scope": "window",
-        # A plain digest of a window that held a secret is an offline guessing oracle for it.
-        "window_sha256": keyed_body_digest(body) if withheld else hashlib.sha256(body).hexdigest(),
+        # Keyed whatever the masking found: a plain digest is an offline guessing oracle for any
+        # secret in the window, recognised or not.
+        "window_sha256": keyed_body_digest(body),
         "content_type": private.headers().get("content-type"),
         "text_sample": text_sample,
         "search_matches": [
@@ -610,10 +652,13 @@ async def analyze_target_javascript(
             "budget_consumed": {"http_requests": 1, "tool_wall_seconds": 1},
         }
     body = private.body()[:length]
-    analysis = analyze_javascript_bytes(body)
+    analysis = analyze_javascript_bytes(
+        body, truncated=private.body_truncated or len(private.body()) > len(body) or len(body) >= length)
     collector = active_withheld_values()
     if collector is not None:
-        analysis["withheld_values"] = collector.entries(json.dumps(analysis["jwt_observations"]))
+        analysis["withheld_values"] = collector.entries(json.dumps(
+            [analysis["jwt_observations"], analysis["routes"], analysis["source_maps"]],
+            ensure_ascii=False))
     analysis.update({
         "kind": "javascript_analysis",
         "path": path,

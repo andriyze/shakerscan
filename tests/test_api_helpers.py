@@ -6057,8 +6057,10 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
                 "success": True,
                 "status_code": 200 if as_user in {"user1", "user2"} else 403,
                 "status_text": "OK",
-                "headers": {"content-type": "application/json"},
-                "body": '{"id": 42}',
+                # Synthetic secrets: the replayed response is masked before it is shown or stored.
+                "headers": {"content-type": "application/json",
+                            "x-cache-backend": "redis://:Hn4tGhPb8nVc@cache.fixture.test:6379"},
+                "body": '{"id": 42, "aws": "AKIAQX7VKPWZ9KLMTY3M"}',
             }
 
     class _FakeManager:
@@ -6240,6 +6242,10 @@ def test_execute_authz_replay_plan_records_observations_without_findings(monkeyp
     assert result["findings_created"] == 0
     assert result["mismatch_count"] == 1
     assert result["violation_count"] == 1
+    # The replayed response reaches the caller and the stored campaign action masked (2.9.0).
+    for text in (json.dumps(result, default=str), str(captured["update_args"][1])):
+        assert "AKIAQX7VKPWZ9KLMTY3M" not in text and "Hn4tGhPb8nVc" not in text
+    assert result["observations"][0]["response"]["body_sample"] == '{"id": 42, "aws": "***"}'
     assert result["campaign_action"]["status"] == "partial"
     assert result["campaign_action"]["dry_run"] is False
     assert result["tool_receipt"]["id"] == str(tool_receipt_id)
