@@ -4027,6 +4027,7 @@ except ModuleNotFoundError:
     from api.credential_api import public_credential_validation_errors
 
 try:
+    from gateway_identity import GatewayIdentityMiddleware
     from host_guard import configure_host_guard
     from public_api_contract import (
         PublicV2BodyLimitMiddleware,
@@ -4038,6 +4039,7 @@ try:
         public_v2_surface,
     )
 except ModuleNotFoundError:
+    from api.gateway_identity import GatewayIdentityMiddleware
     from api.host_guard import configure_host_guard
     from api.public_api_contract import (
         PublicV2BodyLimitMiddleware,
@@ -7315,6 +7317,10 @@ app.add_middleware(CORSMiddleware, **_cors_kwargs)
 # hostname or through a tunnel lost its CORS headers on reads and 403'd on every write.
 app.add_middleware(SameHostCorsMiddleware, expose_headers=_cors_kwargs["expose_headers"])
 configure_host_guard(app, allow_origins=_cors_kwargs["allow_origins"], allow_origin_regex=str(_cors_kwargs.get("allow_origin_regex") or ""))
+# Outermost of all: an operator identity a managed gateway asserts (HMAC, inert without
+# SHAKERSCAN_GATEWAY_IDENTITY_KEY); its headers are removed from every request before anything else
+# reads them, key or no key (gateway_identity.py).
+app.add_middleware(GatewayIdentityMiddleware)
 
 _fastapi_openapi = getattr(app, "openapi", None)
 if callable(_fastapi_openapi):

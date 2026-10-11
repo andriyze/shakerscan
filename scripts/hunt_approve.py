@@ -24,19 +24,25 @@ GATEWAY CONTRACT (G1 implements it; every response, success or refusal, carries 
 ``schema_version`` starting ``shakerscan-approval-``, which is how a missing route is told apart)::
 
     POST /_enterprise/approvals/begin     {schema_version: "shakerscan-approval-begin/v1",
-        purpose, account, origin, decisions | preauthorization | session}
+        purpose, account, origin, decisions | preauthorization | session | knowledge}
       -> {schema_version: "shakerscan-approval-challenge/v1", approval_id, set_digest, methods,
           expires_at, decisions?, nonce?, webauthn?}
     POST /_enterprise/approvals/finish    {schema_version: "shakerscan-approval-finish/v1",
         approval_id, set_digest, proof}
       -> {schema_version: "shakerscan-approval-result/v1", approval_id, decided_by, decision_via,
-          results? | preauthorization? | session?}
+          results? | preauthorization? | session? | knowledge?}
     POST /_enterprise/approvals/session/revoke {schema_version:
         "shakerscan-approval-session-revoke/v1", session_id, session_secret}
       -> {schema_version: "shakerscan-approval-session/v1", session_id, revoked: true}
 
 The digest, proof and result shapes are defined by the functions below and documented in
 docs/hunt-permission-requests.md ("E3: the terminal approval protocol and the G1 contract").
+
+The ``knowledge_decision`` purpose carries one knowledge-review decision (``shakerscan knowledge
+review`` and ``knowledge allow-changes``): accepting one instruction or saved-action proposal,
+confirming one target's agent-written instructions, or letting Hunts edit one target's
+instructions. The step-up is bound to that single decision (the target, the proposal, the digest
+of the text that was shown, the revision) and the gateway applies it itself after the proof.
 """
 
 from __future__ import annotations
@@ -62,7 +68,18 @@ FINISH_PATH = "/_enterprise/approvals/finish"
 SESSION_REVOKE_PATH = "/_enterprise/approvals/session/revoke"
 PREAUTHORIZATION_HEADER = "X-ShakerScan-Preauthorization"
 SET_SCHEMA = "shakerscan-approval-set/v1"
-PURPOSES = ("permission_decision", "preauthorization", "approver_session")
+PURPOSES = ("permission_decision", "preauthorization", "approver_session", "knowledge_decision")
+# One knowledge-review decision, always with exactly these keys (null where they do not apply).
+KNOWLEDGE_DECISIONS = ("accept", "confirm", "allow_changes", "dismiss", "reopen", "retract", "retract_hunt")
+KNOWLEDGE_KEYS = ("decision", "target_id", "subject_id", "text_sha256", "expected_revision", "reason", "note")
+# Which keys each decision names; every other key is null. The subject is the proposal (accept),
+# the finding (dismiss, reopen), the interpretation entry (retract) or the Hunt (retract_hunt).
+KNOWLEDGE_SUBJECT = frozenset({"accept", "dismiss", "reopen", "retract", "retract_hunt"})
+KNOWLEDGE_TEXT = frozenset({"accept", "confirm"})
+KNOWLEDGE_REVISION = frozenset({"confirm", "allow_changes"})
+KNOWLEDGE_NOTE_REQUIRED = frozenset({"dismiss", "reopen", "retract", "retract_hunt"})
+DISMISSAL_REASONS = ("false_positive", "accepted_risk", "duplicate")
+MAX_NOTE_CHARACTERS = 2000
 PREAUTHORIZATION_USES = ("agent_launch", "hunt_start")
 # Hunts that can hold a pending request. The engine withdraws requests when a Hunt ends.
 OPEN_HUNT_STATUSES = ("active", "awaiting_planner", "budget_exhausted")
@@ -100,6 +117,14 @@ class StepUpUnavailable(ApprovalError):
     """The Enterprise gateway does not serve the step-up routes (it predates G1)."""
 
 
+class GatewayRefused(ApprovalError):
+    """The gateway's step-up routes answered with a refusal in the contract's shape."""
+
+    def __init__(self, message: str, *, code: str, status: int) -> None:
+        super().__init__(message)
+        self.code, self.status = code, status
+
+
 # --- transport ---------------------------------------------------------------------------------
 #
 # ``send(method, path, payload=None, headers=None, *, timeout=None) -> (status, body)``: ``body`` is
@@ -119,13 +144,21 @@ def _ok(status: int) -> bool:
     return 200 <= status < 300
 
 
+def _inert(text: str) -> str:
+    """Server text as it may reach the terminal: no control, bidirectional or invisible
+    formatting character can move the cursor or reorder what the person reads."""
+    import unicodedata
+    return "".join("?" if (ord(ch) < 0x20 and ch != "\t") or 0x7F <= ord(ch) < 0xA0
+                   or unicodedata.category(ch) in {"Cf", "Zl", "Zp"} else ch for ch in text)
+
+
 def _detail_text(body: Any) -> str:
     if isinstance(body, Mapping):
         for key in ("message", "detail", "error"):
             if isinstance(body.get(key), str) and body[key].strip():
-                return body[key].strip()[:400]
-        return json.dumps(dict(body), sort_keys=True)[:400]
-    return str(body or "no detail")[:400]
+                return _inert(body[key].strip()[:400])
+        return _inert(json.dumps(dict(body), sort_keys=True)[:400])
+    return _inert(str(body or "no detail")[:400])
 
 
 # --- reading requests --------------------------------------------------------------------------
@@ -259,6 +292,8 @@ def set_document(purpose: str, account: str, origin: str, body: Mapping[str, Any
             "allow": sorted(dict.fromkeys(str(item) for item in body["preauthorization"]["allow"])),
             "use": str(body["preauthorization"]["use"]),
         }
+    elif purpose == "knowledge_decision":
+        document["knowledge"] = {key: body["knowledge"].get(key) for key in KNOWLEDGE_KEYS}
     else:
         document["session"] = {"ttl_seconds": int(body["session"]["ttl_seconds"])}
     return document
@@ -293,6 +328,7 @@ class Terminal:
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
         self._key_fd: int | None = None
+        self._key_saved: Any = None
         self._escape = "idle"  # the escape-sequence state machine of key()
         self._utf8_left = 0  # continuation bytes still due for a UTF-8 character
         self._last_input = 0.0  # when _feed last saw a byte (a control string's quiet reset)
@@ -350,16 +386,41 @@ class Terminal:
             yield  # no terminal control here: key() falls back to reading a line
             return
         self._key_fd = fd
+        self._key_saved = saved
         try:
             yield
         finally:
             self._key_fd = None
+            self._key_saved = None
             # TCSANOW: TCSADRAIN waits until the terminal's output queue is read, and an echoed
             # key nobody reads (a pseudo-terminal) would hold Ctrl-C there for ever.
             try:
                 termios.tcsetattr(fd, termios.TCSANOW, saved)
             except (OSError, termios.error):  # the terminal is gone (SIGHUP): nothing to restore
                 pass
+
+    @contextlib.contextmanager
+    def lines(self) -> Iterator[None]:
+        """Inside ``keypresses``: the terminal's ordinary line mode (echo, Enter, editing) for as
+        long as the block runs, for a typed answer (a sign-in name, a TOTP code); keypress mode
+        is back afterwards, with any key typed meanwhile discarded by the next prompt's settle."""
+        fd, saved = getattr(self, "_key_fd", None), getattr(self, "_key_saved", None)
+        if fd is None or saved is None:
+            yield
+            return
+        import termios
+        import tty
+        # Typed-ahead input (a key or a line sent before this prompt existed) is discarded, so it
+        # can never answer the sign-in name or code prompt that follows.
+        termios.tcsetattr(fd, termios.TCSAFLUSH, saved)
+        self._key_fd = None
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError, termios.error):
+                tty.setcbreak(fd, termios.TCSANOW)
+            self._escape, self._utf8_left = "idle", 0
+            self._key_fd = fd
 
     def _burst(self, fd: int, first: bytes) -> bytes:
         """``first`` and every byte that follows it at once: an escape sequence or a paste."""
@@ -544,7 +605,8 @@ class StepUp:
             )
         if not _ok(status):
             code = str(body.get("error") or "refused")
-            raise ApprovalError(f"the gateway refused ({code}, HTTP {status}): {_detail_text(body)}")
+            raise GatewayRefused(f"the gateway refused ({code}, HTTP {status}): {_detail_text(body)}",
+                                 code=code, status=status)
         return dict(body)
 
     def begin(self, purpose: str, body: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -553,7 +615,8 @@ class StepUp:
         challenge = self._post(BEGIN_PATH, {
             "schema_version": "shakerscan-approval-begin/v1", "purpose": purpose,
             "account": account, "origin": self.origin,
-            **{key: value for key, value in document.items() if key in {"decisions", "preauthorization", "session"}},
+            **{key: value for key, value in document.items()
+               if key in {"decisions", "preauthorization", "session", "knowledge"}},
         })
         if challenge.get("set_digest") != set_digest(document):
             raise ApprovalError(
@@ -684,6 +747,95 @@ def preauthorize(send: Send, origin: str, terminal: Terminal, allow: Sequence[st
     if not grant.get("id"):
         raise ApprovalError("the gateway answered without a pre-authorization id; nothing was pre-authorized")
     return dict(grant)
+
+
+# --- knowledge-review decisions ----------------------------------------------------------------
+
+
+def knowledge_entry(decision: str, target_id: str, *, subject_id: str | None = None,
+                    text_sha256: str | None = None, expected_revision: int | None = None,
+                    reason: str | None = None, note: str | None = None) -> dict[str, Any]:
+    """One knowledge-review decision as the step-up binds it. ``accept`` names the proposal
+    (``subject_id``) and the digest of its text, with an optional note; ``confirm`` the digest of
+    the unconfirmed text and the instructions' revision; ``allow_changes`` the Hunt permissions'
+    revision; ``dismiss`` the finding, a reason and a note; ``reopen`` the finding and a note;
+    ``retract`` the interpretation entry and a note; ``retract_hunt`` the Hunt and a note."""
+    if decision not in KNOWLEDGE_DECISIONS:
+        raise ApprovalError(f"unknown knowledge decision {decision!r}")
+    target = str(target_id or "").strip().lower()
+    if not _UUID.fullmatch(target):
+        raise ApprovalError(f"{target_id!r} is not a target id")
+    subject = str(subject_id or "").strip().lower() or None
+    digest = str(text_sha256 or "").strip() or None
+    if decision in KNOWLEDGE_SUBJECT and (subject is None or not _UUID.fullmatch(subject)):
+        raise ApprovalError(f"{decision} names the record it decides (an id)")
+    if decision not in KNOWLEDGE_SUBJECT and subject is not None:
+        raise ApprovalError(f"{decision} names no other record")
+    if decision in KNOWLEDGE_TEXT and (digest is None or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+        raise ApprovalError("the server did not give the digest of the text shown; nothing was decided")
+    if decision not in KNOWLEDGE_TEXT and digest is not None:
+        raise ApprovalError(f"{decision} names no text")
+    if decision in KNOWLEDGE_REVISION:
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ApprovalError("the server did not give the revision that was shown; nothing was decided")
+    elif expected_revision is not None:
+        raise ApprovalError(f"{decision} is not bound to a revision")
+    if (reason is not None) != (decision == "dismiss") or (reason is not None and reason not in DISMISSAL_REASONS):
+        raise ApprovalError(f"dismissing names one reason of {', '.join(DISMISSAL_REASONS)}; nothing else does")
+    if decision in KNOWLEDGE_NOTE_REQUIRED and not (note or "").strip():
+        raise ApprovalError(f"{decision} needs a note (why)")
+    if note is not None and (decision not in KNOWLEDGE_NOTE_REQUIRED | {"accept"}
+                             or not note or len(note) > MAX_NOTE_CHARACTERS):
+        raise ApprovalError(f"a note goes with accept, dismiss, reopen and retract, 1 to {MAX_NOTE_CHARACTERS} "
+                            "characters")
+    if note is not None and _inert(note.replace("\n", " ")) != note.replace("\n", " "):
+        raise ApprovalError("a note may not contain control, bidirectional or invisible formatting characters")
+    return {"decision": decision, "target_id": target, "subject_id": subject, "text_sha256": digest,
+            "expected_revision": expected_revision, "reason": reason, "note": note}
+
+
+def _knowledge_summary(entry: Mapping[str, Any]) -> str:
+    subject = entry.get("subject_id")
+    what = {
+        "accept": f"accept proposal {subject}",
+        "confirm": f"confirm the agent-written instructions at revision {entry.get('expected_revision')}",
+        "allow_changes": ("let Hunts edit the instructions (Hunt permissions revision "
+                          f"{entry.get('expected_revision')})"),
+        "dismiss": f"dismiss finding {subject} as {entry.get('reason')}",
+        "reopen": f"reopen finding {subject}",
+        "retract": f"retract interpretation {subject}",
+        "retract_hunt": f"retract every active interpretation Hunt {subject} wrote",
+    }[str(entry.get("decision"))]
+    digest = f", text {str(entry['text_sha256'])[:12]}" if entry.get("text_sha256") else ""
+    return (f"Your step-up will {what} on target {entry.get('target_id')}{digest}, and nothing else. "
+            "If you did not just choose this here, press Ctrl-C.")
+
+
+def decide_knowledge(stepup: "StepUp", entry: Mapping[str, Any]) -> tuple[int, Any]:
+    """Enterprise: step up for this one decision; the gateway applies it after the proof and
+    answers with the engine's status and body (``(status, body)`` like ``send``)."""
+    with stepup.terminal.lines():
+        # Said again right where the code is asked for: what this code (or key touch) decides.
+        stepup.terminal.say(_knowledge_summary(entry))
+        try:
+            challenge, _ = stepup.begin("knowledge_decision", {"knowledge": dict(entry)})
+        except GatewayRefused as exc:
+            if exc.code == "request_invalid" and exc.status == 422:
+                raise ApprovalError(
+                    "this ShakerScan Enterprise gateway cannot take knowledge-review decisions from the "
+                    f"terminal ({exc}); it needs a gateway release with terminal knowledge review. "
+                    "Nothing was decided."
+                ) from exc
+            raise
+        result = stepup.finish(challenge, stepup.prove(challenge))
+    applied = result.get("knowledge") if isinstance(result.get("knowledge"), Mapping) else {}
+    status = applied.get("http_status")
+    if not isinstance(status, int):
+        raise ApprovalError("the gateway answered without the decision's outcome; check the review again")
+    body = applied.get("result") if _ok(status) else applied.get("error")
+    if isinstance(body, Mapping):
+        body = {**body, "decided_by": result.get("decided_by")}
+    return status, body
 
 
 # --- deciding ----------------------------------------------------------------------------------
@@ -1010,8 +1162,9 @@ def add_arguments(parser: Any, command: str) -> None:
 
 
 __all__ = [
-    "APPROVAL_SCHEMA_PREFIX", "ApprovalError", "BEGIN_PATH", "FINISH_PATH", "PREAUTHORIZATION_HEADER",
+    "APPROVAL_SCHEMA_PREFIX", "ApprovalError", "BEGIN_PATH", "GatewayRefused", "FINISH_PATH", "PREAUTHORIZATION_HEADER",
     "REVOKE_TIMEOUT_SECONDS", "RequestGone", "SESSION_REVOKE_PATH", "StepUp", "StepUpUnavailable", "Terminal", "add_arguments",
-    "assertion_json", "decide", "decision_entry", "expected_challenge", "find_request", "list_pending", "preauthorize",
+    "assertion_json", "decide", "decide_knowledge", "decision_entry", "expected_challenge", "find_request",
+    "knowledge_entry", "list_pending", "preauthorize",
     "render_request", "run", "set_digest", "set_document", "wait_for", "watch",
 ]

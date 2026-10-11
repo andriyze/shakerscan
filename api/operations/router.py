@@ -375,7 +375,7 @@ async def list_cli_v1_findings(
 
 
 @router.post("/discovery")
-async def start_discovery(root_domain: str = Query(..., max_length=1012)):
+async def start_discovery(request: Request, root_domain: str = Query(..., max_length=1012)):
     """Start passive subdomain discovery for a domain under a declared target.
 
     Refused with 400 for anything but a bare domain at or below a registrable domain, 403 when
@@ -385,7 +385,7 @@ async def start_discovery(root_domain: str = Query(..., max_length=1012)):
     try:
         domain = discovery_domain(root_domain)
         async with _pool().acquire() as conn:
-            discovery_uuid = await admit_discovery(conn, domain, requested_by=requester())
+            discovery_uuid = await admit_discovery(conn, domain, requested_by=requester(request))
     except DiscoveryRefused as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     r = get_redis()
