@@ -36,6 +36,18 @@ def test_concurrent_actions_survive_fresh_service_and_connections():
                 id UUID PRIMARY KEY,
                 hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL
             )""")
+            # The rest of what a Hunt read joins: findings it verified again after another Hunt,
+            # credential uses, and permission requests.
+            for name in ("finding_hunt_verifications", "hunt_credential_uses"):
+                statement = re.search(rf"CREATE TABLE {name} \(.*?\n\);", ddl, re.DOTALL)
+                assert statement is not None
+                await control.execute(statement[0])
+            start = ddl.index("CREATE TABLE IF NOT EXISTS hunt_preauthorizations")
+            end = ddl.index("FOR EACH ROW EXECUTE FUNCTION hunt_permission_events_append_only();")
+            await control.execute(ddl[start:end] + "FOR EACH ROW EXECUTE FUNCTION hunt_permission_events_append_only();")
+            await control.execute(
+                "CREATE TABLE investigation_candidates(id UUID PRIMARY KEY, status TEXT); "
+                "CREATE TABLE investigation_candidate_observations(candidate_id UUID, hunt_run_id UUID)")
             target, hunt, other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
             await control.execute("INSERT INTO targets VALUES($1)", target)
             for identifier in (hunt, other):
