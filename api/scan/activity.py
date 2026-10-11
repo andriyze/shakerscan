@@ -90,6 +90,8 @@ _DIAGNOSTIC_ERROR_CLASSES = frozenset({
     "process_killed", "cancelled",
     # Every endpoint was attempted; the named endpoints were too slow to finish the pack.
     "slow_endpoints",
+    # The Scan's own time limit stopped the action or kept it from starting.
+    "scan_time_limit",
 })
 # Labels a batch prepends to say *that* it failed rather than *why*. They are honest answers
 # only when nothing more specific follows, so the scan must look past them.

@@ -350,6 +350,38 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         description="Deterministic Mongo-style operator injection proof over query and JSON candidates.",
     ),
     CheckFamilySpec(
+        name="graphql",
+        phase="active",
+        family="api",
+        label="GraphQL",
+        is_active=True,
+        risk_level="medium",
+        telemetry_schema="active_endpoint_attempt_v1",
+        proof_contract=("endpoint", "root_type", "check", "response_body_sha256"),
+        severity_rules={"low_requires": ["graphql_response_signature"]},
+        # V2-native: executed by the ``graphql.verify_batch`` capability. Endpoint discovery,
+        # introspection and IDE exposure are read-only and belong to sensitive_exposure.
+        dispatch_adapter="graphql_verify_batch",
+        aliases=("graphql_security", "graphql-security"),
+        finding_tools=("shakerscan_graphql_probe",),
+        finding_cwes=("CWE-200", "CWE-770"),
+        finding_title_markers=(
+            "graphql field suggestions", "graphql alias limit", "graphql duplicate field",
+        ),
+        finding_type_markers=("graphql_proof",),
+        remediation=(
+            "Disable field suggestions and introspection in production.",
+            "Limit aliases and duplicate fields per operation; apply query cost limits.",
+        ),
+        emits_endpoint_telemetry=False,
+        scanner_focus_order=48,
+        runnable=False,
+        description=(
+            "Bounded read-only GraphQL checks over GET: field suggestions and missing alias "
+            "or duplicate-field limits on discovered GraphQL endpoints."
+        ),
+    ),
+    CheckFamilySpec(
         name="authz_surface",
         phase="active",
         family="access_control",

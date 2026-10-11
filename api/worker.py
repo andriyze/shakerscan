@@ -304,6 +304,11 @@ from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
 from scan.action_authority_guard import ScanAuthorityGuard
+from scan.scan_deadline import load_scan_deadline
+from scan.cancelled_report import (
+    cancellation_error_result, cancelled_scan_report, is_kept_cancelled_report,
+    persist_kept_cancelled_scan,
+)
 from scan.action_interruption import action_interrupted
 from scan.running_scan_authority import ScanAuthorityStopped, running_retest_authority, running_scan_authority
 from scan.retest_authority import (
@@ -11460,6 +11465,16 @@ async def _load_scan_continuation_request_manifests(
     )
 
 
+def _local_continuation_runtime(dispatcher: Any, execution_plan: Any) -> ContinuationRuntime:
+    return ContinuationRuntime(
+        db_pool=db_pool, dispatcher=dispatcher, execution_plan=execution_plan,
+        load_request_manifests=_load_scan_continuation_request_manifests,
+        record_event=lambda name: record_operational_event(get_redis(), name),
+        manifest_store_factory=lambda: PostgresScanManifestStore(),
+        action_store_factory=lambda: PostgresScanActionStore(),
+    )
+
+
 async def _materialize_local_scan_continuation(
     *,
     parent_plan: ScanActionPlan,
@@ -11473,15 +11488,7 @@ async def _materialize_local_scan_continuation(
 ) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
     """Compile and persist one continuation revision (see scan.continuation_rounds)."""
     return await materialize_local_scan_continuation(
-        ContinuationRuntime(
-            db_pool=db_pool,
-            dispatcher=dispatcher,
-            execution_plan=execution_plan,
-            load_request_manifests=_load_scan_continuation_request_manifests,
-            record_event=lambda name: record_operational_event(get_redis(), name),
-            manifest_store_factory=lambda: PostgresScanManifestStore(),
-            action_store_factory=lambda: PostgresScanActionStore(),
-        ),
+        _local_continuation_runtime(dispatcher, execution_plan),
         parent_plan=parent_plan,
         allocation=allocation,
         parent_results=parent_results,
@@ -11596,13 +11603,31 @@ async def _execute_reserved_deterministic_scan(
     # and broker actions do; one guard spans every continuation round of this Scan.
     authority = ScanAuthorityGuard.for_scan(db_pool, target_binding=execution.target_binding,
         policy=admission.plan.policy, record_event=lambda name: record_operational_event(get_redis(), name))
+    # The Scan's own time limit, kept here rather than left to the stale-scan sweep: work
+    # stops at the limit and the report keeps what was confirmed before it.
+    deadline = await load_scan_deadline(
+        db_pool, scan_id=scan_id, options=normalized,
+        max_duration_seconds=admission.plan.budget.max_duration_seconds,
+        own_max_duration_seconds=(
+            ScanShardAuthority.from_payload(options["canonical_shard_authority"]).sub_budget.max_duration_seconds
+            if options.get("canonical_shard_authority") is not None else None
+        ),
+    )
     def local_executor() -> ReceiptScanActionExecutor:
         return ReceiptScanActionExecutor(scan_id=scan_id, target_id=execution.target_binding.target_id,
             worker_id=worker_id, dispatcher=dispatcher, scope_receipt_id=execution.target_binding.scope_receipt_id,
             approval_receipt_id=admission.plan.policy.approval_receipt_id, authority=authority,
             credential_check=build_scan_credential_check(db_pool, options=normalized, target=execution.target_binding,
                 scan_id=scan_id, session_check=dispatcher.authentication_health_status),
-            user_cancelled=lambda: _scan_cancel_requested(scan_id))
+            user_cancelled=lambda: _scan_cancel_requested(scan_id), deadline=deadline)
+
+    async def cancelled_report() -> dict[str, Any]:
+        async def load_allocation() -> Any:
+            async with db_pool.acquire() as conn:
+                return await action_store.load_continuation_allocation(conn, scan_id=scan_id)
+        return await cancelled_scan_report(
+            dispatcher, scan_id=scan_id, load_allocation=load_allocation,
+            runtime=_local_continuation_runtime(dispatcher, execution.execution_plan))
     executor = local_executor()
     initial_has_finalizer = any(
         action.action_id == "finalize.report" for action in plan.actions
@@ -11624,7 +11649,7 @@ async def _execute_reserved_deterministic_scan(
             result.status.value == "cancelled"
             for result in orchestration.action_results.values()
         ):
-            raise ValueError("Cancelled by user")
+            return await cancelled_report()
         async with db_pool.acquire() as conn:
             continuation_allocation = (
                 await action_store.load_continuation_allocation(
@@ -11672,6 +11697,9 @@ async def _execute_reserved_deterministic_scan(
         async def materialize_round(**kwargs: Any) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
             if authority.withdrawn and not kwargs.get("finalize_only"):
                 return None  # no further work rounds once authorization is withdrawn
+            if deadline is not None and not kwargs.get("finalize_only") and deadline.reached():
+                deadline.record_refused_round()  # reported as a time-limit stop
+                return None  # nor once the Scan has reached its time limit
             return await _materialize_local_scan_continuation(
                 allocation=continuation_allocation,
                 dispatcher=dispatcher,
@@ -11690,18 +11718,23 @@ async def _execute_reserved_deterministic_scan(
         except ScanContinuationError as exc:
             record_operational_event(get_redis(), "continuation_rejected")
             raise ScanCapabilityContractError(str(exc)) from exc
+        except ValueError as exc:
+            if str(exc) != "Cancelled by user":
+                raise
+            return await cancelled_report()
     final_result = orchestration.action_results.get("finalize.report")
     if final_result is not None and final_result.status.value == "cancelled":
-        raise ValueError("Cancelled by user")
+        return await cancelled_report()
     if final_result is None or final_result.observation_manifest_ref is None:
         raise ScanCapabilityContractError(
             "canonical Scan finalization produced no report manifest"
         )
-    return await authority.annotate(await load_recorded_scan_report(
+    report = await authority.annotate(await load_recorded_scan_report(
         db_pool, PostgresObservationManifestStore(), final_result, scan_id=scan_id,
         root_domains=execution.target_binding.allowed_root_domains,
         invalid_error=ScanCapabilityContractError,
     ), scan_id=scan_id)
+    return deadline.annotate(report) if deadline is not None else report
 
 
 async def _execute_scan_subdomain_discovery(
@@ -13581,6 +13614,21 @@ async def process_scan_job(job_data: dict):
         # Calculate duration
         completed_at = utc_now()
         duration = int((completed_at - now).total_seconds())
+
+        # A cancelled canonical Scan keeps what its settled actions confirmed (still cancelled).
+        if is_kept_cancelled_report(result) and await persist_kept_cancelled_scan(
+            db_pool, scan_id=scan_id, result=result, completed_at=completed_at,
+            duration=duration, coverage=result_coverage, budget_used=budget_used,
+        ):
+            try:
+                saved_count = await save_findings(scan_id, target_id, findings) if target_id and findings else 0
+                print(f"[{job_id[:8]}] Scan cancelled; kept {saved_count} confirmed finding(s)", flush=True)
+            except Exception as e:
+                print(f"[{job_id[:8]}] save_findings error: {e}", flush=True)
+            r.hset(f"job:{job_id}", mapping={'status': 'cancelled', 'result_path': filepath,
+                   'completed_at': completed_at.isoformat(), 'progress': '100', 'current_phase': 'cancelled'})
+            r.expire(f"job:{job_id}", 86400)
+            return
 
         # Update database - but check if scan was already marked terminal by
         # stale cleanup or user cancellation.
@@ -17821,9 +17869,9 @@ async def process_exploit_batch_job(job_data: dict):
             scan_opts = await _hydrate_generic_scan_credentials(scan_opts, scan_id)
             scan_opts = await _hydrate_managed_scan_credentials(scan_opts, scan_id)
             domain_rate.mark_executing(rate_entry)
-            result = await _execute_reserved_deterministic_scan(
+            result = cancellation_error_result(await _execute_reserved_deterministic_scan(
                 target, scan_opts, scan_id=scan_id, job_id=job_id,
-            )
+            ), target)  # an ASM batch keeps its cancellation outcome: no completion side effects
         except Exception as e:
             result = {'target': target, 'error': str(e), 'result': {'score': None, 'grade': None}, 'findings': []}
         domain_rate.annotate_result(result, reduction)

@@ -317,6 +317,18 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "requires_active_testing": true,
       "requires_credentials": true,
       "risk_level": "high"
+    },
+    {
+      "capabilities": [
+        "graphql.verify_batch"
+      ],
+      "default_enabled": false,
+      "description": "Bounded read-only GraphQL checks over GET: field suggestions and missing alias or duplicate-field limits on discovered GraphQL endpoints.",
+      "label": "GraphQL",
+      "name": "graphql",
+      "requires_active_testing": true,
+      "requires_credentials": false,
+      "risk_level": "medium"
     }
   ],
   "family_presets": {

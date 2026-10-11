@@ -18,9 +18,11 @@ import pytest
 from api.capabilities.exposure_probe import (
     _CLASS_SEVERITY,
     EXPOSURE_PROOF_CONTRACTS,
+    GRAPHQL_SEED_PROBE_COUNT,
     SENSITIVE_SEED_PATHS,
     classify_exposure,
     exposure_first_slice_hold,
+    graphql_seed_probes,
     is_never_requested,
     is_sensitive_exposure_class,
     redacted_exposure_excerpt,
@@ -390,7 +392,8 @@ def test_phpinfo_and_debug_consoles_verify_and_pages_about_them_do_not():
 # --- Soft-404 ------------------------------------------------------------------------------
 
 def test_a_soft_404_site_answering_every_seed_with_its_shell_proves_nothing():
-    for path in SENSITIVE_SEED_PATHS:
+    graphql_paths = [url for url, _headers in graphql_seed_probes("")]
+    for path in (*SENSITIVE_SEED_PATHS, *graphql_paths):
         assert _classify(path, SPA_SHELL, "text/html; charset=utf-8") is None, path
         # The same shell without a content type is still recognised as HTML.
         assert _classify(path, SPA_SHELL, "") is None, path
@@ -524,6 +527,9 @@ def test_value_fingerprints_are_deterministic_and_memory_hard():
 
 def test_first_slice_reserves_the_seed_sweep_beyond_its_endpoint_share():
     hold = exposure_first_slice_hold(3)
-    # 44 seeds + 2 soft-404 controls + 3 endpoints + 10 listing follow-ups.
-    assert hold["http_requests"] == len(SENSITIVE_SEED_PATHS) + 2 + 3 + 10
-    assert hold["tool_wall_seconds"] >= len(SENSITIVE_SEED_PATHS)
+    # The seeds and the fixed GraphQL reads + 2 soft-404 controls + 3 endpoints + 10
+    # listing follow-ups.
+    seeds = len(SENSITIVE_SEED_PATHS) + GRAPHQL_SEED_PROBE_COUNT
+    assert GRAPHQL_SEED_PROBE_COUNT == 8
+    assert hold["http_requests"] == seeds + 2 + 3 + 10
+    assert hold["tool_wall_seconds"] >= seeds
