@@ -1586,10 +1586,12 @@ def _userinfo_value(raw: str, encoded: bool, quote: str | None, markup: bool) ->
 # first blank or ``/``, its user name to the first ``:``, its password to the run's last ``@``.
 # It errs to withholding: a password written with an unencoded ``#``, ``?`` or quote
 # (``postgres://app:Pa#ss?w0rd@db``, ``'ftp://u:o'neil@h/'``) is not a URL the exact reader can
-# parse, but it is still a password. A user name holding a quote crosses from one string into
-# the next (``"http://a","p":"x:y@z"``): two strings, not one authority, left alone.
+# parse, but it is still a password. A user name holding a quote, or the URL's own opening quote
+# followed by JSON or JS punctuation (``"http://a","p":"x:y@z"``, ``["http://h:8080",1,"a@b"]``),
+# crosses out of the quoted URL: two strings, not one authority, left alone.
 _LOOSE_AUTHORITY_STOP_RE = re.compile(r"[\s/]")
 _QUOTE_RE = re.compile(r"[\"'`]")
+_QUOTE_CLOSED_RES = {quote: re.compile(re.escape(quote) + r"\s*[,:\]})]") for quote in "\"'`"}
 _LOOSE_SCHEME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-")
 
 
@@ -1615,12 +1617,12 @@ def mask_url_userinfo_loose(text: Any) -> Any:
             raw = text[colon + 1:at]
             # A quote in the user name ends a string (``"http://a","p":"x``, ``api:"https://h",
             # ver:"1"``): two strings, not one authority.
-            # So does a password that holds the URL's own opening quote followed by the next
-            # member (``"http://api:8080","key":"…","owner":"ops@corp"``).
+            # So does the URL's own opening quote followed by JSON or JS punctuation before the
+            # ``@`` (``"http://h:8080",1,"a@b"``, ``'http://h:8080',{from:'me@x'}``): the quoted
+            # URL ended there.
             opening = _scheme_quote(text, separator)
             joined = _QUOTE_RE.search(text, start, colon) or (
-                opening is not None and re.search(
-                    re.escape(opening) + r"\s*[,:]\s*" + re.escape(opening), raw) is not None)
+                opening is not None and _QUOTE_CLOSED_RES[opening].search(text, start, at) is not None)
             if raw and raw != MASK and not WITHHELD_MARKER_RE.fullmatch(raw) and not joined:
                 pieces.append(text[cursor:colon + 1])
                 position = 0

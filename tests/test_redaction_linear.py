@@ -157,7 +157,7 @@ def _old_redact_text(text: str) -> str:
 
 def _crosses_strings(text: str, match: re.Match[str]) -> bool:
     """The old match read past a string's end into the next string: a quote in its user name, or
-    a URL opened by a quote whose password holds that quote and the next member (claim 5)."""
+    a URL opened by a quote whose authority holds that quote then JSON/JS punctuation (claim 5)."""
     authority = match.group(0).split("://", 1)[1]
     user, password = authority.split(":", 1)
     if re.search(r"[\"'`]", user):
@@ -166,7 +166,7 @@ def _crosses_strings(text: str, match: re.Match[str]) -> bool:
     while start > 0 and re.match(r"[A-Za-z0-9+.-]", text[start - 1]) and match.start() < start:
         start -= 1
     quote = text[start - 1] if start > 0 and text[start - 1] in "\"'`" else None
-    return quote is not None and re.search(re.escape(quote) + r"\s*[,:]\s*" + re.escape(quote), password) is not None
+    return quote is not None and re.search(re.escape(quote) + r"\s*[,:\]})]", authority) is not None
 
 
 def _withheld_before_but_shown_now(text: str) -> list[str]:
@@ -216,8 +216,10 @@ def test_generated_url_passwords_are_withheld_at_least_as_before(alphabet):
         text = rng.choice(_CONTEXTS).format(url)
         old, new = _old_redact_text(text), redact_text(text)
         quote = text[text.index(url) - 1] if text.index(url) and text[text.index(url) - 1] in "\"'`" else None
-        if quote and re.search(re.escape(quote) + r"\s*[,:]\s*" + re.escape(quote), password):
-            continue  # two strings, not one URL (claim 5): the one intended difference besides references
+        if quote and re.search(re.escape(quote) + r"\s*[,:\]})]", password):
+            # The URL's own quote then JSON/JS punctuation: the quoted URL ended there, the rest is
+            # the next value (claim 5) -- the intended difference besides references.
+            continue
         pieces = {password[k:k + 4] for k in range(len(password) - 3)}
         assert not any(piece in new and piece not in old for piece in pieces), (text, new)
 

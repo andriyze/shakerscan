@@ -634,3 +634,94 @@ def test_replay_rows_stored_before_the_fix_are_masked_when_read():
     text = json.dumps(public)
     assert AWS_KEY not in text and "Hn4tGhPb8nVc" not in text
     assert public["result_json"]["authz_replay"]["observations"][0]["observed_status"] == 200
+
+
+# --- Third review (PR #398) -------------------------------------------------------------------
+
+def test_a_device_body_that_pauses_without_a_length_is_reported_cut():
+    """No Content-Length, no chunked encoding: only the peer's close ends the body. A pause ends
+    the read and the body is reported cut, so the preview withholds what the cut may split."""
+    from api.devices import router as device_router
+    from scanner.scanner_tools import device_web
+
+    page = WEB_CONFIG.encode()
+    cut = page.index(WEB_VALUE.encode()) + 9
+
+    async def run():
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"HTTP/1.0 200 OK\r\nContent-Type: text/xml\r\n\r\n" + page[:cut])
+
+        async def later():
+            await asyncio.sleep(0.8)
+            reader.feed_data(page[cut:])
+            reader.feed_eof()
+
+        task = asyncio.create_task(later())
+        result = await device_web._read_response(reader, 5, expect_body=True)
+        await task
+        return result
+
+    _status, _headers, body, truncated = asyncio.run(run())
+    assert truncated is True
+    preview = device_router._redact_device_http_body_preview(
+        "/web.config", body, b"", after_complete=not truncated)
+    assert WEB_VALUE[:4] not in preview
+
+
+def test_a_device_body_closed_short_of_its_length_is_reported_cut():
+    from scanner.scanner_tools import device_web
+
+    async def run():
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + b"x" * 10)
+        reader.feed_eof()
+        return await device_web._read_response(reader, 5, expect_body=True)
+
+    assert asyncio.run(run())[3] is True
+
+
+def _compact_documents(count: int, seed: int) -> list[str]:
+    """Compact JSON documents holding URLs with ports and, later, email addresses (fixtures)."""
+    import random
+
+    rng = random.Random(seed)
+
+    def value(depth=0):
+        roll = rng.random()
+        if roll < .2:
+            return rng.choice(["http://h:8080", "https://api.x.io:443", "ws://w:9"])
+        if roll < .35:
+            return rng.choice(["a@b.c", "ops@corp.com"])
+        if roll < .5:
+            return rng.randint(0, 99)
+        if roll < .6:
+            return rng.choice([True, None])
+        if roll < .75 and depth < 3:
+            return [value(depth + 1) for _ in range(rng.randint(1, 3))]
+        if depth < 3:
+            return {rng.choice("abcdefg"): value(depth + 1) for _ in range(rng.randint(1, 3))}
+        return "x"
+
+    documents = (json.dumps({"k": value()}, separators=(",", ":")) for _ in range(count))
+    return [text for text in documents if "://" in text and "@" in text]
+
+
+def test_masking_never_breaks_compact_json_holding_port_urls_and_emails():
+    from scanner.redaction import redact_text
+
+    documents = _compact_documents(4_000, seed=5)
+    assert len(documents) > 300
+    for text in documents:
+        for mask in (masking.mask_body_text, redact_text):
+            assert mask(text) == text, (mask.__name__, text)
+
+
+@pytest.mark.parametrize("text", [
+    '["http://h:8080",1,"a@b.c"]',
+    "fetch('http://h:8080',{headers:{from:'me@ex.com'}})",
+    '{"u":"http://h:8080"}, {"e":"ops@corp.com"}',
+])
+def test_a_quoted_url_with_a_port_never_reaches_a_later_email(text):
+    from scanner.redaction import redact_text
+
+    assert masking.mask_body_text(text) == text and redact_text(text) == text
