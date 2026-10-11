@@ -2160,6 +2160,16 @@
     "operation_id": "enable_device_profile_targets__target_id__device_profile_post"
   },
   {
+    "path": "/targets/{target_id}/findings/{finding_id}/dismiss",
+    "method": "post",
+    "operation_id": "post_dismiss_finding_targets__target_id__findings__finding_id__dismiss_post"
+  },
+  {
+    "path": "/targets/{target_id}/findings/{finding_id}/reopen",
+    "method": "post",
+    "operation_id": "post_reopen_finding_targets__target_id__findings__finding_id__reopen_post"
+  },
+  {
     "path": "/targets/{target_id}/graph",
     "method": "get",
     "operation_id": "get_application_graph_targets__target_id__graph_get"
@@ -2185,6 +2195,11 @@
     "operation_id": "put_hunt_authority_targets__target_id__hunt_authority_put"
   },
   {
+    "path": "/targets/{target_id}/hunts/{hunt_id}/interpretations/retract",
+    "method": "post",
+    "operation_id": "post_retract_hunt_interpretations_targets__target_id__hunts__hunt_id__interpretations_retract_post"
+  },
+  {
     "path": "/targets/{target_id}/instruction-proposals",
     "method": "get",
     "operation_id": "get_target_instruction_proposals_targets__target_id__instruction_proposals_get"
@@ -2208,6 +2223,21 @@
     "path": "/targets/{target_id}/instruction-proposals/{proposal_id}/reject",
     "method": "post",
     "operation_id": "post_reject_instruction_proposal_targets__target_id__instruction_proposals__proposal_id__reject_post"
+  },
+  {
+    "path": "/targets/{target_id}/interpretations",
+    "method": "get",
+    "operation_id": "get_target_interpretations_targets__target_id__interpretations_get"
+  },
+  {
+    "path": "/targets/{target_id}/interpretations",
+    "method": "post",
+    "operation_id": "post_target_interpretation_targets__target_id__interpretations_post"
+  },
+  {
+    "path": "/targets/{target_id}/interpretations/{entry_id}/retract",
+    "method": "post",
+    "operation_id": "post_retract_interpretation_targets__target_id__interpretations__entry_id__retract_post"
   },
   {
     "path": "/targets/{target_id}/invariants",
@@ -2248,6 +2278,11 @@
     "path": "/targets/{target_id}/inventory/hypotheses",
     "method": "post",
     "operation_id": "generate_endpoint_inventory_hypotheses_targets__target_id__inventory_hypotheses_post"
+  },
+  {
+    "path": "/targets/{target_id}/negative-results",
+    "method": "get",
+    "operation_id": "get_target_negative_results_targets__target_id__negative_results_get"
   },
   {
     "path": "/targets/{target_id}/network-scans",

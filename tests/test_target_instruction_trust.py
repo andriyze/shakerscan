@@ -22,9 +22,17 @@ class Connection:
 
     async def fetchrow(self, query, identifier, *args):
         assert identifier == self.row['id']
+        if 'target_interpretations' in query:
+            # The knowledge mirror (one note per knowledge text): recorded, never read back here.
+            return None
         if query.lstrip().startswith('UPDATE targets SET'):
             self.row['metadata_json']['target_skill'] = json.loads(args[0])
         return deepcopy(self.row)
+
+    async def execute(self, query, *args):
+        assert 'target_interpretations' in query, query
+        self.mirrored = [*getattr(self, 'mirrored', []), query.split()[0]]
+        return 'OK'
 
 
 async def write(conn, text, source, operation=None, *, purpose='instructions', delegation=None):

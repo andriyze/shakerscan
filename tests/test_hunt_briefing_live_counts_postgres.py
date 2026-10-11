@@ -167,6 +167,11 @@ def test_inconclusive_authorization_attempt_is_reported_and_survives_a_restart(m
                 assert counts['open'] == 3 and counts['settled'] == 0 and counts['needs_review'] == 0
                 assert briefing['awaiting_permission_actions'] == 1
                 assert counts['at_least'] is False
+                # The inconclusive attempt is an experiment_inconclusive negative result; nothing else is.
+                negatives = (await operator.post(f'/hunts/{hunt}/query', json={
+                    'kind': 'negative_results', 'filter': {'source': 'authorization_workflow'}})).json()['rows']
+                assert [(row['negative_state'], row['record_ref']['id']) for row in negatives] == [
+                    ('experiment_inconclusive', approved['proposal_id'])]
 
                 # A second Hunt on the same target sees the unfinished work in its start response.
                 second = await _start(operator, _web_contract(target))
@@ -214,6 +219,15 @@ def test_settled_and_inconsistent_investigations_are_classified_without_failing_
                 read = (await operator.get(
                     f"/hunts/{hunt}/authorization-investigations/{refuted['proposal_id']}")).json()
                 assert read['settled'] is True and read['attempts'][-1]['outcome'] == 'refuted'
+                # The same projection is the settled negative result, bound to its exact conditions.
+                negatives = (await operator.post(f'/hunts/{hunt}/query', json={
+                    'kind': 'negative_results', 'filter': {'source': 'authorization_workflow'}})).json()['rows']
+                assert [(row['negative_state'], row['record_ref']['id']) for row in negatives] == [
+                    ('experiment_completed_negative', refuted['proposal_id'])]
+                conditions = negatives[0]['conditions']
+                assert conditions['method'] == 'GET' and conditions['objects'][0].startswith('sha256:')
+                assert len(conditions['principals']) == 2 and negatives[0]['server_owned'] is True
+                assert negatives[0]['applicability']['state'] == 'unknown'
 
                 # A persisted binding that no longer verifies is counted for review, never raised.
                 await conn.execute(

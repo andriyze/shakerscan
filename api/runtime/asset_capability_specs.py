@@ -2,6 +2,7 @@
 
 MAX_TARGET_SKILL_CHARACTERS = 12_000
 MAX_PROPOSALS_PER_HUNT = 5
+MAX_INTERPRETATIONS_PER_HUNT = 200  # hunt/interpretations.py MAX_PER_HUNT
 
 def asset_capability_specs(spec, schema, kinds):
     confirmed = {'type':'boolean','description':'Deprecated compatibility field; grants no authority. Metadata edits default on but obey operator opt-outs; instruction edits need the operator’s explicit instruction_changes opt-in; sharing needs saved grants.'}
@@ -28,6 +29,15 @@ def asset_capability_specs(spec, schema, kinds):
         'evidence_refs':{'type':'array','maxItems':20,'uniqueItems':True,'items':{'type':'string','format':'uuid'},
                          'description':'Ids of Hunt actions or receipts, findings, candidates or scans on this target’s asset.'},
     }
+    text = {'type':'string','minLength':1,'maxLength':512}
+    exact = {'type':'array','minItems':1,'maxItems':32,'uniqueItems':True,'items':text}
+    conditions = {'type':'object','additionalProperties':False,
+        'description':'The exact conditions: no wildcards, patterns, “all”, “any” or “every”. A negative result needs '
+                      'operation (or method and route) and principals, objects or inputs; an experiment result also its technique.',
+        'properties':{'principals':exact,'roles':exact,'objects':exact,'operation':text,'method':text,'route':text,
+                      'service':text,'environment':text,'deployment_fingerprint':text,'technique':text,
+                      'tool_version':text,'inputs':{'type':'object'},'application_state':{'type':'object'},
+                      'budget':{'type':'object'}}}
     reviewed = (' Applied only where the operator saved instruction_changes for this target; otherwise filed as '
                 'a proposal for operator review (the result says applied=false).')
     definitions = (
@@ -54,6 +64,36 @@ def asset_capability_specs(spec, schema, kinds):
                            'items':{'type':'string','format':'uuid'},
                            'description':'Ids of Hunt actions or receipts, findings, candidates or scans on this target’s asset.'}},
          ('title','methodology','reason','base_revision')),
+        ('knowledge.record',('Record one attributed interpretation of this target: an observation, hypothesis, '
+         'explanation, next_step or note, or a narrow negative_result (experiment_completed_negative, '
+         'experiment_inconclusive or hypothesis_refuted). Cite existing records in evidence_refs (required for '
+         'observations, explanations and negative results) and the exact conditions a negative result covers; '
+         'never broaden it. Advisory: it is not proof, changes no finding and grants nothing. Only an operator '
+         f'dismisses a finding. At most {MAX_INTERPRETATIONS_PER_HUNT} per Hunt.'),
+         {'kind':{'type':'string','enum':['observation','hypothesis','explanation','next_step','note','negative_result']},
+          'negative_state':{'type':'string','enum':['experiment_completed_negative','experiment_inconclusive','hypothesis_refuted'],
+                            'description':'Required exactly when kind is negative_result.'},
+          'title':{'type':'string','minLength':1,'maxLength':200},
+          'body':{'type':'string','maxLength':4000},
+          'provenance':{'type':'string','enum':['observed','inferred','quoted_from_target'],'default':'inferred',
+                        'description':'quoted_from_target for text copied from the target; it is returned as untrusted data.'},
+          'evidence_refs':{'type':'array','maxItems':20,'uniqueItems':True,'items':{'type':'string','format':'uuid'},
+                           'description':'Ids of Hunt actions or receipts, findings, candidates, scans, hypotheses, '
+                                         'authorization investigations or interpretations on this target’s asset. An '
+                                         'experiment result must cite the action that ran it.'},
+          'conditions':conditions,
+          'subject':{'type':'object','additionalProperties':False,'required':['type','id'],
+                     'properties':{'type':{'type':'string','enum':['finding','hypothesis','candidate',
+                                   'authorization_investigation','interpretation','endpoint']},
+                                   'id':identifier}},
+          'supersedes':{**identifier,'description':'An earlier entry this Hunt wrote that this one replaces.'},
+          'observed_at':{'type':'string','format':'date-time'},
+          'agent':{'type':'string','maxLength':80,'description':'Your agent’s name (attribution only).'},
+          'model':{'type':'string','maxLength':120,'description':'Your model’s name (attribution only).'}},
+         ('kind','title')),
+        ('knowledge.check_experiment',('Look up what is recorded about one exact experiment on this target (every '
+         'condition equal) before repeating it. Nothing is skipped automatically while applicability is unknown.'),
+         {'conditions':conditions},('conditions',)),
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
           'name':{'type':'string','maxLength':255},
@@ -76,10 +116,11 @@ def asset_capability_specs(spec, schema, kinds):
         {'tool_wall_seconds':5},{'control_plane':True},
         schema({'action_id':identifier,'parameters':{'type':'object','maxProperties':16}}),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
+    advisory = ('targets.','knowledge.')
     return (read,action_read) + tuple(spec(name,description,'internal',
-        'read_only' if name.startswith('targets.') else 'active',kinds,name,'1',
-        None if name.startswith('targets.') else 'active_testing',
-        {'tool_wall_seconds':5},{'control_plane':True,**({} if name.startswith('targets.') else {'user_confirmation':True})},
-        schema({**properties,'operator_confirmed':confirmed},required=required),
+        'read_only' if name.startswith(advisory) else 'active',kinds,name,'1',
+        None if name.startswith(advisory) else 'active_testing',
+        {'tool_wall_seconds':5},{'control_plane':True,**({} if name.startswith(advisory) else {'user_confirmation':True})},
+        schema({**properties,**({} if name.startswith('knowledge.') else {'operator_confirmed':confirmed})},required=required),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
         for name,description,properties,required in definitions)

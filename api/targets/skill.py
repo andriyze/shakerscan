@@ -233,6 +233,13 @@ async def write_target_skill(conn: Any, target_id: Any, operation: str,
         row = await conn.fetchrow("""UPDATE targets SET
             metadata_json=jsonb_set(COALESCE(metadata_json,'{}'::jsonb),'{target_skill}',$2::jsonb),
             updated_at=NOW() WHERE id=$1 RETURNING id,metadata_json""", row['id'], json.dumps(saved))
+        if purpose == 'knowledge':
+            # The same text is one note among the target's interpretations (hunt/interpretations.py).
+            try:
+                from hunt.interpretations import mirror_knowledge_note
+            except ModuleNotFoundError:
+                from ..hunt.interpretations import mirror_knowledge_note
+            await mirror_knowledge_note(conn, row['id'])
         return _public(row)
 
 

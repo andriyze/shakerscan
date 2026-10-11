@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 try:
     from runtime.credential_store import PostgresCredentialProfileStore, CredentialStoreError
@@ -28,7 +29,8 @@ except ModuleNotFoundError:
 NAMES = frozenset({'targets.create','targets.update','credentials.grant','collections.bind',
                    'targets.skill.read','targets.skill.create','targets.skill.update','targets.skill.delete',
                    'targets.skill.propose',
-                   'targets.actions.read','targets.actions.create','targets.actions.update','targets.actions.delete'})
+                   'targets.actions.read','targets.actions.create','targets.actions.update','targets.actions.delete',
+                   'knowledge.record','knowledge.check_experiment'})
 
 
 async def execute_asset_action(pool, run, name, values):
@@ -52,6 +54,24 @@ async def _perform_asset_action(pool, run, name, values):
     policy = run.get('policy_json') or {}
     if isinstance(policy,str):
         policy = json.loads(policy)
+    if name.startswith('knowledge.'):
+        from .interpretations import InterpretationInput, check_experiment, record_interpretation
+        async with pool.acquire() as conn:
+            if name == 'knowledge.check_experiment':
+                return {'ok':True, **await check_experiment(conn, target_id, values.get('conditions'))}
+            # Advisory: one attributed entry. Needs no delegation; never changes a finding, guidance,
+            # authority or this Hunt's snapshot. The writer is this Hunt, never caller-supplied.
+            try:
+                parsed = InterpretationInput(**values)
+            except ValidationError as exc:
+                # Name the field and the rule, never echo the refused value into the action ledger.
+                raise HTTPException(422, {'error':'invalid_interpretation', 'message':'; '.join(
+                    f"{'.'.join(str(part) for part in error['loc']) or 'input'}: {error['msg']}"
+                    for error in exc.errors(include_input=False))[:2000]}) from None
+            entry = await record_interpretation(conn, target_id, parsed,
+                                                writer=f"hunt:{run['id']}", hunt_run_id=run['id'])
+            return {'ok':True, 'interpretation':entry, 'is_proof':False, 'authority_granted':False,
+                    'hunt_snapshot_unchanged':True}
     if name.startswith('targets.actions.'):
         from targets.actions import read_target_actions, write_target_action, TargetActionWrite, resolve_steps
         async with pool.acquire() as conn, conn.transaction():

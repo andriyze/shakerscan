@@ -248,6 +248,11 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 except ModuleNotFoundError:
                     from api.scan.retest_authority import FINDING_VERIFICATION_AUTHORITY_SQL
                 await conn.execute(FINDING_VERIFICATION_AUTHORITY_SQL)
+                try:
+                    from hunt.interpretation_schema import INTERPRETATION_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.interpretation_schema import INTERPRETATION_SCHEMA_SQL
+                await conn.execute(INTERPRETATION_SCHEMA_SQL)
                 # Data migrations added after the conversion must run here: the baseline above
                 # never runs again on a converted database. Each is marker-gated.
                 try:
@@ -293,6 +298,20 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 # are marked agent-written and unconfirmed (advisory until an operator saves them).
                 from .instruction_origin_migration import mark_unconfirmed_agent_writes
                 await mark_unconfirmed_agent_writes(conn)
+                # Idempotent, on every startup: each target's advisory knowledge text is also one
+                # note among its interpretations; the knowledge slot itself is never rewritten.
+                try:
+                    from hunt.interpretations import import_knowledge_notes
+                except ModuleNotFoundError:
+                    from api.hunt.interpretations import import_knowledge_notes
+                await import_knowledge_notes(conn)
+                # Idempotent: a dismissal whose finding's status changed elsewhere (also by an
+                # earlier engine after a rollback) no longer counts as an active dismissal.
+                try:
+                    from hunt.dismissal_status import reconcile_dismissals
+                except ModuleNotFoundError:
+                    from api.hunt.dismissal_status import reconcile_dismissals
+                await reconcile_dismissals(conn)
             # After the schema commits, still under the startup lock: Hunts granted something by
             # 2.8.0 have no recorded baseline, so their authority is rebuilt from their live
             # grants once (R1), each Hunt in its own short transaction. A Hunt that cannot be

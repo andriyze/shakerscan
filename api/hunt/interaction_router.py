@@ -277,6 +277,9 @@ class HuntQueryRequest(BaseModel):
         # first page is not dominated by repeated samples of one handler. "endpoints" is
         # unchanged for callers that want raw samples.
         "endpoint_groups", "service_intelligence",
+        # Attributed interpretations, and negative results (recorded ones plus those the server's
+        # own records establish).
+        "interpretations", "negative_results",
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
@@ -4242,6 +4245,16 @@ def _hunt_redacted_capability_input(
     if capability_name in {'targets.skill.create', 'targets.skill.update', 'targets.skill.propose'} and 'methodology' in values:
         body = str(values.pop('methodology'))
         values.update(body_sha256=hashlib.sha256(body.encode('utf-8')).hexdigest(), characters=len(body))
+    if capability_name == 'knowledge.record':
+        # The ledger keeps digests of free text (it may quote the target); the entry itself is stored once.
+        for key in ('title', 'body'):
+            if key in values:
+                text = str(values.pop(key))
+                values[key + '_sha256'] = hashlib.sha256(text.encode('utf-8')).hexdigest()
+                values[key + '_characters'] = len(text)
+    if capability_name in {'knowledge.record', 'knowledge.check_experiment'} and 'conditions' in values:
+        values['conditions_sha256'] = hashlib.sha256(json.dumps(
+            values.pop('conditions'), sort_keys=True, default=str).encode()).hexdigest()
     if capability_name in {'targets.actions.create', 'targets.actions.update'}:
         for key in ('steps','instructions','parameters'):
             body = json.dumps(values.pop(key, None), sort_keys=True, default=str)

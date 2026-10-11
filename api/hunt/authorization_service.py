@@ -89,9 +89,10 @@ MAX_COUNTED_INVESTIGATIONS = 1000
 _UNREADABLE = (AuthorizationWorkflowError, KeyError, TypeError)  # inconsistent persisted records
 
 
-async def asset_investigation_counts(conn: Any, *, asset: Any, include_members: bool,
+async def asset_investigation_states(conn: Any, *, asset: Any, include_members: bool,
+                                     limit: int = MAX_COUNTED_INVESTIGATIONS,
                                      repo: PostgresAuthorizationRepository | None = None) -> dict[str, Any]:
-    """Authorization investigations on one asset, across every Hunt, by state.
+    """Each authorization investigation on one asset, across every Hunt, with its state.
 
     Each proposal is classified from the same reads as ``AuthorizationInvestigationService.read``:
     its persisted binding, its latest attempt's canonical action and transactions
@@ -107,7 +108,7 @@ async def asset_investigation_counts(conn: Any, *, asset: Any, include_members: 
     * ``needs_review``: the persisted proposal, its Hunt or an attempt binding is inconsistent,
       so no state can be derived from it.
 
-    ``open`` is proposed_not_run + awaiting_execution + inconclusive. ``include_members`` adds the
+    Newest first, at most ``limit``; ``at_least`` says more exist. ``include_members`` adds the
     asset's service members (a host asset's application origins). Database errors propagate.
     """
     repo = repo or PostgresAuthorizationRepository()
@@ -116,12 +117,13 @@ async def asset_investigation_counts(conn: Any, *, asset: Any, include_members: 
     rows = await conn.fetch(
         f"""SELECT id, attributes->>'hunt_id' AS hunt_id FROM application_graph_nodes
             WHERE {scope} AND node_type=$2 ORDER BY last_seen_at DESC, id LIMIT $3""",
-        asset, PROPOSAL_TYPE, MAX_COUNTED_INVESTIGATIONS + 1,
+        asset, PROPOSAL_TYPE, limit + 1,
     )
-    counts = dict.fromkeys(("proposed_not_run", "awaiting_execution", "inconclusive",
-                            "deferred", "settled", "needs_review"), 0)
     runs: dict[str, Any] = {}
-    for row in rows[:MAX_COUNTED_INVESTIGATIONS]:
+    views: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        view: dict[str, Any] = {"proposal_id": str(row["id"]), "hunt_id": str(row["hunt_id"]),
+                                "outcome": None, "conditions": {}, "evidence_refs": [], "completed_at": None}
         try:
             hunt_id = str(row["hunt_id"])
             if hunt_id not in runs:
@@ -130,21 +132,52 @@ async def asset_investigation_counts(conn: Any, *, asset: Any, include_members: 
             proposal = await repo.proposal(conn, run, row["id"])
             attempts = await attempt_views(repo, conn, run, proposal, latest_only=True)
             status = investigation_status(attempts, await repo.skipped(conn, run, row["id"]))
-        except _UNREADABLE:
-            counts["needs_review"] += 1
+            latest = attempts[-1] if attempts else None
+            if not attempts:
+                state = "deferred" if status["deferred"] else "proposed_not_run"
+            elif status["settled"]:
+                state = "settled"
+            elif latest["execution_status"] not in TERMINAL_ACTION_STATES | {"not_dispatched"}:
+                state = "awaiting_execution"
+            else:
+                state = "inconclusive"
+            # The exact conditions this investigation covered: one selected object, one principal pair,
+            # one route and one frozen target context. It says nothing about other objects or principals.
+            view["conditions"] = {
+                "technique": "authz.verify cross-principal replay", "method": "GET",
+                "route": urlsplit(str(proposal.get("public_consumer_url") or "")).path,
+                "objects": ["sha256:" + str(proposal.get("resource_id_sha256"))],
+                "principals": ["primary_session:" + str(proposal.get("primary_session_ref")),
+                               "secondary_session:" + str(proposal.get("secondary_session_ref"))],
+                "inputs": {"baseline_kind": proposal.get("baseline_kind") or "collection",
+                           "expected_access": proposal.get("expected_access") or "unknown",
+                           "proposal_digest": proposal.get("proposal_digest")},
+                "deployment_fingerprint": "target_context_sha256:" + str(proposal.get("target_context_sha256")),
+            }
+            if latest:
+                view.update(outcome=latest.get("outcome"), completed_at=latest.get("completed_at"),
+                            evidence_refs=[ref for ref in (latest.get("action_id"), latest.get("receipt_id")) if ref])
+        except (*_UNREADABLE, ValueError, AttributeError):
+            views.append({**view, "state": "needs_review"})
             continue
-        if not attempts:
-            counts["deferred" if status["deferred"] else "proposed_not_run"] += 1
-        elif status["settled"]:
-            counts["settled"] += 1
-        elif attempts[-1]["execution_status"] not in TERMINAL_ACTION_STATES | {"not_dispatched"}:
-            counts["awaiting_execution"] += 1
-        else:
-            counts["inconclusive"] += 1
+        views.append({**view, "state": state})
+    return {"investigations": views, "at_least": len(rows) > limit}
+
+
+async def asset_investigation_counts(conn: Any, *, asset: Any, include_members: bool,
+                                     repo: PostgresAuthorizationRepository | None = None) -> dict[str, Any]:
+    """Authorization investigations on one asset, across every Hunt, counted by state
+    (``asset_investigation_states``). ``open`` is proposed_not_run + awaiting_execution +
+    inconclusive."""
+    states = await asset_investigation_states(conn, asset=asset, include_members=include_members, repo=repo)
+    counts = dict.fromkeys(("proposed_not_run", "awaiting_execution", "inconclusive",
+                            "deferred", "settled", "needs_review"), 0)
+    for view in states["investigations"]:
+        counts[view["state"]] += 1
     return {
         "open": counts["proposed_not_run"] + counts["awaiting_execution"] + counts["inconclusive"],
         **counts,
-        "at_least": len(rows) > MAX_COUNTED_INVESTIGATIONS,
+        "at_least": states["at_least"],
     }
 
 

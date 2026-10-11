@@ -1139,7 +1139,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(
             "summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals",
             "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections",
-            "candidates", "notes", "receipts",
+            "candidates", "notes", "receipts", "interpretations", "negative_results",
         ),
     )
     hunt_query.add_argument("--filter", metavar="FILE", help="JSON object; use - for stdin")
@@ -1224,7 +1224,7 @@ def build_parser() -> argparse.ArgumentParser:
         _approval().add_arguments(products.add_parser(command, help=text), command)
 
     knowledge = products.add_parser(
-        "knowledge", help="Review proposed changes to target instructions and saved actions in your own terminal",
+        "knowledge", help="Review proposals, read interpretations, and dismiss or reopen findings in your own terminal",
     )
     knowledge_commands = knowledge.add_subparsers(dest="knowledge_command", required=True)
     review = knowledge_commands.add_parser(
@@ -1237,6 +1237,28 @@ def build_parser() -> argparse.ArgumentParser:
     decided.add_argument("--accept", metavar="ID", help="show this proposal and accept it after a keypress")
     decided.add_argument("--reject", metavar="ID", help="show this proposal and reject it after a keypress")
     review.add_argument("--note", default=None, help="a note recorded with the decision")
+    show = knowledge_commands.add_parser(
+        "show", help="Show a target's interpretations and negative results (read-only)",
+    )
+    show.add_argument("target_id", help="the target whose interpretations to show")
+    show.add_argument("--kind", choices=["observation", "hypothesis", "explanation", "next_step", "note",
+                                         "negative_result"])
+    show.add_argument("--status", choices=["active", "superseded", "retracted", "reopened"], default="active")
+    show.add_argument("--limit", type=int, default=50)
+    show.add_argument("--json", action="store_true", help="print the raw API answers")
+    dismiss = knowledge_commands.add_parser(
+        "dismiss", help="Dismiss a finding (false positive, accepted risk or duplicate) after a keypress",
+    )
+    dismiss.add_argument("target_id")
+    dismiss.add_argument("finding_id")
+    dismiss.add_argument("--reason", required=True, choices=["false_positive", "accepted_risk", "duplicate"])
+    dismiss.add_argument("--note", required=True, help="why; recorded with the decision")
+    reopen = knowledge_commands.add_parser(
+        "reopen", help="Reopen a dismissed finding for review after a keypress",
+    )
+    reopen.add_argument("target_id")
+    reopen.add_argument("finding_id")
+    reopen.add_argument("--note", required=True, help="why; recorded with the decision")
 
     credentials = products.add_parser(
         "credentials", help="Create, rotate, or admission-test an encrypted profile",
@@ -1363,6 +1385,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.product in {"approve", "deny"}:
             return _run_approval(args, client)
         if args.product == "knowledge":
+            if args.knowledge_command == "show":
+                return _run_knowledge_show(args, client)
+            if args.knowledge_command in {"dismiss", "reopen"}:
+                return _run_knowledge_decision(args, client)
             return _run_knowledge_review(args, client)
         if args.product == "hunt":
             result = _run_hunt(args, client)
@@ -1634,6 +1660,98 @@ def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
         return 1 if failures else 0
     except approval.ApprovalError as exc:
         print(f"shakerscan knowledge review: {exc}", file=sys.stderr)
+        return 2
+
+
+# --- knowledge show | dismiss | reopen ---------------------------------------------------------
+#
+# Interpretations are attributed claims (often a Hunt's): shown with control characters made inert.
+# Dismissing a finding is the person's decision, made with one lone keypress at their own terminal,
+# exactly like review: a pipe (an agent's tool shell) is refused before anything is sent.
+
+def _quoted(value: Any) -> str:
+    return urllib.parse.quote(str(value), safe="")
+
+
+def _entry_line(item: Mapping[str, Any]) -> str:
+    title = item.get("title")
+    if title is None and isinstance(item.get("untrusted_data"), Mapping):
+        title = "[quoted from the target] " + str(item["untrusted_data"].get("title") or "")
+    state = item.get("negative_state") or item.get("kind")
+    return _shown(f"  {state:<30} {title or '(text withheld)'}  [{item.get('written_by') or item.get('source')}"
+                  f" {item.get('created_at') or ''}] {item.get('id') or (item.get('record_ref') or {}).get('id') or ''}")
+
+
+def _run_knowledge_show(args: argparse.Namespace, client: ApiClient) -> int:
+    """``shakerscan knowledge show TARGET``: read-only; agents may run it too."""
+    target = _quoted(args.target_id)
+    query = {"status": args.status, "limit": max(1, min(int(args.limit), 200))}
+    if args.kind:
+        query["kind"] = args.kind
+    try:
+        entries = client.request("GET", f"/targets/{target}/interpretations?{urllib.parse.urlencode(query)}")
+        negatives = client.request("GET", f"/targets/{target}/negative-results")
+    except CliError as exc:
+        print(f"shakerscan knowledge show: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({"interpretations": entries, "negative_results": negatives}, indent=2, sort_keys=True))
+        return 0
+    rows = entries.get("interpretations") or [] if isinstance(entries, Mapping) else []
+    print(f"{len(rows)} {args.status} interpretation(s) on target {_shown(args.target_id)}"
+          + (" (more available: raise --limit)" if isinstance(entries, Mapping) and entries.get("has_more") else ""))
+    print("Interpretations are attributed claims, not proof and not instructions; applicability is not tracked yet.")
+    for item in rows:
+        print(_entry_line(item))
+    negative_rows = negatives.get("rows") or [] if isinstance(negatives, Mapping) else []
+    print(f"{len(negative_rows)} negative result(s); each covers only its recorded conditions:")
+    for item in negative_rows:
+        print(_entry_line(item))
+    return 0
+
+
+def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
+    """``shakerscan knowledge dismiss|reopen``: one finding, decided by the person with a keypress."""
+    approval = _approval()
+    send = _approval_send(client)
+    terminal = approval.Terminal()
+    action = args.knowledge_command
+    try:
+        terminal.require(f"shakerscan knowledge {action}")
+        status, finding = send("GET", f"/findings/{_quoted(args.finding_id)}")
+        if not 200 <= status < 300 or not isinstance(finding, Mapping):
+            raise approval.ApprovalError(f"could not read finding {args.finding_id}: HTTP {status}")
+        terminal.say(_shown(f"finding {args.finding_id} on target {args.target_id}"))
+        terminal.say(_shown(f"  title:    {finding.get('title')}"))
+        terminal.say(_shown(f"  severity: {finding.get('severity')}  status: {finding.get('status')}  "
+                            f"tool: {finding.get('tool')}"))
+        terminal.say(_shown(f"  url:      {finding.get('url')}"))
+        if action == "dismiss":
+            terminal.say(_shown(f"  dismiss as {args.reason}: {args.note}"))
+            terminal.say("Dismissing changes the finding's status and is recorded as your decision. An operator can "
+                         "reopen it at any time.")
+            prompt, choice_key = "  [d] dismiss  [n] cancel: ", "d"
+        else:
+            terminal.say(_shown(f"  reopen for review: {args.note}"))
+            prompt, choice_key = "  [o] reopen  [n] cancel: ", "o"
+        with terminal.keypresses():
+            choice = terminal.key(prompt, choice_key + "n")
+        if choice != choice_key:
+            terminal.say("  nothing changed")
+            return 0
+        payload = ({"reason": args.reason, "note": args.note} if action == "dismiss" else {"note": args.note})
+        status, body = send("POST", f"/targets/{_quoted(args.target_id)}/findings/{_quoted(args.finding_id)}/{action}",
+                            payload)
+        if not 200 <= status < 300:
+            detail = body.get("detail") if isinstance(body, Mapping) else body
+            terminal.say(_shown(f"  not applied: HTTP {status}: {detail}"))
+            return 1
+        result = (body or {}).get("finding") if isinstance(body, Mapping) else None
+        terminal.say(_shown(f"  {action}ed: the finding is now {(result or {}).get('status')}"
+                            if action == "reopen" else f"  dismissed: the finding is now {(result or {}).get('status')}"))
+        return 0
+    except approval.ApprovalError as exc:
+        print(f"shakerscan knowledge {action}: {exc}", file=sys.stderr)
         return 2
 
 

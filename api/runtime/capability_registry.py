@@ -1726,9 +1726,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                     "type": "string",
                     "enum": ["critical", "high", "medium", "low", "info"],
                 },
+                # Triage dismissals (false_positive, accepted_risk) are an operator's decision.
                 "status": {
                     "type": "string",
-                    "enum": ["active", "resolved", "false_positive", "accepted_risk"],
+                    "enum": ["active", "resolved"],
                 },
                 "notes": {"type": "string", "maxLength": 8000},
                 "evidence_action_ids": {
