@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import time
@@ -14,12 +13,12 @@ import httpx
 
 try:
     from runtime.archive_body_masking import (
-        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, holds_withheld_material,
+        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
         mask_body_text, mask_url_userinfo, withhold_url_userinfo,
     )
 except ModuleNotFoundError:  # package import layout
     from api.runtime.archive_body_masking import (
-        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, holds_withheld_material,
+        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
         mask_body_text, mask_url_userinfo, withhold_url_userinfo,
     )
 
@@ -351,16 +350,15 @@ def _scrub_sample(value: str) -> str:
     return _masked_body(value)[:MAX_RESPONSE_SAMPLE]
 
 
-def _body_digest(bounded: bytes, *, withheld: bool) -> str:
-    """A plain SHA-256 of a body that held a secret is an offline guessing oracle for that
-    secret; such a body gets this installation's keyed digest instead."""
-    if not withheld:
-        return hashlib.sha256(bounded).hexdigest()
+def _body_digest(data: bytes) -> str:
+    """The public digest of a response body or an extracted value: installation-keyed and
+    memory-hard (``keyed_response_digest``), never a plain SHA-256, which would be an offline
+    guessing oracle for any secret in it, recognised by the masking or not."""
     try:
-        from capabilities.secret_material import keyed_body_digest
+        from capabilities.secret_material import keyed_response_digest
     except ModuleNotFoundError:  # package import layout
-        from api.capabilities.secret_material import keyed_body_digest
-    return keyed_body_digest(bounded)
+        from api.capabilities.secret_material import keyed_response_digest
+    return keyed_response_digest(data)
 
 
 def _semantically_populated(value: Any) -> bool:
@@ -435,7 +433,9 @@ def response_summary(
         "content_length": len(bounded),
         "content_length_header": int(response.headers["content-length"]) if str(response.headers.get("content-length") or "").isdigit() else None,
         "bytes_observed": len(body),
-        "body_sha256": _body_digest(bounded, withheld=masked_text != text),
+        # Keyed whether or not anything was withheld (see ``_body_digest``); the name is kept for
+        # the readers that compare it.
+        "body_sha256": _body_digest(bounded),
         "body_digest_scope": "prefix" if truncated else "complete",
         "body_sample": body_sample,
         "json_type": type(parsed_json).__name__ if parsed_json is not None else None,
@@ -697,13 +697,9 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                     "response": summary,
                     "extracted": {
                         name: {
-                            # Keyed when the response held a secret: a plain digest of an
-                            # extracted token is an offline guessing oracle for it.
-                            "sha256": _body_digest(
-                                value.encode("utf-8"),
-                                withheld=str(summary.get("body_sha256") or "").startswith("hmac-")
-                                or holds_withheld_material(value),
-                            ),
+                            # Keyed: a plain digest of an extracted token is an offline
+                            # guessing oracle for it.
+                            "sha256": _body_digest(value.encode("utf-8")),
                             "length": len(value),
                         }
                         for name, value in extracted.items()
