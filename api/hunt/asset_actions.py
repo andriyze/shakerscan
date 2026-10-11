@@ -30,7 +30,8 @@ NAMES = frozenset({'targets.create','targets.update','credentials.grant','collec
                    'targets.skill.read','targets.skill.create','targets.skill.update','targets.skill.delete',
                    'targets.skill.propose',
                    'targets.actions.read','targets.actions.create','targets.actions.update','targets.actions.delete',
-                   'knowledge.record','knowledge.check_experiment','knowledge.changes'})
+                   'knowledge.record','knowledge.check_experiment','knowledge.changes',
+                   'knowledge.continue'})
 
 
 async def execute_asset_action(pool, run, name, values):
@@ -83,6 +84,20 @@ async def _perform_asset_action(pool, run, name, values):
                 except ChangeQueryError as exc:
                     raise HTTPException(422, {'error':'invalid_since', 'message':str(exc)}) from None
                 return {**report, 'is_proof':False, 'authority_granted':False}
+            if name == 'knowledge.continue':
+                from .knowledge_changes import ChangeQueryError
+                from .knowledge_continue import CursorError, continue_report
+                current = await conn.fetchrow('SELECT * FROM hunt_runs WHERE id=$1', uuid.UUID(str(run['id'])))
+                try:
+                    return await continue_report(conn, run.get('device_target_id') or target_id,
+                                                 device=bool(run.get('device_target_id')), audience='hunt',
+                                                 since=values.get('since') or 'release',
+                                                 run=dict(current) if current else run,
+                                                 limit=values.get('limit') or 25, after=values.get('after'))
+                except CursorError as exc:
+                    raise HTTPException(422, {'error':'invalid_cursor', 'message':str(exc)}) from None
+                except ChangeQueryError as exc:
+                    raise HTTPException(422, {'error':'invalid_since', 'message':str(exc)}) from None
             # Advisory: one attributed entry. Needs no delegation; never changes a finding, guidance,
             # authority or this Hunt's snapshot. The writer is this Hunt, never caller-supplied.
             try:

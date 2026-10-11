@@ -194,7 +194,9 @@ ORIGIN = "https://app.example"
 
 def _cited(method="GET", path="/api/invoices/17", session=SESSION, **extra):
     raw = {"method": method, "path": path, **({"session_ref": session} if session else {}), **extra}
+    # The session store's identity for the session (unit fixture: one principal per session id).
     return {"id": uuid.UUID(int=1), "default_origin": ORIGIN,
+            "principal": f"profile:{session}/primary/" if session else "anonymous",
             "input_summary": {"input": _redaction()("http.request", raw)}}
 
 

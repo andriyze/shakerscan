@@ -2285,6 +2285,21 @@
     "operation_id": "get_target_knowledge_changes_targets__target_id__knowledge_changes_get"
   },
   {
+    "path": "/targets/{target_id}/knowledge/continue",
+    "method": "get",
+    "operation_id": "get_target_knowledge_continue_targets__target_id__knowledge_continue_get"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/releases",
+    "method": "get",
+    "operation_id": "get_target_releases_targets__target_id__knowledge_releases_get"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/releases",
+    "method": "post",
+    "operation_id": "post_target_release_targets__target_id__knowledge_releases_post"
+  },
+  {
     "path": "/targets/{target_id}/negative-results",
     "method": "get",
     "operation_id": "get_target_negative_results_targets__target_id__negative_results_get"

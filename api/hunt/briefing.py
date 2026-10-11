@@ -228,6 +228,11 @@ def bound_briefing(briefing: dict[str, Any], limit: int = MAX_BRIEFING_BYTES) ->
     # Interpretation headlines (agent-written titles) give way first; their counts stay.
     interpretations = result.get("interpretations") if isinstance(result.get("interpretations"), dict) else {}
     changed = result.get("changed_since_last_hunt") if isinstance(result.get("changed_since_last_hunt"), dict) else {}
+    continuation = (result.get("continue_after_release")
+                    if isinstance(result.get("continue_after_release"), dict) else {})
+    if _size(result) > limit and continuation.get("top"):
+        continuation["top"] = []
+        trimmed.append("continue_after_release.top removed to fit the size limit; use knowledge.continue")
     for key in ("knowledge", "deployment"):
         part = changed.get(key) if isinstance(changed.get(key), dict) else {}
         listed = "affected" if key == "knowledge" else "changes"
@@ -360,8 +365,13 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
         from .knowledge_changes import briefing_changes
         return await briefing_changes(conn, target, device=device, hunt_id=item.get("id"))
 
+    async def continuation() -> dict[str, Any]:
+        from .knowledge_continue import briefing_continuation
+        return await briefing_continuation(conn, item)
+
     await section("knowledge", knowledge)
     await section("changed_since_last_hunt", changes)
+    await section("continue_after_release", continuation)
     await section("interpretations", interpretations)
     await section("proposals", proposals)
     await section("unresolved", unresolved)
@@ -382,6 +392,7 @@ async def with_live_briefing(conn: Any, result: dict[str, Any], row: Mapping[str
     briefing["knowledge"] = knowledge
     briefing["interpretations"] = _bounded_interpretations(live.get("interpretations"), briefing)
     briefing["changed_since_last_hunt"] = live.get("changed_since_last_hunt")
+    briefing["continue_after_release"] = live.get("continue_after_release")
     briefing["proposals"] = live.get("proposals")
     briefing["unresolved"] = live.get("unresolved")
     delegation = live.get("delegation")
