@@ -1704,7 +1704,8 @@ def _run_knowledge_show(args: argparse.Namespace, client: ApiClient) -> int:
     for item in rows:
         print(_entry_line(item))
     negative_rows = negatives.get("rows") or [] if isinstance(negatives, Mapping) else []
-    print(f"{len(negative_rows)} negative result(s); each covers only its recorded conditions:")
+    print(f"{len(negative_rows)} negative result(s); each covers only its recorded conditions, read as exact "
+          "literals (never sets, ranges or patterns):")
     for item in negative_rows:
         print(_entry_line(item))
     return 0
