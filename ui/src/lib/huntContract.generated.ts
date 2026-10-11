@@ -780,7 +780,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/knowledge.check_experiment"
       },
-      "description": "Look up what is recorded about one exact experiment on this target (every condition equal) before repeating it. skip is true only for an applicable experiment_completed_negative whose conditions match a plain request (no query, headers or body) your own cited http.request made: method, route (placeholders only for ids, each covered by a named object), objects in the path, its session_ref as the only principal or anonymous, a technique starting with http.request, and no other condition fields. Unknown is never unchanged. Skip is advice, never a block.",
+      "description": "Look up what is recorded about one exact experiment on this target (every condition equal) before repeating it. skip is true only for an applicable experiment_completed_negative whose conditions match a plain request (only method, path, origin and session_ref) your own cited http.request made: the origin, method, route (each placeholder filled by exactly one named object), its session_ref as the only principal or anonymous, a technique starting with http.request, and no other condition fields; and only when that request (or a Scan of the same deployment and route) was observed again, unchanged, since this Hunt started. Unknown is never unchanged. Skip is advice, never a block.",
       "input": {
         "fields": [
           "conditions"

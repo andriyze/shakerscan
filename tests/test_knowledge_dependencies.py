@@ -17,8 +17,8 @@ import uuid
 from hunt import briefing as hunt_briefing
 from hunt.interpretations import reuse_decision
 from hunt.knowledge_dependencies import (
-    INCOMPARABLE, MINOR, SIGNIFICANCE_RULES, SIGNIFICANT, bind_experiment, compare_auth_surface, compare_deployment,
-    compare_endpoint, compare_finding, compare_response, compare_service, compare_subject, decide, digest_format,
+    INCOMPARABLE, MINOR, SIGNIFICANCE_RULES, SIGNIFICANT, bind_experiment, canonical_origin, compare_auth_surface,
+    compare_deployment, compare_endpoint, compare_finding, compare_response, compare_service, compare_subject, decide, digest_format,
     operation_route, public_dependencies, service_key,
 )
 
@@ -64,6 +64,17 @@ def test_response_rules_status_media_type_and_keys_are_significant_body_alone_is
         "status": SIGNIFICANT, "media_type": SIGNIFICANT, "json_keys_sha256": SIGNIFICANT}
 
 
+def test_a_body_change_is_significant_for_a_negative_result():
+    item = _item("response", {"action_id": "a", "status": 200, "media_type": "application/json",
+                              "json_keys_sha256": "k"})
+    same = {"status": 200, "media_type": "application/json", "json_keys_sha256": "k"}
+    changes = compare_response(item, same, recorded_body="1" * 64, newer_body="2" * 64, body_significant=True)
+    assert _significance(changes) == {"body_digest": SIGNIFICANT}
+    assert compare_response(item, same, recorded_body="1" * 64, newer_body="1" * 64, body_significant=True) == []
+    missing = compare_response(item, same, recorded_body="1" * 64, newer_body=None, body_significant=True)
+    assert _significance(missing) == {"body_digest": INCOMPARABLE}
+
+
 def test_body_digests_of_different_formats_are_never_compared():
     assert digest_format("1" * 64) == "sha256"
     assert digest_format("scrypt-v1:" + "ab" * 16) == "scrypt-v1"
@@ -105,14 +116,29 @@ def test_auth_service_finding_and_subject_rules():
     assert _significance(compare_service(service, {"present": True, "state": "not_observed", "product": "OpenSSH",
                                                    "version": "9.6"})) == {"state": SIGNIFICANT}
     finding = _item("finding", {"severity": "medium", "url": "https://a/s", "tool": "nuclei",
-                                "last_verification_verdict": None})
+                                "last_verification_verdict": None, "resurfaced_count": 0},
+                    dismissal_reason="false_positive")
     assert compare_finding(finding, dict(finding["observed"])) == []
     assert _significance(compare_finding(finding, {**finding["observed"], "tool": "zap"})) == {"tool": MINOR}
     assert _significance(compare_finding(finding, {**finding["observed"], "severity": "high",
                                                    "last_verification_verdict": "exploited"})) == {
         "severity": SIGNIFICANT, "last_verification_verdict": SIGNIFICANT}
+    # Noise never reopens: a verdict agreeing with the dismissal, an error or inconclusive verdict, a
+    # lower severity, a cleared verdict.
+    for verdict in ("false_positive", "error", "inconclusive", "likely_fixed", "blocked_by_security"):
+        changes = compare_finding(finding, {**finding["observed"], "last_verification_verdict": verdict})
+        assert SIGNIFICANT not in _significance(changes).values(), verdict
+    assert SIGNIFICANT not in _significance(compare_finding(finding, {**finding["observed"],
+                                                                      "severity": "low"})).values()
     verified = _item("finding", {**finding["observed"], "last_verification_verdict": "false_positive"})
     assert compare_finding(verified, {**finding["observed"], "last_verification_verdict": None}) == []  # cleared
+    # An accepted risk proven exploitable was already accepted as real: not a change of the decision.
+    accepted = {**finding, "dismissal_reason": "accepted_risk"}
+    assert SIGNIFICANT not in _significance(compare_finding(accepted, {**finding["observed"],
+                                            "last_verification_verdict": "exploited"})).values()
+    # Resolved and detected again: a regression.
+    assert _significance(compare_finding(finding, {**finding["observed"], "resurfaced_count": 1})) == \
+        {"resurfaced": SIGNIFICANT}
     assert compare_finding(finding, None)[0]["historical"] is True
     assert compare_subject(_item("subject", {"exists": True}), False)[0]["historical"] is True
 
@@ -128,14 +154,28 @@ def test_decide_never_applicable_without_observed_dependencies():
         "historical"
 
 
-def _cited(method="GET", path="/api/invoices/17", session=SESSION):
-    return {"id": uuid.UUID(int=1), "input_summary": {"input": {"method": method, "path": path,
-                                                                 "session_ref": session}}}
+def _redaction():
+    """The real input redaction of the loaded app (the Hunt action ledger writes input summaries
+    through it), so binding is tested on what is actually recorded."""
+    from api import api as api_module
+    routes = (nested for route in api_module.app.routes
+              for nested in getattr(getattr(route, "original_router", None), "routes", (route,)))
+    endpoint = next(route.endpoint for route in routes if getattr(route, "path", None) == "/hunts/{hunt_id}/query")
+    return endpoint.__globals__["_hunt_redacted_capability_input"]
+
+
+ORIGIN = "https://app.example"
+
+
+def _cited(method="GET", path="/api/invoices/17", session=SESSION, **extra):
+    raw = {"method": method, "path": path, **({"session_ref": session} if session else {}), **extra}
+    return {"id": uuid.UUID(int=1), "default_origin": ORIGIN,
+            "input_summary": {"input": _redaction()("http.request", raw)}}
 
 
 def test_experiment_conditions_are_bound_only_to_what_the_cited_request_was():
-    exact = {"method": "GET", "route": "/api/invoices/{id}", "principals": [SESSION], "objects": ["invoice:17"],
-             "technique": "http.request cross-tenant read"}
+    exact = {"origin": ORIGIN, "method": "GET", "route": "/api/invoices/{id}", "principals": [SESSION],
+             "objects": ["invoice:17"], "technique": "http.request cross-tenant read"}
     assert bind_experiment(exact, [_cited()])["bound"] is True
     assert bind_experiment({**exact, "route": None, "operation": "GET /api/invoices/{id}"}, [_cited()])["bound"]
     for mismatch, cited in (({"method": "POST"}, _cited()), ({"route": "/api/orders/{id}"}, _cited()),
@@ -144,23 +184,44 @@ def test_experiment_conditions_are_bound_only_to_what_the_cited_request_was():
                             ({}, _cited(session="")), ({"principals": None, "roles": ["viewer"]}, _cited())):
         conditions = {key: value for key, value in {**exact, **mismatch}.items() if value is not None}
         assert bind_experiment(conditions, [cited])["bound"] is False, mismatch
-    # An object the request did not address, request inputs that cannot be confirmed, and a template
-    # broader than the requested path never bind.
     for mismatch in ({"objects": ["invoice:99"]}, {"inputs": {"q": "x"}}, {"route": "/{a}/{b}/{c}"},
                      {"route": "/api/{collection}/{id}"}, {"route": "/api/invoices/{id}/{more}"},
-                     {"route": "/api/invoices/18", "objects": None}, {"objects": None},
-                     {"technique": "not-http.request"}, {"principals": None}, {"service": "tcp/443"},
-                     {"environment": "staging"}, {"application_state": {"cart": "empty"}}):
+                     {"objects": None}, {"technique": "not-http.request"}, {"principals": None},
+                     {"service": "tcp/443"}, {"environment": "staging"}, {"application_state": {"cart": "empty"}},
+                     {"origin": None}, {"origin": "https://app.example:8443"}, {"origin": "http://app.example"},
+                     # A named id standing in a literal segment, or a concrete route naming objects.
+                     {"route": "/api/invoices/17"}, {"objects": ["invoice:17", "invoice:18"]}):
         conditions = {key: value for key, value in {**exact, **mismatch}.items() if value is not None}
         assert bind_experiment(conditions, [_cited()])["bound"] is False, mismatch
     concrete = {**exact, "route": "/api/invoices/17"}
     assert bind_experiment({k: v for k, v in concrete.items() if k != "objects"}, [_cited()])["bound"] is True
-    # A request with a query string, headers or a body is not the plain request the conditions name.
-    for extra in ({"path": "/api/invoices/17?debug=1"}, {"headers": {"X-Tenant": "2"}}, {"body": "x"},
-                  {"json_body": {"a": 1}}):
-        cited = _cited()
-        cited["input_summary"]["input"].update(extra)
+    # Two placeholders need two named objects, each in exactly its own segment.
+    nested = _cited(path="/api/users/5/invoices/17")
+    two = {**exact, "route": "/api/users/{uid}/invoices/{id}"}
+    assert bind_experiment(two, [nested])["bound"] is False  # user 5 was part of the request, not named
+    assert bind_experiment({**two, "objects": ["user:5", "invoice:17"]}, [nested])["bound"] is True
+    assert bind_experiment({**two, "objects": ["user:17", "invoice:5"]}, [_cited(path="/api/users/5/invoices/5")]
+                           )["bound"] is False  # duplicate ids are ambiguous
+    # The request's origin: explicit, or the Hunt target's when none was given; a different port is
+    # a different origin.
+    port = _cited(origin="https://app.example:8443")
+    assert bind_experiment(exact, [port])["bound"] is False
+    assert bind_experiment({**exact, "origin": "https://app.example:8443"}, [port])["bound"] is True
+    assert bind_experiment({**exact, "origin": "https://APP.example:443/"}, [_cited()])["bound"] is True
+    recorded = _cited(method="POST", json_body={"owner": "victim"})["input_summary"]["input"]
+    assert recorded["body_kind"] == "json" and "json_body" not in recorded  # the real redaction ran
+    # Anything recorded beyond method, path, origin and session is not a plain request: bodies (which
+    # the ledger keeps only as body_kind), a principal binding without a session, a pinned address,
+    # redirects, query, headers, captures and request bindings.
+    for extra in ({"json_body": {"owner": "victim"}}, {"form_body": {"user": "x"}},
+                  {"as_principal": "primary"}, {"via_address": "203.0.113.9"}, {"follow_redirects": True},
+                  {"follow_redirects": False}, {"query": {"debug": "1"}}, {"headers": {"X-Tenant": "2"}},
+                  {"capture": [{"name": "a", "json_pointer": "/a"}]}, {"path": "/api/invoices/17?debug=1"}):
+        cited = _cited(**{k: v for k, v in extra.items() if k != "path"},
+                       **({"path": extra["path"]} if "path" in extra else {}))
         assert bind_experiment(exact, [cited])["bound"] is False, extra
+    principal = _cited(session="", as_principal="primary")
+    assert bind_experiment({**exact, "principals": ["anonymous"]}, [principal])["bound"] is False
     anonymous = {**exact, "principals": ["anonymous"]}
     assert bind_experiment(anonymous, [_cited(session="")])["bound"] is True
     assert bind_experiment(exact, [])["bound"] is False
@@ -168,6 +229,8 @@ def test_experiment_conditions_are_bound_only_to_what_the_cited_request_was():
     assert operation_route({"operation": "delete /a/42"}) == ("DELETE", "/a/{id}")
     assert service_key("tcp/443") == ("tcp", 443) and service_key("8443/UDP") == ("udp", 8443)
     assert service_key("443") is None and service_key("tcp/70000") is None
+    assert canonical_origin("https://user@app.example") is None and canonical_origin("ftp://a") is None
+    assert canonical_origin("http://App.Example:80") == "http://app.example"
 
 
 def _negative(**extra):
@@ -177,9 +240,18 @@ def _negative(**extra):
             "applicability": "applicable", "dependencies": dependencies, **extra}
 
 
+FRESH = {"observed": True, "by": "the same request after this Hunt started"}
+
+
 def test_reuse_needs_every_guard_and_the_skip_is_only_advice():
-    assert reuse_decision(_negative(), "a" * 64)["skip"] is True
-    assert "Advice" in reuse_decision(_negative(), "a" * 64)["override"]
+    assert reuse_decision(_negative(), "a" * 64, evaluated=True, reobservation=FRESH)["skip"] is True
+    assert "Advice" in reuse_decision(_negative(), "a" * 64, evaluated=True, reobservation=FRESH)["override"]
+    # Applicable is not enough: an evaluation during this check and a fresh observation are required.
+    assert reuse_decision(_negative(), "a" * 64)["skip"] is False
+    assert reuse_decision(_negative(), "a" * 64, reobservation=FRESH)["skip"] is False
+    assert reuse_decision(_negative(), "a" * 64, evaluated=True)["skip"] is False
+    assert reuse_decision(_negative(), "a" * 64, evaluated=True,
+                          reobservation={"observed": False, "reason": "x"})["skip"] is False
     dependencies = _negative()["dependencies"]
     for variant in (
             {"applicability": "unknown"}, {"applicability": "needs_revalidation"}, {"applicability": "historical"},
@@ -189,8 +261,9 @@ def test_reuse_needs_every_guard_and_the_skip_is_only_advice():
             {"dependencies": {**dependencies, "unobserved": [{"type": "deployment"}]}},
             {"dependencies": {**dependencies, "items": [{"type": "endpoint"}, {"type": "response"}]}},
             {"dependencies": {}}):
-        assert reuse_decision(_negative(**variant), "a" * 64)["skip"] is False, variant
-    assert reuse_decision(_negative(), "b" * 64)["skip"] is False
+        assert reuse_decision(_negative(**variant), "a" * 64, evaluated=True,
+                              reobservation=FRESH)["skip"] is False, variant
+    assert reuse_decision(_negative(), "b" * 64, evaluated=True, reobservation=FRESH)["skip"] is False
 
 
 def test_public_dependencies_carry_no_digests():

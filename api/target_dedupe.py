@@ -201,6 +201,49 @@ async def _merge_named_credentials(conn, survivor_id, dupe_ids: list) -> None:
     )
 
 
+_RANKED_FINDINGS = """
+    WITH ranked AS (
+        SELECT id, FIRST_VALUE(id) OVER (
+            PARTITION BY fingerprint ORDER BY (target_id=$2) DESC, updated_at DESC, id DESC
+        ) AS keep_id
+        FROM findings WHERE target_id=ANY($1::uuid[])
+    )"""
+
+
+async def _move_dismissals(conn, all_ids: list, survivor_id) -> None:
+    """An operator's dismissal of a finding merged into another follows the surviving finding (it
+    would otherwise be deleted with the merged-away row). The newest active dismissal stays active
+    and its decision is applied to the survivor; any other active one becomes superseded history."""
+    await conn.execute(_RANKED_FINDINGS + """,
+        moved AS (
+            SELECT i.id, r.keep_id, ROW_NUMBER() OVER (PARTITION BY r.keep_id
+                                                       ORDER BY i.created_at DESC, i.id DESC) AS rn
+            FROM target_interpretations i JOIN ranked r ON i.finding_id=r.id
+            WHERE r.id<>r.keep_id AND i.negative_state='finding_dismissed' AND i.status='active'
+        )
+        UPDATE target_interpretations i SET status='superseded', status_changed_by='system:finding-merge',
+            status_changed_at=NOW(), status_note='Merged into a finding that already has an active dismissal.'
+        FROM moved m
+        WHERE i.id=m.id AND (m.rn>1 OR EXISTS (
+            SELECT 1 FROM target_interpretations k WHERE k.finding_id=m.keep_id
+              AND k.negative_state='finding_dismissed' AND k.status='active'))
+        """, all_ids, survivor_id)
+    await conn.execute(_RANKED_FINDINGS + """
+        UPDATE target_interpretations i SET finding_id=r.keep_id,
+            subject=jsonb_build_object('type','finding','id',r.keep_id::text)
+        FROM ranked r
+        WHERE i.finding_id=r.id AND r.id<>r.keep_id AND i.negative_state='finding_dismissed'
+        """, all_ids, survivor_id)
+    await conn.execute("""
+        UPDATE findings f SET status=CASE WHEN i.dismissal_reason='accepted_risk' THEN 'accepted_risk'
+                                          ELSE 'false_positive' END,
+            analyst_verdict=i.dismissal_reason, updated_at=NOW()
+        FROM target_interpretations i
+        WHERE i.finding_id=f.id AND i.negative_state='finding_dismissed' AND i.status='active'
+          AND f.target_id=ANY($1::uuid[]) AND f.status NOT IN ('false_positive','accepted_risk')
+        """, all_ids)
+
+
 async def _merge_findings(conn, survivor_id, dupe_ids: list) -> None:
     """Merge fingerprint collisions without cascading away proof history."""
     if not await _table_exists(conn, "findings"):
@@ -269,6 +312,8 @@ async def _merge_findings(conn, survivor_id, dupe_ids: list) -> None:
             all_ids,
             survivor_id,
         )
+    if await _table_exists(conn, "target_interpretations"):
+        await _move_dismissals(conn, all_ids, survivor_id)
     await conn.execute(
         """
         WITH ranked AS (

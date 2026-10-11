@@ -121,7 +121,22 @@ BEGIN
     END IF;
 END
 $applicability_columns$;
-CREATE INDEX IF NOT EXISTS idx_target_interpretations_applicability
-    ON target_interpretations(target_id, applicability_checked_at NULLS FIRST)
-    WHERE status = 'active' AND dependencies <> '{{}}'::jsonb;
+DO $applicability_indexes$
+BEGIN
+    -- Checked first: CREATE INDEX IF NOT EXISTS still takes a SHARE lock on the table (it waits
+    -- for every open writer) even when the index exists, and this runs at every start.
+    IF to_regclass('idx_target_interpretations_applicability') IS NULL THEN
+        CREATE INDEX idx_target_interpretations_applicability
+            ON target_interpretations(target_id, applicability_checked_at NULLS FIRST)
+            WHERE status = 'active' AND dependencies <> '{{}}'::jsonb;
+    END IF;
+    -- Later responses of the same request are looked up by path (hunt/knowledge_dependencies.py);
+    -- built once, at the first start of a release that has it.
+    IF to_regclass('idx_hunt_actions_http_request_path') IS NULL THEN
+        CREATE INDEX idx_hunt_actions_http_request_path
+            ON hunt_actions ((input_summary->'input'->>'path'), completed_at DESC)
+            WHERE capability_name = 'http.request';
+    END IF;
+END
+$applicability_indexes$;
 """

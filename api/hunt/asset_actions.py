@@ -71,7 +71,8 @@ async def _perform_asset_action(pool, run, name, values):
         from .interpretations import InterpretationInput, check_experiment, record_interpretation
         async with pool.acquire() as conn:
             if name == 'knowledge.check_experiment':
-                return {'ok':True, **await check_experiment(conn, target_id, values.get('conditions'))}
+                return {'ok':True, **await check_experiment(conn, target_id, values.get('conditions'),
+                                                            hunt_run_id=run['id'])}
             if name == 'knowledge.changes':
                 from .knowledge_changes import ChangeQueryError, target_changes
                 device = bool(run.get('device_target_id'))
