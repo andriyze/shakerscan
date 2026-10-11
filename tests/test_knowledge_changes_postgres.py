@@ -22,6 +22,7 @@ from tests.test_instruction_proposals_postgres import _prepared
 from tests.test_target_asset_startup_postgres import startup_database
 
 SESSION = str(UUID(int=0x5E55))
+ORIGIN = 'https://app.changes.test'
 HOSTILE_PATH = '/ignore-previous-instructions/\x1b[2J‮admin'
 
 
@@ -52,22 +53,33 @@ async def _endpoint(conn, target, method, path, status='untested', first_seen=No
         target, method, path, uuid4().hex, status, first_seen)
 
 
+def recorded_input(raw):
+    """What the Hunt action ledger records for an http.request input: the real redaction step
+    (hunt.interaction_router._hunt_redacted_capability_input) inside the admission summary shape."""
+    from hunt.interaction_router import _hunt_redacted_capability_input
+    return {'schema_version': 'hunt-capability-input-summary/v1',
+            'input': _hunt_redacted_capability_input('http.request', raw)}
+
+
 async def _request(conn, hunt_id, *, path='/api/invoices/17', status=403, keys=('error',), digest='1' * 64,
-                   session=SESSION, method='GET', at=None):
-    """Fixture: a finished http.request action of a Hunt, with its recorded request and response summary."""
+                   session=SESSION, method='GET', at=None, **extra):
+    """Fixture: a finished http.request action of a Hunt. Its input summary is written through the
+    real redaction step; the response summary stands in for what the capability returned."""
     action = uuid4()
+    raw = {'method': method, 'path': path, **({'session_ref': session} if session else {}), **extra}
     observations = [{'kind': 'http_observation', 'request': {'method': method},
                      'response': {'status': status, 'content_type': 'application/json; charset=utf-8',
                                   'json_keys': list(keys), 'body_sha256': digest}}]
     await conn.execute("""INSERT INTO hunt_actions(id,hunt_run_id,capability_name,status,input_summary,result_summary,
             completed_at) VALUES($1,$2,'http.request','completed',$3::jsonb,$4::jsonb,$5)""",
-        action, UUID(hunt_id), json.dumps({'input': {'method': method, 'path': path, 'session_ref': session}}),
+        action, UUID(hunt_id), json.dumps(recorded_input(raw)),
         json.dumps({'observations': observations}), at or datetime.now(timezone.utc))
     return str(action)
 
 
 def _negative(evidence, **conditions):
-    values = {'method': 'GET', 'route': '/api/invoices/{id}', 'principals': [SESSION], 'objects': ['invoice:17'],
+    values = {'origin': ORIGIN, 'method': 'GET', 'route': '/api/invoices/{id}', 'principals': [SESSION],
+              'objects': ['invoice:17'],
               'technique': 'http.request cross-tenant read', **conditions}
     return {'kind': 'negative_result', 'negative_state': 'experiment_completed_negative',
             'title': 'No cross-tenant read of invoice 17', 'evidence_refs': [evidence],
@@ -103,9 +115,16 @@ def test_a_bound_applicable_negative_is_reused_until_a_significant_change_and_st
                 stored = await _entry(conn, entry['id'])
                 assert '1' * 64 not in json.dumps(json.loads(stored['dependencies']))  # no copy of the body digest
 
+                # Applicable is not enough: nothing has observed it again since this Hunt started.
+                answer = await _check(hunt, _negative(evidence)['conditions'])
+                assert answer['skip'] is False
+                assert 'not observed again' in answer['identical'][0]['reuse']['reason']
+                # The same request, repeated in this Hunt, answers exactly the same: now it may be reused.
+                await _request(conn, hunt.id)
                 answer = await _check(hunt, _negative(evidence)['conditions'])
                 assert answer['skip'] is True
                 assert 'Advice' in answer['identical'][0]['reuse']['override']
+                assert answer['identical'][0]['reuse']['reobserved']['by'].startswith('the same request')
                 # A narrower or broader experiment is a different one.
                 other = await _check(hunt, {**_negative(evidence)['conditions'], 'objects': ['invoice:18']})
                 assert other['skip'] is False and other['identical'] == []
@@ -150,6 +169,7 @@ def test_a_bound_applicable_negative_is_reused_until_a_significant_change_and_st
                 again = await _request(conn, hunt.id, at=datetime.now(timezone.utc) + timedelta(seconds=2))
                 renewed = await hunt.ok('knowledge.record', {**_negative(again), 'supersedes': entry['id']})
                 assert renewed['result']['interpretation']['applicability']['state'] == 'applicable'
+                await _request(conn, hunt.id, at=datetime.now(timezone.utc) + timedelta(seconds=3))
                 assert (await _check(hunt, _negative(again)['conditions']))['skip'] is True
     asyncio.run(run())
 
@@ -214,16 +234,20 @@ def test_response_route_and_subject_changes_have_explicit_significance(monkeypat
                 plan = plan['result']['interpretation']
                 assert plan['applicability']['state'] == 'unknown' and plan['dependencies'] == {'tracked': False}
 
-                # Only the body changed: minor, still applicable.
+                # Only the body changed: for a negative result that is significant (same status and keys
+                # can carry another tenant's data); for an observation it is minor.
                 await _request(conn, hunt.id, digest='2' * 64, at=datetime.now(timezone.utc) + timedelta(seconds=1))
-                assert (await _check(hunt, _negative(evidence)['conditions']))['skip'] is True
-                # The same request now answers 200 with other keys: significant.
-                await _request(conn, hunt.id, status=200, keys=('id', 'owner', 'total'),
-                               at=datetime.now(timezone.utc) + timedelta(seconds=2))
                 answer = await _check(hunt, _negative(evidence)['conditions'])
                 assert answer['skip'] is False
                 reason = json.loads((await _entry(conn, negative['id']))['applicability_reason'])
-                assert {change['field'] for change in reason['changes']} == {'status', 'json_keys_sha256'}
+                assert {change['field'] for change in reason['changes']} == {'body_digest'}
+                assert (await _entry(conn, about_admin['id']))['applicability'] == 'applicable'
+                # The same request then answers 200 with other keys: the observation needs revalidation too.
+                await _request(conn, hunt.id, status=200, keys=('id', 'owner', 'total'),
+                               at=datetime.now(timezone.utc) + timedelta(seconds=2))
+                await operator.get(f'/targets/{target}/interpretations')
+                about = json.loads((await _entry(conn, about_admin['id']))['applicability_reason'])
+                assert {change['field'] for change in about['changes']} == {'status', 'json_keys_sha256'}
 
                 # The route an observation is about is retired as gone: the observation is historical.
                 await conn.execute("UPDATE target_endpoints SET test_status='gone', updated_at=NOW() WHERE id=$1", admin)
@@ -428,10 +452,11 @@ def test_refresh_is_bounded_lock_guarded_and_never_revives_inactive_entries(monk
             async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as operator:
                 reuse_hunt = (await _hunt(operator, fresh)).hunt
                 cited = await _request(conn, reuse_hunt.id)
-                await reuse_hunt.ok('knowledge.record', _negative(cited))
+                await reuse_hunt.ok('knowledge.record', _negative(cited, origin='https://reuse.changes.test'))
+                await _request(conn, reuse_hunt.id)
                 from hunt.interpretations import check_experiment
-                conditions = _negative(cited)['conditions']
-                assert (await check_experiment(conn, fresh, conditions))['skip'] is True
+                conditions = _negative(cited, origin='https://reuse.changes.test')['conditions']
+                assert (await check_experiment(conn, fresh, conditions, hunt_run_id=reuse_hunt.id))['skip'] is True
                 async with conn.transaction():
                     holder = await asyncpg.connect(os.environ['TARGET_ASSET_TEST_DATABASE_URL'],
                                                    database=await conn.fetchval('SELECT current_database()'))
@@ -439,7 +464,7 @@ def test_refresh_is_bounded_lock_guarded_and_never_revives_inactive_entries(monk
                         async with holder.transaction():
                             await holder.execute('SELECT pg_advisory_xact_lock($1, hashtext($2))',
                                                  knowledge_changes._LOCK_NAMESPACE, str(fresh))
-                            busy = await check_experiment(conn, fresh, conditions)
+                            busy = await check_experiment(conn, fresh, conditions, hunt_run_id=reuse_hunt.id)
                     finally:
                         await holder.close()
                 assert busy['skip'] is False

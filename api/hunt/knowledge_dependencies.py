@@ -34,6 +34,7 @@ import hashlib
 import json
 import re
 from typing import Any, Iterable, Mapping
+from urllib.parse import urlsplit
 import uuid
 
 SCHEMA = "knowledge-dependencies/v1"
@@ -42,8 +43,6 @@ MAX_RESPONSE_DEPENDENCIES = 5
 MAX_TECHNOLOGIES = 40
 MAX_ENDPOINT_ROWS = 200
 MAX_AUTH_ROUTES = 500
-#: Recent http.request actions of an asset read per evaluation (newest first).
-RESPONSE_WINDOW = 2000
 
 SIGNIFICANT = "significant"
 MINOR = "minor"
@@ -55,9 +54,9 @@ SIGNIFICANCE_RULES: dict[str, str] = {
                  "deleted from the inventory); a route first appearing in the inventory, a new auth state "
                  "or a new parameter shape is minor (the inventory learned more)"),
     "response": ("compared with every later http.request of the same plain request (method, origin, path "
-                 "without query, session; no headers, body or bindings) among the asset's latest "
-                 f"{2000}: a different status code, media type or JSON key set in any of them is significant; "
-                 "a different body digest alone is minor; digests of different formats are incomparable"),
+                 "without query, session; nothing else in the request): a different status code, media type or "
+                 "JSON key set in any of them is significant; a different body digest is significant for a "
+                 "negative result and minor otherwise; digests of different formats are incomparable"),
     "deployment": ("compared with the latest later Scan of the same target that recorded technologies (a side "
                    "without technologies or banners compares nothing): a version change of a "
                    "technology seen in both, a versioned technology appearing or disappearing, or a changed "
@@ -67,9 +66,11 @@ SIGNIFICANCE_RULES: dict[str, str] = {
                      "disappears from the inventory"),
     "service": ("significant when the service is no longer observed open, or its product or version "
                 "changed"),
-    "finding": ("significant when the finding's severity or URL changed, or a verification recorded a new "
-                "verdict (a verdict cleared when the scanner re-records evidence is not a change); a different "
-                "tool name is minor; the finding being observed again, a new Scan or a release alone is not"),
+    "finding": ("significant when the finding's severity rose, its URL changed, it was resolved and detected "
+                "again (resurfaced), or a verifier proved it exploited while it is dismissed as a false positive "
+                "or duplicate; a verdict agreeing with the dismissal, an error, inconclusive or cleared verdict, a "
+                "lower severity, a tool name, new scanner evidence for the same issue, a Scan or a release alone "
+                "are not; a dismissal of a finding merged into another follows the surviving finding"),
     "subject": "the record an entry is about no longer exists (or its route is gone): the entry is historical",
     "age": "never: how old an entry is changes nothing",
 }
@@ -199,8 +200,12 @@ def compare_endpoint(item: Mapping[str, Any], current: Mapping[str, Any]) -> lis
 
 
 def compare_response(item: Mapping[str, Any], newer: Mapping[str, Any] | None, *,
-                     recorded_body: Any = None, newer_body: Any = None) -> list[dict[str, Any]]:
-    """``newer`` is the latest later observation of the same request, or None (nothing newer)."""
+                     recorded_body: Any = None, newer_body: Any = None,
+                     body_significant: bool = False) -> list[dict[str, Any]]:
+    """``newer`` is a later observation of the same request, or None (nothing newer).
+
+    For a negative result (``body_significant``) a different body is significant: the same status
+    and keys can carry another tenant's data."""
     if not newer:
         return []
     before, changes = item["observed"], []
@@ -214,7 +219,11 @@ def compare_response(item: Mapping[str, Any], newer: Mapping[str, Any] | None, *
             changes.append(_change(item, "body_digest", INCOMPARABLE, old_format, new_format,
                                    note="digests of different formats are never compared"))
         elif recorded_body != newer_body:
-            changes.append(_change(item, "body_digest", MINOR, "earlier digest", "different digest"))
+            changes.append(_change(item, "body_digest", SIGNIFICANT if body_significant else MINOR,
+                                   "earlier digest", "different digest"))
+    elif body_significant and (old_format or new_format):
+        changes.append(_change(item, "body_digest", INCOMPARABLE, old_format, new_format,
+                               note="one side recorded no body digest"))
     return changes
 
 
@@ -267,19 +276,37 @@ def compare_service(item: Mapping[str, Any], current: Mapping[str, Any]) -> list
     return changes
 
 
+_SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+#: Verdicts that contradict a dismissal as a false positive or a duplicate.
+CONTRADICTING_VERDICTS = frozenset({"exploited"})
+
+
 def compare_finding(item: Mapping[str, Any], current: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """A dismissal is re-decided when the finding got worse or came back, never on noise."""
     before = item["observed"]
     if current is None:
         return [_change(item, "exists", SIGNIFICANT, True, False, historical=True)]
     changes = []
-    for field in ("severity", "url"):
-        if before.get(field) != current.get(field):
-            changes.append(_change(item, field, SIGNIFICANT, before.get(field), current.get(field)))
-    # The scanner clears the verdict when it re-records evidence; only a new verdict is a change.
+    old_rank = _SEVERITY_ORDER.get(str(before.get("severity") or "").lower(), -1)
+    new_rank = _SEVERITY_ORDER.get(str(current.get("severity") or "").lower(), -1)
+    if new_rank > old_rank:
+        changes.append(_change(item, "severity", SIGNIFICANT, before.get("severity"), current.get("severity")))
+    elif new_rank != old_rank:
+        changes.append(_change(item, "severity", MINOR, before.get("severity"), current.get("severity")))
+    if before.get("url") != current.get("url"):
+        changes.append(_change(item, "url", SIGNIFICANT, before.get("url"), current.get("url")))
+    # Only a verifier proving the issue contradicts a false-positive or duplicate dismissal; a
+    # verdict agreeing with it, an error, inconclusive or a cleared verdict is not a change.
     verdict = current.get("last_verification_verdict")
-    if verdict is not None and verdict != before.get("last_verification_verdict"):
-        changes.append(_change(item, "last_verification_verdict", SIGNIFICANT,
+    if verdict != before.get("last_verification_verdict") and verdict is not None:
+        contradicts = verdict in CONTRADICTING_VERDICTS and item.get("dismissal_reason") in {"false_positive",
+                                                                                          "duplicate"}
+        changes.append(_change(item, "last_verification_verdict", SIGNIFICANT if contradicts else MINOR,
                                before.get("last_verification_verdict"), verdict))
+    # The finding was resolved and then detected again: a regression.
+    if int(current.get("resurfaced_count") or 0) > int(before.get("resurfaced_count") or 0):
+        changes.append(_change(item, "resurfaced", SIGNIFICANT, before.get("resurfaced_count"),
+                               current.get("resurfaced_count")))
     if before.get("tool") != current.get("tool"):
         changes.append(_change(item, "tool", MINOR, before.get("tool"), current.get("tool")))
     return changes
@@ -323,7 +350,7 @@ def _response_view(row: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     status = response.get("status")
     keys = response.get("json_keys")
-    return {"action_id": str(row["id"]), "completed_at": _iso(row.get("completed_at")),
+    return {"action_id": str(row["id"]) if row.get("id") else None, "completed_at": _iso(row.get("completed_at")),
             "status": status if isinstance(status, int) else None,
             "media_type": media_type(response.get("content_type")),
             "json_keys_sha256": _sha(sorted(str(key) for key in keys)) if isinstance(keys, list) else None,
@@ -331,25 +358,64 @@ def _response_view(row: Mapping[str, Any]) -> dict[str, Any] | None:
             "_body": response.get("body_sha256")}
 
 
-#: Request options that change what was sent beyond method, origin, path and session. A request
-#: carrying any of them (or a query string) is never the same request as a plain one.
-_REQUEST_OPTIONS = ("headers", "body", "json_body", "form", "request_bindings", "capture", "collection_id",
-                    "request_collection_id", "request_collection_ref", "query", "params")
+#: The only keys a recorded http.request input may hold to count as a plain request: method, path
+#: (no query string), origin and session. Anything else (a body, which the ledger records as
+#: ``body_kind``; ``as_principal``; ``via_address``; ``follow_redirects``; headers, query, captures,
+#: bindings) makes it a different request, never comparable with a plain one.
+PLAIN_REQUEST_KEYS = frozenset({"method", "path", "origin", "session_ref"})
 
 
-def _request_view(row: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
-    """(method, origin and path, session) of a plain recorded request: no query string and no
-    headers, body or bindings. Anything else is not comparable and returns None."""
+def canonical_origin(value: Any) -> str | None:
+    """``scheme://host[:port]`` lower-cased, the default port dropped; None for anything else
+    (user info, a path, a query or a fragment, a scheme other than http or https)."""
+    if not isinstance(value, str) or not value or len(value) > 300:
+        return None
+    try:
+        parts = urlsplit(value.strip())
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").rstrip(".").lower()
+    if scheme not in {"http", "https"} or not host or parts.username is not None or parts.password is not None \
+            or parts.path not in {"", "/"} or parts.query or parts.fragment:
+        return None
+    if port is None or (scheme, port) in {("https", 443), ("http", 80)}:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def _request_view(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The identity of a plain recorded request, or None when the request was not plain.
+
+    The effective origin is the recorded one, or the Hunt's target origin when none was given."""
     summary = _json(row.get("input_summary"), {}) or {}
     values = summary.get("input") if isinstance(summary, Mapping) else None
     if not isinstance(values, Mapping) or not isinstance(values.get("path"), str):
         return None
-    path = values["path"][:2048]
-    if not path.startswith("/") or "?" in path or "#" in path or any(values.get(key) for key in _REQUEST_OPTIONS):
+    if set(values) - PLAIN_REQUEST_KEYS:
         return None
-    origin = str(values.get("origin") or "")[:300]
-    return (str(values.get("method") or "GET").upper()[:10], path, str(values.get("session_ref") or "")[:64],
-            origin)
+    path = values["path"]
+    if len(path) > 2048 or not path.startswith("/") or "?" in path or "#" in path:
+        return None
+    origin = canonical_origin(values.get("origin") or row.get("default_origin"))
+    if origin is None:
+        return None
+    return {"method": str(values.get("method") or "GET").upper()[:10], "path": path,
+            "session_ref": str(values.get("session_ref") or "")[:64], "origin": origin}
+
+
+def request_identity(view: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    return view["method"], view["path"], view["session_ref"], view["origin"]
+
+
+#: Joined to every read of http.request actions: the Hunt's target origin, the default for a
+#: request that names none.
+_ACTIONS_FROM = """FROM hunt_actions a JOIN hunt_runs h ON h.id=a.hunt_run_id
+                LEFT JOIN targets t ON t.id = CASE WHEN h.target_id IS NOT NULL THEN h.target_id
+                                                   ELSE h.device_target_id END"""
+#: Distinct later responses of one request read at most; more is reported as a change.
+MAX_DISTINCT_RESPONSES = 1000
 
 
 class Observer:
@@ -367,49 +433,73 @@ class Observer:
 
     async def endpoint(self, method: str | None, path: str) -> dict[str, Any]:
         async def read() -> dict[str, Any]:
-            rows = await self.conn.fetch(f"""SELECT method, auth_state, param_shape, test_status FROM target_endpoints
+            rows = await self.conn.fetch(f"""SELECT method, auth_state, param_shape, test_status, last_seen_at
+                FROM target_endpoints
                 WHERE {asset_scope('target_id')} AND path=$2 AND ($3::text IS NULL OR method=$3)
                 ORDER BY id LIMIT {MAX_ENDPOINT_ROWS}""", self.target, path, method)
             live = [row for row in rows if row["test_status"] != "gone"]
+            seen = [row["last_seen_at"] for row in live if row["last_seen_at"] is not None]
             return {"present": bool(live), "rows": len(live),
                     "auth_states": sorted({str(row["auth_state"]) for row in live}),
-                    "param_shapes_sha256": _sha(sorted({f"{row['method']} {row['param_shape']}" for row in live}))}
+                    "param_shapes_sha256": _sha(sorted({f"{row['method']} {row['param_shape']}" for row in live})),
+                    "_last_seen_at": max(seen) if seen else None}
         return await self._cached(("endpoint", method, path), read)
 
-    async def _requests(self) -> dict[tuple[str, str, str, str], list[dict[str, Any]]]:
-        """The asset's most recent plain http.request responses, grouped by request identity, newest
-        first: one bounded read per evaluation instead of one query per dependency."""
-        async def read() -> dict[tuple[str, str, str, str], list[dict[str, Any]]]:
-            rows = await self.conn.fetch(f"""SELECT a.id, a.completed_at, a.input_summary, a.result_summary
-                FROM hunt_actions a JOIN hunt_runs h ON h.id=a.hunt_run_id
-                WHERE {asset_scope('COALESCE(h.device_target_id, h.target_id)')}
-                  AND a.capability_name='http.request' AND a.status IN ('completed','partial')
-                  AND a.completed_at IS NOT NULL
-                ORDER BY a.completed_at DESC, a.id DESC LIMIT {RESPONSE_WINDOW}""", self.target)
-            grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
-            for row in rows:
-                request, view = _request_view(row), _response_view(row)
-                if request is not None and view is not None:
-                    grouped.setdefault(request, []).append({**view, "_at": _time(row["completed_at"])})
-            return grouped
-        return await self._cached(("requests",), read)
+    async def _same_path(self, path: str, *, after: Any = None, before: Any = None, exclude: Any = None,
+                         distinct: bool) -> list[Mapping[str, Any]]:
+        """http.request actions on this asset to exactly ``path`` (an indexed lookup, no window)."""
+        scope = f"({asset_scope('h.target_id')} OR {asset_scope('h.device_target_id')})"
+        if distinct:
+            # Every distinct (request, response) pair after the point: a later change is never
+            # hidden behind later unchanged requests, however many there are.
+            sql = f"""SELECT DISTINCT a.input_summary, t.url AS default_origin,
+                    jsonb_build_object('observations', jsonb_path_query_array(
+                        a.result_summary, '$.observations[*] ? (@.kind == "http_observation")')) AS result_summary,
+                    NULL::uuid AS id, NULL::timestamptz AS completed_at
+                {_ACTIONS_FROM}
+                WHERE a.capability_name='http.request' AND (a.input_summary->'input'->>'path')=$2
+                  AND a.status IN ('completed','partial') AND a.completed_at IS NOT NULL AND {scope}
+                  AND ($3::timestamptz IS NULL OR a.completed_at > $3)
+                  AND ($4::timestamptz IS NULL OR a.completed_at <= $4)
+                  AND ($5::uuid IS NULL OR a.id <> $5)
+                LIMIT {MAX_DISTINCT_RESPONSES + 1}"""
+        else:
+            sql = f"""SELECT a.id, a.completed_at, a.input_summary, a.result_summary, t.url AS default_origin
+                {_ACTIONS_FROM}
+                WHERE a.capability_name='http.request' AND (a.input_summary->'input'->>'path')=$2
+                  AND a.status IN ('completed','partial') AND a.completed_at IS NOT NULL AND {scope}
+                  AND ($3::timestamptz IS NULL OR a.completed_at > $3)
+                  AND ($4::timestamptz IS NULL OR a.completed_at <= $4)
+                  AND ($5::uuid IS NULL OR a.id <> $5)
+                ORDER BY a.completed_at DESC, a.id DESC LIMIT 200"""
+        return list(await self.conn.fetch(sql, self.target, path, _time(after), _time(before),
+                                          uuid.UUID(str(exclude)) if exclude else None))
 
     async def responses_after(self, identity: tuple[str, str, str, str], after: Any, *,
-                              exclude: Any = None) -> list[dict[str, Any]]:
-        """Every later observation of the same plain request (newest first, at most 50)."""
-        moment = _time(after)
-        rows = (await self._requests()).get(identity, [])
-        return [row for row in rows if moment is not None and row["_at"] > moment
-                and row["action_id"] != str(exclude)][:50]
+                              exclude: Any = None) -> tuple[list[dict[str, Any]], bool]:
+        """Every distinct later response of the same plain request, and whether there were too many
+        distinct ones to list (which callers treat as a change)."""
+        async def read() -> tuple[list[dict[str, Any]], bool]:
+            rows = await self._same_path(identity[1], after=after, exclude=exclude, distinct=True)
+            views = []
+            for row in rows[:MAX_DISTINCT_RESPONSES]:
+                request, view = _request_view(row), _response_view(row)
+                if request is not None and view is not None and request_identity(request) == tuple(identity):
+                    views.append(view)
+            return views, len(rows) > MAX_DISTINCT_RESPONSES
+        return await self._cached(("after", tuple(identity), str(after), str(exclude)), read)
 
     async def response(self, identity: tuple[str, str, str, str], *, after: Any = None,
                        before: Any = None) -> dict[str, Any] | None:
-        """The latest observation of the same plain request after (or at or before) a time."""
-        rows = (await self._requests()).get(identity, [])
-        for row in rows:
-            if (after is None or row["_at"] > _time(after)) and (before is None or row["_at"] <= _time(before)):
-                return row
-        return None
+        """The latest observation of the same plain request after (or at or before) a time, among
+        the latest 200 requests to that path."""
+        async def read() -> dict[str, Any] | None:
+            for row in await self._same_path(identity[1], after=after, before=before, distinct=False):
+                request, view = _request_view(row), _response_view(row)
+                if request is not None and view is not None and request_identity(request) == tuple(identity):
+                    return view
+            return None
+        return await self._cached(("latest", tuple(identity), str(after), str(before)), read)
 
     async def action_body(self, action_id: Any) -> Any:
         async def read() -> Any:
@@ -459,9 +549,10 @@ class Observer:
 
     async def finding(self, finding_id: Any) -> dict[str, Any] | None:
         async def read() -> dict[str, Any] | None:
-            row = await self.conn.fetchrow(f"""SELECT severity, url, tool, last_verification_verdict FROM findings
+            row = await self.conn.fetchrow(f"""SELECT severity, url, tool, last_verification_verdict,
+                    resurfaced_count FROM findings
                 WHERE id=$2 AND {asset_scope('target_id')}""", self.target, uuid.UUID(str(finding_id)))
-            return finding_view(row) if row else None
+            return finding_view(dict(row)) if row else None
         return await self._cached(("finding", str(finding_id)), read)
 
     async def subject(self, subject_type: str, subject_id: Any) -> bool:
@@ -507,8 +598,10 @@ def deployment_view(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def finding_view(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: (str(row[key]) if row[key] is not None else None)
-            for key in ("severity", "url", "tool", "last_verification_verdict")}
+    view: dict[str, Any] = {key: (str(row[key]) if row.get(key) is not None else None)
+                            for key in ("severity", "url", "tool", "last_verification_verdict")}
+    view["resurfaced_count"] = int(row.get("resurfaced_count") or 0)
+    return view
 
 
 # --- binding of an experiment's conditions to what ran -------------------------------------------
@@ -517,41 +610,62 @@ def _placeholder(segment: str) -> bool:
     return len(segment) > 2 and segment.startswith("{") and segment.endswith("}")
 
 
-def _route_matches(route: str, path: str) -> bool:
-    """A condition route matches the path an action requested: segment by segment equal, with a
-    ``{name}`` placeholder allowed only where the inventory's own normalization templates the
-    requested segment (a number, UUID or long hex id). ``/{a}/{b}`` never matches ``/api/orders``."""
-    template = route.split("/")
-    concrete = path.split("/")
+def _object_id(value: str) -> str:
+    """``invoice:17`` -> ``17``; a bare value is its own id."""
+    return value.rsplit(":", 1)[-1].strip()
+
+
+def _route_binding(route: str, path: str, objects: list[str]) -> str | None:
+    """None when the route as written is exactly the requested path with each placeholder filled by
+    one named object; otherwise what differs.
+
+    Segments are equal except placeholders. Each placeholder's segment in the path must be an
+    identifier the inventory would template (number, UUID, long hex) and the id of exactly one named
+    object; every named object fills exactly one placeholder; no named id may stand in a literal
+    segment. ``/api/users/{uid}/invoices/{id}`` with only ``invoice:17`` is therefore unbound: user
+    5 was part of the request and was not named.
+    """
+    template, concrete = route.split("/"), path.split("/")
     normalized = (normalize_route(path) or path).split("/")
     if not (len(template) == len(concrete) == len(normalized)):
-        return False
-    return all(t == c or (_placeholder(t) and _placeholder(n)) for t, c, n in zip(template, concrete, normalized))
-
-
-def _object_named(value: str, path: str) -> bool:
-    """An object is bound when its identifier (``invoice:17`` -> ``17``) is a segment of the path."""
-    identifier = value.rsplit(":", 1)[-1].strip()
-    return bool(identifier) and identifier in path.split("/")
+        return "route"
+    ids = [_object_id(value) for value in objects]
+    if any(not identifier for identifier in ids) or len(set(ids)) != len(ids):
+        return "objects"
+    filled: list[str] = []
+    for written, sent, templated in zip(template, concrete, normalized):
+        if _placeholder(written):
+            if not _placeholder(templated):
+                return "route"
+            if ids.count(sent) != 1:
+                return "objects"
+            filled.append(sent)
+        elif written != sent:
+            return "route"
+        elif sent in ids:
+            return "objects"
+    if sorted(filled) != sorted(ids):
+        return "objects"
+    return None
 
 
 #: The only condition fields a recorded request can confirm. Any other field (roles, inputs, service,
 #: environment, deployment fingerprint, tool version, application state, budget) cannot be checked
 #: against what was sent, so its presence leaves the experiment unbound.
-BINDABLE_FIELDS = frozenset({"method", "route", "operation", "principals", "objects", "technique"})
+BINDABLE_FIELDS = frozenset({"method", "route", "operation", "origin", "principals", "objects", "technique"})
 
 
 def bind_experiment(conditions: Mapping[str, Any], cited: list[Mapping[str, Any]]) -> dict[str, Any]:
     """Whether the experiment's conditions are what one cited testing action actually requested.
 
-    Bound only when one cited ``http.request`` of the writing Hunt recorded a plain request (no
-    query string, headers, body or bindings) and:
+    Bound only when one cited ``http.request`` of the writing Hunt recorded a plain request (its
+    recorded input holds only method, path, origin and session) and:
 
-    * the conditions name only method, route or operation, principals, objects and technique;
+    * the conditions name only origin, method, route or operation, principals, objects, technique;
+    * the origin (scheme, host and port) is named and is the request's effective origin;
     * the method is the conditions' method (default GET);
-    * the path is the conditions' route as written: segments equal, a ``{name}`` placeholder only
-      where the path holds an identifier, and then every placeholder covered by a named object;
-    * every named object's identifier (``invoice:17`` -> ``17``) is a segment of the path;
+    * the route as written is the requested path, each placeholder filled by exactly one named
+      object (see ``_route_binding``);
     * exactly one principal is named and it is the request's ``session_ref`` (``anonymous``
       without a session);
     * the technique's first word is ``http.request``.
@@ -562,6 +676,10 @@ def bind_experiment(conditions: Mapping[str, Any], cited: list[Mapping[str, Any]
     if set(conditions) - BINDABLE_FIELDS:
         return {"bound": False, "reasons": ["conditions name fields a recorded request cannot confirm: "
                                             + ", ".join(sorted(set(conditions) - BINDABLE_FIELDS))]}
+    origin = canonical_origin(conditions.get("origin"))
+    if origin is None:
+        return {"bound": False, "reasons": ["the conditions name no origin (scheme://host[:port]) to compare with "
+                                            "the request"]}
     method = str(conditions.get("method") or "").upper() or None
     route = conditions.get("route")
     if not route and isinstance(conditions.get("operation"), str):
@@ -578,25 +696,25 @@ def bind_experiment(conditions: Mapping[str, Any], cited: list[Mapping[str, Any]
     for row in cited:
         request = _request_view(row)
         if request is None:
-            reasons.append(f"action {row['id']}: not a plain request (a query string, headers, body or bindings), "
-                           "or no request was recorded")
+            reasons.append(f"action {row['id']}: not a plain request (it carried a body, headers, query, "
+                           "principal binding, address, redirect or capture option), or none was recorded")
             continue
-        req_method, path, session, _origin = request
         mismatch = []
-        if (method or "GET") != req_method:
+        if request["origin"] != origin:
+            mismatch.append("origin")
+        if (method or "GET") != request["method"]:
             mismatch.append("method")
-        if not _route_matches(route, path):
-            mismatch.append("route")
-        if any(not _object_named(value, path) for value in objects) or \
-                (any(_placeholder(part) for part in route.split("/")) and not objects):
-            mismatch.append("objects")
-        if len(principals) != 1 or principals[0] != (session or "anonymous"):
+        differs = _route_binding(route, request["path"], objects)
+        if differs:
+            mismatch.append(differs)
+        if len(principals) != 1 or principals[0] != (request["session_ref"] or "anonymous"):
             mismatch.append("principals")
         if not technique or technique[0].rstrip(":,;").casefold() != "http.request":
             mismatch.append("technique")
         if not mismatch:
-            return {"bound": True, "action_id": str(row["id"]), "method": req_method, "path": path,
-                    "session_ref": session or None}
+            return {"bound": True, "action_id": str(row["id"]), "method": request["method"],
+                    "path": request["path"], "origin": request["origin"],
+                    "session_ref": request["session_ref"] or None}
         reasons.append(f"action {row['id']}: " + ", ".join(mismatch) + " differ from the recorded request")
     if not cited:
         reasons.append("no cited http.request of this Hunt recorded the request (other capabilities are not bound)")
@@ -611,12 +729,13 @@ async def _cited_requests(conn: Any, target: uuid.UUID, refs: Iterable[str], *,
     identifiers = [uuid.UUID(ref) for ref in refs]
     if not identifiers:
         return []
-    return list(await conn.fetch(f"""SELECT a.id, a.completed_at, a.input_summary, a.result_summary
-        FROM hunt_actions a JOIN hunt_runs h ON h.id=a.hunt_run_id
+    return list(await conn.fetch(f"""SELECT a.id, a.completed_at, a.input_summary, a.result_summary,
+            t.url AS default_origin
+        {_ACTIONS_FROM}
         WHERE (a.id = ANY($2::uuid[]) OR a.receipt_id = ANY($2::uuid[]))
           AND a.capability_name='http.request' AND a.status IN ('completed','partial')
           AND ($3::uuid IS NULL OR a.hunt_run_id=$3)
-          AND {asset_scope('COALESCE(h.device_target_id, h.target_id)')}
+          AND ({asset_scope('h.target_id')} OR {asset_scope('h.device_target_id')})
         ORDER BY a.completed_at DESC NULLS LAST LIMIT {MAX_RESPONSE_DEPENDENCIES}""", target, identifiers,
         uuid.UUID(str(hunt_run_id)) if hunt_run_id else None))
 
@@ -634,6 +753,7 @@ async def capture(conn: Any, target_id: Any, *, kind: str, negative_state: str |
     keys: set[tuple[str, str]] = set()
 
     def add(item: dict[str, Any]) -> None:
+        item["observed"] = {key: value for key, value in dict(item["observed"]).items() if not key.startswith("_")}
         if (item["type"], item["key"]) not in keys and len(items) < MAX_ITEMS:
             keys.add((item["type"], item["key"]))
             items.append(item)
@@ -663,10 +783,11 @@ async def capture(conn: Any, target_id: Any, *, kind: str, negative_state: str |
         view = _response_view(row)
         if request is None or view is None:
             unobserved.append({"type": "response", "key": str(row["id"]),
-                               "reason": "the cited request is not a plain request (query string, headers, body or "
-                                         "bindings) or recorded no response summary"})
+                               "reason": "the cited request is not a plain request (a body, headers, query, "
+                                         "principal binding, address, redirect or capture option) or recorded no "
+                                         "response summary"})
             continue
-        req_method, path, session, origin = request
+        req_method, path, session, origin = request_identity(request)
         observed = {key: value for key, value in view.items() if not key.startswith("_")}
         add({"type": "response", "key": f"{req_method} {origin}{path} session:{session or 'none'}",
              "method": req_method, "path": path, "session_ref": session, "origin": origin, "observed": observed})
@@ -685,7 +806,8 @@ async def capture(conn: Any, target_id: Any, *, kind: str, negative_state: str |
     if finding is not None:
         # A dismissal depends on what it was decided about, only: Scans, banners and inventory
         # changes are reported by knowledge.changes but never reopen a person's decision.
-        add({"type": "finding", "key": str(finding["id"]), "observed": finding_view(finding)})
+        add({"type": "finding", "key": str(finding["id"]), "observed": finding_view(finding),
+             "dismissal_reason": finding.get("dismissal_reason")})
         return {"schema": SCHEMA, "captured_at": _now().isoformat(), "items": items, "unobserved": unobserved,
                 "for": negative_state or kind}
 
@@ -711,10 +833,41 @@ async def capture(conn: Any, target_id: Any, *, kind: str, negative_state: str |
     return result
 
 
-async def evaluate(observer: Observer, recorded: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
-    """(state, changes, incomparable) for one entry's recorded dependencies, read from ``observer``."""
+NEGATIVE_FOR = frozenset({"experiment_completed_negative", "experiment_inconclusive", "hypothesis_refuted",
+                          "finding_dismissed"})
+
+
+async def _response_changes(observer: Observer, item: Mapping[str, Any], *, after: Any, exclude: Any,
+                            body_significant: bool) -> tuple[list[dict[str, Any]], int]:
+    """Changes across every distinct later response of the item's request, and how many there were."""
+    observed = item["observed"]
+    identity = (item["method"], item["path"], item.get("session_ref") or "", item.get("origin") or "")
+    later, overflow = await observer.responses_after(identity, after, exclude=exclude)
+    changes: list[dict[str, Any]] = []
+    if overflow:
+        changes.append(_change(item, "responses", SIGNIFICANT, None, f"more than {MAX_DISTINCT_RESPONSES} different",
+                               note="too many different later responses to confirm none changed"))
+    recorded_body = await observer.action_body(observed["action_id"]) if later else None
+    seen: set[tuple[str, str]] = set()
+    # Every later observation counts: a later one that looks unchanged never hides one that did not.
+    for newer in later:
+        for change in compare_response(item, newer, recorded_body=recorded_body, newer_body=newer.get("_body"),
+                                       body_significant=body_significant):
+            marker = (change["field"], change["significance"])
+            if marker not in seen:
+                seen.add(marker)
+                changes.append(change)
+    return changes, len(later)
+
+
+async def evaluate(observer: Observer, recorded: Mapping[str, Any], *,
+                   finding_id: Any = None) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    """(state, changes, incomparable) for one entry's recorded dependencies, read from ``observer``.
+
+    ``finding_id`` is the dismissal's current finding (it follows a finding merge)."""
     if not isinstance(recorded, Mapping) or recorded.get("schema") != SCHEMA:
         return "unknown", [], []
+    body_significant = recorded.get("for") in NEGATIVE_FOR
     changes: list[dict[str, Any]] = []
     for item in recorded.get("items") or ():
         kind = item.get("type")
@@ -722,18 +875,10 @@ async def evaluate(observer: Observer, recorded: Mapping[str, Any]) -> tuple[str
             changes += compare_endpoint(item, await observer.endpoint(item.get("method"), item["path"]))
         elif kind == "response":
             observed = item["observed"]
-            identity = (item["method"], item["path"], item.get("session_ref") or "", item.get("origin") or "")
-            later = await observer.responses_after(identity, observed.get("completed_at"),
-                                                   exclude=observed.get("action_id"))
-            recorded_body = await observer.action_body(observed["action_id"]) if later else None
-            # Every later observation counts: a later one that looks unchanged never hides one that did not.
-            seen: set[str] = set()
-            for index, newer in enumerate(later):
-                for change in compare_response(item, newer, recorded_body=recorded_body if index == 0 else None,
-                                               newer_body=newer.get("_body") if index == 0 else None):
-                    if change["field"] not in seen:
-                        seen.add(change["field"])
-                        changes.append(change)
+            found, _count = await _response_changes(observer, item, after=observed.get("completed_at"),
+                                                    exclude=observed.get("action_id"),
+                                                    body_significant=body_significant)
+            changes += found
         elif kind == "deployment":
             changes += compare_deployment(item, await observer.deployment(after=item["observed"].get("completed_at")))
         elif kind == "auth_surface":
@@ -741,12 +886,53 @@ async def evaluate(observer: Observer, recorded: Mapping[str, Any]) -> tuple[str
         elif kind == "service":
             changes += compare_service(item, await observer.service(item["transport"], int(item["port"])))
         elif kind == "finding":
-            changes += compare_finding(item, await observer.finding(item["key"]))
+            changes += compare_finding(item, await observer.finding(finding_id or item["key"]))
         elif kind == "subject":
             subject_type, _, subject_id = str(item["key"]).partition(":")
             changes += compare_subject(item, await observer.subject(subject_type, subject_id))
     incomparable = [change for change in changes if change["significance"] == INCOMPARABLE]
     return decide(recorded, changes, incomparable), changes, incomparable
+
+
+async def reobserved(observer: Observer, recorded: Mapping[str, Any], anchor: Any) -> dict[str, Any]:
+    """Whether a negative result's conditions were positively observed again after ``anchor`` (the
+    start of the Hunt asking), with nothing that differs. Evidence, not age: a later observation is
+    required, however recent the entry is.
+
+    Accepted: the bound request itself was made again (by any Hunt on the asset) after the anchor and
+    every such response equals the recorded one, body included; or a Scan of the same target
+    completed after the anchor recorded exactly the recorded technologies and banners, and the
+    endpoint inventory saw the route after the anchor.
+    """
+    moment = _time(anchor)
+    if moment is None or not isinstance(recorded, Mapping):
+        return {"observed": False, "reason": "no Hunt context to re-observe from"}
+    binding = recorded.get("binding") if isinstance(recorded.get("binding"), Mapping) else {}
+    items = list(recorded.get("items") or ())
+    for item in items:
+        if item.get("type") != "response" or item.get("origin") != binding.get("origin") \
+                or item.get("path") != binding.get("path") or item.get("method") != binding.get("method") \
+                or (item.get("session_ref") or None) != binding.get("session_ref"):
+            continue
+        found, count = await _response_changes(observer, item, after=moment, exclude=item["observed"].get("action_id"),
+                                               body_significant=True)
+        if count and not found:
+            return {"observed": True, "by": "the same request after this Hunt started", "responses": count}
+        if found:
+            return {"observed": False, "reason": "the same request answered differently after this Hunt started"}
+    deployment = next((item for item in items if item.get("type") == "deployment"), None)
+    endpoint = next((item for item in items if item.get("type") == "endpoint" and item.get("method")), None)
+    if deployment is not None and endpoint is not None:
+        scan = await observer.deployment(after=moment)
+        route = await observer.endpoint(endpoint.get("method"), endpoint["path"])
+        last_seen = route.get("_last_seen_at")
+        if scan is not None and scan.get("technologies") == deployment["observed"].get("technologies") \
+                and scan.get("server_banners_sha256") == deployment["observed"].get("server_banners_sha256") \
+                and route.get("present") and last_seen is not None and _time(last_seen) > moment:
+            return {"observed": True, "by": "a Scan after this Hunt started saw the same deployment and route",
+                    "scan_id": scan.get("scan_id")}
+    return {"observed": False, "reason": "not observed again since this Hunt started: repeat the request (or a "
+                                         "Scan must see the same deployment and route) before it can be reused"}
 
 
 def public_dependencies(recorded: Any) -> dict[str, Any]:
@@ -764,7 +950,7 @@ def public_dependencies(recorded: Any) -> dict[str, Any]:
 
 __all__ = [
     "AUTH_ROUTE_PATTERN", "INCOMPARABLE", "MINOR", "Observer", "SCHEMA", "SIGNIFICANCE_RULES", "SIGNIFICANT",
-    "asset_scope", "auth_route", "bind_experiment", "capture", "compare_auth_surface", "compare_deployment", "compare_endpoint",
+    "asset_scope", "auth_route", "bind_experiment", "canonical_origin", "capture", "reobserved", "compare_auth_surface", "compare_deployment", "compare_endpoint",
     "compare_finding", "compare_response", "compare_service", "compare_subject", "decide", "deployment_view",
     "digest_format", "evaluate", "media_type", "normalize_route", "operation_route", "public_dependencies",
     "service_key",
