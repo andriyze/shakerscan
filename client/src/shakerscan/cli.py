@@ -1515,11 +1515,14 @@ def build_parser() -> argparse.ArgumentParser:
         approval.add_argument("args", nargs=argparse.REMAINDER, help="<request-id> | --all-pending [--hunt ID] ...")
     knowledge = commands.add_parser(
         "knowledge",
-        help="review proposed changes to target instructions and saved actions in your own terminal: "
-             "knowledge review [target] [--accept ID | --reject ID]",
+        help="review proposed changes to target instructions and saved actions in your own terminal, and continue "
+             "a target after its latest release: knowledge review [target] [--accept ID | --reject ID], "
+             "knowledge continue <target> [--refresh], knowledge release <target> [--label L]",
     )
     connection(knowledge)
-    knowledge.add_argument("args", nargs=argparse.REMAINDER, help="review [target-id] [--accept ID | --reject ID]")
+    knowledge.add_argument("args", nargs=argparse.REMAINDER,
+                           help="review [target-id] [--accept ID | --reject ID] | show | changes | continue | "
+                                "release | releases | dismiss | reopen")
     doctor = commands.add_parser(
         "doctor",
         help=(

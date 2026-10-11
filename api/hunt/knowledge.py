@@ -166,6 +166,31 @@ async def query_knowledge_page(
         except ChangeQueryError as exc:
             raise KnowledgeQueryError(str(exc)) from exc
         return {**report, "supported": True, "count": 0, "rows": [], "has_more": False, "next_cursor": None}
+    if kind == "continue":
+        from .knowledge_changes import ChangeQueryError
+        from .knowledge_continue import CursorError, continue_report
+        supplied = dict(filters or {})
+        if set(supplied) - {"since", "after"}:
+            raise KnowledgeQueryError("Unsupported knowledge filters: "
+                                      + ", ".join(sorted(set(supplied) - {"since", "after"})))
+        after = supplied.get("after")
+        if after is not None and (not isinstance(after, str) or len(after) > 2048):
+            raise KnowledgeQueryError("after must be the next_after cursor of a previous page")
+        if cursor is not None:
+            raise KnowledgeQueryError("continue is one bounded report; it has no cursor")
+        since = supplied.get("since") or "release"
+        if not isinstance(since, str) or len(since) > 100:
+            raise KnowledgeQueryError("since must be a bounded string")
+        run = None
+        if current_hunt_id is not None:
+            found = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", uuid.UUID(str(current_hunt_id)))
+            run = dict(found) if found else None
+        try:
+            report = await continue_report(conn, target_id, device=device, audience="hunt", since=since, run=run,
+                                           limit=min(int(limit), 100), after=after)
+        except (ChangeQueryError, CursorError) as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
+        return {**report, "supported": True, "count": 0, "rows": [], "has_more": False, "next_cursor": None}
     if kind == "negative_results":
         from .interpretations import negative_results
         supplied = dict(filters or {})

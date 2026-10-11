@@ -25,6 +25,7 @@ MAX_TITLE_CHARACTERS = 200
 #: Larger bodies hold an operator's entry or the imported advisory knowledge (12,000 characters).
 MAX_BODY_CHARACTERS = 12_000
 MAX_NOTE_CHARACTERS = 2_000
+MAX_RELEASE_LABEL_CHARACTERS = 120
 
 
 def _values(values: tuple[str, ...]) -> str:
@@ -139,4 +140,22 @@ BEGIN
     END IF;
 END
 $applicability_indexes$;
+-- Releases an operator declared for a target (api/hunt/release_markers.py): the point
+-- knowledge.changes since=release starts from when one exists. Append-only.
+CREATE TABLE IF NOT EXISTS target_release_markers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    label TEXT CHECK (label IS NULL OR length(label) BETWEEN 1 AND {MAX_RELEASE_LABEL_CHARACTERS}),
+    released_at TIMESTAMPTZ NOT NULL,
+    declared_by TEXT NOT NULL CHECK (declared_by ~ '^operator:' AND length(declared_by) <= 200),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+DO $release_marker_index$
+BEGIN
+    IF to_regclass('idx_target_release_markers_target') IS NULL THEN
+        CREATE INDEX idx_target_release_markers_target
+            ON target_release_markers(target_id, released_at DESC, created_at DESC);
+    END IF;
+END
+$release_marker_index$;
 """

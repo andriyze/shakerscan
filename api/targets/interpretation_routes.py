@@ -19,6 +19,10 @@ except ModuleNotFoundError:  # package import
     from ..hunt.interpretations import (DismissalInput, InterpretationInput, StatusNote, dismiss_finding,
                                         negative_results, operator_list, record_interpretation, reopen_finding,
                                         retract_interpretation, retract_run)
+try:
+    from hunt.release_markers import ReleaseMarkerInput, declare_release, list_releases
+except ModuleNotFoundError:  # package import
+    from ..hunt.release_markers import ReleaseMarkerInput, declare_release, list_releases
 from .metadata_row import target_metadata_row
 
 router = APIRouter(tags=['targets'])
@@ -107,6 +111,50 @@ async def get_target_knowledge_changes(target_id: str, request: Request,
             return await target_changes(conn, row['id'], device=True, since=since, limit=limit)
         except ChangeQueryError as exc:
             raise HTTPException(422, {'error': 'invalid_since', 'message': str(exc)}) from None
+
+
+@router.get('/targets/{target_id}/knowledge/continue')
+async def get_target_knowledge_continue(target_id: str, request: Request,
+                                        since: str = Query('release', max_length=100),
+                                        limit: int = Query(25, ge=1, le=100),
+                                        after: str | None = Query(None, max_length=2048)):
+    """Continue investigating this target after its latest release: what changed, what still applies,
+    what needs re-testing, and the next experiments ranked by fixed rules. Reads only; a passive refresh
+    is offered, never started (``shakerscan knowledge continue --refresh`` starts it after a keypress)."""
+    _operator(request)
+    try:
+        from hunt.knowledge_changes import ChangeQueryError
+        from hunt.knowledge_continue import CursorError, continue_report
+    except ModuleNotFoundError:  # package import
+        from ..hunt.knowledge_changes import ChangeQueryError
+        from ..hunt.knowledge_continue import CursorError, continue_report
+    async with pool().acquire() as conn:
+        row = await target_metadata_row(conn, target_id)
+        try:
+            return await continue_report(conn, row['id'], device=True, audience='operator', since=since, limit=limit,
+                                         after=after)
+        except CursorError as exc:
+            raise HTTPException(422, {'error': 'invalid_cursor', 'message': str(exc)}) from None
+        except ChangeQueryError as exc:
+            raise HTTPException(422, {'error': 'invalid_since', 'message': str(exc)}) from None
+
+
+@router.get('/targets/{target_id}/knowledge/releases')
+async def get_target_releases(target_id: str, request: Request, limit: int = Query(50, ge=1, le=50)):
+    _operator(request)
+    async with pool().acquire() as conn:
+        row = await target_metadata_row(conn, target_id)
+        return await list_releases(conn, row['id'], device=True, limit=limit)
+
+
+@router.post('/targets/{target_id}/knowledge/releases', status_code=201)
+async def post_target_release(target_id: str, body: ReleaseMarkerInput, request: Request):
+    """Declare that this target was released (an operator's statement): the point
+    ``since=release`` starts from. Changes no applicability and grants nothing."""
+    actor = _operator(request)
+    async with pool().acquire() as conn:
+        row = await target_metadata_row(conn, target_id)
+        return await declare_release(conn, row['id'], body, actor=actor)
 
 
 @router.post('/targets/{target_id}/findings/{finding_id}/dismiss')

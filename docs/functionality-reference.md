@@ -1899,8 +1899,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 487 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 406 | `api/**/*.py` |
+| Public REST operations | 490 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 408 | `api/**/*.py` |
 | Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1917,7 +1917,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 111 | `db/init.sql` + migrations |
+| Durable tables | 112 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2389,6 +2389,9 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/targets/{target_id}/invariants/{contract_id}/verification-plan` | `get_target_invariant_verification_plan` |
 | `POST` | `/targets/{target_id}/inventory/hypotheses` | `generate_endpoint_inventory_hypotheses` |
 | `GET` | `/targets/{target_id}/knowledge/changes` | `get_target_knowledge_changes` |
+| `GET` | `/targets/{target_id}/knowledge/continue` | `get_target_knowledge_continue` |
+| `GET` | `/targets/{target_id}/knowledge/releases` | `get_target_releases` |
+| `POST` | `/targets/{target_id}/knowledge/releases` | `post_target_release` |
 | `GET` | `/targets/{target_id}/negative-results` | `get_target_negative_results` |
 | `POST` | `/targets/{target_id}/network-scans` | `start_target_network_scan` |
 | `GET` | `/targets/{target_id}/posture` | `get_target_posture` |
@@ -3335,6 +3338,7 @@ Scan feature or a second orchestration engine.
 | `target_invariant_contracts` | `api/retest_contract.py` |
 | `target_principal_provisioning_attempts` | `api/retest_contract.py` |
 | `target_principals` | `api/retest_contract.py` |
+| `target_release_markers` | `db/init.sql` |
 | `targets` | `db/init.sql` |
 | `tool_receipts` | `api/retest_contract.py` |
 

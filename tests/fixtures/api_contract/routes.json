@@ -3238,6 +3238,27 @@
     "name": "get_target_knowledge_changes"
   },
   {
+    "path": "/targets/{target_id}/knowledge/continue",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_knowledge_continue"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/releases",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_releases"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/releases",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_target_release"
+  },
+  {
     "path": "/targets/{target_id}/negative-results",
     "methods": [
       "GET"

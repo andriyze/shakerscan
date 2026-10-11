@@ -424,19 +424,45 @@ def _request_view(row: Mapping[str, Any]) -> dict[str, Any] | None:
     origin = canonical_origin(values.get("origin") or row.get("default_origin"))
     if origin is None:
         return None
+    session = str(values.get("session_ref") or "")[:64]
+    principal = "anonymous" if not session else _row_value(row, "principal")
+    if principal is None:
+        return None  # a session the session store cannot name is never compared
     return {"method": str(values.get("method") or "GET").upper()[:10], "path": path,
-            "session_ref": str(values.get("session_ref") or "")[:64], "origin": origin}
+            "session_ref": session, "principal": str(principal), "origin": origin}
+
+
+def _row_value(row: Mapping[str, Any], key: str) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
 
 
 def request_identity(view: Mapping[str, Any]) -> tuple[str, str, str, str]:
-    return view["method"], view["path"], view["session_ref"], view["origin"]
+    """(method, path, principal, origin). The principal is the identity the session store recorded
+    for the request's session (credential profile and its version, principal slot and label), never
+    the per-Hunt session id and never anything an agent wrote: a later Hunt using the same profile
+    version and principal makes the same request. A rotated profile is a new principal (a rotation
+    can change the account behind the profile; a pure secret rotation is over-reported, never
+    under-reported)."""
+    return view["method"], view["path"], view["principal"], view["origin"]
+
+
+#: The principal identity of a recorded request, from the session store.
+PRINCIPAL_SQL = ("CASE WHEN COALESCE(a.input_summary->'input'->>'session_ref','')='' THEN 'anonymous' "
+                 "WHEN s.id IS NULL THEN NULL ELSE 'profile:'||s.profile_id::text||'@v'||s.profile_version::text||'/'||"
+                 "s.principal_slot||'/'||"
+                 "COALESCE(s.principal_label, cp.principal_label, '') END AS principal")
 
 
 #: Joined to every read of http.request actions: the Hunt's target origin, the default for a
 #: request that names none.
 _ACTIONS_FROM = """FROM hunt_actions a JOIN hunt_runs h ON h.id=a.hunt_run_id
                 LEFT JOIN targets t ON t.id = CASE WHEN h.target_id IS NOT NULL THEN h.target_id
-                                                   ELSE h.device_target_id END"""
+                                                   ELSE h.device_target_id END
+                LEFT JOIN auth_sessions s ON s.id::text = a.input_summary->'input'->>'session_ref'
+                LEFT JOIN credential_profiles cp ON cp.id = s.profile_id"""
 #: Distinct later responses of one request read at most; more is reported as a change.
 MAX_DISTINCT_RESPONSES = 1000
 
@@ -476,7 +502,7 @@ class Observer:
             # Every distinct (request, response) pair after the point: a later change is never
             # hidden behind later unchanged requests, however many there are.
             sql = f"""SELECT DISTINCT jsonb_build_object('input', a.input_summary->'input') AS input_summary,
-                    t.url AS default_origin,
+                    t.url AS default_origin, {PRINCIPAL_SQL},
                     jsonb_build_object('observations', jsonb_path_query_array(
                         a.result_summary, '$.observations[*] ? (@.kind == "http_observation")')) AS result_summary,
                     NULL::uuid AS id, NULL::timestamptz AS completed_at
@@ -488,7 +514,8 @@ class Observer:
                   AND ($5::uuid IS NULL OR a.id <> $5)
                 LIMIT {MAX_DISTINCT_RESPONSES + 1}"""
         else:
-            sql = f"""SELECT a.id, a.completed_at, a.input_summary, a.result_summary, t.url AS default_origin
+            sql = f"""SELECT a.id, a.completed_at, a.input_summary, a.result_summary, t.url AS default_origin,
+                    {PRINCIPAL_SQL}
                 {_ACTIONS_FROM}
                 WHERE a.capability_name='http.request' AND (a.input_summary->'input'->>'path')=$2
                   AND a.status IN ('completed','partial') AND a.completed_at IS NOT NULL AND {scope}
@@ -524,6 +551,27 @@ class Observer:
                     return view
             return None
         return await self._cached(("latest", tuple(identity), str(after), str(before)), read)
+
+    async def principal(self, session_ref: Any) -> str | None:
+        """The principal identity the session store recorded for a session (None when unknown)."""
+        if not session_ref:
+            return "anonymous"
+
+        async def read() -> str | None:
+            return await self.conn.fetchval("""SELECT 'profile:'||s.profile_id::text||'@v'||s.profile_version::text
+                    ||'/'||s.principal_slot||'/'||
+                    COALESCE(s.principal_label, cp.principal_label, '')
+                FROM auth_sessions s LEFT JOIN credential_profiles cp ON cp.id=s.profile_id
+                WHERE s.id::text=$1""", str(session_ref))
+        return await self._cached(("principal", str(session_ref)), read)
+
+    async def item_identity(self, item: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
+        """A recorded response dependency's request identity; an item recorded before principals
+        were kept is resolved through the session store, and None when it cannot be."""
+        principal = item.get("principal") or await self.principal(item.get("session_ref"))
+        if principal is None:
+            return None
+        return (str(item.get("method") or "GET"), str(item.get("path")), str(principal), str(item.get("origin") or ""))
 
     async def action_body(self, action_id: Any) -> Any:
         async def read() -> Any:
@@ -690,8 +738,8 @@ def bind_experiment(conditions: Mapping[str, Any], cited: list[Mapping[str, Any]
     * the method is the conditions' method (default GET);
     * the route as written is the requested path, each placeholder filled by exactly one named
       object (see ``_route_binding``);
-    * exactly one principal is named and it is the request's ``session_ref`` (``anonymous``
-      without a session);
+    * exactly one principal is named and it is the request's ``session_ref`` or the principal
+      identity the session store recorded for it (``anonymous`` without a session);
     * the technique's first word is ``http.request``.
 
     Anything else is unbound: the entry is kept as a record, but never lets an experiment be
@@ -731,14 +779,14 @@ def bind_experiment(conditions: Mapping[str, Any], cited: list[Mapping[str, Any]
         differs = _route_binding(route, request["path"], objects)
         if differs:
             mismatch.append(differs)
-        if len(principals) != 1 or principals[0] != (request["session_ref"] or "anonymous"):
+        if len(principals) != 1 or principals[0] not in {request["session_ref"] or "anonymous", request["principal"]}:
             mismatch.append("principals")
         if not technique or technique[0].rstrip(":,;").casefold() != "http.request":
             mismatch.append("technique")
         if not mismatch:
             return {"bound": True, "action_id": str(row["id"]), "method": request["method"],
                     "path": request["path"], "origin": request["origin"],
-                    "session_ref": request["session_ref"] or None}
+                    "session_ref": request["session_ref"] or None, "principal": request["principal"]}
         reasons.append(f"action {row['id']}: " + ", ".join(mismatch) + " differ from the recorded request")
     if not cited:
         reasons.append("no cited http.request of this Hunt recorded the request (other capabilities are not bound)")
@@ -754,7 +802,7 @@ async def _cited_requests(conn: Any, target: uuid.UUID, refs: Iterable[str], *,
     if not identifiers:
         return []
     return list(await conn.fetch(f"""SELECT a.id, a.completed_at, a.input_summary, a.result_summary,
-            t.url AS default_origin
+            t.url AS default_origin, {PRINCIPAL_SQL}
         {_ACTIONS_FROM}
         WHERE (a.id = ANY($2::uuid[]) OR a.receipt_id = ANY($2::uuid[]))
           AND a.capability_name='http.request' AND a.status IN ('completed','partial')
@@ -811,10 +859,12 @@ async def capture(conn: Any, target_id: Any, *, kind: str, negative_state: str |
                                          "principal binding, address, redirect or capture option) or recorded no "
                                          "response summary"})
             continue
-        req_method, path, session, origin = request_identity(request)
+        req_method, path, principal, origin = request_identity(request)
+        session = request["session_ref"]
         observed = {key: value for key, value in view.items() if not key.startswith("_")}
-        add({"type": "response", "key": f"{req_method} {origin}{path} session:{session or 'none'}",
-             "method": req_method, "path": path, "session_ref": session, "origin": origin, "observed": observed})
+        add({"type": "response", "key": f"{req_method} {origin}{path} principal:{principal}",
+             "method": req_method, "path": path, "session_ref": session, "principal": principal, "origin": origin,
+             "observed": observed})
         normalized = normalize_route(path)
         if normalized:
             add({"type": "endpoint", "key": f"{req_method} {normalized}", "method": req_method, "path": normalized,
@@ -865,7 +915,11 @@ async def _response_changes(observer: Observer, item: Mapping[str, Any], *, afte
                             body_significant: bool) -> tuple[list[dict[str, Any]], int]:
     """Changes across every distinct later response of the item's request, and how many there were."""
     observed = item["observed"]
-    identity = (item["method"], item["path"], item.get("session_ref") or "", item.get("origin") or "")
+    identity = await observer.item_identity(item)
+    if identity is None:
+        # The session store cannot name the principal: nothing later can be compared (unknown).
+        return [_change(item, "principal", INCOMPARABLE, None, None,
+                        note="the session's principal is not recorded by the session store")], 0
     later, overflow = await observer.responses_after(identity, after, exclude=exclude)
     changes: list[dict[str, Any]] = []
     if overflow:
@@ -922,7 +976,7 @@ async def reobserved(observer: Observer, recorded: Mapping[str, Any], anchor: An
     """Whether a negative result's bound request was made again after ``anchor`` (the start of the
     Hunt asking) and answered exactly as recorded. Evidence, not age.
 
-    Only the same plain request identity (method, path, origin, session) repeated by a Hunt counts,
+    Only the same plain request identity (method, path, origin, principal) repeated by a Hunt counts,
     and every such response must equal the recorded one, body digest included. Scans and the
     endpoint inventory never re-observe the behaviour under test: they feed applicability (and
     needs_revalidation), never a skip.
@@ -934,7 +988,8 @@ async def reobserved(observer: Observer, recorded: Mapping[str, Any], anchor: An
     for item in recorded.get("items") or ():
         if item.get("type") != "response" or item.get("origin") != binding.get("origin") \
                 or item.get("path") != binding.get("path") or item.get("method") != binding.get("method") \
-                or (item.get("session_ref") or None) != binding.get("session_ref"):
+                or (item.get("principal") or None, item.get("session_ref") or None) != \
+                (binding.get("principal") or None, binding.get("session_ref") or None):
             continue
         found, count = await _response_changes(observer, item, after=moment, exclude=item["observed"].get("action_id"),
                                                body_significant=True)

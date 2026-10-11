@@ -700,7 +700,7 @@ async def record_interpretation(conn: Any, target_id: Any, entry: Interpretation
             await _require_subject(conn, target, entry.subject)
         if entry.supersedes is not None:
             await _supersede(conn, target, entry.supersedes, writer=writer, kind=kind,
-                             hunt_run_id=hunt_run_id)
+                             hunt_run_id=hunt_run_id, retest=(entry, conditions))
         key = experiment_key(target, conditions) if entry.negative_state in EXPERIMENT_STATES else None
         subject = {"type": entry.subject.type, "id": str(entry.subject.id)} if entry.subject else None
         dependencies = await capture(conn, target, kind=entry.kind, negative_state=entry.negative_state,
@@ -723,10 +723,84 @@ async def record_interpretation(conn: Any, target_id: Any, entry: Interpretation
         return result
 
 
+#: What a re-test may be recorded as when it supersedes another writer's entry.
+RETEST_KINDS = frozenset({"observation", "negative_result"})
+
+
+async def _retest_of(conn: Any, target: Any, previous: Mapping[str, Any], entry: Any, conditions: Mapping[str, Any],
+                     hunt_run_id: Any) -> bool:
+    """Whether ``entry`` is a re-test of another writer's ``previous`` entry. All of:
+
+    * ``previous`` is a Hunt's (an operator's entry is never superseded by a Hunt) observation or
+      experiment result that is due for a re-test: it needs revalidation or is unknown, or it was
+      written before the target's latest release;
+    * ``entry`` has the same kind and negative state (a different outcome is recorded beside it) and
+      the identical, non-empty conditions;
+    * it cites this Hunt's own plain ``http.request`` (the same allowlist the binding uses) that
+      completed after ``previous`` was written, repeated a request ``previous`` recorded (method, path,
+      principal identity from the session store, and origin) and got the same response (status, media type, key set and the complete
+      body digest). A changed answer is a different result, recorded beside the earlier entry.
+    """
+    if not str(previous["written_by"]).startswith("hunt:"):
+        return False
+    if entry.kind not in RETEST_KINDS or previous["kind"] != entry.kind \
+            or previous["negative_state"] != entry.negative_state:
+        return False
+    if not conditions or conditions_digest(conditions) != previous["conditions_sha256"]:
+        return False
+    if previous["applicability"] not in {"needs_revalidation", "unknown", "historical"}:
+        from .knowledge_changes import ChangeQueryError, resolve_since
+        try:
+            release = await resolve_since(conn, target, "release", device=False)
+        except ChangeQueryError:
+            return False
+        at = release.get("at") if release.get("resolved") else None
+        if at is None or previous["created_at"] >= at:
+            return False
+    recorded = _loads(previous["dependencies"], {}) or {}
+    # The responses the earlier entry recorded, by request: a re-test must reproduce one of them.
+    items = [item for item in (recorded.get("items") or () if isinstance(recorded, Mapping) else ())
+             if isinstance(item, Mapping) and item.get("type") == "response" and item.get("path")
+             and item.get("origin") and isinstance(item.get("observed"), Mapping)
+             and item["observed"].get("action_id")]
+    if not items:
+        return False
+    from .knowledge_dependencies import (
+        _ACTIONS_FROM, PRINCIPAL_SQL, Observer, _request_view, _response_view, compare_response, digest_format,
+        request_identity,
+    )
+    rows = await conn.fetch(f"""SELECT a.id, a.input_summary, a.result_summary, a.completed_at,
+            t.url AS default_origin, {PRINCIPAL_SQL} {_ACTIONS_FROM}
+        WHERE (a.id = ANY($1::uuid[]) OR a.receipt_id = ANY($1::uuid[])) AND a.hunt_run_id=$2
+          AND a.capability_name='http.request' AND a.status = ANY($3::text[]) AND a.completed_at > $4""",
+        [uuid.UUID(ref) for ref in entry.evidence_refs], uuid.UUID(str(hunt_run_id)),
+        sorted(RAN_ACTION_STATES),  # a failed or blocked attempt never replaces another writer's result
+        previous["created_at"])
+    observer = Observer(conn, target)
+    for row in rows:
+        request, newer = _request_view(row), _response_view(row)
+        if request is None or newer is None:
+            continue
+        for item in items:
+            identity = await observer.item_identity(item)
+            if identity is None or request_identity(request) != identity:
+                continue
+            # The same response, by the reuse rules: status, media type, key set and the complete body
+            # digest. A truncated, prefix-only or missing body is never "unchanged": a different result
+            # is recorded beside the earlier entry, never over it.
+            recorded_body = await observer.action_body(item["observed"]["action_id"])
+            if not (digest_format(recorded_body) and digest_format(newer.get("_body"))):
+                continue
+            if not compare_response(item, newer, recorded_body=recorded_body, newer_body=newer.get("_body"),
+                                    body_significant=True):
+                return True
+    return False
+
+
 async def _supersede(conn: Any, target: Any, previous_id: uuid.UUID, *, writer: str, kind: str,
-                     hunt_run_id: Any) -> None:
-    previous = await conn.fetchrow("""SELECT id, status, written_by, hunt_run_id, negative_state
-        FROM target_interpretations WHERE id=$1 AND target_id=$2 FOR UPDATE""", previous_id, target)
+                     hunt_run_id: Any, retest: tuple[Any, Mapping[str, Any]] | None = None) -> None:
+    previous = await conn.fetchrow("""SELECT id, kind, status, written_by, hunt_run_id, negative_state,
+            conditions_sha256, created_at, applicability, dependencies FROM target_interpretations WHERE id=$1 AND target_id=$2 FOR UPDATE""", previous_id, target)
     if previous is None:
         raise _refusal(404, "interpretation_not_found", "The superseded entry is not on this target.")
     if previous["status"] != "active":
@@ -735,11 +809,18 @@ async def _supersede(conn: Any, target: Any, previous_id: uuid.UUID, *, writer: 
         raise _refusal(403, "finding_dismissal_is_human_only",
                        "A dismissal is changed only by an operator reopening the finding.",
                        reason_code="finding_dismissal_is_human_only")
-    if kind == "hunt" and (previous["hunt_run_id"] is None or str(previous["hunt_run_id"]) != str(hunt_run_id)):
-        # A Hunt never hides another writer's entry. It records its own entry beside it.
+    own = previous["hunt_run_id"] is not None and str(previous["hunt_run_id"]) == str(hunt_run_id)
+    if kind == "hunt" and not own and not (retest and await _retest_of(conn, target, previous, *retest,
+                                                                       hunt_run_id=hunt_run_id)):
+        # A Hunt never hides another writer's entry by a claim. Only a re-test of the identical
+        # experiment, citing its own action that ran after the entry, supersedes it (kept as history).
         raise _refusal(403, "supersede_own_entries_only",
-                       "A Hunt supersedes only entries it wrote itself. Record a new entry (with subject "
-                       "type interpretation and that entry's id) to contradict another; both stay visible.",
+                       "A Hunt supersedes only entries it wrote itself, or another Hunt's entry it re-tested: "
+                       "an observation or experiment result due for a re-test (needs revalidation, unknown, or "
+                       "written before the latest release), the same kind and outcome with the identical "
+                       "conditions, citing this Hunt's own http.request that repeated a request that entry "
+                       "recorded, after it. Otherwise record a new entry (with subject type interpretation and "
+                       "that entry's id); both stay visible.",
                        reason_code="supersede_own_entries_only")
     await conn.execute("""UPDATE target_interpretations SET status='superseded', status_changed_by=$2,
         status_changed_at=NOW() WHERE id=$1""", previous["id"], writer)
@@ -1070,12 +1151,17 @@ async def negative_results(conn: Any, target_id: Any, *, device: bool, audience:
                       else "experiment_inconclusive" if view["state"] == "inconclusive" else None)
             if mapped is None or (state is not None and mapped != state):
                 continue
+            # A settled refutation is bound by the workflow and evaluated from its own records
+            # (hunt/authorization_applicability.py); an inconclusive one settles nothing.
+            from .authorization_applicability import authorization_applicability
+            tracked = (await authorization_applicability(conn, target_id, view)
+                       if mapped == "experiment_completed_negative" else _UNTRACKED_RECORD)
             rows.append({"source": "authorization_workflow", "server_owned": True, "negative_state": mapped,
                          "status": "active", "record_ref": {"type": "authorization_investigation",
                                                             "id": view["proposal_id"], "hunt_id": view["hunt_id"]},
                          "conditions": view["conditions"], "conditions_semantics": CONDITIONS_SEMANTICS,
                          "evidence_refs": view["evidence_refs"],
-                         "created_at": view["completed_at"], "applicability": _UNTRACKED_RECORD,
+                         "created_at": view["completed_at"], "applicability": tracked,
                          "read_with": f"GET /hunts/{view['hunt_id']}/authorization-investigations/{view['proposal_id']}"})
     if state in (None, "hypothesis_refuted"):
         if source in (None, "hypothesis_lifecycle"):

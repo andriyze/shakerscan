@@ -154,8 +154,12 @@ async def asset_investigation_states(conn: Any, *, asset: Any, include_members: 
                            "proposal_digest": proposal.get("proposal_digest")},
                 "deployment_fingerprint": "target_context_sha256:" + str(proposal.get("target_context_sha256")),
             }
+            # The exact request the proposal bound (method, URL, body size digest): what a later
+            # observation must repeat to say anything about this result (hunt/authorization_applicability.py).
+            view["capture_sha256"] = proposal.get("capture_sha256")
             if latest:
                 view.update(outcome=latest.get("outcome"), completed_at=latest.get("completed_at"),
+                            action_id=latest.get("action_id"), transaction_ids=list(latest.get("transaction_ids") or []),
                             evidence_refs=[ref for ref in (latest.get("action_id"), latest.get("receipt_id")) if ref])
         except (*_UNREADABLE, ValueError, AttributeError):
             views.append({**view, "state": "needs_review"})

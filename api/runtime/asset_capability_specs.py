@@ -97,7 +97,7 @@ def asset_capability_specs(spec, schema, kinds):
          'condition equal) before repeating it. skip is true only for an applicable experiment_completed_negative '
          'whose conditions match a plain request (only method, path, origin and session_ref) your own cited '
          'http.request made: the origin, method, route (each placeholder filled by exactly one named object), its '
-         'session_ref as the only principal or anonymous, a technique starting with http.request, and no other '
+         'session_ref (or its recorded principal identity profile:<id>@v<version>/<slot>/<label>) as the only principal or anonymous, a technique starting with http.request, and no other '
          'condition fields; and only when that same request was repeated since this Hunt started and every response '
          'was unchanged, body included. Applicable is not safe to skip; skip is rare by design and only advice.'),
          {'conditions':conditions},('conditions',)),
@@ -105,9 +105,22 @@ def asset_capability_specs(spec, schema, kinds):
          'Scans, earlier http.request responses, services, subdomain discovery, findings, Hunts), with the '
          'interpretations each change affects and the significance rules. Sends no traffic and starts nothing.'),
          {'since':{'type':'string','maxLength':100,
-                   'description':'last_hunt (default), release (the latest Scan-detected deployment change), '
+                   'description':'last_hunt (default), release (the later of the latest operator-declared release and the latest Scan-detected deployment change), '
                                  'scan:<id>, hunt:<id>, or an ISO-8601 time with a time zone.'},
           'limit':{'type':'integer','minimum':1,'maximum':25}},()),
+        ('knowledge.continue',('Continue investigating this target after its latest release: what changed since '
+         'the release (an operator-declared marker, else the latest Scan-detected deployment change), what is still '
+         'applicable, what needs revalidation or was not re-observed since the release, what is unfinished and '
+         'which dismissals were reopened, with the next experiments ranked by fixed rules and checked against '
+         'this Hunt’s current authority. Reads existing records only: sends no traffic, starts nothing, grants '
+         'nothing; a passive refresh is only offered for an operator to approve.'),
+         {'since':{'type':'string','maxLength':100,
+                   'description':'release (default), release:<marker id>, last_hunt, scan:<id>, hunt:<id>, or an '
+                                 'ISO-8601 time with a time zone.'},
+          'limit':{'type':'integer','minimum':1,'maximum':100,
+                   'description':'Ranked items per page (default 25).'},
+          'after':{'type':'string','maxLength':2048,
+                   'description':'next_experiments.next_after from the previous page; omit for the first page.'}},()),
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
           'name':{'type':'string','maxLength':255},
