@@ -75,6 +75,8 @@ class ScanDeadline:
     reached_at: str | None = None
     interrupted_actions: list[str] = field(default_factory=list)
     not_run_actions: list[str] = field(default_factory=list)
+    # Continuation rounds that were not compiled because the limit had passed.
+    refused_rounds: int = 0
 
     @classmethod
     def for_scan(
@@ -127,9 +129,14 @@ class ScanDeadline:
         if action_id not in self.not_run_actions:
             self.not_run_actions.append(action_id)
 
+    def record_refused_round(self) -> None:
+        """A further work round was not compiled because the limit had passed."""
+        self._mark()
+        self.refused_rounds += 1
+
     @property
     def stopped(self) -> bool:
-        return bool(self.interrupted_actions or self.not_run_actions)
+        return bool(self.interrupted_actions or self.not_run_actions or self.refused_rounds)
 
     def annotate(self, report: dict[str, Any]) -> dict[str, Any]:
         """Record on the Scan report that it stopped at its time limit.
@@ -147,6 +154,7 @@ class ScanDeadline:
             "observed_at": self.reached_at,
             "interrupted_actions": list(self.interrupted_actions),
             "not_run_actions": list(self.not_run_actions),
+            "continuation_rounds_not_run": self.refused_rounds,
             "message": (
                 "The scan stopped at its time limit; findings confirmed before the stop are "
                 "kept and coverage is incomplete"
@@ -219,6 +227,37 @@ async def load_scan_deadline(
     return min(found, key=lambda item: item.deadline_at) if found else None
 
 
+def _limit(value: Any) -> int | None:
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return None
+    return limit if limit > 0 else None
+
+
+def node_scan_deadline(
+    options: Mapping[str, Any], *, clock: Callable[[], float] = time.time,
+) -> ScanDeadline | None:
+    """The time limit a fleet node keeps, measured from when it starts the Scan.
+
+    A node has no database to read the Scan's start from; it starts the work as soon as it
+    leases it, so its own start is the nearest it can measure. A shard keeps the smaller of the
+    Scan's limit and its own.
+    """
+    limits: list[int] = []
+    plan = options.get("scan_execution_plan")
+    budget = plan.get("budget") if isinstance(plan, Mapping) else None
+    if isinstance(budget, Mapping) and _limit(budget.get("max_duration_seconds")):
+        limits.append(int(budget["max_duration_seconds"]))
+    shard = options.get("canonical_shard_authority")
+    sub_budget = shard.get("sub_budget") if isinstance(shard, Mapping) else None
+    if isinstance(sub_budget, Mapping) and _limit(sub_budget.get("max_duration_seconds")):
+        limits.append(int(sub_budget["max_duration_seconds"]))
+    if not limits:
+        return None
+    return ScanDeadline.for_scan(started_at=clock(), max_duration_seconds=min(limits), clock=clock)
+
+
 __all__ = [
     "FINALIZER_ACTION_ID",
     "SCAN_TIME_LIMIT",
@@ -226,4 +265,5 @@ __all__ = [
     "TIME_LIMIT_STOP_GRACE_SECONDS",
     "finalization_reserve_seconds",
     "load_scan_deadline",
+    "node_scan_deadline",
 ]

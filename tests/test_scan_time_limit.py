@@ -8,25 +8,24 @@ no target is contacted. The PostgreSQL composition is in ``test_scan_time_limit_
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from datetime import datetime, timezone
 import time
 
 import pytest
 
-from api.runtime.receipts import CapabilityReceipt
-from api.scan.action_interruption import action_interrupted
-from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
-from api.scan.cancelled_report import is_kept_cancelled_report, mark_cancelled_scan_report
-from api.scan.execution_backend import PostgresScanExecutionBackend
-from api.scan.scan_deadline import (
+from scan.action_interruption import action_interrupted
+from scan.capability_result import CapabilityResultReason, CapabilityResultStatus
+from scan.cancelled_report import is_kept_cancelled_report, mark_cancelled_scan_report
+from scan.execution_backend import PostgresScanExecutionBackend
+from scan.scan_deadline import (
     SCAN_TIME_LIMIT,
     ScanDeadline,
     finalization_reserve_seconds,
 )
-from api.scan.worker_action_executor import ReceiptScanActionExecutor
-from tests.test_scan_orchestrator import SCAN_ID, FakePool, FakePostgresConn, _plan
-from tests.test_worker_action_executor import _lease
+from scan.worker_action_executor import ReceiptScanActionExecutor
+from tests.test_scan_action_adapter import TARGET, _lease
+from tests.toplevel_scan_fixtures import SCAN_ID, WORKER_ID, baseline_plan as _plan
+from tests.toplevel_scan_fixtures import receipt as _receipt
 
 
 def _deadline_in(seconds: float, *, limit: int = 100, grace: float = 0.5) -> ScanDeadline:
@@ -38,36 +37,13 @@ def _deadline_in(seconds: float, *, limit: int = 100, grace: float = 0.5) -> Sca
     return deadline
 
 
-def _receipt(action, *, status="success", errors=(), observations=None, timed_out=False):
-    now = datetime.now(timezone.utc).isoformat()
-    return CapabilityReceipt(
-        capability_name=action.capability_name,
-        adapter_name=str(action.placement["adapter_name"]),
-        adapter_version=str(action.placement["adapter_version"]),
-        target_id="target-1",
-        scan_id=SCAN_ID,
-        worker_id="local-worker-1",
-        status=status,
-        input_digest=action.action_digest,
-        parser_version="1",
-        started_at=now,
-        finished_at=now,
-        budget_reserved=action.requested_budget,
-        budget_consumed={"http_requests": 1, "tool_wall_seconds": 1},
-        partial=status in {"partial", "timed_out"} or timed_out,
-        timed_out=timed_out,
-        errors=tuple(errors),
-        observations=tuple(observations or ({"kind": "http_response", "status_code": 200},)),
-    )
-
-
 async def _noop_heartbeat():
     return None
 
 
 def _executor(dispatch, deadline):
     return ReceiptScanActionExecutor(
-        scan_id=SCAN_ID, target_id="target-1", worker_id="local-worker-1",
+        scan_id=SCAN_ID, target_id=TARGET.target_id, worker_id=WORKER_ID,
         dispatcher=dispatch, deadline=deadline,
     )
 
@@ -234,34 +210,19 @@ def test_an_action_that_finishes_before_the_deadline_is_untouched():
     ],
 )
 def test_a_time_limit_receipt_settles_with_the_scan_time_limit_reason(status, timed_out, expected):
-    plan = _plan()
-    conn = FakePostgresConn(plan)
-    backend = PostgresScanExecutionBackend(
-        pool=FakePool(conn), plan=plan, worker_id="local-worker-1",
-        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
-    )
-    action = plan.actions[0]
-    lease = asyncio.run(backend.acquire_action(action))
-    lease = replace(lease)
+    action = _plan().actions[0]
+    backend = object.__new__(PostgresScanExecutionBackend)  # the pure receipt mapping only
     receipt = _receipt(action, status=status, errors=(SCAN_TIME_LIMIT,), timed_out=timed_out)
-    result = asyncio.run(backend.settle(lease, receipt))
-    assert result.status is expected
-    assert result.reason_code is CapabilityResultReason.SCAN_TIME_LIMIT
+    assert backend._receipt_outcome(receipt) == (expected, CapabilityResultReason.SCAN_TIME_LIMIT)
 
 
 def test_an_ordinary_timeout_still_settles_as_timed_out():
-    plan = _plan()
-    conn = FakePostgresConn(plan)
-    backend = PostgresScanExecutionBackend(
-        pool=FakePool(conn), plan=plan, worker_id="local-worker-1",
-        token_factory=lambda: "abcdefghijklmnopqrstuvwxyz012345",
-    )
-    action = plan.actions[0]
-    lease = asyncio.run(backend.acquire_action(action))
+    action = _plan().actions[0]
+    backend = object.__new__(PostgresScanExecutionBackend)
     receipt = _receipt(action, status="timed_out", errors=("timeout",), timed_out=True)
-    result = asyncio.run(backend.settle(lease, receipt))
-    assert result.status is CapabilityResultStatus.TIMED_OUT
-    assert result.reason_code is CapabilityResultReason.TIMED_OUT
+    assert backend._receipt_outcome(receipt) == (
+        CapabilityResultStatus.TIMED_OUT, CapabilityResultReason.TIMED_OUT,
+    )
 
 
 # --- cancellation keeps the report ------------------------------------------------------------
@@ -310,10 +271,57 @@ def test_a_deadline_passing_after_the_dispatch_returned_changes_nothing():
         return _receipt(action)
 
     executor = ReceiptScanActionExecutor(
-        scan_id=SCAN_ID, target_id="target-1", worker_id="local-worker-1",
+        scan_id=SCAN_ID, target_id=TARGET.target_id, worker_id=WORKER_ID,
         dispatcher=dispatch, deadline=deadline, credential_check=credential_check,
     )
     receipt = asyncio.run(executor.execute(action, _lease(plan, action), _noop_heartbeat))
     assert len(calls) >= 2  # before, polled while running, and the closing check
     assert receipt.status == "success" and receipt.errors == ()
     assert deadline.interrupted_actions == [] and deadline.not_run_actions == []
+
+
+def test_a_round_refused_between_rounds_is_reported_as_a_time_limit_stop():
+    """The limit passing between continuation rounds stops the Scan as much as mid-round."""
+    deadline = ScanDeadline.for_scan(started_at=0, max_duration_seconds=60, clock=lambda: 10_000.0)
+    assert deadline.reached() is True
+    assert deadline.stopped is False  # reaching it alone is not yet a stop
+    deadline.record_refused_round()  # what the worker's materialize_round now records
+    report = deadline.annotate({"coverage": {"status": "complete", "reasons": []}, "scan_metadata": {}})
+    assert report["coverage"] == {"status": "partial", "reasons": [SCAN_TIME_LIMIT]}
+    stop = report["scan_metadata"]["time_limit_stop"]
+    assert stop["continuation_rounds_not_run"] == 1
+    assert report["scan_metadata"]["stopped_at_time_limit"] is True
+
+
+def test_the_worker_records_the_refused_round():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "api" / "worker.py").read_text()
+    refused = source.index("deadline.reached():\n                deadline.record_refused_round()")
+    assert source.index("return None  # nor once the Scan has reached its time limit") > refused
+
+
+@pytest.mark.parametrize(("options", "expected"), [
+    ({"scan_execution_plan": {"budget": {"max_duration_seconds": 900}}}, 900),
+    ({"scan_execution_plan": {"budget": {"max_duration_seconds": 900}},
+      "canonical_shard_authority": {"sub_budget": {"max_duration_seconds": 180}}}, 180),
+    ({"scan_execution_plan": {"budget": {"max_duration_seconds": "x"}}}, None),
+    ({"scan_execution_plan": "hostile"}, None),
+    ({}, None),
+])
+def test_a_fleet_node_keeps_the_limit_from_its_own_start(options, expected):
+    from scan.scan_deadline import node_scan_deadline
+
+    deadline = node_scan_deadline(options, clock=lambda: 5_000.0)
+    if expected is None:
+        assert deadline is None
+    else:
+        assert deadline.max_duration_seconds == expected and deadline.started_at == 5_000.0
+
+
+def test_fleet_node_executors_are_given_the_deadline():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "api" / "broker_worker.py").read_text()
+    assert source.count("deadline=deadline,") == 2  # the first round and every continuation
+    assert "return deadline.annotate(report)" in source

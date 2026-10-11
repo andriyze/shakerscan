@@ -41,6 +41,7 @@ from scan.continuation import MAX_SCAN_PLAN_REVISION
 from scan.continuation_rounds import round_progress_window
 from scan.continuation import ScanContinuationError, ScanPlanRevision
 from scan.authority_deadline import AUTHORITY_UNVERIFIED_AFTER_SECONDS
+from scan.scan_deadline import node_scan_deadline
 from scan.broker_backend import (
     BrokerActionAuthority,
     BrokerActionHTTPError,
@@ -636,6 +637,9 @@ async def _execute_broker_action_plan(
     # when it leases each action and, through this authority, before and while each one runs.
     # One authority spans every continuation round, so a withdrawal stays for the whole Scan.
     authority = BrokerActionAuthority(lambda: backend, authority_request)
+    # The Scan's time limit, kept by the node as by a local worker: work past it is stopped or
+    # never started, and every later round's work settles at once until the finalizer runs.
+    deadline = node_scan_deadline(options)
     executor = ReceiptScanActionExecutor(
         scan_id=scan_id,
         target_id=target.target_id,
@@ -644,6 +648,7 @@ async def _execute_broker_action_plan(
         scope_receipt_id=target.scope_receipt_id,
         approval_receipt_id=dispatcher.policy.approval_receipt_id,
         authority=authority,
+        deadline=deadline,
     )
 
     def action_activity_callback(
@@ -772,6 +777,7 @@ async def _execute_broker_action_plan(
             scope_receipt_id=target.scope_receipt_id,
             approval_receipt_id=dispatcher.policy.approval_receipt_id,
             authority=authority,
+            deadline=deadline,
         )
         terminal = plan.actions[-1].action_id == "finalize.report"
         progress_start, progress_end = (90, 95) if terminal else round_progress_window(plan_revision.revision)
@@ -795,7 +801,7 @@ async def _execute_broker_action_plan(
     ):
         raise BrokerWorkerError("broker Scan final report observation is invalid")
     report = dict(observations[0]["report"])
-    return report
+    return deadline.annotate(report) if deadline is not None else report
 
 
 def _private_input_authority(

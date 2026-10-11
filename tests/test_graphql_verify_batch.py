@@ -176,7 +176,8 @@ def test_the_request_ceiling_stops_the_batch_partial_and_resume_finishes_it(monk
 
 
 def test_no_misspelling_is_sent_when_the_root_field_list_is_incomplete(monkeypatch):
-    """A field list cut short could hide the very name a misspelling would hit."""
+    """A field list cut short could hide the very name a misspelling would hit: only names
+    reserved by GraphQL are asked for then."""
     cut = {"data": {"__schema": {
         "queryType": {"name": "Query", "fields": [{"name": "pastes"}, {"name": "not a name"}]},
         "types": [{"name": "Query"}],
@@ -187,6 +188,82 @@ def test_no_misspelling_is_sent_when_the_root_field_list_is_incomplete(monkeypat
             return 200, json.dumps(cut).encode()
         return dvga(url)
 
+    from capabilities.graphql_probe import reserved_probe_query
+
     _receipt, proofs, transport, *_ = _run(monkeypatch, answer)
-    assert "field_suggestions" not in {item["check"] for item in proofs}
     assert not [url for url in transport.sent if "zq" in (_document(url) or "") and "__typenamezq" not in (_document(url) or "")]
+    assert reserved_probe_query() in {_document(url) for url in transport.sent}
+    suggestion = [item for item in proofs if item["check"] == "field_suggestions"]
+    assert suggestion and suggestion[0]["misspelling"].startswith("__user")
+
+
+def _slice_run(monkeypatch, paths, start, answer=dvga):
+    scan_id = str(uuid.uuid4())
+    manifest = _manifest(scan_id, paths)
+    transport = _Transport(answer)
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: transport)
+    action = _action("verify.graphql", "graphql.verify_batch", 0, capability_args={
+        "endpoint_manifest_ref": manifest.reference().canonical_dict(),
+        "slice": {"start": start, "count": 1},
+        "profile": "balanced", "proof_policy": "deterministic_proof_contract_required"})
+    action = replace(action, requested_budget={"http_requests": 200, "tool_wall_seconds": 120},
+                     action_digest=None)
+    plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
+                          target_binding_digest=TARGET.digest, actions=(action,))
+    backend = Backend(manifests={manifest.manifest_id: manifest})
+    dispatcher = _dispatcher(plan, backend, policy=ScanPolicy(active_testing=True))
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    return receipt, transport
+
+
+def test_a_conventional_endpoint_is_checked_once_across_slices(monkeypatch):
+    """Review of #399: a later slice that discovered /graphql checked and proved it again."""
+    paths = ("/graphql", "/admin", "/login", "/api/users")
+    first, first_sent = _slice_run(monkeypatch, paths, 0)
+    later, later_sent = _slice_run(monkeypatch, paths, 1)
+    assert [item for item in first.observations if item.get("kind") == "graphql_proof"]
+    assert not [item for item in later.observations if item.get("kind") == "graphql_proof"]
+    assert not [url for url in later_sent.sent if "/graphql?" in url]
+
+
+def test_suggestions_are_checked_with_introspection_off_without_sending_a_real_field():
+    """Review of #399: suggestions matter most when introspection is off."""
+    from capabilities.graphql_probe import (
+        CONTROL_QUERY, RESERVED_PROBE_FIELDS, check_endpoint, reserved_probe_query,
+    )
+
+    sent = []
+
+    async def send(url):
+        sent.append(url)
+        document = _document(url)
+        if document == TYPENAME_QUERY:
+            return 200, b'{"data":{"__typename":"Query"}}'
+        if document == CONTROL_QUERY:
+            return 200, b'{"errors":[{"message":"Cannot query field \\"__typenamezq\\" on type \\"Query\\". Did you mean \\"__typename\\"?"}]}'
+        if document == INTROSPECTION_QUERY:
+            return 200, b'{"errors":[{"message":"GraphQL introspection is not allowed"}]}'
+        if document == reserved_probe_query():
+            return 400, json.dumps({"errors": [
+                {"message": "Cannot query field '__user' on type 'Query'. Did you mean 'users'?"},
+                {"message": "Cannot query field '__me' on type 'Query'. Did you mean '__typename'?"},
+            ]}).encode()
+        return 400, b'{"errors":[{"message":"Too many aliases"}]}'
+
+    out = asyncio.run(check_endpoint("https://app.example.test/graphql", send, can_send=lambda: True))
+    suggestion = [item for item in out["proofs"] if item["check"] == "field_suggestions"]
+    assert out["graphql"] is True and out["introspection"] is False
+    assert [item["suggested_fields"] for item in suggestion] == [["users"]]
+    # Every name the probe asked for is reserved by GraphQL: no schema can define it.
+    assert all(name.startswith("__") for name in RESERVED_PROBE_FIELDS)
+    assert len(sent) <= 6
+
+    async def no_suggestions(url):
+        document = _document(url)
+        if document == reserved_probe_query():
+            return 400, b'{"errors":[{"message":"Cannot query field \\"__user\\" on type \\"Query\\"."}]}'
+        return await send(url)
+
+    quiet = asyncio.run(check_endpoint("https://app.example.test/graphql", no_suggestions,
+                                       can_send=lambda: True))
+    assert not [item for item in quiet["proofs"] if item["check"] == "field_suggestions"]

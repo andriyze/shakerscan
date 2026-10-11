@@ -9,8 +9,9 @@ mutation), so no resolver of the application's own fields ever runs:
   control document no schema defines, which every GraphQL server rejects. Together they prove
   an endpoint is a validating GraphQL server rather than a page that answers everything.
 * the introspection document below -- only the ``__schema`` meta field.
-* a misspelt root field name (active family only) -- the server's validation rejects it
-  before execution; a server with field suggestions names the real field in its error.
+* a misspelt root field name, or with introspection off names reserved for introspection
+  (``__user``; no schema may define one) (active family only) -- the server's validation rejects
+  it before execution; a server with field suggestions names the real field in its error.
 * ``__typename`` under 100 aliases, or repeated 100 times (active family only) -- meta fields
   only; whether the server bounds aliases or duplicate fields at all.
 
@@ -253,24 +254,45 @@ def suggestion_query(misspelling: str) -> str:
     return "query{" + misspelling + "}"
 
 
-def suggested_fields(document: Any, *, misspelling: str, known_fields: Sequence[str]) -> tuple[str, ...]:
-    """Real root fields a validation error suggested for ``misspelling`` (empty when none).
+# Names reserved by GraphQL for introspection (spec 3.4: a schema may not define a field whose
+# name begins with "__"), each one edit-close to a common root field. Querying them is always a
+# validation error, so no resolver can run, and a server with suggestions names its real field.
+RESERVED_PROBE_FIELDS: tuple[str, ...] = (
+    "__user", "__users", "__me", "__viewer", "__node", "__search", "__account", "__products",
+)
 
-    Only an error that rejects the misspelling and names, as a suggestion, a field the
-    schema really has counts: a generic error, or one that only repeats the request, does not.
+
+def reserved_probe_query() -> str:
+    return "query{" + " ".join(RESERVED_PROBE_FIELDS) + "}"
+
+
+def suggested_fields(
+    document: Any, *, misspelling: str | Sequence[str], known_fields: Sequence[str] | None,
+) -> tuple[str, ...]:
+    """Root fields a validation error suggested for a misspelling (empty when none).
+
+    Only an error that rejects one of the misspellings and names, as a suggestion, another field
+    counts: a generic error, or one that only repeats the request, does not. With
+    ``known_fields`` the suggestion must be a field the schema really has; without (introspection
+    off) it must be an ordinary field name, which only the server's schema can have supplied.
     """
     if not isinstance(document, Mapping) or _data(document):
         return ()
-    known = set(known_fields)
+    misspellings = (misspelling,) if isinstance(misspelling, str) else tuple(misspelling)
+    known = set(known_fields) if known_fields is not None else None
     found: list[str] = []
     for message in _errors(document):
-        if misspelling not in message:
+        if not any(item in message for item in misspellings):
             continue
         match = _SUGGESTION_RE.search(message)
         if match is None:
             continue
         for name in _QUOTED_NAME_RE.findall(match.group(0)):
-            if name in known and name != misspelling and name not in found:
+            acceptable = (
+                name in known if known is not None
+                else not name.startswith("__")
+            )
+            if acceptable and name not in misspellings and name not in found:
                 found.append(name)
     return tuple(found)
 
@@ -397,21 +419,27 @@ async def check_endpoint(
         misspelt_field(summary["query_fields"])
         if summary and summary["query_fields_complete"] else None
     )
+    # With the root fields known, one of them is misspelt; without them (introspection off,
+    # where suggestions matter most), reserved names close to common fields are asked for.
     if pair is not None:
-        real, misspelling = pair
-        answer = await get(suggestion_query(misspelling))
-        if answer is not None:
-            # Validation errors may come back as 200 or, under the GraphQL over HTTP
-            # response media type, as 400; either carries the error list.
-            suggested = suggested_fields(
-                json_body(answer[1]) if answer[0] in {200, 400} else None,
-                misspelling=misspelling, known_fields=summary["query_fields"],
-            )
-            if suggested:
-                outcome["proofs"].append(_proof(
-                    "field_suggestions", endpoint, root, answer[0], answer[1],
-                    misspelling=misspelling, suggested_fields=list(suggested[:10]),
-                ))
+        misspelling: str | tuple[str, ...] = pair[1]
+        document, known = suggestion_query(pair[1]), summary["query_fields"]
+    else:
+        misspelling, document, known = RESERVED_PROBE_FIELDS, reserved_probe_query(), None
+    answer = await get(document)
+    if answer is not None:
+        # Validation errors may come back as 200 or, under the GraphQL over HTTP response
+        # media type, as 400; either carries the error list.
+        suggested = suggested_fields(
+            json_body(answer[1]) if answer[0] in {200, 400} else None,
+            misspelling=misspelling, known_fields=known,
+        )
+        if suggested:
+            outcome["proofs"].append(_proof(
+                "field_suggestions", endpoint, root, answer[0], answer[1],
+                misspelling=misspelling if isinstance(misspelling, str) else ",".join(misspelling),
+                suggested_fields=list(suggested[:10]),
+            ))
 
     answer = await get(alias_query())
     if answer is not None and answer[0] == 200 and aliases_answered(json_body(answer[1])):
@@ -439,6 +467,7 @@ __all__ = [
     "GRAPHQL_REQUEST_HEADERS",
     "INTROSPECTION_QUERY",
     "CONTROL_QUERY",
+    "RESERVED_PROBE_FIELDS",
     "TYPENAME_QUERY",
     "alias_query",
     "aliases_answered",
@@ -457,6 +486,7 @@ __all__ = [
     "json_body",
     "misspelt_field",
     "rejected",
+    "reserved_probe_query",
     "seed_endpoint_urls",
     "suggested_fields",
     "suggestion_query",

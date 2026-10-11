@@ -8,21 +8,31 @@ from __future__ import annotations
 
 import pytest
 
-from api.capabilities.graphql_probe import (
+from capabilities.graphql_probe import (
     GRAPHQL_ENDPOINT_PATHS,
     GRAPHQL_PROOF_CONTRACTS,
     GRAPHQL_REQUESTS_PER_ENDPOINT,
     graphql_first_slice_hold,
 )
-from api.check_registry import get_check_family
-from api.proof_contracts import CANONICAL_PROOF_CONTRACTS
-from api.runtime.capability_registry import CAPABILITY_REGISTRY
-from api.scan.action_plan import ScanActionPlan, ScanActionPlanCompiler
-from api.scan.contracts import SCAN_V2_FAMILY_NAMES, public_scan_contract, resolve_scan_contract
-from api.scan.finalizer import finalize_scan_report
-from tests.test_scan_action_compiler import _execution, _target
-from tests.test_scan_finalizer import _result_with_observation_count
-from tests.test_scan_orchestrator import SCAN_ID, _action
+from check_registry import get_check_family
+from proof_contracts import CANONICAL_PROOF_CONTRACTS
+from runtime.capability_registry import CAPABILITY_REGISTRY
+from scan.action_plan import ScanActionPlanCompiler
+from scan.contracts import SCAN_V2_FAMILY_NAMES, public_scan_contract, resolve_scan_contract
+from scan.finalizer import finalize_scan_report
+from tests.test_scan_action_adapter import _action as _adapter_action
+from tests.toplevel_scan_fixtures import (
+    SCAN_ID,
+    compiler_target as _target,
+    execution as _execution,
+    plan as _plan,
+    result_with_observations as _result_with_observation_count,
+)
+
+
+def _action(action_id, ordinal, *, capability_name=None, dependencies=()):
+    capability = "scan.finalize" if action_id == "finalize.report" else capability_name
+    return _adapter_action(action_id, capability, ordinal, dependencies=dependencies)
 
 
 def test_graphql_is_an_active_canonical_family():
@@ -79,8 +89,7 @@ def _proof(check: str, **extra):
 def test_finalizer_promotes_only_verified_known_graphql_checks():
     verify = _action("verify.graphql", 0, capability_name="graphql.verify_batch")
     final = _action("finalize.report", 1, dependencies=(verify.action_id,))
-    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
-                          target_binding_digest="a" * 64, actions=(verify, final))
+    plan = _plan(verify, final)
     observations = (
         _proof("field_suggestions", misspelling="pastezq", suggested_fields=["pastes", "paste"]),
         _proof("alias_limit_absent", alias_count=100),
@@ -112,8 +121,7 @@ def test_finalizer_promotes_only_verified_known_graphql_checks():
 def test_a_graphql_proof_from_another_capability_is_not_promoted():
     other = _action("verify.exposure", 0, capability_name="exposure.verify_batch")
     final = _action("finalize.report", 1, dependencies=(other.action_id,))
-    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
-                          target_binding_digest="a" * 64, actions=(other, final))
+    plan = _plan(other, final)
     report = finalize_scan_report(
         plan=plan, target_url="https://app.example.test",
         action_results={other.action_id: _result_with_observation_count(other, 1)},
