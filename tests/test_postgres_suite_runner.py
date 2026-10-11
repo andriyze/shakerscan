@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 import yaml
 
 from scripts.run_postgres_suite import (
+    ALLOWED_NOT_PASSED,
     CONTAINER_ENV,
     POSTGRES_DATABASES,
     PROVISIONED,
@@ -75,27 +76,67 @@ def test_an_unprovisioned_variable_fails_before_anything_runs(tmp_path):
     assert unprovisioned(found) == {name: ["test_new.py"]}
 
 
-def test_verify_fails_on_a_skip_for_a_missing_database_and_keeps_other_skips(tmp_path):
-    found = {ROOT / "tests" / "test_domain_rate.py": frozenset({"SHAKERSCAN_TEST_REDIS_URL"})}
-    ok = _junit(tmp_path / "ok.xml", [
-        ("tests.test_domain_rate", "test_a", None),
-        ("tests.test_domain_rate", "test_b", "native nmap is not installed"),
-    ])
-    assert verify(ROOT, ok, found) == []
+def _skip_type(path: Path, cases: list[tuple[str, str, str | None, str | None]]) -> Path:
+    """Like _junit, with the <skipped type> pytest writes (``pytest.xfail`` for an xfail)."""
+    suite = ET.Element("testsuite")
+    for classname, name, skip, kind in cases:
+        case = ET.SubElement(suite, "testcase", classname=classname, name=name)
+        if skip is not None:
+            ET.SubElement(case, "skipped", message=skip, type=kind or "pytest.skip")
+    root = ET.Element("testsuites")
+    root.append(suite)
+    ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
+    return path
+
+
+DOMAIN_RATE = {ROOT / "tests" / "test_domain_rate.py": frozenset({"SHAKERSCAN_TEST_REDIS_URL"})}
+
+
+def test_verify_passes_only_when_every_case_of_every_discovered_file_passed(tmp_path):
+    ok = _junit(tmp_path / "ok.xml", [("tests.test_domain_rate", "test_a", None),
+                                      ("tests.test_domain_rate.TestLua", "test_b", None)])
+    assert verify(ROOT, ok, DOMAIN_RATE) == []
+    assert ALLOWED_NOT_PASSED == {}
+
+
+def test_verify_fails_on_a_skip_for_a_missing_database(tmp_path):
     for reason in ("TARGET_ASSET_TEST_DATABASE_URL is not configured",
                    "disposable PostgreSQL DSN not configured",
                    "set SHAKERSCAN_TEST_REDIS_URL to a disposable Redis to run the Lua itself",
                    "requires explicitly labelled restore fixture",
                    "could not import 'asyncpg': No module named 'asyncpg'"):
-        skipped = _junit(tmp_path / "skip.xml", [("tests.test_domain_rate", "test_a", reason)])
-        assert any("missing database" in problem for problem in verify(ROOT, skipped, found)), reason
+        skipped = _junit(tmp_path / "skip.xml", [("tests.test_domain_rate", "test_a", None),
+                                                 ("tests.test_domain_rate", "test_b", reason)])
+        assert any("missing database" in problem for problem in verify(ROOT, skipped, DOMAIN_RATE)), reason
 
 
-def test_verify_fails_when_a_discovered_file_produced_no_test_case(tmp_path):
-    found = {ROOT / "tests" / "test_domain_rate.py": frozenset({"SHAKERSCAN_TEST_REDIS_URL"})}
+def test_verify_fails_on_a_reworded_or_unrelated_skip(tmp_path):
+    for reason in ("needs PG", "native nmap is not installed"):
+        skipped = _junit(tmp_path / "skip.xml", [("tests.test_domain_rate", "test_a", None),
+                                                 ("tests.test_domain_rate", "test_b", reason)])
+        assert verify(ROOT, skipped, DOMAIN_RATE) == [
+            f"skipped or xfailed with a database: tests.test_domain_rate::test_b ({reason})"]
+
+
+def test_verify_fails_on_a_file_whose_cases_all_xfail(tmp_path):
+    xfail = _skip_type(tmp_path / "xfail.xml", [
+        ("tests.test_domain_rate", "test_a", "known broken", "pytest.xfail"),
+        ("tests.test_domain_rate", "test_b", "known broken", "pytest.xfail"),
+    ])
+    problems = verify(ROOT, xfail, DOMAIN_RATE)
+    assert len([p for p in problems if p.startswith("skipped or xfailed")]) == 2
+    assert "discovered file passed no test case: tests/test_domain_rate.py" in problems
+
+
+def test_verify_fails_on_a_file_with_no_executed_case(tmp_path):
     other = _junit(tmp_path / "other.xml", [("tests.test_domain_rate_x", "test_a", None)])
-    assert verify(ROOT, other, found) == [
-        "discovered file produced no test case: tests/test_domain_rate.py"]
+    assert verify(ROOT, other, DOMAIN_RATE) == [
+        "discovered file passed no test case: tests/test_domain_rate.py"]
+
+
+def test_the_runner_makes_an_xpass_fail():
+    source = (ROOT / "scripts" / "run_postgres_suite.py").read_text(encoding="utf-8")
+    assert "-o xfail_strict=true" in source
 
 
 def test_cross_check_requires_every_database_skip_of_the_complete_suite_to_pass(tmp_path):
@@ -108,6 +149,9 @@ def test_cross_check_requires_every_database_skip_of_the_complete_suite_to_pass(
     assert cross_check(full, passed) == []
     missing = _junit(tmp_path / "pg-missing.xml", [("tests.test_other", "test_a", None)])
     assert len(cross_check(full, missing)) == 1
+    # A reworded reason still counts when its module ran with databases.
+    reworded = _junit(tmp_path / "full-reworded.xml", [("tests.test_x_postgres", "test_b", "needs PG")])
+    assert len(cross_check(reworded, passed)) == 1
     assert main(["--cross-check", str(full), str(missing)]) == 1
 
 
@@ -126,3 +170,18 @@ def test_ci_requires_the_postgres_job_and_the_candidate_certifies_with_it():
     assert "run_postgres_suite.py --verify" in certify and "--cross-check" in certify
     candidate_run = "\n".join(step.get("run", "") for step in candidate["postgres-suite"]["steps"])
     assert "scripts/run_postgres_suite.py" in candidate_run and "--withhold" not in candidate_run
+
+
+def test_ci_databases_are_the_production_images_and_checkouts_keep_no_token():
+    import re
+
+    compose = (ROOT / "docker-compose.release.yml").read_text(encoding="utf-8")
+    images = {name: re.search(rf"\$\{{{name}_IMAGE:-([^}}]+)\}}", compose)[1]
+              for name in ("POSTGRES", "REDIS")}
+    for workflow, job in (("python-suite.yml", "postgres"), ("release-candidate.yml", "postgres-suite")):
+        spec = yaml.safe_load((WORKFLOWS / workflow).read_text(encoding="utf-8"))["jobs"][job]
+        assert spec["services"]["redis"]["image"] == "mirror.gcr.io/library/" + images["REDIS"]
+        run = "\n".join(step.get("run", "") for step in spec["steps"])
+        assert "mirror.gcr.io/library/" + images["POSTGRES"] in run
+        checkouts = [step for step in spec["steps"] if step.get("uses", "").startswith("actions/checkout@")]
+        assert checkouts and all(step["with"]["persist-credentials"] is False for step in checkouts)

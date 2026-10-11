@@ -11,10 +11,10 @@ PostgreSQL database or Redis skips there. This runner is the other half of that 
 * it creates a separate database for every PostgreSQL variable, sets every
   ``*_POSTGRES_REQUIRED`` flag, and runs the discovered files with the same import-layout
   partition and whole-group collection the complete suite uses;
-* ``--verify`` fails when any test was skipped for a missing database, DSN or Redis, or when a
-  discovered file produced no test case;
+* ``--verify`` fails when any test in a discovered file skipped, xfailed or xpassed (unless it is
+  on the commented ALLOWED_NOT_PASSED list), failed, or when a discovered file passed no case;
 * ``--cross-check`` fails when a test that the database-less complete suite skipped for a missing
-  database did not pass here, so a database-backed test outside the discovery rule cannot hide.
+  database, or skipped in a module run here, did not pass here, so a database-backed test outside the discovery rule cannot hide.
 """
 
 from __future__ import annotations
@@ -50,7 +50,8 @@ ENV_SKIP = re.compile(
     re.IGNORECASE,
 )
 
-# One database per variable, so tests that reset a schema never share one with another module.
+# Each variable gets its own database. Modules that read the same variable share that database,
+# as they do in their dedicated workflows, and run one after another.
 POSTGRES_DATABASES = {
     "ASSURANCE_TEST_DATABASE_URL": "shakerscan_assurance_test",
     "COLLECTION_TEST_DATABASE_URL": "shakerscan_collection_retry_test",
@@ -77,6 +78,9 @@ REDIS_DATABASES = {
 CONTAINER_ENV = "ASSURANCE_TEST_POSTGRES_CONTAINER"
 PROVISIONED = frozenset((*POSTGRES_DATABASES, *REDIS_DATABASES, CONTAINER_ENV))
 REPORT = "postgres-python.xml"
+# Test ids (``classname::name``) in a discovered file that may legitimately skip or xfail here,
+# each with a comment saying why. Anything else that does not pass fails the job.
+ALLOWED_NOT_PASSED: dict[str, str] = {}
 
 
 class PostgresSuiteError(RuntimeError):
@@ -206,27 +210,34 @@ def _case_id(case: ET.Element) -> str:
     return f"{case.get('classname', '')}::{case.get('name', '')}"
 
 
-def env_skips(cases: list[ET.Element]) -> list[tuple[str, str]]:
-    skipped = []
-    for case in cases:
-        skip = case.find("skipped")
-        if skip is not None:
-            reason = skip.get("message") or skip.text or ""
-            if ENV_SKIP.search(reason):
-                skipped.append((_case_id(case), reason))
-    return skipped
+def _outcome(case: ET.Element) -> str:
+    for tag in ("failure", "error", "skipped"):
+        if case.find(tag) is not None:
+            return tag
+    return "passed"
 
 
 def verify(repo_root: Path, report: Path, found: dict[Path, frozenset[str]]) -> list[str]:
+    """Every discovered file must pass at least one case and skip or xfail none.
+
+    The runner sets ``xfail_strict``, so an xpass is a failure and an xfail is a skip here.
+    """
     cases = _cases(report)
-    problems = [f"skipped for a missing database: {case} ({reason})"
-                for case, reason in env_skips(cases)]
-    classnames = [case.get("classname", "") for case in cases]
+    problems = []
+    for case in cases:
+        if _outcome(case) == "skipped" and _case_id(case) not in ALLOWED_NOT_PASSED:
+            skip = case.find("skipped")
+            reason = (skip.get("message") or skip.text or "").strip()
+            kind = ("skipped for a missing database" if ENV_SKIP.search(reason)
+                    else "skipped or xfailed with a database")
+            problems.append(f"{kind}: {_case_id(case)} ({reason})")
     for path in found:
         prefix = _module_prefix(repo_root, path)
-        if not any(name == prefix or name.startswith(prefix + ".") for name in classnames):
-            problems.append(f"discovered file produced no test case: {path.relative_to(repo_root)}")
-    if any(case.find("failure") is not None or case.find("error") is not None for case in cases):
+        own = [case for case in cases if case.get("classname", "") == prefix
+               or case.get("classname", "").startswith(prefix + ".")]
+        if not any(_outcome(case) == "passed" for case in own):
+            problems.append(f"discovered file passed no test case: {path.relative_to(repo_root)}")
+    if any(_outcome(case) in {"failure", "error"} for case in cases):
         problems.append("database-backed tests failed")
     if not cases:
         problems.append("the database-backed suite ran no test")
@@ -234,14 +245,21 @@ def verify(repo_root: Path, report: Path, found: dict[Path, frozenset[str]]) -> 
 
 
 def cross_check(full_report: Path, report: Path) -> list[str]:
-    passed = {
-        _case_id(case) for case in _cases(report)
-        if all(case.find(tag) is None for tag in ("skipped", "failure", "error"))
-    }
-    return [
-        f"env-skipped in the complete suite and not passed with databases: {case} ({reason})"
-        for case, reason in env_skips(_cases(full_report)) if case not in passed
-    ]
+    """Every case the complete suite skipped for a missing database, or skipped in a module this
+    suite ran, must have passed here."""
+    cases = _cases(report)
+    passed = {_case_id(case) for case in cases if _outcome(case) == "passed"}
+    modules = {case.get("classname", "") for case in cases}
+    problems = []
+    for case in _cases(full_report):
+        skip = case.find("skipped")
+        if skip is None or _case_id(case) in passed:
+            continue
+        reason = (skip.get("message") or skip.text or "").strip()
+        if ENV_SKIP.search(reason) or case.get("classname", "") in modules:
+            problems.append(f"skipped in the complete suite and not passed with databases: "
+                            f"{_case_id(case)} ({reason})")
+    return problems
 
 
 def _summary(cases: list[ET.Element]) -> str:
@@ -298,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
             repo_root, postgres_url=args.postgres_url, redis_url=args.redis_url,
             container=args.postgres_container, withhold=tuple(args.withhold),
         ))
+        # An unexpected pass of an xfail test fails; an xfail is reported as a skip and verified.
+        os.environ["PYTEST_ADDOPTS"] = (os.environ.get("PYTEST_ADDOPTS", "") + " -o xfail_strict=true").strip()
         artifacts.mkdir(parents=True, exist_ok=True)
         package, compatibility = partition_test_files(repo_root)
         reports, failed_groups = [], []
