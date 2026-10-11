@@ -2452,6 +2452,9 @@ export interface RetestRecord {
   retryable?: boolean
   message?: string
   error_message?: string
+  // Set when the retest stopped because of its authorization while it ran.
+  stop_reason?: 'authorization_withdrawn' | 'authorization_unverified' | null
+  authority_stop?: Record<string, unknown> | null
   created_at?: string
   started_at?: string | null
   completed_at?: string | null
