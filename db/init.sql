@@ -2580,3 +2580,28 @@ CREATE INDEX IF NOT EXISTS idx_target_interpretations_experiment
     ON target_interpretations(target_id, experiment_key) WHERE experiment_key IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_target_interpretations_one_dismissal
     ON target_interpretations(finding_id) WHERE negative_state = 'finding_dismissed' AND status = 'active';
+-- Whatever path changes a finding's status (a route, a scan or verifier re-detecting it, or an
+-- earlier engine after a rollback), an operator's dismissal ends when the status leaves the
+-- dismissed statuses: it is marked reopened, never left active beside an active finding.
+CREATE OR REPLACE FUNCTION target_interpretations_end_dismissal() RETURNS trigger
+LANGUAGE plpgsql AS $end_dismissal$
+BEGIN
+    IF NEW.status IS DISTINCT FROM OLD.status
+            AND NEW.status NOT IN ('false_positive', 'accepted_risk') THEN
+        UPDATE target_interpretations
+           SET status = 'reopened', status_changed_by = 'system:finding-status', status_changed_at = NOW(),
+               status_note = 'The finding status changed outside the dismissal.'
+         WHERE finding_id = NEW.id AND negative_state = 'finding_dismissed' AND status = 'active';
+    END IF;
+    RETURN NULL;
+END
+$end_dismissal$;
+DO $end_dismissal_trigger$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'findings_end_dismissal'
+                   AND tgrelid = 'findings'::regclass) THEN
+        CREATE TRIGGER findings_end_dismissal AFTER UPDATE OF status ON findings
+            FOR EACH ROW EXECUTE FUNCTION target_interpretations_end_dismissal();
+    END IF;
+END
+$end_dismissal_trigger$;

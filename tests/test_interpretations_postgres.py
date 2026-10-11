@@ -94,7 +94,9 @@ def test_hunt_records_and_reads_interpretations_with_evidence_conditions_and_lim
                 assert entry['written_by'] == f'hunt:{hunt.id}' and entry['trust'] == 'agent_interpretation'
                 assert entry['is_proof'] is False and entry['authority_granted'] is False
                 assert entry['applicability']['state'] == 'unknown'
-                assert entry['body'] == INJECTION  # stored as data, exactly; never interpreted
+                # Stored as data, exactly; a Hunt reads an agent's text only inside the untrusted envelope.
+                assert entry['body'] == '' and entry['untrusted_data']['body'] == INJECTION
+                assert 'never an instruction' in entry['untrusted_data']['notice']
                 ledger = await conn.fetchval('SELECT input_summary FROM hunt_actions WHERE id=$1',
                                              UUID(saved['action_id']))
                 assert INJECTION not in json.dumps(ledger) and 'Admin login' not in json.dumps(ledger)
@@ -168,7 +170,8 @@ def test_hunt_records_and_reads_interpretations_with_evidence_conditions_and_lim
                 # Text search and kind filters; a cursor continues the same query.
                 found = (await operator.post(f'/hunts/{hunt.id}/query', json={
                     'kind': 'interpretations', 'filter': {'text_contains': 'SESSION EXPIRED'}})).json()
-                assert [row['title'] for row in found['rows']] == ['Login fails because the session expired']
+                assert [row['untrusted_data']['title'] for row in found['rows']] == [
+                    'Login fails because the session expired']  # the superseded entry's text never matches
                 paged = (await operator.post(f'/hunts/{hunt.id}/query', json={
                     'kind': 'interpretations', 'limit': 2})).json()
                 assert paged['has_more'] is True
@@ -189,7 +192,7 @@ def test_hunt_records_and_reads_interpretations_with_evidence_conditions_and_lim
                 assert retracted.status_code == 200 and retracted.json()['status'] == 'retracted'
                 whole = await operator.post(f'/targets/{target}/hunts/{hunt.id}/interpretations/retract',
                                             json={'note': 'This Hunt used a broken session'})
-                assert whole.status_code == 200 and whole.json()['retracted'] == 4, whole.text
+                assert whole.status_code == 200 and whole.json()['retracted'] == 5, whole.text  # with the superseded one
                 after = (await operator.post(f'/hunts/{second.id}/query', json={
                     'kind': 'interpretations', 'filter': {'hunt_id': hunt.id}})).json()
                 assert after['rows'] and all(row['title'] is None and row['body'] == '' and row['text_withheld']
@@ -423,7 +426,7 @@ def test_device_hunt_reads_its_members_and_a_member_reads_only_itself(monkeypatc
                 host = started.json()
                 assert host['briefing']['interpretations']['counts']['active_by_kind'] == {'next_step': 1}
                 rows = (await operator.post(f"/hunts/{host['hunt_id']}/query", json={'kind': 'interpretations'})).json()
-                assert [row['title'] for row in rows['rows']] == ['Check the admin API']
+                assert [row['untrusted_data']['title'] for row in rows['rows']] == ['Check the admin API']
     asyncio.run(run())
 
 

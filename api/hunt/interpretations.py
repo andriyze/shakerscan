@@ -151,14 +151,38 @@ def clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
     return text
 
 
-def _broad(text: str) -> bool:
+#: Fields that hold one exact value each: listing several in one value is packing a set.
+_SINGLE_VALUE_FIELDS = frozenset({"principals", "roles", "objects", "method", "service", "environment"})
+_PACKING = re.compile(r"[,;|]|\s/\s")
+#: Pattern syntax in a path (route, or an object given as a path): a path names one thing; a query
+#: string (?a=1&b=2) and percent-encoding (%2F) are exact and allowed.
+_PATH_PATTERN = re.compile(r"[*|\[\]^$\\]|\.[*+]|%(?![0-9a-f]{2})|\.\.\.|\{\s*\}")
+
+
+def _wildcard_like(character: str) -> bool:
+    """Asterisks, stars and ellipses in any of their Unicode forms, and other pictographic symbols."""
+    name = unicodedata.name(character, "")
+    return (any(word in name for word in ("ASTERISK", "STAR", "ELLIPSIS", "WILDCARD"))
+            or unicodedata.category(character) == "So")
+
+
+def _broad(text: str, field: str = "") -> bool:
     """A value naming a set rather than the exact thing tested (compatibility- and case-folded)."""
     folded = unicodedata.normalize("NFKC", text).casefold().strip()
+    if any(_wildcard_like(ch) for ch in text + folded):
+        return True
     # Letters from other scripts that look Latin (Cyrillic "аny") fold to nothing NFKC can see; a
     # value mixing scripts with Latin is refused rather than guessed.
     scripts = {unicodedata.name(ch, "").split(" ")[0] for ch in folded if ch.isalpha()}
     if len(scripts - {"LATIN"}) and "LATIN" in scripts:
         return True
+    if field in _SINGLE_VALUE_FIELDS and _PACKING.search(folded):
+        return True
+    if field == "method" and not re.fullmatch(r"[a-z]+", folded):
+        return True
+    if folded.startswith("/") and field in {"route", "objects", "operation", ""}:
+        # A path: "all" may be a literal segment (/api/users/all); wildcards and patterns may not.
+        return bool(_PATH_PATTERN.search(folded))
     return bool(_BROAD_WORDS.search(folded) or _PATTERN_SYNTAX.search(folded))
 
 
@@ -166,7 +190,7 @@ def _condition_text(value: Any, field: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"conditions.{field} must be text")
     text = clean_text(value, field=f"conditions.{field}", maximum=MAX_CONDITION_TEXT, required=True)
-    if _broad(text):
+    if _broad(text, field):
         raise ValueError(f"conditions.{field} names a set it did not test ({text!r}); record the exact "
                          "principals, objects and operation the experiment covered, without wildcards, "
                          "patterns or words such as all, any or every")
@@ -237,8 +261,13 @@ def conditions_digest(conditions: Mapping[str, Any]) -> str:
 
 
 def experiment_key(target_id: Any, conditions: Mapping[str, Any]) -> str:
-    """The identity of one exact experiment on one target: every condition, nothing less."""
-    payload = {"target_id": str(target_id), "conditions": conditions}
+    """The identity of one exact experiment: every condition, nothing less.
+
+    The target is not part of the digest: every lookup is bound to the entry's own target row
+    (``target_id``), so a key never matches across targets, and entries keep their key when
+    duplicate targets are merged. ``target_id`` stays in the signature for that binding.
+    """
+    payload = {"conditions": conditions}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -395,8 +424,10 @@ def _iso(value: Any) -> Any:
 def public_interpretation(row: Mapping[str, Any], *, audience: Literal["hunt", "operator"]) -> dict[str, Any]:
     """One entry as a reader receives it.
 
-    Hunts never read the text of a retracted entry, and target-quoted text always arrives inside
-    an untrusted-data envelope.
+    For Hunts: no free text of a retracted or superseded entry (history only, marked), and an
+    agent-written entry's title and body arrive only inside an untrusted-data envelope, whatever
+    provenance its writer declared: the server cannot tell an agent's own words from text it
+    copied from the target. Operator-written text is returned as written.
     """
     item = dict(row)
     written_by = str(item.get("written_by") or "")
@@ -427,13 +458,18 @@ def public_interpretation(row: Mapping[str, Any], *, audience: Literal["hunt", "
                   else "agent_interpretation"),
         "is_proof": False, "authority_granted": False,
     }
-    if audience == "hunt" and result["status"] == "retracted":
+    if audience == "hunt" and result["status"] in {"retracted", "superseded"}:
         # Every free-text field goes: title, body, note, conditions, subject and labels.
         result.update(title=None, body="", status_note=None, conditions={}, subject=None, agent=None, model=None,
-                      text_withheld="An operator retracted this entry; its text is not shown to Hunts.")
-    elif result["provenance"] == "quoted_from_target":
+                      text_withheld=("An operator retracted this entry; its text is not shown to Hunts."
+                                     if result["status"] == "retracted" else
+                                     "Superseded: history only. Its text is not shown to Hunts; read the entry "
+                                     "that replaced it."))
+    elif result["provenance"] == "quoted_from_target" or (
+            audience == "hunt" and result["trust"] == "agent_interpretation"):
+        quoted = result["provenance"] == "quoted_from_target"
         result["untrusted_data"] = {"title": result.pop("title"), "body": result.pop("body"),
-                                    "notice": UNTRUSTED_NOTICE}
+                                    "notice": UNTRUSTED_NOTICE if quoted else AGENT_CLAIM_NOTICE}
         result["title"], result["body"] = None, ""
     return result
 
@@ -646,7 +682,7 @@ async def _supersede(conn: Any, target: Any, previous_id: uuid.UUID, *, writer: 
 
 async def _identical(conn: Any, target: Any, key: str, *, exclude: Any = None) -> list[dict[str, Any]]:
     rows = await conn.fetch("""SELECT * FROM target_interpretations
-        WHERE target_id=$1 AND experiment_key=$2 AND ($3::uuid IS NULL OR id<>$3)
+        WHERE target_id=$1 AND experiment_key=$2 AND status='active' AND ($3::uuid IS NULL OR id<>$3)
         ORDER BY created_at DESC, id DESC LIMIT 20""", target, key, exclude)
     return [{"id": str(row["id"]), "negative_state": row["negative_state"], "status": row["status"],
              "written_by": row["written_by"], "created_at": _iso(row["created_at"]),
@@ -685,27 +721,62 @@ async def retract_interpretation(conn: Any, target_id: Any, entry_id: Any, *, ac
             raise _refusal(404, "interpretation_not_found", "Interpretation not found on this target.")
         if entry["negative_state"] == "finding_dismissed":
             raise _refusal(409, "use_reopen", "Reopen the finding to undo a dismissal.")
-        if entry["status"] != "active":
+        if entry["status"] not in {"active", "superseded"}:
             raise _refusal(409, "interpretation_not_active", f"That entry is already {entry['status']}.")
-        saved = await conn.fetchrow("""UPDATE target_interpretations SET status='retracted', status_changed_by=$2,
-            status_changed_at=NOW(), status_note=$3 WHERE id=$1 RETURNING *""", identifier, actor, note)
-        return public_interpretation(saved, audience="operator")
+        # The whole supersede chain of that writer goes with it: superseding a planted entry with a
+        # benign one never keeps the planted text out of a retraction.
+        rows = await conn.fetch("""WITH RECURSIVE chain(id) AS (
+                SELECT $1::uuid
+                UNION
+                SELECT i.id FROM target_interpretations i JOIN chain c ON i.supersedes=c.id OR i.id=(
+                    SELECT supersedes FROM target_interpretations WHERE id=c.id)
+                WHERE i.target_id=$4 AND i.written_by=$5)
+            UPDATE target_interpretations SET status='retracted', status_changed_by=$2,
+                status_changed_at=NOW(), status_note=$3
+            WHERE id IN (SELECT id FROM chain) AND status IN ('active','superseded') RETURNING *""",
+            identifier, actor, note, row["id"], entry["written_by"])
+        await _withhold_knowledge(conn, row["id"], rows, actor=actor, note=note)
+        saved = next(item for item in rows if item["id"] == identifier)
+        result = public_interpretation(saved, audience="operator")
+        result["retracted_with_it"] = [str(item["id"]) for item in rows if item["id"] != identifier]
+        return result
 
 
 async def retract_run(conn: Any, target_id: Any, hunt_id: Any, *, actor: str, note: str) -> dict[str, Any]:
-    """Retract every active entry one Hunt wrote on this target, in one operation."""
+    """Retract every entry one Hunt wrote on this target (current and superseded), and the knowledge
+    note its knowledge write caused, in one operation."""
     _operator_only(actor)
     hunt = _uuid(hunt_id, "hunt id")
     async with conn.transaction():
         row = await _target_row(conn, target_id, lock=True)
         rows = await conn.fetch("""UPDATE target_interpretations SET status='retracted', status_changed_by=$3,
             status_changed_at=NOW(), status_note=$4
-            WHERE target_id=$1 AND status='active'
+            WHERE target_id=$1 AND status IN ('active','superseded')
               AND (written_by=$2 OR (written_by='system:knowledge-import' AND subject->>'written_by'=$2))
-            RETURNING id""",
+            RETURNING *""",
             row["id"], f"hunt:{hunt}", actor, note)
+        await _withhold_knowledge(conn, row["id"], rows, actor=actor, note=note)
         return {"target_id": str(row["id"]), "hunt_id": str(hunt), "retracted": len(rows),
                 "ids": [str(item["id"]) for item in rows]}
+
+
+async def _withhold_knowledge(conn: Any, target: Any, rows: list[Any], *, actor: str, note: str) -> None:
+    """A retracted knowledge note withholds the same text in the target's knowledge slot from Hunts.
+
+    The slot keeps the text (an operator still reads it, and saving knowledge again restores it);
+    ``knowledge_withheld`` names its digest, and Hunt reads of the slot leave that text out.
+    """
+    for item in rows:
+        if item["written_by"] != KNOWLEDGE_IMPORT_WRITER:
+            continue
+        sha = (_loads(item["subject"], {}) or {}).get("body_sha256")
+        if not sha:
+            continue
+        flag = {"body_sha256": sha, "interpretation_id": str(item["id"]), "by": actor, "note": note,
+                "at": datetime.now(timezone.utc).isoformat()}
+        await conn.execute("""UPDATE targets SET metadata_json=jsonb_set(metadata_json,
+                '{target_skill,knowledge_withheld}', $2::jsonb), updated_at=NOW()
+            WHERE id=$1 AND jsonb_typeof(metadata_json->'target_skill')='object'""", target, json.dumps(flag))
 
 
 def _uuid(value: Any, label: str) -> uuid.UUID:
@@ -816,8 +887,8 @@ async def reopen_finding(conn: Any, target_id: Any, finding_id: Any, *, actor: s
 
 def _scope(device: bool) -> str:
     # A host asset reads its own entries and its service members'; anything else reads exactly its own.
-    return ("target_id IN (SELECT id FROM targets WHERE id=$1 OR asset_owner_id=$1)" if device
-            else "target_id=$1")
+    return ("target_id IN (SELECT id FROM targets WHERE id=$1 OR (asset_owner_id=$1 "
+            "AND target_asset_access_owner(id)=$1))" if device else "target_id=$1")
 
 
 async def operator_list(conn: Any, target_id: Any, *, kind: str | None = None, status: str | None = None,
@@ -1051,8 +1122,16 @@ def _inert(text: str) -> str:
     return _escape_invisible(CONTROL_CHARACTERS.sub(lambda match: "\\x%02x" % ord(match.group()), text))
 
 
-async def import_knowledge_notes(conn: Any) -> int:
-    """Startup: mirror every target's advisory knowledge whose text differs from its active note."""
+IMPORT_BATCH = 100
+
+
+async def import_knowledge_notes(conn: Any, *, batch: int = IMPORT_BATCH, after_batch: Any = None) -> int:
+    """Startup: mirror every target's advisory knowledge whose text differs from its latest note.
+
+    Runs outside the schema transaction, ``batch`` targets per committed transaction (each target
+    in its own savepoint), so a target row lock is held for one batch at most. Idempotent per
+    target: a target already mirrored is not selected again. ``after_batch`` is a test hook.
+    """
     rows = await conn.fetch("""
         SELECT t.id FROM targets t
         WHERE COALESCE(t.metadata_json->'target_skill'->'knowledge_snapshot'->>'body_sha256',
@@ -1065,13 +1144,18 @@ async def import_knowledge_notes(conn: Any) -> int:
           AND t.metadata_json ? 'target_skill'
         ORDER BY t.id""", KNOWLEDGE_IMPORT_WRITER)
     changed = 0
-    for row in rows:
-        try:
-            async with conn.transaction():
-                changed += await mirror_knowledge_note(conn, row["id"]) is not None
-        except Exception as exc:  # noqa: BLE001 - one unreadable record never stops startup
-            # The knowledge slot itself is unchanged; the note is retried at the next start.
-            print(f"[schema] knowledge note for target {row['id']} not mirrored: {type(exc).__name__}", flush=True)
+    for start in range(0, len(rows), max(1, batch)):
+        async with conn.transaction():
+            for row in rows[start:start + max(1, batch)]:
+                try:
+                    async with conn.transaction():
+                        changed += await mirror_knowledge_note(conn, row["id"]) is not None
+                except Exception as exc:  # noqa: BLE001 - one unreadable record never stops startup
+                    # The slot itself is unchanged; the note is retried at the next start.
+                    print(f"[schema] knowledge note for target {row['id']} not mirrored: {type(exc).__name__}",
+                          flush=True)
+        if after_batch is not None:
+            await after_batch(start)
     return changed
 
 
