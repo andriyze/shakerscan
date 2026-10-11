@@ -237,7 +237,7 @@ def validate_conditions(raw: Any, *, required: bool, experiment: bool = False) -
                 # One exact origin: scheme, host and port (the default port is dropped).
                 origin = canonical_origin(raw[field]) if isinstance(raw[field], str) else None
                 if origin is None:
-                    raise ValueError("conditions.origin must be one origin, scheme://host[:port], with no path")
+                    raise ValueError("conditions.origin must be one origin, scheme://host or scheme://host:port, with no path")
                 result[field] = origin
                 continue
             value = _condition_text(raw[field], field)
