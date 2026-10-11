@@ -45,7 +45,7 @@ BUDGET_PROFILES: Mapping[str, ScanBudget] = {
 # names here would create a successful no-op Scan.
 SCAN_V2_FAMILY_NAMES = (
     "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
-    "sensitive_exposure", "nosqli", "authz_surface",
+    "sensitive_exposure", "nosqli", "authz_surface", "graphql",
 )
 # Families that examine the application itself: they discover its surface or test what was
 # discovered. sensitive_exposure alone only reads a fixed list of well-known locations (its
@@ -67,10 +67,14 @@ SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
 # breadth promise: the old quotas assumed 30-second candidates and were met only by
 # wall-killing every attempt. Continuation rounds add breadth beyond these floors.
 SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, Mapping[str, int]] = {
-    "fast": {"xss": 1, "sqli": 1, "sensitive_exposure": 5, "nosqli": 5, "authz_surface": 5},
-    "balanced": {"xss": 4, "sqli": 4, "sensitive_exposure": 10, "nosqli": 10, "authz_surface": 10},
-    "thorough": {"xss": 12, "sqli": 16, "sensitive_exposure": 20, "nosqli": 25, "authz_surface": 20},
-    "deep": {"xss": 24, "sqli": 32, "sensitive_exposure": 50, "nosqli": 50, "authz_surface": 50},
+    "fast": {"xss": 1, "sqli": 1, "sensitive_exposure": 5, "nosqli": 5, "authz_surface": 5,
+             "graphql": 5},
+    "balanced": {"xss": 4, "sqli": 4, "sensitive_exposure": 10, "nosqli": 10, "authz_surface": 10,
+                 "graphql": 10},
+    "thorough": {"xss": 12, "sqli": 16, "sensitive_exposure": 20, "nosqli": 25, "authz_surface": 20,
+                 "graphql": 20},
+    "deep": {"xss": 24, "sqli": 32, "sensitive_exposure": 50, "nosqli": 50, "authz_surface": 50,
+             "graphql": 50},
 }
 _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "recon": (
@@ -85,6 +89,7 @@ _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "sensitive_exposure": ("exposure.verify_batch",),
     "nosqli": ("nosqli.verify_batch",),
     "authz_surface": ("authz_surface.verify_batch",),
+    "graphql": ("graphql.verify_batch",),
 }
 # Proof capabilities are additional verifiers a family may escalate to after its
 # batch action produces a candidate. They are part of the family's authority even

@@ -103,7 +103,7 @@ _ACTIVE_VERIFIER_CAPABILITIES = frozenset({
     "xss.request_verify", "sqli.request_verify", "browser.proof",
     "xss.request_verify_batch", "sqli.request_verify_batch", "sqli.prove_batch",
     "xss.browser_prove_batch", "exposure.verify_batch", "nosqli.verify_batch",
-    "authz_surface.verify_batch",
+    "authz_surface.verify_batch", "graphql.verify_batch",
 })
 _TRAFFIC_BUDGETS = frozenset({
     "http_requests", "state_changing_requests", "browser_actions",
@@ -147,7 +147,33 @@ _DISCOVERY_TRUNCATION_REASONS = frozenset({
     "crawler_memory_bound_exceeded",
     # Killed mid-crawl by a signal (the kernel's OOM killer): cut short like the bound.
     "process_killed",
+    # Stopped, or never started, because the Scan reached its time limit.
+    "scan_time_limit",
 })
+# GraphQL checks (capabilities/graphql_probe.py): title and CWE per check.
+_GRAPHQL_CHECKS = {
+    "field_suggestions": ("GraphQL field suggestions enabled", "CWE-200"),
+    "alias_limit_absent": ("GraphQL alias limit absent (100 aliases in one query)", "CWE-770"),
+    "duplicate_field_limit_absent": (
+        "GraphQL duplicate field limit absent (100 duplicates in one query)", "CWE-770",
+    ),
+}
+_GRAPHQL_EXPOSURE_TITLES = {
+    "graphql_introspection_enabled": "GraphQL introspection enabled",
+    "graphql_ide_exposure": "GraphQL IDE served publicly",
+}
+
+
+def _url_without_query(value: Any) -> Any:
+    try:
+        parts = urllib.parse.urlsplit(str(value or ""))
+    except ValueError:
+        return value
+    if not parts.scheme or not parts.netloc:
+        return value
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path or "/", "", ""))
+
+
 _FAMILY_BY_CAPABILITY = {
     "xss.verify_batch": "xss",
     "xss.request_verify_batch": "xss",
@@ -160,6 +186,7 @@ _FAMILY_BY_CAPABILITY = {
     "exposure.verify_batch": "sensitive_exposure",
     "nosqli.verify_batch": "nosqli",
     "authz_surface.verify_batch": "authz_surface",
+    "graphql.verify_batch": "graphql",
     "authz.verify": "bola",
 }
 
@@ -284,12 +311,14 @@ try:
         SECRET_MATERIAL_CLASSES,
         is_sensitive_exposure_class,
     )
+    from capabilities.graphql_probe import GRAPHQL_PROOF_CONTRACTS
 except ModuleNotFoundError:
     from ..capabilities.exposure_probe import (
         EXPOSURE_PROOF_CONTRACTS,
         SECRET_MATERIAL_CLASSES,
         is_sensitive_exposure_class,
     )
+    from ..capabilities.graphql_probe import GRAPHQL_PROOF_CONTRACTS
 
 try:
     from scanner_tools.xss_evidence import apply_xss_execution_evidence as _apply_xss_execution_evidence
@@ -582,6 +611,7 @@ def _findings_for_action(
         "exposure.verify_batch": {"candidate_attempt", "sensitive_exposure_proof"},
         "nosqli.verify_batch": {"candidate_attempt", "nosqli_proof"},
         "authz_surface.verify_batch": {"candidate_attempt", "authz_surface_proof"},
+        "graphql.verify_batch": {"candidate_attempt", "graphql_proof"},
         "authz.verify": {"authz_differential"},
         "templates.scan": {"template_match"},
         "templates.passive_scan": {"template_match"},
@@ -957,12 +987,18 @@ def _findings_for_action(
                 for entry in list(item.get("exposure_fingerprints") or ())[:50]
                 if isinstance(entry, Mapping)
             ]
+            graphql_title = _GRAPHQL_EXPOSURE_TITLES.get(exposure_class)
             finding = _base_finding(
                 tool="shakerscan_exposure_probe",
-                title=f"Sensitive exposure: {exposure_class.replace('_', ' ')}",
+                title=graphql_title or f"Sensitive exposure: {exposure_class.replace('_', ' ')}",
                 severity=severity,
                 cwe="CWE-538" if secret_material else "CWE-200",
-                url=item.get("request_url"),
+                # A GraphQL read is reported on its endpoint; the fixed document it sent stays
+                # in the evidence's request_url.
+                url=(
+                    _url_without_query(item.get("request_url")) if graphql_title
+                    else item.get("request_url")
+                ),
                 evidence={
                     "exposure_class": exposure_class,
                     "request_url": item.get("request_url"),
@@ -1091,6 +1127,51 @@ def _findings_for_action(
                     "Anonymous access matched authenticated access, but nothing "
                     "establishes that this particular function is privileged"
                 ),
+            })
+            findings.append(finding)
+        elif (
+            kind == "graphql_proof"
+            and result.capability_name == "graphql.verify_batch"
+            and item.get("proof_state") == "verified"
+            and item.get("finding_verdict") == "verified"
+            and str(item.get("check") or "") in _GRAPHQL_CHECKS
+            and str(item.get("response_body_sha256") or "")
+        ):
+            check = str(item["check"])
+            title, cwe = _GRAPHQL_CHECKS[check]
+            finding = _base_finding(
+                tool="shakerscan_graphql_probe",
+                title=title,
+                severity="low",
+                cwe=cwe,
+                url=_url_without_query(item.get("endpoint")),
+                evidence={
+                    "check": check,
+                    "endpoint": _url_without_query(item.get("endpoint")),
+                    "root_type": item.get("root_type"),
+                    "response_status": item.get("response_status"),
+                    "response_body_sha256": item.get("response_body_sha256"),
+                    "misspelling": item.get("misspelling"),
+                    "suggested_fields": list(item.get("suggested_fields") or ())[:10],
+                    "alias_count": item.get("alias_count"),
+                    "duplicate_count": item.get("duplicate_count"),
+                    # The check names the contract; a stored observation cannot pick its own.
+                    "proof_contract": GRAPHQL_PROOF_CONTRACTS.get(check),
+                    "canonical_capability": result.capability_name,
+                    "capability_receipt": receipt,
+                    "proof_producer": "shakerscan",
+                    "evidence_type": "graphql_response_signature",
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": "Deterministic GraphQL response signature satisfied",
             })
             findings.append(finding)
         elif kind == "authz_differential":
@@ -2423,6 +2504,7 @@ def finalize_scan_report(
         "exposure.verify_batch": "sensitive_exposure",
         "nosqli.verify_batch": "nosqli",
         "authz_surface.verify_batch": "authz_surface",
+        "graphql.verify_batch": "graphql",
     }
     candidate_coverage: dict[str, dict[str, Any]] = {}
     for action in expected_actions:

@@ -1182,6 +1182,70 @@ end"""
         "verification": 'curl -X POST -H "Content-Type: application/json" -d \'{"query":"{ __schema { types { name } } }"}\' https://example.com/graphql',
         "effort": "hours"
     },
+    "graphql_ide_exposed": {
+        "title": "GraphQL IDE Served Publicly",
+        "severity_base": "low",
+        "cwe": "CWE-200",
+        "owasp": "A05:2021 - Security Misconfiguration",
+        "description": "An in-browser GraphQL IDE (GraphiQL or GraphQL Playground) is served to anyone who requests it.",
+        "business_impact": "The IDE gives anyone a ready-made client for exploring and querying the API; with introspection on it browses the whole schema.",
+        "remediation_steps": [
+            "Disable the IDE in production builds",
+            "If an IDE must stay reachable, require authentication in front of it",
+            "Disable introspection in production as well"
+        ],
+        "code_examples": {
+            "graphql_yoga": "createYoga({ schema, graphiql: process.env.NODE_ENV !== 'production' })",
+            "flask_graphql": "app.add_url_rule('/graphql', view_func=GraphQLView.as_view('graphql', schema=schema, graphiql=False))"
+        },
+        "documentation_links": [
+            "https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html"
+        ],
+        "verification": "curl -s -H 'Accept: text/html' https://example.com/graphiql | grep -i graphiql   # expect no IDE page",
+        "effort": "minutes"
+    },
+    "graphql_field_suggestions": {
+        "title": "GraphQL Field Suggestions Enabled",
+        "severity_base": "low",
+        "cwe": "CWE-200",
+        "owasp": "A05:2021 - Security Misconfiguration",
+        "description": "The GraphQL server answers a query for a misspelt field with \"Did you mean ...\" suggestions naming real fields.",
+        "business_impact": "Field names can be recovered by guessing even when introspection is disabled, so the schema is not hidden.",
+        "remediation_steps": [
+            "Disable field suggestions in production (mask validation error suggestions)",
+            "Disable introspection in production as well"
+        ],
+        "code_examples": {
+            "apollo_server": "// Apollo Server 4: hide suggestions\nformatError: (formatted) => ({ ...formatted, message: formatted.message.replace(/Did you mean.*$/, '') })",
+            "graphql_yoga": "import { blockFieldSuggestionsPlugin } from '@escape.tech/graphql-armor-block-field-suggestions'"
+        },
+        "documentation_links": [
+            "https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html"
+        ],
+        "verification": "curl -s -G --data-urlencode 'query={usr}' https://example.com/graphql   # expect no 'Did you mean'",
+        "effort": "minutes"
+    },
+    "graphql_query_limits_absent": {
+        "title": "GraphQL Query Limits Absent (Aliases or Duplicate Fields)",
+        "severity_base": "low",
+        "cwe": "CWE-770",
+        "owasp": "API4:2023 - Unrestricted Resource Consumption",
+        "description": "The GraphQL server executes one query that repeats a field a hundred times, under aliases or as duplicates, without any limit.",
+        "business_impact": "One request can multiply work (alias-based brute force of a login or one-time code, amplified expensive resolvers), bypassing per-request rate limits.",
+        "remediation_steps": [
+            "Limit aliases and duplicate fields per operation",
+            "Apply query cost or complexity analysis and a depth limit",
+            "Rate-limit by operation cost, not only by HTTP request"
+        ],
+        "code_examples": {
+            "graphql_armor": "import { maxAliasesPlugin } from '@escape.tech/graphql-armor-max-aliases'"
+        },
+        "documentation_links": [
+            "https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html"
+        ],
+        "verification": "Send one query with 100 aliases of __typename; expect a validation error",
+        "effort": "hours"
+    },
 
     # =========================================================================
     # API Security
@@ -1442,6 +1506,8 @@ EXPOSURE_CLASS_REMEDIATION = {
     "directory_metadata_file": "exposed_directory_metadata",
     "phpinfo_disclosure": "exposed_debug_interface",
     "debug_interface_exposure": "exposed_debug_interface",
+    "graphql_introspection_enabled": "graphql_introspection",
+    "graphql_ide_exposure": "graphql_ide_exposed",
 }
 
 

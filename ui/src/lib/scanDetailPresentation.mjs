@@ -255,6 +255,7 @@ function structuredLogWarning(raw, source) {
 // for a code this table does not know.
 const COVERAGE_REASON_LABELS = {
   timed_out: 'A planned step ran out of its time allowance before it finished',
+  scan_time_limit: 'The scan reached its time limit, so planned steps were stopped or never started; findings confirmed before the stop are kept',
   http_request_budget_exhausted: 'A planned step used up its HTTP request allowance before it finished',
   state_changing_budget_exhausted: 'A planned step used up its state-changing request allowance before it finished',
   process_killed: 'A tool was killed by the system (for example, out of memory) before it finished; what it wrote before that is kept',
@@ -333,10 +334,10 @@ export function notExaminedExplanation(report) {
 
 // sensitive_exposure is read-only GET traffic and runs in passive Scans, so it is not
 // something active permission bought.
-const ACTIVE_FAMILIES = new Set(['xss', 'sqli', 'nuclei_active', 'bola', 'nosqli', 'authz_surface'])
+const ACTIVE_FAMILIES = new Set(['xss', 'sqli', 'nuclei_active', 'bola', 'nosqli', 'authz_surface', 'graphql'])
 const ACTIVE_FAMILY_LABELS = {
   xss: 'XSS', sqli: 'SQLi', nuclei_active: 'active templates', bola: 'BOLA',
-  nosqli: 'NoSQLi', authz_surface: 'authz',
+  nosqli: 'NoSQLi', authz_surface: 'authz', graphql: 'GraphQL',
 }
 
 // The one thing to do next, derived from what limited this run. A page that lists every gap

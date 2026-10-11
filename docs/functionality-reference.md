@@ -1901,7 +1901,7 @@ for the profile contract, invocation, limits and acceptance gates.
 |---|---|---|
 | Public REST operations | 479 | `api/**/*.py` FastAPI decorators |
 | Unique REST paths | 399 | `api/**/*.py` |
-| Check families | 18 | `api/check_registry.py` |
+| Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
@@ -2412,6 +2412,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `bola` | active | access_control | True | high | True | `asm_endpoint_batch` | `active_endpoint_attempt_v1` | Multi-user object authorization comparisons. Requires Lab/deep policy and two auth contexts. |
 | `business_logic` | active | workflow | True | high | False | `none` | `planned_workflow_attempt` | Workflow/business-logic testing. Planned for AI/manual-assisted campaigns. |
 | `endpoint_security` | passive | endpoint_surface | False | low | True | `endpoint_scoped_surface` | `endpoint_surface_attempt_v1` | Target-wide API data exposure, webhook signature, and approval/authorization checks over the discovered endpoint inventory. |
+| `graphql` | active | api | True | medium | False | `graphql_verify_batch` | `active_endpoint_attempt_v1` | Bounded read-only GraphQL checks over GET: field suggestions and missing alias or duplicate-field limits on discovered GraphQL endpoints. |
 | `headers` | passive | headers | False | low | True | `legacy_config_findings` | `planned_passive_attempt` | HTTP security header posture checks. |
 | `jwt` | active | authentication | True | medium | True | `legacy_advanced_jwt` | `jwt_probe_attempt_v1` | JWT algorithm, signature, key, and claim mutation checks with acceptance proof. |
 | `lfi` | active | server_side | True | high | False | `none` | `planned_high_risk_attempt` | File inclusion and path traversal checks. Planned and permission-gated. |
