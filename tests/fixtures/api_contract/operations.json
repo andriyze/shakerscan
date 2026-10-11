@@ -2280,6 +2280,11 @@
     "operation_id": "generate_endpoint_inventory_hypotheses_targets__target_id__inventory_hypotheses_post"
   },
   {
+    "path": "/targets/{target_id}/knowledge/changes",
+    "method": "get",
+    "operation_id": "get_target_knowledge_changes_targets__target_id__knowledge_changes_get"
+  },
+  {
     "path": "/targets/{target_id}/negative-results",
     "method": "get",
     "operation_id": "get_target_negative_results_targets__target_id__negative_results_get"

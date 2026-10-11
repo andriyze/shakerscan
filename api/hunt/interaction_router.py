@@ -280,6 +280,8 @@ class HuntQueryRequest(BaseModel):
         # Attributed interpretations, and negative results (recorded ones plus those the server's
         # own records establish).
         "interpretations", "negative_results",
+        # What changed since a point (filter.since), with the interpretations it affects.
+        "changes",
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
@@ -388,12 +390,15 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
                 conn, target_id=run["device_target_id"] or run["target_id"],
                 device=bool(run["device_target_id"]), kind=request.kind,
                 filters=request.filter, limit=request.limit, cursor=request.cursor,
+                current_hunt_id=hunt_id,
             )
         except KnowledgeQueryError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     result["rows"] = [
         _arsenal_routes._redact_agent_payload(_json_safe_row(row)) for row in result["rows"]
     ]
+    if request.kind == "changes":
+        result = _arsenal_routes._redact_agent_payload(_json_safe_row(result))
     return {"hunt_id": hunt_id, **result}
 
 

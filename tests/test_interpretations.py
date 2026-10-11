@@ -132,11 +132,15 @@ def test_reuse_needs_identical_active_applicable_and_unknown_is_not_unchanged():
     for other in ({"negative_state": "experiment_inconclusive"}, {"negative_state": "hypothesis_refuted"},
                   {"status": "superseded"}, {"status": "retracted"}):
         assert reuse_decision({**entry, **other}, key)["skip"] is False
-    assert applicability({"status": "active"}) == {
-        "state": "unknown", "tracked": False,
-        "reason": "dependency changes are not tracked yet; unknown is never treated as unchanged"}
+    untracked = applicability({"status": "active"})
+    assert untracked["state"] == "unknown" and untracked["tracked"] is False
+    assert "never treated as unchanged" in untracked["reason"]["note"]
     assert applicability({"status": "superseded"})["state"] == "superseded"
     assert applicability({"status": "retracted"})["state"] == "historical"
+    # Retracted and superseded entries are never applicable, whatever was recorded for them.
+    for status in ("superseded", "retracted"):
+        assert applicability({"status": status, "applicability": "applicable"})["state"] != "applicable"
+        assert reuse_decision({**entry, "status": status, "applicability": "applicable"}, key)["skip"] is False
 
 
 def test_kind_and_negative_state_shape():
@@ -217,6 +221,8 @@ class _Connection:
     """Answers the briefing's live reads with one interpretation headline (unit fixture)."""
 
     async def fetch(self, query, *args):
+        if "GROUP BY applicability" in query:
+            return [{"applicability": "unknown", "count": 2}]
         if "GROUP BY kind, negative_state, status" in query:
             return [{"kind": "next_step", "negative_state": None, "status": "active", "count": 1},
                     {"kind": "note", "negative_state": None, "status": "active", "count": 1}]
@@ -241,6 +247,9 @@ def test_live_briefing_carries_interpretations_and_withholds_quoted_titles():
     result = asyncio.run(hunt_briefing.with_live_briefing(_Connection(), public_hunt_run(row), row))
     section = result["briefing"]["interpretations"]
     assert section["counts"]["active_by_kind"] == {"next_step": 1, "note": 1}
+    assert section["applicability"]["active_by_state"] == {"unknown": 2}
+    # A section this fixture cannot answer says so instead of failing the briefing.
+    assert result["briefing"]["changed_since_last_hunt"]["available"] is False
     assert section["open_next_steps"][0]["title"] is None
     assert section["open_next_steps"][0]["agent_claim"]["title"] == "Check /admin"
     inconclusive = section["inconclusive_experiments"][0]
