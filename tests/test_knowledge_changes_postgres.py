@@ -62,14 +62,15 @@ def recorded_input(raw):
 
 
 async def _request(conn, hunt_id, *, path='/api/invoices/17', status=403, keys=('error',), digest='1' * 64,
-                   session=SESSION, method='GET', at=None, **extra):
+                   session=SESSION, method='GET', at=None, scope='complete', **extra):
     """Fixture: a finished http.request action of a Hunt. Its input summary is written through the
     real redaction step; the response summary stands in for what the capability returned."""
     action = uuid4()
     raw = {'method': method, 'path': path, **({'session_ref': session} if session else {}), **extra}
     observations = [{'kind': 'http_observation', 'request': {'method': method},
                      'response': {'status': status, 'content_type': 'application/json; charset=utf-8',
-                                  'json_keys': list(keys), 'body_sha256': digest}}]
+                                  'json_keys': list(keys), 'body_sha256': digest,
+                                  'body_digest_scope': scope, 'truncated': scope != 'complete'}}]
     await conn.execute("""INSERT INTO hunt_actions(id,hunt_run_id,capability_name,status,input_summary,result_summary,
             completed_at) VALUES($1,$2,'http.request','completed',$3::jsonb,$4::jsonb,$5)""",
         action, UUID(hunt_id), json.dumps(recorded_input(raw)),

@@ -53,7 +53,8 @@ def test_endpoint_rules_removal_is_significant_inventory_growth_is_minor():
 
 
 def test_response_rules_status_media_type_and_keys_are_significant_body_alone_is_minor():
-    before = {"action_id": "a", "status": 403, "media_type": "application/json", "json_keys_sha256": "k1"}
+    before = {"action_id": "a", "status": 403, "media_type": "application/json", "json_keys_sha256": "k1",
+              "body_complete": True}
     item = _item("response", before)
     assert compare_response(item, None) == []  # nothing newer observed: no change, as of that observation
     same = dict(before)
@@ -67,8 +68,8 @@ def test_response_rules_status_media_type_and_keys_are_significant_body_alone_is
 
 def test_a_body_change_is_significant_for_a_negative_result():
     item = _item("response", {"action_id": "a", "status": 200, "media_type": "application/json",
-                              "json_keys_sha256": "k"})
-    same = {"status": 200, "media_type": "application/json", "json_keys_sha256": "k"}
+                              "json_keys_sha256": "k", "body_complete": True})
+    same = {"status": 200, "media_type": "application/json", "json_keys_sha256": "k", "body_complete": True}
     changes = compare_response(item, same, recorded_body="1" * 64, newer_body="2" * 64, body_significant=True)
     assert _significance(changes) == {"body_digest": SIGNIFICANT}
     assert compare_response(item, same, recorded_body="1" * 64, newer_body="1" * 64, body_significant=True) == []
@@ -76,13 +77,36 @@ def test_a_body_change_is_significant_for_a_negative_result():
     assert _significance(missing) == {"body_digest": INCOMPARABLE}
 
 
+def test_a_prefix_digest_of_a_truncated_body_is_never_unchanged():
+    whole = {"action_id": "a", "status": 200, "media_type": "application/json", "json_keys_sha256": None,
+             "body_complete": False}
+    item = _item("response", whole)
+    # Equal prefix digests and the empty key set of unparseable JSON say nothing about the rest.
+    changes = compare_response(item, dict(whole), recorded_body="1" * 64, newer_body="1" * 64, body_significant=True)
+    assert _significance(changes) == {"json_keys_sha256": INCOMPARABLE, "body_digest": INCOMPARABLE}
+    assert decide({"items": [item]}, changes, [c for c in changes if c["significance"] == INCOMPARABLE]) == "unknown"
+    # A complete body on one side only is no better; an entry recorded before completeness was kept
+    # (no body_complete) is treated the same way.
+    complete = {**whole, "body_complete": True, "json_keys_sha256": "k"}
+    assert INCOMPARABLE in _significance(compare_response(_item("response", complete), whole,
+                                                          recorded_body="1" * 64, newer_body="1" * 64,
+                                                          body_significant=True)).values()
+    legacy = {k: v for k, v in complete.items() if k != "body_complete"}
+    assert INCOMPARABLE in _significance(compare_response(_item("response", legacy), complete,
+                                                          recorded_body="1" * 64, newer_body="1" * 64,
+                                                          body_significant=True)).values()
+    # The status still counts on its own.
+    assert _significance(compare_response(item, {**whole, "status": 403}))["status"] == SIGNIFICANT
+
+
 def test_body_digests_of_different_formats_are_never_compared():
     assert digest_format("1" * 64) == "sha256"
     assert digest_format("scrypt-v1:" + "ab" * 16) == "scrypt-v1"
     assert digest_format("hmac-installation:" + "cd" * 32) == "hmac-installation"
     assert digest_format("") is None and digest_format("other") == "unrecognized"
-    item = _item("response", {"action_id": "a", "status": 200, "media_type": None, "json_keys_sha256": None})
-    newer = {"status": 200, "media_type": None, "json_keys_sha256": None}
+    item = _item("response", {"action_id": "a", "status": 200, "media_type": None, "json_keys_sha256": None,
+                              "body_complete": True})
+    newer = {"status": 200, "media_type": None, "json_keys_sha256": None, "body_complete": True}
     changes = compare_response(item, newer, recorded_body="1" * 64, newer_body="scrypt-v1:" + "ab" * 16)
     assert _significance(changes) == {"body_digest": INCOMPARABLE}
     assert decide({"items": [item]}, changes, changes) == "unknown"  # incomparable is not unchanged
