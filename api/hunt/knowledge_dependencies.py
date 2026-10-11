@@ -386,7 +386,7 @@ PLAIN_REQUEST_KEYS = frozenset({"method", "path", "origin", "session_ref"})
 
 
 def canonical_origin(value: Any) -> str | None:
-    """``scheme://host[:port]`` lower-cased, the default port dropped; None for anything else
+    """``scheme://host or scheme://host:port`` lower-cased, the default port dropped; None for anything else
     (user info, a path, a query or a fragment, a scheme other than http or https)."""
     if not isinstance(value, str) or not value or len(value) > 300:
         return None
@@ -702,7 +702,7 @@ def bind_experiment(conditions: Mapping[str, Any], cited: list[Mapping[str, Any]
                                             + ", ".join(sorted(set(conditions) - BINDABLE_FIELDS))]}
     origin = canonical_origin(conditions.get("origin"))
     if origin is None:
-        return {"bound": False, "reasons": ["the conditions name no origin (scheme://host[:port]) to compare with "
+        return {"bound": False, "reasons": ["the conditions name no origin (scheme://host or scheme://host:port) to compare with "
                                             "the request"]}
     method = str(conditions.get("method") or "").upper() or None
     route = conditions.get("route")
