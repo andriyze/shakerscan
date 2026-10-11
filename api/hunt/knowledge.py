@@ -138,7 +138,7 @@ async def _endpoint_group_page(
 async def query_knowledge_page(
     conn: Any, *, target_id: Any, kind: str, device: bool = False,
     filters: Mapping[str, Any] | None = None, limit: int = 100,
-    cursor: str | None = None,
+    cursor: str | None = None, current_hunt_id: Any = None,
 ) -> dict[str, Any]:
     kind = "receipts" if kind == "tool_receipts" else kind
     if kind == "service_intelligence":
@@ -150,6 +150,22 @@ async def query_knowledge_page(
             return await query_service_knowledge(conn, target_id=target_id, device=device, filters=filters, limit=limit, cursor=cursor)
         except ValueError as exc:
             raise KnowledgeQueryError(str(exc)) from exc
+    if kind == "changes":
+        from .knowledge_changes import ChangeQueryError, target_changes
+        supplied = dict(filters or {})
+        if set(supplied) - {"since"}:
+            raise KnowledgeQueryError("Unsupported knowledge filters: " + ", ".join(sorted(set(supplied) - {"since"})))
+        if cursor is not None:
+            raise KnowledgeQueryError("changes is one bounded report; it has no cursor")
+        since = supplied.get("since") or "last_hunt"
+        if not isinstance(since, str) or len(since) > 100:
+            raise KnowledgeQueryError("since must be a bounded string")
+        try:
+            report = await target_changes(conn, target_id, device=device, since=since,
+                                          current_hunt_id=current_hunt_id, limit=min(int(limit), 25))
+        except ChangeQueryError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
+        return {**report, "supported": True, "count": 0, "rows": [], "has_more": False, "next_cursor": None}
     if kind == "negative_results":
         from .interpretations import negative_results
         supplied = dict(filters or {})

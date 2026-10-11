@@ -92,8 +92,19 @@ def asset_capability_specs(spec, schema, kinds):
           'model':{'type':'string','maxLength':120,'description':'Your model’s name (attribution only).'}},
          ('kind','title')),
         ('knowledge.check_experiment',('Look up what is recorded about one exact experiment on this target (every '
-         'condition equal) before repeating it. Nothing is skipped automatically while applicability is unknown.'),
+         'condition equal) before repeating it. skip is true only for an applicable experiment_completed_negative '
+         'whose conditions match a plain request (no query, headers or body) your own cited http.request made: '
+         'method, route (placeholders only for ids, each covered by a named object), objects in the path, its '
+         'session_ref as the only principal or anonymous, a technique starting with http.request, and no other '
+         'condition fields. Unknown is never unchanged. Skip is advice, never a block.'),
          {'conditions':conditions},('conditions',)),
+        ('knowledge.changes',('What changed on this target since a point, from existing records (endpoint inventory, '
+         'Scans, earlier http.request responses, services, subdomain discovery, findings, Hunts), with the '
+         'interpretations each change affects and the significance rules. Sends no traffic and starts nothing.'),
+         {'since':{'type':'string','maxLength':100,
+                   'description':'last_hunt (default), release (the latest Scan-detected deployment change), '
+                                 'scan:<id>, hunt:<id>, or an ISO-8601 time with a time zone.'},
+          'limit':{'type':'integer','minimum':1,'maximum':25}},()),
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
           'name':{'type':'string','maxLength':255},

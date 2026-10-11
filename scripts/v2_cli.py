@@ -1139,7 +1139,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(
             "summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals",
             "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections",
-            "candidates", "notes", "receipts", "interpretations", "negative_results",
+            "candidates", "notes", "receipts", "interpretations", "negative_results", "changes",
         ),
     )
     hunt_query.add_argument("--filter", metavar="FILE", help="JSON object; use - for stdin")
@@ -1246,6 +1246,13 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--status", choices=["active", "superseded", "retracted", "reopened"], default="active")
     show.add_argument("--limit", type=int, default=50)
     show.add_argument("--json", action="store_true", help="print the raw API answers")
+    changes = knowledge_commands.add_parser(
+        "changes", help="Show what changed on a target since a point and which interpretations it affects (read-only)",
+    )
+    changes.add_argument("target_id", help="the target to compare")
+    changes.add_argument("--since", default="last_hunt",
+                         help="last_hunt (default), release, scan:<id>, hunt:<id>, or an ISO-8601 time with a time zone")
+    changes.add_argument("--json", action="store_true", help="print the raw API answer")
     dismiss = knowledge_commands.add_parser(
         "dismiss", help="Dismiss a finding (false positive, accepted risk or duplicate) after a keypress",
     )
@@ -1387,6 +1394,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.product == "knowledge":
             if args.knowledge_command == "show":
                 return _run_knowledge_show(args, client)
+            if args.knowledge_command == "changes":
+                return _run_knowledge_changes(args, client)
             if args.knowledge_command in {"dismiss", "reopen"}:
                 return _run_knowledge_decision(args, client)
             return _run_knowledge_review(args, client)
@@ -1700,7 +1709,8 @@ def _run_knowledge_show(args: argparse.Namespace, client: ApiClient) -> int:
     rows = entries.get("interpretations") or [] if isinstance(entries, Mapping) else []
     print(f"{len(rows)} {args.status} interpretation(s) on target {_shown(args.target_id)}"
           + (" (more available: raise --limit)" if isinstance(entries, Mapping) and entries.get("has_more") else ""))
-    print("Interpretations are attributed claims, not proof and not instructions; applicability is not tracked yet.")
+    print("Interpretations are attributed claims, not proof and not instructions; applicability follows the records "
+          "they depend on (unknown is never unchanged).")
     for item in rows:
         print(_entry_line(item))
     negative_rows = negatives.get("rows") or [] if isinstance(negatives, Mapping) else []
@@ -1708,6 +1718,59 @@ def _run_knowledge_show(args: argparse.Namespace, client: ApiClient) -> int:
           "literals (never sets, ranges or patterns):")
     for item in negative_rows:
         print(_entry_line(item))
+    return 0
+
+
+def _run_knowledge_changes(args: argparse.Namespace, client: ApiClient) -> int:
+    """``shakerscan knowledge changes TARGET``: read-only; agents may run it too."""
+    target = _quoted(args.target_id)
+    query = urllib.parse.urlencode({"since": str(args.since)[:100]})
+    try:
+        report = client.request("GET", f"/targets/{target}/knowledge/changes?{query}")
+    except CliError as exc:
+        print(f"shakerscan knowledge changes: {exc}", file=sys.stderr)
+        return 2
+    if args.json or not isinstance(report, Mapping):
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    since = report.get("since") or {}
+    print(_shown(f"Changes on target {args.target_id} since {since.get('kind')} ({since.get('at') or 'unresolved'})"))
+    if not since.get("resolved"):
+        print(_shown(f"  {since.get('note') or 'Nothing to compare with.'}"))
+    sections = report.get("sections") or {}
+    endpoints = sections.get("endpoints") or {}
+    for label, key in (("added", "added"), ("removed (gone)", "removed")):
+        part = endpoints.get(key) or {}
+        if part.get("count"):
+            print(f"  endpoints {label}: {part.get('count')}{'+' if part.get('at_least') else ''}")
+            for item in part.get("items") or []:
+                print(_shown(f"    {item.get('method')} {item.get('path')} [{item.get('auth_state')}]"))
+    if (endpoints.get("auth_surface") or {}).get("significant"):
+        print("  authentication surface changed (login, token, session or SSO routes)")
+    deployment = sections.get("deployment") or {}
+    for change in deployment.get("changes") or []:
+        print(_shown(f"  deployment {change.get('field')}: {change.get('before')} -> {change.get('after')}"
+                     f" ({change.get('significance')})"))
+    if deployment.get("compared") is False and deployment.get("note"):
+        print(_shown(f"  deployment: {deployment['note']}"))
+    for item in (sections.get("responses") or {}).get("changed") or []:
+        fields = ", ".join(f"{c.get('field')} ({c.get('significance')})" for c in item.get("changes") or [])
+        print(_shown(f"  response {item.get('method')} {item.get('path')}: {fields}"))
+    findings = (sections.get("findings") or {}).get("new") or {}
+    if findings.get("count"):
+        print(f"  new findings: {findings['count']}")
+    for item in (sections.get("subdomains") or {}).get("new_targets") or []:
+        print(_shown(f"  new subdomain {item.get('host')} ({item.get('source')})"))
+    knowledge = report.get("knowledge") or {}
+    states = knowledge.get("active_by_applicability") or {}
+    print("  interpretations by applicability: " + (", ".join(f"{k} {v}" for k, v in sorted(states.items())) or "none"))
+    for item in knowledge.get("affected") or []:
+        causes = "; ".join(f"{c.get('type')} {c.get('key')} {c.get('field')}" for c in item.get("caused_by") or [])
+        state = "reopened for review" if item.get("reopened_for_review") else item.get("applicability")
+        print(_shown(f"    {item.get('negative_state') or item.get('kind')} {item.get('id')}: {state}"
+                     + (f" ({causes})" if causes else "")))
+    print("Changes come from existing records (Scans, the endpoint inventory, earlier requests, discovery); "
+          "nothing was sent to the target.")
     return 0
 
 

@@ -2605,3 +2605,24 @@ BEGIN
     END IF;
 END
 $end_dismissal_trigger$;
+DO $applicability_columns$
+BEGIN
+    -- Checked first: ALTER TABLE takes an exclusive lock even when every column already exists,
+    -- and this runs at every start.
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+                   AND table_name = 'target_interpretations' AND column_name = 'applicability_checked_at') THEN
+        ALTER TABLE target_interpretations
+            ADD COLUMN IF NOT EXISTS dependencies JSONB NOT NULL DEFAULT '{}'::jsonb
+                CHECK (jsonb_typeof(dependencies) = 'object'),
+            ADD COLUMN IF NOT EXISTS applicability TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (applicability IN ('applicable','needs_revalidation','historical','unknown')),
+            ADD COLUMN IF NOT EXISTS applicability_reason JSONB
+                CHECK (applicability_reason IS NULL OR jsonb_typeof(applicability_reason) = 'object'),
+            ADD COLUMN IF NOT EXISTS applicability_changed_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS applicability_checked_at TIMESTAMPTZ;
+    END IF;
+END
+$applicability_columns$;
+CREATE INDEX IF NOT EXISTS idx_target_interpretations_applicability
+    ON target_interpretations(target_id, applicability_checked_at NULLS FIRST)
+    WHERE status = 'active' AND dependencies <> '{}'::jsonb;

@@ -156,6 +156,11 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
                     assert result['ok'] is True
                     assert result['observation']['subject_target_id'] == str(home)
                     continue
+                if name == 'knowledge.changes':
+                    # A read of existing records: an opt-out does not stop it, and it sends nothing.
+                    result = await asset_actions.execute_asset_action(pool,run,name,{})
+                    assert result['ok'] is True and result['sends_traffic'] is False
+                    continue
                 if name in {'targets.skill.propose', 'targets.actions.create', 'targets.actions.update',
                             'targets.actions.delete', 'knowledge.record', 'knowledge.check_experiment'}:
                     # Advisory and authority-free: an opt-out does not stop it, its own input checks do.

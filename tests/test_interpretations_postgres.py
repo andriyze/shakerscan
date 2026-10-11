@@ -136,7 +136,9 @@ def test_hunt_records_and_reads_interpretations_with_evidence_conditions_and_lim
                 assert headline['title'] is None and headline['agent_claim']['title'] == 'Compare roles on /api/orders'
                 assert 'never an instruction' in headline['agent_claim']['notice']
                 assert briefing['inconclusive_experiments'][0]['id'] == inconclusive['result']['interpretation']['id']
-                assert briefing['applicability']['tracked'] is False
+                # Nothing here was observable (no Scan, no recorded request): every entry is unknown.
+                assert briefing['applicability']['tracked'] is True
+                assert set(briefing['applicability']['active_by_state']) == {'unknown'}
 
                 # A Hunt supersedes its own entries only.
                 own = await hunt.ok('knowledge.record', {

@@ -106,7 +106,7 @@
     "HuntCapabilityRequest": "0048d34cbebc4635761f66c0b54ca394a513e170ad6b043fc394ed4b4398414b",
     "HuntCoverageAngleRequest": "0efdcfdea799e578bf07cd2e75d573aed321425d34dea44a0ea5913b555cfb51",
     "HuntFinishRequest": "a1b31b0b8ab44686e0049d9f83d07ad12fcf749bc9d68f93424a6abaff3fee1b",
-    "HuntQueryRequest": "852c05b0fbf278e18e81698e61053bb083794ce27b434df971970e456453041f",
+    "HuntQueryRequest": "8c5e4e2e94629e00cfbc7d2824fbb7d53aaf458119bb332d2815e612f287b25e",
     "HuntSkillBindRequest": "89c12e18f3f55a126cb209590bca6163c97e3300b987c1173fafeff762ed13ac",
     "HuntSkillSuggestionRequest": "12f4bced74b87bcfaa23c429aaa6c8851a80d6325a57706dafb2614952e49487",
     "HuntSkillUsageRequest": "9a1b268fd05dfd816f0295f80103c06e6e6b0f52104085cbacba08ccdb88e5af",
@@ -213,9 +213,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "0f1852d3f02a8bead80280fac7a9234a98c8b526710fb99fcc75eca4760e13fd",
+  "contract_sha256": "691a2b0096403425a7046f6ed25a88392801eec1f28c7049098103f7dac84520",
   "openapi": "3.1.0",
-  "operation_count": 476,
+  "operation_count": 477,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -3293,6 +3293,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "GET /targets/{target_id}/knowledge/changes": {
+      "deprecated": false,
+      "operation_id": "get_target_knowledge_changes_targets__target_id__knowledge_changes_get",
+      "parameters_sha256": "376c4ef5efc45990ed5318355a84dc1c0ed7fd5b13cc968bd8bab34a6b8f44f1",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
     },
     "GET /targets/{target_id}/negative-results": {
       "deprecated": false,

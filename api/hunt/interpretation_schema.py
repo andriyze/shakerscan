@@ -4,6 +4,9 @@ One row is one attributed entry about a target: an agent's (or an operator's) ob
 hypothesis, explanation, next step or note, or a narrow negative result. Entries are appended and
 superseded, never rewritten: only the lifecycle columns (status and who changed it) are updated.
 
+The dependency and applicability columns are added after the table (not inside it), so a table
+created by an earlier 2.9.0 build and a fresh install end with the same columns in the same order.
+
 ``finding_dismissed`` is a human decision. Besides the route checks, the table itself refuses a
 dismissal that an operator did not write.
 """
@@ -14,6 +17,9 @@ NEGATIVE_STATES = ("experiment_completed_negative", "experiment_inconclusive", "
 PROVENANCES = ("observed", "inferred", "quoted_from_target")
 STATUSES = ("active", "superseded", "retracted", "reopened")
 DISMISSAL_REASONS = ("false_positive", "accepted_risk", "duplicate")
+#: Whether an entry's recorded dependencies still hold (hunt/knowledge_changes.py). ``superseded``
+#: is the entry's status, not a stored applicability; ``unknown`` is never treated as unchanged.
+APPLICABILITY_STATES = ("applicable", "needs_revalidation", "historical", "unknown")
 MAX_TITLE_CHARACTERS = 200
 #: The stored ceiling; a Hunt writes at most MAX_AGENT_BODY_CHARACTERS (see interpretations.py).
 #: Larger bodies hold an operator's entry or the imported advisory knowledge (12,000 characters).
@@ -97,4 +103,25 @@ BEGIN
     END IF;
 END
 $end_dismissal_trigger$;
+DO $applicability_columns$
+BEGIN
+    -- Checked first: ALTER TABLE takes an exclusive lock even when every column already exists,
+    -- and this runs at every start.
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+                   AND table_name = 'target_interpretations' AND column_name = 'applicability_checked_at') THEN
+        ALTER TABLE target_interpretations
+            ADD COLUMN IF NOT EXISTS dependencies JSONB NOT NULL DEFAULT '{{}}'::jsonb
+                CHECK (jsonb_typeof(dependencies) = 'object'),
+            ADD COLUMN IF NOT EXISTS applicability TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (applicability IN ({_values(APPLICABILITY_STATES)})),
+            ADD COLUMN IF NOT EXISTS applicability_reason JSONB
+                CHECK (applicability_reason IS NULL OR jsonb_typeof(applicability_reason) = 'object'),
+            ADD COLUMN IF NOT EXISTS applicability_changed_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS applicability_checked_at TIMESTAMPTZ;
+    END IF;
+END
+$applicability_columns$;
+CREATE INDEX IF NOT EXISTS idx_target_interpretations_applicability
+    ON target_interpretations(target_id, applicability_checked_at NULLS FIRST)
+    WHERE status = 'active' AND dependencies <> '{{}}'::jsonb;
 """

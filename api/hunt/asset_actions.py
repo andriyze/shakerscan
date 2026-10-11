@@ -30,7 +30,7 @@ NAMES = frozenset({'targets.create','targets.update','credentials.grant','collec
                    'targets.skill.read','targets.skill.create','targets.skill.update','targets.skill.delete',
                    'targets.skill.propose',
                    'targets.actions.read','targets.actions.create','targets.actions.update','targets.actions.delete',
-                   'knowledge.record','knowledge.check_experiment'})
+                   'knowledge.record','knowledge.check_experiment','knowledge.changes'})
 
 
 async def execute_asset_action(pool, run, name, values):
@@ -72,6 +72,16 @@ async def _perform_asset_action(pool, run, name, values):
         async with pool.acquire() as conn:
             if name == 'knowledge.check_experiment':
                 return {'ok':True, **await check_experiment(conn, target_id, values.get('conditions'))}
+            if name == 'knowledge.changes':
+                from .knowledge_changes import ChangeQueryError, target_changes
+                device = bool(run.get('device_target_id'))
+                try:
+                    report = await target_changes(conn, run.get('device_target_id') or target_id, device=device,
+                                                  since=values.get('since') or 'last_hunt',
+                                                  current_hunt_id=run['id'], limit=values.get('limit') or 25)
+                except ChangeQueryError as exc:
+                    raise HTTPException(422, {'error':'invalid_since', 'message':str(exc)}) from None
+                return {**report, 'is_proof':False, 'authority_granted':False}
             # Advisory: one attributed entry. Needs no delegation; never changes a finding, guidance,
             # authority or this Hunt's snapshot. The writer is this Hunt, never caller-supplied.
             try:
