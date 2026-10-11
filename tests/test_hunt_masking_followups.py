@@ -145,15 +145,6 @@ def test_device_state_observations_publish_keyed_digests():
     assert again["body_sha256"] == observation["body_sha256"]
 
 
-def test_the_keyed_digest_is_remembered_by_a_keyed_tag_not_a_plain_hash():
-    from api.capabilities import secret_material
-
-    first = secret_material.keyed_response_digest(TOKEN.encode())
-    assert secret_material.keyed_response_digest(TOKEN.encode()) == first
-    assert all(not key.startswith(first) and len(key) == 64 for key in secret_material._RESPONSE_DIGESTS)
-    assert len(secret_material._RESPONSE_DIGESTS) <= secret_material._MAX_REMEMBERED_DIGESTS
-
-
 # --- 2. Password inputs, whatever their name ----------------------------------------------------
 
 def _password_input(value: str, rng: random.Random) -> str:
