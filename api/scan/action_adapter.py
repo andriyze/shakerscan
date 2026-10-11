@@ -54,10 +54,21 @@ try:
     )
     from capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
+    from capabilities.graphql_probe import (
+        GRAPHQL_PROBE_PARSER_VERSION,
+        GRAPHQL_REQUEST_HEADERS,
+        INTROSPECTION_QUERY as GRAPHQL_INTROSPECTION_QUERY,
+        check_endpoint as check_graphql_endpoint,
+        endpoint_of as graphql_endpoint_of,
+        graphql_request_url,
+        is_graphql_endpoint_url,
+        seed_endpoint_urls as graphql_seed_endpoint_urls,
+    )
     from capabilities.exposure_probe import (
         DIRECTORY_FOLLOW_UP_FLOOR,
         EXPOSURE_PROBE_MIN_START_SECONDS,
         exposure_probe_timeout,
+        graphql_seed_probes,
         SENSITIVE_SEED_PATHS,
         SOFT_404_CONTROL_COUNT,
         EXPOSURE_PROBE_PARSER_VERSION,
@@ -127,10 +138,21 @@ except (ImportError, ModuleNotFoundError):
     )
     from ..capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from ..capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
+    from ..capabilities.graphql_probe import (
+        GRAPHQL_PROBE_PARSER_VERSION,
+        GRAPHQL_REQUEST_HEADERS,
+        INTROSPECTION_QUERY as GRAPHQL_INTROSPECTION_QUERY,
+        check_endpoint as check_graphql_endpoint,
+        endpoint_of as graphql_endpoint_of,
+        graphql_request_url,
+        is_graphql_endpoint_url,
+        seed_endpoint_urls as graphql_seed_endpoint_urls,
+    )
     from ..capabilities.exposure_probe import (
         DIRECTORY_FOLLOW_UP_FLOOR,
         EXPOSURE_PROBE_MIN_START_SECONDS,
         exposure_probe_timeout,
+        graphql_seed_probes,
         SENSITIVE_SEED_PATHS,
         SOFT_404_CONTROL_COUNT,
         EXPOSURE_PROBE_PARSER_VERSION,
@@ -2626,14 +2648,21 @@ class DatabaseNeutralScanActionDispatcher:
         # The seed wordlist is probed once, in the first slice; later slices scan
         # their own endpoint window for accidental disclosure signatures.
         probes: list[tuple[str, str]] = []
+        # Request headers of the probes that need them (the fixed GraphQL reads).
+        probe_headers: dict[str, tuple[tuple[str, str], ...]] = {}
+        graphql_seeds = graphql_seed_probes(base_origin)
         if start == 0:
             probes.extend(
                 (f"{base_origin}{path}", "seed_path") for path in SENSITIVE_SEED_PATHS
             )
+            for url, headers in graphql_seeds:
+                probes.append((url, "graphql_seed"))
+                probe_headers[url] = headers
         # Content discovery requests the same curated paths, so a seed that answered
         # is also a discovered endpoint; probing it twice would spend a request on a
         # body this batch has already classified.
         seed_urls = {f"{base_origin}{path}" for path in SENSITIVE_SEED_PATHS}
+        seed_urls.update(url for url, _headers in graphql_seeds)
         window = endpoints.entries[start:min(len(endpoints.entries), start + count)]
         for entry in window:
             try:
@@ -2643,6 +2672,13 @@ class DatabaseNeutralScanActionDispatcher:
             if url in seed_urls or is_never_requested(url):
                 continue
             probes.append((url, "discovered_endpoint"))
+            # A discovered GraphQL route is also read with the fixed introspection document.
+            if is_graphql_endpoint_url(url):
+                graphql_url = graphql_request_url(url, GRAPHQL_INTROSPECTION_QUERY)
+                if graphql_url not in seed_urls:
+                    seed_urls.add(graphql_url)
+                    probes.append((graphql_url, "discovered_graphql_endpoint"))
+                    probe_headers[graphql_url] = GRAPHQL_REQUEST_HEADERS
 
         # Content disclosure is often served by middleware that overstates
         # Content-Length or closes mid-body (a directory index is the common
@@ -2692,7 +2728,7 @@ class DatabaseNeutralScanActionDispatcher:
             request = ReplayRequest(
                 request_id=f"exposure:{ordinal}", ordinal=ordinal,
                 name="exposure probe", folder="", method="GET", url=url,
-                headers=(), body=b"", body_mode="none",
+                headers=probe_headers.get(url, ()), body=b"", body_mode="none",
                 auth_type="none", has_sensitive_material=False,
             )
             result = await transport.send(
@@ -2906,6 +2942,151 @@ class DatabaseNeutralScanActionDispatcher:
                 "soft_404_controls_requested": absent_bodies is not None,
                 "checkpoint_mode": "after_each_candidate",
                 "secret_values_visible": False,
+            },
+        )
+
+    async def _graphql_verify_batch(
+        self, action: ScanAction, heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        """Bounded read-only GraphQL checks: field suggestions and alias/duplicate limits.
+
+        Candidates are the conventional GraphQL locations (first slice only) and the
+        discovered routes of this slice that name a GraphQL transport. Every request is a GET
+        of a fixed document (``capabilities.graphql_probe``); none selects an application field.
+        """
+        endpoints = await self._work_manifest(
+            action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+        )
+        if endpoints is None:
+            return self._skip(action, "manifest_unavailable")
+        raw_slice = action.capability_args.get("slice")
+        start = raw_slice.get("start") if isinstance(raw_slice, Mapping) else None
+        count = raw_slice.get("count") if isinstance(raw_slice, Mapping) else None
+        if (
+            isinstance(start, bool) or not isinstance(start, int) or start < 0
+            or isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 100
+        ):
+            raise ScanActionAdapterError("graphql batch slice is invalid")
+        origin = self._exposure_origin()
+        if origin is None:
+            return self._skip(action, "no_canonical_origin")
+        load_attempts = getattr(self.backend, "load_batch_attempts", None)
+        checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
+        if not callable(load_attempts) or not callable(checkpoint_attempt):
+            raise ScanActionAdapterError("graphql backend lacks durable checkpoints")
+        completed = {
+            str(item.get("attempt_id") or ""): dict(item)
+            for item in await load_attempts(action.action_id) if isinstance(item, Mapping)
+        }
+        manifest_digest = endpoints.reference().manifest_digest
+        candidates = list(graphql_seed_endpoint_urls(origin[0])) if start == 0 else []
+        # A slice entry that is not a GraphQL route was never this family's work: recorded as
+        # inapplicable so coverage does not count it as an unattempted candidate.
+        inapplicable: list[Mapping[str, Any]] = []
+        for entry in endpoints.entries[start:min(len(endpoints.entries), start + count)]:
+            try:
+                url = execution_url_for_endpoint(entry)
+            except (ScanWorkManifestError, KeyError):
+                url = ""
+            if url and is_graphql_endpoint_url(url):
+                candidates.append(graphql_endpoint_of(url))
+            else:
+                inapplicable.append({
+                    "kind": "candidate_inapplicable", "family": "graphql",
+                    "candidate_id": str(entry.get("route_id") or ""),
+                    "reason": "not_a_graphql_route",
+                })
+        candidates = list(dict.fromkeys(candidates))
+        transport = self._scan_replay_transport(action, principal_slot="anonymous", private=True)
+        started_at = datetime.now(timezone.utc).isoformat()
+        consumed = {name: 0 for name in action.requested_budget}
+        http_ceiling = int(action.requested_budget.get("http_requests") or 0)
+        wall_deadline = time.monotonic() + max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
+        observations: list[Mapping[str, Any]] = list(inapplicable)
+        errors: list[str] = []
+        attempted = resumed = 0
+        incomplete = False
+        ordinal = start * 1000
+
+        def can_send() -> bool:
+            return (not self.cancelled() and consumed["http_requests"] < http_ceiling
+                    and wall_deadline - time.monotonic() >= 1.0)
+
+        async def send(url: str) -> tuple[int | None, bytes]:
+            nonlocal ordinal
+            ordinal += 1
+            request = ReplayRequest(
+                request_id=f"graphql:{ordinal}", ordinal=ordinal, name="graphql probe",
+                folder="", method="GET", url=url, headers=GRAPHQL_REQUEST_HEADERS, body=b"",
+                body_mode="none", auth_type="none", has_sensitive_material=False,
+            )
+            result = await transport.send(
+                request, target=self.target, follow_redirects=False,
+                timeout_seconds=max(1.0, min(15.0, wall_deadline - time.monotonic())),
+            )
+            consumed["http_requests"] = min(http_ceiling, consumed["http_requests"] + 1)
+            if result.error_code:
+                errors.append(str(result.error_code))
+            await heartbeat()
+            return result.status_code, bytes(result.response_body or b"")
+
+        for endpoint in candidates:
+            attempt_id = hashlib.sha256(f"{manifest_digest}:graphql:{endpoint}".encode()).hexdigest()
+            prior = completed.get(attempt_id)
+            if prior is not None:
+                resumed += 1
+                attempted += 1
+                observations.extend(prior.get("observations") or ())
+                continue
+            if not can_send():
+                break
+            outcome = await check_graphql_endpoint(endpoint, send, can_send=can_send)
+            proven = bool(outcome["proofs"])
+            bundled = ({
+                "kind": "candidate_attempt", "attempt_id": attempt_id,
+                "candidate_id": attempt_id[:32], "family": "graphql",
+                "status": "success" if outcome["complete"] else "partial",
+                "proof_state": "verified" if proven else "not_proven",
+                "graphql_endpoint": bool(outcome["graphql"]),
+                "introspection_enabled": bool(outcome["introspection"]),
+                "budget_consumed": {"http_requests": int(outcome["requests"])},
+            }, *outcome["proofs"])
+            observations.extend(bundled)
+            if not outcome["complete"]:
+                incomplete = True  # not checkpointed: a resumed batch checks it again
+                break
+            attempted += 1
+            if not self.cancelled():
+                await checkpoint_attempt(action.action_id, {
+                    "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
+                    "status": "success", "observations": bundled,
+                    "budget_consumed": {"http_requests": int(outcome["requests"])},
+                    "proof_state": "verified" if proven else "not_proven",
+                })
+        unattempted = max(0, len(candidates) - attempted)
+        partial = bool(unattempted or incomplete)
+        if "tool_wall_seconds" in consumed:
+            consumed["tool_wall_seconds"] = min(
+                int(action.requested_budget["tool_wall_seconds"]), max(1, consumed["http_requests"]),
+            )
+        stopped_by = (
+            CapabilityResultReason.CANCELLED.value if self.cancelled()
+            else CapabilityResultReason.HTTP_REQUEST_BUDGET_EXHAUSTED.value
+            if consumed["http_requests"] >= http_ceiling
+            else CapabilityResultReason.TIMED_OUT.value
+        )
+        return self._receipt(
+            action, status="partial" if partial else "success",
+            parser_version=GRAPHQL_PROBE_PARSER_VERSION, started_at=started_at,
+            observations=tuple(observations),
+            errors=tuple(([stopped_by] if partial else []) + errors[:20]), consumed=consumed,
+            partial=partial, timed_out=partial and stopped_by == CapabilityResultReason.TIMED_OUT.value,
+            redacted_execution={
+                "action_id": action.action_id, "manifest_digest": manifest_digest,
+                "slice": {"start": start, "count": count},
+                "candidate_count": len(candidates), "attempted_count": attempted,
+                "resumed_count": resumed, "unattempted_count": unattempted,
+                "checkpoint_mode": "after_each_endpoint",
             },
         )
 
@@ -4575,10 +4756,37 @@ class DatabaseNeutralScanActionDispatcher:
     async def _finalize(self, action: ScanAction) -> CapabilityReceipt:
         self._private_replay_plans.clear()
         self._private_requests.clear()
+        report = await self.build_scan_report(exclude_action_id=action.action_id)
+        now = datetime.now(timezone.utc).isoformat()
+        return self._receipt(
+            action,
+            status="success",
+            parser_version="pure-receipt-finalizer/v1",
+            started_at=now,
+            observations=({"kind": "scan_report", "report": report},),
+            redacted_execution={
+                "action_id": action.action_id,
+                "target_traffic": False,
+                "plan_digest": self.plan.plan_digest,
+            },
+        )
+
+    async def build_scan_report(
+        self, *, exclude_action_id: str = "finalize.report",
+        plan: ScanActionPlan | None = None, plan_revision: Any = None,
+    ) -> dict[str, Any]:
+        """The pure finalizer's report over every settled action of the current plan.
+
+        ``finalize.report`` uses it; a cancelled Scan, whose finalizer action was itself
+        cancelled, uses it to keep what its settled actions confirmed. It sends no traffic
+        and raises when an action of the plan is not terminal.
+        """
+        plan = plan or self.plan
+        plan_revision = plan_revision if plan_revision is not None else self.plan_revision
         results = {}
         observations = {}
-        for planned in self.plan.actions:
-            if planned.action_id == action.action_id:
+        for planned in plan.actions:
+            if planned.action_id == exclude_action_id:
                 continue
             stored = await self.backend.load_result(planned.action_id)
             if stored is None:
@@ -4596,8 +4804,8 @@ class DatabaseNeutralScanActionDispatcher:
                 )
         execution_plan = self.options.get("scan_execution_plan")
         report = finalize_scan_report(
-            plan=self.plan,
-            plan_revision=self.plan_revision,
+            plan=plan,
+            plan_revision=plan_revision,
             target_url=self.target_url,
             action_results=results,
             observations=observations,
@@ -4610,22 +4818,10 @@ class DatabaseNeutralScanActionDispatcher:
                 else None
             ),
             work_manifest_references=unique_work_manifest_reference_dicts(
-                planned.capability_args for planned in self.plan.actions
+                planned.capability_args for planned in plan.actions
             ),
         )
-        now = datetime.now(timezone.utc).isoformat()
-        return self._receipt(
-            action,
-            status="success",
-            parser_version="pure-receipt-finalizer/v1",
-            started_at=now,
-            observations=({"kind": "scan_report", "report": report},),
-            redacted_execution={
-                "action_id": action.action_id,
-                "target_traffic": False,
-                "plan_digest": self.plan.plan_digest,
-            },
-        )
+        return report
 
     async def __call__(
         self,
@@ -4698,6 +4894,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._nosqli_verify_batch(action, heartbeat)
         if action.capability_name == "authz_surface.verify_batch":
             return await self._authz_surface_batch(action, heartbeat)
+        if action.capability_name == "graphql.verify_batch":
+            return await self._graphql_verify_batch(action, heartbeat)
         if action.capability_name == "authz.verify":
             return await self._authz(action, heartbeat)
         raise ScanActionAdapterError(

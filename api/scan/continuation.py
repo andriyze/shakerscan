@@ -45,6 +45,7 @@ _LEGACY_CONTINUATION_CAPABILITIES = (
     "authz.verify",
     "authz_surface.verify_batch",
     "exposure.verify_batch",
+    "graphql.verify_batch",
     "nosqli.verify_batch",
     "sqli.prove_batch",
     "sqli.request_verify",

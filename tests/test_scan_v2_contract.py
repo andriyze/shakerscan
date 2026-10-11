@@ -236,7 +236,7 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
     assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough", "deep"]
     assert [item["name"] for item in contract["families"]] == [
         "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
-        "sensitive_exposure", "nosqli", "authz_surface",
+        "sensitive_exposure", "nosqli", "authz_surface", "graphql",
     ]
     assert contract["passive_coverage"]["default_families"] == [
         "recon", "nuclei_passive", "sensitive_exposure",
@@ -321,7 +321,9 @@ def test_active_family_admission_is_derived_from_the_check_registry():
     # Exact, so a reclassification is a reviewed decision rather than a silent drift.
     # sensitive_exposure is read-only GET traffic: ADR 0001 places it with the
     # immutable content-discovery wordlist and the reviewed passive templates.
-    assert checked_active == {"nuclei_active", "xss", "sqli", "bola", "nosqli", "authz_surface"}
+    assert checked_active == {
+        "nuclei_active", "xss", "sqli", "bola", "nosqli", "authz_surface", "graphql",
+    }
     assert checked_passive == {"recon", "nuclei_passive", "sensitive_exposure"}
 
 

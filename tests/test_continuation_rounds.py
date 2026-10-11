@@ -304,3 +304,30 @@ def test_shared_compiler_accepts_static_principal_without_inventing_an_auth_acti
     prepared = compile_next_continuation(**fixture, revision_number=1)
     assert prepared is not None
     assert not any(action.action_id.startswith("inputs.auth_") for action in prepared.plan.actions)
+
+
+def test_a_cancelled_scan_gets_no_more_work_but_a_finalize_only_revision_for_its_report():
+    """Cancellation refuses work rounds; the finalize-only revision adds none and lets the report
+    of what settled be built (scan.cancelled_report)."""
+    from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
+    from api.scan.continuation import ScanContinuationError
+    from api.scan.continuation_rounds import compile_continuation_round
+    from tests.test_scan_orchestrator import _result
+
+    fixture = _shared_round_fixture()
+    _settle_round_fixture(fixture)
+    last = fixture["parent_plan"].actions[-1]
+    fixture["parent_results"][last.action_id] = _result(
+        last, status=CapabilityResultStatus.CANCELLED, reason=CapabilityResultReason.CANCELLED,
+    )
+    with pytest.raises(ScanContinuationError, match="cancelled Scan cannot continue"):
+        compile_continuation_round(
+            **fixture, revision_number=1, include_finalizer=False, finalize_only=False,
+        )
+    prepared = compile_continuation_round(
+        **fixture, revision_number=1, include_finalizer=True, finalize_only=True,
+    )
+    parent = fixture["parent_plan"]
+    appended = prepared.plan.actions[len(parent.actions):]
+    assert [action.action_id for action in appended] == ["finalize.report"]
+    assert prepared.revision.parent_plan_digest == parent.plan_digest

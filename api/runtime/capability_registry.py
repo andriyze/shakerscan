@@ -1111,6 +1111,34 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=False,
         ),
         CapabilitySpec(
+            "graphql.verify_batch",
+            "Check discovered GraphQL endpoints for field suggestions and missing alias or "
+            "duplicate-field limits with fixed GET documents over one bounded slice.",
+            # Active: the documents deliberately exercise a hypothesis (a misspelt field, a
+            # hundred aliases). Every request is still a GET that selects no application field.
+            "internal", "active", _HTTP_TARGETS, "graphql.verify_batch", "1",
+            "active_testing",
+            {"http_requests": 200, "tool_wall_seconds": 120},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "deterministic_proof_contract": True,
+                "single_worker_batch": True,
+                "durable_attempt_checkpoints": True,
+            },
+            _schema({
+                "endpoint_manifest_ref": {"type": "object"},
+                "slice": {"type": "object"},
+                "profile": {"type": "string"},
+                "proof_policy": {"type": "string"},
+            }, required=("endpoint_manifest_ref", "slice", "profile", "proof_policy")),
+            "graphql-probe-batch/v1",
+            ("candidate_attempt", "graphql_proof"),
+            arsenal_status="wired",
+            retest_contract="rerun-exact-graphql-check",
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "authz_surface.verify_batch",
             "Prove broken function-level authorization by comparing anonymous and "
             "authenticated access across a bounded route slice.",

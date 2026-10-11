@@ -27,6 +27,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from .graphql_probe import (
+    GRAPHQL_IDE_HEADERS,
+    GRAPHQL_IDE_PATHS,
+    GRAPHQL_REQUEST_HEADERS,
+    INTROSPECTION_QUERY,
+    graphql_request_url,
+    ide_page as graphql_ide_page,
+    introspection_summary as graphql_introspection_summary,
+    is_ide_location as graphql_ide_location,
+    is_introspection_request as graphql_introspection_request,
+    seed_endpoint_urls as graphql_seed_endpoint_urls,
+)
 from .secret_material import (
     SecretEvidence,
     fingerprinted_secret_evidence,
@@ -45,7 +57,7 @@ except ModuleNotFoundError:  # package layout in host-side tests
     from scanner.redaction import redact_text as _shared_redact_text
 
 
-EXPOSURE_PROBE_PARSER_VERSION = "exposure-probe/v3"
+EXPOSURE_PROBE_PARSER_VERSION = "exposure-probe/v4"
 
 # Common discovery locations across frameworks and hosting stacks. Location
 # alone never establishes sensitivity, confidentiality, or a verified finding.
@@ -105,6 +117,26 @@ SENSITIVE_SEED_PATHS: tuple[str, ...] = (
     "/dump.sql",
 )
 
+
+
+def graphql_seed_probes(base_origin: str) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
+    """Fixed GraphQL reads probed once with the seed list: ``(url, headers)``.
+
+    Each conventional endpoint is sent the fixed introspection document over GET (read-only by
+    GraphQL over HTTP: a GET carries only a query, and this one selects only ``__schema``);
+    each IDE location is requested as a browser would. Nothing varies with the target.
+    """
+    return (
+        *(
+            (graphql_request_url(url, INTROSPECTION_QUERY), GRAPHQL_REQUEST_HEADERS)
+            for url in graphql_seed_endpoint_urls(base_origin)
+        ),
+        *((f"{base_origin}{path}", GRAPHQL_IDE_HEADERS) for path in GRAPHQL_IDE_PATHS),
+    )
+
+
+GRAPHQL_SEED_PROBE_COUNT = len(graphql_seed_probes(""))
+
 # Requests the probe never sends, even when discovery reports the route: each one
 # makes the target do expensive work (a full JVM heap dump) rather than read a file.
 _NEVER_REQUESTED_PATH_SUFFIXES: tuple[str, ...] = ("/heapdump",)
@@ -125,7 +157,7 @@ def exposure_first_slice_hold(slice_count: int) -> dict[str, int]:
     One request and one wall second per seed, the soft-404 controls and the
     directory follow-up floor are held explicitly.
     """
-    seeds = len(SENSITIVE_SEED_PATHS) + SOFT_404_CONTROL_COUNT
+    seeds = len(SENSITIVE_SEED_PATHS) + GRAPHQL_SEED_PROBE_COUNT + SOFT_404_CONTROL_COUNT
     endpoints = max(0, int(slice_count))
     return {
         "http_requests": seeds + endpoints + DIRECTORY_FOLLOW_UP_FLOOR,
@@ -190,6 +222,10 @@ _CLASS_SEVERITY: Mapping[str, str] = {
     "phpinfo_disclosure": "medium",
     "debug_interface_exposure": "medium",
     "verbose_error_disclosure": "medium",
+    # The whole schema is readable without credentials, and an in-browser IDE is served to
+    # anyone; both are configuration that production GraphQL deployments turn off.
+    "graphql_introspection_enabled": "low",
+    "graphql_ide_exposure": "low",
 }
 
 # The deterministic proof contract each promotable class satisfies. Registered in
@@ -210,6 +246,8 @@ EXPOSURE_PROOF_CONTRACTS: Mapping[str, str] = {
     "phpinfo_disclosure": "phpinfo_exposure/v1",
     "debug_interface_exposure": "debug_interface_exposure/v1",
     "verbose_error_disclosure": "verbose_error_exposure/v1",
+    "graphql_introspection_enabled": "graphql_introspection_exposure/v1",
+    "graphql_ide_exposure": "graphql_ide_exposure/v1",
 }
 
 _HTML_TYPES = ("text/html", "application/xhtml")
@@ -402,7 +440,7 @@ def _json_document(text: str) -> Any:
         return None
     try:
         return json.loads(stripped)
-    except ValueError:
+    except (ValueError, RecursionError):  # a hostile, deeply nested body
         return None
 
 
@@ -607,6 +645,10 @@ def _web_config(path: str, text: str) -> ExposureSignature | None:
 
 
 def _json_signature(path: str, text: str, document: Any) -> ExposureSignature | None:
+    # Introspection is proven by the answer to the introspection request only; a schema file
+    # served as a static document says nothing about the server answering introspection.
+    if graphql_introspection_request(path) and graphql_introspection_summary(document) is not None:
+        return _sig("graphql_introspection_enabled", '"__schema"')
     actuator = _actuator_pairs(document)
     if actuator is not None:
         secrets = _secrets(text, actuator, server_side=True)
@@ -804,7 +846,7 @@ def _structured_text(path: str, text: str) -> ExposureSignature | None:
     return None
 
 
-def _structured_html(text: str) -> ExposureSignature | None:
+def _structured_html(text: str, path: str = "") -> ExposureSignature | None:
     """Proofs for server-generated diagnostic pages, which are HTML by nature."""
     if _PHPINFO_TITLE_RE.search(text) and _PHPINFO_VERSION_RE.search(text):
         rows: list[tuple[str, object]] = [
@@ -818,6 +860,10 @@ def _structured_html(text: str) -> ExposureSignature | None:
         return _sig("debug_interface_exposure", "werkzeug_debugger_console", severity="high")
     if _PPROF_RE.search(text):
         return _sig("debug_interface_exposure", "go_pprof_index")
+    # Only at an IDE location: a documentation page showing the same setup code is not an IDE.
+    ide = graphql_ide_page(text) if graphql_ide_location(path) else None
+    if ide is not None:
+        return _sig("graphql_ide_exposure", "(?i)graphiql|graphqlplayground")
     return None
 
 
@@ -865,7 +911,7 @@ def classify_exposure(
         _HTML_PREFIX_RE.match(text[:512])
     )
 
-    structured = _structured_html(text) if is_html else _structured_text(path, text)
+    structured = _structured_html(text, path) if is_html else _structured_text(path, text)
     if structured is not None:
         return structured
 
