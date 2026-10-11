@@ -12753,7 +12753,28 @@ def _public_campaign_action_row(row: Any) -> dict[str, Any]:
         "result_json",
     ):
         payload[key] = _decode_json_value(payload.get(key)) or ([] if key != "result_json" else {})
+    payload["result_json"] = _masked_stored_authz_replay(payload["result_json"])
     return payload
+
+
+def _masked_stored_authz_replay(result_json: Any) -> Any:
+    """A stored replay's observed responses masked as they are read: rows written before 2.9.0
+    hold them as the target sent them (no backfill rewrites them)."""
+    replay = result_json.get("authz_replay") if isinstance(result_json, dict) else None
+    if not isinstance(replay, dict) or not isinstance(replay.get("observations"), list):
+        return result_json
+    observations = []
+    for observation in replay["observations"]:
+        response = observation.get("response") if isinstance(observation, dict) else None
+        if isinstance(response, dict):
+            shown = masked_endpoint_response({
+                "headers": response.get("headers") if isinstance(response.get("headers"), dict) else {},
+                "body": response.get("body_sample"),
+            })
+            observation = {**observation, "response": {
+                **response, "headers": shown["headers"], "body_sample": shown["body"]}}
+        observations.append(observation)
+    return {**result_json, "authz_replay": {**replay, "observations": observations}}
 
 
 def _public_campaign_row(row: Any) -> dict[str, Any]:

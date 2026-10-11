@@ -90,6 +90,7 @@ async def _read_bounded_response(
     body_limit: int = MAX_BODY_BYTES,
     lookahead: bytearray | None = None,
     lookahead_limit: int = 0,
+    lookahead_state: dict[str, bool] | None = None,
 ) -> tuple[bytes, str, int, bool, bool]:
     """Read at most one byte past ``body_limit`` under one absolute deadline.
 
@@ -98,7 +99,9 @@ async def _read_bounded_response(
     byte past the body ceiling proves truncation without draining an unbounded response.
     Returned length and digest describe observed bytes; ``truncated`` says they are a prefix.
     ``lookahead`` receives up to ``lookahead_limit`` bytes past the body: read only to mask the
-    body where it is cut, never recorded or digested.
+    body where it is cut, never recorded or digested. ``lookahead_state["complete"]`` says whether
+    the stream ended within what was read; when it did not, the masking withholds what the cut
+    may have split.
     """
     import httpx
 
@@ -125,6 +128,7 @@ async def _read_bounded_response(
     except TimeoutError:
         truncated = True
         deadline_exceeded = True
+    ended = False
     if truncated and not deadline_exceeded and lookahead is not None and len(lookahead) < lookahead_limit:
         # Within its own short wait, and never past the request deadline: a stream that pauses
         # after the ceiling (a long poll, server-sent events) ends the lookahead, not the request.
@@ -136,8 +140,12 @@ async def _read_bounded_response(
                         lookahead.extend(chunk[:lookahead_limit - len(lookahead)])
                         if len(lookahead) >= lookahead_limit:
                             break
+                    else:
+                        ended = True
             except (TimeoutError, OSError, httpx.HTTPError):
-                pass  # the body is complete without it; the masking cuts at a safe boundary
+                pass  # a pause or an error past the ceiling ends the lookahead, not the request
+    if lookahead_state is not None:
+        lookahead_state["complete"] = not truncated or ended
     digest = hashlib.sha256(bytes(observed)).hexdigest()
     return bytes(retained), digest, len(observed), truncated, deadline_exceeded
 
@@ -572,6 +580,7 @@ async def execute_bound_http_request(
     response = None
     body = b""
     body_lookahead = bytearray()
+    lookahead_state: dict[str, bool] = {"complete": True}
     final_url = url
     request_deadline = time.perf_counter() + max(0.001, float(timeout))
     try:
@@ -647,6 +656,7 @@ async def execute_bound_http_request(
                         body_limit=max(1, min(int(response_body_limit), MAX_PRIVATE_BODY_BYTES)),
                         lookahead=body_lookahead,
                         lookahead_limit=CUT_LOOKAHEAD_CHARS,
+                        lookahead_state=lookahead_state,
                     )
                 finally:
                     await response.aclose()
@@ -799,6 +809,8 @@ async def execute_bound_http_request(
         response,
         body,
         lookahead=bytes(body_lookahead),
+        lookahead_complete=lookahead_state["complete"],
+        body_truncated=bool(body_truncated),
         selected_headers=[
             str(name).strip().lower()
             for name in selected_headers or []

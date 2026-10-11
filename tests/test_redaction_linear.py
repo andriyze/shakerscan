@@ -138,33 +138,100 @@ def test_rewritten_rules_redact_exactly_as_before(family):
 _OLD_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]*):(?!\[withheld:[1-9][0-9]{0,3}\]@)[^@\s/]+@")
 
 
-def _intended_userinfo_difference(text: str) -> bool:
-    """Where the shared reader differs from the old regex by design: a reference (the regex split
-    one at its own ``:``), a run with more than one ``@`` (a password ends at the authority's last
-    one), a ``#`` (it ends an authority), a quote (a quoted URL ends at its own quote)."""
-    return "[withheld:" in text or "#" in text or any(char in text for char in "\"'`") or any(
-        run.count("@") > 1 for run in re.split(r"\s", text))
+# The connection-string rule main also had (removed: the userinfo reader covers it).
+_OLD_CONNECTION_RE = re.compile(
+    r"(?i)\b((?:postgres(?:ql)?|mysql|mongodb|redis|amqp|https?|ftp)://[^\s:@/]+:)"
+    r"(?!\[withheld:[1-9][0-9]{0,3}\]@)([^\s@/]+)(@)")
 
 
-def test_the_userinfo_rule_differs_from_the_old_regex_only_where_intended():
+def _old_redact_text(text: str) -> str:
+    """``redact_text`` as main ran it before the 2.9.0 masking review."""
+    for index, rule in enumerate(redaction._TEXT_PATTERNS):
+        if index == 9:
+            text = _OLD_USERINFO_RE.sub(r"\1:***@", text)
+        else:
+            pattern, replacement = _REFERENCE_REWRITTEN.get(index, rule)
+            text = pattern(text) if replacement is None else pattern.sub(replacement, text)
+    return _OLD_CONNECTION_RE.sub(r"\1***\3", text)
+
+
+def _crosses_strings(text: str, match: re.Match[str]) -> bool:
+    """The old match read past a string's end into the next string: a quote in its user name, or
+    a URL opened by a quote whose password holds that quote and the next member (claim 5)."""
+    authority = match.group(0).split("://", 1)[1]
+    user, password = authority.split(":", 1)
+    if re.search(r"[\"'`]", user):
+        return True
+    start = match.start() + match.group(0).index("://")
+    while start > 0 and re.match(r"[A-Za-z0-9+.-]", text[start - 1]) and match.start() < start:
+        start -= 1
+    quote = text[start - 1] if start > 0 and text[start - 1] in "\"'`" else None
+    return quote is not None and re.search(re.escape(quote) + r"\s*[,:]\s*" + re.escape(quote), password) is not None
+
+
+def _withheld_before_but_shown_now(text: str) -> list[str]:
+    """Every password the old rules withheld that the new output shows more often than the old
+    one did. One direction only: redaction may withhold more than before, never less."""
+    old, new = _old_redact_text(text), redact_text(text)
+    shown = []
+    for pattern, group in ((_OLD_USERINFO_RE, 0), (_OLD_CONNECTION_RE, 2)):
+        for match in pattern.finditer(text):
+            value = match.group(group)
+            if group == 0:
+                value = value[value.index("://") + 3:][:-1].split(":", 1)[1]
+            # The intended differences: the old regex split a reference at its own ``:``, and read
+            # a user name across a string's closing quote into the next string (claim 5).
+            if "[withheld:" in match.group(0) or _crosses_strings(text, match):
+                continue
+            if len(value) >= 4 and new.count(value) > old.count(value):
+                shown.append(value)
+    return shown
+
+
+def test_the_userinfo_rule_never_shows_a_password_the_old_rules_withheld():
     rng = random.Random("r2-userinfo-differential")
-    atoms = _ATOMS["userinfo"] + ('"', "'")
-    differing = 0
-    for _ in range(3_000):
+    atoms = _ATOMS["userinfo"] + ('"', "'", "#", "?", "Pa#ss", "o'neil", "S3cr?t")
+    for _ in range(5_000):
         text = "".join(rng.choice(atoms) for _ in range(rng.randint(1, 40)))
-        new = redact_text(text)
-        assert "[withheld:***" not in new, repr(text)  # never splits a reference
-        before = text
-        for index, rule in enumerate(redaction._TEXT_PATTERNS):
-            if index == 9:
-                before = _OLD_USERINFO_RE.sub(r"\1:***@", before)
-            else:
-                pattern, replacement = _REFERENCE_REWRITTEN.get(index, rule)
-                before = pattern(before) if replacement is None else pattern.sub(replacement, before)
-        if new != before:
-            differing += 1
-            assert _intended_userinfo_difference(text), repr(text)
-    assert differing  # the generator reaches the differences
+        assert "[withheld:***" not in redact_text(text), repr(text)  # never splits a reference
+        assert _withheld_before_but_shown_now(text) == [], repr(text)
+
+
+_SCHEMES = ("https", "http", "redis", "postgres", "mongodb+srv", "amqp", "ftp", "git+ssh", "s3", "x-y")
+_CONTEXTS = ("{}", '"{}"', "'{}'", '{{"u":"{}"}}', '<a href="{}">', "url={}", "({})", "`{}`", "[{}]",
+             "<{}>", "{},x", "DATABASE_URL={}\n", "&lt;{}&gt;", "<a href='{}'>")
+
+
+@pytest.mark.parametrize("alphabet", [
+    "abcdefXYZ0123456789!$&'()*+,;=-._~",                   # RFC 3986 userinfo characters
+    "abcdefXYZ0123456789!$&'()*+,;=-._~%:?#[]\"<>{}|^`\\",  # and what hand-written DSNs hold
+])
+def test_generated_url_passwords_are_withheld_at_least_as_before(alphabet):
+    """Seeded (2.9.0 review): every generated password the old rules withheld stays withheld."""
+    rng = random.Random(f"userinfo-{len(alphabet)}")
+    for _ in range(20_000):
+        password = "Pq" + "".join(rng.choice(alphabet) for _ in range(rng.randint(2, 12))) + "Zk"
+        url = f"{rng.choice(_SCHEMES)}://{rng.choice(['', 'u', 'admin', 'a.b'])}:{password}@" + rng.choice(
+            ["h", "db.example", "10.0.0.1:5432", "h/path", "h?x=1"])
+        text = rng.choice(_CONTEXTS).format(url)
+        old, new = _old_redact_text(text), redact_text(text)
+        quote = text[text.index(url) - 1] if text.index(url) and text[text.index(url) - 1] in "\"'`" else None
+        if quote and re.search(re.escape(quote) + r"\s*[,:]\s*" + re.escape(quote), password):
+            continue  # two strings, not one URL (claim 5): the one intended difference besides references
+        pieces = {password[k:k + 4] for k in range(len(password) - 3)}
+        assert not any(piece in new and piece not in old for piece in pieces), (text, new)
+
+
+@pytest.mark.parametrize("text", [
+    "upstream connect failed: postgres://app:Pa#ss?w0rd@db.internal:5432/app",
+    "MongoServerSelectionError mongodb://root:Hunt3r#2024@mongo:27017",
+    "redis://:S3cr?tV4lue@cache:6379/0 refused",
+    "<a href='ftp://u:o'neil99@h/'>",
+])
+def test_passwords_with_unencoded_delimiters_stay_withheld(text):
+    assert redact_text(text) == _old_redact_text(text)
+    for secret in ("Pa#ss", "Hunt3r", "S3cr?t", "neil99"):
+        assert secret not in redact_text(text)
 
 
 @pytest.mark.parametrize("text, expected", [

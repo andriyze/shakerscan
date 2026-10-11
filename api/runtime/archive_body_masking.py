@@ -1582,6 +1582,64 @@ def _userinfo_value(raw: str, encoded: bool, quote: str | None, markup: bool) ->
     return _url_decoded(_url_decoded(raw) if encoded else raw)
 
 
+# The loose reading of a URL userinfo, after the exact one: an authority runs from ``://`` to the
+# first blank or ``/``, its user name to the first ``:``, its password to the run's last ``@``.
+# It errs to withholding: a password written with an unencoded ``#``, ``?`` or quote
+# (``postgres://app:Pa#ss?w0rd@db``, ``'ftp://u:o'neil@h/'``) is not a URL the exact reader can
+# parse, but it is still a password. A user name holding a quote crosses from one string into
+# the next (``"http://a","p":"x:y@z"``): two strings, not one authority, left alone.
+_LOOSE_AUTHORITY_STOP_RE = re.compile(r"[\s/]")
+_QUOTE_RE = re.compile(r"[\"'`]")
+_LOOSE_SCHEME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-")
+
+
+def mask_url_userinfo_loose(text: Any) -> Any:
+    """Withhold the password of every URL userinfo the loose reading finds (above). Linear: each
+    authority run is read once (a ``://`` inside one would end it at its ``/``)."""
+    if not isinstance(text, str) or "://" not in text or "@" not in text:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    separator = text.find("://")
+    while separator >= 0:
+        start = separator + 3
+        stop = _LOOSE_AUTHORITY_STOP_RE.search(text, start)
+        end = stop.start() if stop else len(text)
+        at = text.rfind("@", start, end)
+        found = _userinfo_colon(text, start, at, False) if at > start else None
+        colon = found[0] if found is not None else -1
+        if (
+            separator > 0 and text[separator - 1] in _LOOSE_SCHEME_CHARS
+            and colon >= 0 and "@" not in text[start:colon] and start >= cursor
+        ):
+            raw = text[colon + 1:at]
+            # A quote in the user name ends a string (``"http://a","p":"x``, ``api:"https://h",
+            # ver:"1"``): two strings, not one authority.
+            # So does a password that holds the URL's own opening quote followed by the next
+            # member (``"http://api:8080","key":"…","owner":"ops@corp"``).
+            opening = _scheme_quote(text, separator)
+            joined = _QUOTE_RE.search(text, start, colon) or (
+                opening is not None and re.search(
+                    re.escape(opening) + r"\s*[,:]\s*" + re.escape(opening), raw) is not None)
+            if raw and raw != MASK and not WITHHELD_MARKER_RE.fullmatch(raw) and not joined:
+                pieces.append(text[cursor:colon + 1])
+                position = 0
+                # A reference an earlier pass put in it keeps its place, as in mask_url_userinfo.
+                for marker in WITHHELD_MARKER_RE.finditer(raw):
+                    if marker.start() > position:
+                        pieces.append(_withhold(raw[position:marker.start()]))
+                    pieces.append(marker.group(0))
+                    position = marker.end()
+                if position < len(raw):
+                    pieces.append(_withhold(raw[position:]))
+                cursor = at
+        separator = text.find("://", max(end, start))
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def mask_url_userinfo_redacted(text: Any) -> Any:
     """``mask_url_userinfo`` with every password ``***``, never a reference, whether or not a Hunt
     is collecting: the scanner's free-text redactor (``redaction.redact_text``) runs it, and its
@@ -1591,7 +1649,7 @@ def mask_url_userinfo_redacted(text: Any) -> Any:
         return text
     token = _COLLECTOR.set(None)
     try:
-        return mask_url_userinfo(mask_url_userinfo(text, form="escaped"))
+        return mask_url_userinfo_loose(mask_url_userinfo(mask_url_userinfo(text, form="escaped")))
     finally:
         _COLLECTOR.reset(token)
 
@@ -1668,7 +1726,12 @@ def masked_header_value(name: Any, value: Any, limit: int) -> str:
     text = str(value if value is not None else "")
     if str(name).strip().lower() in URL_BEARING_HEADERS:
         text = mask_url_secrets(text)
-    text = mask_provider_secrets(mask_url_userinfo(text))
+    return bounded_masked_text(mask_provider_secrets(mask_url_userinfo_loose(mask_url_userinfo(text))), limit)
+
+
+def bounded_masked_text(text: str, limit: int) -> str:
+    """Masked ``text`` cut to ``limit`` characters outside anything withheld: a cut that would
+    split a reference (``[withheld:1`` of ``[withheld:12]``) or ``***`` ends in ``***``."""
     if len(text) <= limit:
         return text
     prefix, straddled = _cut_outside_withheld(text, limit)
@@ -1696,7 +1759,7 @@ def _cut_outside_withheld(text: str, end: int) -> tuple[str, bool]:
 CUT_LOOKAHEAD_CHARS = 16_384
 
 
-def mask_before_cut(text: str, after: str, mask: Any) -> str:
+def mask_before_cut(text: str, after: str, mask: Any, *, after_complete: bool = True) -> str:
     """``text``, which a cut ended before ``after``, masked as ``text + after`` is masked.
 
     ``mask`` is the caller's whole masking of one text. The result is the longest prefix of the
@@ -1704,9 +1767,16 @@ def mask_before_cut(text: str, after: str, mask: Any) -> str:
     splits is withheld whole (the result ends in ``***`` there), and nothing of ``after`` is
     shown. Both passes are linear; with no ``after`` this is ``mask(text)``. Inside a Hunt a
     reference binds the whole value: the masking of the whole text numbers it first, and what the
-    masking of the cut text alone withheld beyond it (a piece of a value) is forgotten."""
+    masking of the cut text alone withheld beyond it (a piece of a value) is forgotten.
+
+    ``after_complete``: ``after`` runs to the end of the resource. When it does not, a value may
+    run past it, and the masking of both texts can show it alike: a value opened by a quote that
+    nothing in view closes is withheld from that quote on. When ``after`` is also short of
+    ``CUT_LOOKAHEAD_CHARS`` (the stream paused, or a deadline cut the body), the masking had too
+    little to read, and the cut text's last line is withheld whole."""
     if not after:
-        return mask(text)
+        shown = mask(text)
+        return shown if after_complete else _withhold_open_tail(shown, "", short=True)
     collector = _COLLECTOR.get()
     before = len(collector.values) if collector is not None else 0
     whole = mask(text + after)
@@ -1734,7 +1804,43 @@ def mask_before_cut(text: str, after: str, mask: Any) -> str:
         # not use up the collector's references or say how many secrets lie past the window.
         new = [number for number in collector.shown_numbers(shown) if number > before]
         collector.forget_after(max([before, *new]))
+    if not after_complete:
+        shown = _withhold_open_tail(shown, after, short=len(after) < CUT_LOOKAHEAD_CHARS)
     return shown
+
+
+# A quote that opens a value: after ``=``, ``:``, ``(``, ``[``, ``,`` or ``=>`` (blanks allowed).
+_VALUE_QUOTE_RE = re.compile(r"""(?:[=:(\[,]|=>)[ \t]*(["'`])""")
+
+
+def _withhold_open_tail(shown: str, after: str, *, short: bool) -> str:
+    """``shown`` with what a value cut by the end of everything read may hold withheld.
+
+    ``short``: the masking read too little past the cut to judge; the last line is withheld
+    (``***`` in its place). Otherwise the last line is withheld from the first value-opening
+    quote that neither the rest of the line nor ``after`` (up to its first line break) closes.
+    Linear: each quote closes or opens once."""
+    line_start = shown.rfind("\n") + 1
+    if short:
+        return shown if shown[line_start:] in ("", MASK) else shown[:line_start] + MASK
+    rest = after.split("\n", 1)[0]
+    line = shown[line_start:]
+    position = 0
+    while True:
+        opening = _VALUE_QUOTE_RE.search(line, position)
+        if opening is None:
+            return shown
+        quote = opening.group(1)
+        closing = _closing_quote(line, quote, opening.end(), len(line))
+        if closing >= 0:
+            position = closing + 1
+            continue
+        if _closing_quote(rest, quote, 0, len(rest)) >= 0 or len(line) - opening.end() == 0:
+            return shown  # closed after the cut (the whole text's masking read it), or nothing
+        tail = line[opening.end():]
+        if tail == MASK or WITHHELD_MARKER_RE.fullmatch(tail):
+            return shown
+        return shown[:line_start + opening.end()] + MASK
 
 
 def _sql_state(collector: "WithheldValues | None") -> Any:
@@ -1772,11 +1878,13 @@ def decode_cut(text: bytes, after: bytes, encoding: str = "utf-8") -> tuple[str,
             return bytes(text).decode("utf-8", errors="replace"), bytes(after).decode("utf-8", errors="replace")
 
 
-def mask_cut_bytes(text: bytes, after: bytes, mask: Any, encoding: str = "utf-8") -> str:
+def mask_cut_bytes(text: bytes, after: bytes, mask: Any, encoding: str = "utf-8", *,
+                   after_complete: bool = True) -> str:
     """``mask_before_cut`` of a body cut at a byte offset, ``after`` bounded by
     ``CUT_LOOKAHEAD_CHARS``."""
     head, tail = decode_cut(text, bytes(after[:CUT_LOOKAHEAD_CHARS * 4]), encoding)
-    return mask_before_cut(head, tail[:CUT_LOOKAHEAD_CHARS], mask)
+    return mask_before_cut(head, tail[:CUT_LOOKAHEAD_CHARS], mask,
+                           after_complete=after_complete and len(tail) <= CUT_LOOKAHEAD_CHARS)
 
 
 def mask_public_http_urls(result: dict[str, Any]) -> dict[str, Any]:
@@ -2954,7 +3062,7 @@ def mask_body_text(text: str, *, _depth: int = 0, window: bool = False) -> str:
         text = _mask_text_passes(text)
     # Over the whole text as written, JSON-led or not: a URL in a string the nested passes did not
     # decode (a string in a string in a string), never spanning a string's end.
-    text = mask_url_userinfo(text, form="escaped")
+    text = mask_url_userinfo_loose(mask_url_userinfo(text, form="escaped"))
     return mask_provider_secrets(text)
 
 
@@ -2994,6 +3102,7 @@ __all__ = [
     "mask_url_secrets",
     "mask_url_userinfo",
     "mask_url_userinfo_redacted",
+    "mask_url_userinfo_loose",
     "withhold_url_userinfo",
     "scrub_known_values",
     "withheld_body_notice",
@@ -3011,6 +3120,7 @@ __all__ = [
     "is_withheld_key",
     "mask_body_text",
     "mask_before_cut",
+    "bounded_masked_text",
     "masked_header_value",
     "mask_cut_bytes",
     "decode_cut",

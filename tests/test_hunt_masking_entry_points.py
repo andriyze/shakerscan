@@ -95,14 +95,14 @@ def test_a_ranged_window_past_a_label_was_shown_whole_and_is_now_withheld():
 
 
 @pytest.mark.parametrize("content_range, shown", [
-    ("bytes 0-49/50", True),          # the whole resource
+    ("bytes 0-49/50", False),         # a 206 is always an answer to a Range
     ("bytes 0-19/50", False),         # a prefix: the server cut its end
     ("bytes 20-49/50", False),        # a window past byte 0
     ("bytes 0-19/*", False),          # length unknown
     (None, False),                    # a 206 that says nothing
 ])
 def test_only_a_range_that_is_the_whole_resource_is_shown(content_range, shown):
-    body = b"x" * 50 if shown else b"x" * 20
+    body = b"x" * 50 if content_range == "bytes 0-49/50" else b"x" * 20
     headers = {"content-range": content_range} if content_range else {}
     summary = response_summary(httpx.Response(206, headers=headers, content=body), body)
     assert summary["body_sample"].startswith("[ranged body withheld") is not shown
@@ -443,11 +443,11 @@ def test_a_stream_that_pauses_after_the_ceiling_costs_only_the_lookahead_wait():
     async def run():
         response = httpx.Response(200, stream=Paused())
         started = time.perf_counter()
-        body, lookahead = await read_capped_body(response)
-        return body, lookahead, time.perf_counter() - started
+        body, lookahead, ended = await read_capped_body(response)
+        return body, lookahead, ended, time.perf_counter() - started
 
-    body, lookahead, elapsed = asyncio.run(run())
-    assert len(body) == MAX_BODY_BYTES + 1 and len(lookahead) == 99
+    body, lookahead, ended, elapsed = asyncio.run(run())
+    assert len(body) == MAX_BODY_BYTES + 1 and len(lookahead) == 99 and ended is False
     assert elapsed < LOOKAHEAD_WAIT_SECONDS + 1
 
 
@@ -487,5 +487,150 @@ def test_interactive_extract_masks_values_and_page_content():
     from api import session_manager
 
     source = open(session_manager.__file__, encoding="utf-8").read()
-    assert 'values.append(mask_body_text(val) if isinstance(val, str) else val)' in source
-    assert 'result["html"] = mask_body_text(await page.content())' in source
+    assert 'values.append(_masked_endpoint_text(val) if isinstance(val, str) else val)' in source
+    assert 'result["html"] = _masked_endpoint_text(await page.content())' in source
+    assert '== "password"' in source
+
+
+# --- Second review (PR #398) ------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, secret", [
+    ("upstream connect failed: postgres://app:Pa#ss?w0rd@db.internal:5432/app", "Pa#ss?w0rd"),
+    ("MongoServerSelectionError mongodb://root:Hunt3r#2024@mongo:27017", "Hunt3r#2024"),
+    ("redis://:S3cr?tV4lue@cache:6379/0 refused", "S3cr?tV4lue"),
+    ("<a href='ftp://u:o'neil99@h/'>", "o'neil99"),
+])
+def test_a_password_with_unencoded_delimiters_is_withheld_on_every_path(text, secret):
+    from scanner.redaction import redact_text
+
+    assert secret[:4] not in redact_text(text)
+    assert secret[:4] not in masking.mask_body_text(text)
+    shown, collector = _hunt(masking.mask_body_text, text)
+    assert secret[:4] not in shown and collector.values == [secret]
+
+
+def _paused_executor(monkeypatch, body: bytes, split: int, pause: float, timeout: int = 15):
+    from api.capabilities.http import execute_bound_http_request
+
+    class Paused(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield body[:split]
+            await asyncio.sleep(pause)
+            yield body[split:]
+
+    class _MockClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("transport", None)
+            super().__init__(transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, stream=Paused())), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+
+    async def run():
+        return await execute_bound_http_request(
+            "https://honey.fixture.test", {"method": "GET", "path": "/web.config"}, target=TARGET,
+            timeout_seconds=timeout)
+
+    return _hunt(asyncio.run, run())[0]
+
+
+@pytest.mark.parametrize("split, pause, timeout", [
+    (MAX_BODY_BYTES + 1, 1.0, 15),   # a pause just past the ceiling: the lookahead reads nothing
+    (MAX_BODY_BYTES - 3, 3.0, 1),    # a deadline cuts the body inside the value
+])
+def test_a_cut_the_lookahead_could_not_read_past_withholds_the_last_line(monkeypatch, split, pause, timeout):
+    body = _past_the_ceiling(WEB_CONFIG, WEB_VALUE)
+    result = _paused_executor(monkeypatch, body, split, pause, timeout)
+    assert WEB_VALUE[:4] not in json.dumps(result)
+
+
+LONG_VALUE = "".join("Qx7vKpWz9kLmTy3mNbPb8nVcRc2hXz"[i % 30] + str(i % 7) for i in range(20_000))
+
+
+@pytest.mark.parametrize("form", [
+    '<add key="ApiKey" value="%s" />', '<input type="hidden" name="csrf_token" value="%s">',
+    "$config['db_password'] = '%s';", 'SECRET_KEY="%s"\n', '{"private_key": "%s"}',
+])
+def test_a_value_longer_than_the_lookahead_is_withheld_from_its_opening_quote(form):
+    body = form % LONG_VALUE
+    start = body.index(LONG_VALUE)
+    for cut in (start + 5, start + 100):
+        after = body[cut:cut + masking.CUT_LOOKAHEAD_CHARS]
+        for hunt in (False, True):
+            call = (lambda: _hunt(masking.mask_before_cut, body[:cut], after, masking.mask_body_text,
+                                  after_complete=False)[0]) if hunt else (
+                lambda: masking.mask_before_cut(body[:cut], after, masking.mask_body_text, after_complete=False))
+            shown = call()
+            assert not any(LONG_VALUE[k:k + 4] in shown for k in range(0, 120)), (form, cut, shown[-40:])
+
+
+def test_a_closed_value_past_the_cut_keeps_the_window_visible():
+    body = 'var a="x";' * 4_000 + 'var b="' + "y" * 50 + '";'
+    cut = 19_000
+    shown = masking.mask_before_cut(body[:cut], body[cut:cut + masking.CUT_LOOKAHEAD_CHARS],
+                                    masking.mask_body_text, after_complete=False)
+    assert shown == masking.mask_body_text(body[:cut])
+
+
+@pytest.mark.parametrize("status, content_range", [
+    (200, "bytes 19-48/51"),    # a Range answered with 200
+    (206, "bytes 0-29/30"),     # a 206 that claims the whole resource
+    (416, "bytes */51"),
+])
+def test_any_ranged_answer_withholds_its_body(status, content_range):
+    """A 200 whose Content-Range is the whole resource and whose body is that long is shown."""
+    whole = b"x" * 30
+    assert response_summary(httpx.Response(200, headers={"content-range": "bytes 0-29/30"}, content=whole),
+                            whole)["body_sample"] == "x" * 30
+    body = f"SECRET_KEY={WEB_VALUE}\nHOST=x\n".encode()[11:41]
+    summary = response_summary(httpx.Response(status, headers={"content-range": content_range}, content=body), body)
+    assert summary["body_sample"].startswith("[ranged body withheld") and WEB_VALUE[:4] not in summary["body_sample"]
+
+
+def test_the_sample_cut_never_splits_a_reference():
+    text = "x" * 1_995 + "[withheld:12] tail"
+    assert masking.bounded_masked_text(text, 2_000) == "x" * 1_995 + "***"
+    body = ("A_TOKEN=Qx7vKpWz9kLmTy3m\n" * 13 + "x" * (2_000 - 13 * 21 - 3) + "\nZ_TOKEN=Wz9kLmTy3mNbPb8n\n").encode()
+    summary, _collector = _hunt(response_summary, httpx.Response(200, content=body), body)
+    assert not summary["body_sample"].rstrip("*").endswith("[withheld")
+    assert "[withheld:" not in summary["body_sample"][-12:] or summary["body_sample"].endswith("]")
+
+
+def test_a_source_map_reference_the_bundle_end_cuts_is_skipped():
+    password = "Hn4tGhPb8nVcQ"
+    source = ("var a=1;\n" * 50 + f"//# sourceMappingURL=https://deploy:{password}@maps.fixture.test/a.map\n").encode()
+    start = source.index(password.encode())
+    for offset in (6, 10):
+        result, _collector = _hunt(artifact_capability.analyze_javascript_bytes, source[:start + offset],
+                                   truncated=True)
+        assert password[:4] not in json.dumps(result) and result["source_maps"] == []
+
+
+def test_secret_named_headers_and_bare_tokens_in_a_tested_endpoint_are_withheld():
+    from api.session_manager import masked_endpoint_response
+
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijkLMNOP"
+    shown = masked_endpoint_response({
+        "body": f'[{{"id":1}}, "{jwt}", "Authorization header: Bearer zz0123456789abcdefQ"]',
+        "headers": {"X-Subject-Token": "gAAAAABmZ2tW8kQx9fake_fernet_token_value_1234567890",
+                    "X-Auth-Token": jwt, "X-Upstream-Auth": "Bearer zz0123456789abcdefQ",
+                    "Content-Type": "application/json"},
+        "json": None})
+    text = json.dumps(shown)
+    for secret in (jwt, "gAAAAABmZ2tW8kQx9", "zz0123456789abcdefQ"):
+        assert secret not in text, secret
+    assert shown["headers"]["Content-Type"] == "application/json"
+
+
+def test_replay_rows_stored_before_the_fix_are_masked_when_read():
+    import api.api as api_module
+
+    row = {"id": "a", "finding_ids": "[]", "hypothesis_ids": "[]", "evidence_object_ids": "[]",
+           "tool_receipt_ids": "[]", "blocked_by": "[]", "result_json": json.dumps({"authz_replay": {
+               "observations": [{"observed_status": 200, "response": {
+                   "status": 200, "headers": {"x-cache-backend": "redis://:Hn4tGhPb8nVc@c:6379"},
+                   "body_sample": '{"aws": "' + AWS_KEY + '"}'}}]}})}
+    public = api_module._public_campaign_action_row(row)
+    text = json.dumps(public)
+    assert AWS_KEY not in text and "Hn4tGhPb8nVc" not in text
+    assert public["result_json"]["authz_replay"]["observations"][0]["observed_status"] == 200

@@ -14,13 +14,15 @@ import httpx
 
 try:
     from runtime.archive_body_masking import (
-        CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
-        decode_cut, mask_before_cut, mask_body_text, mask_url_userinfo, withhold_url_userinfo,
+        CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_masked_text,
+        bounded_public_url, decode_cut, mask_before_cut, mask_body_text, mask_url_userinfo,
+        withhold_url_userinfo,
     )
 except ModuleNotFoundError:  # package import layout
     from api.runtime.archive_body_masking import (
-        CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
-        decode_cut, mask_before_cut, mask_body_text, mask_url_userinfo, withhold_url_userinfo,
+        CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_masked_text,
+        bounded_public_url, decode_cut, mask_before_cut, mask_body_text, mask_url_userinfo,
+        withhold_url_userinfo,
     )
 
 
@@ -349,17 +351,26 @@ def _masked_body(value: str, *, window: bool = False) -> str:
 _CONTENT_RANGE_RE = re.compile(r"\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$", re.I)
 
 
-def _partial_range(response: httpx.Response) -> str | None:
-    """The byte range a response holds when it is part of a resource (``bytes 40-99/500``, a
-    multipart range, a 206 that does not say), else ``None``."""
+def _partial_range(response: httpx.Response, body_bytes: int) -> str | None:
+    """The byte range a response holds when it may be part of a resource, else ``None``: any
+    response that names a range (a 206, or a 200 or a 416 with ``Content-Range``: a proxy or a
+    server may answer a Range either way) unless the range is the whole resource and the body is
+    that long. A 206 is always one: only a Range is answered with it."""
     content_range = str(response.headers.get("content-range") or "")
-    if response.status_code != 206:
-        return None  # a 416 or a HEAD names a range but holds no part of one
+    if response.status_code != 206 and not content_range:
+        return None
+    if response.status_code == 206:
+        return _range_label(content_range)  # only a Range is answered with a 206
     match = _CONTENT_RANGE_RE.match(content_range)
     if match and match.group(3) != "*":
         first, last, total = (int(match.group(index)) for index in (1, 2, 3))
-        if first == 0 and last + 1 >= total:
+        if first == 0 and last + 1 == total and body_bytes == total:
             return None
+    return _range_label(content_range)
+
+
+def _range_label(content_range: str) -> str:
+    match = _CONTENT_RANGE_RE.match(content_range)
     return f"bytes {match.group(1)}-{match.group(2)}" if match else "a byte range"
 
 
@@ -368,29 +379,35 @@ def _partial_range(response: httpx.Response) -> str | None:
 LOOKAHEAD_WAIT_SECONDS = 0.5
 
 
-async def read_capped_body(response: httpx.Response) -> tuple[bytes, bytes]:
-    """A streamed body up to one byte past ``MAX_BODY_BYTES``, and what follows it up to
-    ``CUT_LOOKAHEAD_CHARS`` bytes: read only to mask the body where it is cut, within
-    ``LOOKAHEAD_WAIT_SECONDS``; a pause, an error or the end there ends the lookahead only."""
+async def read_capped_body(response: httpx.Response) -> tuple[bytes, bytes, bool]:
+    """A streamed body up to one byte past ``MAX_BODY_BYTES``, what follows it up to
+    ``CUT_LOOKAHEAD_CHARS`` bytes (read only to mask the body where it is cut, within
+    ``LOOKAHEAD_WAIT_SECONDS``), and whether the stream ended within what was read. A pause or an
+    error past the ceiling ends the lookahead, not the request; the masking then withholds what
+    the cut may have split (``mask_before_cut``, ``after_complete``)."""
     body = bytearray()
     lookahead = bytearray()
+    ended = True
     chunks = response.aiter_bytes().__aiter__()
     async for chunk in chunks:
         room = MAX_BODY_BYTES + 1 - len(body)
         body.extend(chunk[:room])
         lookahead.extend(chunk[room:][:CUT_LOOKAHEAD_CHARS])
         if len(body) > MAX_BODY_BYTES:
+            ended = False
             break
-    if len(body) > MAX_BODY_BYTES and len(lookahead) < CUT_LOOKAHEAD_CHARS:
+    if not ended and len(lookahead) < CUT_LOOKAHEAD_CHARS:
         try:
             async with asyncio.timeout(LOOKAHEAD_WAIT_SECONDS):
+                ended = True
                 async for chunk in chunks:
                     lookahead.extend(chunk[:CUT_LOOKAHEAD_CHARS - len(lookahead)])
                     if len(lookahead) >= CUT_LOOKAHEAD_CHARS:
+                        ended = False
                         break
         except (TimeoutError, httpx.HTTPError):
-            pass  # the body is complete without it; the masking cuts at the safe boundary
-    return bytes(body), bytes(lookahead)
+            ended = False
+    return bytes(body), bytes(lookahead), ended
 
 
 def _scrub_sample(value: str) -> str:
@@ -435,9 +452,14 @@ def response_summary(
     selected_headers: list[str] | None = None,
     elapsed_ms: int | None = None,
     lookahead: bytes = b"",
+    lookahead_complete: bool | None = None,
+    body_truncated: bool = False,
 ) -> dict[str, Any]:
     """``body`` may run past ``MAX_BODY_BYTES``; ``lookahead`` is what followed it when a reader
-    cut it. Both are read only to mask the bounded text where it is cut, and never shown."""
+    cut it. Both are read only to mask the bounded text where it is cut, and never shown.
+    ``lookahead_complete``: what was read runs to the end of the response (``None``: it does when
+    it is shorter than the lookahead). ``body_truncated``: the reader cut ``body`` (at its ceiling,
+    or a deadline cut it short)."""
     truncated = len(body) > MAX_BODY_BYTES
     bounded = body[:MAX_BODY_BYTES]
     after = (body[MAX_BODY_BYTES:] + bytes(lookahead or b""))[:CUT_LOOKAHEAD_CHARS]
@@ -477,19 +499,23 @@ def response_summary(
         bool(range_start and int(range_start.group(1)) > 0)
         or (parsed_json is None and text.lstrip()[:1] in ("{", "["))
     )
-    partial = _partial_range(response)
+    partial = _partial_range(response, len(body))
     if partial is not None:
         # The request chose where the server cuts: a label just before the window, or a closing
         # quote just after it, is outside what the masking can read, and the value between shows
         # as plain text. artifact.inspect reads a window with what surrounds it.
         body_sample = (
-            f"[ranged body withheld: {partial} is part of a resource, and the masking cannot read "
+            f"[ranged body withheld: {partial} answers a byte range, and the masking cannot read "
             "what lies outside it; artifact.inspect reads a window (offset, max_bytes) with its "
             "surroundings]"
         )
     else:
-        masked_text = mask_before_cut(text, after_text, lambda value: _masked_body(value, window=window))
-        body_sample = masked_text[:MAX_RESPONSE_SAMPLE]
+        rest = len(body) - MAX_BODY_BYTES + len(lookahead or b"")
+        complete = not (truncated or body_truncated) or (
+            rest < CUT_LOOKAHEAD_CHARS if lookahead_complete is None else lookahead_complete)
+        masked_text = mask_before_cut(text, after_text, lambda value: _masked_body(value, window=window),
+                                      after_complete=complete)
+        body_sample = bounded_masked_text(masked_text, MAX_RESPONSE_SAMPLE)
     summary = {
         "status": response.status_code,
         "content_type": str(response.headers.get("content-type") or "")[:200],
@@ -712,7 +738,7 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                 attempted_requests += 1
                 response = await client.send(request, stream=True)
                 try:
-                    body, lookahead = await read_capped_body(response)
+                    body, lookahead, ended = await read_capped_body(response)
                 finally:
                     await response.aclose()
                 elapsed_ms = round((time.perf_counter() - started) * 1000)
@@ -720,6 +746,7 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                     response,
                     body,
                     lookahead=lookahead,
+                    lookahead_complete=ended,
                     selected_json_paths=step["select_json"],
                     selected_headers=step["select_headers"],
                     elapsed_ms=elapsed_ms,

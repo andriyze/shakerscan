@@ -49,7 +49,9 @@ try:
     from scanner_tools.request_collections import validate_request_collection as validate_device_request_collection
     from runtime.credential_migration import LegacyCredentialMigrationError
     from runtime.credential_store import CredentialStoreError
-    from runtime.archive_body_masking import mask_body_text, mask_cut_bytes, masked_header_value
+    from runtime.archive_body_masking import (
+        bounded_masked_text, mask_body_text, mask_cut_bytes, masked_header_value,
+    )
     from capabilities.secret_material import keyed_response_digest
     from scanner_tools import device_advisories, device_shell
     from scanner_tools.device_safety import safety_profile_catalog, validate_safety_request
@@ -76,7 +78,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.request_collections import validate_request_collection as validate_device_request_collection
     from ..runtime.credential_migration import LegacyCredentialMigrationError
     from ..runtime.credential_store import CredentialStoreError
-    from ..runtime.archive_body_masking import mask_body_text, mask_cut_bytes, masked_header_value
+    from ..runtime.archive_body_masking import (
+        bounded_masked_text, mask_body_text, mask_cut_bytes, masked_header_value,
+    )
     from ..capabilities.secret_material import keyed_response_digest
     from ..secret_store import decrypt_secret, encrypt_secret, encryption_enabled
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
@@ -2825,6 +2829,8 @@ async def _execute_device_capability_operation(
             "body_truncated": len(raw_body) > len(body) or bool(response.get("truncated")),
             "body_preview": _redact_device_http_body_preview(
                 args["path"], body, raw_body[len(body):],
+                # The transport's own cap cut the body: what follows is not all there is.
+                after_complete=not response.get("truncated"),
             ),
             "redirects_followed": False,
             "elapsed_ms": response.get("elapsed_ms"),
@@ -3334,7 +3340,8 @@ def _device_planner_response_headers(headers: dict[str, str]) -> dict[str, str]:
     }
 
 
-def _redact_device_http_body_preview(path: str, body: bytes | str, after: bytes = b"") -> str:
+def _redact_device_http_body_preview(path: str, body: bytes | str, after: bytes = b"", *,
+                                     after_complete: bool = True) -> str:
     """The body preview the device agent's model reads: request query values the device
     reflects, then the body masking every planner view applies (``mask_body_text``), over the
     whole read body and what followed it before anything is cut."""
@@ -3353,7 +3360,8 @@ def _redact_device_http_body_preview(path: str, body: bytes | str, after: bytes 
         return redact_text(mask_body_text(text))
 
     data = body.encode("utf-8") if isinstance(body, str) else bytes(body)
-    return mask_cut_bytes(data, after, mask)[:device_agent.DEVICE_HTTP_REQUEST_BODY_PREVIEW_BYTES]
+    return bounded_masked_text(mask_cut_bytes(data, after, mask, after_complete=after_complete),
+                               device_agent.DEVICE_HTTP_REQUEST_BODY_PREVIEW_BYTES)
 
 
 async def _verify_device_firmware_candidate(

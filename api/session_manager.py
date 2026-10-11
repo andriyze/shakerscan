@@ -31,12 +31,37 @@ from urllib.parse import urljoin, urlparse
 
 try:
     from runtime.archive_body_masking import (
-        CUT_LOOKAHEAD_CHARS, mask_before_cut, mask_body_text, masked_header_value,
+        CUT_LOOKAHEAD_CHARS, bounded_masked_text, mask_before_cut, mask_body_text,
+        masked_header_value,
     )
 except ModuleNotFoundError:  # package import layout
     from api.runtime.archive_body_masking import (
-        CUT_LOOKAHEAD_CHARS, mask_before_cut, mask_body_text, masked_header_value,
+        CUT_LOOKAHEAD_CHARS, bounded_masked_text, mask_before_cut, mask_body_text,
+        masked_header_value,
     )
+
+try:
+    from redaction import is_sensitive_key, redact_text
+except ModuleNotFoundError:  # package import layout
+    from scanner.redaction import is_sensitive_key, redact_text
+
+# A response header whose name says it carries a credential (``X-Subject-Token``, ``X-Auth-Token``,
+# ``X-Upstream-Auth``, a session or key header): withheld whatever its value looks like.
+_SECRET_HEADER_FRAGMENTS = ("token", "auth", "secret", "key", "session", "password", "credential",
+                            "cookie", "signature")
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)(?!\[withheld:)[a-z0-9._~+/=-]+")
+
+
+def _secret_header(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in _CREDENTIAL_RESPONSE_HEADERS or is_sensitive_key(lowered) or any(
+        fragment in lowered for fragment in _SECRET_HEADER_FRAGMENTS)
+
+
+def _masked_endpoint_text(text: str) -> str:
+    """The body masking, then a bare bearer credential and a standalone JWT (``redact_text``)."""
+    return str(redact_text(_BEARER_RE.sub(r"\1***", mask_body_text(text))))
+
 
 # The body text a tested endpoint's result shows, masked before it is cut.
 TEST_ENDPOINT_BODY_CHARS = 5000
@@ -55,20 +80,22 @@ def masked_endpoint_response(result: dict[str, Any]) -> dict[str, Any]:
     body = result.get("body")
     shown = None
     if isinstance(body, str):
-        shown = mask_before_cut(
+        shown = bounded_masked_text(mask_before_cut(
             body[:TEST_ENDPOINT_BODY_CHARS],
             body[TEST_ENDPOINT_BODY_CHARS:TEST_ENDPOINT_BODY_CHARS + CUT_LOOKAHEAD_CHARS],
-            mask_body_text,
-        )
+            _masked_endpoint_text,
+            # The browser reads the whole body and returns its length: what follows the lookahead.
+            after_complete=int(result.get("length") or len(body)) <= len(body),
+        ), TEST_ENDPOINT_BODY_CHARS)
     headers = {
-        str(name): "<redacted>" if str(name).lower() in _CREDENTIAL_RESPONSE_HEADERS
-        else masked_header_value(name, value, 1000)
+        str(name): "<redacted>" if _secret_header(str(name))
+        else str(redact_text(_BEARER_RE.sub(r"\1***", masked_header_value(name, value, 1000))))
         for name, value in dict(result.get("headers") or {}).items()
     }
     parsed = None
     if result.get("json") is not None:
         try:
-            parsed = json.loads(mask_body_text(json.dumps(result.get("json"), ensure_ascii=False)))
+            parsed = json.loads(_masked_endpoint_text(json.dumps(result.get("json"), ensure_ascii=False)))
         except (TypeError, ValueError):
             parsed = None  # not shown when its masked text is no longer JSON
     return {"body": shown, "headers": headers, "json": parsed}
@@ -549,12 +576,18 @@ class InteractiveSession:
                                 val = await el.get_attribute(attribute)
                             else:
                                 val = await el.text_content()
-                            # Masked as a body is: a value can be a token or a password.
-                            values.append(mask_body_text(val) if isinstance(val, str) else val)
+                            if (
+                                isinstance(val, str) and val
+                                and str(attribute or "").lower() == "value"
+                                and str(await el.get_attribute("type") or "").lower() == "password"
+                            ):
+                                val = "***"  # a password field's value, whatever its name
+                            # Masked as a body is, with bare bearer tokens and JWTs.
+                            values.append(_masked_endpoint_text(val) if isinstance(val, str) else val)
                         result["values"] = values
                     else:
                         # Extract page content, masked whole (a pre-filled credential field).
-                        result["html"] = mask_body_text(await page.content())
+                        result["html"] = _masked_endpoint_text(await page.content())
 
                 else:
                     return {"success": False, "error": f"Unknown action: {action_type}"}
@@ -1124,6 +1157,7 @@ class InteractiveSession:
                                     headers: Object.fromEntries(response.headers.entries()),
                                     // and what follows it, read to mask the body where it is cut
                                     body: text.substring(0, bodyChars + lookahead),
+                                    length: text.length,
                                     json: json,
                                     ok: response.ok
                                 };

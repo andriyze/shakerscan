@@ -1483,13 +1483,14 @@ async def execute_workflow(
                     request_started = time.perf_counter()
                     http_response = await client.send(request, stream=True)
                     try:
-                        body, lookahead = await read_capped_body(http_response)
+                        body, lookahead, ended = await read_capped_body(http_response)
                     finally:
                         await http_response.aclose()
                     response = response_summary(
                         http_response,
                         body,
                         lookahead=lookahead,
+                        lookahead_complete=ended,
                         selected_json_paths=step.get("select_json") or [],
                         elapsed_ms=round((time.perf_counter() - request_started) * 1000),
                     )

@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 try:
     from runtime.archive_body_masking import (
         CUT_LOOKAHEAD_CHARS, HEAD_VERDICT_KEY, MASK, WithheldValues, active_withheld_values,
+        bounded_masked_text,
         collecting_withheld_values, copy_block_at, copy_evidence, decode_cut,
         looks_like_dump_head, mask_before_cut, mask_body_text, mask_sql_values, mask_url_secrets,
         masked_header_value, scrub_known_values,
@@ -34,6 +35,7 @@ try:
 except ModuleNotFoundError:
     from api.runtime.archive_body_masking import (
         CUT_LOOKAHEAD_CHARS, HEAD_VERDICT_KEY, MASK, WithheldValues, active_withheld_values,
+        bounded_masked_text,
         collecting_withheld_values, copy_block_at, copy_evidence, decode_cut,
         looks_like_dump_head, mask_before_cut, mask_body_text, mask_sql_values, mask_url_secrets,
         masked_header_value, scrub_known_values,
@@ -145,7 +147,12 @@ def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[st
 
     # A route can carry a value (``/api/reset;token=...``, a provider key in a path segment).
     routes = sorted({_masked_string(route, 500) for route in set(_ROUTE_RE.findall(text))})[:200]
-    source_maps = sorted({_source_map_reference(value) for value in _SOURCE_MAP_RE.findall(text)})[:20]
+    # A reference the bundle's end cuts is skipped as a cut token is: masked alone, a piece of a
+    # userinfo password or a key in its path would show.
+    source_maps = sorted({
+        _source_map_reference(match.group(1)) for match in _SOURCE_MAP_RE.finditer(text)
+        if not (truncated and match.end() >= len(text))
+    })[:20]
     supabase_origins = sorted(set(_SUPABASE_RE.findall(text)))[:20]
     sink_names = (
         "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(",
@@ -404,7 +411,7 @@ def _context_secrets(context: bytes, body: bytes, start: int | None = None) -> l
 
 
 def _masked_window_text(body: bytes, context: bytes = b"", start: int | None = None,
-                        after: bytes = b"") -> str:
+                        after: bytes = b"", *, after_complete: bool = True) -> str:
     """The whole window, masked before anything is cut from it.
 
     The body masking every masked archive view applies (N56): SQL dump rows, markup key/value
@@ -435,7 +442,7 @@ def _masked_window_text(body: bytes, context: bytes = b"", start: int | None = N
         value = re.sub(r"(?i)(bearer\s+)(?!\[withheld:)[a-z0-9._~+/=-]+", r"\1<redacted>", value)
         return str(_shared_redact_text(value))
 
-    return mask_before_cut(text, tail[:CUT_LOOKAHEAD_CHARS], mask)
+    return mask_before_cut(text, tail[:CUT_LOOKAHEAD_CHARS], mask, after_complete=after_complete)
 
 
 def _redacted_text_sample(body: bytes) -> str:
@@ -583,9 +590,13 @@ async def inspect_target_artifact(
     body = received[:length]
     resource_bytes = _resource_bytes(private)
     terms = [str(term)[:100] for term in args.get("search_terms") or [] if str(term)][:10]
+    # What was read reaches the resource's end (a value the window's end cuts was read whole), or
+    # the masking withholds what the cut may have split (a deadline, a value past the lookahead).
+    read_to_end = resource_bytes is not None and context_start + len(private.body()) >= resource_bytes
     masked_text = _masked_window_text(body, context, context_start,
-                                      received[length:length + CUT_LOOKAHEAD_CHARS])
-    text_sample = masked_text[:MAX_PUBLIC_TEXT]
+                                      received[length:length + CUT_LOOKAHEAD_CHARS],
+                                      after_complete=read_to_end)
+    text_sample = bounded_masked_text(masked_text, MAX_PUBLIC_TEXT)
     # Counted over the masked window: a count over raw bytes recovers a withheld value one
     # guessed character at a time.
     lowered = masked_text.lower()
