@@ -176,11 +176,18 @@ def test_window_digest_is_keyed_when_anything_was_withheld(monkeypatch):
     assert plain["window_sha256"] == hashlib.sha256(b"hello world\n").hexdigest()
 
 
-def test_response_body_digest_is_keyed_when_anything_was_withheld():
+def test_response_body_digest_is_always_keyed_and_memory_hard():
+    """A body the masking found nothing in can still hold a secret it did not recognise: no
+    response digest is a plain SHA-256 any more, and the same body still digests the same."""
     summary, _collector = _summary('{"api_key": "Fx_Api_Key_0123456789"}', headers={"content-type": "application/json"})
-    assert summary["body_sha256"].startswith("hmac-sha256-")
+    assert summary["body_sha256"].startswith("scrypt-")
     plain, _collector = _summary("hello world")
-    assert plain["body_sha256"] == hashlib.sha256(b"hello world").hexdigest()
+    assert plain["body_sha256"].startswith("scrypt-")
+    assert plain["body_sha256"] != hashlib.sha256(b"hello world").hexdigest()
+    again, _collector = _summary("hello world")
+    assert again["body_sha256"] == plain["body_sha256"]
+    other, _collector = _summary("hello world!")
+    assert other["body_sha256"] != plain["body_sha256"]
 
 
 def test_search_counts_never_see_a_withheld_value(monkeypatch):
@@ -643,14 +650,15 @@ def test_executor_adapter_observation_carries_no_raw_url_secret(monkeypatch):
 
 # --- Round 2 should-fix: experiment extract digests ------------------------------------------
 
-def test_experiment_extract_digest_is_keyed_when_the_response_held_a_secret(monkeypatch):
+def test_experiment_extract_digest_is_keyed_and_memory_hard(monkeypatch):
     import api.http_experiment as experiment
 
-    keyed = experiment._body_digest(b"FxExtractedToken0123", withheld=True)
-    assert keyed.startswith("hmac-sha256-")
+    keyed = experiment._body_digest(b"FxExtractedToken0123")
+    assert keyed.startswith("scrypt-")
+    assert keyed == experiment._body_digest(b"FxExtractedToken0123")
     assert keyed != hashlib.sha256(b"FxExtractedToken0123").hexdigest()
     source = (Path(experiment.__file__)).read_text()
-    assert '"sha256": hashlib.sha256(value.encode("utf-8")).hexdigest()' not in source
+    assert "hashlib.sha256" not in source
 
 
 # --- Round 2 should-fix: the SKILL example is a valid http.request ---------------------------

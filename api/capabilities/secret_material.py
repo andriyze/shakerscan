@@ -398,6 +398,25 @@ def value_fingerprint(value: str) -> str:
     return f"scrypt-{scheme}:{digest}"
 
 
+_RESPONSE_DIGEST_DOMAIN = b"shakerscan-response-digest/v1\x00"
+
+
+def keyed_response_digest(data: bytes) -> str:
+    """The public digest of a target's response body (or of a value extracted from one).
+
+    Any response can hold a secret the masking did not recognise, and a plain SHA-256 of it is
+    an offline guessing oracle: guess the body, hash it, compare. So the digest is keyed by this
+    installation's private derived key, as :func:`value_fingerprint` is, and memory-hard (scrypt),
+    so a guess still costs what a password hash costs if that key is ever exposed with the
+    evidence. It still matches the same body within one installation, which is all a comparison
+    (``body_changed``) or a repeat sighting needs."""
+    scheme, key = _installation_key("response-body-digest")
+    digest = hashlib.scrypt(
+        bytes(data), salt=_RESPONSE_DIGEST_DOMAIN + key, n=2**14, r=8, p=1, dklen=16,
+    ).hex()
+    return f"scrypt-{scheme}:{digest}"
+
+
 def keyed_body_digest(body: bytes) -> str:
     """An installation-keyed digest of a response body that holds secret material.
 
@@ -494,6 +513,7 @@ __all__ = [
     "is_secret_key_name",
     "is_structured_secret_value",
     "keyed_body_digest",
+    "keyed_response_digest",
     "normalized_key_name",
     "redact_text_assignments",
     "redactable_assignments",

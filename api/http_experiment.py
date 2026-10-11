@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import time
@@ -14,13 +13,13 @@ import httpx
 
 try:
     from runtime.archive_body_masking import (
-        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, holds_withheld_material,
-        mask_body_text,
+        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
+        mask_body_text, mask_url_userinfo, withhold_url_userinfo,
     )
 except ModuleNotFoundError:  # package import layout
     from api.runtime.archive_body_masking import (
-        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url, holds_withheld_material,
-        mask_body_text,
+        URL_BEARING_HEADERS, active_withheld_values, bounded_public_url,
+        mask_body_text, mask_url_userinfo, withhold_url_userinfo,
     )
 
 
@@ -351,16 +350,15 @@ def _scrub_sample(value: str) -> str:
     return _masked_body(value)[:MAX_RESPONSE_SAMPLE]
 
 
-def _body_digest(bounded: bytes, *, withheld: bool) -> str:
-    """A plain SHA-256 of a body that held a secret is an offline guessing oracle for that
-    secret; such a body gets this installation's keyed digest instead."""
-    if not withheld:
-        return hashlib.sha256(bounded).hexdigest()
+def _body_digest(data: bytes) -> str:
+    """The public digest of a response body or an extracted value: installation-keyed and
+    memory-hard (``keyed_response_digest``), never a plain SHA-256, which would be an offline
+    guessing oracle for any secret in it, recognised by the masking or not."""
     try:
-        from capabilities.secret_material import keyed_body_digest
+        from capabilities.secret_material import keyed_response_digest
     except ModuleNotFoundError:  # package import layout
-        from api.capabilities.secret_material import keyed_body_digest
-    return keyed_body_digest(bounded)
+        from api.capabilities.secret_material import keyed_response_digest
+    return keyed_response_digest(data)
 
 
 def _semantically_populated(value: Any) -> bool:
@@ -399,16 +397,24 @@ def response_summary(
         pass
     json_keys = sorted(str(key)[:120] for key in parsed_json.keys())[:100] if isinstance(parsed_json, dict) else []
     selected_json: dict[str, Any] = {}
+    # Inside a Hunt a selected value's or header's URL userinfo password becomes a reference, as
+    # in the body sample. Elsewhere selected values are compared (a changed password must still
+    # read as a change), and the caller's redactor masks them.
+    in_hunt = active_withheld_values() is not None
     for path in selected_json_paths or []:
         try:
-            selected_json[path] = _json_path_get(parsed_json, path)
+            value = _json_path_get(parsed_json, path)
+            selected_json[path] = withhold_url_userinfo(value) if in_hunt else value
         except ExperimentContractError:
             selected_json[path] = None
-    # A URL-bearing header's secret parameters are withheld (inside a Hunt) before it is cut.
+    # A URL-bearing header's secret parameters are withheld (inside a Hunt) before it is cut; any
+    # other header's URL userinfo password too (``X-Cache-Backend: redis://:pw@h``), in a Hunt.
     selected_response_headers = {
         name: (
             bounded_public_url(str(response.headers.get(name) or ""), 1000)
-            if str(name).lower() in URL_BEARING_HEADERS else str(response.headers.get(name) or "")[:1000]
+            if str(name).lower() in URL_BEARING_HEADERS
+            else (mask_url_userinfo(str(response.headers.get(name) or "")) if in_hunt
+                  else str(response.headers.get(name) or ""))[:1000]
         )
         for name in selected_headers or []
     }
@@ -427,7 +433,9 @@ def response_summary(
         "content_length": len(bounded),
         "content_length_header": int(response.headers["content-length"]) if str(response.headers.get("content-length") or "").isdigit() else None,
         "bytes_observed": len(body),
-        "body_sha256": _body_digest(bounded, withheld=masked_text != text),
+        # Keyed whether or not anything was withheld (see ``_body_digest``); the name is kept for
+        # the readers that compare it.
+        "body_sha256": _body_digest(bounded),
         "body_digest_scope": "prefix" if truncated else "complete",
         "body_sample": body_sample,
         "json_type": type(parsed_json).__name__ if parsed_json is not None else None,
@@ -445,9 +453,11 @@ def response_summary(
     }
     withheld = active_withheld_values()
     if withheld is not None:
-        # Every marker the summary shows has its entry: the body sample's and the URL fields'.
+        # Every marker the summary shows has its entry: the body sample's, the URL fields' and the
+        # selected values'.
         entries = withheld.entries(
-            body_sample, summary["location"], json.dumps(selected_response_headers, ensure_ascii=False))
+            body_sample, summary["location"], json.dumps(selected_response_headers, ensure_ascii=False),
+            json.dumps(selected_json, ensure_ascii=False, default=str))
         if entries:
             summary["withheld_values"] = entries
     return summary
@@ -687,13 +697,9 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                     "response": summary,
                     "extracted": {
                         name: {
-                            # Keyed when the response held a secret: a plain digest of an
-                            # extracted token is an offline guessing oracle for it.
-                            "sha256": _body_digest(
-                                value.encode("utf-8"),
-                                withheld=str(summary.get("body_sha256") or "").startswith("hmac-")
-                                or holds_withheld_material(value),
-                            ),
+                            # Keyed: a plain digest of an extracted token is an offline
+                            # guessing oracle for it.
+                            "sha256": _body_digest(value.encode("utf-8")),
                             "length": len(value),
                         }
                         for name, value in extracted.items()
