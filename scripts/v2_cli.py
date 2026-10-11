@@ -1530,21 +1530,22 @@ def _review_unconfirmed(send: Any, terminal: Any, item: dict[str, Any], stepup: 
         terminal.say("  left unconfirmed")
         return "skipped"
     # Bound to the text that was shown: the server refuses any other text or revision.
-    if stepup is not None:
-        approval = _approval()
-        try:
-            status, body = approval.decide_knowledge(stepup, approval.knowledge_entry(
+    approval = _approval()
+    path = f"/targets/{urllib.parse.quote(str(item['target_id']), safe='')}/skill/confirm"
+    try:
+        status, body = apply_knowledge_decision(
+            send, stepup, approval.knowledge_entry(
                 "confirm", str(item.get("target_id")), text_sha256=item.get("body_sha256"),
-                expected_revision=item.get("revision")))
-        except approval.StepUpUnavailable:
-            raise
-        except approval.ApprovalError as exc:
-            terminal.say(f"  not confirmed: {exc}")
-            return "failed"
-    else:
-        path = f"/targets/{urllib.parse.quote(str(item['target_id']), safe='')}/skill/confirm"
-        status, body = send("POST", path, {"expected_revision": item.get("revision"),
-                                           "body_sha256": item.get("body_sha256")})
+                expected_revision=item.get("revision")) if stepup is not None else {},
+            "POST", path, {"expected_revision": item.get("revision"), "body_sha256": item.get("body_sha256")})
+    except approval.StepUpUnavailable:
+        raise
+    except approval.OutcomeUnknown as exc:
+        terminal.say(UNKNOWN_OUTCOME.format(_shown(exc)))
+        return "failed"
+    except approval.ApprovalError as exc:
+        terminal.say(f"  not confirmed: {exc}")
+        return "failed"
     if 200 <= status < 300:
         terminal.say("  confirmed: these are now the target's operator instructions"
                      + _decided_by(body))
@@ -1552,6 +1553,28 @@ def _review_unconfirmed(send: Any, terminal: Any, item: dict[str, Any], stepup: 
     detail = body.get("detail") if isinstance(body, Mapping) else body
     terminal.say(f"  not confirmed: HTTP {status}: {_shown(detail)}")
     return "failed"
+
+
+UNKNOWN_OUTCOME = ("  outcome unknown: {}. It may have been applied: check with `shakerscan knowledge "
+                   "review` (or the target) before deciding again.")
+
+
+def apply_knowledge_decision(send: Any, stepup: Any, entry: Mapping[str, Any], method: str, path: str,
+                             payload: Any) -> tuple[int, Any]:
+    """Make one knowledge decision: through the gateway's step-up on Enterprise (``stepup``), as
+    the request ``method path payload`` to a local engine otherwise. Raises OutcomeUnknown when it
+    was sent and no answer came back, so the caller says so instead of "not applied".
+
+    Ready for every decision kind, finding dismissal and interpretation retraction included
+    (``knowledge_entry("dismiss", target, subject_id=finding, reason=..., note=...)`` with
+    ``POST /targets/{id}/findings/{fid}/dismiss``)."""
+    approval = _approval()
+    if stepup is not None:
+        return approval.decide_knowledge(stepup, entry)
+    try:
+        return send(method, path, payload)
+    except approval.ApprovalError as exc:
+        raise approval.OutcomeUnknown(str(exc)) from exc
 
 
 def _decided_by(body: Any) -> str:
@@ -1566,11 +1589,14 @@ def _decide_proposal(send: Any, terminal: Any, proposal: Mapping[str, Any], acti
         # Enterprise: the person's step-up for exactly this proposal and text; the gateway applies it.
         approval = _approval()
         try:
-            status, body = approval.decide_knowledge(stepup, approval.knowledge_entry(
+            status, body = apply_knowledge_decision(send, stepup, approval.knowledge_entry(
                 "accept", str(proposal.get("target_id")), subject_id=str(proposal.get("id")),
-                text_sha256=proposal.get("methodology_sha256"), note=note))
+                text_sha256=proposal.get("methodology_sha256"), note=note), "POST", "", None)
         except approval.StepUpUnavailable:
             raise
+        except approval.OutcomeUnknown as exc:
+            terminal.say(UNKNOWN_OUTCOME.format(_shown(exc)))
+            return False, None
         except approval.ApprovalError as exc:
             terminal.say(f"  not applied: {exc}")
             return False, None
@@ -1582,7 +1608,13 @@ def _decide_proposal(send: Any, terminal: Any, proposal: Mapping[str, Any], acti
     if action == "accept":
         # Bind the decision to the text that was shown: the server refuses any other text.
         payload["methodology_sha256"] = proposal.get("methodology_sha256")
-    status, body = send("POST", _proposal_path(proposal, action), payload)
+    try:
+        status, body = send("POST", _proposal_path(proposal, action), payload)
+    except _approval().ApprovalError as exc:
+        if action != "accept":
+            raise
+        terminal.say(UNKNOWN_OUTCOME.format(_shown(exc)))
+        return False, None
     if 200 <= status < 300:
         return True, body
     detail = body.get("message") if isinstance(body, Mapping) else body
@@ -1667,7 +1699,7 @@ def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
                      "or applies the saved-action change, for future Hunts; nothing here grants testing authority.")
         if unconfirmed:
             terminal.say(f"{len(unconfirmed)} target(s) have agent-written, unconfirmed instructions.")
-        if client.api_token is None:
+        if approval.instance_kind(send) == "local":
             terminal.say("This engine has no accounts: anyone who can reach its API could decide. "
                          "The keypress below is the only check.")
         else:
@@ -1751,12 +1783,16 @@ def _run_allow_changes(args: argparse.Namespace, client: ApiClient) -> int:
         if choice != "y":
             terminal.say("  nothing was changed")
             return 1
-        if want and client.api_token is not None:
+        stepup = None
+        if want and approval.instance_kind(send) == "enterprise":
             stepup = approval.StepUp(send, client.base_url, terminal, account=args.account, method=args.method)
-            status, body = approval.decide_knowledge(stepup, approval.knowledge_entry(
-                "allow_changes", target, expected_revision=current["revision"]))
-        else:
-            status, body = send("PUT", path, authority_write(current, want))
+        try:
+            status, body = apply_knowledge_decision(
+                send, stepup, approval.knowledge_entry("allow_changes", target, expected_revision=current["revision"])
+                if stepup is not None else {}, "PUT", path, authority_write(current, want))
+        except approval.OutcomeUnknown as exc:
+            terminal.say(UNKNOWN_OUTCOME.format(_shown(exc)))
+            return 1
         if 200 <= status < 300:
             revision = body.get("revision") if isinstance(body, Mapping) else None
             terminal.say(f"  {'on' if want else 'off'}: Hunt permissions are now revision {revision}" + _decided_by(body))

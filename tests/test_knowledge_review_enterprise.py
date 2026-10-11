@@ -37,10 +37,10 @@ AUTHORITY = {"target_id": TARGET, "revision": 3, "metadata_changes": True, "inst
              "ssh_trust_first_contact": False, "recorded_by": "x", "updated_at": "2026-10-10T00:00:00Z"}
 
 
-def contract_digest(account: str, part: dict[str, Any]) -> str:
+def contract_digest(account: str, part: dict[str, Any], origin: str = ORIGIN) -> str:
     """The set digest from the contract text (docs/hunt-permission-requests.md), not the client."""
     document = {"schema_version": "shakerscan-approval-set/v1", "purpose": "knowledge_decision",
-                "account": account, "origin": ORIGIN,
+                "account": account, "origin": origin,
                 "knowledge": {key: part[key] for key in ("decision", "target_id", "subject_id", "text_sha256",
                                                           "expected_revision", "reason", "note")}}
     canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -53,7 +53,8 @@ class FakeGateway:
 
     def __init__(self, *proposals: dict[str, Any], unconfirmed: list[dict[str, Any]] | None = None,
                  authority: dict[str, Any] | None = None, knows_knowledge: bool = True,
-                 has_stepup: bool = True) -> None:
+                 has_stepup: bool = True, enterprise: bool = True) -> None:
+        self.enterprise = enterprise
         self.proposals = {item["id"]: dict(item) for item in proposals}
         self.unconfirmed = list(unconfirmed or [])
         self.authority = dict(authority or AUTHORITY)
@@ -64,6 +65,8 @@ class FakeGateway:
     def __call__(self, method: str, path: str, payload: Any = None, headers: Any = None, *,
                  timeout: float | None = None) -> tuple[int, Any]:
         self.seen.append((method, path, payload))
+        if path == "/_enterprise/healthz":
+            return (200, {"status": "ok", "mode": "enterprise"}) if self.enterprise else (404, {"detail": "Not Found"})
         if path.startswith("/_enterprise/approvals/"):
             if not self.has_stepup:
                 return 404, {"detail": "Not Found"}
@@ -94,7 +97,7 @@ class FakeGateway:
                 return 422, {"schema_version": error, "error": "request_invalid",
                              "message": "invalid approval request fields"}
             identifier = f"apv_{len(self.begun) + 1:04d}"
-            digest = contract_digest(payload["account"], payload["knowledge"])
+            digest = contract_digest(payload["account"], payload["knowledge"], payload["origin"])
             self.begun[identifier] = {"digest": digest, "knowledge": payload["knowledge"]}
             return 200, {"schema_version": "shakerscan-approval-challenge/v1", "approval_id": identifier,
                          "set_digest": digest, "methods": ["totp"], "expires_at": "2026-10-10T00:03:00Z"}
@@ -259,7 +262,7 @@ def test_allow_changes_on_enterprise_steps_up_for_that_target_and_revision(monke
 
 
 def test_allow_changes_on_open_source_writes_only_that_switch_after_a_keypress(monkeypatch):
-    gateway = FakeGateway()
+    gateway = FakeGateway(enterprise=False)
     monkeypatch.setattr(FakeGateway, "__call__", _oss_put(FakeGateway.__call__))
     assert _run(gateway, Terminal("n"), "allow-changes", TARGET, monkeypatch=monkeypatch, enterprise=False) == 1
     assert not [call for call in gateway.seen if call[0] == "PUT"]
@@ -387,3 +390,80 @@ def test_finding_and_interpretation_decisions_are_exact_entries():
         with pytest.raises(approval.ApprovalError):
             approval.knowledge_entry(decision, TARGET, **values)
     assert "dismiss finding 44444444" in approval._knowledge_summary(dismiss)
+
+
+def test_the_server_not_the_token_says_whether_a_step_up_is_needed(monkeypatch):
+    # A token, but the server says it is an open-source engine: no step-up, the plain request.
+    local = FakeGateway(enterprise=False)
+    monkeypatch.setattr(FakeGateway, "__call__", _oss_put(FakeGateway.__call__))
+    assert _run(local, Terminal("y"), "allow-changes", TARGET, monkeypatch=monkeypatch) == 0
+    assert local.begins() == [] and [c for c in local.seen if c[0] == "PUT"]
+    # No token, but the server is an Enterprise gateway: the step-up is still asked for.
+    gateway = FakeGateway()
+    assert _run(gateway, Terminal("y"), "allow-changes", TARGET, monkeypatch=monkeypatch, enterprise=False) == 0
+    assert gateway.begins() and not [c for c in gateway.seen if c[0] == "PUT"]
+
+
+def test_a_server_that_cannot_say_what_it_is_decides_nothing(monkeypatch, capsys):
+    gateway = FakeGateway()
+    original = FakeGateway.__call__
+
+    def broken(self, method, path, payload=None, headers=None, *, timeout=None):
+        if path == "/_enterprise/healthz":
+            return 503, {"detail": "starting"}
+        return original(self, method, path, payload, headers, timeout=timeout)
+
+    monkeypatch.setattr(FakeGateway, "__call__", broken)
+    assert _run(gateway, Terminal("y"), "allow-changes", TARGET, monkeypatch=monkeypatch) == 2
+    assert "cannot tell what kind of instance" in capsys.readouterr().err
+    assert not [c for c in gateway.seen if c[0] != "GET"]
+
+
+def test_an_unanswered_decision_is_reported_as_unknown_not_as_refused(monkeypatch):
+    gateway = FakeGateway(_proposal(methodology_sha256="f" * 64))
+    original = FakeGateway.__call__
+
+    def silent_finish(self, method, path, payload=None, headers=None, *, timeout=None):
+        if path == approval.FINISH_PATH:
+            self.seen.append((method, path, payload))
+            raise approval.ApprovalError("no answer within 60 s")
+        return original(self, method, path, payload, headers, timeout=timeout)
+
+    monkeypatch.setattr(FakeGateway, "__call__", silent_finish)
+    terminal = Terminal("y")
+    assert _run(gateway, terminal, "review", monkeypatch=monkeypatch) == 1
+    text = terminal.stdout.getvalue()
+    assert "outcome unknown" in text and "check with `shakerscan knowledge review`" in text
+    assert "not applied" not in text
+
+
+def test_a_gateway_reported_unknown_outcome_is_said_as_such(monkeypatch):
+    gateway = FakeGateway(_proposal(methodology_sha256="f" * 64))
+    original = FakeGateway._approval
+
+    def unknown(self, path, payload):
+        status, body = original(self, path, payload)
+        if path.endswith("/finish") and status == 200:
+            body["knowledge"] = {"decision": "accept", "target_id": TARGET, "http_status": 502,
+                                 "outcome": "unknown", "error": {"message": "the engine did not answer"}}
+        return status, body
+
+    monkeypatch.setattr(FakeGateway, "_approval", unknown)
+    terminal = Terminal("y")
+    assert _run(gateway, terminal, "review", monkeypatch=monkeypatch) == 1
+    assert "outcome unknown: the engine did not answer" in terminal.stdout.getvalue()
+
+
+def test_the_decision_helper_is_ready_for_dismissal(monkeypatch):
+    """After the interpretations work merges, `knowledge dismiss` calls this with its entry."""
+    sent = []
+
+    def send(method, path, payload=None, headers=None, *, timeout=None):
+        sent.append((method, path, payload))
+        return 200, {"finding": {"status": "false_positive"}}
+
+    entry = approval.knowledge_entry("dismiss", TARGET, subject_id=FINDING, reason="false_positive", note="lab")
+    path = f"/targets/{TARGET}/findings/{FINDING}/dismiss"
+    assert v2_cli.apply_knowledge_decision(send, None, entry, "POST", path,
+                                           {"reason": "false_positive", "note": "lab"})[0] == 200
+    assert sent == [("POST", path, {"reason": "false_positive", "note": "lab"})]

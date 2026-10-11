@@ -9,12 +9,14 @@ channel, and the only one:
 * It is active only when ``SHAKERSCAN_GATEWAY_IDENTITY_KEY`` holds a key of at least 32
   characters (a comma-separated list during a key rotation: any of them verifies). Without a key it
   never sets an identity.
-* On every request it reads ``X-ShakerScan-Operator`` (printable ASCII, at most 200 characters)
-  and ``X-ShakerScan-Operator-Assertion: t=<unix seconds>,n=<32 hex nonce>,s=<64 hex>`` where
+* The API takes the key out of its process environment at startup (``capture_key``), so no
+  process the API starts inherits it.
+* On every request it reads ``X-ShakerScan-Operator`` (the operator, at most 200 characters,
+  UTF-8 percent-encoded into printable ASCII) and ``X-ShakerScan-Operator-Assertion: t=<unix seconds>,n=<32 hex nonce>,s=<64 hex>`` where
   ``s`` is HMAC-SHA256(key, method "\\n" path "\\n" operator "\\n" t "\\n" n) over the request's
   method, its path (``scope["path"]``, without the query string) and the header value. A valid
   signature no more than 60 seconds old (or ahead), whose nonce was not seen before by this
-  process, sets ``scope["shakerscan.operator_identity"]`` to the operator. Anything else (no key,
+  process, sets ``scope["shakerscan.operator_identity"]`` to the decoded operator. Anything else (no key,
   a missing, repeated or malformed header, a wrong or stale signature, a replayed nonce) sets
   nothing: the routes fall back to their own provenance names. Invalid assertions are logged
   without their values.
@@ -45,7 +47,46 @@ MAX_AGE_SECONDS = 60
 MIN_KEY_CHARACTERS = 32
 MAX_OPERATOR_CHARACTERS = 200
 MAX_REMEMBERED_NONCES = 100_000
-_OPERATOR = re.compile(r"[\x21-\x7e](?:[\x20-\x7e]{0,198}[\x21-\x7e])?")
+# The header value: printable ASCII, UTF-8 percent-encoded (the gateway encodes "%" and every
+# non-ASCII character), decoded after the signature over the encoded value is checked.
+_OPERATOR = re.compile(r"[\x21-\x7e](?:[\x20-\x7e]{0,1998}[\x21-\x7e])?")
+# The process's key, taken out of os.environ (capture_key) so no child process the API starts can
+# inherit it, whatever environment that child is given.
+_captured: str | None = None
+
+
+def capture_key() -> str:
+    """The key from SHAKERSCAN_GATEWAY_IDENTITY_KEY, removed from this process's environment the
+    first time it is seen there (again if it is set again); the last one captured otherwise."""
+    global _captured
+    raw = os.environ.pop(KEY_ENV, None)
+    if raw is not None:
+        _captured = raw
+    return _captured or ""
+
+
+def forget_key() -> None:
+    """Drop the captured key (tests; a process that should stop trusting the gateway)."""
+    global _captured
+    _captured = None
+
+
+def decoded_operator(value: str) -> str | None:
+    """The operator a verified header names: percent-decoded UTF-8, at most 200 characters, with
+    no control, bidirectional or invisible formatting character; None for anything else."""
+    import unicodedata
+    from urllib.parse import unquote
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        return None  # a "%" the gateway did not encode
+    try:
+        text = unquote(value, encoding="utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if (not text or text != text.strip() or len(text) > MAX_OPERATOR_CHARACTERS
+            or any(ord(ch) < 0x20 or 0x7F <= ord(ch) < 0xA0
+                   or unicodedata.category(ch) in {"Cf", "Zl", "Zp", "Cs"} for ch in text)):
+        return None
+    return text
 _ASSERTION = re.compile(r"t=([0-9]{1,12}),n=([0-9a-f]{32}),s=([0-9a-f]{64})")
 
 LOGGER = logging.getLogger("shakerscan.gateway_identity")
@@ -107,7 +148,7 @@ class GatewayIdentityMiddleware:
     def keys(self) -> tuple[bytes, ...]:
         if self._fixed is not None:
             return self._fixed
-        raw = os.environ.get(KEY_ENV, "")
+        raw = capture_key()
         if raw != self._raw:
             self._raw, self._parsed = raw, configured_keys(raw)
         return self._parsed
@@ -166,10 +207,14 @@ class GatewayIdentityMiddleware:
                    for key in keys):
             self._warn("signature")
             return None
+        identity = decoded_operator(operator)
+        if identity is None:
+            self._warn("malformed")
+            return None
         if not self._remember(nonce, now):
             self._warn("replayed")
             return None
-        return operator
+        return identity
 
     def _remember(self, nonce: str, now: float) -> bool:
         """Record ``nonce``; False when it was seen within its validity (a replay), or when the
@@ -188,5 +233,6 @@ class GatewayIdentityMiddleware:
 
 __all__ = [
     "ASSERTION_HEADER", "GatewayIdentityMiddleware", "KEY_ENV", "MAX_AGE_SECONDS", "OPERATOR_HEADER",
-    "SCOPE_KEY", "assertion", "configured_keys", "operator_identity", "signature",
+    "SCOPE_KEY", "assertion", "capture_key", "configured_keys", "decoded_operator", "forget_key",
+    "operator_identity", "signature",
 ]

@@ -25,6 +25,7 @@ def _signed(method, path, operator=CAROL, key=KEY, now=None):
 
 
 def test_the_gateway_names_the_person_on_proposals_decisions_and_permissions(monkeypatch):
+    importlib.import_module('gateway_identity').forget_key()
     monkeypatch.setenv('SHAKERSCAN_GATEWAY_IDENTITY_KEY', KEY)
 
     async def run():
@@ -70,11 +71,15 @@ def test_the_gateway_names_the_person_on_proposals_decisions_and_permissions(mon
                 assert replayed.status_code == 200
                 assert replayed.json()['recorded_by'] == 'operator:target-permissions-api'
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        importlib.import_module('gateway_identity').forget_key()
 
 
 def test_without_the_key_a_signed_request_names_nobody(monkeypatch):
     monkeypatch.delenv('SHAKERSCAN_GATEWAY_IDENTITY_KEY', raising=False)
+    importlib.import_module('gateway_identity').forget_key()
 
     async def run():
         async with startup_database() as conn:

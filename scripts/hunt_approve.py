@@ -117,6 +117,10 @@ class StepUpUnavailable(ApprovalError):
     """The Enterprise gateway does not serve the step-up routes (it predates G1)."""
 
 
+class OutcomeUnknown(ApprovalError):
+    """The decision was sent but its outcome is not known (no answer in time): check, never resend."""
+
+
 class GatewayRefused(ApprovalError):
     """The gateway's step-up routes answered with a refusal in the contract's shape."""
 
@@ -751,6 +755,23 @@ def preauthorize(send: Send, origin: str, terminal: Terminal, allow: Sequence[st
 
 # --- knowledge-review decisions ----------------------------------------------------------------
 
+HEALTH_PATH = "/_enterprise/healthz"
+
+
+def instance_kind(send: Send) -> str:
+    """"enterprise" or "local", as the server says, never inferred from whether this connection
+    holds a token: an Enterprise gateway answers GET /_enterprise/healthz with mode "enterprise";
+    an open-source engine has no such route (404). Anything else is refused: the client cannot
+    tell, so it decides nothing."""
+    status, body = send("GET", HEALTH_PATH)
+    if _ok(status) and isinstance(body, Mapping) and body.get("mode") == "enterprise":
+        return "enterprise"
+    if status == 404 or (_ok(status) and not (isinstance(body, Mapping) and "mode" in body)):
+        return "local"
+    raise ApprovalError(f"cannot tell what kind of instance this is (GET {HEALTH_PATH} answered HTTP {status}); "
+                        "nothing was decided")
+
+
 
 def knowledge_entry(decision: str, target_id: str, *, subject_id: str | None = None,
                     text_sha256: str | None = None, expected_revision: int | None = None,
@@ -827,8 +848,16 @@ def decide_knowledge(stepup: "StepUp", entry: Mapping[str, Any]) -> tuple[int, A
                     "Nothing was decided."
                 ) from exc
             raise
-        result = stepup.finish(challenge, stepup.prove(challenge))
+        proof = stepup.prove(challenge)
+        try:
+            result = stepup.finish(challenge, proof)
+        except (GatewayRefused, StepUpUnavailable):
+            raise
+        except ApprovalError as exc:  # sent, and no answer: the gateway may have applied it
+            raise OutcomeUnknown(f"no answer from the gateway after the step-up ({exc})") from exc
     applied = result.get("knowledge") if isinstance(result.get("knowledge"), Mapping) else {}
+    if applied.get("outcome") == "unknown":
+        raise OutcomeUnknown(_detail_text(applied.get("error")))
     status = applied.get("http_status")
     if not isinstance(status, int):
         raise ApprovalError("the gateway answered without the decision's outcome; check the review again")
@@ -1162,7 +1191,8 @@ def add_arguments(parser: Any, command: str) -> None:
 
 
 __all__ = [
-    "APPROVAL_SCHEMA_PREFIX", "ApprovalError", "BEGIN_PATH", "GatewayRefused", "FINISH_PATH", "PREAUTHORIZATION_HEADER",
+    "APPROVAL_SCHEMA_PREFIX", "ApprovalError", "BEGIN_PATH", "GatewayRefused", "OutcomeUnknown",
+    "instance_kind", "FINISH_PATH", "PREAUTHORIZATION_HEADER",
     "REVOKE_TIMEOUT_SECONDS", "RequestGone", "SESSION_REVOKE_PATH", "StepUp", "StepUpUnavailable", "Terminal", "add_arguments",
     "assertion_json", "decide", "decide_knowledge", "decision_entry", "expected_challenge", "find_request",
     "knowledge_entry", "list_pending", "preauthorize",

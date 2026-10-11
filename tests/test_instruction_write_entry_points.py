@@ -84,7 +84,7 @@ def test_the_runtime_cli_decides_proposals_only_after_a_keypress():
         body = source[source.index(f"def {function}"):]
         body = body[:body.index("\ndef ", 1)]
         assert "terminal.key(" in body
-        posts = [match.start() for match in re.finditer(r'send\("POST"|_decide_proposal\(|decide_knowledge\(', body)]
+        posts = [match.start() for match in re.finditer(r'send\("POST"|_decide_proposal\(|decide_knowledge\(|apply_knowledge_decision\(', body)]
         assert posts and body.index("terminal.key(") < min(posts)
 
 
@@ -93,13 +93,13 @@ def test_letting_hunts_edit_instructions_from_the_cli_takes_a_keypress_and_on_en
     body = source[source.index("def _run_allow_changes"):]
     body = body[:body.index("\ndef ", 1)] if "\ndef " in body[1:] else body
     assert body.index("terminal.require(") < body.index("terminal.key(")
-    writes = [match.start() for match in re.finditer(r'send\("PUT"|decide_knowledge\(', body)]
+    writes = [match.start() for match in re.finditer(r'send\("PUT"|apply_knowledge_decision\(', body)]
     assert writes and body.index("terminal.key(") < min(writes)
-    # Turning it on through Enterprise goes through the person's step-up, never a token PUT.
-    assert 'if want and client.api_token is not None:' in body
-    on_enterprise = body[body.index("if want and client.api_token is not None:"):body.index("else:", body.index(
-        "if want and client.api_token is not None:"))]
-    assert "decide_knowledge(" in on_enterprise and 'send("PUT"' not in on_enterprise
+    # The server says whether it is an Enterprise gateway; turning it on there takes the step-up.
+    assert 'if want and approval.instance_kind(send) == "enterprise":' in body
+    helper = source[source.index("def apply_knowledge_decision"):]
+    helper = helper[:helper.index("\ndef ", 1)]
+    assert helper.index("decide_knowledge(stepup, entry)") < helper.index("send(method, path, payload)")
 
 
 def test_no_agent_entry_point_reaches_the_terminal_step_up():

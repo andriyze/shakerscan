@@ -807,15 +807,27 @@ engine's accept, confirm or Hunt-permission write for them itself. Rejecting, re
   then says the gateway cannot take knowledge-review decisions from the terminal and decides
   nothing.
 
+- **Which instance.** The client asks the server, not its own configuration: an Enterprise
+  gateway answers `GET /_enterprise/healthz` with `"mode": "enterprise"` (then every accept,
+  confirm and allow-changes goes through the step-up), an open-source engine has no such route
+  (404: the keypress decides). Any other answer decides nothing.
+- **An unanswered decision is "outcome unknown", never "not applied".** When the gateway does
+  not answer `finish` in time, or answers `"outcome": "unknown"` (the engine did not answer; the
+  gateway reads the engine's state and reports `applied` when it shows the change), the client
+  says the outcome is unknown and to check before deciding again.
+
 **Who decided, at the engine.** An Enterprise gateway names the person on every request it
-forwards to the engine API with `X-ShakerScan-Operator` and `X-ShakerScan-Operator-Assertion:
+forwards to the engine API with `X-ShakerScan-Operator` (UTF-8, percent-encoded so that every
+printable ASCII character but `%` is itself) and `X-ShakerScan-Operator-Assertion:
 t=<unix seconds>,n=<32 hex nonce>,s=<HMAC-SHA256 hex over method, path, operator, t and n, joined
 by newlines>`, keyed with `SHAKERSCAN_GATEWAY_IDENTITY_KEY`, which the deployment gives both. The
 engine (`api/gateway_identity.py`) trusts a valid assertion no more than 60 seconds old whose
-nonce it has not seen, and records that person as `proposed_by`, `decided_by`, `recorded_by` and
+nonce it has not seen, decodes the name (refusing control, bidirectional and invisible formatting
+characters), and records that person as `proposed_by`, `decided_by`, `recorded_by` and
 `requested_by`. Without the key, or for anything else, it records its own provenance names
 (`local-operator`, `operator:...-api`). It removes both headers from every request, key or no
-key. The identity is attribution only: what a person may do is decided at the gateway.
+key, and takes the key out of its own process environment at startup, so no process the API
+starts inherits it. A comma-separated list of keys is accepted for a rotation. The identity is attribution only: what a person may do is decided at the gateway.
 
 ## PR split
 

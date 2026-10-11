@@ -18,8 +18,16 @@ sys.path.insert(0, str(ROOT / "api"))
 
 import gateway_identity  # noqa: E402
 from gateway_identity import (  # noqa: E402
-    GatewayIdentityMiddleware, KEY_ENV, SCOPE_KEY, assertion, configured_keys, operator_identity, signature,
+    GatewayIdentityMiddleware, KEY_ENV, SCOPE_KEY, assertion, capture_key, configured_keys, decoded_operator,
+    forget_key, operator_identity, signature,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_captured_key():
+    forget_key()
+    yield
+    forget_key()
 
 KEY = b"k" * 64
 OTHER = b"o" * 64
@@ -121,15 +129,19 @@ def test_a_replayed_assertion_is_ignored_and_a_fresh_nonce_is_not():
     [(b"x-shakerscan-operator-assertion", b"t=1,n=" + b"0" * 32 + b",s=" + b"0" * 64)],
     _signed() + [(b"x-shakerscan-operator", b"Mallory")],
     _signed() + _signed()[1:2],
-    [(b"x-shakerscan-operator", "Zoë".encode()), _signed("Zo?")[1]],
+    [(b"x-shakerscan-operator", "Zoë".encode()), _signed("Zo%C3%AB")[1]],
     [(b"x-shakerscan-operator", b"a\r\nb"), _signed("a\r\nb")[1]],
     [(b"x-shakerscan-operator", b" Carol"), _signed(" Carol")[1]],
     [(b"x-shakerscan-operator", b"x" * 201), _signed("x" * 201)[1]],
+    [(b"x-shakerscan-operator", b"a%0Ab"), _signed("a%0Ab")[1]],
+    [(b"x-shakerscan-operator", b"a%E2%80%AEb"), _signed("a%E2%80%AEb")[1]],
+    [(b"x-shakerscan-operator", b"a%FFb"), _signed("a%FFb")[1]],
     [_signed()[0], (b"x-shakerscan-operator-assertion", b"t=1760000000,s=" + b"0" * 64)],
     [_signed()[0], (b"x-shakerscan-operator-assertion", _signed()[1][1].upper())],
     [_signed()[0], (b"x-shakerscan-operator-assertion", _signed()[1][1] + b",x=1")],
 ], ids=["operator-only", "assertion-only", "repeated-operator", "repeated-assertion", "not-ascii",
-        "control-characters", "leading-space", "too-long", "no-nonce", "upper-case", "trailing-field"])
+        "control-characters", "leading-space", "too-long", "encoded-newline", "encoded-bidi",
+        "encoded-not-utf8", "no-nonce", "upper-case", "trailing-field"])
 def test_malformed_or_ambiguous_headers_are_ignored(headers):
     seen = _run(_middleware(), _scope(headers))
     assert SCOPE_KEY not in seen
@@ -197,3 +209,21 @@ def test_child_processes_of_the_api_never_inherit_the_key():
                    and any(getattr(t, "id", "") == "_SENSITIVE_ENV_MARKERS" for t in node.targets))
     values = {element.value for element in markers.elts}
     assert any(marker in KEY_ENV for marker in values)
+
+
+def test_a_non_ascii_name_travels_percent_encoded_and_is_decoded():
+    seen = _run(_middleware(), _scope(_signed("Zo%C3%AB (local:zoe) via service token")))
+    assert seen[SCOPE_KEY] == "Zoë (local:zoe) via service token"
+    assert _run(_middleware(), _scope(_signed("100%25 sure")))[SCOPE_KEY] == "100% sure"
+    assert decoded_operator("%" * 3) is None and decoded_operator("a" * 201) is None
+
+
+def test_the_key_is_taken_out_of_the_process_environment(monkeypatch):
+    import os
+    monkeypatch.setenv(KEY_ENV, KEY.decode())
+    assert capture_key() == KEY.decode()
+    assert KEY_ENV not in os.environ, "a child process started now cannot inherit it"
+    middleware = GatewayIdentityMiddleware(Recorder(), clock=lambda: NOW)
+    assert _run(middleware, _scope(_signed()))[SCOPE_KEY] == "Carol (local:carol)"
+    forget_key()
+    assert SCOPE_KEY not in _run(middleware, _scope(_signed(nonce="9" * 32)))

@@ -4027,7 +4027,7 @@ except ModuleNotFoundError:
     from api.credential_api import public_credential_validation_errors
 
 try:
-    from gateway_identity import GatewayIdentityMiddleware
+    from gateway_identity import GatewayIdentityMiddleware, capture_key as _capture_gateway_identity_key
     from host_guard import configure_host_guard
     from public_api_contract import (
         PublicV2BodyLimitMiddleware,
@@ -4039,7 +4039,7 @@ try:
         public_v2_surface,
     )
 except ModuleNotFoundError:
-    from api.gateway_identity import GatewayIdentityMiddleware
+    from api.gateway_identity import GatewayIdentityMiddleware, capture_key as _capture_gateway_identity_key
     from api.host_guard import configure_host_guard
     from api.public_api_contract import (
         PublicV2BodyLimitMiddleware,
@@ -7321,6 +7321,9 @@ configure_host_guard(app, allow_origins=_cors_kwargs["allow_origins"], allow_ori
 # SHAKERSCAN_GATEWAY_IDENTITY_KEY); its headers are removed from every request before anything else
 # reads them, key or no key (gateway_identity.py).
 app.add_middleware(GatewayIdentityMiddleware)
+# Taken out of os.environ now, before any worker, scanner or helper process is started, so none of
+# them inherits the key; the middleware keeps it.
+_capture_gateway_identity_key()
 
 _fastapi_openapi = getattr(app, "openapi", None)
 if callable(_fastapi_openapi):
