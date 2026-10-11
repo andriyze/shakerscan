@@ -1910,7 +1910,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 409 | Python sources + Compose manifests |
+| Runtime environment keys | 410 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 131 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2930,6 +2930,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `POSTGRES_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `POSTGRES_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `PROOF_REQUIRED_FOR_SMART` | `api/api.py`, `api/retest_contract.py`, `api/worker.py`, `scanner/scanner.py` |
+| `PYTEST_ADDOPTS` | `scripts/run_postgres_suite.py` |
 | `REDIS_IMAGE` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |

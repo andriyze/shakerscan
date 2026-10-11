@@ -185,7 +185,7 @@ def test_pr_service_containers_pull_through_the_mirror_without_credentials():
                 services += 1
                 where = (path.name, name, service_name)
                 # Same official image and tag, not Docker Hub's anonymous rate limit.
-                assert re.fullmatch(r"mirror\.gcr\.io/library/(postgres|redis):[\w.-]+", service["image"]), where
+                assert re.fullmatch(r"mirror\.gcr\.io/library/(postgres|redis):[\w.-]+(@sha256:[0-9a-f]{64})?", service["image"]), where
                 # Empty credentials (no secrets, forks, Dependabot) make the job template invalid.
                 assert "credentials" not in service, where
             assert "container" not in job, (path.name, name)
