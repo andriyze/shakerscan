@@ -13,7 +13,10 @@ whenever anything inside it was shortened:
   requirements and budget;
 * counts: knowledge available on the target, pending instruction proposals, unresolved work;
 * interpretations: counts by kind and negative state, reopened dismissals, and a few headlines
-  (open next steps, inconclusive experiments). Titles quoted from the target are withheld here.
+  (open next steps, inconclusive experiments). Titles quoted from the target are withheld here;
+* changed since the last Hunt: counts of endpoint, deployment, response, finding and subdomain
+  changes from existing records, and up to five interpretations they affected (ids, states and
+  the dependency that changed; no text).
 
 Counts are read live (``with_live_briefing``) where a connection is at hand: the start response,
 ``GET /hunts/{id}`` and the summary query. Proposal text, advisory knowledge text and interpretation
@@ -224,6 +227,14 @@ def bound_briefing(briefing: dict[str, Any], limit: int = MAX_BRIEFING_BYTES) ->
     trimmed = result.setdefault("trimmed", [])
     # Interpretation headlines (agent-written titles) give way first; their counts stay.
     interpretations = result.get("interpretations") if isinstance(result.get("interpretations"), dict) else {}
+    changed = result.get("changed_since_last_hunt") if isinstance(result.get("changed_since_last_hunt"), dict) else {}
+    for key in ("knowledge", "deployment"):
+        part = changed.get(key) if isinstance(changed.get(key), dict) else {}
+        listed = "affected" if key == "knowledge" else "changes"
+        if _size(result) > limit and part.get(listed):
+            part[listed] = []
+            trimmed.append(f"changed_since_last_hunt.{key}.{listed} removed to fit the size limit; "
+                           "use knowledge.changes")
     for key in INTERPRETATION_HEADLINES:
         if _size(result) > limit and interpretations.get(key):
             interpretations[key] = []
@@ -345,7 +356,12 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
         from .interpretations import briefing_section
         return await briefing_section(conn, target, device=device)
 
+    async def changes() -> dict[str, Any]:
+        from .knowledge_changes import briefing_changes
+        return await briefing_changes(conn, target, device=device, hunt_id=item.get("id"))
+
     await section("knowledge", knowledge)
+    await section("changed_since_last_hunt", changes)
     await section("interpretations", interpretations)
     await section("proposals", proposals)
     await section("unresolved", unresolved)
@@ -365,6 +381,7 @@ async def with_live_briefing(conn: Any, result: dict[str, Any], row: Mapping[str
         knowledge = {**knowledge, "advisory_notes": _advisory_notes(row)}
     briefing["knowledge"] = knowledge
     briefing["interpretations"] = _bounded_interpretations(live.get("interpretations"), briefing)
+    briefing["changed_since_last_hunt"] = live.get("changed_since_last_hunt")
     briefing["proposals"] = live.get("proposals")
     briefing["unresolved"] = live.get("unresolved")
     delegation = live.get("delegation")

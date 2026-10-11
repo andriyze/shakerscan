@@ -3231,6 +3231,13 @@
     "name": "generate_endpoint_inventory_hypotheses"
   },
   {
+    "path": "/targets/{target_id}/knowledge/changes",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_knowledge_changes"
+  },
+  {
     "path": "/targets/{target_id}/negative-results",
     "methods": [
       "GET"

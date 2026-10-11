@@ -90,6 +90,25 @@ async def get_target_negative_results(target_id: str, request: Request, state: S
                                       source=source, limit=limit)
 
 
+@router.get('/targets/{target_id}/knowledge/changes')
+async def get_target_knowledge_changes(target_id: str, request: Request,
+                                       since: str = Query('last_hunt', max_length=100),
+                                       limit: int = Query(25, ge=1, le=25)):
+    """What changed on this target (and, for a host, its services) since a point, from existing records,
+    and which interpretations it affects. Reads only; never sends traffic or starts a Scan."""
+    _operator(request)
+    try:
+        from hunt.knowledge_changes import ChangeQueryError, target_changes
+    except ModuleNotFoundError:  # package import
+        from ..hunt.knowledge_changes import ChangeQueryError, target_changes
+    async with pool().acquire() as conn:
+        row = await target_metadata_row(conn, target_id)
+        try:
+            return await target_changes(conn, row['id'], device=True, since=since, limit=limit)
+        except ChangeQueryError as exc:
+            raise HTTPException(422, {'error': 'invalid_since', 'message': str(exc)}) from None
+
+
 @router.post('/targets/{target_id}/findings/{finding_id}/dismiss')
 async def post_dismiss_finding(target_id: str, finding_id: str, body: DismissalInput, request: Request):
     """Dismiss a finding (false positive, accepted risk or duplicate) with a reason: an operator's decision."""
