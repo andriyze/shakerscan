@@ -1206,7 +1206,9 @@ def test_read_existing_bola_resolves_owner_ref_without_exposing_value():
         {"name": "attacker_object_id", "principal": "user2", "ref": "basket_id",
          "sha256": keyed_response_digest(b"84"), "length": 2},
     ]
-    assert "42" not in str(result["principal_variable_receipts"])
+    # The value itself is never shown (its keyed digest may contain the digits by chance).
+    assert "42" not in str([{key: item for key, item in receipt.items() if key != "sha256"}
+                            for receipt in result["principal_variable_receipts"]])
     assert workflow.server_corroborated_predicates(result) >= {
         "distinct_identity", "ownership_established", "cross_principal_access", "denial_control",
     }

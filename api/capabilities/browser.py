@@ -937,7 +937,7 @@ async def _execute_browser_action(
                 proof_events.append({
                     "signal": "dialog",
                     "marker_match": message == prepared.marker,
-                    "message_sha256": hashlib.sha256(message.encode()).hexdigest(),
+                    "message_sha256": keyed_response_digest(message.encode()),
                 })
                 await dialog.dismiss()
 

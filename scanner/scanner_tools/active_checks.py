@@ -1,3 +1,7 @@
+try:
+    from capabilities.secret_material import keyed_short_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_short_digest
 import asyncio
 import copy
 import base64
@@ -1961,7 +1965,6 @@ def _collapse_duplicate_exposed_file_entries(exposed: list[dict[str, Any]]) -> l
 
 
 async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[str, Any]:
-    import hashlib
     exposed: list[dict[str, Any]] = []
     high_priority_paths = [
         ".git/config", ".git/HEAD", ".git/index", ".git/logs/HEAD", ".svn/entries", ".svn/wc.db", ".hg/store/undo", ".bzr/branch/branch.conf",
@@ -2016,7 +2019,7 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
                     parts = first_line.split()
                     if len(parts) >= 2:
                         status_code = parts[1]
-                content_hash = hashlib.sha256(content_out.encode('utf-8', errors='ignore')).hexdigest()[:16]
+                content_hash = keyed_short_digest(content_out.encode('utf-8', errors='ignore'))
                 # Record ALL responses regardless of status code
                 canary_responses.append({
                     "path": canary,
@@ -2047,7 +2050,7 @@ async def check_exposed_files(base_url: str, quick_mode: bool = False) -> dict[s
     def create_fingerprint(content: str, headers: str):
         content_bytes = content.encode('utf-8', errors='ignore') if isinstance(content, str) else content
         return {
-            "hash": hashlib.sha256(content_bytes).hexdigest()[:16],
+            "hash": keyed_short_digest(content_bytes),
             "length": len(content),
             "has_html": b"<html" in content_bytes.lower() or b"<!doctype" in content_bytes.lower(),
             "content_type": extract_header(headers, "content-type"),
@@ -5516,7 +5519,7 @@ async def graphql_vulnerability_test(url: str) -> dict[str, Any]:
                 response = json.loads(out)
                 if "data" in response and "__schema" in response.get("data", {}):
                     schema_types = response.get("data", {}).get("__schema", {}).get("types", [])
-                    response_hash = hashlib.sha256(out.encode("utf-8", errors="ignore")).hexdigest()[:16]
+                    response_hash = keyed_short_digest(out.encode("utf-8", errors="ignore"))
                     results["vulnerable"] = True
                     if "introspection_enabled" not in results["issues"]:
                         results["issues"].append("introspection_enabled")

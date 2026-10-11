@@ -263,16 +263,57 @@ _CREATE_TABLE_RE = re.compile(r"(?i)\bcreate\s+(?:temporary\s+|temp\s+|unlogged\
 
 def _whole_statements(text: str) -> str:
     """``text`` cut back to what a cut cannot have changed: its last whole line, and before a
-    CREATE TABLE that nothing in view ends (``;``). A column list cut at ``(id, name, p`` would
-    otherwise teach ``p`` as the column ``password`` is (``mask_before_cut`` for what is learned
-    rather than shown)."""
+    CREATE TABLE whose column list does not close in view. A column list cut at ``(id, name, p``
+    would otherwise teach ``p`` as the column ``password`` is (``mask_before_cut`` for what is
+    learned rather than shown); a partial schema is worse than none, which fails closed."""
     text = text[:text.rfind("\n") + 1]
     last = None
     for last in _CREATE_TABLE_RE.finditer(text):
         pass
-    if last is not None and ";" not in text[last.end():]:
+    if last is not None and not _column_list_closes(text, last.end()):
         text = text[:last.start()]
     return text
+
+
+def _column_list_closes(text: str, start: int) -> bool:
+    """Whether the parenthesised column list after ``start`` closes in ``text``: quotes
+    (``'a;b'``, ``"x"``, backticks), ``--`` and ``/* */`` comments and nested parentheses are
+    read as SQL reads them. Linear."""
+    depth = 0
+    position = start
+    length = len(text)
+    while position < length:
+        char = text[position]
+        if char in "'\"`":
+            closing = text.find(char, position + 1)
+            while closing >= 0 and char == "'" and text.startswith("''", closing):
+                closing = text.find(char, closing + 2)
+            if closing < 0:
+                return False
+            position = closing + 1
+            continue
+        if text.startswith("--", position):
+            newline = text.find("\n", position)
+            if newline < 0:
+                return False
+            position = newline + 1
+            continue
+        if text.startswith("/*", position):
+            end = text.find("*/", position + 2)
+            if end < 0:
+                return False
+            position = end + 2
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return True
+        elif char == ";" and depth == 0:
+            return False  # a statement that ended before any column list
+        position += 1
+    return False
 
 
 def _learn_head(

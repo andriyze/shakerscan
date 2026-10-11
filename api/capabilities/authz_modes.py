@@ -7,10 +7,11 @@ from urllib.parse import urlsplit
 from .authz import _normalized_routes, AuthzVerificationContractError
 from .authz_surface import PrincipalProbe, RouteComparison, boundary_established, bfla_finding
 from .http import execute_bound_http_request
+# Keyed (HMAC), not scrypt: six probes per route in one 55 s budget, compared with each other.
 try:
-    from capabilities.secret_material import keyed_response_digest
+    from capabilities.secret_material import keyed_body_digest
 except ModuleNotFoundError:  # package import layout
-    from api.capabilities.secret_material import keyed_response_digest
+    from api.capabilities.secret_material import keyed_body_digest
 try:
     from scanner_tools.url_redaction import redact_url
 except ModuleNotFoundError:
@@ -65,7 +66,7 @@ async def verify_function_authorization(base_url,routes,*,target,primary_headers
         response=captured[0];body=response.body()
         complete=archive.get('response_digest_scope')=='complete' and archive.get('response_body_truncated') is False
         content_type={key.lower():value for key,value in response.headers().items()}.get('content-type','').split(';')[0]
-        return PrincipalProbe(response.status_code,keyed_response_digest(body),len(body),
+        return PrincipalProbe(response.status_code,keyed_body_digest(body),len(body),
             content_type=='application/json' or content_type.endswith('+json'),
             not result.get('ok') or not complete)
     for url in normalized:

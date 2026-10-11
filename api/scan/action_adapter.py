@@ -3166,7 +3166,10 @@ class DatabaseNeutralScanActionDispatcher:
             ), "")
             return PrincipalProbe(
                 status=result.status_code,
-                body_sha256=keyed_response_digest(result.response_body),
+                # Keyed (HMAC): four probes per endpoint, up to 100 endpoints a batch; scrypt
+                # would add seconds to the batch. Without this installation's key it confirms
+                # no guess.
+                body_sha256=keyed_body_digest(result.response_body),
                 body_len=len(result.response_body),
                 is_json="json" in content_type,
                 error=bool(result.error_code),

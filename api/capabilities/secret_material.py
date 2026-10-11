@@ -438,6 +438,14 @@ _RESPONSE_DIGESTS: "collections.OrderedDict[str, str]" = collections.OrderedDict
 _RESPONSE_DIGEST_LOCK = threading.Lock()
 
 
+def keyed_short_digest(data: bytes, chars: int = 16) -> str:
+    """A short installation-keyed tag of response data, for a scan's own comparisons and the
+    evidence that names them (a soft-404 baseline, a content tag). Cheap enough for every probe
+    (HMAC); a truncated plain SHA-256 would still confirm a guess of the body offline."""
+    _scheme, key = _installation_key("response-short-digest")
+    return hmac.new(key, bytes(data), hashlib.sha256).hexdigest()[:chars]
+
+
 def keyed_body_digest(body: bytes) -> str:
     """An installation-keyed digest of a response body that holds secret material.
 

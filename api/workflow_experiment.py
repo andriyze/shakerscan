@@ -384,12 +384,10 @@ def _create_object_readback(mutation: dict[str, Any], after: dict[str, Any]) -> 
     if not tail or "/" in tail:
         return False
     extracted = mutation.get("extracted") if isinstance(mutation.get("extracted"), dict) else {}
-    # Extracted values are recorded by their keyed digest (never a plain one).
-    tail_hash = keyed_response_digest(tail.encode())
-    return any(
-        isinstance(receipt, dict) and str(receipt.get("sha256") or "") == tail_hash
-        for receipt in extracted.values()
-    )
+    # Extracted values are recorded by their keyed digest since 2.9.0; an execution recorded
+    # before then holds the plain one, which is matched too (it is already published there).
+    recorded = {str(receipt.get("sha256") or "") for receipt in extracted.values() if isinstance(receipt, dict)}
+    return keyed_response_digest(tail.encode()) in recorded or hashlib.sha256(tail.encode()).hexdigest() in recorded
 
 
 def _meaningful_equivalent_response(

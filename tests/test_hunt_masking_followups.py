@@ -18,6 +18,7 @@ import asyncio
 import html
 import json
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -52,17 +53,76 @@ PUBLISHED_DIGESTS = {
     "api/capabilities/sqli_proof.py": ["_sha256(control.response_body)", "_sha256(payload.response_body)"],
     "api/capabilities/nosqli_verify.py": ["_sha256(result.response_body)", "_sha256(literal.response_body)"],
     "api/capabilities/nse_http_transport.py": ["hashlib.sha256(response.response_body)"],
-    "api/capabilities/browser.py": ["hashlib.sha256(text.encode())"],
+    "api/capabilities/browser.py": ["hashlib.sha256(text.encode())", "hashlib.sha256(message.encode())"],
+    "api/capabilities/nse.py": ["hashlib.sha256(script_output"],
     "api/device_agent.py": ["hashlib.sha256(body_bytes)", "hashlib.sha256(encoded_value"],
     "api/devices/router.py": ['hashlib.sha256(bytes(replay.get("body")'],
-    "api/workflow_experiment.py": ["hashlib.sha256(rendered_value", "hashlib.sha256(value.encode())",
-                                   "hashlib.sha256(tail.encode())"],
+    "api/workflow_experiment.py": ["hashlib.sha256(rendered_value", "hashlib.sha256(value.encode())"],
     "api/scan/action_adapter.py": ["hashlib.sha256(result.response_body)"],
     "scanner/scanner_tools/device_application.py": ["hashlib.sha256(body)", "hashlib.sha256(response_body)"],
     "scanner/scanner_tools/device_control_plane.py": ["hashlib.sha256(response_body)",
                                                       'hashlib.sha256(bytes(describe.get("body")'],
-    "scanner/scanner_tools/device_web.py": ["hashlib.sha256(negative_body)"],
+    "scanner/scanner_tools/device_web.py": ["hashlib.sha256(negative_body)", "hashlib.sha256(anonymous_body)",
+                                            '"response_sha256": hashlib.sha256(response_body)'],
+    "scanner/scanner_tools/discovery.py": ['hashlib.sha256(body_text', 'hashlib.sha256(response_body'],
+    "scanner/scanner_tools/active_checks.py": ["hashlib.sha256(content_bytes)"],
+    "scanner/scanner_tools/proof_of_exploit.py": ['hashlib.sha256(body.encode']
 }
+
+
+# Every plain digest left in the modules that build planner, agent, finding or evidence output,
+# with why it is not a digest of target response data. A new one fails until it is keyed or
+# listed here with its reason.
+_SCANNED = ("api/capabilities", "api/hunt", "api/scan", "api/devices", "api/device_agent.py",
+            "api/workflow_experiment.py", "api/http_experiment.py", "api/runtime/request_replay_executor.py",
+            "scanner/scanner_tools")
+_RESPONSE_WORDS = re.compile(r"(?i)body|response|output|content|message|doc|text|value|chunk|window|sample|result")
+_PLAIN_DIGEST = re.compile(r"hashlib\.(?:sha256|md5|sha1)\((?P<argument>[^\n]{0,120})")
+ALLOWED_PLAIN_DIGESTS = {
+    ("api/capabilities/artifact.py", "hashlib.sha256(window)"): "the archive row's own digest (masked exports key it)",
+    ("api/capabilities/sqli_proof.py", "hashlib.sha256(value)"): "helper used for the request URL only",
+    ("api/capabilities/browser.py", "hashlib.sha256(body)"): "the request body the planner supplied",
+    ("api/hunt/permission_grants.py", "hashlib.sha256(value.encode"): "an operator grant value, not a response",
+    ("api/hunt/skills.py", "hashlib.sha256(body.encode"): "operator instruction text",
+    ("api/scan/capability_result.py", "hashlib.sha256(json.dumps("): "an engine result manifest",
+    ("api/hunt/knowledge.py", "hashlib.sha256(json.dumps("): "advisory knowledge fields",
+    ("api/hunt/interaction_router.py", "hashlib.sha256(body.encode"): "planner-written instructions and actions",
+    ("api/scan/report_rebuild.py", "hashlib.sha256(content)"): "integrity check against a stored digest",
+    ("api/device_agent.py", "hashlib.sha256(content)"): "integrity check of an operator upload",
+    ("scanner/scanner_tools/sarif_output.py", "hashlib.sha256("): "SARIF location fingerprints",
+    ("scanner/scanner_tools/model_intake_sandbox.py", "hashlib.sha256(json.dumps("): "model intake (not a target)",
+    ("scanner/scanner_tools/model_intake_admission.py", "hashlib.sha256(message)"): "model intake signatures",
+    ("scanner/scanner_tools/model_intake.py", "hashlib.sha256(model_card_bytes)"): "model intake artifacts",
+    ("scanner/scanner_tools/model_intake_evaluation.py", "hashlib.sha256(json.dumps("): "model intake",
+    ("scanner/scanner_tools/model_intake_scanners.py", "hashlib.sha256(text.encode())"): "model intake",
+    ("scanner/scanner_tools/model_intake_scanners.py", "hashlib.sha256(value)"): "model intake",
+    ("scanner/scanner_tools/discovery.py", "hashlib.md5(path.encode())"): "a temporary file name",
+    ("scanner/scanner_tools/race_condition_tests.py", "hashlib.md5(body.encode())"): "counted in-process, never published",
+    ("scanner/scanner_tools/common.py", "hashlib.sha256(captured.encode("): "the digest of redacted text shown beside it",
+    ("scanner/scanner_tools/vendor_risk.py", "hashlib.md5(result.target.encode())"): "a finding id from the target URL",
+}
+
+
+def _plain_digests():
+    files = []
+    for root in _SCANNED:
+        path = ROOT / root
+        files.extend(sorted(path.rglob("*.py")) if path.is_dir() else [path])
+    for path in files:
+        relative = str(path.relative_to(ROOT))
+        for line in path.read_text(encoding="utf-8").splitlines():
+            for match in _PLAIN_DIGEST.finditer(line):
+                if _RESPONSE_WORDS.search(match.group("argument")):
+                    yield relative, match.group(0)
+
+
+def test_every_plain_digest_of_response_like_data_is_keyed_or_listed():
+    unlisted = sorted({
+        (path, text) for path, text in _plain_digests()
+        if not any(path == allowed_path and text.startswith(prefix)
+                   for allowed_path, prefix in ALLOWED_PLAIN_DIGESTS)
+    })
+    assert unlisted == []
 
 
 @pytest.mark.parametrize("module", sorted(PUBLISHED_DIGESTS))
@@ -221,3 +281,83 @@ def test_an_extracted_value_rendered_into_a_path_is_not_shown():
     text = json.dumps(result)
     assert TOKEN not in text
     assert result["observations"][1]["request"]["path"] == "/r/${next_id}"
+
+
+# --- Review of the follow-up ------------------------------------------------------------------
+
+def test_the_guard_reads_real_digests():
+    assert len(list(_plain_digests())) >= len(ALLOWED_PLAIN_DIGESTS) // 2
+
+
+def test_a_masked_export_carries_no_plain_digest_of_the_raw_body():
+    """Already so on main (``_plan`` drops recorded digests from every masked export); pinned here
+    because the review of this change read the export path as publishing them."""
+    from api.runtime.http_archive_reader import export_document
+
+    body = f"DB_PASSWORD={TOKEN}\n"
+    import hashlib
+
+    plain = hashlib.sha256(body.encode()).hexdigest()
+    row = {"id": "00000000-0000-4000-8000-0000000009b9", "plane": "hunt", "sequence": 0,
+           "hunt_run_id": ACTION, "hunt_action_id": ACTION, "capability_name": "http.request",
+           "method": "GET", "url": "https://h.fixture.test/.env", "status_code": 200,
+           "request_headers": {}, "request_body": None, "response_headers": {},
+           "response_body": body, "response_body_sha256": plain, "metadata_json": {}}
+    masked = json.dumps(export_document([row], export_format="transactions", redaction="redacted",
+                                        owner={"hunt_id": ACTION}, total=1))
+    raw = json.dumps(export_document([row], export_format="transactions", redaction="raw",
+                                     owner={"hunt_id": ACTION}, total=1))
+    assert plain not in masked and TOKEN not in masked
+    assert '"sha256": null' in masked
+
+
+@pytest.mark.parametrize("text, secret", [
+    ('<input type="password" value="a>b Hunter2xx">', "Hunter2xx"),
+    ('<input type=password name=x value="' + "A" * 5000 + 'Hunter2xx"><p>after</p>', "Hunter2xx"),
+    ('<input type="password" value="open Hunter2xx', "Hunter2xx"),
+    ('<input type="password" value="open Hunter2xx\n<p>x</p>', "Hunter2xx"),
+    ("<input\ttype = 'pass&#119;ord'\nvalue=Hunter2xx/>", "Hunter2xx"),
+])
+def test_password_input_bypasses_are_closed(text, secret):
+    for shown in (masking.mask_body_text(text), _hunt(masking.mask_body_text, text)[0]):
+        assert secret not in shown, shown
+    assert "<p>after</p>" in masking.mask_body_text(text) or "after" not in text
+
+
+def test_password_input_scanning_is_linear():
+    import time
+
+    for text in ('<input "' * 40_000, '<input type=password value="x' * 12_000, "<input type=password value=x>" * 12_000):
+        started = time.perf_counter()
+        masking.mask_body_text(text)
+        assert time.perf_counter() - started < 5
+
+
+@pytest.mark.parametrize("text", [
+    "CREATE TABLE users (id int, note text DEFAULT 'a;b',\n pw\n",
+    "CREATE TABLE users (id int, n text COMMENT 'x; y',\n -- legacy; keep\n pw\n",
+    "CREATE TABLE `us;ers` (id int,\n /* a; b */ pw\n",
+])
+def test_a_semicolon_inside_a_cut_column_list_teaches_nothing(text):
+    assert artifact_capability._whole_statements(text) == ""
+
+
+def test_closed_column_lists_are_kept():
+    text = "CREATE TABLE t (a int, b text DEFAULT 'x;y', c text COMMENT 'p; q') ENGINE=InnoDB\n;\n"
+    assert artifact_capability._whole_statements(text) == text
+
+
+def test_selected_descriptors_and_arrays_follow_the_body_rules():
+    assert masking.mask_selected_value({"name": "password", "value": "Winter2023"})["value"] == "***"
+    assert masking.mask_selected_value([{"key": "DB_PASSWORD", "value": "Winter2023x"}])[0]["value"] == "***"
+
+
+@pytest.mark.parametrize("text", ["Basic authentication required", "token validation failed",
+                                  "basic subscription plan", "admin", "ROLE_ADMIN"])
+def test_prose_and_roles_are_not_read_as_credentials(text):
+    assert masking.mask_selected_string(text) == text
+
+
+def test_a_bearer_credential_in_a_selected_value_is_withheld():
+    assert TOKEN not in masking.mask_selected_string(f"Bearer {TOKEN}")
+    assert "abcDEF123456xyz" not in masking.mask_selected_string("Bearer abcDEF123456xyz")
