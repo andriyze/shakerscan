@@ -15,6 +15,10 @@ from http.cookies import SimpleCookie
 from typing import Any, Mapping
 import urllib.parse
 from .browser_steps import browser_steps, browser_surface, ELEMENT_DESCRIPTOR, validate_fill
+try:
+    from capabilities.secret_material import keyed_response_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_response_digest
 
 try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
@@ -942,7 +946,7 @@ async def _execute_browser_action(
                 proof_events.append({
                     "signal": "console",
                     "marker_match": text == prepared.marker,
-                    "message_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                    "message_sha256": keyed_response_digest(text.encode()),
                 })
 
             page.on("dialog", proof_dialog)

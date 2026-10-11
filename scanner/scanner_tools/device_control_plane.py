@@ -18,6 +18,10 @@ import re
 import urllib.parse
 from typing import Any
 from xml.sax.saxutils import escape as _xml_escape
+try:
+    from capabilities.secret_material import keyed_response_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_response_digest
 
 try:
     from .device_web import request_pinned_device_http
@@ -624,7 +628,7 @@ async def discover_control_plane_surface(
                     "outcome": verdict["outcome"],
                     "auth_required": verdict["auth_required"],
                     "body_bytes": len(response_body),
-                    "body_sha256": hashlib.sha256(response_body).hexdigest(),
+                    "body_sha256": keyed_response_digest(response_body),
                     "truncated": bool(response.get("truncated")),
                     "elapsed_ms": response.get("elapsed_ms"),
                 })
@@ -668,7 +672,7 @@ async def discover_control_plane_surface(
                     "auth_required": verdict["auth_required"],
                     "rtsp_options_status": options.get("status"),
                     "body_bytes": len(bytes(describe.get("body") or b"")),
-                    "body_sha256": hashlib.sha256(bytes(describe.get("body") or b"")).hexdigest(),
+                    "body_sha256": keyed_response_digest(bytes(describe.get("body") or b"")),
                 })
                 details = verdict.get("details") or {}
                 if details.get("session_name"):
@@ -711,7 +715,7 @@ async def discover_control_plane_surface(
                     "outcome": verdict["outcome"],
                     "auth_required": verdict["auth_required"],
                     "body_bytes": len(response_body),
-                    "body_sha256": hashlib.sha256(response_body).hexdigest(),
+                    "body_sha256": keyed_response_digest(response_body),
                     "truncated": bool(response.get("truncated")),
                     "elapsed_ms": response.get("elapsed_ms"),
                 })

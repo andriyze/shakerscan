@@ -650,6 +650,39 @@ def mask_credential_shaped(text: str) -> str:
     )
 
 
+_BARE_JWT_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}(?![A-Za-z0-9_-])")
+_BARE_BEARER_RE = re.compile(r"(?i)\b((?:bearer|basic|token)\s+)(?!\[withheld:)([A-Za-z0-9._~+/=-]{8,})")
+
+
+def mask_selected_string(text: str) -> str:
+    """One value a request selected from a response (a JSON path, a header), masked by its shape
+    as well as by what names it: the body masking (labelled values, provider formats, URL
+    secrets), then a bare JWT, a ``Bearer``/``Basic``/``Token`` credential, and any
+    credential-shaped token. A selected value has no key name of its own to judge it by."""
+    text = mask_body_text(text)
+    text = _BARE_JWT_RE.sub(lambda match: _withhold(match.group(0)), text)
+    text = _BARE_BEARER_RE.sub(lambda match: match.group(1) + _withhold(match.group(2)), text)
+    return mask_credential_shaped(text)
+
+
+def mask_selected_value(value: Any) -> Any:
+    """``mask_selected_string`` over every string in a selected value; an object's members under
+    secret-named keys are withheld whole, as the body masking withholds them."""
+    if isinstance(value, str):
+        return mask_selected_string(value)
+    if isinstance(value, dict):
+        return {
+            key: (_withhold(json.dumps(item, ensure_ascii=False) if not isinstance(item, str) else item)
+                  if is_withheld_key(str(key)) and item not in (None, "", [], {})
+                  else mask_selected_value(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [mask_selected_value(item) for item in value]
+    return value
+
+
 def mask_string_content(text: str, *, credential_context: bool, depth: int = 0) -> str:
     """Withhold the secrets a string *documents*: labelled values (``Master key: ...``), the
     formats it nests (a config file, markup, a SQL dump, JSON) and, in a credential context,
@@ -1040,7 +1073,7 @@ _HTML_VALUE_ATTRIBUTES = frozenset({"value", "content"})
 
 def mask_html_fields(text: str) -> str:
     """Withhold the value of an HTML field or meta tag whose name is secret (a CSRF token,
-    an API key in a hidden input)."""
+    an API key in a hidden input), and of every password input."""
     def tag(match: re.Match[str]) -> str:
         body = match.group(1)
         attributes = list(_HTML_ATTRIBUTE_RE.finditer(body))
@@ -1048,9 +1081,16 @@ def mask_html_fields(text: str) -> str:
             item.group(2).strip("\"'") for item in attributes
             if item.group(1).lower() in _HTML_NAME_ATTRIBUTES
         ]
-        if not any(is_withheld_key(name) for name in names):
+        # A password input's value is a password whatever the field is named (``name="p"``, no
+        # name, ``value`` before ``type``).
+        password_input = match.group(0)[1:6].lower() == "input" and any(
+            item.group(1).lower() == "type"
+            and html.unescape(item.group(2).strip("\"'")).strip().lower() == "password"
+            for item in attributes
+        )
+        if not password_input and not any(is_withheld_key(name) for name in names):
             return match.group(0)
-        if _planner_form_token(match.group(0)[1:].split(None, 1)[0].rstrip(">/"), names):
+        if not password_input and _planner_form_token(match.group(0)[1:].split(None, 1)[0].rstrip(">/"), names):
             return match.group(0)
         pieces: list[str] = []
         cursor = 0
@@ -3128,6 +3168,8 @@ __all__ = [
     "decode_cut",
     "CUT_LOOKAHEAD_CHARS",
     "mask_credential_shaped",
+    "mask_selected_string",
+    "mask_selected_value",
     "mask_embedded_objects",
     "mask_html_fields",
     "mask_json_text",

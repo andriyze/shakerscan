@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import sys
 from pathlib import Path
 
@@ -10,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 import workflow_experiment as workflow  # noqa: E402
+from capabilities.secret_material import keyed_response_digest  # noqa: E402
 
 
 def _contexts(*, same_identity=False):
@@ -804,8 +804,8 @@ def test_mass_assignment_create_based_binds_readback_to_created_object():
     # accept the create->object-read binding -- but ONLY when the read-back id was EXTRACTED from the
     # create's own response (hash-verified), or a read of a pre-existing admin would mint a false positive.
     created_id, control_id = "42", "43"
-    created_hash = hashlib.sha256(created_id.encode()).hexdigest()
-    control_hash = hashlib.sha256(control_id.encode()).hexdigest()
+    created_hash = keyed_response_digest(created_id.encode())
+    control_hash = keyed_response_digest(control_id.encode())
 
     def _result(readback_path):
         return {
@@ -1202,9 +1202,9 @@ def test_read_existing_bola_resolves_owner_ref_without_exposing_value():
     assert result["restoration_verified"] is True
     assert result["principal_variable_receipts"] == [
         {"name": "owner_object_id", "principal": "user1", "ref": "basket_id",
-         "sha256": hashlib.sha256(b"42").hexdigest(), "length": 2},
+         "sha256": keyed_response_digest(b"42"), "length": 2},
         {"name": "attacker_object_id", "principal": "user2", "ref": "basket_id",
-         "sha256": hashlib.sha256(b"84").hexdigest(), "length": 2},
+         "sha256": keyed_response_digest(b"84"), "length": 2},
     ]
     assert "42" not in str(result["principal_variable_receipts"])
     assert workflow.server_corroborated_predicates(result) >= {

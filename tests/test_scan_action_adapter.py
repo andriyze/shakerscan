@@ -1247,7 +1247,8 @@ def test_exposure_probe_batch_probes_seeds_follows_listings_and_checkpoints(monk
             assert item["response_body_sha256"] is None
             assert str(item["response_body_hmac"]).startswith("hmac-sha256-")
         else:
-            assert len(item["response_body_sha256"]) == 64
+            # Keyed whatever the classifier found (2.9.0): never a plain SHA-256.
+            assert str(item["response_body_sha256"]).startswith("scrypt-")
 
     # Every probe is checkpointed; a resumed run repeats no request.
     assert backend.attempts[action.action_id]

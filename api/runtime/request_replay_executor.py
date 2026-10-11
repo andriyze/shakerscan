@@ -15,13 +15,16 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import hashlib
 import inspect
 import ipaddress
 import math
 import re
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 import urllib.parse
+try:
+    from capabilities.secret_material import keyed_response_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_response_digest
 
 try:
     from scanner_tools.request_replay import ReplayPlan, ReplayRequest
@@ -291,7 +294,7 @@ def _observation(request: ReplayRequest, result: ReplayTransportResult, *, priva
         "attempted_addresses": list(result.attempted_addresses),
         "status_code": result.status_code,
         "response_header_names": sorted(str(name)[:200] for name in result.response_headers),
-        "response_body_sha256": None if private_body else hashlib.sha256(result.response_body).hexdigest(),
+        "response_body_sha256": None if private_body else keyed_response_digest(result.response_body),
         "response_body_size": len(result.response_body),
         "elapsed_ms": result.elapsed_ms,
         "error_code": result.error_code,

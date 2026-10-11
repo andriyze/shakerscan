@@ -28,11 +28,13 @@ to scrub excerpts, and only labels, key names and fingerprints are persisted.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import hmac
 import math
 import re
 import secrets
+import threading
 import urllib.parse
 from dataclasses import dataclass, field, replace
 
@@ -411,10 +413,29 @@ def keyed_response_digest(data: bytes) -> str:
     evidence. It still matches the same body within one installation, which is all a comparison
     (``body_changed``) or a repeat sighting needs."""
     scheme, key = _installation_key("response-body-digest")
+    # A capability compares the same few bodies many times (each principal twice, a control and
+    # its payload): a body seen recently is not hashed again. Remembered by its keyed HMAC, never
+    # by a plain digest; bounded, and the digests only, never the bodies.
+    remembered = hmac.new(key, bytes(data), hashlib.sha256).hexdigest()
+    with _RESPONSE_DIGEST_LOCK:
+        cached = _RESPONSE_DIGESTS.get(remembered)
+        if cached is not None:
+            _RESPONSE_DIGESTS.move_to_end(remembered)
+            return cached
     digest = hashlib.scrypt(
         bytes(data), salt=_RESPONSE_DIGEST_DOMAIN + key, n=2**14, r=8, p=1, dklen=16,
     ).hex()
-    return f"scrypt-{scheme}:{digest}"
+    public = f"scrypt-{scheme}:{digest}"
+    with _RESPONSE_DIGEST_LOCK:
+        _RESPONSE_DIGESTS[remembered] = public
+        while len(_RESPONSE_DIGESTS) > _MAX_REMEMBERED_DIGESTS:
+            _RESPONSE_DIGESTS.popitem(last=False)
+    return public
+
+
+_MAX_REMEMBERED_DIGESTS = 256
+_RESPONSE_DIGESTS: "collections.OrderedDict[str, str]" = collections.OrderedDict()
+_RESPONSE_DIGEST_LOCK = threading.Lock()
 
 
 def keyed_body_digest(body: bytes) -> str:

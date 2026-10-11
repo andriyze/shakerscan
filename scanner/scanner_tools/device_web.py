@@ -1096,7 +1096,7 @@ async def _run_imported_requests(
                         negative_body = bytes(negative.get("body") or b"")
                         negative_differs = bool(
                             int(negative.get("status") or 0) != int(anonymous.get("status") or 0)
-                            or hashlib.sha256(negative_body).digest() != hashlib.sha256(anonymous_body).digest()
+                            or bytes(negative_body) != bytes(anonymous_body)
                         )
                         findings.append(_request_finding(
                             title="Imported authenticated request also succeeds without credentials", severity="medium",

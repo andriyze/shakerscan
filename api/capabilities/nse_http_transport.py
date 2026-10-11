@@ -12,11 +12,14 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import replace
-import hashlib
 import ipaddress
 import re
 from typing import Any, Mapping
 from urllib.parse import urljoin, urlsplit, urlunsplit
+try:
+    from capabilities.secret_material import keyed_response_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_response_digest
 
 from runtime.models import TargetBinding
 from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
@@ -139,7 +142,7 @@ class NseHttpTransport:
             response = await transport.send(request, target=target, timeout_seconds=15,
                                             follow_redirects=False)
             attempt.update(status_code=response.status_code, error=response.error_code,
-                           response_sha256=hashlib.sha256(response.response_body).hexdigest())
+                           response_sha256=keyed_response_digest(response.response_body))
             if response.error_code and phase == "script":
                 self._error("nse_http_" + response.error_code)
             headers = {}

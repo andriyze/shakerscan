@@ -18,6 +18,10 @@ import json
 import re
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
+try:
+    from capabilities.secret_material import keyed_response_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_response_digest
 
 _IDENTIFIERS = (
     re.compile(r"[0-9]+"),
@@ -216,7 +220,7 @@ async def compare_selected_objects(
             observation.update(
                 cross_access_observed=True,
                 reason="selected_object_cross_access_observed_entitlement_unproven",
-                selected_object_content_sha256=hashlib.sha256(owner_doc.encode()).hexdigest(),
+                selected_object_content_sha256=keyed_response_digest(owner_doc.encode()),
             )
             return observation
     except TimeoutError:

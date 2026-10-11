@@ -3880,7 +3880,7 @@ async def _verify_device_control_authorization_candidate(
             "after_state": transition["after"],
             "state_changed": transition["changed"],
             "replay_credentials": "stripped",
-            "replay_sha256": hashlib.sha256(bytes(replay.get("body") or b"")).hexdigest(),
+            "replay_sha256": keyed_response_digest(bytes(replay.get("body") or b"")),
             "cleanup_outcome": cleanup_outcome,
             "cleanup_status": cleanup_status,
             "cleanup_request_id": str(reverse.get("id") or ""),

@@ -15,14 +15,14 @@ import httpx
 try:
     from runtime.archive_body_masking import (
         CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_masked_text,
-        bounded_public_url, decode_cut, mask_before_cut, mask_body_text, mask_url_userinfo,
-        withhold_url_userinfo,
+        bounded_public_url, decode_cut, is_withheld_key, mask_before_cut, mask_body_text,
+        mask_selected_string, mask_selected_value, mask_url_userinfo, withhold_url_userinfo,
     )
 except ModuleNotFoundError:  # package import layout
     from api.runtime.archive_body_masking import (
         CUT_LOOKAHEAD_CHARS, URL_BEARING_HEADERS, active_withheld_values, bounded_masked_text,
-        bounded_public_url, decode_cut, mask_before_cut, mask_body_text, mask_url_userinfo,
-        withhold_url_userinfo,
+        bounded_public_url, decode_cut, is_withheld_key, mask_before_cut, mask_body_text,
+        mask_selected_string, mask_selected_value, mask_url_userinfo, withhold_url_userinfo,
     )
 
 
@@ -410,6 +410,25 @@ async def read_capped_body(response: httpx.Response) -> tuple[bytes, bytes, bool
     return bytes(body), bytes(lookahead), ended
 
 
+def _compared_value(value: Any) -> Any:
+    """A selected value outside a Hunt: as it is, or, where the masking would withhold anything
+    in it, ``***`` and its keyed digest, so two different secrets still compare different."""
+    if isinstance(value, str):
+        if mask_selected_string(value) == value:
+            return value
+        return f"*** (withheld {_body_digest(value.encode('utf-8'))})"
+    if isinstance(value, dict):
+        return {
+            key: (f"*** (withheld {_body_digest(json.dumps(item, ensure_ascii=False, sort_keys=True).encode('utf-8'))})"
+                  if is_withheld_key(str(key)) and item not in (None, "", [], {})
+                  else _compared_value(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_compared_value(item) for item in value]
+    return value
+
+
 def _scrub_sample(value: str) -> str:
     # Masked before it is cut, so a value is never split by the sample's end.
     return _masked_body(value)[:MAX_RESPONSE_SAMPLE]
@@ -471,14 +490,15 @@ def response_summary(
         pass
     json_keys = sorted(str(key)[:120] for key in parsed_json.keys())[:100] if isinstance(parsed_json, dict) else []
     selected_json: dict[str, Any] = {}
-    # Inside a Hunt a selected value's or header's URL userinfo password becomes a reference, as
-    # in the body sample. Elsewhere selected values are compared (a changed password must still
-    # read as a change), and the caller's redactor masks them.
+    # A selected value is masked by its shape too (a bare JWT, a bearer credential, a
+    # credential-shaped token), not only by its name. Inside a Hunt a withheld value is a
+    # reference, as in the body sample. Elsewhere selected values are compared (a changed
+    # password must still read as a change): a withheld one shows as its keyed digest.
     in_hunt = active_withheld_values() is not None
     for path in selected_json_paths or []:
         try:
             value = _json_path_get(parsed_json, path)
-            selected_json[path] = withhold_url_userinfo(value) if in_hunt else value
+            selected_json[path] = mask_selected_value(withhold_url_userinfo(value)) if in_hunt else _compared_value(value)
         except ExperimentContractError:
             selected_json[path] = None
     # A URL-bearing header's secret parameters are withheld (inside a Hunt) before it is cut; any
@@ -722,7 +742,9 @@ async def execute_experiment(target_url: str, raw: Any, *, transport: httpx.Asyn
                     raise ExperimentContractError("rendered_query_contains_control_character")
                 request_view = {
                     "method": step["method"],
-                    "path": rendered_path,
+                    # The path as written: an extracted value rendered into it (a token, an id
+                    # taken from a response) is shown by its ``${name}``, never its value.
+                    "path": step["path"],
                     "query_keys": sorted(rendered_query),
                     "body_kind": "json" if rendered_json is not None else "form" if rendered_form is not None else None,
                 }

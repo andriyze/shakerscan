@@ -17,6 +17,10 @@ import math
 import statistics
 import time
 import urllib.parse
+try:
+    from capabilities.secret_material import keyed_response_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_response_digest
 
 try:
     import agent_tools
@@ -741,7 +745,7 @@ def _exposure_observation(
         **({"response_body_sha256": None,
             "response_body_hmac": keyed_body_digest(result.response_body)}
            if signature.withholds_content else
-           {"response_body_sha256": hashlib.sha256(result.response_body).hexdigest()}),
+           {"response_body_sha256": keyed_response_digest(result.response_body)}),
         "matched_signature": signature.matched_pattern,
         "redacted_excerpt": redacted_exposure_excerpt(result.response_body, signature),
         # Key names, provider categories and scrypt fingerprints of the proven secrets:
@@ -2746,8 +2750,8 @@ class DatabaseNeutralScanActionDispatcher:
                         ordinal += 1
                         answer = await probe(f"{base_origin}/{control}", ordinal)
                         if answer.status_code == 200 and answer.response_body:
-                            absent_bodies.add(hashlib.sha256(answer.response_body).hexdigest())
-                if hashlib.sha256(result.response_body).hexdigest() in absent_bodies:
+                            absent_bodies.add(bytes(answer.response_body))
+                if bytes(result.response_body) in absent_bodies:
                     indistinguishable += 1
                     signature = None
             attempt_observations: list[Mapping[str, Any]] = []
@@ -3162,7 +3166,7 @@ class DatabaseNeutralScanActionDispatcher:
             ), "")
             return PrincipalProbe(
                 status=result.status_code,
-                body_sha256=hashlib.sha256(result.response_body).hexdigest(),
+                body_sha256=keyed_response_digest(result.response_body),
                 body_len=len(result.response_body),
                 is_json="json" in content_type,
                 error=bool(result.error_code),

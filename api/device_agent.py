@@ -18,6 +18,10 @@ import stat
 import threading
 import urllib.parse
 from typing import Any
+try:
+    from capabilities.secret_material import keyed_response_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_response_digest
 
 try:
     import agent_text_toolcalls
@@ -865,7 +869,7 @@ def control_state_observation(response: dict[str, Any] | None) -> dict[str, Any]
         "observable": status > 0,
         "status": status,
         "body_bytes": len(body_bytes),
-        "body_sha256": hashlib.sha256(body_bytes).hexdigest(),
+        "body_sha256": keyed_response_digest(body_bytes),
         "truncated": bool(value.get("truncated")),
     }
 
@@ -909,7 +913,7 @@ def control_json_pointer_value(
         "found": True,
         "value": current,
         "value_type": type(current).__name__,
-        "value_sha256": hashlib.sha256(encoded_value.encode()).hexdigest(),
+        "value_sha256": keyed_response_digest(encoded_value.encode()),
     }
 
 
