@@ -117,7 +117,8 @@ def test_experiment_identity_is_every_condition_on_one_target():
     reordered = validate_conditions({**EXACT, "principals": ["tenant-a", "tenant-b"], "method": "GET"},
                                     required=True)
     assert experiment_key(target, exact) == experiment_key(target, reordered)
-    assert experiment_key(target, exact) != experiment_key(other, exact)  # never across targets
+    # The digest is the conditions; every lookup is bound to one target row (and survives a merge).
+    assert experiment_key(target, exact) == experiment_key(other, exact)
     narrower = validate_conditions({**EXACT, "objects": ["invoice:17", "invoice:18"]}, required=True)
     assert experiment_key(target, exact) != experiment_key(target, narrower)
 
@@ -283,7 +284,7 @@ def test_mcp_query_tool_offers_interpretations_and_negative_results():
     {"principals": ["\uff41\uff4c\uff4c"]}, {"principals": ["\u0430ny"]}, {"principals": ["every user"]},
     {"principals": ["allusers"]}, {"objects": ["%admin%"]}, {"route": "/api/.+"},
     {"operation": "entire application"}, {"objects": ["every endpoint"]}, {"objects": ["invoice:[0-9]"]},
-    {"objects": ["a|b"]}, {"route": "/api/items?"}, {"inputs": {"all": "x"}},
+    {"objects": ["a|b"]}, {"route": "/api/*/items"}, {"inputs": {"all": "x"}},
 ])
 def test_review_broadening_probes_are_refused(broad):
     with pytest.raises(ValueError, match="names a set it did not test"):

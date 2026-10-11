@@ -24,6 +24,8 @@ export interface TargetSkillState {
   knowledge?: TargetSkill | null
   unconfirmed_instructions?: TargetSkill | null
   trust?: 'none' | 'operator' | 'operator_delegated' | 'agent_unconfirmed' | 'hunt_advisory' | 'unknown_advisory'
+  /** Set when an operator retracted this knowledge text: Hunts do not receive it until it is saved again. */
+  knowledge_withheld?: {body_sha256: string; note?: string; by?: string; at?: string} | null
 }
 export interface TargetSkillSnapshot extends TargetSkillState {
   loaded_at_start: boolean

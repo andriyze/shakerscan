@@ -529,6 +529,14 @@ async def merge_target_group(conn, survivor_id, dupe_ids: list) -> None:
             f"UPDATE {table} SET target_id = $2 WHERE target_id = ANY($1::uuid[])",
             dupe_ids, survivor_id)
     await _merge_endpoint_expectations(conn, survivor_id, dupe_ids)
+    if await _table_exists(conn, "target_interpretations"):
+        # The survivor's own knowledge slot applies after a merge: a duplicate's note mirroring its
+        # knowledge text stays as history, not as a second active knowledge note.
+        await conn.execute(
+            """UPDATE target_interpretations SET status='superseded', status_changed_by='system:target-merge',
+                   status_changed_at=NOW(), status_note='Merged into another target; its knowledge applies.'
+               WHERE target_id = ANY($1::uuid[]) AND written_by='system:knowledge-import' AND status='active'""",
+            dupe_ids)
     for table in MERGE_PLAIN_TABLES:
         if not await _table_exists(conn, table):
             continue
