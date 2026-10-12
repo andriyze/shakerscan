@@ -19,6 +19,10 @@ Usage:
     )
 """
 
+try:
+    from capabilities.secret_material import keyed_short_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_short_digest
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -373,7 +377,7 @@ async def check_resource_security(
                 # Get content for hashing (limited to first 1MB)
                 content = await response.content.read(1024 * 1024)
                 result["size_bytes"] = len(content)
-                result["content_hash"] = hashlib.sha256(content).hexdigest()[:16]
+                result["content_hash"] = keyed_short_digest(content)
 
     except aiohttp.ClientSSLError as e:
         result["error"] = f"SSL error: {e!s}"

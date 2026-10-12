@@ -365,7 +365,7 @@ def _failing_head_server(monkeypatch, document: bytes, seen: list, recorded: lis
     async def fake_execute(_target_url, args, **kwargs):
         start, end = (int(part) for part in args["headers"]["Range"].split("=")[1].split("-"))
         seen.append((start, end, kwargs.get("timeout_seconds")))
-        if start == 0 and end == artifact_capability.HEAD_PROBE_BYTES - 1:
+        if start == 0 and end == artifact_capability.HEAD_READ_BYTES - 1:
             kwargs["private_response_sink"](WorkerPrivateHTTPResponse(
                 status_code=500, final_url="https://honey.fixture.test/x", _body=b"", _headers={}, _cookies={}))
             return {"ok": True}

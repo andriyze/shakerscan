@@ -7,6 +7,10 @@ executor so scope, DNS pinning, redirects, archiving, and cancellation keep one 
 
 from __future__ import annotations
 
+try:
+    from capabilities.secret_material import keyed_short_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_short_digest
 import base64
 import hashlib
 import json
@@ -108,10 +112,11 @@ def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[st
         if truncated and match.end() >= len(text):
             continue
         token = match.group(1)
-        digest = hashlib.sha256(token.encode("ascii", errors="ignore")).hexdigest()
-        if digest in seen_tokens:
+        if token in seen_tokens:
             continue
-        seen_tokens.add(digest)
+        seen_tokens.add(token)
+        # Keyed: a plain digest of a JWT lets anyone crack a weak HS256 secret offline.
+        digest = keyed_body_digest(token.encode("ascii", errors="ignore"))
         segments = token.split(".")
         header = _b64_json(segments[0]) or {}
         payload = _b64_json(segments[1]) or {}
@@ -179,7 +184,7 @@ def _jwt_replacement(match: re.Match[str]) -> str:
     collector = active_withheld_values()
     if collector is not None:
         return collector.marker(token)
-    return f"<jwt:sha256:{hashlib.sha256(token.encode()).hexdigest()[:16]}>"
+    return f"<jwt:{keyed_short_digest(token.encode())}>"
 
 
 # A window read at an offset is masked with up to this much of what precedes it: a dump's column
@@ -246,6 +251,8 @@ _NEAR_CONTEXT_BYTES = 65_536
 
 
 HEAD_PROBE_BYTES = 65_536
+# A head read takes the lookahead too, so a statement the probe's end cuts is read whole.
+HEAD_READ_BYTES = HEAD_PROBE_BYTES + CUT_LOOKAHEAD_CHARS
 # A head that could not be read is asked for at most this many times per resource per Hunt;
 # until it is read, the resource's tab-separated rows fail closed.
 MAX_HEAD_ATTEMPTS = 2
@@ -256,12 +263,72 @@ INSPECT_WALL_SECONDS = 30
 _MIN_HEAD_READ_SECONDS = 5
 
 
+_CREATE_TABLE_RE = re.compile(r"(?i)\bcreate\s+(?:temporary\s+|temp\s+|unlogged\s+)?table\b")
+
+
+def _whole_statements(text: str) -> str:
+    """``text`` cut back to what a cut cannot have changed: its last whole line, and before a
+    CREATE TABLE whose column list does not close in view. A column list cut at ``(id, name, p``
+    would otherwise teach ``p`` as the column ``password`` is (``mask_before_cut`` for what is
+    learned rather than shown); a partial schema is worse than none, which fails closed."""
+    text = text[:text.rfind("\n") + 1]
+    last = None
+    for last in _CREATE_TABLE_RE.finditer(text):
+        pass
+    if last is not None and not _column_list_closes(text, last.end()):
+        text = text[:last.start()]
+    return text
+
+
+def _column_list_closes(text: str, start: int) -> bool:
+    """Whether the parenthesised column list after ``start`` closes in ``text``: quotes
+    (``'a;b'``, ``"x"``, backticks), ``--`` and ``/* */`` comments and nested parentheses are
+    read as SQL reads them. Linear."""
+    depth = 0
+    position = start
+    length = len(text)
+    while position < length:
+        char = text[position]
+        if char in "'\"`":
+            closing = text.find(char, position + 1)
+            while closing >= 0 and char == "'" and text.startswith("''", closing):
+                closing = text.find(char, closing + 2)
+            if closing < 0:
+                return False
+            position = closing + 1
+            continue
+        if text.startswith("--", position):
+            newline = text.find("\n", position)
+            if newline < 0:
+                return False
+            position = newline + 1
+            continue
+        if text.startswith("/*", position):
+            end = text.find("*/", position + 2)
+            if end < 0:
+                return False
+            position = end + 2
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return True
+        elif char == ";" and depth == 0:
+            return False  # a statement that ended before any column list
+        position += 1
+    return False
+
+
 def _learn_head(
     collector: WithheldValues, tables: dict[str, list[str]], resource: str, head: bytes,
-    headers: dict[str, str], version: str | None = None,
+    headers: dict[str, str], version: str | None = None, *, complete: bool = False,
 ) -> None:
     """Remember whether a resource's head reads as a dump; a dump head also teaches its COPY and
-    CREATE TABLE columns and where its COPY blocks open."""
+    CREATE TABLE columns and where its COPY blocks open. ``head`` is read past
+    ``HEAD_PROBE_BYTES`` by up to ``CUT_LOOKAHEAD_CHARS``; unless it is the whole resource
+    (``complete``), only its whole statements teach columns."""
     text = head.decode("utf-8", errors="replace")
     if not (looks_like_dump_head(text) or _served_as_dump(headers)):
         # Bound to the version it was read from: another version may be a dump.
@@ -274,7 +341,8 @@ def _learn_head(
     learner = WithheldValues(_CONTEXT_COLLECTOR_ID, limit=0)
     learner.sql_tables, learner.sql_path, learner.sql_dump_like = collector.sql_tables, resource, True
     with collecting_withheld_values(learner):
-        mask_sql_values(text)  # the head's column lists, for this and later windows
+        # The head's column lists, for this and later windows.
+        mask_sql_values(text if complete else _whole_statements(text))
 
 
 def _metadata_recorder(recorder: Callable[[dict[str, Any]], None] | None):
@@ -324,7 +392,7 @@ async def _check_resource_head(
     if tabs is None or copy_evidence(text, tables, tabs):
         return 0
     if span_start == 0:
-        _learn_head(collector, tables, resource, span[:HEAD_PROBE_BYTES], {}, version)
+        _learn_head(collector, tables, resource, span[:HEAD_READ_BYTES], {}, version)
         return 0
     attempts = 0
     if verdict[:1] == ["unreadable"] and len(verdict) > 1 and str(verdict[1]).isdigit():
@@ -334,7 +402,7 @@ async def _check_resource_head(
         collector.sql_dump_like = True  # unknown: fail closed without another request
         return 0
     result, private = await _fetch_artifact(
-        target_url, path=path, target=target, offset=0, length=HEAD_PROBE_BYTES,
+        target_url, path=path, target=target, offset=0, length=HEAD_READ_BYTES,
         transaction_recorder=_metadata_recorder(transaction_recorder),
         timeout_seconds=min(INSPECT_WALL_SECONDS, int(remaining)),
     )
@@ -342,8 +410,10 @@ async def _check_resource_head(
         tables[HEAD_VERDICT_KEY] = ["unreadable", str(attempts + 1)]
         collector.sql_dump_like = True  # unknown: fail closed
         return 1
-    _learn_head(collector, tables, resource, private.body()[:HEAD_PROBE_BYTES], private.headers(),
-                _resource_version(private))
+    head = private.body()[:HEAD_READ_BYTES]
+    size = _resource_bytes(private)
+    _learn_head(collector, tables, resource, head, private.headers(), _resource_version(private),
+                complete=size is not None and len(head) >= size)
     return 1
 
 

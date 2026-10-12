@@ -83,7 +83,15 @@ def redact_url(
 ) -> str:
     """Redact one absolute or relative URL without retaining userinfo or query values."""
     text = str(value or "").strip()
-    parsed = urllib.parse.urlsplit(text)
+    try:
+        parsed = urllib.parse.urlsplit(text)
+    except ValueError:
+        # Text that only looks like a URL (``scheme://host[:port]``): no userinfo, no query or
+        # fragment, nothing past the authority is kept (erring to withholding).
+        start = text.find("://")
+        authority = text[start + 3:] if start >= 0 else text
+        authority = re.split(r"[/?#]", authority, maxsplit=1)[0].rsplit("@", 1)[-1]
+        return (text[:start + 3] if start >= 0 else "") + authority[:200] + "/<unparsed>"
     path = redact_path(parsed.path or "/")
     query = urllib.parse.urlencode([
         (str(name)[:200], query_placeholder)

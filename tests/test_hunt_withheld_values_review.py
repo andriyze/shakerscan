@@ -1187,7 +1187,7 @@ def test_copy_rows_with_no_evidence_in_view_read_the_head_once(monkeypatch, encr
     conn = _KnowledgeRows()
     result, seen = _hunt_inspect_path(monkeypatch, document, "/download?id=7", offset, conn)
     assert "!q0" not in json.dumps(result)
-    assert (0, artifact_capability.HEAD_PROBE_BYTES - 1) in seen  # the head read
+    assert (0, artifact_capability.HEAD_READ_BYTES - 1) in seen  # the head read
     assert result["budget_consumed"]["http_requests"] == 2 and result["observation"]["resource_head_checked"]
     assert "@fixture.test" in result["observation"]["text_sample"]
     # The verdict is remembered for the resource: the next window does not read the head again.

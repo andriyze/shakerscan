@@ -12,8 +12,11 @@ All functions follow async patterns and return structured dictionaries.
 All checks run in safe_mode by default (detection only, no exploitation).
 """
 
+try:
+    from capabilities.secret_material import keyed_short_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_short_digest
 import asyncio
-import hashlib
 import json
 import re
 import urllib.parse
@@ -1128,7 +1131,7 @@ async def test_api_security(
         strong_markers = [m for m in markers if m not in {"email", "admin_role"}]
         if not strong_markers:
             continue
-        response_hash = hashlib.sha256(body.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        response_hash = keyed_short_digest(body.encode("utf-8", errors="ignore"))
         results["vulnerable"] = True
         results["excessive_data_exposure"].append({
             "url": api_url,

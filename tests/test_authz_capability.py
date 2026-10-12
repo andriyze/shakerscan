@@ -80,7 +80,9 @@ def test_target_bound_authz_capability_emits_content_free_verified_proof(
     assert observation["producer_url"] == (
         "https://app.example.test/api/orders"
     )
-    assert observation["resource_id_sha256"] == hashlib.sha256(b"101").hexdigest()
+    # Keyed (2.9.0): a plain digest of a small id is reversed by enumerating ids.
+    assert observation["resource_id_sha256"].startswith("hmac-sha256-")
+    assert observation["resource_id_sha256"] != hashlib.sha256(b"101").hexdigest()
     assert observation["object_absent_from_secondary_listing"] is True
     assert observation["responses_equivalent"] is True
     assert observation["secret_values_visible"] is False

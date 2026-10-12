@@ -22,8 +22,11 @@ MITRE ATT&CK:
 - T1213: Data from Information Repositories
 """
 
+try:
+    from capabilities.secret_material import keyed_short_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_short_digest
 import asyncio
-import hashlib
 import http.client
 import re
 import socket
@@ -621,7 +624,7 @@ async def harvest_listed_files(dir_url: str, listing_html: str, max_files: int =
         # preview_hash16 hashes the FULL body (same shape the retest prover
         # re-hashes) so a marker-less-but-genuinely-exposed file can still be
         # re-confirmed byte-for-byte; content_type feeds the prover's shape match.
-        preview_hash16 = hashlib.sha256(body.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        preview_hash16 = keyed_short_digest(body.encode("utf-8", errors="ignore"))
         found.append({
             "file": name,
             "url": file_url,

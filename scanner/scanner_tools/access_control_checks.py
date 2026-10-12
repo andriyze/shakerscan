@@ -11,6 +11,10 @@ CWE-285: Improper Authorization
 All functions follow async patterns and return structured dictionaries.
 """
 
+try:
+    from capabilities.secret_material import keyed_short_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_short_digest
 import asyncio
 import base64
 import hashlib
@@ -2454,7 +2458,7 @@ def _response_body_fingerprint(body: str) -> str:
     if not body:
         return ""
     normalized = normalize_response_body(body)
-    return hashlib.sha256(normalized[:4000].encode()).hexdigest()
+    return keyed_short_digest(normalized[:4000].encode(), 64)
 
 
 def _id_parameter_affects_response(

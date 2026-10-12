@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
 import ipaddress
 import re
 import json
@@ -194,7 +197,7 @@ class NseCheckAdapter:
                                     "transport": transport, "script_id": script_id,
                                     "status": "failed" if failed else "reported" if script_output.strip() else "no_output",
                                     "signals": {} if failed else _signals(script_id, script_output),
-                                    "output_sha256": hashlib.sha256(script_output.encode()).hexdigest(),
+                                    "output_sha256": keyed_body_digest(script_output.encode()),
                                     "proof_state": "observation_only",
                                 })
                     elif event == "end" and element.tag == "port":
