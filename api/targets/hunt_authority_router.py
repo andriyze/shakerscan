@@ -58,7 +58,11 @@ async def put_hunt_authority(target_id: str, values: HuntAuthorityWrite, request
             if sent != unchanged:
                 raise HTTPException(422, 'Save other Hunt-permission edits separately before enabling instruction edits')
             from .decision_receipts import receipt_request
-            return await receipt_request(conn, request, target_id, 'allow_changes', expected_revision=values.expected_revision)
+            return await receipt_request(conn, request, target_id, 'allow_changes',
+                expected_revision=values.expected_revision,
+                perform=lambda identity: save_authority(conn, row,
+                    {**current, 'instruction_changes': True, 'revision': current['revision'] + 1},
+                    recorded_by=identity))
         for table, identifiers in [('credential_profiles', values.credential_profile_ids),
                                    ('request_collections', values.collection_ids)]:
             count = await conn.fetchval(f'SELECT count(*) FROM {table} WHERE id=ANY($1::uuid[]) AND is_active',

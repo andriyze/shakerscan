@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 210,
+  "component_schema_count": 211,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -58,6 +58,7 @@
     "BulkFindingUpdateRequest": "ab9b1e432ad383a93762b41a99a3c797962628406130be954a356b0b95edfa1d",
     "CampaignActionLinkRequest": "38c2784e4d2458c9257889d4316b5bab7dec9dbdabf05bd1e22bf85cee2304ed",
     "CampaignRequest": "d93684ab216e4304f708123ee41f543627384361a55b28a9b5e3c5f33a876591",
+    "ConfirmedTargetSkillResponse": "92db68f7933cea7263a1a0f1b801e4f46fb8f9d05d609ce5c75e9c590c7f2511",
     "CredentialGrantCreate": "3e5a611bf478571c2b71e44f2e1221e4d086d03751d11c57469a90d436ecd2e2",
     "CredentialProfileCreate": "e126e6b782f64c10eeb4544e2bc0f6719234992b16c69520d41847fdc8567738",
     "CredentialProfilePatch": "b27d3790c601e9eebf639ae8991422fe4b36d1e3c6d39a9ee6fd344d6482aca1",
@@ -216,7 +217,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "ac484c80e82ef26b1c449a5750fd94fe5424843e3b0d0d1cad59cf1261b6a9a0",
+  "contract_sha256": "e86aac27e883cefcff89b9086dcddc17f16e48e761ef1c9c2bf79a143ac0fb47",
   "openapi": "3.1.0",
   "operation_count": 484,
   "operations": {
@@ -6532,7 +6533,7 @@
       "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
       "request_schema_sha256": "0d6ded56d51c0493659a953e128be61b93902a995ae40cf899148e0bebee4f06",
       "response_schema_sha256": {
-        "200": "cd500422d024a17a348092ae4aaf8a4f8d679e03713c7a274862106be175e465",
+        "200": "e63f42265be15521388d8220851d1092d683007e46ed4038512f651a88009e9b",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
       },
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
