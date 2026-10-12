@@ -78,3 +78,20 @@ test('a finished discovery says how many names were skipped for having no addres
   assert.equal(failed.kind, 'error')
   assert.match(failed.message, /subfinder missing/)
 })
+
+test('a source that failed never reads as "no subdomains exist"', () => {
+  const partial = discoveryOutcomeMessage('example.com', {
+    status: 'completed', subdomains_found: 0, new_subdomains: 0, resolution: { added: 0, unresolved_count: 0 },
+    source_errors: { crtsh: 'crt.sh HTTP 503; Certificate Transparency results are incomplete' },
+  })
+  assert.equal(partial.kind, 'info')
+  assert.match(partial.message, /Results may be incomplete: crt\.sh \(crt\.sh HTTP 503/)
+  assert.match(partial.message, /run discovery again later/)
+
+  const none = discoveryOutcomeMessage('example.com', {
+    status: 'completed', subdomains_found: 0, new_subdomains: 0, resolution: { added: 0, unresolved_count: 0 },
+    source_errors: {},
+  })
+  assert.equal(none.kind, 'success')
+  assert.doesNotMatch(none.message, /incomplete/)
+})

@@ -75,6 +75,7 @@ import parallel_scan
 import asm_inventory
 import domain_rate
 import target_resolution
+import discovery_outcome
 import family_proof
 import agent_tools
 import worker_queue_policy as worker_queue_policy_module
@@ -2701,8 +2702,11 @@ async def run_discovery(root_domain: str) -> dict:
         result = json.loads(stdout.decode())
     except json.JSONDecodeError:
         return {'error': stderr.decode(), 'root_domain': root_domain, 'subdomains': []}
-    return {'subdomains': result.get('subdomains', []), 'name_sources': result.get('name_sources', {}),
-            'by_source': result.get('by_source', {}), 'total': result.get('subdomain_count', 0)}
+    found = {'subdomains': result.get('subdomains', []), 'name_sources': result.get('name_sources', {}),
+             'by_source': result.get('by_source', {}), 'total': result.get('subdomain_count', 0),
+             'source_errors': discovery_outcome.source_errors(result), 'sources_answered': result.get('sources_answered')}
+    failed = discovery_outcome.failed_run_message(found)
+    return {**found, 'error': failed} if failed else found
 
 
 def generate_finding_fingerprint(finding: dict) -> str:
@@ -13950,7 +13954,7 @@ async def process_discovery_job(job_data: dict):
                     completed_at = $5
                 WHERE id = $6
             """, result.get('total', 0), resolution['added'], json.dumps(result.get('subdomains', [])),
-                 json.dumps({**(result.get('by_source') if isinstance(result.get('by_source'), dict) else {}), 'dns_resolution': resolution}), completed_at, uuid.UUID(discovery_id))
+                 json.dumps({**(result.get('by_source') if isinstance(result.get('by_source'), dict) else {}), 'dns_resolution': resolution, 'source_errors': result.get('source_errors') or {}}), completed_at, uuid.UUID(discovery_id))
 
     job_key = f"job:{job_id}"
     r.hset(job_key, mapping={

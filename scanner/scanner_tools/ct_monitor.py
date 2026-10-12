@@ -41,6 +41,51 @@ from .discovered_names import subdomain_of
 CRT_SH_URL = "https://crt.sh"
 
 
+class CTQueryError(Exception):
+    """crt.sh did not answer with a usable result. Never read as "no certificates"."""
+
+
+#: Attempts per crt.sh query, and the pause before each retry (crt.sh often answers 502/503/429
+#: or times out under load; an empty list must only ever mean crt.sh answered "none").
+CRTSH_ATTEMPTS = 3
+CRTSH_RETRY_DELAYS = (2.0, 5.0)
+
+
+def _crtsh_fetch(url: str, timeout: int) -> list[dict[str, Any]]:
+    """One crt.sh request. Raises CTQueryError with a short reason, never returns a guess."""
+    req = Request(url, headers={"User-Agent": "Security Scanner/1.0", "Accept": "application/json"})
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        raise CTQueryError(f"HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        raise CTQueryError(f"unreachable ({type(reason).__name__ if not isinstance(reason, str) else reason})"[:120]) from exc
+    text = body.strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        # crt.sh answers its error page (HTML) with status 200 when it is overloaded.
+        raise CTQueryError("unexpected non-JSON answer") from exc
+    if not isinstance(data, list):
+        raise CTQueryError("unexpected answer shape")
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _retryable(error: CTQueryError) -> bool:
+    text = str(error)
+    if text.startswith("HTTP "):
+        try:
+            code = int(text.split()[1])
+        except (IndexError, ValueError):
+            return True
+        return code == 429 or code >= 500
+    return True
+
+
 async def _query_crtsh(domain: str, timeout: int = 30, include_expired: bool = False) -> list[dict[str, Any]]:
     """
     Query crt.sh for certificates issued for a domain.
@@ -51,33 +96,24 @@ async def _query_crtsh(domain: str, timeout: int = 30, include_expired: bool = F
         include_expired: Include expired certificates in results
 
     Returns:
-        List of certificate records from crt.sh
+        List of certificate records from crt.sh (empty only when crt.sh answered with none).
+
+    Raises:
+        CTQueryError: crt.sh failed after retries (HTTP error, timeout, non-JSON answer).
     """
-    def _sync_query():
+    url = f"{CRT_SH_URL}/?q={quote(domain)}&output=json"
+    if not include_expired:
+        url += "&exclude=expired"
+    last: CTQueryError | None = None
+    for attempt in range(CRTSH_ATTEMPTS):
         try:
-            # Query crt.sh JSON API
-            url = f"{CRT_SH_URL}/?q={quote(domain)}&output=json"
-            if not include_expired:
-                url += "&exclude=expired"
-
-            req = Request(url, headers={
-                "User-Agent": "Security Scanner/1.0",
-                "Accept": "application/json"
-            })
-
-            with urlopen(req, timeout=timeout) as resp:
-                data = resp.read().decode('utf-8')
-                if data.strip():
-                    return json.loads(data)
-                return []
-        except json.JSONDecodeError:
-            return []
-        except (URLError, HTTPError):
-            return []
-        except Exception:
-            return []
-
-    return await asyncio.to_thread(_sync_query)
+            return await asyncio.to_thread(_crtsh_fetch, url, timeout)
+        except CTQueryError as exc:
+            last = exc
+            if not _retryable(exc) or attempt == CRTSH_ATTEMPTS - 1:
+                break
+            await asyncio.sleep(CRTSH_RETRY_DELAYS[min(attempt, len(CRTSH_RETRY_DELAYS) - 1)])
+    raise CTQueryError(f"crt.sh {last}" if last else "crt.sh failed")
 
 
 def _parse_crtsh_date(date_str: str) -> datetime | None:
@@ -497,7 +533,14 @@ async def check_certificate_transparency(
         if safe_mode:
             await asyncio.sleep(1)  # Rate limit
 
-        certs = await _query_crtsh(query, timeout=timeout, include_expired=include_expired)
+        try:
+            certs = await _query_crtsh(query, timeout=timeout, include_expired=include_expired)
+        except CTQueryError as exc:
+            # A failed query is a failed source, never "no certificates": callers that list
+            # subdomains must say the result is incomplete instead of reporting none exist.
+            results["source_status"] = "error"
+            results["error"] = f"{exc}; Certificate Transparency results are incomplete"
+            return results
         all_certs.extend(certs)
 
     # Deduplicate by certificate ID
@@ -511,8 +554,10 @@ async def check_certificate_transparency(
 
     results["certificates_found"] = len(unique_certs)
 
+    results["source_status"] = "ok"
     if not unique_certs:
-        results["error"] = "No certificates found in CT logs"
+        # crt.sh answered and listed none: a real, empty answer (not an error).
+        results["note"] = "No certificates found in CT logs"
         results["recommendations"].append("No CT log entries found. This could indicate the domain doesn't use HTTPS or certificates are not logged.")
         return results
 
@@ -654,9 +699,14 @@ async def monitor_ct_for_domain(
         "alert_level": "none"
     }
 
-    # Query CT logs
-    certs = await _query_crtsh(f"%.{domain}", timeout=timeout, include_expired=False)
-    certs.extend(await _query_crtsh(domain, timeout=timeout, include_expired=False))
+    # Query CT logs. A failed query is reported, never read as "no new certificates".
+    try:
+        certs = await _query_crtsh(f"%.{domain}", timeout=timeout, include_expired=False)
+        certs.extend(await _query_crtsh(domain, timeout=timeout, include_expired=False))
+    except CTQueryError as exc:
+        results["error"] = str(exc)
+        results["alert_level"] = "unknown"
+        return results
 
     # Filter to recent certificates
     now = datetime.now(UTC)

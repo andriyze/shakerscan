@@ -12,6 +12,18 @@ export interface DiscoveryOutcomeLike {
   new_subdomains?: number | null
   error_message?: string | null
   resolution?: { added: number; unresolved_count: number } | null
+  /** Sources that failed (e.g. crt.sh answering 503): the list may be incomplete. */
+  source_errors?: Record<string, string> | null
+}
+
+const DISCOVERY_SOURCE_LABELS: Record<string, string> = { crtsh: 'crt.sh', gungnir: 'Gungnir', subfinder: 'subfinder' }
+
+function failedSources(run: DiscoveryOutcomeLike): string {
+  const errors = run.source_errors && typeof run.source_errors === 'object' ? run.source_errors : {}
+  return Object.entries(errors)
+    .filter(([, reason]) => typeof reason === 'string' && reason.trim())
+    .map(([name, reason]) => `${DISCOVERY_SOURCE_LABELS[name] ?? name} (${reason.trim().slice(0, 120)})`)
+    .join(', ')
 }
 
 // The distinct reasons a batch of scan starts was refused, in first-seen order, capped so a
@@ -73,6 +85,12 @@ export function discoveryOutcomeMessage(rootDomain: string, run: DiscoveryOutcom
   let message = `Discovery for ${rootDomain} found ${found} name${found === 1 ? '' : 's'}; ${added} new target${added === 1 ? '' : 's'} added`
   if (skipped > 0) {
     message += `. ${skipped} name${skipped === 1 ? '' : 's'} found but not resolving in DNS (no A/AAAA record) ${skipped === 1 ? 'was' : 'were'} skipped`
+  }
+  const failed = failedSources(run)
+  if (failed) {
+    // A failed source is not a source that found nothing: never let "0 found" read as "none exist".
+    message += `. Results may be incomplete: ${failed} did not answer; run discovery again later`
+    return { kind: 'info', message }
   }
   return { kind: skipped > 0 ? 'info' : 'success', message }
 }

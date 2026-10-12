@@ -554,4 +554,18 @@ def public_discovery_run(row: Mapping[str, Any]) -> dict[str, Any]:
         public["sources_used"] = sources
     else:
         public.setdefault("resolution", None)
+    # Sources that failed (e.g. crt.sh answering 503): the run's list may be incomplete. Older
+    # rows carry the same information as per-source ``error`` fields.
+    errors: dict[str, str] = {}
+    if isinstance(sources, Mapping):
+        sources = dict(sources)
+        recorded = sources.pop("source_errors", None)
+        if isinstance(recorded, Mapping):
+            errors = {str(k): str(v)[:300] for k, v in recorded.items() if v}
+        else:
+            errors = {str(k): str(v.get("error"))[:300] for k, v in sources.items()
+                      if isinstance(v, Mapping) and v.get("error") and not v.get("unavailable")
+                      and v.get("error") != "No certificates found in CT logs"}
+        public["sources_used"] = sources
+    public["source_errors"] = errors
     return public
