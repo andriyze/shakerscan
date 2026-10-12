@@ -84,8 +84,32 @@ def test_the_runtime_cli_decides_proposals_only_after_a_keypress():
         body = source[source.index(f"def {function}"):]
         body = body[:body.index("\ndef ", 1)]
         assert "terminal.key(" in body
-        posts = [match.start() for match in re.finditer(r'send\("POST"|_decide_proposal\(', body)]
+        posts = [match.start() for match in re.finditer(r'send\("POST"|_decide_proposal\(|decide_knowledge\(|apply_knowledge_decision\(', body)]
         assert posts and body.index("terminal.key(") < min(posts)
+
+
+def test_letting_hunts_edit_instructions_from_the_cli_takes_a_keypress_and_on_enterprise_a_step_up():
+    source = (ROOT / "scripts/v2_cli.py").read_text(encoding="utf-8")
+    body = source[source.index("def _run_allow_changes"):]
+    body = body[:body.index("\ndef ", 1)] if "\ndef " in body[1:] else body
+    assert body.index("terminal.require(") < body.index("terminal.key(")
+    writes = [match.start() for match in re.finditer(r'send\("PUT"|apply_knowledge_decision\(', body)]
+    assert writes and body.index("terminal.key(") < min(writes)
+    # The server says whether it is an Enterprise gateway; turning it on there takes the step-up.
+    assert 'if want and approval.instance_kind(send) == "enterprise":' in body
+    helper = source[source.index("def apply_knowledge_decision"):]
+    helper = helper[:helper.index("\ndef ", 1)]
+    assert helper.index("decide_knowledge(stepup, entry)") < helper.index("send(method, path, payload)")
+
+
+def test_no_agent_entry_point_reaches_the_terminal_step_up():
+    """The MCP adapter (and the scripts it imports) never call the approval protocol, so an agent
+    holding the connection's token can at most begin an approval it cannot finish (the person's
+    authenticator code or security key is asked for at their own terminal)."""
+    for name in ("shakerscan_mcp.py", "mcp_stdio.py", "mcp_ssh_stream.py", "api_stream.py"):
+        source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        for marker in ("/_enterprise/approvals", "knowledge_decision", "decide_knowledge", "hunt_approve"):
+            assert marker not in source, (name, marker)
 
 
 @pytest.mark.parametrize("key", ["target_skill", "hunt_actions", "hunt_authority"])

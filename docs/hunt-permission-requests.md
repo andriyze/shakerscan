@@ -650,7 +650,7 @@ pre-authorized …") and exits 2. There is no fallback.
 1. `POST /_enterprise/approvals/begin`
    ```json
    {"schema_version": "shakerscan-approval-begin/v1",
-    "purpose": "permission_decision | preauthorization | approver_session",
+    "purpose": "permission_decision | preauthorization | approver_session | knowledge_decision",
     "account": "<the sign-in name the person typed>",
     "origin": "https://<gateway public origin>",
     "decisions": [{"hunt_id": "…", "request_id": "…", "subject_digest": "<64 hex>",
@@ -754,6 +754,108 @@ same loop, and each keypress is the confirmation.
 **Security keys.** CTAP2 over USB or NFC through python-fido2 when it is installed beside the
 client (`pipx inject shakerscan fido2`); without it the client says so and offers `--method totp`.
 Platform authenticators are not reachable from a pip-installed command.
+
+**Knowledge-review decisions (`purpose: knowledge_decision`).** Accepting an instruction or
+saved-action proposal, confirming a target's agent-written instructions and turning a target's
+`instruction_changes` on make text a Hunt wrote into guidance for every future Hunt on that target.
+On an Enterprise connection, `shakerscan knowledge review` (`y` on a proposal, `c` on unconfirmed
+instructions) and `shakerscan knowledge allow-changes <target>` take them through the same routes
+as above, one decision per step-up; the token alone never does them, and the client never sends the
+engine's accept, confirm or Hunt-permission write for them itself. Rejecting, rebasing and
+`allow-changes --off` need no step-up.
+- `begin` carries `"knowledge": {"decision", "target_id", "subject_id", "text_sha256",
+  "expected_revision", "reason", "note"}`, every key present, lower-case ids, `null` where it does
+  not apply:
+
+  | decision | subject_id | text_sha256 | expected_revision | reason | note |
+  |---|---|---|---|---|---|
+  | `accept` | the proposal | its `methodology_sha256` as shown | | | optional |
+  | `confirm` | | the unconfirmed text's `body_sha256` | the instructions' revision | | |
+  | `allow_changes` | | | the Hunt permissions' revision | | |
+  | `dismiss` | the finding | | | `false_positive`, `accepted_risk` or `duplicate` | required |
+  | `reopen` | the finding | | | | required |
+  | `retract` | the interpretation entry | | | | required |
+  | `retract_hunt` | the Hunt whose active entries are retracted | | | | required |
+  | `release_marker` | | digest of the reviewed label/time | | | |
+  | `revert` | the decision receipt | its `receipt_sha256` | | | |
+
+  A note is 1 to 2000 characters without control, bidirectional or invisible formatting
+  characters. The set document's part is `knowledge` with exactly these seven keys, except
+  `release_marker` also includes `release_label` and `released_at`. Its text digest is SHA-256 of
+  ASCII JSON `{ "label": <label or null>, "released_at": <time or null> }`, with sorted keys and
+  compact separators. An explicit time includes its timezone; labels are limited to 120 characters.
+  The terminal helper is `shakerscan knowledge release <target> --label <label>`.
+- The approving person must have a gateway factor (TOTP or a security key) and be an
+  administrator for `accept`, `confirm`, `allow_changes` and `revert`, an operator or administrator for the
+  finding and interpretation decisions;
+  the approver session is not a proof for this purpose. `begin` checks with the engine that the
+  decision is still what was shown (the proposal pending, not stale, with that digest; the
+  unconfirmed text and revision; the permissions' revision with `instruction_changes` off). A
+  challenge is answered within three minutes, once. The Hunt setting does not apply; the
+  licence's `can_mutate` does.
+- `finish` applies the decision itself, as the person: `POST
+  /targets/{id}/instruction-proposals/{pid}/accept` `{note, methodology_sha256}`, `POST
+  /targets/{id}/skill/confirm` `{expected_revision, body_sha256}`, the Hunt-permissions write
+  with only `instruction_changes` turned on, at the revision named (the engine refuses any other
+  text or revision), `POST /targets/{id}/findings/{fid}/dismiss` `{reason, note}`,
+  `.../findings/{fid}/reopen`, `.../interpretations/{eid}/retract` or
+  `.../hunts/{hid}/interpretations/retract` `{note}`. It answers `"knowledge": {"decision", "target_id", "http_status", "result":
+  <engine body> | "error": <engine detail>}` and audits `knowledge.<change>`.
+- Right before asking for the code (or the key touch) the client says what it decides (the
+  decision, target, proposal or revision, and the start of the text digest). Typed-ahead input is
+  discarded before the sign-in name and code prompts. As for every terminal approval, this protects
+  against an agent that holds the connection's token; it assumes the agent cannot write the
+  client's installation or type into the person's terminal (run agents as another OS user or in a
+  container), see "The approver session, honestly".
+- The gateway counts failed proofs for this purpose per connection and per person over a day and
+  then refuses them, so an agent guessing codes through the token gets a few tries a day.
+- A gateway that serves `begin` but not this purpose answers `request_invalid` (422); the client
+  then says the gateway cannot take knowledge-review decisions from the terminal and decides
+  nothing.
+
+**Decision receipts and reversal.** The gateway creates an opaque decision ID only after a
+person authenticates for the bound change, and persists intent before calling the engine. The
+engine applies the existing operator route and stores its receipt and encrypted before/after
+snapshot in one transaction. A lost answer is reconciled by that exact ID, never by inferring
+success from another operator's change. An unresolved outcome remains visible in Recent decisions.
+Receipts include the target, subject, actor, channel, reviewed digest and redacted readable diff.
+The console shows a person their own receipts and administrators all receipts, with per-person
+read acknowledgments. This is an operator audit; it is never Hunt guidance.
+
+An administrator's fresh `revert` decision binds the receipt ID and digest, then calls
+`POST /targets/{id}/knowledge/decisions/{receipt_id}/revert` with `{receipt_sha256}`. The engine
+allows reversal for 24 hours only when the affected state still matches the recorded result.
+It restores the existing records, advances instruction/permission revisions, preserves original
+instruction provenance and retains decision history. Release markers are marked retracted, never
+deleted. Reversal does not restore credentials, scope, approval receipts or finding proof.
+
+Older triage mutations also require one person-authenticated decision: finding status/verdict
+PATCH, bulk status changes, and exception create/update/delete. Notes-only finding PATCH stays
+available under the ordinary operator permission. The compatibility binding is
+`{decision: "legacy_triage", method, path, payload}`: the exact bounded route and complete JSON
+payload, with no arbitrary route approval. Tokens alone cannot perform these triage decisions.
+
+- **Which instance.** The client asks the server, not its own configuration: an Enterprise
+  gateway answers `GET /_enterprise/healthz` with `"mode": "enterprise"` (then every accept,
+  confirm and allow-changes goes through the step-up), an open-source engine has no such route
+  (404: the keypress decides). Any other answer decides nothing.
+- **An unanswered decision is "outcome unknown", never "not applied".** When the gateway does
+  not answer `finish` in time, or answers `"outcome": "unknown"` (the engine did not answer; the
+  gateway reads the engine's state and reports `applied` when it shows the change), the client
+  says the outcome is unknown and to check before deciding again.
+
+**Who decided, at the engine.** An Enterprise gateway names the person on every request it
+forwards to the engine API with `X-ShakerScan-Operator` (UTF-8, percent-encoded so that every
+printable ASCII character but `%` is itself) and `X-ShakerScan-Operator-Assertion:
+t=<unix seconds>,n=<32 hex nonce>,s=<HMAC-SHA256 hex over method, path, operator, t and n, joined
+by newlines>`, keyed with `SHAKERSCAN_GATEWAY_IDENTITY_KEY`, which the deployment gives both. The
+engine (`api/gateway_identity.py`) trusts a valid assertion no more than 60 seconds old whose
+nonce it has not seen, decodes the name (refusing control, bidirectional and invisible formatting
+characters), and records that person as `proposed_by`, `decided_by`, `recorded_by` and
+`requested_by`. Without the key, or for anything else, it records its own provenance names
+(`local-operator`, `operator:...-api`). It removes both headers from every request, key or no
+key, and takes the key out of its own process environment at startup, so no process the API
+starts inherits it. A comma-separated list of keys is accepted for a rotation. The identity is attribution only: what a person may do is decided at the gateway.
 
 ## PR split
 

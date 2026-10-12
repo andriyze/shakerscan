@@ -392,7 +392,7 @@ def test_post_discovery_answers_on_a_converted_2_8_1_installation_after_restart(
             monkeypatch.setattr(operations, '_pool_provider', lambda: pool)
             monkeypatch.setitem(operations._deps, 'get_redis', lambda: object())
             monkeypatch.setitem(operations._deps, 'enqueue_job', lambda _r, _q, job: queued.append(job))
-            answer = await operations.start_discovery(root_domain='example.co.uk')
+            answer = await operations.start_discovery(request=None, root_domain='example.co.uk')
             assert answer['status'] == 'queued' and queued[0]['root_domain'] == 'example.co.uk'
             assert await conn.fetchval(
                 'SELECT requested_by FROM discovery_runs WHERE id=$1',

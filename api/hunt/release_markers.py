@@ -6,8 +6,8 @@ deployment change is the fallback). A marker changes no applicability, suppresse
 grants nothing: applicability always follows the recorded dependencies, whatever the marker says.
 
 Only an operator declares one (the operator route and ``shakerscan knowledge release``); no Hunt
-capability, query or MCP tool writes it. Markers are append-only: a wrong one is corrected by
-declaring another.
+capability, query or MCP tool writes it. History is retained: a guarded operator-decision
+reversal marks a marker retracted, and current anchors exclude those markers.
 """
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ async def declare_release(conn: Any, target_id: Any, entry: ReleaseMarkerInput, 
 async def list_releases(conn: Any, target_id: Any, *, device: bool, limit: int = MAX_LISTED_MARKERS) -> dict[str, Any]:
     scope = asset_scope("target_id") if device else "target_id=$1"
     limit = max(1, min(int(limit), MAX_LISTED_MARKERS))
-    rows = await conn.fetch(f"""SELECT * FROM target_release_markers WHERE {scope}
+    rows = await conn.fetch(f"""SELECT * FROM target_release_markers WHERE ({scope}) AND retracted_at IS NULL
         ORDER BY released_at DESC, created_at DESC, id DESC LIMIT {limit + 1}""", uuid.UUID(str(target_id)))
     return {"target_id": str(target_id), "count": min(len(rows), limit), "has_more": len(rows) > limit,
             "releases": [public_marker(row) for row in rows[:limit]],
@@ -102,9 +102,9 @@ async def latest_release(conn: Any, target_id: Any, *, device: bool, marker_id: 
     one named by ``marker_id`` when it is on this target."""
     scope = asset_scope("target_id") if device else "target_id=$1"
     if marker_id is not None:
-        return await conn.fetchrow(f"SELECT * FROM target_release_markers WHERE id=$2 AND {scope}",
+        return await conn.fetchrow(f"SELECT * FROM target_release_markers WHERE id=$2 AND ({scope}) AND retracted_at IS NULL",
                                    uuid.UUID(str(target_id)), uuid.UUID(str(marker_id)))
-    return await conn.fetchrow(f"""SELECT * FROM target_release_markers WHERE {scope}
+    return await conn.fetchrow(f"""SELECT * FROM target_release_markers WHERE ({scope}) AND retracted_at IS NULL
         ORDER BY released_at DESC, created_at DESC, id DESC LIMIT 1""", uuid.UUID(str(target_id)))
 
 
