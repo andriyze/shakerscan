@@ -159,3 +159,39 @@ test('HIERARCHY-005 Discover is offered only for domain groups discovery accepts
   await expect(page.getByRole('menuitem',{name:'Discover subdomains of github.io',exact:true})).toHaveCount(0)
   await expect(page.getByRole('button',{name:'Discover subdomains of github.io',exact:true})).toHaveCount(0)
 })
+
+test('HIERARCHY-006 subdomains collapse even when the domain itself is not a target, and stay collapsed', async ({page}) => {
+  await pinMockApiOrigin(page)
+  const subs = Array.from({length: 8}, (_, index) => `s${index}.many.test`)
+  const rows = subs.map((locator, index) => ({ id: `00000000-0000-4000-8000-${String(index + 600).padStart(12,'0')}`,
+    asset_id: `00000000-0000-4000-8000-${String(index + 600).padStart(12,'0')}`, name: locator, locator,
+    url: `host://${locator}`, root_domain: 'many.test', is_active: true, environment: 'lab', connected_device: false,
+    origin_count: 0, service_count: 0, active_findings_count: 0 }))
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
+    if (new URL(route.request().url()).pathname === '/targets/inventory') {
+      return route.fulfill({json:{targets:rows,total:rows.length,total_groups:1,
+        groups:[{root_domain:'many.test',discoverable:true,targets:rows}]}})
+    }
+    return route.fulfill({json:{status:'healthy',skill:null,revision:0,targets:[],total:0}})
+  })
+  await page.goto('/targets')
+  const domain = page.getByRole('button',{name:'Subdomains of many.test',exact:true})
+  // More than five targets: collapsed by default, and collapsed really hides them.
+  await expect(domain).toHaveAttribute('aria-expanded','false')
+  await expect(page.getByRole('link',{name:'s0.many.test',exact:true})).toHaveCount(0)
+  await expect(page.getByRole('button',{name:'8 subdomains hidden · show'})).toBeVisible()
+  await domain.click()
+  await expect(page.getByRole('link',{name:'s7.many.test',exact:true})).toBeVisible()
+  await domain.click()
+  await expect(domain).toHaveAttribute('aria-expanded','false')
+  await expect(page.getByRole('link',{name:'s3.many.test',exact:true})).toHaveCount(0)
+  // The choice survives a reload in this browser.
+  await page.getByRole('button',{name:'8 subdomains hidden · show'}).click()
+  await expect(page.getByRole('link',{name:'s5.many.test',exact:true})).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('button',{name:'Subdomains of many.test',exact:true})).toHaveAttribute('aria-expanded','true')
+  await page.getByRole('button',{name:'Subdomains of many.test',exact:true}).click()
+  await page.reload()
+  await expect(page.getByRole('button',{name:'Subdomains of many.test',exact:true})).toHaveAttribute('aria-expanded','false')
+  await expect(page.getByRole('link',{name:'s1.many.test',exact:true})).toHaveCount(0)
+})

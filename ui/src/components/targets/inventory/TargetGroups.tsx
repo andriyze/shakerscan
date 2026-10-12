@@ -92,7 +92,12 @@ export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDelet
     </div>
     <div role="rowgroup" className="divide-y divide-gray-800/60">
       {root && row(root)}
-      {(open || !root) && children.map(asset => row(asset, Boolean(root)))}
+      {/* Collapsing hides the subdomains whether or not the domain itself is a target. */}
+      {open && children.map(asset => row(asset, Boolean(root)))}
+      {!open && children.length > 0 && !root && <button type="button" onClick={onToggle}
+        className="w-full px-4 py-2 text-left text-xs text-gray-500 hover:bg-gray-800/40 hover:text-gray-300">
+        {children.length} subdomain{children.length === 1 ? '' : 's'} hidden · show
+      </button>}
     </div>
   </section>
 }
