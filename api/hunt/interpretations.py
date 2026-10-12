@@ -775,10 +775,10 @@ async def _retest_of(conn: Any, target: Any, previous: Mapping[str, Any], entry:
     if not items:
         return False
     from .knowledge_dependencies import (
-        _ACTIONS_FROM, PRINCIPAL_SQL, Observer, _request_view, _response_view, compare_response, digest_format,
-        request_identity,
+        _ACTIONS_FROM, PRINCIPAL_SQL, RESULT_SUMMARY_SQL, Observer, _request_view, _response_view, compare_response,
+        digest_format, request_identity,
     )
-    rows = await conn.fetch(f"""SELECT a.id, a.input_summary, a.result_summary, a.completed_at,
+    rows = await conn.fetch(f"""SELECT a.id, a.input_summary, {RESULT_SUMMARY_SQL} AS result_summary, a.completed_at,
             t.url AS default_origin, {PRINCIPAL_SQL} {_ACTIONS_FROM}
         WHERE (a.id = ANY($1::uuid[]) OR a.receipt_id = ANY($1::uuid[])) AND a.hunt_run_id=$2
           AND a.capability_name='http.request' AND a.status = ANY($3::text[]) AND a.completed_at > $4""",

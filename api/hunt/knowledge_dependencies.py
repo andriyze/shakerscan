@@ -462,7 +462,23 @@ _ACTIONS_FROM = """FROM hunt_actions a JOIN hunt_runs h ON h.id=a.hunt_run_id
                 LEFT JOIN targets t ON t.id = CASE WHEN h.target_id IS NOT NULL THEN h.target_id
                                                    ELSE h.device_target_id END
                 LEFT JOIN auth_sessions s ON s.id::text = a.input_summary->'input'->>'session_ref'
-                LEFT JOIN credential_profiles cp ON cp.id = s.profile_id"""
+                LEFT JOIN credential_profiles cp ON cp.id = s.profile_id
+                LEFT JOIN budget_reservations br ON br.owner_kind='hunt'
+                     AND br.owner_id=a.hunt_run_id::text AND br.action_id=a.id::text
+                LEFT JOIN LATERAL (SELECT jsonb_path_query_first(
+                     CASE WHEN jsonb_typeof(a.result_summary->'observations')='array' THEN a.result_summary
+                          WHEN br.receipt_json->>'receipt_id' = a.receipt_id::text THEN br.receipt_json END,
+                     '$.observations[*] ? (@.kind == "http_observation").response') AS response) obs ON true"""
+#: The recorded response of an http.request action, as ``_response_view`` reads it. The worker keeps
+#: a content-safe count in ``result_summary`` and the observations in the action's own settled
+#: capability receipt (``action_replay``); a summary that carries observations is read first. Only
+#: the fields a comparison uses are projected: timings and samples would make every repeat distinct.
+RESULT_SUMMARY_SQL = """CASE WHEN obs.response IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('observations',
+                jsonb_build_array(jsonb_build_object('kind', 'http_observation', 'response', jsonb_build_object(
+                    'status', obs.response->'status', 'content_type', obs.response->'content_type',
+                    'json_keys', obs.response->'json_keys', 'body_sha256', obs.response->'body_sha256',
+                    'body_digest_scope', obs.response->'body_digest_scope',
+                    'truncated', obs.response->'truncated')))) END"""
 #: Distinct later responses of one request read at most; more is reported as a change.
 MAX_DISTINCT_RESPONSES = 1000
 
@@ -503,8 +519,7 @@ class Observer:
             # hidden behind later unchanged requests, however many there are.
             sql = f"""SELECT DISTINCT jsonb_build_object('input', a.input_summary->'input') AS input_summary,
                     t.url AS default_origin, {PRINCIPAL_SQL},
-                    jsonb_build_object('observations', jsonb_path_query_array(
-                        a.result_summary, '$.observations[*] ? (@.kind == "http_observation")')) AS result_summary,
+                    {RESULT_SUMMARY_SQL} AS result_summary,
                     NULL::uuid AS id, NULL::timestamptz AS completed_at
                 {_ACTIONS_FROM}
                 WHERE a.capability_name='http.request' AND (a.input_summary->'input'->>'path')=$2
@@ -514,7 +529,8 @@ class Observer:
                   AND ($5::uuid IS NULL OR a.id <> $5)
                 LIMIT {MAX_DISTINCT_RESPONSES + 1}"""
         else:
-            sql = f"""SELECT a.id, a.completed_at, a.input_summary, a.result_summary, t.url AS default_origin,
+            sql = f"""SELECT a.id, a.completed_at, a.input_summary, {RESULT_SUMMARY_SQL} AS result_summary,
+                    t.url AS default_origin,
                     {PRINCIPAL_SQL}
                 {_ACTIONS_FROM}
                 WHERE a.capability_name='http.request' AND (a.input_summary->'input'->>'path')=$2
@@ -575,8 +591,8 @@ class Observer:
 
     async def action_body(self, action_id: Any) -> Any:
         async def read() -> Any:
-            row = await self.conn.fetchrow("SELECT id, completed_at, result_summary FROM hunt_actions WHERE id=$1",
-                                           uuid.UUID(str(action_id)))
+            row = await self.conn.fetchrow(f"""SELECT a.id, a.completed_at, {RESULT_SUMMARY_SQL} AS result_summary
+                {_ACTIONS_FROM} WHERE a.id=$1""", uuid.UUID(str(action_id)))
             view = _response_view(row) if row else None
             return view.get("_body") if view else None
         return await self._cached(("body", str(action_id)), read)
@@ -801,7 +817,7 @@ async def _cited_requests(conn: Any, target: uuid.UUID, refs: Iterable[str], *,
     identifiers = [uuid.UUID(ref) for ref in refs]
     if not identifiers:
         return []
-    return list(await conn.fetch(f"""SELECT a.id, a.completed_at, a.input_summary, a.result_summary,
+    return list(await conn.fetch(f"""SELECT a.id, a.completed_at, a.input_summary, {RESULT_SUMMARY_SQL} AS result_summary,
             t.url AS default_origin, {PRINCIPAL_SQL}
         {_ACTIONS_FROM}
         WHERE (a.id = ANY($2::uuid[]) OR a.receipt_id = ANY($2::uuid[]))

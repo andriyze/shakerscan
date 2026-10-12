@@ -37,7 +37,9 @@ def asset_capability_specs(spec, schema, kinds):
         'properties':{'principals':exact,'roles':exact,'objects':exact,'origin':{**text,'description':
                       'scheme://host or scheme://host:port the request went to; required for a reusable experiment result'},
                       'operation':text,'method':text,'route':text,
-                      'service':text,'environment':text,'deployment_fingerprint':text,'technique':text,
+                      'service':text,'environment':text,'deployment_fingerprint':text,'technique':{**text,'description':
+                      'How it was tested; start it with http.request (e.g. "http.request anonymous read") for a result '
+                      'of your own cited http.request, or the result can never let the experiment be skipped'},
                       'tool_version':text,'inputs':{'type':'object'},'application_state':{'type':'object'},
                       'budget':{'type':'object'}}}
     reviewed = (' Applied only where the operator saved instruction_changes for this target; otherwise filed as '
