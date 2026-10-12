@@ -492,12 +492,9 @@ def test_independent_review_regressions(monkeypatch):
                     **_negative(regression, '/api/invoices/{id}', 'invoice:17'), 'supersedes': day1['invoices']})
                 assert answer.status_code == 403 and 'supersede_own_entries_only' in answer.text
                 # The same status with another body, or a truncated body, is not the same answer either.
-                for extra in ({'digest': '8' * 64}, {'truncated': True}):
-                    action = await _request(conn, day8.id, path='/api/invoices/17', **extra) \
-                        if 'digest' in extra else await _request(conn, day8.id, path='/api/invoices/17')
-                    if 'truncated' in extra:  # fixture: the capture recorded only a prefix of the body
-                        await conn.execute("""UPDATE hunt_actions SET result_summary=jsonb_set(result_summary,
-                            '{observations,0,response,body_digest_scope}', '"prefix"') WHERE id=$1""", UUID(action))
+                # (scope 'prefix': the capture recorded only a prefix of the body)
+                for extra in ({'digest': '8' * 64}, {'scope': 'prefix'}):
+                    action = await _request(conn, day8.id, path='/api/invoices/17', **extra)
                     answer = await day8.call('knowledge.record', {
                         **_negative(action, '/api/invoices/{id}', 'invoice:17'), 'supersedes': day1['invoices']})
                     assert answer.status_code == 403, extra

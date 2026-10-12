@@ -83,9 +83,13 @@ async def _session(conn, hunt_id, session, *, profile=None, slot='primary', labe
 
 
 async def _request(conn, hunt_id, *, path='/api/invoices/17', status=403, keys=('error',), digest='1' * 64,
-                   session=SESSION, method='GET', at=None, scope='complete', **extra):
+                   session=SESSION, method='GET', at=None, scope='complete', stored='receipt', **extra):
     """Fixture: a finished http.request action of a Hunt. Its input summary is written through the
-    real redaction step; the response summary stands in for what the capability returned."""
+    real redaction step; the response stands in for what the capability returned.
+
+    ``stored='receipt'`` (the default) writes it where the worker does: a content-safe count in
+    ``result_summary`` and the observations in the action's settled capability receipt on its budget
+    reservation. ``stored='summary'`` writes the observations into ``result_summary`` itself."""
     action = uuid4()
     if session:
         await _session(conn, hunt_id, session)
@@ -93,11 +97,23 @@ async def _request(conn, hunt_id, *, path='/api/invoices/17', status=403, keys=(
     observations = [{'kind': 'http_observation', 'request': {'method': method},
                      'response': {'status': status, 'content_type': 'application/json; charset=utf-8',
                                   'json_keys': list(keys), 'body_sha256': digest,
-                                  'body_digest_scope': scope, 'truncated': scope != 'complete'}}]
+                                  'body_digest_scope': scope, 'truncated': scope != 'complete',
+                                  'elapsed_ms': uuid4().int % 900 + 1, 'body_sample': '{"error": "forbidden"}'}}]
+    receipt = uuid4()
+    summary = ({'observations': observations} if stored == 'summary'
+               else {'ok': True, 'status': 'success', 'record_count': 1, 'receipt_id': str(receipt)})
+    completed = at or datetime.now(timezone.utc)
     await conn.execute("""INSERT INTO hunt_actions(id,hunt_run_id,capability_name,status,input_summary,result_summary,
-            completed_at) VALUES($1,$2,'http.request','completed',$3::jsonb,$4::jsonb,$5)""",
-        action, UUID(hunt_id), json.dumps(recorded_input(raw)),
-        json.dumps({'observations': observations}), at or datetime.now(timezone.utc))
+            receipt_id,completed_at) VALUES($1,$2,'http.request','completed',$3::jsonb,$4::jsonb,$5,$6)""",
+        action, UUID(hunt_id), json.dumps(recorded_input(raw)), json.dumps(summary), receipt, completed)
+    if stored == 'receipt':
+        await conn.execute("""INSERT INTO budget_reservations(id,owner_kind,owner_id,action_id,action_digest,
+                capability_name,status,requested_json,hold_applied,worker_id,started_at,finished_at,
+                execution_receipt_hash,version,state_digest,state_json,receipt_json,created_at,updated_at)
+            VALUES($1,'hunt',$2,$3,$4,'http.request','committed','{}'::jsonb,true,'fixture-worker',$6,$6,
+                $4,1,$4,'{}'::jsonb,$5::jsonb,$6,$6)""",
+            str(uuid4()), hunt_id, str(action), 'c' * 64,
+            json.dumps({'receipt_id': str(receipt), 'observations': observations}), completed)
     return str(action)
 
 
@@ -195,6 +211,30 @@ def test_a_bound_applicable_negative_is_reused_until_a_significant_change_and_st
                 assert renewed['result']['interpretation']['applicability']['state'] == 'applicable'
                 await _request(conn, hunt.id, at=datetime.now(timezone.utc) + timedelta(seconds=3))
                 assert (await _check(hunt, _negative(again)['conditions']))['skip'] is True
+    asyncio.run(run())
+
+
+def test_a_response_is_read_from_the_summary_or_from_the_actions_own_receipt_only(monkeypatch):
+    """The worker keeps http.request observations in the settled receipt; an older summary may
+    carry them itself. A receipt settled by another attempt (a different receipt id) is never read."""
+    async def run():
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            target = await _web_target(conn, 'https://app.changes.test')
+            await _scan(conn, target, tech={'Express': '4.18'}, at=datetime.now(timezone.utc) - timedelta(hours=2))
+            await _endpoint(conn, target, 'GET', '/api/invoices/{id}')
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as operator:
+                hunt = (await _hunt(operator, target)).hunt
+                from_summary = await _request(conn, hunt.id, stored='summary')
+                entry = (await hunt.ok('knowledge.record', _negative(from_summary)))['result']['interpretation']
+                assert entry['applicability']['state'] == 'applicable'
+
+                foreign = await _request(conn, hunt.id)
+                await conn.execute("""UPDATE budget_reservations SET receipt_json=jsonb_set(receipt_json,
+                    '{receipt_id}', to_jsonb($2::text)) WHERE action_id=$1""", foreign, str(uuid4()))
+                unread = (await hunt.ok('knowledge.record', _negative(foreign)))['result']['interpretation']
+                assert unread['applicability']['state'] == 'unknown'
+                assert any(item['type'] == 'response' for item in unread['dependencies']['unobserved'])
     asyncio.run(run())
 
 
