@@ -120,7 +120,9 @@ async def discover_subdomains(
                 "subdomains": [],
                 "count": 0,
                 "unique": 0,
-                "error": "Gungnir binary not available"
+                "error": "Gungnir binary not available",
+                # Not installed is a configuration state, not a failed query.
+                "unavailable": True,
             }
 
     if use_subfinder:
@@ -204,6 +206,18 @@ async def discover_subdomains(
             "unique": 0,  # Will be calculated below
             "error": error
         }
+
+    # Sources that were asked and failed (an unavailable tool is not a failure). A run that lists
+    # names must say when a source failed: "none found" is only true when every source answered.
+    result["source_errors"] = {
+        name: str(entry.get("error"))[:300]
+        for name, entry in result["by_source"].items()
+        if isinstance(entry, dict) and entry.get("error") and not entry.get("unavailable")
+    }
+    result["sources_answered"] = sorted(
+        name for name, entry in result["by_source"].items()
+        if isinstance(entry, dict) and not entry.get("error")
+    )
 
     # Calculate unique counts (subdomains found only by that source)
     for source in source_subdomains:
