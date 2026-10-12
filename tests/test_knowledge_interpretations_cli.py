@@ -159,3 +159,12 @@ def test_arrow_keys_and_pastes_never_dismiss_in_a_real_terminal(tmp_path, burst)
         code, out, err = session.finish()
     assert code == 0, (out, err)
     assert [path for path, _ in stub.posts()] == [f"/targets/{TARGET}/findings/{FINDING}/dismiss"]
+
+
+def test_an_entry_no_longer_in_force_says_so():
+    # A reopened dismissal stays in the negative results as history; it must not read as in force.
+    reopened = {"id": "ac3e7ca6", "negative_state": "finding_dismissed", "status": "reopened",
+                "title": "Dismissed (accepted_risk): Missing header", "written_by": "operator:interpretations-api"}
+    assert "finding_dismissed (reopened)" in v2_cli._entry_line(reopened)
+    assert "(active)" not in v2_cli._entry_line({**reopened, "status": "active"})
+    assert "finding_dismissed " in v2_cli._entry_line({**reopened, "status": "active"})
