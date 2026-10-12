@@ -264,8 +264,11 @@ async def query_knowledge_page(
             where.append(f"(status NOT IN ('retracted','superseded') AND (strpos(lower(title),{placeholder})>0 "
                          f"OR strpos(lower(body),{placeholder})>0) AND NOT (written_by='system:knowledge-import' "
                          "AND EXISTS (SELECT 1 FROM targets withheld WHERE withheld.id=target_interpretations.target_id "
-                         "AND withheld.metadata_json->'target_skill'->'knowledge_withheld'->'digests' "
-                         "? (target_interpretations.subject->>'body_sha256'))))")
+                         "AND CASE WHEN jsonb_typeof(withheld.metadata_json->'target_skill'->'knowledge_withheld'->'digests')='object' "
+                         "THEN jsonb_typeof(withheld.metadata_json->'target_skill'->'knowledge_withheld'->'digests' "
+                         "-> (target_interpretations.subject->>'body_sha256'))='object' "
+                         "ELSE withheld.metadata_json->'target_skill'->'knowledge_withheld'->>'body_sha256' "
+                         "= target_interpretations.subject->>'body_sha256' END)))")
         elif key == "path_contains":
             where.append(f"path ILIKE '%'||{bind(value)}||'%'")
         elif key == "verified_only":
