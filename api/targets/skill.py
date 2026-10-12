@@ -73,6 +73,10 @@ class TargetSkillResponse(BaseModel):
     knowledge_withheld: dict | None = None
 
 
+class ConfirmedTargetSkillResponse(TargetSkillResponse):
+    decision_receipt: dict | None = None
+
+
 class TargetSkillWrite(BaseModel):
     model_config = ConfigDict(extra='forbid')
     title: str = Field(default='Target instructions', min_length=1, max_length=120)
@@ -390,11 +394,12 @@ async def delete_target_skill(target_id: str, expected_revision: int = Query(...
         return await write_target_skill(conn, target_id, 'delete', expected_revision=expected_revision, purpose=purpose)
 
 
-@router.post('/targets/{target_id}/skill/confirm', response_model=TargetSkillResponse)
+@router.post('/targets/{target_id}/skill/confirm', response_model=ConfirmedTargetSkillResponse)
 async def confirm_target_skill(target_id: str, body: UnconfirmedConfirmation, request: Request):
     """Save agent-written, unconfirmed instructions as operator instructions, unchanged."""
     async with pool().acquire() as conn:
         from .decision_receipts import receipt_request
         recorded = await receipt_request(conn, request, target_id, 'confirm',
-            expected_revision=body.expected_revision, text_sha256=body.body_sha256)
+            expected_revision=body.expected_revision, text_sha256=body.body_sha256,
+            perform=lambda identity: confirm_unconfirmed_instructions(conn, target_id, body, source=identity))
         return recorded if recorded is not None else await confirm_unconfirmed_instructions(conn, target_id, body)

@@ -4,6 +4,8 @@ import hashlib
 import json
 from uuid import UUID, uuid4
 
+import pytest
+
 from httpx import ASGITransport, AsyncClient
 
 from tests.test_target_asset_startup_postgres import startup_database
@@ -15,7 +17,31 @@ def entry(target, kind, **values):
     return {'receipt_id': str(uuid4()), 'target_id': str(target), 'decision': kind, **values}
 
 
-def test_dismissal_receipt_is_encrypted_and_reversal_is_guarded_and_idempotent(monkeypatch):
+async def submit_decision(client, path, item, canonical):
+    if not canonical:
+        return await client.post(path, json=item)
+    target, kind = item['target_id'], item['decision']
+    prefix = f'/targets/{target}'
+    if kind == 'dismiss':
+        route = f"{prefix}/findings/{item['subject_id']}/dismiss"
+        body = {key: item[key] for key in ('reason', 'note')}
+    elif kind == 'confirm':
+        route = f'{prefix}/skill/confirm'
+        body = {'expected_revision': item['expected_revision'], 'body_sha256': item['text_sha256']}
+    elif kind == 'accept':
+        route = f"{prefix}/instruction-proposals/{item['subject_id']}/accept"
+        body = {'methodology_sha256': item['text_sha256']}
+    elif kind == 'release_marker':
+        route = f'{prefix}/knowledge/releases'
+        body = {'label': item['release_label'], 'released_at': item.get('released_at')}
+    else:
+        route = f"{prefix}/hunts/{item['subject_id']}/interpretations/retract"
+        body = {'note': item['note']}
+    return await client.post(route, json=body, headers={'x-shakerscan-decision-id': item['receipt_id']})
+
+
+@pytest.mark.parametrize("canonical", [False, True])
+def test_dismissal_receipt_is_encrypted_and_reversal_is_guarded_and_idempotent(monkeypatch, canonical):
     async def run():
         async with startup_database() as conn:
             app_module = await _prepared(conn, monkeypatch)
@@ -25,14 +51,14 @@ def test_dismissal_receipt_is_encrypted_and_reversal_is_guarded_and_idempotent(m
                 request = entry(target, 'dismiss', subject_id=str(finding), reason='false_positive',
                                 note='Human reviewed a harmless fixture')
                 path = f'/targets/{target}/knowledge/decisions'
-                response = await client.post(path, json=request)
+                response = await submit_decision(client, path, request, canonical)
                 assert response.status_code == 200, response.text
                 receipt = response.json()['decision_receipt']
                 assert receipt['decision'] == 'dismiss' and 'false_positive' in receipt['diff']
                 ciphertext = await conn.fetchval('SELECT snapshot FROM target_operator_decisions WHERE id=$1',
                                                 UUID(receipt['id']))
                 assert 'Human reviewed' not in ciphertext and 'false_positive' not in ciphertext
-                assert (await client.post(path, json=request)).json()['decision_receipt']['id'] == receipt['id']
+                assert (await submit_decision(client, path, request, canonical)).json()['decision_receipt']['id'] == receipt['id']
                 assert await conn.fetchval('SELECT count(*) FROM target_operator_decisions') == 1
                 assert await conn.fetchval("SELECT count(*) FROM target_interpretations WHERE finding_id=$1", finding) == 1
                 revert = f"{path}/{receipt['id']}/revert"
@@ -46,7 +72,8 @@ def test_dismissal_receipt_is_encrypted_and_reversal_is_guarded_and_idempotent(m
     asyncio.run(run())
 
 
-def test_confirm_reversal_returns_agent_text_to_unconfirmed_and_never_authorizes_it(monkeypatch):
+@pytest.mark.parametrize("canonical", [False, True])
+def test_confirm_reversal_returns_agent_text_to_unconfirmed_and_never_authorizes_it(monkeypatch, canonical):
     async def run():
         async with startup_database() as conn:
             app_module = await _prepared(conn, monkeypatch)
@@ -63,8 +90,8 @@ def test_confirm_reversal_returns_agent_text_to_unconfirmed_and_never_authorizes
                 original = (await client.get(skill_path)).json()
                 assert original['operator_skill'] is None
                 path = f'/targets/{target}/knowledge/decisions'
-                response = await client.post(path, json=entry(target, 'confirm',
-                    expected_revision=original['revision'], text_sha256=document['body_sha256']))
+                response = await submit_decision(client, path, entry(target, 'confirm',
+                    expected_revision=original['revision'], text_sha256=document['body_sha256']), canonical)
                 assert response.status_code == 200, response.text
                 receipt = response.json()['decision_receipt']
                 assert (await client.get(skill_path)).json()['operator_skill'] is not None
@@ -100,7 +127,8 @@ def test_later_edits_and_expiry_prevent_reversal_without_clobbering_state(monkey
     asyncio.run(run())
 
 
-def test_release_marker_reversal_restores_previous_anchor_and_never_deletes_history(monkeypatch):
+@pytest.mark.parametrize("canonical", [False, True])
+def test_release_marker_reversal_restores_previous_anchor_and_never_deletes_history(monkeypatch, canonical):
     async def run():
         async with startup_database() as conn:
             app_module = await _prepared(conn, monkeypatch)
@@ -111,8 +139,8 @@ def test_release_marker_reversal_restores_previous_anchor_and_never_deletes_hist
                 request = entry(target, 'release_marker', release_label='v2',
                     text_sha256=hashlib.sha256(json.dumps(bound,sort_keys=True,separators=(',',':')).encode()).hexdigest())
                 path = f'/targets/{target}/knowledge/decisions'
-                response = await client.post(path,json=request)
-                assert response.status_code == 200,response.text
+                response = await submit_decision(client, path, request, canonical)
+                assert response.status_code == (201 if canonical else 200),response.text
                 receipt = response.json()['decision_receipt']
                 response = await client.post(f"{path}/{receipt['id']}/revert", json={'receipt_sha256':receipt['receipt_sha256']})
                 assert response.status_code == 200,response.text
@@ -122,7 +150,8 @@ def test_release_marker_reversal_restores_previous_anchor_and_never_deletes_hist
     asyncio.run(run())
 
 
-def test_instruction_reversal_preserves_operator_text_and_advances_revision(monkeypatch):
+@pytest.mark.parametrize("canonical", [False, True])
+def test_instruction_reversal_preserves_operator_text_and_advances_revision(monkeypatch, canonical):
     async def run():
         async with startup_database() as conn:
             app_module = await _prepared(conn, monkeypatch)
@@ -134,7 +163,7 @@ def test_instruction_reversal_preserves_operator_text_and_advances_revision(monk
                     'title':'Update','methodology':'New operator instruction','reason':'Reviewed change','base_revision':saved['revision']})).json()
                 proposal=proposed
                 path=f'/targets/{target}/knowledge/decisions'
-                response=await client.post(path,json=entry(target,'accept',subject_id=proposal['id'],text_sha256=proposal['methodology_sha256']))
+                response=await submit_decision(client, path, entry(target,'accept',subject_id=proposal['id'],text_sha256=proposal['methodology_sha256']), canonical)
                 assert response.status_code==200,response.text
                 receipt=response.json()['decision_receipt']
                 after=(await client.get(skill_path)).json()
@@ -195,7 +224,8 @@ def test_planner_cannot_read_apply_or_reverse_operator_receipts(monkeypatch):
     asyncio.run(run())
 
 
-def test_run_retraction_receipt_restores_quarantine_and_existing_entries_without_losing_history(monkeypatch):
+@pytest.mark.parametrize("canonical", [False, True])
+def test_run_retraction_receipt_restores_quarantine_and_existing_entries_without_losing_history(monkeypatch, canonical):
     async def run():
         from tests.test_interpretations_postgres import _hunt
         async with startup_database() as conn:
@@ -206,7 +236,7 @@ def test_run_retraction_receipt_restores_quarantine_and_existing_entries_without
                 recorded = await hunt.ok('knowledge.record', {'kind': 'note', 'title': 'Run note', 'body': 'Review me'})
                 identifier = recorded['result']['interpretation']['id']
                 path = f'/targets/{target}/knowledge/decisions'
-                response = await client.post(path, json=entry(target, 'retract_hunt', subject_id=hunt.id, note='Operator found a poisoned run'))
+                response = await submit_decision(client, path, entry(target, 'retract_hunt', subject_id=hunt.id, note='Operator found a poisoned run'), canonical)
                 assert response.status_code == 200, response.text
                 receipt = response.json()['decision_receipt']
                 from hunt.interpretations import hunt_quarantined

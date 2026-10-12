@@ -23,6 +23,7 @@ import shakerscan_mcp  # noqa: E402
 WRITERS = ("write_target_skill", "write_target_action", "confirm_unconfirmed_instructions")
 # Every call site of a write function, with who reaches it.
 EXPECTED_CALLERS = {
+    ("api/targets/decision_actions.py", "apply_operator_decision"): "operator decision dispatcher, digest/revision-bound confirmation",
     ("api/targets/skill.py", "create_target_skill"): "operator route POST /targets/{id}/skill",
     ("api/targets/skill.py", "update_target_skill"): "operator route PUT /targets/{id}/skill",
     ("api/targets/skill.py", "delete_target_skill"): "operator route DELETE /targets/{id}/skill",

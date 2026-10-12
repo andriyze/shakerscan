@@ -1,6 +1,7 @@
 """A failed api-storage-init explains itself instead of a bare failed dependency."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 
@@ -16,7 +17,7 @@ def _fn(name: str) -> str:
 FUNCTIONS = "\n".join(_fn(name) for name in ("compose_up", "explain_storage_init_failure", "backup_key_file"))
 
 
-def _run(*, up_status: int, container: str, exit_code: str) -> subprocess.CompletedProcess[str]:
+def _run(*, up_status: int, container: str, exit_code: str, key_file: str | None = None) -> subprocess.CompletedProcess[str]:
     harness = f"""
 set -e
 SCRIPT_DIR=/srv/shakerscan
@@ -32,7 +33,10 @@ docker_cli() {{ printf '%s\\n' '{exit_code}'; }}
 {FUNCTIONS}
 compose_up -d
 """
-    return subprocess.run(["bash", "-c", harness], capture_output=True, text=True, timeout=30)
+    env = {key: value for key, value in os.environ.items() if key != "AI_CREDENTIAL_ENC_KEY_FILE"}
+    if key_file is not None:
+        env["AI_CREDENTIAL_ENC_KEY_FILE"] = key_file
+    return subprocess.run(["bash", "-c", harness], capture_output=True, text=True, timeout=30, env=env)
 
 
 def test_a_failed_storage_init_shows_its_log_and_the_key_guidance():
@@ -51,3 +55,9 @@ def test_other_start_failures_and_successful_starts_add_nothing():
     assert "api-storage-init" not in _run(up_status=1, container="", exit_code="1").stdout
     ok = _run(up_status=0, container="abc123", exit_code="1")
     assert ok.returncode == 0 and "api-storage-init" not in ok.stdout
+
+
+def test_failed_storage_guidance_uses_the_configured_key_path():
+    result = _run(up_status=1, container="abc123", exit_code="1", key_file="/srv/keys/test.key")
+    assert result.returncode == 1
+    assert "/srv/keys/test.key" in result.stdout

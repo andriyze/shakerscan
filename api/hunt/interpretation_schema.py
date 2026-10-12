@@ -141,7 +141,7 @@ BEGIN
 END
 $applicability_indexes$;
 -- Releases an operator declared for a target (api/hunt/release_markers.py): the point
--- knowledge.changes since=release starts from when one exists. Append-only.
+-- knowledge.changes since=release starts from when one exists. Reversals retain history.
 CREATE TABLE IF NOT EXISTS target_release_markers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,

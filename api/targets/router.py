@@ -134,7 +134,7 @@ from .actions import router as target_actions_router
 from .hunt_authority_router import router as hunt_authority_router
 from .instruction_proposals import router as instruction_proposals_router
 from .interpretation_routes import router as interpretation_router
-from .decision_receipts import router as decision_receipts_router
+from .decision_receipt_routes import router as decision_receipts_router
 router = APIRouter()
 router.include_router(asset_router)
 router.include_router(target_skill_router)

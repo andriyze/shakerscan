@@ -11,16 +11,14 @@ from datetime import datetime, timedelta, timezone
 import difflib
 import hashlib
 import json
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from .metadata_row import target_metadata_row
-from .interpretation_routes import _operator, pool
-
-router = APIRouter(tags=['targets'])
+from .operator_identity import operator_identity
 MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024
 MAX_ENTRIES = 4000
 LIFETIME = timedelta(hours=24)
@@ -162,53 +160,8 @@ async def _snapshot(conn: Any, target: UUID, item: DecisionInput) -> dict:
     return json.loads(_canonical(state))
 
 
-async def _apply(conn: Any, target: UUID, item: DecisionInput, actor: str) -> dict:
-    from .instruction_proposals import accept_proposal
-    from .skill import UnconfirmedConfirmation, confirm_unconfirmed_instructions
-    from .hunt_authority import authority_row, read_hunt_authority, save_authority
-    try:
-        from hunt.interpretations import (DismissalInput, StatusNote, dismiss_finding, reopen_finding,
-                                         retract_interpretation, retract_run)
-        from hunt.release_markers import ReleaseMarkerInput, declare_release
-    except ModuleNotFoundError:
-        from ..hunt.interpretations import (DismissalInput, StatusNote, dismiss_finding, reopen_finding,
-                                          retract_interpretation, retract_run)
-        from ..hunt.release_markers import ReleaseMarkerInput, declare_release
-    kind = item.decision
-    if kind == 'accept':
-        if item.text_sha256 is None:
-            raise HTTPException(422, 'Accept must name the reviewed text')
-        return await accept_proposal(conn, target, str(item.subject_id), actor=actor, note=item.note,
-                                     reviewed_sha256=item.text_sha256)
-    if kind == 'confirm':
-        return await confirm_unconfirmed_instructions(conn, target,
-            UnconfirmedConfirmation(expected_revision=item.expected_revision, body_sha256=item.text_sha256))
-    if kind == 'allow_changes':
-        row = await authority_row(conn, target, lock=True)
-        if not row['is_active']:
-            raise HTTPException(409, 'Reactivate this target before delegating Hunt actions')
-        current = await read_hunt_authority(conn, target)
-        if current['revision'] != item.expected_revision or current['instruction_changes'] is True:
-            raise HTTPException(409, 'Hunt permissions changed; review again')
-        return await save_authority(conn, row,
-            {**current, 'instruction_changes': True, 'revision': current['revision'] + 1}, recorded_by=actor)
-    if kind == 'dismiss':
-        return await dismiss_finding(conn, target, item.subject_id,
-            DismissalInput(reason=item.reason, note=item.note), actor=actor)
-    if kind == 'release_marker':
-        bound = {'label': item.release_label, 'released_at': item.released_at}
-        if hashlib.sha256(_canonical(bound).encode('ascii')).hexdigest() != item.text_sha256:
-            raise HTTPException(422, 'Release marker does not match the approved label and time')
-        return await declare_release(conn, target, ReleaseMarkerInput(**bound), actor=actor)
-    note = StatusNote(note=item.note).note
-    if kind == 'reopen':
-        return await reopen_finding(conn, target, item.subject_id, actor=actor, note=note)
-    if kind == 'retract':
-        return await retract_interpretation(conn, target, item.subject_id, actor=actor, note=note)
-    return await retract_run(conn, target, item.subject_id, actor=actor, note=note)
-
-
-async def apply_decision(conn: Any, target: UUID, item: DecisionInput, actor: str) -> dict:
+async def apply_decision(conn: Any, target: UUID, item: DecisionInput, actor: str,
+                         *, perform: Callable[[str], Awaitable[dict]]) -> dict:
     if item.target_id != target:
         raise HTTPException(422, 'Decision target does not match the route')
     request_digest = hashlib.sha256(_canonical(item.model_dump(mode='json')).encode()).hexdigest()
@@ -223,7 +176,7 @@ async def apply_decision(conn: Any, target: UUID, item: DecisionInput, actor: st
         before = await _snapshot(conn, target, item)
         # Check encryption and limits before applying; any later failure rolls back the same transaction.
         _sealed(before)
-        result = await _apply(conn, target, item, actor)
+        result = await perform(actor)
         after = await _snapshot(conn, target, item)
         difference = '\n'.join(difflib.unified_diff(_redacted(before).splitlines(),
             _redacted(after).splitlines(), fromfile='before', tofile='after', lineterm=''))
@@ -242,7 +195,8 @@ async def apply_decision(conn: Any, target: UUID, item: DecisionInput, actor: st
         return {'decision_receipt': public_receipt(row), 'result': result}
 
 
-async def receipt_request(conn: Any, request: Request, target_id: Any, kind: str, **values: Any) -> dict | None:
+async def receipt_request(conn: Any, request: Request, target_id: Any, kind: str,
+                          *, perform: Callable[[str], Awaitable[dict]], **values: Any) -> dict | None:
     """Optional receipt on the existing operator route. The gateway sets this opaque id only
     after the fresh step-up; it is never proof of authority and never accepted from a planner."""
     identifier = request.headers.get('x-shakerscan-decision-id')
@@ -253,7 +207,7 @@ async def receipt_request(conn: Any, request: Request, target_id: Any, kind: str
         item = DecisionInput(receipt_id=identifier, target_id=target_id, decision=kind, **values)
     except ValidationError as exc:
         raise HTTPException(422, 'Invalid decision receipt request') from exc
-    recorded = await apply_decision(conn, UUID(str(target_id)), item, _operator(request))
+    recorded = await apply_decision(conn, UUID(str(target_id)), item, operator_identity(request), perform=perform)
     return {**recorded['result'], 'decision_receipt': recorded['decision_receipt']}
 
 
@@ -339,35 +293,3 @@ async def revert_decision(conn: Any, target: UUID, receipt: UUID, sha: str, acto
         row = await conn.fetchrow('''UPDATE target_operator_decisions SET reverted_at=NOW(),reverted_by=$2
             WHERE id=$1 RETURNING *''', receipt, actor)
         return public_receipt(row)
-
-
-@router.post('/targets/{target_id}/knowledge/decisions')
-async def post_decision(target_id: UUID, body: DecisionInput, request: Request):
-    actor = _operator(request)
-    async with pool().acquire() as conn:
-        return await apply_decision(conn, target_id, body, actor)
-
-
-@router.get('/knowledge/decisions')
-async def get_decisions(request: Request, limit: int = Query(50, ge=1, le=100)):
-    _operator(request)
-    async with pool().acquire() as conn:
-        rows = await conn.fetch('SELECT * FROM target_operator_decisions ORDER BY created_at DESC,id DESC LIMIT $1', limit)
-    return {'decisions': [public_receipt(row) for row in rows]}
-
-
-@router.get('/targets/{target_id}/knowledge/decisions/{receipt_id}')
-async def get_decision(target_id: UUID, receipt_id: UUID, request: Request):
-    _operator(request)
-    async with pool().acquire() as conn:
-        row = await conn.fetchrow('SELECT * FROM target_operator_decisions WHERE id=$1 AND target_id=$2', receipt_id, target_id)
-    if row is None:
-        raise HTTPException(404, 'Decision receipt not found')
-    return {'decision_receipt': public_receipt(row), 'result': _open(row['snapshot'])['result']}
-
-
-@router.post('/targets/{target_id}/knowledge/decisions/{receipt_id}/revert')
-async def post_revert(target_id: UUID, receipt_id: UUID, body: RevertInput, request: Request):
-    actor = _operator(request)
-    async with pool().acquire() as conn:
-        return await revert_decision(conn, target_id, receipt_id, body.receipt_sha256, actor)

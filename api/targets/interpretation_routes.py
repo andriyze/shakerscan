@@ -36,13 +36,7 @@ SourceFilter = Literal['interpretations', 'authorization_workflow', 'hypothesis_
                        'candidate_verification']
 
 
-def _operator(request: Request) -> str:
-    """The server-derived operator identity. A request through the planner ingress is never one."""
-    if request.scope.get('shakerscan.planner_identity') or request.scope.get('shakerscan.planner_hunt_id'):
-        raise HTTPException(403, {'error': 'operator_only', 'reason_code': 'operator_only',
-                                  'message': 'This is an operator route; a Hunt planner cannot use it.'})
-    actor = str(request.scope.get('shakerscan.operator_identity') or 'operator:interpretations-api')
-    return (actor if actor.startswith('operator:') else f'operator:{actor}')[:200]
+from .operator_identity import operator_identity as _operator
 
 
 def pool():
@@ -74,7 +68,8 @@ async def post_retract_interpretation(target_id: str, entry_id: str, body: Statu
     actor = _operator(request)
     async with pool().acquire() as conn:
         from .decision_receipts import receipt_request
-        recorded = await receipt_request(conn, request, target_id, 'retract', subject_id=entry_id, note=body.note)
+        recorded = await receipt_request(conn, request, target_id, 'retract', subject_id=entry_id, note=body.note,
+            perform=lambda identity: retract_interpretation(conn, target_id, entry_id, actor=identity, note=body.note))
         if recorded is not None:
             return recorded
         return await retract_interpretation(conn, target_id, entry_id, actor=actor, note=body.note)
@@ -86,7 +81,8 @@ async def post_retract_hunt_interpretations(target_id: str, hunt_id: str, body: 
     actor = _operator(request)
     async with pool().acquire() as conn:
         from .decision_receipts import receipt_request
-        recorded = await receipt_request(conn, request, target_id, 'retract_hunt', subject_id=hunt_id, note=body.note)
+        recorded = await receipt_request(conn, request, target_id, 'retract_hunt', subject_id=hunt_id, note=body.note,
+            perform=lambda identity: retract_run(conn, target_id, hunt_id, actor=identity, note=body.note))
         if recorded is not None:
             return recorded
         return await retract_run(conn, target_id, hunt_id, actor=actor, note=body.note)
@@ -168,6 +164,7 @@ async def post_target_release(target_id: str, body: ReleaseMarkerInput, request:
         raw = await request.json()
         bound = {'label': raw.get('label'), 'released_at': raw.get('released_at')}
         recorded = await receipt_request(conn, request, row['id'], 'release_marker',
+            perform=lambda identity: declare_release(conn, row['id'], body, actor=identity),
             release_label=bound['label'], released_at=bound['released_at'],
             text_sha256=hashlib.sha256(_canonical(bound).encode('ascii')).hexdigest())
         if recorded is not None:
@@ -184,7 +181,8 @@ async def post_dismiss_finding(target_id: str, finding_id: str, body: DismissalI
         if request.headers.get('x-shakerscan-decision-id') and body.evidence_refs:
             raise HTTPException(422, 'This approval did not name evidence references')
         recorded = await receipt_request(conn, request, target_id, 'dismiss', subject_id=finding_id,
-                                         reason=body.reason, note=body.note)
+                                         reason=body.reason, note=body.note,
+            perform=lambda identity: dismiss_finding(conn, target_id, finding_id, body, actor=identity))
         if recorded is not None:
             return recorded
         return await dismiss_finding(conn, target_id, finding_id, body, actor=actor)
@@ -195,7 +193,8 @@ async def post_reopen_finding(target_id: str, finding_id: str, body: StatusNote,
     actor = _operator(request)
     async with pool().acquire() as conn:
         from .decision_receipts import receipt_request
-        recorded = await receipt_request(conn, request, target_id, 'reopen', subject_id=finding_id, note=body.note)
+        recorded = await receipt_request(conn, request, target_id, 'reopen', subject_id=finding_id, note=body.note,
+            perform=lambda identity: reopen_finding(conn, target_id, finding_id, actor=identity, note=body.note))
         if recorded is not None:
             return recorded
         return await reopen_finding(conn, target_id, finding_id, actor=actor, note=body.note)
