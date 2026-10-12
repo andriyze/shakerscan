@@ -99,12 +99,15 @@ def test_a_secret_bearing_body_keeps_only_a_keyed_digest(monkeypatch):
     assert fingerprints and all(item.startswith("scrypt-keyed:") for item in fingerprints)
 
 
-def test_a_body_without_secret_material_keeps_its_plain_digest():
+def test_a_body_without_secret_material_is_keyed_too():
+    """2.9.0: a body the classifier found no secret in can still hold one it did not recognise;
+    its plain SHA-256 would be an offline guessing oracle (as ``body_sha256`` since #395)."""
     from tests.test_exposure_verified_checks import _observation
 
     body = b"# HELP up 1\n# TYPE up gauge\nup 1\n"
     signature = classify_exposure(path="/metrics", status=200, headers={}, body=body)
     assert signature is not None and signature.exposure_class == "metrics_endpoint"
     observation = _observation("/metrics", body, "text/plain")
-    assert observation["response_body_sha256"] == hashlib.sha256(body).hexdigest()
+    assert observation["response_body_sha256"].startswith("scrypt-")
+    assert observation["response_body_sha256"] != hashlib.sha256(body).hexdigest()
     assert "response_body_hmac" not in observation

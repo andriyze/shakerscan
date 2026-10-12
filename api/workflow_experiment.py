@@ -8,6 +8,10 @@ import re
 import time
 from typing import Any, Awaitable, Callable
 from urllib.parse import urljoin
+try:
+    from capabilities.secret_material import keyed_response_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_response_digest
 
 import httpx
 
@@ -380,11 +384,10 @@ def _create_object_readback(mutation: dict[str, Any], after: dict[str, Any]) -> 
     if not tail or "/" in tail:
         return False
     extracted = mutation.get("extracted") if isinstance(mutation.get("extracted"), dict) else {}
-    tail_hash = hashlib.sha256(tail.encode()).hexdigest()
-    return any(
-        isinstance(receipt, dict) and str(receipt.get("sha256") or "") == tail_hash
-        for receipt in extracted.values()
-    )
+    # Extracted values are recorded by their keyed digest since 2.9.0; an execution recorded
+    # before then holds the plain one, which is matched too (it is already published there).
+    recorded = {str(receipt.get("sha256") or "") for receipt in extracted.values() if isinstance(receipt, dict)}
+    return keyed_response_digest(tail.encode()) in recorded or hashlib.sha256(tail.encode()).hexdigest() in recorded
 
 
 def _meaningful_equivalent_response(
@@ -1367,7 +1370,7 @@ async def execute_workflow(
             "name": binding["name"],
             "principal": binding["principal"],
             "ref": binding["ref"],
-            "sha256": hashlib.sha256(rendered_value.encode()).hexdigest(),
+            "sha256": keyed_response_digest(rendered_value.encode()),
             "length": len(rendered_value),
         })
     observations: list[dict[str, Any]] = []
@@ -1564,7 +1567,7 @@ async def execute_workflow(
                 "submitted_fields": submitted_fields if not error else [],
                 "submitted_field_hashes": submitted_field_hashes if not error else {},
                 "extracted_names": sorted(extracted) if not error else [],
-                "extracted": {name: {"sha256": hashlib.sha256(value.encode()).hexdigest(), "length": len(value)} for name, value in extracted.items()} if not error else {},
+                "extracted": {name: {"sha256": keyed_response_digest(value.encode()), "length": len(value)} for name, value in extracted.items()} if not error else {},
                 "error": error,
             })
             # A server may commit a mutation before returning an error status, so once a mutation

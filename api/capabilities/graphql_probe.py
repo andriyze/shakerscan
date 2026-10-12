@@ -22,11 +22,15 @@ grammar are checked, and a reflected or echoed request never satisfies a proof.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-import hashlib
 import json
 import re
 import urllib.parse
 from typing import Any
+
+try:
+    from capabilities.secret_material import keyed_response_digest
+except ModuleNotFoundError:
+    from api.capabilities.secret_material import keyed_response_digest
 
 
 # Where GraphQL endpoints conventionally live. Each is probed with a fixed document; a path
@@ -367,7 +371,7 @@ def _proof(check: str, endpoint: str, root: str, status: int | None, body: bytes
         "endpoint": endpoint,
         "root_type": root,
         "response_status": status,
-        "response_body_sha256": hashlib.sha256(body).hexdigest(),
+        "response_body_sha256": keyed_response_digest(body),
         "proof_producer": "shakerscan",
         **details,
     }

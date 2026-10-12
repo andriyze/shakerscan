@@ -9,6 +9,7 @@ applications; the batch itself is driven in ``test_graphql_exposure_batch.py``.
 from __future__ import annotations
 
 import json
+import hashlib
 import urllib.parse
 
 import pytest
@@ -30,6 +31,14 @@ from tests.toplevel_scan_fixtures import result_with_observations as _result_wit
 
 def _json(document) -> bytes:
     return json.dumps(document).encode()
+
+
+def test_graphql_proof_publishes_a_keyed_response_digest():
+    body = b'{"errors":[{"message":"secret fixture password"}]}'
+    proof = gql._proof('field_suggestions', 'https://app.example.test/graphql', 'Query', 200, body)
+    assert proof['response_body_sha256'] != hashlib.sha256(body).hexdigest()
+    assert proof['response_body_sha256'] == gql.keyed_response_digest(body)
+    assert proof['response_body_sha256'] != gql.keyed_response_digest(body + b' ')
 
 
 def _classify(path, body, content_type, status=200):

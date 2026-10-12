@@ -12,12 +12,20 @@ context, not permission to promote a finding. No target-specific facts live here
 """
 from __future__ import annotations
 
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
 import asyncio
 import hashlib
 import json
 import re
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
+try:
+    from capabilities.secret_material import keyed_response_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_response_digest
 
 _IDENTIFIERS = (
     re.compile(r"[0-9]+"),
@@ -158,8 +166,8 @@ async def compare_selected_objects(
         "kind": "authz_differential", "mode": "selected_object", "method": "GET",
         "proof_state": "inconclusive", "proof_type": "selected_object_comparison",
         "selected_request_sha256": request_digest(selected), "baseline_request_sha256": request_digest(own),
-        "resource_id_sha256": hashlib.sha256(selected_id.encode()).hexdigest(),
-        "baseline_resource_id_sha256": hashlib.sha256(own_id.encode()).hexdigest(),
+        "resource_id_sha256": keyed_body_digest(selected_id.encode()),
+        "baseline_resource_id_sha256": keyed_body_digest(own_id.encode()),
         "principal_contexts_distinct": True, "secret_values_visible": False,
         "selected_request_examined": False, "cross_access_observed": False,
         "secondary_baseline_valid": False, "owner_repeat_stable": False,
@@ -216,7 +224,7 @@ async def compare_selected_objects(
             observation.update(
                 cross_access_observed=True,
                 reason="selected_object_cross_access_observed_entitlement_unproven",
-                selected_object_content_sha256=hashlib.sha256(owner_doc.encode()).hexdigest(),
+                selected_object_content_sha256=keyed_response_digest(owner_doc.encode()),
             )
             return observation
     except TimeoutError:

@@ -6,9 +6,12 @@ outcomes are read back from canonical actions, never accepted from the client.
 """
 from __future__ import annotations
 
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
 from typing import Any, Awaitable, Callable, Mapping
 from urllib.parse import urlsplit
-import hashlib
 import uuid
 
 from .authorization_evidence import (
@@ -274,7 +277,7 @@ class AuthorizationInvestigationService:
                     "target_context_sha256": digest(_target_context(run)),
                     "sessions_sha256": digest([primary, secondary]),
                     "capture_sha256": request_identity(capture), "baseline_sha256": request_identity(baseline),
-                    "resource_id_sha256": hashlib.sha256(request.identifier.encode()).hexdigest(),
+                    "resource_id_sha256": keyed_body_digest(request.identifier.encode()),
                     "public_consumer_url": self.public_proof_url(capture["url"], base_origin=origin, object_id=request.identifier),
                     "public_baseline_url": self.public_proof_url(baseline["url"], base_origin=origin),
                     "evidence_needed": list(proposal.evidence_needed),
@@ -283,7 +286,7 @@ class AuthorizationInvestigationService:
                 if baseline_kind == "own_object":
                     _, own_id = selected_object_pair([capture["url"], baseline["url"]])
                     binding.update(
-                        baseline_resource_id_sha256=hashlib.sha256(own_id.encode()).hexdigest(),
+                        baseline_resource_id_sha256=keyed_body_digest(own_id.encode()),
                         public_baseline_url=self.public_proof_url(baseline["url"], base_origin=origin, object_id=own_id),
                         evidence_needed=[
                             "a fresh successful secondary read of its own captured object, not a collection listing",

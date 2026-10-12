@@ -181,7 +181,7 @@ async def test_exact_wire_request_executes_with_reservation_and_redacted_receipt
     assert outcome.receipt.redacted_execution["principal_slot"] == "primary"
     assert observation["response_header_names"] == ["Content-Type", "Set-Cookie"]
     assert observation["response_body_size"] == len(b'{"secret":"response-body"}')
-    assert len(observation["response_body_sha256"]) == 64
+    assert observation["response_body_sha256"].startswith("hmac-sha256-")  # keyed, never plain
 
 
 @pytest.mark.asyncio

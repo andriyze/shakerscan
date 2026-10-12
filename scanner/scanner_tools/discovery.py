@@ -1,3 +1,7 @@
+try:
+    from capabilities.secret_material import keyed_short_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_short_digest
 import asyncio
 import hashlib
 import json
@@ -454,7 +458,7 @@ def _normalize_location(location: str) -> str:
 
 def _body_hash(body: str) -> str:
     sample = body[:4000] if body else ""
-    return hashlib.sha256(sample.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return keyed_short_digest(sample.encode("utf-8", errors="ignore"), 12)
 
 
 def _extract_redirect_info(resp: httpx.Response) -> tuple[int | None, str]:
@@ -1266,7 +1270,7 @@ async def discover_endpoint_parameters(
             pass
 
     # Compute baseline body hash for comparison
-    baseline_hash = hashlib.sha256(baseline_body[:5000].encode("utf-8", errors="ignore")).hexdigest()[:12]
+    baseline_hash = keyed_short_digest(baseline_body[:5000].encode("utf-8", errors="ignore"), 12)
 
     # Load parameters to test
     if use_comprehensive_wordlist:
@@ -1360,7 +1364,7 @@ async def discover_endpoint_parameters(
                     confidence += 0.1
 
             # Signal 3: Response body hash changed
-            test_hash = hashlib.sha256(test_body[:5000].encode("utf-8", errors="ignore")).hexdigest()[:12]
+            test_hash = keyed_short_digest(test_body[:5000].encode("utf-8", errors="ignore"), 12)
             if test_hash != baseline_hash:
                 signals += 1
                 confidence += 0.2
@@ -2953,7 +2957,7 @@ async def enumerate_virtual_hosts(
         return {
             "status": status_code,
             "length": len(body_text),
-            "hash": hashlib.sha256(body_text[:50000].encode("utf-8", errors="ignore")).hexdigest()[:12] if body_text else "",
+            "hash": keyed_short_digest(body_text[:50000].encode("utf-8", errors="ignore"), 12) if body_text else "",
         }
 
     ip = ip_addresses[0]
@@ -3082,7 +3086,7 @@ async def api_security_test(url: str) -> dict[str, Any]:
                             if marker in response_body.lower()
                         ]
                         if sensitive_markers:
-                            content_hash = hashlib.sha256(response_body.encode("utf-8", errors="ignore")).hexdigest()[:16]
+                            content_hash = keyed_short_digest(response_body.encode("utf-8", errors="ignore"))
                             results["vulnerabilities"].append({
                                 "type": "sensitive_data_exposure",
                                 "severity": "high",

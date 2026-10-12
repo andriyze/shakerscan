@@ -650,6 +650,59 @@ def mask_credential_shaped(text: str) -> str:
     )
 
 
+_BARE_JWT_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}(?![A-Za-z0-9_-])")
+_BARE_BEARER_RE = re.compile(r"(?i)\b((?:bearer|basic|token)\s+)(?!\[withheld:)([A-Za-z0-9._~+/=-]{8,})")
+
+
+def _bearer_credential(match: re.Match[str]) -> str:
+    """A credential after ``Bearer``/``Basic``/``Token``: letters and digits mixed (``Basic
+    authentication required`` is prose), or credential-shaped."""
+    value = match.group(2)
+    if _is_credential_shaped(value) or (
+        len(value) >= 12 and any(char.isdigit() for char in value) and any(char.isalpha() for char in value)
+    ):
+        return match.group(1) + _withhold(value)
+    return match.group(0)
+
+
+def mask_selected_string(text: str) -> str:
+    """One value a request selected from a response (a JSON path, a header), masked by its shape
+    as well as by what names it: the body masking (labelled values, provider formats, URL
+    secrets), then a bare JWT, a ``Bearer``/``Basic``/``Token`` credential, and any
+    credential-shaped token. A selected value has no key name of its own to judge it by."""
+    text = mask_body_text(text)
+    text = _BARE_JWT_RE.sub(lambda match: _withhold(match.group(0)), text)
+    text = _BARE_BEARER_RE.sub(_bearer_credential, text)
+    return mask_credential_shaped(text)
+
+
+def mask_selected_value(value: Any) -> Any:
+    """``mask_selected_string`` over every string in a selected value; an object's members under
+    secret-named keys are withheld whole, as the body masking withholds them."""
+    if isinstance(value, str):
+        return mask_selected_string(value)
+    if isinstance(value, (dict, list, tuple)):
+        # The body masking's JSON rules first (secret-named members, ``{"name": "password",
+        # "value": ...}`` descriptors), then each string's shape.
+        try:
+            value = json.loads(mask_json_text(json.dumps(value, ensure_ascii=False)))
+        except (TypeError, ValueError):
+            return _withhold(json.dumps(value, ensure_ascii=False, default=str))
+        return _shape_strings(value)
+    return value
+
+
+def _shape_strings(value: Any) -> Any:
+    if isinstance(value, str):
+        return mask_selected_string(value)
+    if isinstance(value, dict):
+        return {key: _shape_strings(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_shape_strings(item) for item in value]
+    return value
+
+
 def mask_string_content(text: str, *, credential_context: bool, depth: int = 0) -> str:
     """Withhold the secrets a string *documents*: labelled values (``Master key: ...``), the
     formats it nests (a config file, markup, a SQL dump, JSON) and, in a credential context,
@@ -1038,9 +1091,117 @@ _HTML_NAME_ATTRIBUTES = frozenset({"name", "id", "property", "itemprop", "data-n
 _HTML_VALUE_ATTRIBUTES = frozenset({"value", "content"})
 
 
+_INPUT_OPEN_RE = re.compile(r"(?i)<input(?=[\s/>])")
+_INPUT_ATTRIBUTE_RE = re.compile(
+    r"""[\s/]*([^\s"'<>/=]+)(?:[ \t\r\n]*=[ \t\r\n]*("[^"]*"|'[^']*'|[^\s"'=<>`]+))?""")
+_CLOSED_QUOTE_RES = {quote: re.compile(quote + "[^" + quote + "]*" + quote) for quote in "\"'"}
+# How far one input tag is read before it is judged cut (and a password one withheld to there).
+_MAX_INPUT_TAG_CHARS = 65_536
+
+
+# An ``<input type="password" value="...">`` written inside a string: its brackets and quotes
+# escaped for JavaScript (``\"``, ``\u0022``, ``\x22``) or HTML (``&quot;``, ``&lt;``).
+_ESCAPED_OPEN_RE = re.compile(r"(?i)(?:<|&lt;|\\u003c|\\x3c)input\b")
+_ESCAPED_CLOSE_RE = re.compile(r"(?i)&gt;|\\u003e|\\x3e|>")
+_ESCAPED_QUOTE = r"(?:\\\\?[\"']|&quot;|&#0*3[49];|&#x0*2[27];|&apos;|\\u0022|\\u0027|\\x22|\\x27)"
+_ESCAPED_TYPE_RE = re.compile(r"(?i)\btype\s*=\s*" + _ESCAPED_QUOTE + r"?\s*password\s*" + _ESCAPED_QUOTE + r"?")
+_ESCAPED_VALUE_RE = re.compile(
+    r"(?i)(\bvalue\s*=\s*)(" + _ESCAPED_QUOTE + r")(.*?)(\2)", re.S)
+_MAX_ESCAPED_TAG_CHARS = 4_096
+
+
+def _mask_escaped_password_inputs(text: str) -> str:
+    """Withhold the value of a password input written escaped inside a string (above). Each
+    escaped tag is read once, up to its escaped ``>`` within ``_MAX_ESCAPED_TAG_CHARS``."""
+    lowered = text.lower()
+    if "password" not in lowered or not any(mark in lowered for mark in ("&lt;", "\\u003c", "\\x3c", '\\"', "&quot;")):
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    for opening in _ESCAPED_OPEN_RE.finditer(text):
+        if opening.start() < cursor:
+            continue
+        closing = _ESCAPED_CLOSE_RE.search(text, opening.end(), opening.end() + _MAX_ESCAPED_TAG_CHARS)
+        end = closing.start() if closing else min(len(text), opening.end() + _MAX_ESCAPED_TAG_CHARS)
+        if not _ESCAPED_TYPE_RE.search(text, opening.end(), end):
+            continue
+        for value in _ESCAPED_VALUE_RE.finditer(text, opening.end(), end):
+            inner = value.group(3)
+            if not inner or inner == MASK or WITHHELD_MARKER_RE.fullmatch(inner):
+                continue
+            pieces.extend((text[cursor:value.start(3)], _withhold(html.unescape(inner))))
+            cursor = value.end(3)
+        cursor = max(cursor, opening.start())
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _mask_password_inputs(text: str) -> str:
+    """Withhold the value of every ``<input type="password">``: quote-aware, so a quoted value
+    holding ``>`` or a tag longer than the attribute reader's bound is read whole. A password
+    input whose tag does not close within ``_MAX_INPUT_TAG_CHARS`` is withheld from its value to
+    there. Linear: each tag is read once, from its ``<input`` to its own ``>``."""
+    if "<" not in text or "input" not in text.lower():
+        return text
+    pieces: list[str] = []
+    cursor = scanned = 0
+    for opening in _INPUT_OPEN_RE.finditer(text):
+        if opening.start() < max(cursor, scanned):
+            continue  # inside a tag already read
+        position, limit = opening.end(), min(len(text), opening.end() + _MAX_INPUT_TAG_CHARS)
+        attributes: list[re.Match[str]] = []
+        closed = None
+        while position < limit:
+            if text[position] == ">":
+                closed = position
+                break
+            if text[position] in "\"'" and not _CLOSED_QUOTE_RES[text[position]].match(text, position, limit):
+                break  # an unterminated quote runs past the tag: read as cut
+            item = _INPUT_ATTRIBUTE_RE.match(text, position, limit)
+            if item is None or item.end() == position:
+                position += 1
+                continue
+            attributes.append(item)
+            position = item.end()
+        scanned = closed if closed is not None else limit
+        password = any(
+            item.group(1).lower() == "type" and item.group(2) is not None
+            and html.unescape(item.group(2).strip("\"'")).strip().lower() == "password"
+            for item in attributes
+        )
+        if not password:
+            continue
+        end = closed if closed is not None else limit
+        if closed is None:
+            # Cut, or a tag that never closes (an unterminated quote): nothing after its first
+            # ``value`` (or, with none read, after ``<input``) is shown.
+            first_value = next((item.start(1) for item in attributes if item.group(1).lower() == "value"),
+                               opening.end())
+            pieces.append(text[cursor:first_value] + MASK)
+            cursor = end
+            continue
+        for item in attributes:
+            if item.group(1).lower() != "value" or item.group(2) is None:
+                continue
+            raw = item.group(2)
+            quote = raw[0] if raw[0] in "\"'" else ""
+            inner = raw[1:-1] if quote and len(raw) > 1 and raw.endswith(quote) else raw.lstrip("\"'")
+            if not inner or inner == MASK or WITHHELD_MARKER_RE.fullmatch(inner):
+                continue
+            pieces.append(text[cursor:item.start(2)])
+            pieces.append(f"{quote or chr(34)}{_withhold(html.unescape(inner))}{quote or chr(34)}")
+            cursor = item.end(2)
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def mask_html_fields(text: str) -> str:
     """Withhold the value of an HTML field or meta tag whose name is secret (a CSRF token,
-    an API key in a hidden input)."""
+    an API key in a hidden input), and of every password input."""
     def tag(match: re.Match[str]) -> str:
         body = match.group(1)
         attributes = list(_HTML_ATTRIBUTE_RE.finditer(body))
@@ -1048,9 +1209,16 @@ def mask_html_fields(text: str) -> str:
             item.group(2).strip("\"'") for item in attributes
             if item.group(1).lower() in _HTML_NAME_ATTRIBUTES
         ]
-        if not any(is_withheld_key(name) for name in names):
+        # A password input's value is a password whatever the field is named (``name="p"``, no
+        # name, ``value`` before ``type``).
+        password_input = match.group(0)[1:6].lower() == "input" and any(
+            item.group(1).lower() == "type"
+            and html.unescape(item.group(2).strip("\"'")).strip().lower() == "password"
+            for item in attributes
+        )
+        if not password_input and not any(is_withheld_key(name) for name in names):
             return match.group(0)
-        if _planner_form_token(match.group(0)[1:].split(None, 1)[0].rstrip(">/"), names):
+        if not password_input and _planner_form_token(match.group(0)[1:].split(None, 1)[0].rstrip(">/"), names):
             return match.group(0)
         pieces: list[str] = []
         cursor = 0
@@ -1065,7 +1233,7 @@ def mask_html_fields(text: str) -> str:
         start = match.start(1) - match.start(0)
         return match.group(0)[:start] + "".join(pieces) + match.group(0)[start + len(body):]
 
-    return _HTML_TAG_RE.sub(tag, text)
+    return _HTML_TAG_RE.sub(tag, _mask_escaped_password_inputs(_mask_password_inputs(text)))
 
 
 # --- JSON fragments embedded in text (inline scripts, logs) ------------------------------------
@@ -3128,6 +3296,8 @@ __all__ = [
     "decode_cut",
     "CUT_LOOKAHEAD_CHARS",
     "mask_credential_shaped",
+    "mask_selected_string",
+    "mask_selected_value",
     "mask_embedded_objects",
     "mask_html_fields",
     "mask_json_text",

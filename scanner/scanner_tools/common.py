@@ -1,3 +1,7 @@
+try:
+    from capabilities.secret_material import keyed_short_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_short_digest
 import asyncio
 import contextlib
 import contextvars
@@ -957,7 +961,7 @@ def _compute_content_hash(content: str) -> str:
     import re
     normalized = re.sub(r'nonce="[^"]*"', 'nonce=""', normalized)
     normalized = re.sub(r'\d{10,}', '0', normalized)  # Remove timestamps
-    return hashlib.sha256(normalized.encode()).hexdigest()[:32]
+    return keyed_short_digest(normalized.encode(), 32)
 
 
 async def detect_spa_catch_all(base_url: str, timeout: int = 10) -> dict[str, Any]:

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
 import asyncio
 from dataclasses import dataclass, field
 import json
@@ -52,6 +56,18 @@ _DANGEROUS_INTERACTION = re.compile(
     re.IGNORECASE,
 )
 
+
+
+# A proof page's dialog and console text is digested for at most this many events; past it an
+# event keeps only whether it matched the marker. Keyed (HMAC), never scrypt: a page that logs in
+# a loop must not hold the worker.
+MAX_DIGESTED_PROOF_EVENTS = 50
+
+
+def _event_digest(events: list[dict[str, Any]], text: str) -> str | None:
+    if len(events) >= MAX_DIGESTED_PROOF_EVENTS:
+        return None
+    return keyed_body_digest(str(text).encode("utf-8", "replace"))
 
 class BrowserCapabilityInputError(ValueError):
     pass
@@ -933,7 +949,7 @@ async def _execute_browser_action(
                 proof_events.append({
                     "signal": "dialog",
                     "marker_match": message == prepared.marker,
-                    "message_sha256": hashlib.sha256(message.encode()).hexdigest(),
+                    "message_sha256": _event_digest(proof_events, message),
                 })
                 await dialog.dismiss()
 
@@ -942,7 +958,7 @@ async def _execute_browser_action(
                 proof_events.append({
                     "signal": "console",
                     "marker_match": text == prepared.marker,
-                    "message_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                    "message_sha256": _event_digest(proof_events, text),
                 })
 
             page.on("dialog", proof_dialog)

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import hashlib
 import json
 import math
 import time
 from typing import Any, Mapping, Sequence
 import urllib.parse
+try:
+    from capabilities.secret_material import keyed_body_digest
+except ModuleNotFoundError:  # package import layout
+    from api.capabilities.secret_material import keyed_body_digest
 
 try:
     from capabilities.sql_error_signatures import sql_error_signatures
@@ -276,7 +279,7 @@ def replace_private_request_field(
 
 
 def _body_sha256(result: ReplayTransportResult) -> str:
-    return hashlib.sha256(result.response_body).hexdigest()
+    return keyed_body_digest(result.response_body)
 
 
 class RequestMutationVerificationAdapter:

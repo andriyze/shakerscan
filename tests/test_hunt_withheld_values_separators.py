@@ -372,6 +372,8 @@ _HOSTILE_FORMS = {
                                     + "';\n"),
     "connection string with blanks": lambda v: (
         "Server=s; Database=App; Password='" + v.replace("\n", " ").replace("'", "''") + "'; Encrypt=True\n"),
+    # A password input with no secret-like name (2.9.0): its type makes it a password.
+    "password input": lambda v: '<form><input name="f7" value="' + html.escape(v) + '" type="password"></form>',
     "redirect link": lambda v: ('<a href="/cb?access_token=' + urllib.parse.quote(v, safe="")
                                 + '&amp;state=fixture-state">continue</a>'),
 }
