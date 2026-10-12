@@ -159,3 +159,27 @@ def test_the_public_run_carries_source_errors_and_hides_none_for_old_ct_rows():
         {"id": "o", "sources_used": {"crtsh": {"error": "No certificates found in CT logs"},
                                      "subfinder": {"error": "subfinder timed out"}}})
     assert old["source_errors"] == {"subfinder": "subfinder timed out"}
+
+
+@pytest.mark.parametrize("crtsh", ["fails", "has_no_certificates"])
+def test_discovery_with_the_real_ct_check_never_crashes(monkeypatch, crtsh):
+    # The real CT check (not a stand-in): it returns before analysing certificates, with no
+    # subdomain_discovery, when crt.sh fails and when it has nothing for the domain.
+    async def query(*_args, **_kwargs):
+        if crtsh == "fails":
+            raise ct_monitor.CTQueryError("crt.sh unreachable (connection refused)")
+        return []
+    async def sub(domain):
+        return {"subdomains": ["a.example.com"]}
+    async def available():
+        return False
+    monkeypatch.setattr(ct_monitor, "_query_crtsh", query)
+    monkeypatch.setattr(subdomain_discovery, "subfinder_scan", sub)
+    monkeypatch.setattr(subdomain_discovery, "check_gungnir_available", available)
+    result = asyncio.run(subdomain_discovery.discover_subdomains("example.com"))
+    assert result["subdomains"] == ["a.example.com"]
+    if crtsh == "fails":
+        assert "connection refused" in result["source_errors"]["crtsh"]
+        assert "crtsh" not in result["sources_answered"]
+    else:
+        assert result["source_errors"] == {} and "crtsh" in result["sources_answered"]
