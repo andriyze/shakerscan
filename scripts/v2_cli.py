@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import os
+import re
 import time
 from pathlib import Path
 import sys
@@ -1293,6 +1294,18 @@ def build_parser() -> argparse.ArgumentParser:
     reopen.add_argument("target_id")
     reopen.add_argument("finding_id")
     reopen.add_argument("--note", required=True, help="why; recorded with the decision")
+    allow_changes = knowledge_commands.add_parser(
+        "allow-changes",
+        help=("Let Hunts edit one target's instructions and saved actions directly instead of proposing "
+              "changes (instruction_changes), after a keypress; --off turns it off again"),
+    )
+    allow_changes.add_argument("target_id", help="the target whose Hunt permissions change")
+    allow_changes.add_argument("--off", action="store_true",
+                               help="stop Hunts editing the instructions directly (no step-up needed)")
+    for command in (review, allow_changes, release, dismiss, reopen):
+        command.add_argument("--account", help="Enterprise: your sign-in name (asked for otherwise)")
+        command.add_argument("--method", choices=("totp", "security_key"),
+                             help="Enterprise step-up: a TOTP code, or a USB/NFC security key (needs python-fido2)")
 
     credentials = products.add_parser(
         "credentials", help="Create, rotate, or admission-test an encrypted profile",
@@ -1431,6 +1444,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return _run_knowledge_releases(args, client)
             if args.knowledge_command in {"dismiss", "reopen"}:
                 return _run_knowledge_decision(args, client)
+            if args.knowledge_command == "allow-changes":
+                return _run_allow_changes(args, client)
             return _run_knowledge_review(args, client)
         if args.product == "hunt":
             result = _run_hunt(args, client)
@@ -1469,6 +1484,10 @@ def _run_approval(args: argparse.Namespace, client: ApiClient) -> int:
 # are listed too: confirming saves them, unchanged, as operator instructions.
 # Deciding one is the person's act, at their own terminal, with the same keypress hardening as
 # `approve --watch`: only a lone key decides; an arrow key, an escape sequence or a paste never does.
+# On ShakerScan Enterprise (the connection holds a service token) accepting, confirming and letting
+# Hunts edit instructions also take the person's step-up, bound to that one decision (the gateway's
+# approval protocol, purpose knowledge_decision, hunt_approve.py): the token alone never does them,
+# and the gateway applies the decision itself after the proof. Rejecting and rebasing need no step-up.
 
 KNOWLEDGE_DIFF_LINES = 400
 # C0/C1 controls, DEL and bidirectional overrides/isolates, which could reorder the diff on screen.
@@ -1566,7 +1585,7 @@ def _render_unconfirmed(item: Mapping[str, Any]) -> tuple[str, bool]:
     return "\n".join(lines), complete
 
 
-def _review_unconfirmed(send: Any, terminal: Any, item: dict[str, Any]) -> str:
+def _review_unconfirmed(send: Any, terminal: Any, item: dict[str, Any], stepup: Any = None) -> str:
     shown, complete = _render_unconfirmed(item)
     terminal.say(shown)
     if not complete:
@@ -1578,25 +1597,92 @@ def _review_unconfirmed(send: Any, terminal: Any, item: dict[str, Any]) -> str:
     if choice != "c":
         terminal.say("  left unconfirmed")
         return "skipped"
-    path = f"/targets/{urllib.parse.quote(str(item['target_id']), safe='')}/skill/confirm"
     # Bound to the text that was shown: the server refuses any other text or revision.
-    status, body = send("POST", path, {"expected_revision": item.get("revision"),
-                                       "body_sha256": item.get("body_sha256")})
+    approval = _approval()
+    path = f"/targets/{urllib.parse.quote(str(item['target_id']), safe='')}/skill/confirm"
+    try:
+        status, body = apply_knowledge_decision(
+            send, stepup, approval.knowledge_entry(
+                "confirm", str(item.get("target_id")), text_sha256=item.get("body_sha256"),
+                expected_revision=item.get("revision")) if stepup is not None else {},
+            "POST", path, {"expected_revision": item.get("revision"), "body_sha256": item.get("body_sha256")})
+    except approval.StepUpUnavailable:
+        raise
+    except approval.OutcomeUnknown as exc:
+        terminal.say(UNKNOWN_OUTCOME.format(_shown(exc)))
+        return "failed"
+    except approval.ApprovalError as exc:
+        terminal.say(f"  not confirmed: {exc}")
+        return "failed"
     if 200 <= status < 300:
-        terminal.say("  confirmed: these are now the target's operator instructions")
+        terminal.say("  confirmed: these are now the target's operator instructions"
+                     + _decided_by(body))
         return "accepted"
     detail = body.get("detail") if isinstance(body, Mapping) else body
     terminal.say(f"  not confirmed: HTTP {status}: {_shown(detail)}")
     return "failed"
 
 
+UNKNOWN_OUTCOME = ("  outcome unknown: {}. It may have been applied: check with `shakerscan knowledge "
+                   "review` (or the target) before deciding again.")
+
+
+def apply_knowledge_decision(send: Any, stepup: Any, entry: Mapping[str, Any], method: str, path: str,
+                             payload: Any) -> tuple[int, Any]:
+    """Make one knowledge decision: through the gateway's step-up on Enterprise (``stepup``), as
+    the request ``method path payload`` to a local engine otherwise. Raises OutcomeUnknown when it
+    was sent and no answer came back, so the caller says so instead of "not applied".
+
+    Ready for every decision kind, finding dismissal and interpretation retraction included
+    (``knowledge_entry("dismiss", target, subject_id=finding, reason=..., note=...)`` with
+    ``POST /targets/{id}/findings/{fid}/dismiss``)."""
+    approval = _approval()
+    if stepup is not None:
+        return approval.decide_knowledge(stepup, entry)
+    try:
+        return send(method, path, payload)
+    except approval.ApprovalError as exc:
+        raise approval.OutcomeUnknown(str(exc)) from exc
+
+
+def _decided_by(body: Any) -> str:
+    who = body.get("decided_by") if isinstance(body, Mapping) else None
+    return f" (by {_shown(who)}, with your step-up)" if who else ""
+
+
 def _decide_proposal(send: Any, terminal: Any, proposal: Mapping[str, Any], action: str,
-                     note: str | None) -> tuple[bool, Any]:
+                     note: str | None, stepup: Any = None) -> tuple[bool, Any]:
     payload = None if action == "rebase" else {"note": note}
+    if action == "accept" and stepup is not None:
+        # Enterprise: the person's step-up for exactly this proposal and text; the gateway applies it.
+        approval = _approval()
+        try:
+            status, body = apply_knowledge_decision(send, stepup, approval.knowledge_entry(
+                "accept", str(proposal.get("target_id")), subject_id=str(proposal.get("id")),
+                text_sha256=proposal.get("methodology_sha256"), note=note), "POST", "", None)
+        except approval.StepUpUnavailable:
+            raise
+        except approval.OutcomeUnknown as exc:
+            terminal.say(UNKNOWN_OUTCOME.format(_shown(exc)))
+            return False, None
+        except approval.ApprovalError as exc:
+            terminal.say(f"  not applied: {exc}")
+            return False, None
+        if 200 <= status < 300:
+            return True, body
+        detail = (body.get("message") or body.get("detail") or body.get("error")) if isinstance(body, Mapping) else body
+        terminal.say(f"  not applied: HTTP {status}: {_shown(detail)}")
+        return False, body
     if action == "accept":
         # Bind the decision to the text that was shown: the server refuses any other text.
         payload["methodology_sha256"] = proposal.get("methodology_sha256")
-    status, body = send("POST", _proposal_path(proposal, action), payload)
+    try:
+        status, body = send("POST", _proposal_path(proposal, action), payload)
+    except _approval().ApprovalError as exc:
+        if action != "accept":
+            raise
+        terminal.say(UNKNOWN_OUTCOME.format(_shown(exc)))
+        return False, None
     if 200 <= status < 300:
         return True, body
     detail = body.get("message") if isinstance(body, Mapping) else body
@@ -1605,7 +1691,7 @@ def _decide_proposal(send: Any, terminal: Any, proposal: Mapping[str, Any], acti
 
 
 def _review_one(send: Any, terminal: Any, proposal: dict[str, Any], note: str | None,
-                only: str | None = None) -> str:
+                only: str | None = None, stepup: Any = None) -> str:
     """Show ``proposal`` and decide it with one key. Returns accepted|rejected|skipped|quit|failed."""
     while True:
         terminal.say(_render_proposal(proposal))
@@ -1635,15 +1721,17 @@ def _review_one(send: Any, terminal: Any, proposal: dict[str, Any], note: str | 
             terminal.say(f"  rebased as proposal {proposal['id']}: review the new difference")
             continue
         if choice == "y" and not proposal.get("stale") and _fully_shown(proposal):
-            ok, body = _decide_proposal(send, terminal, proposal, "accept", note)
+            ok, body = _decide_proposal(send, terminal, proposal, "accept", note, stepup)
             if ok:
                 applied = body if isinstance(body, Mapping) else {}
                 if proposal.get("kind") == "saved_action":
                     revision = (applied.get("saved_actions") or {}).get("revision")
-                    terminal.say(f"  accepted: the target's saved actions are now revision {revision}")
+                    terminal.say(f"  accepted: the target's saved actions are now revision {revision}"
+                                 + _decided_by(applied))
                 else:
                     revision = (applied.get("instructions") or {}).get("revision")
-                    terminal.say(f"  accepted: the target instructions are now revision {revision}")
+                    terminal.say(f"  accepted: the target instructions are now revision {revision}"
+                                 + _decided_by(applied))
                 return "accepted"
             return "failed"
         if choice == "r":
@@ -1661,6 +1749,7 @@ def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
     approval = _approval()
     send = _approval_send(client)
     terminal = approval.Terminal()
+    stepup = None
     try:
         terminal.require("shakerscan knowledge review")
         wanted = args.accept or args.reject
@@ -1678,23 +1767,26 @@ def _run_knowledge_review(args: argparse.Namespace, client: ApiClient) -> int:
                      "or applies the saved-action change, for future Hunts; nothing here grants testing authority.")
         if unconfirmed:
             terminal.say(f"{len(unconfirmed)} target(s) have agent-written, unconfirmed instructions.")
-        if client.api_token is None:
+        if approval.instance_kind(send) == "local":
             terminal.say("This engine has no accounts: anyone who can reach its API could decide. "
                          "The keypress below is the only check.")
         else:
-            terminal.say("The instance's own access rules decide who may change instructions; the keypress "
-                         "below confirms that you, not an agent, are deciding.")
+            stepup = approval.StepUp(send, client.base_url, terminal, account=args.account, method=args.method)
+            terminal.say("Accepting or confirming one also asks for your step-up (a TOTP code or your security "
+                         "key) for that one decision, as an administrator: the connection's token alone never "
+                         "does it. Rejecting and rebasing need only the keypress.")
         failures = 0
         with terminal.keypresses():
             for proposal in proposals:
                 outcome = _review_one(send, terminal, proposal, args.note,
-                                      only="accept" if args.accept else "reject" if args.reject else None)
+                                      only="accept" if args.accept else "reject" if args.reject else None,
+                                      stepup=stepup)
                 failures += outcome == "failed"
                 if outcome == "quit":
                     terminal.say("stopped; the remaining proposals stay pending")
                     return 1 if failures else 0
             for item in unconfirmed:
-                outcome = _review_unconfirmed(send, terminal, item)
+                outcome = _review_unconfirmed(send, terminal, item, stepup)
                 failures += outcome == "failed"
                 if outcome == "quit":
                     terminal.say("stopped; the remaining instructions stay unconfirmed")
@@ -2001,7 +2093,12 @@ def _run_knowledge_release(args: argparse.Namespace, client: ApiClient) -> int:
         if choice != "r":
             terminal.say("  nothing changed")
             return 0
-        status, body = send("POST", f"/targets/{_quoted(args.target_id)}/knowledge/releases", payload)
+        stepup = (approval.StepUp(send, client.base_url, terminal, account=args.account, method=args.method)
+                  if approval.instance_kind(send) == "enterprise" else None)
+        status, body = apply_knowledge_decision(
+            send, stepup, approval.knowledge_entry("release_marker", args.target_id,
+                release_label=args.label, released_at=args.at) if stepup is not None else {},
+            "POST", f"/targets/{_quoted(args.target_id)}/knowledge/releases", payload)
         if not 200 <= status < 300:
             detail = body.get("detail") if isinstance(body, Mapping) else body
             terminal.say(_shown(f"  not declared: HTTP {status}: {detail}"))
@@ -2060,8 +2157,12 @@ def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
             terminal.say("  nothing changed")
             return 0
         payload = ({"reason": args.reason, "note": args.note} if action == "dismiss" else {"note": args.note})
-        status, body = send("POST", f"/targets/{_quoted(args.target_id)}/findings/{_quoted(args.finding_id)}/{action}",
-                            payload)
+        stepup = (approval.StepUp(send, client.base_url, terminal, account=args.account, method=args.method)
+                  if approval.instance_kind(send) == "enterprise" else None)
+        status, body = apply_knowledge_decision(send, stepup, approval.knowledge_entry(
+            action, args.target_id, subject_id=args.finding_id, reason=getattr(args, 'reason', None),
+            note=args.note) if stepup is not None else {}, "POST",
+            f"/targets/{_quoted(args.target_id)}/findings/{_quoted(args.finding_id)}/{action}", payload)
         if not 200 <= status < 300:
             detail = body.get("detail") if isinstance(body, Mapping) else body
             terminal.say(_shown(f"  not applied: HTTP {status}: {detail}"))
@@ -2072,6 +2173,82 @@ def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
         return 0
     except approval.ApprovalError as exc:
         print(f"shakerscan knowledge {action}: {exc}", file=sys.stderr)
+        return 2
+
+
+AUTHORITY_WRITE_KEYS = ("metadata_changes", "credential_profile_ids", "collection_ids", "ssh_trust_first_contact")
+
+
+def authority_write(current: Mapping[str, Any], instruction_changes: bool) -> dict[str, Any]:
+    """The Hunt-permissions write that changes only ``instruction_changes``: every other setting as
+    the server just reported it, at the revision it reported (the server refuses any other)."""
+    keys = []
+    for item in current.get("ssh_host_keys") or []:
+        if isinstance(item, Mapping):
+            keys.append({"port": item.get("port"), "fingerprint": item.get("fingerprint")})
+    return {"expected_revision": current.get("revision"),
+            **{key: current.get(key) for key in AUTHORITY_WRITE_KEYS if key in current},
+            "ssh_host_keys": keys, "instruction_changes": bool(instruction_changes)}
+
+
+def _run_allow_changes(args: argparse.Namespace, client: ApiClient) -> int:
+    """``shakerscan knowledge allow-changes <target>``: the person turns instruction_changes on
+    (or, with --off, off) for one target, at their own terminal; Enterprise: with their step-up."""
+    approval = _approval()
+    send = _approval_send(client)
+    terminal = approval.Terminal()
+    command = "shakerscan knowledge allow-changes"
+    try:
+        terminal.require(command)
+        target = str(args.target_id or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", target):
+            raise approval.ApprovalError(f"{args.target_id!r} is not a target id")
+        path = f"/targets/{urllib.parse.quote(target, safe='')}/hunt-authority"
+        status, current = send("GET", path)
+        if not 200 <= status < 300 or not isinstance(current, Mapping):
+            raise approval.ApprovalError(f"cannot read the target's Hunt permissions: HTTP {status}: {_shown(current)}")
+        if "instruction_changes" not in current or not isinstance(current.get("revision"), int):
+            raise approval.ApprovalError("this engine has no instruction_changes setting (it arrives with 2.9)")
+        named_status, named = send("GET", f"/targets/{urllib.parse.quote(target, safe='')}")
+        name = (named.get("name") or named.get("url")) if 200 <= named_status < 300 and isinstance(named, Mapping) else None
+        want = not args.off
+        terminal.say(f"target {_shown(name or target)} ({target})")
+        terminal.say(f"  Hunts edit its instructions directly: {'yes' if current['instruction_changes'] else 'no'} "
+                     f"(Hunt permissions revision {current['revision']})")
+        if bool(current["instruction_changes"]) == want:
+            terminal.say("  nothing to change")
+            return 0
+        if want:
+            terminal.say("  Turning it on lets every Hunt on this target replace its operator instructions and change "
+                         "its saved actions without a proposal you review. Future Hunts follow what they write.")
+            prompt = "  Let Hunts edit this target's instructions? [y] yes  [n] no: "
+        else:
+            terminal.say("  Turning it off makes Hunts propose instruction and saved-action changes for review again.")
+            prompt = "  Stop Hunts editing this target's instructions? [y] yes  [n] no: "
+        with terminal.keypresses():
+            choice = terminal.key(prompt, "yn")
+        if choice != "y":
+            terminal.say("  nothing was changed")
+            return 1
+        stepup = None
+        if want and approval.instance_kind(send) == "enterprise":
+            stepup = approval.StepUp(send, client.base_url, terminal, account=args.account, method=args.method)
+        try:
+            status, body = apply_knowledge_decision(
+                send, stepup, approval.knowledge_entry("allow_changes", target, expected_revision=current["revision"])
+                if stepup is not None else {}, "PUT", path, authority_write(current, want))
+        except approval.OutcomeUnknown as exc:
+            terminal.say(UNKNOWN_OUTCOME.format(_shown(exc)))
+            return 1
+        if 200 <= status < 300:
+            revision = body.get("revision") if isinstance(body, Mapping) else None
+            terminal.say(f"  {'on' if want else 'off'}: Hunt permissions are now revision {revision}" + _decided_by(body))
+            return 0
+        detail = (body.get("message") or body.get("detail")) if isinstance(body, Mapping) else body
+        terminal.say(f"  not changed: HTTP {status}: {_shown(detail)}")
+        return 1
+    except approval.ApprovalError as exc:
+        print(f"{command}: {exc}", file=sys.stderr)
         return 2
 
 

@@ -2723,6 +2723,8 @@ def _probe_version(binary_path: str, args: tuple[str, ...], timeout_seconds: int
 
 _SENSITIVE_ENV_MARKERS = (
     "API_KEY",
+    # The trusted-gateway identity key (gateway_identity.py): never handed to a child process.
+    "IDENTITY_KEY",
     "AUTH",
     "BEARER",
     "CLAUDE",

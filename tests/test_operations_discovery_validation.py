@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import sys
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -74,7 +75,7 @@ class FixturePool:
         yield self.conn
 
 
-def start(conn, root_domain, *, fail_enqueue=False):
+def start(conn, root_domain, *, fail_enqueue=False, scope=None):
     queued: list[dict] = []
 
     def enqueue(_redis, _queue, job):
@@ -85,7 +86,8 @@ def start(conn, root_domain, *, fail_enqueue=False):
     operations_router.configure_operations_router(
         lambda: FixturePool(conn), get_redis=lambda: object(), enqueue_job=enqueue,
     )
-    result = asyncio.run(operations_router.start_discovery(root_domain=root_domain))
+    request = SimpleNamespace(scope=dict(scope or {}))
+    result = asyncio.run(operations_router.start_discovery(request=request, root_domain=root_domain))
     return result, queued
 
 
@@ -122,8 +124,17 @@ def test_targets_page_flow_queues_the_normalized_domain_and_records_the_requeste
     assert run["requested_by"] == "local-operator"
     import inspect
 
-    assert list(inspect.signature(operations_router.start_discovery).parameters) == ["root_domain"]
+    # The request is read only for the scope key the trusted-gateway middleware sets; no query or
+    # body parameter can name a requester.
+    assert list(inspect.signature(operations_router.start_discovery).parameters) == ["request", "root_domain"]
     assert conn.locks == 1
+
+
+def test_a_trusted_gateway_names_the_requester():
+    conn = FixtureConn(targets=DECLARED)
+    start(conn, "example.co.uk", scope={"shakerscan.operator_identity": "Carol (local:carol)"})
+    (run,) = conn.runs
+    assert run["requested_by"] == "Carol (local:carol)"
 
 
 def test_a_subdomain_of_a_declared_apex_is_admitted_and_shares_its_apex_slot():

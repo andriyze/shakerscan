@@ -62,7 +62,11 @@ or review them in a terminal with `shakerscan knowledge review [target]`
 (`--accept ID`, `--reject ID`), which decides each one with a single keypress
 and ignores arrow keys, escape sequences and pastes; it offers accept only when
 the whole difference was shown, and sends the digest of the text it showed,
-which the server checks. Accepting writes the text
+which the server checks. Through ShakerScan Enterprise, accepting and confirming
+there (and `shakerscan knowledge allow-changes <target>`, which turns
+`instruction_changes` on) also take the person's step-up for that one decision
+(docs/hunt-permission-requests.md, `knowledge_decision`), so an agent holding
+the connection's token cannot do them. Accepting writes the text
 through the ordinary revision-checked operator write. A proposal is stale when
 the instructions changed after its base revision; a stale proposal cannot be
 accepted until it is rebased, which files the same text against the current

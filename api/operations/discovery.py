@@ -25,9 +25,10 @@ and bounded so one caller cannot flood the queue or third-party sources:
 - one discovery per apex is pending or running at a time, and at most
   ``SHAKERSCAN_DISCOVERY_MAX_ACTIVE`` (default 2) across the engine; a run older than
   ``ACTIVE_WINDOW`` no longer holds a slot, so a lost worker cannot block an apex for ever;
-- the run records who requested it (``requested_by``). The engine has no per-person identity
-  on this route (it has one implicit operator and receives no verified identity), so the value
-  is derived here, never taken from the request: it is ``local-operator``.
+- the run records who requested it (``requested_by``), never a caller-supplied value: the
+  operator a trusted gateway asserted for this request (``gateway_identity.py``, verified by HMAC
+  and set in the request's ASGI scope only when the engine holds the gateway's key), else
+  ``local-operator`` (an open-source engine has one implicit operator).
 
 The checks and the insert run under one transaction-scoped advisory lock, so two concurrent
 requests cannot both pass. The worker validates the queued domain again before it spawns
@@ -84,10 +85,13 @@ def discovery_domain(raw: Any) -> str:
         raise DiscoveryRefused(400, f"Cannot discover subdomains: {exc}.") from exc
 
 
-def requester() -> str:
-    """Who asked, as the engine can establish it: never a caller-supplied value. The single
-    place to read a verified principal once the engine has one."""
-    return DEFAULT_REQUESTER
+def requester(request: Any = None) -> str:
+    """Who asked, as the engine can establish it: never a caller-supplied value. The verified
+    operator a trusted gateway asserted (``scope["shakerscan.operator_identity"]``, which only
+    gateway_identity.GatewayIdentityMiddleware sets), else ``local-operator``."""
+    scope = getattr(request, "scope", None)
+    value = scope.get("shakerscan.operator_identity") if isinstance(scope, dict) else None
+    return value[:200] if isinstance(value, str) and value.strip() else DEFAULT_REQUESTER
 
 
 # A row counts when a person added it: an active target from no automated source, and for a

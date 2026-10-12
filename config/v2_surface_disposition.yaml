@@ -340,6 +340,14 @@ surfaces:
     routes: ["/settings", "/settings/*"]
     files: ["api/settings_routes/router.py"]
 
+  - id: operator-decision-audit
+    owner: targets
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: false
+    routes: ["/knowledge/decisions"]
+    files: ["api/targets/decision_receipts.py"]
+
   - id: operations
     owner: operations
     disposition: KEEP_AND_SPLIT

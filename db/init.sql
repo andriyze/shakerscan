@@ -2642,7 +2642,7 @@ BEGIN
 END
 $applicability_indexes$;
 -- Releases an operator declared for a target (api/hunt/release_markers.py): the point
--- knowledge.changes since=release starts from when one exists. Append-only.
+-- knowledge.changes since=release starts from when one exists. Reversals retain history.
 CREATE TABLE IF NOT EXISTS target_release_markers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
@@ -2651,6 +2651,28 @@ CREATE TABLE IF NOT EXISTS target_release_markers (
     declared_by TEXT NOT NULL CHECK (declared_by ~ '^operator:' AND length(declared_by) <= 200),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+DO $release_retraction_columns$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
+                   AND table_name='target_release_markers' AND column_name='retracted_at') THEN
+        ALTER TABLE target_release_markers ADD COLUMN retracted_at TIMESTAMPTZ,
+            ADD COLUMN retracted_by TEXT;
+    END IF;
+END
+$release_retraction_columns$;
+CREATE TABLE IF NOT EXISTS target_operator_decisions (
+    id UUID PRIMARY KEY,
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    request_sha256 TEXT NOT NULL CHECK (request_sha256 ~ '^[0-9a-f]{64}$'),
+    receipt_sha256 TEXT NOT NULL CHECK (receipt_sha256 ~ '^[0-9a-f]{64}$'),
+    display JSONB NOT NULL CHECK (jsonb_typeof(display)='object'),
+    snapshot TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reverted_at TIMESTAMPTZ,
+    reverted_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_target_operator_decisions_target
+    ON target_operator_decisions(target_id,created_at DESC);
 DO $release_marker_index$
 BEGIN
     IF to_regclass('idx_target_release_markers_target') IS NULL THEN

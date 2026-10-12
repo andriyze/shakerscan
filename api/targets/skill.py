@@ -11,7 +11,7 @@ import json
 from typing import Any, Literal
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
 
 from .skill_trust import (AGENT_UNCONFIRMED, EFFECTIVE_TRUST, action_trust, instruction_trust, known_authority,
@@ -391,7 +391,10 @@ async def delete_target_skill(target_id: str, expected_revision: int = Query(...
 
 
 @router.post('/targets/{target_id}/skill/confirm', response_model=TargetSkillResponse)
-async def confirm_target_skill(target_id: str, request: UnconfirmedConfirmation):
+async def confirm_target_skill(target_id: str, body: UnconfirmedConfirmation, request: Request):
     """Save agent-written, unconfirmed instructions as operator instructions, unchanged."""
     async with pool().acquire() as conn:
-        return await confirm_unconfirmed_instructions(conn, target_id, request)
+        from .decision_receipts import receipt_request
+        recorded = await receipt_request(conn, request, target_id, 'confirm',
+            expected_revision=body.expected_revision, text_sha256=body.body_sha256)
+        return recorded if recorded is not None else await confirm_unconfirmed_instructions(conn, target_id, body)

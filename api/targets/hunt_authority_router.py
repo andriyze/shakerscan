@@ -42,6 +42,23 @@ async def put_hunt_authority(target_id: str, values: HuntAuthorityWrite, request
             raise HTTPException(409, 'Hunt permissions changed. Reload before saving.')
         if not row['is_active']:
             raise HTTPException(409, 'Reactivate this target before delegating Hunt actions')
+        if request.headers.get('x-shakerscan-decision-id') and values.instruction_changes and not current['instruction_changes']:
+            # The step-up binds the instruction-edit decision. Other permission changes keep
+            # their normal operator route and must not be silently bundled into its inverse.
+            saved_values = {key: current[key] for key in
+                ('metadata_changes','instruction_changes','credential_profile_ids','collection_ids',
+                 'ssh_host_keys','ssh_trust_first_contact')}
+            saved_values['ssh_host_keys'] = [
+                {key: entry[key] for key in ('port', 'fingerprint')}
+                for entry in saved_values['ssh_host_keys']
+            ]
+            expected = HuntAuthorityWrite(**saved_values, expected_revision=current['revision'])
+            sent = values.model_dump(exclude={'expected_revision','instruction_changes'})
+            unchanged = expected.model_dump(exclude={'expected_revision','instruction_changes'})
+            if sent != unchanged:
+                raise HTTPException(422, 'Save other Hunt-permission edits separately before enabling instruction edits')
+            from .decision_receipts import receipt_request
+            return await receipt_request(conn, request, target_id, 'allow_changes', expected_revision=values.expected_revision)
         for table, identifiers in [('credential_profiles', values.credential_profile_ids),
                                    ('request_collections', values.collection_ids)]:
             count = await conn.fetchval(f'SELECT count(*) FROM {table} WHERE id=ANY($1::uuid[]) AND is_active',

@@ -614,6 +614,12 @@ async def post_instruction_proposal(target_id: str, proposal: ProposalText, requ
 async def post_accept_instruction_proposal(target_id: str, proposal_id: str, request: Request,
                                            decision: ProposalDecision | None = None):
     async with pool().acquire() as conn:
+        from .decision_receipts import receipt_request
+        recorded = await receipt_request(conn, request, target_id, 'accept', subject_id=proposal_id,
+            note=decision.note if decision else None,
+            text_sha256=decision.methodology_sha256 if decision else None)
+        if recorded is not None:
+            return recorded
         return await accept_proposal(conn, target_id, proposal_id, actor=_actor(request),
                                      note=decision.note if decision else None,
                                      reviewed_sha256=decision.methodology_sha256 if decision else None)
