@@ -480,6 +480,59 @@ def _context_secrets(context: bytes, body: bytes, start: int | None = None) -> l
     return probe.values
 
 
+# A value shorter than this is not looked for by position (a one-character value would withhold
+# every window edge that happens to show that character).
+_MIN_CUT_VALUE_BYTES = 3
+
+
+def _withhold_cut_secrets(context: bytes, body: bytes, after: bytes,
+                          values: list[str]) -> tuple[bytes, list[str]]:
+    """``body`` with every byte of a value the window's start or end cuts withheld, by position.
+
+    ``values`` are the secrets the masking found in the near context, the window and the
+    lookahead read together. Each is located in those bytes; where an occurrence crosses an edge
+    of the window, the part inside the window is replaced by ``***``, however few bytes it is.
+    Matching the cut text against the values (``scrub_known_values``) cannot do this: a window
+    that starts and ends inside a value shows a piece with neither of the value's ends, and a run
+    of one-byte windows would rebuild it. Also returns the values to bind as known: those that
+    occur before the window's end (a value only the lookahead holds is never shown, and must not
+    say that it is there)."""
+    near = context[-_NEAR_CONTEXT_BYTES:]
+    span = near + body + after
+    low, high = len(near), len(near) + len(body)
+    cut = bytearray(len(body))
+    known: list[str] = []
+    for value in values:
+        raw = value.encode("utf-8", errors="ignore")
+        if len(raw) < _MIN_CUT_VALUE_BYTES:
+            known.append(value)
+            continue
+        # Only an occurrence that crosses an edge can be cut: at most len(raw) starts per edge,
+        # however often the target repeats the value elsewhere.
+        for edge in (low, high):
+            first = max(0, edge - len(raw) + 1)
+            at = span.find(raw, first, edge + len(raw) - 1)
+            while at != -1:
+                end = min(at + len(raw), high)
+                cut[max(at, low) - low:end - low] = b"\x01" * (end - max(at, low))
+                at = span.find(raw, at + 1, edge + len(raw) - 1)
+        if 0 <= span.find(raw) < high:
+            known.append(value)
+    if not any(cut):
+        return body, known
+    out = bytearray()
+    index = 0
+    while index < len(body):
+        if cut[index]:
+            while index < len(body) and cut[index]:
+                index += 1
+            out += MASK.encode()
+        else:
+            out.append(body[index])
+            index += 1
+    return bytes(out), known
+
+
 def _masked_window_text(body: bytes, context: bytes = b"", start: int | None = None,
                         after: bytes = b"", *, after_complete: bool = True) -> str:
     """The whole window, masked before anything is cut from it.
@@ -492,8 +545,15 @@ def _masked_window_text(body: bytes, context: bytes = b"", start: int | None = N
     a value the window's end cuts is withheld whole (``mask_before_cut``). ``start`` is the byte
     offset of ``context`` (of ``body`` when there is none) in the resource.
     """
+    known: list[str] = []
+    if context:
+        # Read with the lookahead too: a URL's password is one only with the ``@host`` after it.
+        found = _context_secrets(context, body + after, start)
+        held = active_withheld_values()
+        if held is not None:  # and every value the Hunt already sealed or this action sends
+            found = [*found, *held.found, *held.known]
+        body, known = _withhold_cut_secrets(context, body, after, found)
     text, tail = decode_cut(body, after)
-    known = _context_secrets(context, body, start) if context else []
     collector = active_withheld_values()
     if known and collector is not None:
         collector.bind_known(known, found=True)
