@@ -176,9 +176,10 @@ async def discover_subdomains(
                     source_details.setdefault(accepted, set()).update(map(str, upstream or ()))
 
         elif source_name == "crtsh":
-            # CT monitor has subdomain_discovery nested
-            sd = source_result.get("subdomain_discovery", {})
-            subdomains = sd.get("subdomains", [])
+            # CT monitor has subdomain_discovery nested; None when crt.sh failed or found no
+            # certificate (the CT check returns before analysing any).
+            sd = source_result.get("subdomain_discovery") or {}
+            subdomains = sd.get("subdomains") or []
             if source_result.get("error"):
                 error = source_result.get("error")
 
