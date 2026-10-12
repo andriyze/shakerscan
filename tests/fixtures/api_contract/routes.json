@@ -1843,6 +1843,13 @@
     "name": "get_investigation_candidate"
   },
   {
+    "path": "/knowledge/decisions",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_decisions"
+  },
+  {
     "path": "/metrics/v2",
     "methods": [
       "GET"
@@ -3243,6 +3250,27 @@
       "GET"
     ],
     "name": "get_target_knowledge_continue"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/decisions",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_decision"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/decisions/{receipt_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_decision"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/decisions/{receipt_id}/revert",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_revert"
   },
   {
     "path": "/targets/{target_id}/knowledge/releases",

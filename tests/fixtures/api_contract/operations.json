@@ -1300,6 +1300,11 @@
     "operation_id": "get_investigation_candidate_investigation_candidates__candidate_id__get"
   },
   {
+    "path": "/knowledge/decisions",
+    "method": "get",
+    "operation_id": "get_decisions_knowledge_decisions_get"
+  },
+  {
     "path": "/metrics/v2",
     "method": "get",
     "operation_id": "get_v2_operational_metrics_metrics_v2_get"
@@ -2288,6 +2293,21 @@
     "path": "/targets/{target_id}/knowledge/continue",
     "method": "get",
     "operation_id": "get_target_knowledge_continue_targets__target_id__knowledge_continue_get"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/decisions",
+    "method": "post",
+    "operation_id": "post_decision_targets__target_id__knowledge_decisions_post"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/decisions/{receipt_id}",
+    "method": "get",
+    "operation_id": "get_decision_targets__target_id__knowledge_decisions__receipt_id__get"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/decisions/{receipt_id}/revert",
+    "method": "post",
+    "operation_id": "post_revert_targets__target_id__knowledge_decisions__receipt_id__revert_post"
   },
   {
     "path": "/targets/{target_id}/knowledge/releases",
