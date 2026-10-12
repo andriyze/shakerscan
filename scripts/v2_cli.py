@@ -1812,6 +1812,9 @@ def _entry_line(item: Mapping[str, Any]) -> str:
     if title is None and isinstance(item.get("untrusted_data"), Mapping):
         title = "[quoted from the target] " + str(item["untrusted_data"].get("title") or "")
     state = item.get("negative_state") or item.get("kind")
+    status = item.get("status")
+    if status and status != "active":  # reopened, superseded, retracted: kept as history, no longer in force
+        state = f"{state} ({status})"
     return _shown(f"  {state:<30} {title or '(text withheld)'}  [{item.get('written_by') or item.get('source')}"
                   f" {item.get('created_at') or ''}] {item.get('id') or (item.get('record_ref') or {}).get('id') or ''}")
 
