@@ -113,7 +113,7 @@ def public_receipt(row: Any) -> dict:
             'reverted_by': row['reverted_by'], 'state': 'reverted' if row['reverted_at'] else 'applied'}
 
 
-async def _snapshot(conn: Any, target: UUID, item: DecisionInput) -> dict:
+async def _snapshot(conn: Any, target: UUID, item: DecisionInput, *, legacy_entries: bool = False) -> dict:
     row = await target_metadata_row(conn, target, lock=True)
     if item.decision == 'allow_changes':
         from .hunt_authority import authority_row
@@ -141,12 +141,42 @@ async def _snapshot(conn: Any, target: UUID, item: DecisionInput) -> dict:
             ('id', 'status', 'analyst_verdict', 'analyst_verdict_at', 'analyst_verdict_notes',
              'notes', 'resolved_at', 'updated_at')}
     if kind in {'dismiss', 'reopen', 'retract', 'retract_hunt'}:
-        rows = await conn.fetch('''SELECT id,status,status_changed_by,status_changed_at,status_note
-            FROM target_interpretations WHERE target_id=$1 ORDER BY id LIMIT $2 FOR UPDATE''',
-            target, MAX_ENTRIES + 1)
+        if legacy_entries:
+            # Receipts from the first implementation compared the entire exact target.
+            if kind in {'dismiss', 'reopen'} and await conn.fetchval('''SELECT EXISTS(
+                SELECT 1 FROM target_interpretations WHERE finding_id=$1 AND target_id<>$2)''',
+                item.subject_id, target):
+                raise HTTPException(409, 'This older receipt did not capture linked-service records; review the current records instead')
+            rows = await conn.fetch("""SELECT id,status,status_changed_by,status_changed_at,status_note
+                FROM target_interpretations WHERE target_id=$1 ORDER BY id LIMIT $2 FOR UPDATE""",
+                target, MAX_ENTRIES + 1)
+        else:
+            state['entry_scope'] = 'decision/v2'
+            if kind in {'dismiss', 'reopen'}:
+                # Canonical reopen updates a finding's dismissal wherever on this asset it lives.
+                rows = await conn.fetch("""SELECT * FROM target_interpretations
+                    WHERE finding_id=$1 ORDER BY id LIMIT $2 FOR UPDATE""", item.subject_id, MAX_ENTRIES + 1)
+            elif kind == 'retract_hunt':
+                rows = await conn.fetch("""SELECT * FROM target_interpretations
+                    WHERE target_id=$1 AND (written_by=$2 OR
+                        (written_by='system:knowledge-import' AND subject->>'written_by'=$2))
+                    ORDER BY id LIMIT $3 FOR UPDATE""", target, f'hunt:{item.subject_id}', MAX_ENTRIES + 1)
+            else:
+                try:
+                    from hunt.interpretation_retraction import retraction_members
+                except ModuleNotFoundError:
+                    from ..hunt.interpretation_retraction import retraction_members
+                entry = await conn.fetchrow('SELECT * FROM target_interpretations WHERE id=$1 AND target_id=$2 FOR UPDATE',
+                                            item.subject_id, target)
+                if entry is None:
+                    raise HTTPException(404, 'Interpretation not found on this target')
+                rows = await retraction_members(conn, target, entry, limit=MAX_ENTRIES + 1)
         if len(rows) > MAX_ENTRIES:
             raise HTTPException(422, 'Too many entries for one reversible decision.')
-        state['entries'] = [dict(entry) for entry in rows]
+        fields = ('id','status','status_changed_by','status_changed_at','status_note')
+        if not legacy_entries:
+            fields += ('target_id',)
+        state['entries'] = [{key: entry[key] for key in fields} for entry in rows]
     if kind == 'retract_hunt':
         hunt = await conn.fetchrow('SELECT notes FROM hunt_runs WHERE id=$1 AND COALESCE(target_id,device_target_id)=$2 FOR UPDATE',
                                   item.subject_id, target)
@@ -260,7 +290,7 @@ async def _restore(conn: Any, target: UUID, item: DecisionInput, before: dict, a
         status = old['status'] if old else 'reopened'
         await conn.execute('''UPDATE target_interpretations SET status=$2,status_changed_by=$3,
             status_changed_at=NOW(),status_note=$4 WHERE id=$1 AND target_id=$5''',
-            UUID(entry['id']), status, actor, 'Operator reverted the decision within 24 hours.', target)
+            UUID(entry['id']), status, actor, 'Operator reverted the decision within 24 hours.', UUID(str(entry.get('target_id', target))))
     if 'hunt_notes' in before:
         await conn.execute('UPDATE hunt_runs SET notes=$2::jsonb,updated_at=NOW() WHERE id=$1 AND COALESCE(target_id,device_target_id)=$3',
                            item.subject_id, _canonical(before['hunt_notes']), target)
@@ -286,7 +316,8 @@ async def revert_decision(conn: Any, target: UUID, receipt: UUID, sha: str, acto
             raise HTTPException(409, 'The 24-hour reversal window has closed')
         snapshot = _open(row['snapshot'])
         item = DecisionInput.model_validate(snapshot['request'])
-        current = await _snapshot(conn, target, item)
+        current = await _snapshot(conn, target, item,
+            legacy_entries='entries' in snapshot['after'] and 'entry_scope' not in snapshot['after'])
         if current != snapshot['after']:
             raise HTTPException(409, 'State changed after this decision; review the current records instead')
         await _restore(conn, target, item, snapshot['before'], snapshot['after'], actor)

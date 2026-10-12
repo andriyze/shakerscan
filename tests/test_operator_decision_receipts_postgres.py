@@ -13,6 +13,17 @@ from tests.test_instruction_proposals_postgres import _prepared
 from tests.test_interpretations_postgres import _fixture_finding, _web_target
 
 
+@pytest.fixture(autouse=True)
+def receipt_encryption(monkeypatch, tmp_path):
+    import secret_store
+    # A clean runner has no installation key or writable /results directory. Exercise the
+    # normal persisted-key path independently of developer configuration and prior tests.
+    monkeypatch.delenv('AI_CREDENTIAL_ENC_KEY', raising=False)
+    monkeypatch.setenv('AI_CREDENTIAL_ENC_KEY_FILE', str(tmp_path / 'receipt.key'))
+    monkeypatch.setattr(secret_store, '_loaded', False)
+    monkeypatch.setattr(secret_store, '_fernet', None)
+
+
 def entry(target, kind, **values):
     return {'receipt_id': str(uuid4()), 'target_id': str(target), 'decision': kind, **values}
 
@@ -241,9 +252,151 @@ def test_run_retraction_receipt_restores_quarantine_and_existing_entries_without
                 receipt = response.json()['decision_receipt']
                 from hunt.interpretations import hunt_quarantined
                 assert await hunt_quarantined(conn, hunt.id)
+                other = (await _hunt(client, target)).hunt
+                later = await other.ok('knowledge.record', {'kind': 'note', 'title': 'Other run', 'body': 'Unrelated'})
+                later_id = UUID(later['result']['interpretation']['id'])
                 response = await client.post(f"{path}/{receipt['id']}/revert", json={'receipt_sha256': receipt['receipt_sha256']})
                 assert response.status_code == 200, response.text
                 assert not await hunt_quarantined(conn, hunt.id)
                 assert await conn.fetchval('SELECT status FROM target_interpretations WHERE id=$1', UUID(identifier)) == 'active'
+                assert await conn.fetchval('SELECT status FROM target_interpretations WHERE id=$1', later_id) == 'active'
                 assert await conn.fetchval('SELECT count(*) FROM target_operator_decisions') == 1
+    asyncio.run(run())
+
+
+def test_reopen_inverse_restores_dismissal_on_linked_service(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as client:
+                host = (await client.post('/targets/hosts', json={'locator': 'linked.receipts.test', 'environment': 'lab'})).json()['id']
+                service = await _web_target(conn, 'https://linked.receipts.test')
+                assert str(await conn.fetchval('SELECT target_asset_access_owner($1)', service)) == host
+                finding = await _fixture_finding(conn, service)
+                dismissed = await client.post(f'/targets/{service}/findings/{finding}/dismiss',
+                    json={'reason': 'false_positive', 'note': 'Operator reviewed this fixture'})
+                assert dismissed.status_code == 200, dismissed.text
+                dismissal = dismissed.json()['dismissal']['id']
+                response = await client.post(f'/targets/{host}/findings/{finding}/reopen',
+                    json={'note': 'Operator reopens through host inventory'},
+                    headers={'x-shakerscan-decision-id': str(uuid4())})
+                assert response.status_code == 200, response.text
+                receipt = response.json()['decision_receipt']
+                response = await client.post(f"/targets/{host}/knowledge/decisions/{receipt['id']}/revert",
+                    json={'receipt_sha256': receipt['receipt_sha256']})
+                assert response.status_code == 200, response.text
+                assert await conn.fetchval('SELECT status FROM findings WHERE id=$1', finding) == 'false_positive'
+                assert await conn.fetchval('SELECT status FROM target_interpretations WHERE id=$1', UUID(dismissal)) == 'active'
+                assert await conn.fetchval('SELECT target_id FROM target_interpretations WHERE id=$1', UUID(dismissal)) == service
+    asyncio.run(run())
+
+
+def test_unrelated_history_never_blocks_a_small_decision_or_its_inverse(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            target = await _web_target(conn, 'https://history.receipts.test')
+            finding = await _fixture_finding(conn, target)
+            # Fixture: a mature target has more history than one inverse snapshot permits.
+            await conn.execute("""INSERT INTO target_interpretations(target_id,kind,title,provenance,written_by,conditions_sha256)
+                SELECT $1,'note','Unrelated history '||n,'inferred','operator:fixture',$2 FROM generate_series(1,4001) n""",
+                target, '0'*64)
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as client:
+                path = f'/targets/{target}/knowledge/decisions'
+                response = await client.post(path, json=entry(target, 'dismiss', subject_id=str(finding),
+                    reason='false_positive', note='Reviewed one finding'))
+                assert response.status_code == 200, response.text
+                receipt = response.json()['decision_receipt']
+                assert 'Unrelated history' not in receipt['diff']
+                note = await client.post(f'/targets/{target}/interpretations', json={'kind':'note','title':'Later unrelated note'})
+                assert note.status_code == 201, note.text
+                response = await client.post(f"{path}/{receipt['id']}/revert", json={'receipt_sha256':receipt['receipt_sha256']})
+                assert response.status_code == 200, response.text
+                assert await conn.fetchval('SELECT status FROM findings WHERE id=$1', finding) == 'active'
+                assert await conn.fetchval('SELECT status FROM target_interpretations WHERE id=$1', UUID(note.json()['id'])) == 'active'
+                assert await conn.fetchval("SELECT count(*) FROM target_interpretations WHERE title LIKE 'Unrelated history %' AND status='active'") == 4001
+    asyncio.run(run())
+
+
+def test_single_entry_inverse_preserves_the_chain_and_later_unrelated_notes(monkeypatch):
+    async def run():
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            target = await _web_target(conn, 'https://chain.receipts.test')
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as client:
+                entries = f'/targets/{target}/interpretations'
+                first = (await client.post(entries,json={'kind':'note','title':'First version'})).json()['id']
+                second = (await client.post(entries,json={'kind':'note','title':'Second version','supersedes':first})).json()['id']
+                response = await client.post(f'{entries}/{second}/retract',json={'note':'Reviewed chain'},
+                    headers={'x-shakerscan-decision-id':str(uuid4())})
+                assert response.status_code == 200,response.text
+                receipt = response.json()['decision_receipt']
+                note = (await client.post(entries,json={'kind':'note','title':'Unrelated later note'})).json()['id']
+                response = await client.post(f"/targets/{target}/knowledge/decisions/{receipt['id']}/revert",
+                    json={'receipt_sha256':receipt['receipt_sha256']})
+                assert response.status_code == 200,response.text
+                assert await conn.fetchval('SELECT status FROM target_interpretations WHERE id=$1',UUID(first)) == 'superseded'
+                assert await conn.fetchval('SELECT status FROM target_interpretations WHERE id=$1',UUID(second)) == 'active'
+                assert await conn.fetchval('SELECT status FROM target_interpretations WHERE id=$1',UUID(note)) == 'active'
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('linked_service', [False, True])
+def test_legacy_receipt_reversal_refuses_uncaptured_linked_records(monkeypatch, linked_service):
+    async def run():
+        from targets.decision_receipts import _open, _sealed
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            service = await _web_target(conn, 'https://legacy.receipts.test')
+            finding = await _fixture_finding(conn, service)
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as client:
+                target = service
+                if linked_service:
+                    target = UUID((await client.post('/targets/hosts', json={
+                        'locator': 'legacy.receipts.test', 'environment': 'lab'})).json()['id'])
+                assert (await client.post(f'/targets/{service}/findings/{finding}/dismiss', json={
+                    'reason': 'false_positive', 'note': 'Reviewed fixture'})).status_code == 200
+                response = await client.post(f'/targets/{target}/findings/{finding}/reopen',
+                    json={'note': 'Review reversal'}, headers={'x-shakerscan-decision-id': str(uuid4())})
+                assert response.status_code == 200, response.text
+                receipt = response.json()['decision_receipt']
+                # Characterize the first receipt format, which captured only the route's target.
+                encrypted = await conn.fetchval('SELECT snapshot FROM target_operator_decisions WHERE id=$1', UUID(receipt['id']))
+                snapshot = _open(encrypted)
+                for state in (snapshot['before'], snapshot['after']):
+                    state.pop('entry_scope')
+                    state['entries'] = [item for item in state['entries'] if item['target_id'] == str(target)]
+                    for item in state['entries']:
+                        item.pop('target_id')
+                await conn.execute('UPDATE target_operator_decisions SET snapshot=$2 WHERE id=$1',
+                    UUID(receipt['id']), _sealed(snapshot))
+                response = await client.post(f"/targets/{target}/knowledge/decisions/{receipt['id']}/revert",
+                    json={'receipt_sha256': receipt['receipt_sha256']})
+                assert response.status_code == (409 if linked_service else 200), response.text
+                expected = 'active' if linked_service else 'false_positive'
+                assert await conn.fetchval('SELECT status FROM findings WHERE id=$1', finding) == expected
+                assert await conn.fetchval('SELECT status FROM target_interpretations WHERE finding_id=$1', finding) == (
+                    'reopened' if linked_service else 'active')
+                if linked_service:
+                    assert 'older receipt' in response.text
+                    assert await conn.fetchval('SELECT reverted_at FROM target_operator_decisions WHERE id=$1', UUID(receipt['id'])) is None
+    asyncio.run(run())
+
+
+def test_unavailable_encryption_never_applies_a_decision(monkeypatch):
+    async def run():
+        import secret_store
+        async with startup_database() as conn:
+            app_module = await _prepared(conn, monkeypatch)
+            target = await _web_target(conn, 'https://unavailable.receipts.test')
+            finding = await _fixture_finding(conn, target)
+            monkeypatch.setattr(secret_store, '_loaded', True)
+            monkeypatch.setattr(secret_store, '_fernet', None)
+            async with AsyncClient(transport=ASGITransport(app_module.app), base_url='http://operator') as client:
+                response = await client.post(f'/targets/{target}/knowledge/decisions', json=entry(
+                    target, 'dismiss', subject_id=str(finding), reason='false_positive', note='Reviewed fixture'))
+                assert response.status_code == 503 and 'encryption' in response.text
+                assert await conn.fetchval('SELECT status FROM findings WHERE id=$1', finding) == 'active'
+                assert await conn.fetchval('SELECT count(*) FROM target_interpretations WHERE finding_id=$1', finding) == 0
+                assert await conn.fetchval('SELECT count(*) FROM target_operator_decisions') == 0
     asyncio.run(run())

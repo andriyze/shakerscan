@@ -909,27 +909,12 @@ async def retract_interpretation(conn: Any, target_id: Any, entry_id: Any, *, ac
         # benign one never keeps the planted text out of a retraction.
         # Knowledge notes share one writer (system:knowledge-import); their author is the writer of
         # the mirrored text (subject.written_by), so the chain never crosses to another author's text.
-        author = (_loads(entry["subject"], {}) or {}).get("written_by") if entry["written_by"] == KNOWLEDGE_IMPORT_WRITER else None
-        if author and str(author).startswith("hunt:"):
-            # Every version of knowledge text that Hunt wrote, also past operator versions between
-            # them; never an operator's or another Hunt's version.
-            rows = await conn.fetch("""UPDATE target_interpretations SET status='retracted', status_changed_by=$2,
-                    status_changed_at=NOW(), status_note=$3
-                WHERE target_id=$4 AND written_by=$5 AND subject->>'written_by'=$6
-                  AND (id=$1 OR status IN ('active','superseded')) RETURNING *""",
-                identifier, actor, note, row["id"], entry["written_by"], author)
-        else:
-            rows = await conn.fetch("""WITH RECURSIVE chain(id) AS (
-                    SELECT $1::uuid
-                    UNION
-                    SELECT i.id FROM target_interpretations i JOIN chain c ON i.supersedes=c.id OR i.id=(
-                        SELECT supersedes FROM target_interpretations WHERE id=c.id)
-                    WHERE i.target_id=$4 AND i.written_by=$5
-                      AND ($6::text IS NULL OR i.subject->>'written_by'=$6))
-                UPDATE target_interpretations SET status='retracted', status_changed_by=$2,
-                    status_changed_at=NOW(), status_note=$3
-                WHERE id IN (SELECT id FROM chain) AND status IN ('active','superseded') RETURNING *""",
-                identifier, actor, note, row["id"], entry["written_by"], author)
+        from .interpretation_retraction import retraction_members
+        members = await retraction_members(conn, row["id"], entry)
+        rows = await conn.fetch("""UPDATE target_interpretations SET status='retracted', status_changed_by=$2,
+                status_changed_at=NOW(), status_note=$3
+            WHERE id=ANY($1::uuid[]) AND status IN ('active','superseded') RETURNING *""",
+            [member['id'] for member in members], actor, note)
         await _withhold_knowledge(conn, row["id"], rows, actor=actor, note=note)
         saved = next(item for item in rows if item["id"] == identifier)
         result = public_interpretation(saved, audience="operator")
@@ -1293,7 +1278,7 @@ async def briefing_section(conn: Any, target_id: Any, *, device: bool) -> dict[s
 
 # --- advisory knowledge as one note -------------------------------------------------------------
 
-KNOWLEDGE_IMPORT_WRITER = "system:knowledge-import"
+from .interpretation_retraction import KNOWLEDGE_IMPORT_WRITER
 
 
 def knowledge_document(metadata: Any) -> dict[str, Any] | None:
