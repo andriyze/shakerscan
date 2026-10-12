@@ -18,6 +18,7 @@ import { assetKind, type RowActions } from './inventory/TargetRow'
 
 const PAGE_GROUPS = 40
 const SCANNING_REFRESH_MS = 10_000
+const GROUPS_KEY = 'shakerscan.targets.expandedGroups'
 
 /** One inventory of domains, hosts and devices, grouped by domain, ready for Scan and Hunt. */
 export function TargetInventory() {
@@ -33,7 +34,24 @@ export function TargetInventory() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
+  // Which domain groups the viewer expanded or collapsed, kept in this browser across reloads.
+  // Loaded after mount so the server render and the first client render match.
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const groupsLoaded = useRef(false)
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(GROUPS_KEY) || '{}')
+      if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+        const valid = Object.fromEntries(Object.entries(saved).filter(([, value]) => typeof value === 'boolean')) as Record<string, boolean>
+        setExpanded(current => ({ ...valid, ...current }))
+      }
+    } catch { /* storage unavailable */ }
+    groupsLoaded.current = true
+  }, [])
+  useEffect(() => {
+    if (!groupsLoaded.current) return
+    try { window.localStorage.setItem(GROUPS_KEY, JSON.stringify(expanded)) } catch { /* storage unavailable */ }
+  }, [expanded])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState<string | null>(null)
   const [adding, setAdding] = useState(parameters.get('add') === '1')
