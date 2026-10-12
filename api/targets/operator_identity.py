@@ -9,5 +9,3 @@ def operator_identity(request: Request) -> str:
                                   'message': 'This is an operator route; a Hunt planner cannot use it.'})
     actor = str(request.scope.get('shakerscan.operator_identity') or 'operator:interpretations-api')
     return (actor if actor.startswith('operator:') else f'operator:{actor}')[:200]
-
-

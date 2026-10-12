@@ -52,5 +52,3 @@ async def apply_operator_decision(conn: Any, target: UUID, item: DecisionInput, 
     if kind == 'retract':
         return await retract_interpretation(conn, target, item.subject_id, actor=actor, note=note)
     return await retract_run(conn, target, item.subject_id, actor=actor, note=note)
-
-
