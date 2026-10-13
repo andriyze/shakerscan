@@ -17,6 +17,8 @@ _FORBIDDEN_HEADERS = frozenset({
     "x-original-url", "x-rewrite-url", "x-http-method-override", "x-http-method", "x-method-override",
 })
 POINTER_SCHEMA = {"type": "string", "maxLength": 512}
+# A discovered secret's reference (api/hunt/discovered_secrets.py, SECRET_REF_RE).
+SECRET_REF_PATTERN = r"^secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 # A withheld value's reference (api/runtime/archive_body_masking.py, WITHHELD_REF_RE).
 WITHHELD_REF_PATTERN = (
     r"^withheld://hunt/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[1-9][0-9]{0,3}$"
@@ -35,6 +37,9 @@ HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
                 "description": ("A value this Hunt withheld from a capability output, by its reference "
                     "(withheld://hunt/<action id>/<n>, from withheld_values[].ref). The worker sends "
                     "the value; it is never shown.")},
+            "secret_ref": {"type": "string", "maxLength": 80, "pattern": SECRET_REF_PATTERN,
+                "description": ("A secret discovered on this target earlier (secret://<id>, from "
+                    "secrets.inspect). The worker sends the value; it is never shown.")},
             "capture_name": {"type": "string", "pattern": _NAME},
             "principal": {"type": "string", "enum": ["primary", "secondary", "service"]},
             "profile_id": {"type": "string", "maxLength": 36},
@@ -112,12 +117,15 @@ def validate_exchange_input(values: Mapping[str, Any]) -> None:
             pointer_parts(capture["json_pointer"])
     destinations: set[tuple[str, str]] = set()
     for binding in values.get("request_bindings") or ():
-        sources = sum(key in binding for key in ("source_action_id", "principal", "profile_id", "withheld_ref"))
+        sources = sum(key in binding for key in (
+            "source_action_id", "principal", "profile_id", "withheld_ref", "secret_ref"))
         if sources != 1 or (("body_pointer" in binding) == ("header" in binding)):
             raise ValueError("request binding requires one source and one body/header destination")
-        if "withheld_ref" in binding:
-            if not re.fullmatch(WITHHELD_REF_PATTERN, str(binding["withheld_ref"])):
+        if "withheld_ref" in binding or "secret_ref" in binding:
+            if "withheld_ref" in binding and not re.fullmatch(WITHHELD_REF_PATTERN, str(binding["withheld_ref"])):
                 raise ValueError("withheld_ref must be a withheld://hunt/<action id>/<n> reference")
+            if "secret_ref" in binding and not re.fullmatch(SECRET_REF_PATTERN, str(binding["secret_ref"])):
+                raise ValueError("secret_ref must be a secret://<id> reference")
             if any(k in binding for k in ("capture_name", "credential_field", "profile_version")):
                 raise ValueError("withheld value binding takes only its reference and a destination")
         elif "source_action_id" in binding:

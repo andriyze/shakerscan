@@ -53,7 +53,7 @@ async def prepare_http_operation(
     exchange = HttpWorkflowExchange(str(run['id']), str(action_id), target, tuple(inputs.get('capture') or ()))
     injects_headers = bool(trusted_headers) or any('header' in item for item in inputs.get('request_bindings') or ())
     bindings = tuple(inputs.get('request_bindings') or ())
-    withheld_only = bool(bindings) and not inputs.get('capture') and all('withheld_ref' in item for item in bindings)
+    withheld_only = bool(bindings) and not inputs.get('capture') and all('withheld_ref' in item or 'secret_ref' in item for item in bindings)
 
     def record(captured: Mapping[str, Any]) -> None:
         recorder({**captured, "workflow_values_private": True} if workflow else captured)

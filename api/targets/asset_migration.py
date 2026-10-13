@@ -253,6 +253,12 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 except ModuleNotFoundError:
                     from api.hunt.interpretation_schema import INTERPRETATION_SCHEMA_SQL
                 await conn.execute(INTERPRETATION_SCHEMA_SQL)
+                # Secrets found on a target, usable later by reference (2.10).
+                try:
+                    from hunt.discovered_secrets import DISCOVERED_SECRETS_SCHEMA_SQL
+                except ModuleNotFoundError:
+                    from api.hunt.discovered_secrets import DISCOVERED_SECRETS_SCHEMA_SQL
+                await conn.execute(DISCOVERED_SECRETS_SCHEMA_SQL)
                 # Data migrations added after the conversion must run here: the baseline above
                 # never runs again on a converted database. Each is marker-gated.
                 try:

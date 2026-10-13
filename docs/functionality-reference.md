@@ -1916,7 +1916,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 113 | `db/init.sql` + migrations |
+| Durable tables | 115 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -3265,6 +3265,8 @@ Scan feature or a second orchestration engine.
 | `device_request_collections` | `db/init.sql` |
 | `device_services` | `db/init.sql` |
 | `device_targets` | `db/init.sql` |
+| `discovered_secret_uses` | `db/init.sql` |
+| `discovered_secrets` | `db/init.sql` |
 | `discovery_runs` | `db/init.sql` |
 | `evidence_instances` | `api/retest_contract.py` |
 | `evidence_objects` | `db/init.sql` |

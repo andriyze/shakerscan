@@ -56,6 +56,7 @@ POSTGRES_DATABASES = {
     "ASSURANCE_TEST_DATABASE_URL": "shakerscan_assurance_test",
     "COLLECTION_TEST_DATABASE_URL": "shakerscan_collection_retry_test",
     "CREDENTIAL_GRANTS_TEST_DATABASE_URL": "shakerscan_credential_grants_test",
+    "DISCOVERED_SECRETS_TEST_DATABASE_URL": "shakerscan_discovered_secrets_test",
     "DISCOVERY_TEST_DATABASE_URL": "shakerscan_discovery_test",
     "EVIDENCE_INTEGRITY_TEST_DATABASE_URL": "shakerscan_evidence_integrity_test",
     "FINDINGS_PROOF_SQL_TEST_DATABASE_URL": "shakerscan_proof_sql_test",
