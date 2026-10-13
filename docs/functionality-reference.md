@@ -1657,8 +1657,7 @@ returned or logged. An ID/target/auth-kind collision fails closed instead of ove
 identity. These routes will be removed after remaining legacy callers migrate.
 
 **Discovery & exposure**: `POST|GET /discovery` · `GET /discovery/{id}` · `GET /dashboard` ·
-`GET /exposure/graph` · `GET /exposure/nodes` · `GET /exposure/assets` · `GET /exposure/changes` ·
-`GET /exposure/attack-paths`
+`GET /exposure/graph` · `GET /exposure/assets` · `GET /exposure/changes` · `GET /exposure/services`
 
 **Schedules**: `GET|POST /schedules` · `GET|PATCH|DELETE /schedules/{id}`
 
@@ -1899,8 +1898,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 494 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 412 | `api/**/*.py` |
+| Public REST operations | 492 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 410 | `api/**/*.py` |
 | Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2079,10 +2078,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/evidence/{evidence_id}` | `get_evidence_object` |
 | `POST` | `/experiments/workflows/{workflow_id}/cancel` | `cancel_workflow_experiment` |
 | `GET` | `/exposure/assets` | `exposure_assets` |
-| `GET` | `/exposure/attack-paths` | `exposure_attack_paths` |
 | `GET` | `/exposure/changes` | `exposure_changes` |
 | `GET` | `/exposure/graph` | `exposure_graph` |
-| `GET` | `/exposure/nodes` | `exposure_nodes` |
 | `GET` | `/exposure/services` | `exposure_services` |
 | `GET` | `/finding-exceptions` | `list_finding_exceptions` |
 | `POST` | `/finding-exceptions` | `create_finding_exception` |

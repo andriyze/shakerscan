@@ -154,7 +154,7 @@
       "source": "src/app/exposure/page.tsx",
       "owner": "exposure",
       "caseId": "EXP-001",
-      "stateAssertion": "Exposure triage renders real asset state.",
+      "stateAssertion": "Exposure renders retained service evidence per target and listener.",
       "smokePath": "/exposure"
     },
     {
@@ -337,13 +337,6 @@
       "assertion": "Dashboard action opens the canonical form."
     },
     {
-      "caseId": "START-004",
-      "route": "/exposure",
-      "source": "src/app/exposure/page.tsx",
-      "marker": "action={{ label: 'New Scan'",
-      "assertion": "Empty Exposure state opens the canonical form."
-    },
-    {
       "caseId": "START-005",
       "route": "/scan/new",
       "source": "src/app/scan/new/page.tsx",
@@ -375,7 +368,7 @@
       "caseId": "START-009",
       "route": "/targets",
       "source": "src/components/targets/inventory/TargetRow.tsx",
-      "marker": "Customize Scan…",
+      "marker": "Customize Scan\u2026",
       "assertion": "Row custom action prefills New Scan with the asset's web apps."
     },
     {
@@ -396,29 +389,8 @@
       "caseId": "START-012",
       "route": "/targets",
       "source": "src/components/targets/inventory/TargetGroups.tsx",
-      "marker": "Customize batch…",
+      "marker": "Customize batch\u2026",
       "assertion": "Domain custom action opens the exact displayed batch in New Scan."
-    },
-    {
-      "caseId": "START-013",
-      "route": "/exposure",
-      "source": "src/app/exposure/page.tsx",
-      "marker": "scanTarget(asset.id",
-      "assertion": "A web asset queues one fast DAST scan."
-    },
-    {
-      "caseId": "START-014",
-      "route": "/exposure",
-      "source": "src/app/exposure/page.tsx",
-      "marker": "handleBulkScan",
-      "assertion": "Bulk web dispatch reconciles partial outcomes."
-    },
-    {
-      "caseId": "START-015",
-      "route": "/exposure",
-      "source": "src/app/exposure/page.tsx",
-      "marker": "triggerScan(asset)",
-      "assertion": "Mixed kinds use the canonical work type for each asset."
     },
     {
       "caseId": "START-016",
@@ -498,13 +470,6 @@
       "assertion": "Target entry submits the persisted V2 Hunt policy."
     },
     {
-      "caseId": "START-027",
-      "route": "/exposure",
-      "source": "src/app/exposure/page.tsx",
-      "marker": "router.push(`/hunt?target=",
-      "assertion": "Investigate carries the exact asset into canonical Hunt."
-    },
-    {
       "caseId": "START-028",
       "route": "/findings/[id]",
       "source": "src/app/findings/[id]/page.tsx",
@@ -566,6 +531,28 @@
       "source": "src/app/deep-hunt/page.tsx",
       "marker": "redirect(`/hunt",
       "assertion": "Legacy entry redirects once and never launches work."
+    }
+  ],
+  "retiredWorkActions": [
+    {
+      "caseId": "START-004",
+      "reason": "Exposure empty state removed in 2.10; New Scan stays on Targets and DAST Scans"
+    },
+    {
+      "caseId": "START-013",
+      "reason": "Exposure triage removed in 2.10; a single web asset is scanned from Targets (START-007)"
+    },
+    {
+      "caseId": "START-014",
+      "reason": "Exposure triage removed in 2.10; bulk dispatch is on Targets (START-011)"
+    },
+    {
+      "caseId": "START-015",
+      "reason": "Exposure triage removed in 2.10; per-kind work types are chosen on Targets (START-007, START-008)"
+    },
+    {
+      "caseId": "START-027",
+      "reason": "Exposure triage removed in 2.10; Hunt starts from the target page and Hunts"
     }
   ]
 }

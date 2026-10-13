@@ -296,3 +296,14 @@ def test_settled_host_hunt_ports_reach_asset_device_view_and_hunt_query():
             await conn.execute('DELETE FROM hunt_runs WHERE id=$1',hunt)
             assert (await asset_service_knowledge(conn,owner))['services'] == []
     asyncio.run(run())
+
+
+def test_public_asset_carries_owner_and_cohort_bounded_and_absent_as_none():
+    # The target page's "Edit details" reads and prefills these (moved from the removed Exposure
+    # triage drawer); the environment keeps its own fallback to the cohort.
+    from targets.asset_inventory import public_asset
+    row = {'id': 'x', 'metadata_json': {'owner': 'o' * 300, 'cohort': 'lab', 'environment': 'staging'}}
+    asset = public_asset(row)
+    assert asset['owner'] == 'o' * 200 and asset['cohort'] == 'lab' and asset['environment'] == 'staging'
+    bare = public_asset({'id': 'y', 'metadata_json': {}})
+    assert bare['owner'] is None and bare['cohort'] is None and bare['environment'] == 'production'

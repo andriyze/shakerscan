@@ -12,7 +12,7 @@ import { AssetCredentials } from '@/components/collections/AssetCredentials'
 import { useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import { Button, Card, CardSkeleton, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select } from '@/components/ui'
-import { formatDate } from '@/lib/api'
+import { formatDate, updateTargetMetadata } from '@/lib/api'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 import { authorizeTargetAsset, enableTargetNetworkView, getTargetAsset, getTargetAssetHistory, renameTargetAsset, type AssetDetail, type AssetHistory, type AssetHistoryKind } from '@/lib/targetAssetApi'
 
@@ -23,6 +23,7 @@ export function TargetAssetDetail({ id }: {id: string}) {
   const [busy,setBusy] = useState(false)
   const [refresh,setRefresh] = useState(0)
   const [edit,setEdit] = useState<'name' | 'authority' | null>(null)
+  const [details,setDetails] = useState<{owner: string; environment: string; cohort: string} | null>(null)
   const [value,setValue] = useState('')
   const [confirmed,setConfirmed] = useState(false)
   const [historyKind,setHistoryKind] = useState<AssetHistoryKind>('scans')
@@ -65,13 +66,23 @@ export function TargetAssetDetail({ id }: {id: string}) {
     } catch (cause) {setError(cause instanceof Error ? cause.message : 'Could not update target')}
     finally {setBusy(false)}
   }
+  async function saveDetails() {
+    if (!data || !details) return
+    setBusy(true)
+    try {
+      await updateTargetMetadata(data.target.id, {owner: details.owner.trim(), environment: details.environment, cohort: details.cohort})
+      setDetails(null);setRefresh((current) => current+1);setError(null)
+    } catch (cause) {setError(cause instanceof Error ? cause.message : 'Could not update target details')}
+    finally {setBusy(false)}
+  }
   if (!data) return error ? <ErrorState message={error} /> : <CardSkeleton count={4} />
   const target = data.target
   const authorizedOrigins = data.origins.filter(origin => origin.is_active && origin.authorized).length
   return <div>
     <div className="mb-4"><Link href="/targets" className="text-sm text-blue-300">← Targets</Link></div>
-    <PageHeader title={target.name || target.locator} description={`${target.locator} · ${target.environment} · one asset across application and network views`} actions={<div className="flex flex-wrap gap-2">
+    <PageHeader title={target.name || target.locator} description={`${target.locator} · ${target.environment}${target.owner ? ` · owner ${target.owner}` : ''}${target.cohort ? ` · cohort ${target.cohort}` : ''} · one asset across application and network views`} actions={<div className="flex flex-wrap gap-2">
       <Button variant="secondary" onClick={() => {setEdit('name');setValue(target.name || target.locator)}}>Rename</Button>
+      <Button variant="secondary" onClick={() => setDetails({owner: target.owner || '', environment: target.environment || '', cohort: target.cohort || 'unclassified'})}>Edit details</Button>
       {featureEnabled('devices') && target.is_active && <><Button variant="secondary" loading={busy} onClick={() => void openNetwork(true)}>Network Hunt</Button><Button loading={busy} onClick={() => void openNetwork()}>Start network scan</Button></>}
     </div>} />
     <SharedServicePorts knowledge={data.service_intelligence} targetId={target.id} />
@@ -86,5 +97,12 @@ export function TargetAssetDetail({ id }: {id: string}) {
     <section className="mb-6"><h2 className="mb-3 text-lg font-semibold text-white">Shared inputs</h2><div className="space-y-4"><AssetCredentials assetId={target.id} credentials={data.credentials} /><AssetCollections assetId={target.id} assetLocator={target.locator} origins={data.origins} collections={data.request_collections} onChanged={() => setRefresh(value => value + 1)} /></div></section>
     <section><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><h2 className="text-lg font-semibold text-white">Asset history</h2><Select aria-label="History kind" value={historyKind} onChange={(event) => {setHistoryKind(event.target.value as AssetHistoryKind);setHistoryOffset(0)}}><option value="scans">Scans</option><option value="findings">Findings</option><option value="hunts">Hunts</option></Select></div>{historyError ? <ErrorState message={historyError} /> : !history ? <CardSkeleton count={1} /> : history.items.length === 0 ? <EmptyState message="No history for this selection" /> : <Card className="overflow-hidden p-0"><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-gray-900 text-xs uppercase text-gray-500"><tr><th className="px-4 py-3">Record / service</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Created</th></tr></thead><tbody className="divide-y divide-gray-800">{history.items.map((item) => <tr key={item.id}><td className="px-4 py-3"><div className="break-all text-gray-200">{historyKind === 'scans' ? <Link href={`/scans/${item.id}`} className="text-blue-300">{item.target_url || item.id}</Link> : item.title || item.id}</div><div className="mt-1 text-xs text-gray-500">{item.run_kind || item.scan_type || item.severity || historyKind} · {item.target_id === target.id ? 'Host' : 'Application service'}</div></td><td className="px-4 py-3 text-gray-400">{item.status || 'Recorded'}{item.grade ? ` · ${item.grade}` : ''}</td><td className="px-4 py-3 text-xs text-gray-500">{formatDate(item.created_at)}</td></tr>)}</tbody></table></div></Card>}<div className="mt-4 flex items-center justify-between"><Button variant="secondary" disabled={!history || historyOffset===0} onClick={() => setHistoryOffset(Math.max(0,historyOffset-25))}>Previous</Button><span className="text-xs text-gray-500">{history ? `${history.total} records` : 'Loading…'}</span><Button variant="secondary" disabled={!history || historyOffset+25>=history.total} onClick={() => setHistoryOffset(historyOffset+25)}>Next</Button></div></section>
     <Modal open={edit !== null} title={edit === 'name' ? 'Rename asset' : 'Authorize asset and services'} onClose={() => {if (!busy) setEdit(null)}}><div className="space-y-4"><Field label={edit === 'name' ? 'Name' : 'Approved by'}><Input value={value} onChange={(event) => setValue(event.target.value)} /></Field>{edit === 'authority' && <label className="flex items-start gap-2 text-sm text-gray-300"><input type="checkbox" className="mt-1" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>I am authorized to test this host and its linked services. Reuse this authority until revoked; explicit service restrictions still apply. It covers the credentials attached to this target.</span></label>}<Button disabled={!value.trim() || (edit === 'authority' && !confirmed)} loading={busy} onClick={() => void save()}>Save</Button></div></Modal>
+    <Modal open={details !== null} title="Edit target details" onClose={() => {if (!busy) setDetails(null)}}>{details && <div className="space-y-4">
+      <Field label="Owner"><Input value={details.owner} placeholder="team or person" onChange={(event) => setDetails({...details, owner: event.target.value})} /></Field>
+      <Field label="Environment"><Select aria-label="Environment" value={details.environment} onChange={(event) => setDetails({...details, environment: event.target.value})}><option value="">unset</option><option value="production">production</option><option value="staging">staging</option><option value="development">development</option><option value="lab">lab</option></Select></Field>
+      <Field label="Reporting cohort"><Select aria-label="Reporting cohort" value={details.cohort} onChange={(event) => setDetails({...details, cohort: event.target.value})}><option value="unclassified">unclassified</option><option value="production">production</option><option value="staging">staging</option><option value="lab">lab</option><option value="demo">demo</option><option value="calibration">calibration</option><option value="internal">internal</option></Select></Field>
+      <p className="text-xs text-gray-500">The cohort decides which dashboard view counts this target; lab and calibration data never mix into the operational view.</p>
+      <Button loading={busy} onClick={() => void saveDetails()}>Save</Button>
+    </div>}</Modal>
   </div>
 }

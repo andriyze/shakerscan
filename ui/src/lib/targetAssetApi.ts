@@ -11,6 +11,8 @@ export interface TargetAsset {
   root_domain?: string
   is_active: boolean
   environment: string
+  owner?: string | null
+  cohort?: string | null
   port_hints?: number[]
   has_target_skill?: boolean
   connected_device: boolean

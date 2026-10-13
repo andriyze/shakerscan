@@ -15,8 +15,6 @@ async function mockServices(page: Page, fail = false) {
       return route.fulfill({ json: fixture })
     }
     if (url.pathname === '/domains') return route.fulfill({ json: { domains: ['example.test'] } })
-    if (url.pathname === '/exposure/assets') return route.fulfill({ json: { assets: [], total: 0, metrics: null } })
-    if (url.pathname === '/exposure/nodes') return route.fulfill({ json: { nodes: [] } })
     return route.fulfill({ json: { status: 'healthy', workers: [], targets: [], devices: [], total: 0 } })
   })
   return writes
@@ -24,8 +22,8 @@ async function mockServices(page: Page, fail = false) {
 
 test('service evidence, candidates and activities are separate and never execute on navigation', async ({ page }) => {
   const writes = await mockServices(page)
-  await page.goto('/exposure?lens=services')
-  await expect(page.getByRole('tab', { name: 'Services', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await page.goto('/exposure')
+  await expect(page.getByRole('heading', { name: 'Exposure', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Inspect tcp/443 on Fixture app' }).click()
   const details = page.getByTestId('service-details')
   await expect(details).toContainText('Observation relationship—not a proven attack path')
@@ -47,7 +45,7 @@ test('service evidence, candidates and activities are separate and never execute
 
 test('search and browser history preserve the Services lens without stale details', async ({ page }) => {
   await mockServices(page)
-  await page.goto('/exposure?lens=services')
+  await page.goto('/exposure')
   await page.getByRole('button', { name: 'Inspect tcp/443 on Fixture app' }).click()
   await page.getByRole('textbox', { name: 'Search service targets' }).fill('missing')
   await page.getByRole('button', { name: 'Search', exact: true }).click()
@@ -60,8 +58,17 @@ test('search and browser history preserve the Services lens without stale detail
 
 test('source failure remains visible, not a clean empty inventory', async ({ page }) => {
   await mockServices(page, true)
-  await page.goto('/exposure?lens=services')
+  await page.goto('/exposure')
   await expect(page.getByText('Database is not ready', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: /Retry/i })).toBeVisible()
   await expect(page.getByText('No targets on this page', { exact: true })).toHaveCount(0)
+})
+
+test('an old lens link lands on the service view; the removed views are gone', async ({ page }) => {
+  await mockServices(page)
+  for (const lens of ['triage', 'map', 'paths', 'services']) {
+    await page.goto(`/exposure?lens=${lens}`)
+    await expect(page.getByRole('button', { name: 'Inspect tcp/443 on Fixture app' })).toBeVisible()
+    await expect(page.getByRole('tab', { name: /Triage|Map|Attack paths/ })).toHaveCount(0)
+  }
 })

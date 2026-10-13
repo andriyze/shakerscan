@@ -4039,45 +4039,6 @@ export async function testLocalAgentCapability(payload: LocalAgentTestRequest): 
   return res.json()
 }
 
-export async function getExposureGraph(params?: {
-  root_domain?: string
-  includeInactive?: boolean
-  includeResolved?: boolean
-  limitFindings?: number
-  limitScans?: number
-  focus?: string | null
-  depth?: number
-  includeEndpoints?: boolean
-}): Promise<ExposureGraph> {
-  const searchParams = new URLSearchParams()
-  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
-  if (params?.includeInactive) searchParams.set('include_inactive', 'true')
-  if (params?.includeResolved) searchParams.set('include_resolved', 'true')
-  if (params?.limitFindings) searchParams.set('limit_findings', String(params.limitFindings))
-  if (params?.limitScans) searchParams.set('limit_scans', String(params.limitScans))
-  if (params?.focus) searchParams.set('focus', params.focus)
-  if (params?.depth) searchParams.set('depth', String(params.depth))
-  if (params?.includeEndpoints) searchParams.set('include_endpoints', 'true')
-
-  const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/exposure/graph${query ? `?${query}` : ''}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure graph'))
-  return res.json()
-}
-
-export async function getExposureNodes(params?: {
-  root_domain?: string
-  includeResolved?: boolean
-}): Promise<{ nodes: ExposureSearchNode[]; count: number }> {
-  const searchParams = new URLSearchParams()
-  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
-  if (params?.includeResolved) searchParams.set('include_resolved', 'true')
-  const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/exposure/nodes${query ? `?${query}` : ''}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure nodes'))
-  return res.json()
-}
-
 export async function getExposureAssets(params?: {
   root_domain?: string
   kind?: ExposureAssetKind
@@ -4174,17 +4135,6 @@ export async function getExposureChanges(params?: {
   const query = searchParams.toString()
   const res = await fetch(`${API_URL}/exposure/changes${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure changes'))
-  return res.json()
-}
-
-export async function getExposureAttackPaths(params?: {
-  root_domain?: string
-}): Promise<ExposureAttackPathsResponse> {
-  const searchParams = new URLSearchParams()
-  if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
-  const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/exposure/attack-paths${query ? `?${query}` : ''}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch attack paths'))
   return res.json()
 }
 

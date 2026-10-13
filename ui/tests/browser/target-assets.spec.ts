@@ -162,3 +162,25 @@ test('ASSET-INTERP-001 the asset page lists interpretations and negative results
   expect(await page.evaluate(() => (window as unknown as {__pwned?: number}).__pwned)).toBeUndefined()
   expect(writes).toEqual([])
 })
+
+test('ASSET-007 target details (owner, environment, cohort) are edited on the target page', async ({page}) => {
+  // Moved from the removed Exposure triage drawer in 2.10: the only place to set these after creation.
+  await mock(page)
+  const patches: unknown[] = []
+  await page.route(`${MOCK_API_ORIGIN}/targets/${assetId}`, async route => {
+    if (route.request().method() === 'PATCH') {
+      patches.push(route.request().postDataJSON())
+      return route.fulfill({json:{id:assetId,status:'updated'}})
+    }
+    return route.fallback()
+  })
+  await page.goto(`/targets/${assetId}/asset`)
+  await page.getByRole('button', {name: 'Edit details'}).click()
+  const dialog = page.getByRole('dialog', {name: 'Edit target details'})
+  await dialog.getByPlaceholder('team or person').fill('  platform team  ')
+  await dialog.getByLabel('Environment').selectOption('staging')
+  await dialog.getByLabel('Reporting cohort').selectOption('lab')
+  await dialog.getByRole('button', {name: 'Save'}).click()
+  await expect(dialog).toBeHidden()
+  expect(patches).toEqual([{metadata_json:{owner:'platform team',environment:'staging'},cohort:'lab'}])
+})

@@ -173,6 +173,9 @@ def public_asset(row: Any) -> dict[str, Any]:
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
     result['environment'] = str(metadata.get('environment') or metadata.get('cohort') or 'production')
+    # Operator-set ownership (Targets "Edit details"): who owns the asset and its reporting cohort.
+    result['owner'] = str(metadata.get('owner') or '')[:200] or None
+    result['cohort'] = str(metadata.get('cohort') or '')[:40] or None
     saved_skill = metadata.get('target_skill')
     result['has_target_skill'] = bool(isinstance(saved_skill, dict) and (saved_skill.get('methodology')
         or isinstance(saved_skill.get('operator_snapshot'), dict) and saved_skill['operator_snapshot'].get('methodology')))

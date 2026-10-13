@@ -42,9 +42,15 @@ test('every internal sidebar destination is represented in the route manifest', 
   for (const href of hrefs) assert.ok(routes.has(href), `sidebar route ${href} is not declared`)
 })
 
-test('all 36 audited work-start paths retain a source marker and outcome assertion', () => {
+test('all 36 audited work-start paths are active with a source marker, or retired with a reason', () => {
   const expected = Array.from({ length: 36 }, (_, index) => `START-${String(index + 1).padStart(3, '0')}`)
-  assert.deepEqual(manifest.workActions.map((entry) => entry.caseId).sort(), expected)
+  const active = manifest.workActions.map((entry) => entry.caseId)
+  const retired = (manifest.retiredWorkActions || []).map((entry) => entry.caseId)
+  assert.deepEqual([...active, ...retired].sort(), expected)
+  assert.equal(active.filter((caseId) => retired.includes(caseId)).length, 0)
+  for (const entry of manifest.retiredWorkActions || []) {
+    assert.ok(entry.reason?.trim().length > 20, `${entry.caseId} is retired without a reason`)
+  }
   for (const action of manifest.workActions) {
     const sourcePath = path.join(root, action.source)
     assert.ok(existsSync(sourcePath), `${action.caseId} source is missing: ${action.source}`)
