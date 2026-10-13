@@ -801,6 +801,11 @@ record_api_sandbox_group() { :; }
 resolve_start_workers() { printf '1\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull-prebuilt\n'; }
+remember_running_release() { :; }
+ensure_upgrade_space() { printf 'space-check\n'; }
+ensure_pre_upgrade_backup() { printf 'pre-upgrade-backup\n'; }
+ensure_redis_ready() { printf 'redis-ready\n'; }
+record_started_release() { printf 'record-release:%s\n' "$1"; }
 build_local_images() { printf 'build-local\n'; }
 local_application_images_ready() { return __READY_RC__; }
 record_runtime_mode() { printf 'record:%s\n' "$1"; }
@@ -1169,6 +1174,11 @@ resolve_start_workers() { printf '1\n'; }
 restart_worker_count() { printf '3\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull-prebuilt\n'; }
+remember_running_release() { :; }
+ensure_upgrade_space() { printf 'space-check\n'; }
+ensure_pre_upgrade_backup() { printf 'pre-upgrade-backup\n'; }
+ensure_redis_ready() { printf 'redis-ready\n'; }
+record_started_release() { printf 'record-release:%s\n' "$1"; }
 build_local_images() { printf 'build-local\n'; }
 local_application_images_ready() { return 0; }
 record_runtime_mode() { printf 'record:%s\n' "$1"; }

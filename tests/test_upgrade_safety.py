@@ -33,10 +33,10 @@ docker_storage_free_kb() { echo $(( $(cat "$WORK/free_gb") * 1024 * 1024 )); }
 : > "$WORK/images"; : > "$WORK/containers"
 docker() {
   echo "docker $*" >> "$CALLS"
-  case "$1 $2" in
+  case "${1:-} ${2:-}" in
     "image inspect")
       local ref="${@: -1}" line
-      line="$(awk -v ref="$ref" '$1 == ref' "$WORK/images" 2>/dev/null | head -1)"
+      line="$(awk -v ref="$ref" '$1 == ref || $2 == ref' "$WORK/images" 2>/dev/null | head -1)"
       [ -n "$line" ] || return 1
       case "$*" in *--format*) echo "$line" | awk '{print $2}' ;; esac ;;
     "image rm")
@@ -45,12 +45,30 @@ docker() {
     "images --no-trunc")
       awk -v repo="${@: -1}" '$3 == repo {print $2}' "$WORK/images" ;;
     "ps -aq") cat "$WORK/containers" ;;
+    "ps -q") cat "$WORK/containers" ;;
+    "info >/dev/null"|"info "*) return 0 ;;
     "inspect --format") echo "${@: -1}" ;;
     "volume rm") echo "volume removed $3" >> "$CALLS" ;;
+    "volume ls") return 0 ;;
     "volume inspect") [ -f "$WORK/volume_$3" ] ;;
   esac
 }
-compose() { echo "compose $*" >> "$CALLS"; case "$1" in logs) cat "$WORK/redis.log" 2>/dev/null ;; exec) echo "${EXEC_OUT:-}" ;; esac; }
+compose() {
+  echo "compose $*" >> "$CALLS"
+  case "$1" in
+    logs) cat "$WORK/redis.log" 2>/dev/null ;;
+    exec) echo "${EXEC_OUT:-}" ;;
+    run)
+      # The archive: `compose run ... -v <dir>:/backup ... tar czf /backup/redis-data.tgz` writes it.
+      local arg prev=""
+      for arg in "$@"; do
+        if [ "$prev" = "-v" ] && [ "${arg%%:/backup}" != "$arg" ] && [ "${ARCHIVE_FAILS:-0}" != 1 ]; then
+          case "$*" in *"tar czf /backup/redis-data.tgz"*) echo data > "${arg%%:/backup}/redis-data.tgz" ;; esac
+        fi
+        prev="$arg"
+      done ;;
+  esac
+}
 : > "$WORK/redis.log"
 """
 
@@ -80,7 +98,8 @@ def test_older_shakerscan_images_are_removed_first_and_the_upgrade_proceeds(tmp_
     sed -i.bak 's/^ *//' "$WORK/images"
     ensure_upgrade_space; echo rc=$?
     """
-    result = run(tmp_path, body, FREE_GB="10", FREED_PER_IMAGE="5")
+    (tmp_path / ".release-images.current").write_text("# release 2.9.0\nghcr.io/x/shakerscan-api@sha256:prev\n")
+    result = run(tmp_path, body, FREE_GB="10", FREED_PER_IMAGE="8")
     assert "rc=0" in result.stdout, result.stdout + result.stderr
     log = calls(tmp_path)
     assert "docker image rm id-old-scanner" in log and "docker image rm id-old-api" in log
@@ -93,7 +112,8 @@ def test_not_enough_space_refuses_with_nothing_changed(tmp_path):
     assert "rc=1" in result.stdout
     assert "Not enough disk space to upgrade" in result.stderr and "Nothing was changed" in result.stderr
     assert "Do not remove Docker volumes" in result.stderr
-    assert "compose" not in calls(tmp_path) and "volume" not in calls(tmp_path)
+    assert not [line for line in calls(tmp_path).splitlines() if line.startswith("compose ")]
+    assert "volume" not in calls(tmp_path)
 
 
 def test_the_prune_keeps_this_release_the_previous_one_and_images_in_use(tmp_path):
@@ -118,9 +138,9 @@ def test_the_prune_keeps_this_release_the_previous_one_and_images_in_use(tmp_pat
 def test_a_started_release_becomes_current_and_the_one_before_previous(tmp_path):
     body = """
     SHAKERSCAN_PRUNE_OLD_IMAGES=0
-    REFS="a@sha256:1"; SCANNER_VERSION=2.9.0; record_started_release
-    REFS="a@sha256:2"; SCANNER_VERSION=2.10.0; record_started_release
-    REFS="a@sha256:2"; SCANNER_VERSION=2.10.0; record_started_release
+    REFS="a@sha256:1"; SCANNER_VERSION=2.9.0; record_started_release keep
+    REFS="a@sha256:2"; SCANNER_VERSION=2.10.0; record_started_release keep
+    REFS="a@sha256:2"; SCANNER_VERSION=2.10.0; record_started_release keep
     cat "$WORK/.release-images.current"; echo ---; cat "$WORK/.release-images.previous"
     """
     result = run(tmp_path, body)
@@ -129,8 +149,8 @@ def test_a_started_release_becomes_current_and_the_one_before_previous(tmp_path)
     assert "release 2.9.0" in previous and "a@sha256:1" in previous  # a restart keeps it
 
 
-def _redis(tmp_path: Path, states: str, log: str, **env: str) -> subprocess.CompletedProcess[str]:
-    body = f"""
+def _redis(tmp_path: Path, states: str, log: str, EXTRA: str = "", **env: str) -> subprocess.CompletedProcess[str]:
+    body = EXTRA + f"""
     printf '%s\\n' {states} > "$WORK/health"
     redis_health() {{ local s; s="$(head -1 "$WORK/health")"; [ "$(wc -l < "$WORK/health")" -gt 1 ] && sed -i.bak 1d "$WORK/health"; echo "$s"; }}
     wait_for_redis_healthy() {{ [ "$(redis_health)" = healthy ]; }}
@@ -155,8 +175,32 @@ def test_a_damaged_append_only_file_is_kept_and_repaired(tmp_path):
     assert list((tmp_path / "backups").glob("redis-*"))
 
 
+def test_an_unknown_cause_never_removes_redis_data(tmp_path):
+    result = _redis(tmp_path, "unhealthy unhealthy unhealthy", "something else entirely")
+    assert "rc=1" in result.stdout and "nothing was removed" in result.stderr
+    assert "volume rm" not in calls(tmp_path) and "tar czf" not in calls(tmp_path)
+
+
+def test_a_redis_docker_cannot_report_on_is_left_as_it_is(tmp_path):
+    result = _redis(tmp_path, "unknown", "Bad file format reading the append only file")
+    assert "rc=1" in result.stdout and "nothing was changed" in result.stderr
+    assert "volume rm" not in calls(tmp_path) and "redis-check-aof" not in calls(tmp_path)
+
+
+def test_damaged_redis_data_is_never_reset_without_a_copy(tmp_path):
+    body = """
+    archive_redis_data() { echo "archive attempt" >> "$CALLS"; return 1; }
+    """
+    result = _redis(tmp_path, "unhealthy unhealthy unhealthy", "Bad file format reading the append only file",
+                    EXTRA=body)
+    assert "rc=1" in result.stdout and "left as it is" in result.stderr
+    assert "volume rm" not in calls(tmp_path) and "redis-check-aof" not in calls(tmp_path)
+
+
 def test_redis_starts_empty_only_when_repair_does_not_help_and_says_what_that_means(tmp_path):
-    result = _redis(tmp_path, "unhealthy unhealthy healthy", "Bad file format reading the append only file")
+    # first wait, the health re-check, the repair's wait: all unhealthy; then the empty start
+    result = _redis(tmp_path, "unhealthy unhealthy unhealthy healthy",
+                    "Bad file format reading the append only file")
     assert "rc=0" in result.stdout, result.stdout + result.stderr
     log = calls(tmp_path)
     assert log.index("tar czf") < log.index("docker volume rm shakerscan_redis-data")
@@ -170,14 +214,17 @@ def test_a_redis_that_cannot_write_gets_room_from_old_images_never_a_reset(tmp_p
     assert "volume rm" not in calls(tmp_path)
 
 
-def _backup(tmp_path: Path, state: str | None, has_data: str, **env: str) -> subprocess.CompletedProcess[str]:
+def _backup(tmp_path: Path, state: str | None, has_data: str, previous: bool = False,
+            **env: str) -> subprocess.CompletedProcess[str]:
     if state is not None:
         (tmp_path / ".release-images.current").write_text(f"# release {state}\nref\n")
+    if previous:
+        (tmp_path / ".release-images.previous").write_text("# release running-before-upgrade\nid\n")
     body = """
     compose() {
       echo "compose $*" >> "$CALLS"
       case "$*" in
-        *"to_regclass('public.targets')"*) echo "$HAS_DATA" ;;
+        *"to_regclass('public.targets')"*) [ "$HAS_DATA" = fail ] && { echo "connection refused"; return 2; }; echo "$HAS_DATA" ;;
         *pg_database_size*) echo 1024 ;;
         *pg_dump*) echo DUMP ;;
       esac
@@ -190,14 +237,33 @@ def _backup(tmp_path: Path, state: str | None, has_data: str, **env: str) -> sub
 
 def test_a_version_changing_start_saves_the_database_first(tmp_path):
     result = _backup(tmp_path, "2.9.0", "t")
-    assert "rc=0" in result.stdout and "pre-upgrade-2.9.0-to-2.10.0-" in result.stdout
+    assert "rc=0" in result.stdout and "-2.9.0-to-2.10.0" in result.stdout
     dump = next((tmp_path / "backups").glob("pre-upgrade-*/postgres.dump"))
     assert dump.read_text().strip() == "DUMP"
 
 
 def test_the_first_upgrade_from_a_release_without_this_record_is_backed_up(tmp_path):
-    result = _backup(tmp_path, None, "t")
-    assert "pre-upgrade-earlier-to-2.10.0-" in result.stdout
+    result = _backup(tmp_path, None, "t", previous=True)
+    assert "-earlier-to-2.10.0" in result.stdout
+
+
+def test_a_first_start_without_any_record_is_not_taken_for_an_upgrade(tmp_path):
+    assert "pre-upgrade" not in _backup(tmp_path, None, "t").stdout
+
+
+def test_cleanup_keeps_the_backup_just_made_whatever_the_version_names(tmp_path):
+    backups = tmp_path / "backups"
+    for name in ("pre-upgrade-20261001T000000Z-earlier-to-2.9.0", "pre-upgrade-20261005T000000Z-2.9.0-to-2.10.0"):
+        (backups / name).mkdir(parents=True)
+    result = _backup(tmp_path, "2.10.0", "t", SCANNER_VERSION="2.11.0")
+    kept = sorted(path.name for path in backups.iterdir())
+    assert len(kept) == 2 and kept[-1].endswith("-2.10.0-to-2.11.0"), (kept, result.stdout)
+    assert "pre-upgrade-20261005T000000Z-2.9.0-to-2.10.0" in kept
+
+
+def test_a_failed_database_check_stops_the_upgrade_instead_of_skipping_the_backup(tmp_path):
+    result = _backup(tmp_path, "2.9.0", "fail")
+    assert "rc=1" in result.stdout and "Cannot check the database" in result.stderr
 
 
 def test_no_backup_for_a_restart_or_an_empty_database(tmp_path):
@@ -221,3 +287,71 @@ def test_nothing_in_the_launcher_suggests_removing_volumes():
     launcher = (ROOT / "scanner.sh").read_text() + SCRIPT.read_text()
     assert "prune -af --volumes" not in launcher and "volume prune" not in launcher.replace(
         "Never remove Docker volumes (docker volume prune", "")
+
+
+def test_a_restart_with_nothing_to_download_never_needs_upgrade_room(tmp_path):
+    body = """
+    cat > "$WORK/images" <<'X'
+    ghcr.io/x/shakerscan-api@sha256:new1 id1 ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-scanner@sha256:new2 id2 ghcr.io/x/shakerscan-scanner
+    ghcr.io/x/shakerscan-ui@sha256:new3 id3 ghcr.io/x/shakerscan-ui
+    X
+    sed -i.bak 's/^ *//' "$WORK/images"
+    ensure_upgrade_space; echo rc=$?
+    """
+    result = run(tmp_path, body, FREE_GB="2")
+    assert "rc=0" in result.stdout and "Free disk space soon" in result.stdout
+    assert "image rm" not in calls(tmp_path)
+
+
+def test_disabled_pulls_skip_the_space_check(tmp_path):
+    result = run(tmp_path, "ensure_upgrade_space; echo rc=$?", FREE_GB="1", SHAKERSCAN_PULL_IMAGES="0")
+    assert "rc=0" in result.stdout and "docker" not in calls(tmp_path)
+
+
+def test_the_first_upgrade_keeps_the_running_releases_images_for_rollback(tmp_path):
+    body = """
+    cat > "$WORK/images" <<'X'
+    ghcr.io/x/shakerscan-api@sha256:new1 id-new ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-api@sha256:old1 id-running ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-api@sha256:older id-older ghcr.io/x/shakerscan-api
+    X
+    sed -i.bak 's/^ *//' "$WORK/images"
+    echo id-running > "$WORK/containers"
+    remember_running_release
+    : > "$WORK/containers"   # the stack is stopped and recreated from the new release
+    SHAKERSCAN_PRUNE_OLD_IMAGES=1 record_started_release prune
+    """
+    run(tmp_path, body)
+    removed = [line for line in calls(tmp_path).splitlines() if line.startswith("docker image rm")]
+    assert removed == ["docker image rm id-older"]
+
+
+def test_nothing_is_pruned_without_any_release_record(tmp_path):
+    body = """
+    echo "ghcr.io/x/shakerscan-api@sha256:x id-x ghcr.io/x/shakerscan-api" > "$WORK/images"
+    echo "n=$(prune_superseded_release_images)"
+    """
+    assert "n=0" in run(tmp_path, body).stdout and "image rm" not in calls(tmp_path)
+
+
+def test_local_builds_are_recorded_and_never_pruned(tmp_path):
+    body = """
+    echo "ghcr.io/x/shakerscan-api@sha256:x id-x ghcr.io/x/shakerscan-api" > "$WORK/images"
+    record_started_release keep
+    record_started_release keep
+    cat "$WORK/.release-images.current"
+    """
+    result = run(tmp_path, body)
+    assert "# release 2.10.0" in result.stdout and "image rm" not in calls(tmp_path)
+    assert "-to-" not in "".join(p.name for p in (tmp_path / "backups").glob("*")) if (tmp_path / "backups").exists() else True
+
+
+def test_every_docker_call_goes_through_the_launchers_wrapper():
+    script = SCRIPT.read_text()
+    body = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    import re
+    bare = [line for line in body.splitlines()
+            if re.search(r"(^|[^_a-z])docker (image|images|ps|inspect|volume|info|rm)\b", line)
+            and "docker_cli" not in line and "docker image ls" not in line]
+    assert bare == [], bare
