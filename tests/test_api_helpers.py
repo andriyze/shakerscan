@@ -22943,8 +22943,55 @@ def test_a_never_started_scan_lost_from_the_queue_is_queued_again(monkeypatch, n
     if expect == "requeued":
         assert enqueued == [{"job_id": "lost-job", "scan_id": str(scan_id), "fixture": True}]
         assert updates == [("requeue", 1)]
-        # A second sweep inside the guard window does not send it twice.
+        # A second sweep inside the guard window neither sends it twice nor flags it "unknown".
         asyncio.run(api_module.cleanup_orphaned_scan_queue_handoffs(_FakePool(Conn())))
-        assert len(enqueued) == 1
+        assert len(enqueued) == 1 and updates == [("requeue", 1)]
     else:
         assert enqueued == [] and updates == [("flag", None)]
+
+
+
+@pytest.mark.parametrize("role,options,expect_placement,expect_workers", [
+    ("standalone", {"queue_routing": {"placement": {"node_scope": "local"}, "parallel_worker_count": None}},
+     {"node_scope": "local"}, None),
+    ("parent", {"queue_routing": {"placement": None, "parallel_worker_count": 4}}, None, 4),
+    # A Scan submitted before 2.10 recorded no routing: the submit route's normalisation applies.
+    ("standalone", {"placement": {"node_scope": "local", "unknown_key": 1}}, "normalized", None),
+])
+def test_a_requeued_job_carries_the_routing_it_was_first_queued_with(
+    monkeypatch, role, options, expect_placement, expect_workers,
+):
+    seen = {}
+
+    class Conn:
+        async def fetchval(self, query, row_id, count):
+            return row_id
+
+    class Redis:
+        def set(self, *a, **k):
+            return True
+
+    class Job:
+        def queue_payload(self, placement=None):
+            seen["placement"] = placement
+            return {"job_id": "j"}
+
+    monkeypatch.setattr(api_module.CanonicalScanJob, "from_payload", classmethod(lambda cls, value: Job()))
+    monkeypatch.setattr(api_module, "enqueue_job", lambda r, queue, payload: seen.update(payload=payload))
+    monkeypatch.setattr(api_module, "normalize_placement", lambda value: {"normalized": True} if value else {})
+    row = {"id": uuid.uuid4(), "scan_role": role, "scan_generation": "v2", "options": options,
+           "scan_job_payload": {}}
+    outcome = asyncio.run(api_module._requeue_scan_lost_from_queue(Conn(), Redis(), row))
+    assert outcome == "requeued"
+    placement = {"normalized": True} if expect_placement == "normalized" else expect_placement
+    assert seen["placement"] == placement
+    assert seen["payload"].get("parallel_worker_count") == expect_workers
+    if role == "parent":
+        assert seen["payload"]["type"] == api_module.parallel_scan.PLAN_JOB_TYPE
+
+
+def test_submitted_routing_and_requeue_count_never_change_the_shard_options_digest():
+    from scan.jobs import scan_job_options_digest
+    base = {"scan_policy": {"x": 1}}
+    marked = {**base, "queue_routing": {"placement": None, "parallel_worker_count": 3}, "queue_loss_requeues": 2}
+    assert scan_job_options_digest(base) == scan_job_options_digest(marked)

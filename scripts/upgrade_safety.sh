@@ -23,6 +23,7 @@
 UPGRADE_MARGIN_GB="${SHAKERSCAN_UPGRADE_MARGIN_GB:-5}"
 REDIS_READY_SECONDS="${SHAKERSCAN_REDIS_READY_SECONDS:-120}"
 REDIS_LOADING_SECONDS="${SHAKERSCAN_REDIS_LOADING_SECONDS:-900}"
+REDIS_STATE_RESET=0
 RELEASE_STATE_CURRENT="${SCRIPT_DIR}/.release-images.current"
 RELEASE_STATE_PREVIOUS="${SCRIPT_DIR}/.release-images.previous"
 
@@ -352,6 +353,8 @@ ensure_redis_ready() {
             echo -e "${YELLOW}Redis could not be repaired; starting it with empty state (it holds only queues and job status; your scans, findings and evidence are in PostgreSQL and untouched).${NC}"
             compose rm -sf redis >/dev/null 2>&1 || true
             docker_cli volume rm "$(redis_volume)" >/dev/null 2>&1 || true
+            # Running services keep their old queue state; the launcher restarts them after start.
+            REDIS_STATE_RESET=1
             compose up --no-build -d redis >/dev/null 2>&1 || true
             if wait_for_redis_healthy; then
                 echo -e "${GREEN}Redis started with empty state. Scans that were waiting to start are queued again automatically within about 10 minutes; a scan that was already running is marked with an unknown outcome and can be started again from the Scans page.${NC}"

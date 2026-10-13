@@ -155,7 +155,7 @@ def _redis(tmp_path: Path, states: str, log: str, EXTRA: str = "", **env: str) -
     redis_health() {{ local s; s="$(head -1 "$WORK/health")"; [ "$(wc -l < "$WORK/health")" -gt 1 ] && sed -i.bak 1d "$WORK/health"; echo "$s"; }}
     wait_for_redis_healthy() {{ [ "$(redis_health)" = healthy ]; }}
     printf '%s\\n' "{log}" > "$WORK/redis.log"
-    ensure_redis_ready; echo rc=$?
+    ensure_redis_ready; echo rc=$? reset=$REDIS_STATE_RESET
     """
     return run(tmp_path, body, **env)
 
@@ -206,6 +206,7 @@ def test_redis_starts_empty_only_when_repair_does_not_help_and_says_what_that_me
     assert log.index("tar czf") < log.index("docker volume rm shakerscan_redis-data")
     assert "postgres" not in log.split("volume rm", 1)[1]
     assert "scans, findings and evidence are in PostgreSQL and untouched" in result.stdout
+    assert "reset=1" in result.stdout  # the launcher restarts the services onto the new Redis
 
 
 def test_a_redis_that_cannot_write_gets_room_from_old_images_never_a_reset(tmp_path):

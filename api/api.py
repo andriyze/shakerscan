@@ -62,6 +62,7 @@ from scan.deployment_gate_rows import (
     with_report_identity,
 )
 from scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
+from scan import queue_recovery as scan_queue_recovery
 from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
 from scan.finding_reconciliation import reconcile_legacy_finding_row
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
@@ -2883,109 +2884,17 @@ async def cleanup_stale_device_lifecycle(pool: asyncpg.Pool) -> None:
 
 
 async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
-    """Surface uncertain old handoffs without claiming non-execution or freeing capacity."""
-    r = get_redis()
-    try:
-        queued_job_ids = {
-            str((json.loads(raw) if isinstance(raw, str) else {}).get("job_id") or "")
-            for raw in queue_payloads(r, QUEUE_NAME, include_leased=True)
-        }
-    except Exception:
-        # Even successful queue visibility is only a snapshot, not proof that
-        # no execution occurred. An unavailable snapshot cannot diagnose a handoff.
-        return 0
-
-    repaired = 0
-    requeued = 0
-    now = utc_now()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """SELECT s.id, s.job_id, s.parent_scan_id, s.scan_role, s.scan_generation, s.options,
-                      s.scan_job_payload,
-                      (s.started_at IS NULL AND s.worker_id IS NULL AND NOT EXISTS (
-                          SELECT 1 FROM scan_capability_actions a
-                          WHERE a.scan_id=s.id AND a.status <> 'planned')) AS never_started
-               FROM scans s
-               WHERE s.status IN ('pending','queued')
-                 AND COALESCE(s.run_kind, 'web_dast') NOT IN ('device_posture','device_probe','device_web_dast')
-                 AND s.created_at < $1""",
-            now - timedelta(minutes=10),
-        )
-        for row in rows:
-            job_id = str(row.get("job_id") or "")
-            if job_id and job_id in queued_job_ids:
-                continue
-            job_state = _decode_redis_hash(r.hgetall(f"job:{job_id}")) if job_id else {}
-            if str(job_state.get("status") or "") == "running" and job_state.get("heartbeat"):
-                continue
-            # Provably never started (no start, no worker, no action past "planned") and lost from
-            # the queue, typically because Redis lost its data: send the persisted job again
-            # rather than leave the Scan pending forever. Anything that may have run keeps the
-            # conservative flag below (an unknown outcome is never replaced).
-            if row.get("never_started") and await _requeue_scan_lost_from_queue(conn, r, row):
-                requeued += 1
-                continue
-            updated = await conn.fetchrow(
-                """UPDATE scans
-                   SET current_phase='queue_handoff_unknown',
-                       error_message='Queue handoff could not be confirmed. Execution outcome remains unknown; do not submit a replacement.'
-                   WHERE id=$1 AND status IN ('pending','queued')
-                     AND current_phase IS DISTINCT FROM 'queue_handoff_unknown'
-                   RETURNING id, parent_scan_id""",
-                row["id"],
-            )
-            if not updated:
-                continue
-            repaired += 1
-    if repaired:
-        print(f"[cleanup] flagged {repaired} uncertain pending Scan handoff(s)", flush=True)
-    if requeued:
-        print(f"[cleanup] queued {requeued} never-started Scan(s) lost from the queue again", flush=True)
-    return repaired + requeued
+    """Flag uncertain old handoffs; resend never-started Scans lost from the queue."""
+    return await scan_queue_recovery.sweep_lost_queue_handoffs(
+        pool, get_redis(), now=utc_now(), decode_hash=_decode_redis_hash,
+        resend=_requeue_scan_lost_from_queue,
+        queue_snapshot=lambda r: queue_payloads(r, QUEUE_NAME, include_leased=True))
 
 
-QUEUE_LOSS_REQUEUE_LIMIT = 3
-
-
-async def _requeue_scan_lost_from_queue(conn, r, row) -> bool:
-    """Send a never-started Scan's persisted canonical job to the queue again (at most
-    QUEUE_LOSS_REQUEUE_LIMIT times). False when it cannot be rebuilt or was already resent."""
-    if str(row.get("scan_generation") or "") != "v2" or str(row.get("scan_role") or "") not in {
-        "standalone", "parent",
-    }:
-        return False
-    options = parse_json_field(row.get("options")) or {}
-    attempts = int(options.get("queue_loss_requeues") or 0)
-    if attempts >= QUEUE_LOSS_REQUEUE_LIMIT:
-        return False
-    try:
-        job = CanonicalScanJob.from_payload(parse_json_field(row.get("scan_job_payload")) or {})
-        payload = job.queue_payload(
-            placement=options.get("placement") if isinstance(options.get("placement"), Mapping) else None,
-        )
-    except CanonicalScanJobError:
-        return False
-    if str(row.get("scan_role")) == "parent":
-        _configure_scan_plan_job(payload, int(options.get("worker_fleet_size_at_submit") or 0) or None)
-    scan_id = str(row["id"])
-    if not r.set(f"scan:queue-loss-requeue:{scan_id}", "1", nx=True, ex=900):
-        return False
-    claimed = await conn.fetchval(
-        """UPDATE scans
-           SET options = jsonb_set(COALESCE(options, '{}'::jsonb), '{queue_loss_requeues}', to_jsonb($2::int)),
-               current_phase = 'queued_again', error_message = NULL
-           WHERE id=$1 AND status IN ('pending','queued') AND started_at IS NULL AND worker_id IS NULL
-           RETURNING id""",
-        row["id"], attempts + 1,
-    )
-    if not claimed:
-        return False
-    try:
-        enqueue_job(r, QUEUE_NAME, payload)
-    except Exception:
-        logger.exception("Could not queue Scan %s again after a queue loss", scan_id)
-        return False
-    return True
+async def _requeue_scan_lost_from_queue(conn, r, row) -> str:
+    return await scan_queue_recovery.requeue_scan_lost_from_queue(
+        conn, r, row, enqueue=enqueue_job, configure_plan_job=_configure_scan_plan_job,
+        normalize_placement=normalize_placement, queue_name=QUEUE_NAME)
 
 
 async def recover_parallel_orchestration(pool: asyncpg.Pool) -> int:
@@ -3415,6 +3324,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 max_workers=scan_contract.budget.max_workers,
             )
             scan_role = 'parent' if parallel_enabled else 'standalone'
+            # The exact routing this job is queued with, so a job lost from the queue is resent
+            # identically (_requeue_scan_lost_from_queue).
+            scan_options["queue_routing"] = scan_queue_recovery.queue_routing(
+                scan_options.get("placement"), parallel_worker_count if parallel_enabled else None)
 
             canonical_job = None
             scan_action_plan = None
@@ -11542,6 +11455,11 @@ async def _submit_scan(
         except (ScanActionPlanError, ScanBudgetAllocationError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         canonical_job_payload = canonical_job.payload()
+        # The exact routing this job is queued with, so a job lost from the queue is resent
+        # identically (_requeue_scan_lost_from_queue).
+        options_payload["queue_routing"] = scan_queue_recovery.queue_routing(
+            None if parallel_enabled else normalize_placement(options_payload.get("placement") or {}),
+            parallel_worker_count if parallel_enabled else None)
         persisted_options = _attach_target_note(
             options_payload, request.target, target_note, scheme_inferred,
         )

@@ -274,13 +274,17 @@ start_services "$@"
 '''
 
 
-def _start(*args: str, reason: str, network_enabled: str = 'true', device_failure: bool = False) -> str:
+def _start(*args: str, reason: str, network_enabled: str = 'true', device_failure: bool = False,
+           redis_reset: bool = False) -> str:
     harness = (
         START_HARNESS.replace("__COMPOSE_UP__", SCRIPT.split("\ncompose_up() {", 1)[1].split("\n}", 1)[0])
         .replace("__START_SERVICES__", SCRIPT.split("\nstart_services() {", 1)[1].split("\n}", 1)[0])
     )
     if device_failure:
         harness = harness.replace('compose() { printf', 'compose() { [[ "$*" != *"up --no-build -d device-worker"* ]] || return 9; printf')
+    if redis_reset:
+        assert "ensure_redis_ready() {" in harness
+        harness = harness.replace("ensure_redis_ready() {", "ensure_redis_ready() { REDIS_STATE_RESET=1;")
     result = subprocess.run(
         ["bash", "-c", harness, "harness", *args],
         cwd=ROOT,
@@ -448,3 +452,12 @@ def test_doctor_is_quiet_about_a_healthy_stack(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok no leftover ShakerScan containers or networks in use" in result.stdout
     assert "attention" not in result.stdout
+
+
+def test_after_redis_starts_empty_the_api_and_workers_are_restarted_onto_it():
+    """2.10: services that kept running across a Redis reset held the old queue state and picked
+    up nothing until restarted (an operator's lab, 2026-10-13)."""
+    output = _start('2', '0', reason='', redis_reset=True)
+    assert "compose:restart api worker agent-tool-worker" in output
+    assert output.index("compose:up --no-build -d --scale worker=2") < output.index("compose:restart api")
+    assert "compose:restart" not in _start('2', '0', reason='')
