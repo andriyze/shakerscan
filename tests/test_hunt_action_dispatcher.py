@@ -73,6 +73,8 @@ def test_every_planner_capability_is_resolved_without_a_parallel_route_catalog()
         ("collections.inspect", "api"),
         ("collections.inspect", "device"),
         ("collections.replay_safe", "device"),
+        ("secrets.inspect", "web"),
+        ("secrets.inspect", "api"),
     ],
 )
 def test_one_action_and_result_schema_covers_all_target_kinds(

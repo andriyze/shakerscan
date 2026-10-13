@@ -2728,6 +2728,40 @@ async def _execute_hunt_capability_lifecycle(
                 requested_budget=durable_reservation.record.requested,
             )
             result = collection_adapter.result
+        elif name == "secrets.inspect":
+            async def inspect_discovered_secrets() -> dict[str, Any]:
+                try:
+                    from hunt.discovered_secrets import list_for_target
+                except ModuleNotFoundError:
+                    from api.hunt.discovered_secrets import list_for_target
+                async with _pool().acquire() as conn:
+                    listed = await list_for_target(conn, run.get("target_id"), usable_only=True)
+                return {
+                    "ok": True,
+                    "secrets": listed,
+                    "count": len(listed),
+                    "secret_values_visible": False,
+                    "observation": {
+                        "kind": "discovered_secret_observation",
+                        "capability": "secrets.inspect",
+                        "status": "success",
+                        "count": len(listed),
+                    },
+                }
+
+            secrets_adapter = ControlPlaneExecutionAdapter(
+                specification=spec,
+                operation=inspect_discovered_secrets,
+                requested_budget=durable_reservation.record.requested,
+                redacted_execution={},
+                blocked_exceptions=(HTTPException,),
+            )
+            capability_execution = await dispatch_registered_adapter(
+                secrets_adapter,
+                target=inline_hunt_target_binding(),
+                requested_budget=durable_reservation.record.requested,
+            )
+            result = secrets_adapter.result
         elif name in {"findings.create", "findings.update", "findings.delete"}:
             async def mutate_hunt_finding() -> dict[str, Any]:
                 try:

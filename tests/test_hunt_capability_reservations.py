@@ -53,6 +53,7 @@ def test_inline_hunt_capability_set_is_explicit_and_bounded():
     assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("inline")} == {
         "candidate.verify",
         "collections.inspect",
+        "secrets.inspect",
         "collections.select",
         "findings.create",
         "findings.update",

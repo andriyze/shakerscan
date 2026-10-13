@@ -68,6 +68,7 @@ def test_registry_filters_target_kind_and_active_permission():
         "web.content_discover", "web.spec_ingest",
         "templates.passive_scan", "templates.passive_batch", "exposure.verify_batch",
         "collections.inspect", "collections.select", "collections.replay_safe",
+        "secrets.inspect",
     }
     # A device that serves HTTP is the same host a web target is, so it carries the HTTP
     # capabilities too: the operator should be able to examine one address either way and get

@@ -1899,6 +1899,31 @@ export const HUNT_START_CONTRACT = {
     {
       "call": {
         "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/secrets.inspect"
+      },
+      "description": "List secrets discovered on this target earlier (metadata only: reference, kind, field name, length, when seen). Send one with an http.request binding {\"secret_ref\": \"secret://<id>\"}; the worker sends the value, which is never shown.",
+      "input": {
+        "fields": [],
+        "required": []
+      },
+      "name": "secrets.inspect",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "secrets.inspect",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "secrets.inspect"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/findings.create"
       },
       "description": "Create one evidence-linked, explicitly unverified finding owned by this Hunt.",
