@@ -1229,7 +1229,7 @@ def build_parser() -> argparse.ArgumentParser:
     secrets = products.add_parser(
         "secrets", help="Secrets discovered on a target: list (never values), revoke, expiry, grant, promote, reveal",
     )
-    secret_commands = secrets.add_subparsers(dest="secrets_command", required=True)
+    secret_commands = secrets.add_subparsers(dest="store_command", required=True)
     listed = secret_commands.add_parser("list", help="A target's discovered secrets: reference, kind, field, "
                                                      "length, when seen, uses (never the value)")
     listed.add_argument("target_id")
@@ -2232,7 +2232,7 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
     """``shakerscan secrets``: a target's discovered secrets. Listing never shows a value; reveal,
     grant and promote are the person's decisions, made in their own terminal (Enterprise: with
     their step-up, applied by the gateway; an open-source engine: a keypress)."""
-    command, target = args.secrets_command, str(args.target_id).strip().lower()
+    command, target = args.store_command, str(args.target_id).strip().lower()
     base = f"/targets/{_quoted(target)}/discovered-secrets"
     if command == "list":
         body = client.request("GET", base + ("?usable_only=true" if args.usable else ""))
