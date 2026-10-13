@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
+import { ModelIntakeModuleGate } from '@/components/ModelIntakeModuleGate'
 import { Card, CardSkeleton, ErrorState, Modal, useToast } from '@/components/ui'
 import {
   AlertTriangle,
@@ -419,9 +420,11 @@ function metadataString(metadata: Record<string, unknown> | undefined, key: stri
 
 export default function ModelIntakeSettingsPage() {
   return (
-    <Suspense fallback={<ModelIntakePageFallback />}>
-      <ModelIntakeSettingsContent />
-    </Suspense>
+    <ModelIntakeModuleGate>
+      <Suspense fallback={<ModelIntakePageFallback />}>
+        <ModelIntakeSettingsContent />
+      </Suspense>
+    </ModelIntakeModuleGate>
   )
 }
 

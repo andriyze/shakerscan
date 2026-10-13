@@ -36,7 +36,7 @@ import uuid
 import zipfile
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -128,7 +128,29 @@ except ModuleNotFoundError:  # source checkout keeps scanner tools in scanner/
     from scanner.scanner_tools.model_intake_scanners import scan_materialized_snapshot as _scan_materialized_model_snapshot, scanner_adapter_readiness as _model_scanner_adapter_readiness
 
 
-router = APIRouter()
+def model_intake_enabled() -> bool:
+    """Whether the optional Model Intake module is installed and on (2.10; the launcher's
+    SHAKERSCAN_MODEL_INTAKE_ENABLED, kept on for an install that predates the setting)."""
+    return os.environ.get("SHAKERSCAN_MODEL_INTAKE_ENABLED", "true").strip().lower() not in {
+        "0", "false", "no", "off"}
+
+
+MODULE_NOT_INSTALLED = {
+    "reason_code": "module_not_installed",
+    "module": "model_intake",
+    "detail": ("Model Intake is not installed on this instance. Enable it with "
+               "`shakerscan model-intake enable` (pulls about 4.8 GB); existing records stay readable."),
+}
+
+
+async def _require_module_for_changes(request: Request) -> None:
+    """With the module off, existing Model Intake records stay readable; nothing new is
+    submitted, run or changed (409 module_not_installed, never a 500 from a missing service)."""
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and not model_intake_enabled():
+        raise HTTPException(status_code=409, detail=MODULE_NOT_INSTALLED)
+
+
+router = APIRouter(dependencies=[Depends(_require_module_for_changes)])
 
 _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}
@@ -356,6 +378,8 @@ def _model_intake_worker_readiness() -> dict[str, Any]:
     a worker counts only when its report is fresh, its build matches the API, and every
     toolchain path the dedicated image installs resolved on it.
     """
+    if not model_intake_enabled():
+        return {"enabled": False, "status": "disabled", "reason": "module_not_installed"}
     expected_fingerprint = expected_build_fingerprint()
     expected_version = current_scanner_version()
     now = datetime.now(timezone.utc)
@@ -405,6 +429,7 @@ def _model_intake_worker_readiness() -> dict[str, Any]:
     else:
         status, reason = "not_ready", "no_fresh_model_intake_worker"
     return {
+        "enabled": True,
         "status": status,
         "reason": reason,
         "queue_name": MODEL_INTAKE_QUEUE_NAME,
