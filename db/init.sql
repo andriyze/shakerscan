@@ -2707,10 +2707,12 @@ CREATE INDEX IF NOT EXISTS idx_discovered_secrets_target
 CREATE TABLE IF NOT EXISTS discovered_secret_uses (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
-    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
-    action_id UUID NOT NULL REFERENCES hunt_actions(id) ON DELETE CASCADE,
+    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
+    action_id UUID REFERENCES hunt_actions(id) ON DELETE SET NULL,
     destination_host TEXT NOT NULL DEFAULT '' CHECK (length(destination_host) <= 255),
     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_secret
     ON discovered_secret_uses(secret_id, used_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_run
+    ON discovered_secret_uses(hunt_run_id);

@@ -37,7 +37,7 @@ ABANDONED_MINUTES = 15
 VERIFIED_BY_ANOTHER_HUNT = (f'EXISTS (SELECT 1 FROM finding_hunt_verifications fhv WHERE fhv.finding_id = r.id'
                             f' AND NOT fhv.hunt_run_id = {ANY_ROOT})')
 # Rows without a cascading FK to the record, deleted before it in this order.
-DELETE_ORDER = ('tool_receipts', 'auth_sessions', 'investigation_candidates', 'findings',
+DELETE_ORDER = ('tool_receipts', 'auth_sessions', 'investigation_candidates', 'findings', 'discovered_secrets',
                 'model_intake_admissions', 'model_intake_automatic_reviews', 'scans', 'credential_profiles')
 
 
@@ -67,6 +67,11 @@ def owned(kind: str, columns: dict) -> dict[str, str]:
     if kind in ('scan', 'hunt') and has('auth_sessions', 'owner_kind', 'owner_id'):
         result['auth_sessions'] = f"r.owner_kind='{kind}' AND r.owner_id = {ANY_ROOT}"
     if kind == 'hunt':
+        if has('discovered_secrets', 'source'):
+            # Secrets this Hunt found (its sealed values); another Hunt's sightings refresh a row
+            # but keep its source, so a row is erased with the Hunt that first found it.
+            result['discovered_secrets'] = (
+                "r.source->>'hunt_id' = ANY(SELECT root::text FROM unnest($1::uuid[]) root)")
         if has('investigation_candidates', 'hunt_run_id'):
             result['investigation_candidates'] = f'r.hunt_run_id = {ANY_ROOT}'
         if has('findings', 'hunt_run_id', 'scan_id'):

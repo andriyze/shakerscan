@@ -22917,6 +22917,16 @@ async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: d
         _clear_fleet_busy_marker(marker)
 
 
+DISCOVERED_SECRET_SWEEP_INTERVAL_SECONDS = 3_600
+
+
+async def sweep_discovered_secrets() -> dict[str, int]:
+    """Mark expired discovered secrets and delete long-unusable ciphertexts (hourly)."""
+    from hunt.discovered_secrets import expire_due
+    async with db_pool.acquire() as conn:
+        return await expire_due(conn)
+
+
 async def sweep_stale_budget_reservations() -> dict[str, int]:
     """Recover expired durable holds without allowing uncertain traffic refunds."""
     async with db_pool.acquire() as conn:
@@ -22982,6 +22992,7 @@ async def async_main():
     loop = asyncio.get_event_loop()
     last_stale_check_monotonic = 0.0
     last_reservation_sweep_monotonic = 0.0
+    last_secret_sweep_monotonic = 0.0
     build_report_task = asyncio.create_task(worker_queue_policy_module.heartbeat_worker_build_report(
         report_worker_build_fingerprint, interval_seconds=WORKER_BUILD_REPORT_INTERVAL_SECONDS,
     ))
@@ -23016,6 +23027,18 @@ async def async_main():
                         )
                     finally:
                         last_reservation_sweep_monotonic = now_mono
+
+                if now_mono - last_secret_sweep_monotonic >= DISCOVERED_SECRET_SWEEP_INTERVAL_SECONDS:
+                    try:
+                        await sweep_discovered_secrets()
+                    except Exception as secret_sweep_err:
+                        print(
+                            "[watchdog] discovered-secret sweep error: "
+                            f"{type(secret_sweep_err).__name__}",
+                            flush=True,
+                        )
+                    finally:
+                        last_secret_sweep_monotonic = now_mono
 
                 if not await _fleet_node_accepts_work():
                     await asyncio.sleep(min(5, WORKER_QUEUE_BLOCK_SECONDS))
