@@ -68,7 +68,7 @@ class _Transport:
         )
 
 
-def _run(monkeypatch, answer, *, paths=("/app",)):
+def _run(monkeypatch, answer, *, paths=("/app",), backend_cls=None):
     scan_id = str(uuid.uuid4())
     manifest = _manifest(scan_id, paths)
     transport = _Transport(answer)
@@ -87,11 +87,12 @@ def _run(monkeypatch, answer, *, paths=("/app",)):
     }})
     plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
                           target_binding_digest=TARGET.digest, actions=(action,))
-    backend = Backend(manifests={manifest.manifest_id: manifest})
+    backend = (backend_cls or Backend)(manifests={manifest.manifest_id: manifest})
     # Passive policy: the read-only exposure checks need no active-testing authority.
     dispatcher = _dispatcher(plan, backend, policy=ScanPolicy())
     receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
     proofs = [item for item in receipt.observations if item.get("kind") == "sensitive_exposure_proof"]
+    _run.backend = backend
     return receipt, proofs, transport
 
 
@@ -167,3 +168,34 @@ def test_the_batch_verifies_git_credentials_and_keeps_the_token_out(monkeypatch)
     text = json.dumps([receipt.observations, receipt.redacted_execution], default=str)
     for canary in (GIT_TOKEN,):
         assert canary not in text
+
+
+class _KeepingBackend(Backend):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.kept: list[tuple[str, list[tuple[str, str]], str]] = []
+
+    async def record_discovered_secrets(self, action_id, values, resource):
+        self.kept.append((action_id, list(values), resource))
+        return {"stored": len(values), "refreshed": 0}
+
+
+def test_a_verified_exposure_hands_its_values_to_the_backend_and_never_to_the_receipt(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+
+    def answer(url):
+        return (200, DOTENV) if url.endswith("/.env") else (404, b"not found")
+
+    receipt, proofs, _transport = _run(monkeypatch, answer, backend_cls=_KeepingBackend)
+    kept = _run.backend.kept
+    assert kept and kept[0][2].endswith("/.env")
+    assert {value for value, _label in kept[0][1]} >= {PASSWORD, STRIPE}
+    assert {label for value, label in kept[0][1] if value == PASSWORD} == {"DB_PASSWORD"}
+    text = json.dumps([receipt.observations, receipt.redacted_execution], default=str) + caplog.text
+    for canary in (PASSWORD, STRIPE):
+        assert canary not in text
+
+
+def test_a_body_served_everywhere_hands_nothing_to_the_backend(monkeypatch):
+    _run(monkeypatch, lambda _url: (200, DOTENV), backend_cls=_KeepingBackend)
+    assert _run.backend.kept == []
