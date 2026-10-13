@@ -72,3 +72,20 @@ test('an old lens link lands on the service view; the removed views are gone', a
     await expect(page.getByRole('tab', { name: /Triage|Map|Attack paths/ })).toHaveCount(0)
   }
 })
+
+test('a candidate shows known exploitation, likelihood and the checks that exist; inconclusive listeners fold away', async ({ page }) => {
+  await mockServices(page)
+  await page.goto('/exposure')
+  // The UDP listener with no answer is folded by default and can be shown.
+  await expect(page.getByRole('button', { name: 'Inspect udp/161 on Fixture app' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'show 1 inconclusive' }).click()
+  await expect(page.getByRole('button', { name: 'Inspect udp/161 on Fixture app' })).toBeVisible()
+  await expect(page.getByText('1 known exploited')).toBeVisible()
+  await page.getByRole('button', { name: 'Inspect tcp/443 on Fixture app' }).click()
+  const details = page.getByTestId('service-details')
+  await details.getByRole('tab', { name: 'Weaknesses' }).click()
+  await expect(details).toContainText('Known exploited (CISA KEV, added 2022-03-25) · used in ransomware')
+  await expect(details).toContainText('EPSS 94.3% (top 0.1%)')
+  await expect(details).toContainText('CVSS 9.8')
+  await expect(details).toContainText('they run only as part of an authorized Scan')
+})
