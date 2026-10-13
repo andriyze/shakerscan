@@ -679,8 +679,10 @@ async def _sync_legacy_from_generic(
     )
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
-async def create_credential_profile(request: Request, payload: CredentialProfileCreate):
+async def create_profile_in_transaction(conn: Any, payload: CredentialProfileCreate) -> dict[str, Any]:
+    """Validate and store a credential profile inside the caller's transaction; the public view.
+    The create route and promoting a discovered secret (targets/discovered_secret_routes.py) both
+    use it, so a promoted profile passes exactly the checks a typed one does."""
     envelope, configuration = _material(payload.auth_kind, payload)
     allowed_capabilities = _credential_capabilities(
         payload.allowed_capabilities,
@@ -688,38 +690,42 @@ async def create_credential_profile(request: Request, payload: CredentialProfile
         auth_kind=payload.auth_kind,
         allow_active=payload.allow_active_capabilities,
     )
+    await _require_target(conn, target_kind=payload.target_kind, target_id=payload.target_id)
+    if payload.allow_active_capabilities:
+        await _require_active_capability_approval(
+            conn,
+            approval_receipt_id=payload.approval_receipt_id,
+            target_id=payload.target_id,
+        )
+    profile = await _store.create_profile(
+        conn,
+        target_kind=payload.target_kind,
+        target_id=payload.target_id,
+        name=payload.name,
+        auth_kind=payload.auth_kind,
+        principal_slot=payload.principal_slot,
+        principal_label=payload.principal_label,
+        configuration=configuration,
+        encrypted_secret=_encrypt(envelope),
+        encrypted_metadata=_private_metadata(created_by=payload.created_by),
+        expires_at=payload.expires_at,
+        allowed_capabilities=allowed_capabilities,
+        created_by=payload.created_by,
+        now=datetime.now(timezone.utc),
+    )
+    return _public(profile)
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+async def create_credential_profile(request: Request, payload: CredentialProfileCreate):
     pool = _pool(request)
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await _require_target(
-                    conn, target_kind=payload.target_kind, target_id=payload.target_id
-                )
-                if payload.allow_active_capabilities:
-                    await _require_active_capability_approval(
-                        conn,
-                        approval_receipt_id=payload.approval_receipt_id,
-                        target_id=payload.target_id,
-                    )
-                profile = await _store.create_profile(
-                    conn,
-                    target_kind=payload.target_kind,
-                    target_id=payload.target_id,
-                    name=payload.name,
-                    auth_kind=payload.auth_kind,
-                    principal_slot=payload.principal_slot,
-                    principal_label=payload.principal_label,
-                    configuration=configuration,
-                    encrypted_secret=_encrypt(envelope),
-                    encrypted_metadata=_private_metadata(created_by=payload.created_by),
-                    expires_at=payload.expires_at,
-                    allowed_capabilities=allowed_capabilities,
-                    created_by=payload.created_by,
-                    now=datetime.now(timezone.utc),
-                )
+                profile = await create_profile_in_transaction(conn, payload)
     except CredentialStoreError as exc:
         raise _store_error(exc) from exc
-    return {"profile": _public(profile)}
+    return {"profile": profile}
 
 
 @router.get("")
