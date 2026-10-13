@@ -780,11 +780,6 @@
     "operation_id": "exposure_assets_exposure_assets_get"
   },
   {
-    "path": "/exposure/attack-paths",
-    "method": "get",
-    "operation_id": "exposure_attack_paths_exposure_attack_paths_get"
-  },
-  {
     "path": "/exposure/changes",
     "method": "get",
     "operation_id": "exposure_changes_exposure_changes_get"
@@ -793,11 +788,6 @@
     "path": "/exposure/graph",
     "method": "get",
     "operation_id": "exposure_graph_exposure_graph_get"
-  },
-  {
-    "path": "/exposure/nodes",
-    "method": "get",
-    "operation_id": "exposure_nodes_exposure_nodes_get"
   },
   {
     "path": "/exposure/services",

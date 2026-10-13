@@ -1108,13 +1108,6 @@
     "name": "exposure_assets"
   },
   {
-    "path": "/exposure/attack-paths",
-    "methods": [
-      "GET"
-    ],
-    "name": "exposure_attack_paths"
-  },
-  {
     "path": "/exposure/changes",
     "methods": [
       "GET"
@@ -1127,13 +1120,6 @@
       "GET"
     ],
     "name": "exposure_graph"
-  },
-  {
-    "path": "/exposure/nodes",
-    "methods": [
-      "GET"
-    ],
-    "name": "exposure_nodes"
   },
   {
     "path": "/exposure/services",
