@@ -187,7 +187,11 @@ async def check_api_data_exposure(
                     if key in findings_by_family:
                         break
                     findings_by_family.add(key)
-                    snippet = body[max(0, m.start() - 40): m.start() + 80]
+                    matched = m.group(0)
+                    # The matched value never stays in the snippet; the worker keeps it in the
+                    # target's discovered secrets (api/scan/finding_secrets.py).
+                    snippet = body[max(0, m.start() - 40): m.start() + 80].replace(
+                        matched, f"[{family}:{len(matched)} chars]")
                     findings.append({
                         "title": f"{title}: {urllib.parse.urlparse(url).path}",
                         "severity": "high",
@@ -201,6 +205,10 @@ async def check_api_data_exposure(
                             "content_type": ctype,
                             "finding_family": family,
                             "match_snippet": re.sub(r"\s+", " ", snippet).strip(),
+                            # A PEM header is a marker, not the key: nothing worth keeping.
+                            "_discovered_secret_values": (
+                                [] if family == "private_key_exposure"
+                                else [{"value": matched, "label": family}]),
                             "unauthenticated": True,
                             # Pin CVSS so normalize_finding keeps this in the high band.
                             "cvss_score": 7.5,

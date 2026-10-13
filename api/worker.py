@@ -114,6 +114,7 @@ from capabilities.scan import DeterministicScanExecutionAdapter
 from capabilities.tls import inspect_tls_binding
 from capabilities.replay import ReplayExecutionAdapter, worker_hunt_replay_budget
 from hunt.service_binding import registered_hunt_locator
+from scan.finding_secrets import scrub_findings, scrub_report_secrets
 from hunt.verification_budget import record_budget_shortage
 from capabilities.request_mutation import RequestMutationVerificationAdapter
 from hunt.action_dispatcher import (
@@ -3136,6 +3137,9 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
     saved = 0
     target_uuid = uuid.UUID(target_id)
     scan_uuid = uuid.UUID(scan_id)
+    # The same scrub as the result artifact's, for findings that reach the table another way.
+    async with db_pool.acquire() as scrub_conn:
+        await scrub_findings(scrub_conn, target_id=target_uuid, scan_id=scan_uuid, findings=findings)
 
     async with db_pool.acquire() as conn:
         for finding in findings:
@@ -7357,6 +7361,12 @@ async def persist_result_artifact(
     durable manifest cannot be committed. Standalone mode keeps the historical
     local result path and treats a manifest failure as degraded compatibility.
     """
+    # Secrets a check put into finding evidence are kept in the target's discovered secrets and
+    # replaced by references before the result is written anywhere.
+    try:
+        await scrub_report_secrets(db_pool, scan_id=scan_id, result=result)
+    except Exception as scrub_err:
+        print(f"[secrets] finding scrub error: {type(scrub_err).__name__}", flush=True)
     executing_node_id: str | None = None
     try:
         if conn is not None:

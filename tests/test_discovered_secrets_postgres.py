@@ -318,3 +318,18 @@ def test_a_target_keeps_at_most_its_cap(monkeypatch):
             source={"kind": "hunt_action"})
         assert await conn.fetchval("SELECT count(*) FROM discovered_secrets WHERE target_id=$1", target) == 3
     run(scenario)
+
+
+def test_a_scan_findings_secret_is_kept_and_replaced_by_its_reference():
+    from scan.finding_secrets import scrub_findings
+    aws = "AKIA" + "Q7XK2M4N9P3R8T5W"
+
+    async def scenario(conn):
+        target = await _target(conn)
+        findings = [{"title": "Exposed config", "evidence": {"match_snippet": f"key {aws} here"}}]
+        counts = await scrub_findings(conn, target_id=target, scan_id=uuid4(), findings=findings)
+        assert counts == {"found": 1, "kept": 1}
+        listed = await store.list_for_target(conn, target)
+        assert listed[0]["source"]["kind"] == "scan_finding"
+        assert findings[0]["evidence"]["match_snippet"] == f"key [{listed[0]['ref']}] here"
+    run(scenario)

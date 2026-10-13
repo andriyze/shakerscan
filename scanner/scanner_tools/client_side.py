@@ -2084,8 +2084,11 @@ async def test_js_secrets(
                         "file": js_url,
                         "value_preview": masked_value,
                         "line_number": line_num,
-                        "context": context[:100],  # Limit context length
-                        "risk": key_data.get("risk", "Unknown risk level")
+                        # The value itself never stays in the context; the worker keeps it in
+                        # the target's discovered secrets (api/scan/finding_secrets.py).
+                        "context": context.replace(full_value, masked_value)[:100],
+                        "risk": key_data.get("risk", "Unknown risk level"),
+                        "_discovered_secret_values": [{"value": full_value, "label": key_type}],
                     })
 
         except Exception:
