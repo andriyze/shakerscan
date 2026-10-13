@@ -836,7 +836,30 @@ def knowledge_entry(decision: str, target_id: str, *, subject_id: str | None = N
     return result
 
 
+SECRET_ACTIONS = {"reveal": "show you the value of", "grants": "let another target's Hunts use",
+                  "promote": "move into a credential profile"}
+
+
+def secret_entry(action: str, target_id: str, secret_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """One decision on a discovered secret (Enterprise 2.10) as the step-up binds it: the exact
+    route and body the gateway then sends to the engine as you."""
+    if action not in SECRET_ACTIONS:
+        raise ApprovalError(f"unknown secret decision {action!r}")
+    target, secret = str(target_id or "").strip().lower(), str(secret_id or "").strip().lower()
+    if not _UUID.fullmatch(target) or not _UUID.fullmatch(secret):
+        raise ApprovalError("a secret decision names a target id and a secret id")
+    return {"decision": "secret_decision", "method": "POST",
+            "path": f"/targets/{target}/discovered-secrets/{secret}/{action}", "payload": dict(payload)}
+
+
 def _knowledge_summary(entry: Mapping[str, Any]) -> str:
+    if entry.get("decision") == "secret_decision":
+        parts = str(entry.get("path") or "").split("/")
+        target, secret, action = (parts[2], parts[4], parts[5]) if len(parts) == 6 else ("?", "?", "?")
+        extra = entry.get("payload") or {}
+        where = f" (to target {extra.get('target_id')})" if action == "grants" else ""
+        return (f"Your step-up will {SECRET_ACTIONS.get(action, action)} secret {secret} of target "
+                f"{target}{where}, and nothing else. If you did not just choose this here, press Ctrl-C.")
     subject = entry.get("subject_id")
     what = {
         "accept": f"accept proposal {subject}",
