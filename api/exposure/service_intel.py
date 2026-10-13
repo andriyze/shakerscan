@@ -92,6 +92,43 @@ def snapshot_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _number(value: Any, low: float, high: float) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if low <= value <= high else None
+
+
+def _exploitation_context(records: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Exploitation context from the pinned snapshot: CVSS base score, CISA KEV membership, the
+    EPSS likelihood, and the checks the image's own templates carry. Metadata, never executed."""
+    context: dict[str, Any] = {"cvss_score": None, "known_exploited": None, "epss": None, "checks": []}
+    for record in records:
+        score = _number(record.get("cvss_score"), 0, 10)
+        if score is not None and (context["cvss_score"] is None or score > context["cvss_score"]):
+            context["cvss_score"] = score
+        kev = record.get("known_exploited")
+        if isinstance(kev, Mapping) and context["known_exploited"] is None:
+            context["known_exploited"] = {"date_added": text(kev.get("date_added"), 10) or None,
+                                          "ransomware": kev.get("ransomware") is True}
+        epss = record.get("epss")
+        if isinstance(epss, Mapping) and context["epss"] is None:
+            probability, percentile = _number(epss.get("score"), 0, 1), _number(epss.get("percentile"), 0, 1)
+            if probability is not None:
+                context["epss"] = {"score": probability, "percentile": percentile}
+        for check in list(record.get("checks") or [])[:5]:
+            if isinstance(check, Mapping) and re.fullmatch(r"[A-Za-z0-9._-]{1,120}", str(check.get("id") or "")):
+                item = {"kind": "nuclei_template", "id": str(check["id"])}
+                if item not in context["checks"]:
+                    context["checks"].append(item)
+    return context
+
+
+def candidate_priority(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    epss = row.get("epss") or {}
+    return (0 if row.get("known_exploited") else 1, -(epss.get("score") or 0.0),
+            -(row.get("cvss_score") or 0.0), str(row.get("id") or ""))
+
+
 def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher: Callable[..., Any]) -> None:
     """Attach separate applicability, reference and local-validation dimensions."""
     service["cve_candidates"] = []
@@ -138,6 +175,7 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
                             "kind": text(ref.get("kind"), 60) or "public_reference",
                             "review_status": "not_reviewed_for_execution",
                         }
+            context = _exploitation_context(by_id.get(aid, []))
             candidate = {
                 "id": aid, "title": text(match.get("title"), 500) or aid,
                 "severity": text(match.get("severity"), 30) or "unknown",
@@ -148,6 +186,7 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
                 "version_evaluation": text(match.get("version_evaluation"), 30) or "unknown",
                 "local_validation": "no_linked_validation",
                 "exploit_references": list(references.values())[:10],
+                **context,
                 "identity_stale": bool(service.get("identity_stale")),
                 "prerequisites": ["Confirm exact product/build", "Check affected configuration and vendor backports"],
             }
@@ -155,5 +194,7 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
             if prior is None or candidate["match_type"] == "exact_cpe_version_range":
                 found[aid] = candidate
     service["candidates_truncated"] = len(found) > MAX_CANDIDATES
-    service["cve_candidates"] = sorted(found.values(), key=lambda row: row["id"])[:MAX_CANDIDATES]
+    # What to look at first: known exploited in the wild, then exploitation likelihood, then
+    # severity; the cap keeps those, never an alphabetical slice.
+    service["cve_candidates"] = sorted(found.values(), key=candidate_priority)[:MAX_CANDIDATES]
     service["intelligence_status"] = "candidates_found" if found else "no_match_in_snapshot"

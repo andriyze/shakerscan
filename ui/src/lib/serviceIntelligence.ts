@@ -23,6 +23,12 @@ export interface ServiceCandidate {
   identity_stale: boolean
   prerequisites: string[]
   exploit_references: Array<{ url: string; source: string; kind: string; review_status: string }>
+  // Exploitation context from the pinned snapshot (2.10): CVSS base score, CISA KEV membership,
+  // EPSS likelihood, and checks the image's own templates carry. Absent on an older engine.
+  cvss_score?: number | null
+  known_exploited?: { date_added: string | null; ransomware: boolean } | null
+  epss?: { score: number; percentile: number | null } | null
+  checks?: Array<{ kind: string; id: string }>
 }
 export interface ServiceActivity {
   id: string

@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import gzip
 import hashlib
 import json
+import re
 import os
 import sys
 import time
@@ -77,6 +79,61 @@ EMBEDDED_CPE: dict[str, list[str]] = {
     "vsftpd": ["cpe:2.3:a:vsftpd:vsftpd"],
     "proftpd": ["cpe:2.3:a:proftpd:proftpd"],
     "ttyd": ["cpe:2.3:a:ttyd_project:ttyd"],
+}
+
+# Network and web services the scanner fingerprints (nmap -sV, httpx, tlsx) on ordinary hosts. Each
+# entry is the NVD CPE vendor:product a fingerprint of that product carries.
+NETWORK_SERVICE_CPE: dict[str, list[str]] = {
+    "openssh": ["cpe:2.3:a:openbsd:openssh"],
+    "apache-httpd": ["cpe:2.3:a:apache:http_server"],
+    "nginx": ["cpe:2.3:a:f5:nginx", "cpe:2.3:a:nginx:nginx"],
+    "iis": ["cpe:2.3:a:microsoft:internet_information_services"],
+    "tomcat": ["cpe:2.3:a:apache:tomcat"],
+    "jetty": ["cpe:2.3:a:eclipse:jetty"],
+    "php": ["cpe:2.3:a:php:php"],
+    "mysql": ["cpe:2.3:a:oracle:mysql"],
+    "mariadb": ["cpe:2.3:a:mariadb:mariadb"],
+    "postgresql": ["cpe:2.3:a:postgresql:postgresql"],
+    "redis": ["cpe:2.3:a:redis:redis"],
+    "mongodb": ["cpe:2.3:a:mongodb:mongodb"],
+    "elasticsearch": ["cpe:2.3:a:elastic:elasticsearch"],
+    "kibana": ["cpe:2.3:a:elastic:kibana"],
+    "memcached": ["cpe:2.3:a:memcached:memcached"],
+    "rabbitmq": ["cpe:2.3:a:vmware:rabbitmq", "cpe:2.3:a:pivotal_software:rabbitmq"],
+    "jenkins": ["cpe:2.3:a:jenkins:jenkins"],
+    "gitlab": ["cpe:2.3:a:gitlab:gitlab"],
+    "grafana": ["cpe:2.3:a:grafana:grafana"],
+    "exim": ["cpe:2.3:a:exim:exim"],
+    "postfix": ["cpe:2.3:a:postfix:postfix"],
+    "dovecot": ["cpe:2.3:a:dovecot:dovecot"],
+    "samba": ["cpe:2.3:a:samba:samba"],
+    "bind": ["cpe:2.3:a:isc:bind"],
+    "unbound": ["cpe:2.3:a:nlnetlabs:unbound"],
+    "squid": ["cpe:2.3:a:squid-cache:squid"],
+    "haproxy": ["cpe:2.3:a:haproxy:haproxy"],
+    "varnish": ["cpe:2.3:a:varnish-software:varnish_cache", "cpe:2.3:a:varnish_cache_project:varnish_cache"],
+    "traefik": ["cpe:2.3:a:traefik:traefik"],
+    "envoy": ["cpe:2.3:a:envoyproxy:envoy"],
+    "openldap": ["cpe:2.3:a:openldap:openldap"],
+    "ntp": ["cpe:2.3:a:ntp:ntp"],
+    "cups": ["cpe:2.3:a:openprinting:cups", "cpe:2.3:a:apple:cups"],
+    "webmin": ["cpe:2.3:a:webmin:webmin"],
+    "zimbra": ["cpe:2.3:a:zimbra:collaboration"],
+    "confluence": ["cpe:2.3:a:atlassian:confluence_server", "cpe:2.3:a:atlassian:confluence_data_center"],
+    "jira": ["cpe:2.3:a:atlassian:jira_server", "cpe:2.3:a:atlassian:jira_data_center"],
+    "weblogic": ["cpe:2.3:a:oracle:weblogic_server"],
+    "activemq": ["cpe:2.3:a:apache:activemq"],
+    "solr": ["cpe:2.3:a:apache:solr"],
+    "couchdb": ["cpe:2.3:a:apache:couchdb"],
+    "minio": ["cpe:2.3:a:minio:minio"],
+    "nodejs": ["cpe:2.3:a:nodejs:node.js"],
+    "express": ["cpe:2.3:a:expressjs:express"],
+    "gunicorn": ["cpe:2.3:a:gunicorn:gunicorn"],
+    "openvpn-as": ["cpe:2.3:a:openvpn:openvpn_access_server"],
+    "fortios": ["cpe:2.3:o:fortinet:fortios"],
+    "pan-os": ["cpe:2.3:o:paloaltonetworks:pan-os"],
+    "ivanti-connect-secure": ["cpe:2.3:a:ivanti:connect_secure"],
+    "citrix-adc": ["cpe:2.3:a:citrix:netscaler_application_delivery_controller"],
 }
 
 # Curated offline seed. Every bound below was verified against the NVD API 2.0
@@ -360,6 +417,21 @@ def severity_from_metrics(cve: dict) -> str:
     return "unknown"
 
 
+def cvss_score_from_metrics(cve: dict) -> float | None:
+    """The newest CVSS base score NVD lists (v3.1, then v3.0, then v2)."""
+    metrics_root: Any = cve.get("metrics", {})
+    groups = [metrics_root] if isinstance(metrics_root, dict) else list(metrics_root or [])
+    for metric_group in groups:
+        if not isinstance(metric_group, dict):
+            continue
+        for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            for metric in metric_group.get(key, []) or []:
+                score = (metric.get("cvssData") or {}).get("baseScore")
+                if isinstance(score, (int, float)) and 0 <= score <= 10:
+                    return float(score)
+    return None
+
+
 def _iter_unconditional_vulnerable_matches(node: Any):
     """Yield only CPEs NVD marks vulnerable outside conditional/negated branches.
 
@@ -416,6 +488,7 @@ def advisory_from_match(cve: dict, criteria: str, match: dict) -> dict | None:
         "cve": cve.get("id", ""),
         "title": english_description(cve)[:DESCRIPTION_LIMIT],
         "severity": severity_from_metrics(cve),
+        "cvss_score": cvss_score_from_metrics(cve),
         "cwe": first_cwe(cve),
         "cpe": criteria,
         "product": product,
@@ -468,6 +541,81 @@ def collapse_exact_entries_covered_by_ranges(advisories: list[dict]) -> list[dic
             continue
         kept.append(item)
     return kept
+
+
+def load_kev(path: str | None) -> dict[str, dict]:
+    """CISA Known Exploited Vulnerabilities (the catalog JSON) by CVE id."""
+    if not path:
+        return {}
+    with open(path, encoding="utf-8") as handle:
+        catalog = json.load(handle)
+    known: dict[str, dict] = {}
+    for item in catalog.get("vulnerabilities", []) or []:
+        cve = str(item.get("cveID") or "").upper()
+        if re.fullmatch(r"CVE-\d{4}-\d{4,}", cve):
+            known[cve] = {"date_added": str(item.get("dateAdded") or "")[:10],
+                          "ransomware": str(item.get("knownRansomwareCampaignUse") or "").lower() == "known"}
+    return known
+
+
+def load_epss(path: str | None) -> dict[str, dict]:
+    """FIRST EPSS scores (the daily CSV, optionally gzipped) by CVE id."""
+    if not path:
+        return {}
+    opener = gzip.open if path.endswith(".gz") else open
+    scores: dict[str, dict] = {}
+    with opener(path, "rt", encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith("#") or line.startswith("cve,"):
+                continue
+            parts = line.strip().split(",")
+            if len(parts) < 3:
+                continue
+            try:
+                scores[parts[0].upper()] = {"score": round(float(parts[1]), 5), "percentile": round(float(parts[2]), 5)}
+            except ValueError:
+                continue
+    return scores
+
+
+_TEMPLATE_CVE = re.compile(r"\bcve-id:\s*['\"]?(CVE-\d{4}-\d{4,})", re.IGNORECASE)
+_TEMPLATE_ID = re.compile(r"^id:\s*['\"]?([A-Za-z0-9._-]+)", re.MULTILINE)
+
+
+def load_template_checks(directory: str | None) -> dict[str, list[str]]:
+    """nuclei template ids by the CVE each template's classification names."""
+    if not directory:
+        return {}
+    checks: dict[str, list[str]] = {}
+    for root, _dirs, files in os.walk(directory):
+        for name in files:
+            if not name.endswith((".yaml", ".yml")):
+                continue
+            try:
+                with open(os.path.join(root, name), encoding="utf-8", errors="ignore") as handle:
+                    text = handle.read(65536)
+            except OSError:
+                continue
+            template = _TEMPLATE_ID.search(text)
+            if not template:
+                continue
+            for cve in {match.upper() for match in _TEMPLATE_CVE.findall(text)}:
+                checks.setdefault(cve, []).append(template.group(1))
+    return {cve: sorted(set(ids))[:5] for cve, ids in checks.items()}
+
+
+def enrich(advisories: list[dict], kev: dict[str, dict], epss: dict[str, dict],
+           checks: dict[str, list[str]]) -> None:
+    """Add exploitation context: known exploited (CISA KEV), likelihood (EPSS) and the checks the
+    image's own templates carry for the CVE. Metadata only; nothing here is executed."""
+    for item in advisories:
+        cve = str(item.get("cve") or "").upper()
+        if cve in kev:
+            item["known_exploited"] = kev[cve]
+        if cve in epss:
+            item["epss"] = epss[cve]
+        if cve in checks:
+            item["checks"] = [{"kind": "nuclei_template", "id": template} for template in checks[cve]]
 
 
 def build_snapshot(entries: list[dict]) -> dict:
@@ -587,6 +735,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="seconds between NVD requests (default 6, unauthenticated limit)")
     parser.add_argument("--offline", action="store_true",
                         help="emit only the built-in curated seed; no network access")
+    parser.add_argument("--network-services", action="store_true",
+                        help="query every built-in network/web service product (NETWORK_SERVICE_CPE)")
+    parser.add_argument("--kev", metavar="FILE", default=None,
+                        help="CISA KEV catalog JSON to mark known exploited CVEs")
+    parser.add_argument("--epss", metavar="FILE", default=None,
+                        help="FIRST EPSS CSV (or .csv.gz) to add exploit likelihood")
+    parser.add_argument("--templates", metavar="DIR", default=None,
+                        help="nuclei templates directory: name the checks that exist for a CVE")
     parser.add_argument("--self-check", action="store_true",
                         help="validate the written file with the real scanner loader")
     args = parser.parse_args(argv)
@@ -599,6 +755,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def resolve_allowed_keys(args: argparse.Namespace) -> set[str]:
     allowed = embedded_product_keys()
+    for cpes in NETWORK_SERVICE_CPE.values():
+        for cpe in cpes:
+            key = cpe_product_key(cpe)
+            if key:
+                allowed.add(key)
     for cpe in args.cpe:
         key = cpe_product_key(cpe)
         if key:
@@ -651,6 +812,11 @@ def main(argv: list[str] | None = None) -> int:
             per_cve_counts[cve_id] = len(batch)
 
         cpes = list(args.cpe)
+        if args.network_services:
+            for service_cpes in NETWORK_SERVICE_CPE.values():
+                for cpe in service_cpes:
+                    if cpe not in cpes:
+                        cpes.append(cpe)
         for vendor in args.vendor:
             for cpe in EMBEDDED_CPE[vendor]:
                 if cpe not in cpes:
@@ -688,6 +854,7 @@ def main(argv: list[str] | None = None) -> int:
           f"skipped {skipped_unbounded} unbounded and {skipped_product} out-of-scope configuration matches",
           file=sys.stderr)
     snapshot = build_snapshot(entries)
+    enrich(snapshot["advisories"], load_kev(args.kev), load_epss(args.epss), load_template_checks(args.templates))
     digest = write_snapshot(snapshot, args.output)
     for name, count in per_cve_counts.items():
         print(f"  {count:4d}  {name}", file=sys.stderr)

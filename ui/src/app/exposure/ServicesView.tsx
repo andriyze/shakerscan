@@ -92,11 +92,14 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
           {service.candidates_truncated && <p className="text-amber-300">Candidate list truncated; inspect the pinned snapshot for further matches.</p>}
           {service.cve_candidates.map((candidate) => <div key={candidate.id} className="rounded-sm border border-gray-800 p-3">
             <a href={candidate.advisory_url} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-300 hover:underline">{candidate.id}</a>
-            <span className="ml-2 rounded-sm bg-amber-500/10 px-2 py-1 text-xs text-amber-200">Candidate · {candidate.severity}</span>
+            <span className="ml-2 rounded-sm bg-amber-500/10 px-2 py-1 text-xs text-amber-200">Candidate · {candidate.severity}{typeof candidate.cvss_score === 'number' ? ` · CVSS ${candidate.cvss_score.toFixed(1)}` : ''}</span>
+            {candidate.known_exploited && <span className="ml-2 rounded-sm bg-red-500/15 px-2 py-1 text-xs font-medium text-red-200">Known exploited (CISA KEV{candidate.known_exploited.date_added ? `, added ${candidate.known_exploited.date_added}` : ''}){candidate.known_exploited.ransomware ? ' · used in ransomware' : ''}</span>}
+            {candidate.epss && <span className="ml-2 rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300" title="EPSS: probability of exploitation activity in the next 30 days">EPSS {(candidate.epss.score * 100).toFixed(1)}%{typeof candidate.epss.percentile === 'number' ? ` (top ${Math.max(0.1, (1 - candidate.epss.percentile) * 100).toFixed(1)}%)` : ''}</span>}
             <p className="mt-2 text-gray-200">{candidate.title}</p>
             <p className="mt-1 text-xs text-gray-400">{readable(candidate.match_type)} · identity confidence: {candidate.confidence} · {readable(candidate.local_validation)}</p>
             <p className="mt-2 text-gray-400">Prerequisites: {candidate.prerequisites.join('; ')}.</p>
             {candidate.identity_stale && <p className="text-amber-300">Product evidence is stale or undated.</p>}
+            {(candidate.checks || []).length > 0 && <p className="mt-2 text-xs text-gray-400">Checks for this CVE in this release: {(candidate.checks || []).map((check) => check.id).join(', ')} (they run only as part of an authorized Scan).</p>}
             {candidate.exploit_references.length === 0 ? <p className="mt-2 text-xs text-gray-500">No exploit reference in this snapshot. This is not evidence that none exists.</p> : <div className="mt-2 space-y-1">{candidate.exploit_references.map((ref) => <p key={ref.url}><a href={ref.url} target="_blank" rel="noopener noreferrer" className="text-blue-300 hover:underline">{ref.source} · {readable(ref.kind)}</a><span className="ml-2 text-xs text-gray-500">Reference only; never executed here</span></p>)}</div>}
           </div>)}
           <h4 className="pt-2 font-medium text-white">Exactly linked active findings</h4>
@@ -142,6 +145,9 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [retry, setRetry] = useState(0)
+  // Targets whose inconclusive listeners (UDP probes with no answer) are shown; hidden by default
+  // unless a finding is linked, since a long list of them buries what was actually observed.
+  const [showQuiet, setShowQuiet] = useState<Set<string>>(new Set())
   useEffect(() => { setSearch(query) }, [query])
   useEffect(() => {
     const controller = new AbortController()
@@ -179,20 +185,26 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
         {data.targets.map((target) => <Card key={`${target.kind}:${target.id}`} className="overflow-hidden">
           <div className="border-b border-gray-800 p-4"><h3 className="wrap-break-word font-medium text-white">{target.root_domain ? `${target.root_domain} → ` : ''}{target.label}</h3><p className="mt-1 break-all text-xs text-gray-500">{target.kind} · {target.locator} · {target.source_count} evidence sources</p>{target.warnings.map((warning) => <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>)}{target.unlinked_findings_count > 0 && <p role="status" className="mt-2 rounded-sm border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-200"><strong className="font-semibold">{target.unlinked_findings_count} active findings are not shown below.</strong> They are scoped to this target but could not be tied to one listener, so the table understates what is known. Open Findings for this target to see them.</p>}{target.findings_truncated && <p className="mt-2 text-xs text-amber-200">Active-finding association window is truncated.</p>}</div>
           {target.services.length === 0 ? <p className="p-4 text-sm text-gray-500">No positive service evidence retained in this window. Run an authorized Scan or Hunt with the relevant discovery policy to collect evidence.</p> : (() => {
-            const services = [...target.services].sort(byConsequence)
+            const all = [...target.services].sort(byConsequence)
+            const isQuiet = (service: typeof all[number]) => ['inconclusive', 'not_observed'].includes(service.presence)
+              && service.findings.length === 0 && service.cve_candidates.length === 0 && service.id !== selectedId
+            const quietCount = all.filter(isQuiet).length
+            const showingQuiet = showQuiet.has(target.id)
+            const services = showingQuiet ? all : all.filter((service) => !isQuiet(service))
             const notable = services.filter((service) => service.findings.length > 0 || service.cve_candidates.length > 0).length
             const addressed = services.filter((service) => service.address).length
             return <>
-              <p className="border-b border-gray-800 px-4 py-2 text-xs text-gray-400">{services.length} listeners{notable > 0 ? <> · <span className="text-amber-200">{notable} with linked findings or candidates</span></> : ' · nothing linked to any of them'}{addressed === 0 && ' · no network address retained for this target'}</p>
+              <p className="border-b border-gray-800 px-4 py-2 text-xs text-gray-400">{services.length} listeners{notable > 0 ? <> · <span className="text-amber-200">{notable} with linked findings or candidates</span></> : ' · nothing linked to any of them'}{addressed === 0 && ' · no network address retained for this target'}{quietCount > 0 && <> · <button type="button" onClick={() => setShowQuiet((current) => { const next = new Set(current); if (next.has(target.id)) next.delete(target.id); else next.add(target.id); return next })} className="text-blue-300 hover:underline">{showingQuiet ? `hide ${quietCount} inconclusive` : `show ${quietCount} inconclusive`}</button></>}</p>
               <div className="overflow-x-auto"><table className="w-full min-w-[740px] text-left text-sm"><thead className="border-b border-gray-800 text-xs text-gray-500"><tr>{['Listener', 'Identity', 'Linked', 'Last seen', ''].map((label, index) => <th key={index} scope="col" className="px-4 py-3">{label || 'Details'}</th>)}</tr></thead><tbody className="divide-y divide-gray-800">{services.map((service) => {
                 const linked = service.findings.length
                 const candidates = service.cve_candidates.length
+                const knownExploited = service.cve_candidates.filter((candidate) => candidate.known_exploited).length
                 const quiet = linked === 0 && candidates === 0
                 const seen = ago(service.last_seen_at)
                 return <tr key={service.id} className={service.id === selectedId ? 'bg-teal-500/10' : 'hover:bg-gray-800/40'}>
                   <td className="px-4 py-3"><p className={quiet ? 'text-gray-400' : 'font-medium text-gray-100'}>{listener(service)} · {service.service}</p><p className="mt-1 text-xs text-gray-500">{readable(service.presence)}{service.address && <> · {service.address}</>}</p></td>
                   <td className="px-4 py-3 text-gray-300">{service.product ? <>{service.product}{service.version && <> {service.version}</>}</> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{readable(service.identity_basis)}{service.identity_stale && <> · <span className="text-gray-400">identity stale</span></>}</p></td>
-                  <td className="px-4 py-3">{linked > 0 ? <span className="font-medium text-amber-200">{linked} finding{linked === 1 ? '' : 's'}</span> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{candidates > 0 ? `${candidates} CVE candidate${candidates === 1 ? '' : 's'}` : ''}</p></td>
+                  <td className="px-4 py-3">{linked > 0 ? <span className="font-medium text-amber-200">{linked} finding{linked === 1 ? '' : 's'}</span> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{candidates > 0 ? `${candidates} CVE candidate${candidates === 1 ? '' : 's'}` : ''}{knownExploited > 0 && <span className="text-red-300"> · {knownExploited} known exploited</span>}</p></td>
                   <td className="px-4 py-3 text-gray-400">{seen || readable(service.freshness)}<p className="mt-1 text-xs text-gray-500">{readable(service.observation_status)}</p></td>
                   <td className="px-4 py-3"><button type="button" aria-label={`Inspect ${service.transport}/${service.port} on ${target.label}`} aria-expanded={selectedId === service.id} onClick={() => setFilters({ service_id: selectedId === service.id ? undefined : service.id })} className="rounded-sm px-2 py-1 text-blue-300 hover:bg-gray-700 focus-visible:outline-solid focus-visible:outline-2">Inspect</button></td>
                 </tr>
