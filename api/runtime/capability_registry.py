@@ -1671,6 +1671,16 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="inline",
         ),
         CapabilitySpec(
+            "secrets.inspect",
+            "List secrets discovered on this target earlier (metadata only: reference, kind, "
+            "field name, length, when seen). Send one with an http.request binding "
+            "{\"secret_ref\": \"secret://<id>\"}; the worker sends the value, which is never shown.",
+            "internal", "read_only", _HTTP_TARGETS,
+            "secrets.inspect", "1", None, {"tool_wall_seconds": 5}, {"control_plane": True}, _schema(),
+            "discovered-secret-index/v1", ("discovered_secret_observation",),
+            hunt_executor="inline",
+        ),
+        CapabilitySpec(
             "findings.create",
             "Create one evidence-linked, explicitly unverified finding owned by this Hunt.",
             "internal", "active", _HTTP_TARGETS,
