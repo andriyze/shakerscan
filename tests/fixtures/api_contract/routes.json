@@ -3056,6 +3056,34 @@
     "name": "enable_device_profile"
   },
   {
+    "path": "/targets/{target_id}/discovered-secrets",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_discovered_secrets"
+  },
+  {
+    "path": "/targets/{target_id}/discovered-secrets",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_discovered_secrets"
+  },
+  {
+    "path": "/targets/{target_id}/discovered-secrets/{secret_id}/expiry",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_discovered_secret_expiry"
+  },
+  {
+    "path": "/targets/{target_id}/discovered-secrets/{secret_id}/state",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_discovered_secret_state"
+  },
+  {
     "path": "/targets/{target_id}/findings/{finding_id}/dismiss",
     "methods": [
       "POST"

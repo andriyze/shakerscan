@@ -1898,8 +1898,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 492 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 410 | `api/**/*.py` |
+| Public REST operations | 496 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 413 | `api/**/*.py` |
 | Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2362,6 +2362,10 @@ for the profile contract, invocation, limits and acceptance gates.
 | `PATCH` | `/targets/{target_id}/credential-profiles/{profile_id}` | `update_target_credential_profile` |
 | `POST` | `/targets/{target_id}/credential-profiles/{profile_id}/rotate` | `rotate_target_credential_profile` |
 | `POST` | `/targets/{target_id}/device-profile` | `enable_device_profile` |
+| `DELETE` | `/targets/{target_id}/discovered-secrets` | `delete_discovered_secrets` |
+| `GET` | `/targets/{target_id}/discovered-secrets` | `get_discovered_secrets` |
+| `POST` | `/targets/{target_id}/discovered-secrets/{secret_id}/expiry` | `post_discovered_secret_expiry` |
+| `POST` | `/targets/{target_id}/discovered-secrets/{secret_id}/state` | `post_discovered_secret_state` |
 | `POST` | `/targets/{target_id}/findings/{finding_id}/dismiss` | `post_dismiss_finding` |
 | `POST` | `/targets/{target_id}/findings/{finding_id}/reopen` | `post_reopen_finding` |
 | `GET` | `/targets/{target_id}/graph` | `get_application_graph` |
