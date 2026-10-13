@@ -42,7 +42,7 @@ from typing import Any
 
 
 NVD_CVES_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-SCHEMA_VERSION = "shakerscan-device-advisories/v1"
+SCHEMA_VERSION = "shakerscan-device-advisories/v2"
 SOURCE_LABEL = "NIST National Vulnerability Database CPE configurations"
 DESCRIPTION_LIMIT = 500
 USER_AGENT = "shakerscan-device-advisory-generator/1.0"
@@ -642,11 +642,63 @@ def build_snapshot(entries: list[dict]) -> dict:
     }
 
 
+def empty_range(item: dict, compare) -> bool:
+    """A range NVD lists that no version can satisfy (start at or after its end), such as
+    ``1.5 <= v < 1.5.0``. The matcher could never apply it; keeping it only adds noise."""
+    start = item.get("version_start_including") or item.get("version_start_excluding")
+    start_open = bool(item.get("version_start_excluding"))
+    end = item.get("version_end_excluding") or item.get("version_end_including")
+    end_open = bool(item.get("version_end_excluding"))
+    if not start or not end:
+        return False
+    order = compare(str(start), str(end))
+    return order > 0 or (order == 0 and (start_open or end_open))
+
+
+def normalize_snapshot(snapshot: dict) -> dict:
+    """Schema v2: each CVE's title once (``titles``), the exact versions NVD lists for one CVE
+    and product grouped into one record (``versions``), and no per-record NVD link (it is the CVE
+    id's). Same information; the loader re-attaches titles and the matcher reads ``versions``."""
+    titles: dict[str, str] = {}
+    ranges: list[dict] = []
+    grouped: dict[tuple[str, str], dict] = {}
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from scanner.scanner_tools.device_advisories import compare_versions
+
+    dropped = 0
+    for item in snapshot["advisories"]:
+        if empty_range(item, compare_versions):
+            dropped += 1
+            continue
+        cve = str(item.get("cve") or "")
+        titles.setdefault(cve, str(item.get("title") or "")[:200])
+        row = {key: value for key, value in item.items() if key not in {"title", "reference"}}
+        if row.get("version") and not any(row.get(key) for key in RANGE_KEYS):
+            product_cpe = ":".join(str(row.get("cpe") or "").split(":")[:5])
+            key = (cve, product_cpe)
+            group = grouped.get(key)
+            if group is None:
+                group = {k: v for k, v in row.items() if k not in {"version", "cpe"}}
+                group["cpe"] = product_cpe + ":*:*:*:*:*:*:*:*"
+                group["versions"] = []
+                grouped[key] = group
+            if row["version"] not in group["versions"]:
+                group["versions"].append(row["version"])
+        else:
+            ranges.append(row)
+    if dropped:
+        print(f"dropped {dropped} empty version range(s) NVD lists", file=sys.stderr)
+    return {**{k: v for k, v in snapshot.items() if k not in {"advisories", "titles"}},
+            "titles": titles, "advisories": ranges + list(grouped.values())}
+
+
 def write_snapshot(snapshot: dict, output_path: str) -> str:
     directory = os.path.dirname(os.path.abspath(output_path))
     if directory:
         os.makedirs(directory, exist_ok=True)
-    raw = (json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    raw = (json.dumps(snapshot, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
     with open(output_path, "wb") as handle:
         handle.write(raw)
     return hashlib.sha256(raw).hexdigest()
@@ -662,12 +714,17 @@ def probe_versions_for(record: dict) -> list[str]:
     """
     if record.get("version"):
         return [str(record["version"])]
+    if isinstance(record.get("versions"), list) and record["versions"]:
+        return [str(record["versions"][0])]
     candidates: list[str] = []
     start_including = record.get("version_start_including")
     if start_including:
         candidates.extend([str(start_including), f"{start_including}a"])
     if record.get("version_start_excluding"):
-        candidates.append("9999")
+        # Just above an exclusive start (3.20 -> 3.20.1), then far above it.
+        candidates.extend([f"{record['version_start_excluding']}.1", "9999"])
+    if record.get("version_end_including"):
+        candidates.append(str(record["version_end_including"]))
     if record.get("version_end_including") or record.get("version_end_excluding"):
         candidates.append("0")
     candidates.append("1.0")
@@ -687,7 +744,9 @@ def self_check(output_path: str, digest: str) -> None:
     bounded = 0
     promotable = 0
     for record in records:
-        if not any(record.get(key) not in (None, "", "*", "-") for key in BOUNDED_KEYS):
+        if not record.get("versions") and not any(
+            record.get(key) not in (None, "", "*", "-") for key in BOUNDED_KEYS
+        ):
             raise SystemExit(f"self-check failed: unbounded record {record.get('cve')}")
         bounded += 1
         query_cpe_template = record.get("cpe", "")
@@ -855,6 +914,7 @@ def main(argv: list[str] | None = None) -> int:
           file=sys.stderr)
     snapshot = build_snapshot(entries)
     enrich(snapshot["advisories"], load_kev(args.kev), load_epss(args.epss), load_template_checks(args.templates))
+    snapshot = normalize_snapshot(snapshot)
     digest = write_snapshot(snapshot, args.output)
     for name, count in per_cve_counts.items():
         print(f"  {count:4d}  {name}", file=sys.stderr)
