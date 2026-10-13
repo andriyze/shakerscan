@@ -13,6 +13,13 @@ export type WorkspaceCapabilities = {
 
 export const DEFAULT_EDITION_LABEL = 'Open Source Edition'
 
+// A deployment gateway (Enterprise) manages this workspace: host commands such as
+// `shakerscan model-intake enable` are not the user's to run. Client-only, like the edition label.
+export function workspaceIsManaged(): boolean {
+  const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__
+  return Boolean(policy && policy.schema === 'shakerscan.workspace-capabilities/v1' && policy.mode === 'managed')
+}
+
 export function workspaceEdition(): string | undefined {
   // Client-only: the server render always says "Open Source Edition" and the client updates the
   // label after mount, so a managed deployment never produces a hydration mismatch.

@@ -47,3 +47,17 @@ test('MODULE-003 the sidebar lists Model Intake only under the advanced switch',
   await page.getByRole('switch', { name: 'Show all sidebar sections' }).first().click()
   await expect(visibleLink('Model Intake')).not.toHaveCount(0)
 })
+
+test('MODULE-004 in a managed deployment the page says it is not available and names no host command', async ({ page }) => {
+  const intakeRequests = await mock(page, false)
+  await page.addInitScript(() => {
+    window.__SHAKERSCAN_CAPABILITIES__ = {
+      schema: 'shakerscan.workspace-capabilities/v1', mode: 'managed', features: { model_intake: { state: 'enabled' } }, navigation: { '/model-intake': 'model_intake' }, ui_routes: ['/model-intake'],
+      edition: 'Enterprise Edition',
+    }
+  })
+  await page.goto('/model-intake')
+  await expect(page.getByText('Not available in this deployment.')).toBeVisible()
+  await expect(page.getByText('shakerscan model-intake enable')).toHaveCount(0)
+  expect(intakeRequests).toEqual([])
+})

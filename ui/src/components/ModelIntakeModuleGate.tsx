@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Card, CardSkeleton, PageHeader } from '@/components/ui'
 import { getHealth } from '@/lib/api'
+import { workspaceIsManaged } from '@/lib/workspaceCapabilities'
 
 const ENABLE_COMMAND = 'shakerscan model-intake enable'
 
@@ -25,6 +26,20 @@ export function ModelIntakeModuleGate({ children }: { children: ReactNode }) {
 
   if (state === 'loading') return <CardSkeleton />
   if (state === 'enabled') return <>{children}</>
+  if (workspaceIsManaged()) {
+    // A managed deployment (Enterprise) decides which modules it runs; there is no host command here.
+    return (
+      <div className="min-w-0 max-w-full space-y-6">
+        <PageHeader title="Model Intake" description="Not available in this deployment." />
+        <Card>
+          <p className="text-sm text-gray-300">
+            Model Intake checks AI models before you deploy them. This deployment does not include it; ask your administrator
+            if you need it.
+          </p>
+        </Card>
+      </div>
+    )
+  }
   return (
     <div className="min-w-0 max-w-full space-y-6">
       <PageHeader title="Model Intake" description="Optional module: not installed on this instance." />
