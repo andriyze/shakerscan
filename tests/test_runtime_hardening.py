@@ -641,7 +641,9 @@ exit 0
     assert "exit=1" in result.stdout
     assert "Build failed during phase: preflight" in result.stderr
     assert "docker builder prune -af" in result.stderr
-    assert "docker system prune -af --volumes" in result.stderr
+    # The advice never offers the command that deletes ShakerScan's database (owner, 2026-10-13).
+    assert "docker system prune -af --volumes" not in result.stderr
+    assert "Never remove Docker volumes" in result.stderr
     payload = json.loads(receipt.read_text())
     assert payload["schema_version"] == "shakerscan-build-receipt/v1"
     assert payload["status"] == "failed"

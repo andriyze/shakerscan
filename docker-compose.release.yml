@@ -39,6 +39,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      # A large append-only file takes a while to load after an unclean stop.
+      start_period: 60s
     restart: unless-stopped
 
   minio:
