@@ -2180,6 +2180,16 @@
     "operation_id": "delete_discovered_secret_grant_targets__target_id__discovered_secrets__secret_id__grants__grant_target_id__delete"
   },
   {
+    "path": "/targets/{target_id}/discovered-secrets/{secret_id}/promote",
+    "method": "post",
+    "operation_id": "post_discovered_secret_promote_targets__target_id__discovered_secrets__secret_id__promote_post"
+  },
+  {
+    "path": "/targets/{target_id}/discovered-secrets/{secret_id}/reveal",
+    "method": "post",
+    "operation_id": "post_discovered_secret_reveal_targets__target_id__discovered_secrets__secret_id__reveal_post"
+  },
+  {
     "path": "/targets/{target_id}/discovered-secrets/{secret_id}/state",
     "method": "post",
     "operation_id": "post_discovered_secret_state_targets__target_id__discovered_secrets__secret_id__state_post"

@@ -1898,8 +1898,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 498 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 415 | `api/**/*.py` |
+| Public REST operations | 500 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 417 | `api/**/*.py` |
 | Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2367,6 +2367,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets/{target_id}/discovered-secrets/{secret_id}/expiry` | `post_discovered_secret_expiry` |
 | `POST` | `/targets/{target_id}/discovered-secrets/{secret_id}/grants` | `post_discovered_secret_grant` |
 | `DELETE` | `/targets/{target_id}/discovered-secrets/{secret_id}/grants/{grant_target_id}` | `delete_discovered_secret_grant` |
+| `POST` | `/targets/{target_id}/discovered-secrets/{secret_id}/promote` | `post_discovered_secret_promote` |
+| `POST` | `/targets/{target_id}/discovered-secrets/{secret_id}/reveal` | `post_discovered_secret_reveal` |
 | `POST` | `/targets/{target_id}/discovered-secrets/{secret_id}/state` | `post_discovered_secret_state` |
 | `POST` | `/targets/{target_id}/findings/{finding_id}/dismiss` | `post_dismiss_finding` |
 | `POST` | `/targets/{target_id}/findings/{finding_id}/reopen` | `post_reopen_finding` |

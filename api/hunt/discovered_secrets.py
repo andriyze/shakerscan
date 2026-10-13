@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS discovered_secrets (
     state_changed_by TEXT CHECK (state_changed_by IS NULL OR length(state_changed_by) <= 200),
     state_changed_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ NOT NULL,
+    promoted_profile_id UUID,
     CONSTRAINT discovered_secrets_target_value_unique UNIQUE (target_id, value_digest)
 );
 CREATE INDEX IF NOT EXISTS idx_discovered_secrets_target
@@ -93,6 +94,8 @@ CREATE TABLE IF NOT EXISTS discovered_secret_uses (
     hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
     action_id UUID REFERENCES hunt_actions(id) ON DELETE SET NULL,
     destination_host TEXT NOT NULL DEFAULT '' CHECK (length(destination_host) <= 255),
+    -- An operator who revealed the value (no Hunt, no action), or NULL for a Hunt's use.
+    revealed_by TEXT CHECK (revealed_by IS NULL OR length(revealed_by) BETWEEN 1 AND 200),
     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_secret
@@ -293,7 +296,8 @@ async def briefing_counts(conn: Any, target_id: Any) -> dict[str, Any]:
     rows = await conn.fetch(
         """SELECT s.kind, count(*) AS count,
             count(*) FILTER (WHERE NOT EXISTS (
-                SELECT 1 FROM discovered_secret_uses u WHERE u.secret_id=s.id)) AS never_used
+                SELECT 1 FROM discovered_secret_uses u
+                WHERE u.secret_id=s.id AND u.revealed_by IS NULL)) AS never_used
         FROM discovered_secrets s
         WHERE (s.target_id=$1 OR EXISTS (SELECT 1 FROM discovered_secret_grants g
                                          WHERE g.secret_id=s.id AND g.target_id=$1))
@@ -377,6 +381,8 @@ def _public(row: Mapping[str, Any]) -> dict[str, Any]:
         "uses": row["uses"],
         "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None,
         "found_on": str(row["target_id"]),
+        "promoted_profile_id": str(row["promoted_profile_id"]) if row.get("promoted_profile_id") else None,
+        "reveals": row.get("reveals") or 0,
         "granted_to": [str(item) for item in (row["granted_to"] or [])],
     }
 
@@ -392,9 +398,13 @@ async def list_for_target(
     # The target's own secrets, and secrets of other targets an operator granted to it.
     rows = await conn.fetch(
         f"""SELECT s.id, s.target_id, s.kind, s.label, s.length, s.source, s.first_seen_at,
-            s.last_seen_at, s.seen_count, s.state, s.expires_at,
-            (SELECT count(*) FROM discovered_secret_uses u WHERE u.secret_id=s.id) AS uses,
-            (SELECT max(used_at) FROM discovered_secret_uses u WHERE u.secret_id=s.id) AS last_used_at,
+            s.last_seen_at, s.seen_count, s.state, s.expires_at, s.promoted_profile_id,
+            (SELECT count(*) FROM discovered_secret_uses u
+             WHERE u.secret_id=s.id AND u.revealed_by IS NULL) AS uses,
+            (SELECT max(used_at) FROM discovered_secret_uses u
+             WHERE u.secret_id=s.id AND u.revealed_by IS NULL) AS last_used_at,
+            (SELECT count(*) FROM discovered_secret_uses u
+             WHERE u.secret_id=s.id AND u.revealed_by IS NOT NULL) AS reveals,
             ARRAY(SELECT g.target_id FROM discovered_secret_grants g WHERE g.secret_id=s.id
                   ORDER BY g.granted_at) AS granted_to
         FROM discovered_secrets s
@@ -471,6 +481,36 @@ async def revoke_grant(conn: Any, *, target_id: Any, secret_id: Any, to_target_i
         uuid.UUID(str(secret_id)), _target_uuid(target_id), _target_uuid(to_target_id),
     )
     return bool(deleted)
+
+
+async def value_for_operator(
+    conn: Any, *, target_id: Any, secret_id: Any, actor: str, purpose: str,
+) -> str | None:
+    """The value, for an operator's reveal or promotion, recorded in the use ledger with who and
+    why. Any state: an operator may read what a revoked or expired row held. None when absent."""
+    secret = uuid.UUID(str(secret_id))
+    ciphertext = await conn.fetchval(
+        "SELECT value_ciphertext FROM discovered_secrets WHERE id=$1 AND target_id=$2",
+        secret, _target_uuid(target_id))
+    if ciphertext is None:
+        return None
+    value = str(_secret_store().decrypt_secret(str(ciphertext)))
+    await conn.execute(
+        """INSERT INTO discovered_secret_uses(secret_id, destination_host, revealed_by)
+        VALUES($1,$2,$3)""",
+        secret, str(purpose)[:255], str(actor)[:200])
+    return value
+
+
+async def mark_promoted(
+    conn: Any, *, target_id: Any, secret_id: Any, profile_id: Any, actor: str,
+) -> None:
+    """The value now lives in a credential profile: the row is superseded and points at it."""
+    await conn.execute(
+        """UPDATE discovered_secrets SET state='superseded', promoted_profile_id=$3,
+            state_changed_by=$4, state_changed_at=NOW() WHERE id=$1 AND target_id=$2""",
+        uuid.UUID(str(secret_id)), _target_uuid(target_id), uuid.UUID(str(profile_id)),
+        str(actor)[:200])
 
 
 async def purge_target(conn: Any, *, target_id: Any) -> int:

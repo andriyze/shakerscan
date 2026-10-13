@@ -380,3 +380,44 @@ def test_the_briefing_counts_usable_and_never_used_secrets_by_kind():
         assert counts["usable"] == 2 and counts["never_used"] == 1
         assert counts["by_kind"] == {"jwt": 1, "password": 1} and SYNTHETIC not in str(counts)
     run(scenario)
+
+
+def test_promote_moves_the_value_into_a_profile_and_reveal_is_recorded(monkeypatch):
+    import httpx
+    from fastapi import FastAPI
+    from targets import discovered_secret_routes as routes
+
+    async def scenario(conn):
+        target = await _target(conn)
+        await store.record_discovered(conn, target_id=target, values=[(SYNTHETIC, "API_TOKEN")],
+                                      source={"kind": "hunt_action"})
+        ref = (await store.list_for_target(conn, target))[0]["ref"]
+        secret_id = ref.removeprefix("secret://")
+        async with asyncpg.create_pool(DSN, min_size=1, max_size=2) as pool:
+            monkeypatch.setattr(routes, "pool", lambda: pool)
+            app = FastAPI()
+            app.include_router(routes.router)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as http:
+                shown = await http.post(f"/targets/{target}/discovered-secrets/{secret_id}/reveal")
+                assert shown.status_code == 200 and shown.json() == {"value": SYNTHETIC}
+                assert shown.headers["cache-control"] == "no-store"
+                bad = await http.post(f"/targets/{target}/discovered-secrets/{secret_id}/promote",
+                                      json={"name": "x", "auth_kind": "not_a_kind"})
+                assert bad.status_code in {400, 422} and SYNTHETIC not in bad.text
+                assert (await store.list_for_target(conn, target))[0]["state"] == "active"
+                promoted = await http.post(
+                    f"/targets/{target}/discovered-secrets/{secret_id}/promote",
+                    json={"name": "Found API token", "auth_kind": "bearer_token"})
+                assert promoted.status_code == 201, promoted.text
+                assert SYNTHETIC not in promoted.text
+                profile = promoted.json()["profile"]
+        listed = (await store.list_for_target(conn, target))[0]
+        assert listed["state"] == "superseded" and listed["promoted_profile_id"] == str(profile["id"])
+        assert listed["reveals"] >= 2 and listed["uses"] == 0  # reveal and promote, no Hunt use
+        stored = await conn.fetchval("SELECT encrypted_secret FROM credential_profile_versions WHERE profile_id=$1::uuid",
+                                     str(profile["id"]))
+        assert stored and SYNTHETIC not in str(stored)
+        hunt, action = await _hunt(conn, target)
+        with pytest.raises(store.DiscoveredSecretError):  # superseded: use the profile now
+            await store.resolve_for_hunt(conn, reference=ref, target_id=target, hunt_run_id=hunt, action_id=action)
+    run(scenario)

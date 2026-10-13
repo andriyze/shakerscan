@@ -3091,6 +3091,20 @@
     "name": "delete_discovered_secret_grant"
   },
   {
+    "path": "/targets/{target_id}/discovered-secrets/{secret_id}/promote",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_discovered_secret_promote"
+  },
+  {
+    "path": "/targets/{target_id}/discovered-secrets/{secret_id}/reveal",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_discovered_secret_reveal"
+  },
+  {
     "path": "/targets/{target_id}/discovered-secrets/{secret_id}/state",
     "methods": [
       "POST"

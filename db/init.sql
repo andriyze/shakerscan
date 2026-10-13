@@ -2700,6 +2700,7 @@ CREATE TABLE IF NOT EXISTS discovered_secrets (
     state_changed_by TEXT CHECK (state_changed_by IS NULL OR length(state_changed_by) <= 200),
     state_changed_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ NOT NULL,
+    promoted_profile_id UUID,
     CONSTRAINT discovered_secrets_target_value_unique UNIQUE (target_id, value_digest)
 );
 CREATE INDEX IF NOT EXISTS idx_discovered_secrets_target
@@ -2710,6 +2711,8 @@ CREATE TABLE IF NOT EXISTS discovered_secret_uses (
     hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
     action_id UUID REFERENCES hunt_actions(id) ON DELETE SET NULL,
     destination_host TEXT NOT NULL DEFAULT '' CHECK (length(destination_host) <= 255),
+    -- An operator who revealed the value (no Hunt, no action), or NULL for a Hunt's use.
+    revealed_by TEXT CHECK (revealed_by IS NULL OR length(revealed_by) BETWEEN 1 AND 200),
     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_secret
