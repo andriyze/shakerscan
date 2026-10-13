@@ -840,7 +840,7 @@ SECRET_ACTIONS = {"reveal": "show you the value of", "grants": "let another targ
                   "promote": "move into a credential profile"}
 
 
-def secret_entry(action: str, target_id: str, reference: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+def reference_decision(action: str, target_id: str, reference: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     """One decision on a discovered secret (Enterprise 2.10) as the step-up binds it: the exact
     route and body the gateway then sends to the engine as you."""
     if action not in SECRET_ACTIONS:
