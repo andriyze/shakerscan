@@ -387,6 +387,19 @@ def _public(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+PLANNER_KEYS = ("ref", "kind", "label", "length", "first_seen_at", "last_seen_at", "seen_count",
+                "state", "expires_at", "uses", "last_used_at")
+
+
+def planner_view(row: Mapping[str, Any], target_id: Any) -> dict[str, Any]:
+    """What a Hunt sees of a secret: enough to choose and use it, nothing about other targets,
+    Hunts, reveals or credential profiles."""
+    view = {key: row.get(key) for key in PLANNER_KEYS}
+    view["source_kind"] = (row.get("source") or {}).get("kind")
+    view["granted"] = str(row.get("found_on")) != str(_target_uuid(target_id))
+    return view
+
+
 async def list_for_target(
     conn: Any, target_id: Any, *, usable_only: bool = False, limit: int = MAX_LIST,
 ) -> list[dict[str, Any]]:
@@ -457,10 +470,14 @@ async def grant(
     if source is None or other is None or source == other:
         raise ValueError("grant to another, existing target")
     secret = uuid.UUID(str(secret_id))
-    if not await conn.fetchval(
-        "SELECT 1 FROM discovered_secrets WHERE id=$1 AND target_id=$2", secret, source):
+    # The secret's row is locked, so concurrent grants are counted one after another.
+    state = await conn.fetchval(
+        "SELECT state FROM discovered_secrets WHERE id=$1 AND target_id=$2 FOR UPDATE", secret, source)
+    if state is None:
         return False
-    if not await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", other):
+    if state == "superseded":
+        raise ValueError("this secret is now a credential profile; grant the profile instead")
+    if not await conn.fetchval("SELECT 1 FROM targets WHERE id=$1 AND is_active IS NOT FALSE", other):
         raise LookupError("target not found")
     if await conn.fetchval(
         "SELECT count(*) FROM discovered_secret_grants WHERE secret_id=$1", secret,
@@ -500,6 +517,18 @@ async def value_for_operator(
         VALUES($1,$2,$3)""",
         secret, str(purpose)[:255], str(actor)[:200])
     return value
+
+
+async def promotable(conn: Any, *, target_id: Any, secret_id: Any) -> str | None:
+    """None when the secret can be promoted, else why not (absent, or already promoted)."""
+    row = await conn.fetchrow(
+        "SELECT state, promoted_profile_id FROM discovered_secrets WHERE id=$1 AND target_id=$2 FOR UPDATE",
+        uuid.UUID(str(secret_id)), _target_uuid(target_id))
+    if row is None:
+        return "absent"
+    if row["state"] == "superseded" or row["promoted_profile_id"] is not None:
+        return "already promoted to a credential profile"
+    return None
 
 
 async def mark_promoted(

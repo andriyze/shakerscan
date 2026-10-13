@@ -2734,8 +2734,13 @@ async def _execute_hunt_capability_lifecycle(
                     from hunt.discovered_secrets import list_for_target
                 except ModuleNotFoundError:
                     from api.hunt.discovered_secrets import list_for_target
+                try:
+                    from hunt.discovered_secrets import planner_view
+                except ModuleNotFoundError:
+                    from api.hunt.discovered_secrets import planner_view
                 async with _pool().acquire() as conn:
-                    listed = await list_for_target(conn, run.get("target_id"), usable_only=True)
+                    listed = [planner_view(row, run.get("target_id")) for row in
+                              await list_for_target(conn, run.get("target_id"), usable_only=True)]
                 return {
                     "ok": True,
                     "secrets": listed,

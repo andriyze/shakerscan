@@ -25,6 +25,15 @@ class Conn:
     def __init__(self):
         self.calls = []
 
+    def transaction(self):
+        class Tx:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+        return Tx()
+
     async def fetchval(self, query, *args):
         self.calls.append(query)
         if query.startswith("SELECT 1 FROM targets"):
