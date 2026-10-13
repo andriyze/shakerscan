@@ -39,7 +39,7 @@ from ._vendored import kit_sources, load
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
 CLIENT_COMMANDS = (
     "connect", "disconnect", "agent", "api", "scan", "check", "mcp", "hunt", "approve", "deny", "knowledge",
-    "doctor", "version",
+    "secrets", "doctor", "version",
 )
 AGENTS = ("codex", "claude", "opencode", "pi")
 CONNECT_PATH = "/_enterprise/connect/"
@@ -1325,6 +1325,7 @@ COMMANDS = {
     "approve": cmd_approval,
     "deny": cmd_approval,
     "knowledge": cmd_approval,
+    "secrets": cmd_approval,
     "doctor": cmd_doctor,
     "connect": cmd_connect,
     "disconnect": cmd_disconnect,
@@ -1335,7 +1336,7 @@ COMMANDS = {
 }
 
 # Commands that forward their arguments to a runtime CLI after the connection options.
-FORWARDING_COMMANDS = ("api", "scan", "hunt", "approve", "deny", "knowledge")
+FORWARDING_COMMANDS = ("api", "scan", "hunt", "approve", "deny", "knowledge", "secrets")
 _CONNECTION_OPTIONS = ("--url", "--token-file", "--timeout")
 
 
@@ -1523,6 +1524,15 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge.add_argument("args", nargs=argparse.REMAINDER,
                            help="review [target-id] [--accept ID | --reject ID] | show | changes | continue | "
                                 "release | releases | dismiss | reopen")
+    secrets = commands.add_parser(
+        "secrets",
+        help="secrets discovered on a target: secrets list <target> (never values), revoke|reactivate|expiry, "
+             "grant|ungrant --to <target>, promote, reveal (reveal, grant and promote are yours to decide, in "
+             "your own terminal)",
+    )
+    connection(secrets)
+    secrets.add_argument("args", nargs=argparse.REMAINDER,
+                         help="list | revoke | reactivate | expiry | grant | ungrant | promote | reveal ...")
     doctor = commands.add_parser(
         "doctor",
         help=(
@@ -1550,7 +1560,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `shakerscan scan --budget-profile fast URL` failed unless `--` came first.
         # Only the leading connection options are the client's; the rest is forwarded as is.
         own, forwarded = split_connection_options(argv[1:])
-        if argv[0] in {"hunt", "approve", "deny", "knowledge"}:
+        if argv[0] in {"hunt", "approve", "deny", "knowledge", "secrets"}:
             # The runtime Hunt CLI's subcommands are what `hunt --help` should list.
             if any(token in ("-h", "--help") for token in own):
                 own = [token for token in own if token not in ("-h", "--help")]
