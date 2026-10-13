@@ -421,3 +421,42 @@ def test_promote_moves_the_value_into_a_profile_and_reveal_is_recorded(monkeypat
         with pytest.raises(store.DiscoveredSecretError):  # superseded: use the profile now
             await store.resolve_for_hunt(conn, reference=ref, target_id=target, hunt_run_id=hunt, action_id=action)
     run(scenario)
+
+
+def test_review_fixes_planner_view_promote_once_and_grant_to_an_active_target(monkeypatch):
+    import httpx
+    from fastapi import FastAPI
+    from targets import discovered_secret_routes as routes
+
+    async def scenario(conn):
+        owner, other, archived = await _target(conn), await _target(conn), await _target(conn)
+        await conn.execute("UPDATE targets SET is_active=false WHERE id=$1", archived)
+        await store.record_discovered(conn, target_id=owner, values=[(SYNTHETIC, "API_TOKEN")],
+                                      source={"kind": "hunt_action", "hunt_id": str(uuid4())})
+        ref = (await store.list_for_target(conn, owner))[0]["ref"]
+        secret_id = ref.removeprefix("secret://")
+        with pytest.raises(LookupError):
+            await store.grant(conn, target_id=owner, secret_id=secret_id, to_target_id=archived, actor="o")
+        assert await store.grant(conn, target_id=owner, secret_id=secret_id, to_target_id=other, actor="o")
+        # A Hunt of the granted target sees how to use it, nothing about other targets or Hunts.
+        row = (await store.list_for_target(conn, other))[0]
+        view = store.planner_view(row, other)
+        assert view["granted"] is True and view["ref"] == ref
+        assert not {"granted_to", "found_on", "source", "promoted_profile_id", "reveals"} & set(view)
+        async with asyncpg.create_pool(DSN, min_size=1, max_size=2) as pool:
+            monkeypatch.setattr(routes, "pool", lambda: pool)
+            app = FastAPI()
+            app.include_router(routes.router)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as http:
+                body = {"name": "Found token", "auth_kind": "bearer_token"}
+                first = await http.post(f"/targets/{owner}/discovered-secrets/{secret_id}/promote", json=body)
+                assert first.status_code == 201, first.text
+                again = await http.post(f"/targets/{owner}/discovered-secrets/{secret_id}/promote",
+                                        json={**body, "name": "Again"})
+                assert again.status_code == 409 and SYNTHETIC not in again.text
+                regrant = await http.post(f"/targets/{owner}/discovered-secrets/{secret_id}/grants",
+                                          json={"target_id": str(archived)})
+                assert regrant.status_code in {400, 404}
+        profiles = await conn.fetchval("SELECT count(*) FROM credential_profiles WHERE target_id=$1", owner)
+        assert profiles == 1
+    run(scenario)

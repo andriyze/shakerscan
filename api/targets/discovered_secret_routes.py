@@ -103,9 +103,10 @@ async def post_discovered_secret_grant(target_id: str, secret_id: str, body: Sec
     actor = _operator(request)
     async with pool().acquire() as conn:
         try:
-            granted = await secrets_store.grant(
-                conn, target_id=_uuid(target_id, 'target'), secret_id=_uuid(secret_id, 'secret'),
-                to_target_id=_uuid(body.target_id, 'target'), actor=actor)
+            async with conn.transaction():  # the secret's row stays locked while it is counted
+                granted = await secrets_store.grant(
+                    conn, target_id=_uuid(target_id, 'target'), secret_id=_uuid(secret_id, 'secret'),
+                    to_target_id=_uuid(body.target_id, 'target'), actor=actor)
         except LookupError:
             raise HTTPException(404, 'target not found') from None
         except ValueError as exc:
@@ -144,6 +145,11 @@ async def post_discovered_secret_promote(target_id: str, secret_id: str, body: S
     target, secret = _uuid(target_id, 'target'), _uuid(secret_id, 'secret')
     async with pool().acquire() as conn:
         async with conn.transaction():
+            refusal = await secrets_store.promotable(conn, target_id=target, secret_id=secret)
+            if refusal == 'absent':
+                raise HTTPException(404, 'secret not found on this target')
+            if refusal:
+                raise HTTPException(409, refusal)
             value = await secrets_store.value_for_operator(
                 conn, target_id=target, secret_id=secret, actor=actor, purpose='promote')
             if value is None:
