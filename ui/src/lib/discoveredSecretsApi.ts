@@ -23,35 +23,33 @@ export interface DiscoveredSecret {
 /** The Enterprise gateway asks for the person's step-up for this one decision. */
 export class StepUpRequired extends Error {}
 
-const base = (targetId: string) => `${API_URL}/targets/${encodeURIComponent(targetId)}/discovered-secrets`
-const secretPath = (targetId: string, ref: string) => `${base(targetId)}/${encodeURIComponent(ref.replace(/^secret:\/\//, ''))}`
+const T = (id: string) => encodeURIComponent(id)
+const S = (ref: string) => encodeURIComponent(ref.replace(/^secret:\/\//, ''))
 
-async function send<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { cache: 'no-store', ...init })
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, { cache: 'no-store', ...init })
   if (response.status === 403 && response.headers.get('x-shakerscan-step-up') === 'required') {
     throw new StepUpRequired(await getApiErrorMessage(response, 'This decision needs your step-up'))
   }
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Discovered-secret request failed'))
   return response.json() as Promise<T>
 }
-const post = (body: unknown): RequestInit => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+const json = (method: string, body: unknown): RequestInit => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 
 export const listDiscoveredSecrets = (targetId: string, signal?: AbortSignal) =>
-  send<{ secrets: DiscoveredSecret[]; count: number }>(base(targetId), { signal })
+  request<{ secrets: DiscoveredSecret[]; count: number }>(`/targets/${T(targetId)}/discovered-secrets`, { signal })
 export const setDiscoveredSecretState = (targetId: string, ref: string, state: 'active' | 'revoked_by_operator') =>
-  send(`${secretPath(targetId, ref)}/state`, post({ state }))
+  request(`/targets/${T(targetId)}/discovered-secrets/${S(ref)}/state`, json('POST', { state }))
 export const setDiscoveredSecretExpiry = (targetId: string, ref: string, days: number) =>
-  send(`${secretPath(targetId, ref)}/expiry`, post({ days }))
+  request(`/targets/${T(targetId)}/discovered-secrets/${S(ref)}/expiry`, json('POST', { days }))
 export const grantDiscoveredSecret = (targetId: string, ref: string, toTargetId: string) =>
-  send(`${secretPath(targetId, ref)}/grants`, post({ target_id: toTargetId }))
+  request(`/targets/${T(targetId)}/discovered-secrets/${S(ref)}/grants`, json('POST', { target_id: toTargetId }))
 export const ungrantDiscoveredSecret = (targetId: string, ref: string, toTargetId: string) =>
-  send(`${secretPath(targetId, ref)}/grants/${encodeURIComponent(toTargetId)}`, { method: 'DELETE' })
+  request(`/targets/${T(targetId)}/discovered-secrets/${S(ref)}/grants/${T(toTargetId)}`, { method: 'DELETE' })
 export const revealDiscoveredSecret = (targetId: string, ref: string) =>
-  send<{ value: string }>(`${secretPath(targetId, ref)}/reveal`, post({}))
+  request<{ value: string }>(`/targets/${T(targetId)}/discovered-secrets/${S(ref)}/reveal`, json('POST', {}))
 export const promoteDiscoveredSecret = (targetId: string, ref: string, input: { name: string; auth_kind: string; header_name?: string }) =>
-  send<{ profile: { id: string } }>(`${secretPath(targetId, ref)}/promote`, post(input))
-export const purgeDiscoveredSecrets = (targetId: string) =>
-  send<{ deleted: number }>(base(targetId), { method: 'DELETE' })
+  request<{ profile: { id: string } }>(`/targets/${T(targetId)}/discovered-secrets/${S(ref)}/promote`, json('POST', input))
 
 /** The terminal command that makes a step-up decision on Enterprise. */
 export const terminalCommand = (action: 'reveal' | 'grant' | 'promote', targetId: string, ref: string) =>
