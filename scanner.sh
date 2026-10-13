@@ -22,6 +22,12 @@ if [ ! -f "$SCRIPT_DIR/scripts/postgres_upgrade.sh" ]; then
 fi
 # shellcheck source=scripts/postgres_upgrade.sh
 source "$SCRIPT_DIR/scripts/postgres_upgrade.sh"
+if [ ! -f "$SCRIPT_DIR/scripts/upgrade_safety.sh" ]; then
+    echo -e "${RED}Error: $SCRIPT_DIR/scripts/upgrade_safety.sh is missing; re-run the installer.${NC}" >&2
+    exit 1
+fi
+# shellcheck source=scripts/upgrade_safety.sh
+source "$SCRIPT_DIR/scripts/upgrade_safety.sh"
 
 # Default workers
 WORKERS=${WORKERS:-auto}
@@ -2556,6 +2562,8 @@ start_services() {
         echo "  ui:      ${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
         echo "  signer:  ${SIGNER_IMAGE:-}"
         echo "  model intake: ${MODEL_INTAKE_IMAGE:-}"
+        # Before anything is downloaded or stopped: room for this release's images.
+        ensure_upgrade_space || return 1
         pull_prebuilt_images
     else
         echo "Mode: local build"
@@ -2590,6 +2598,10 @@ start_services() {
     fi
     source "$SCRIPT_DIR/scripts/target_upgrade_backup.sh"
     ensure_target_upgrade_backup || return 1
+    compose_up -d postgres || return 1
+    ensure_pre_upgrade_backup || return 1
+    # Everything else waits for a healthy Redis; one that cannot start is repaired here.
+    ensure_redis_ready || return 1
     compose_up -d --scale worker=$start_workers || return 1
     if [ "${SHAKERSCAN_NETWORK_WORKER_ENABLED:-true}" = "false" ]; then
         compose --profile devices stop device-worker || return 1
@@ -2624,6 +2636,9 @@ start_services() {
         "$(running_compose_service_count model-intake-worker)"
     if [ "$USE_PREBUILT" -eq 1 ]; then
         record_runtime_mode prebuilt
+        # This release is running: remember it (and the one before it, for rollback) and remove
+        # older ShakerScan images.
+        record_started_release
     fi
     echo -e "${GREEN}Services started.${NC}"
     echo "  UI:  $(ui_base_url)"
@@ -2839,6 +2854,10 @@ show_status() {
     echo -e "${BLUE}Access:${NC}"
     echo "  UI:  $(ui_base_url)"
     echo "  API: $(api_base_url)"
+    local warning
+    upgrade_safety_warnings | while IFS= read -r warning; do
+        echo -e "${YELLOW}Warning:${NC} $warning"
+    done
 }
 
 show_logs() {
@@ -3137,7 +3156,8 @@ build_failure_guidance() {
     echo "Receipt: $BUILD_RECEIPT_FILE" >&2
     echo "Safe cleanup (does not remove containers or volumes): docker builder prune -af" >&2
     echo "Also remove unused images: docker image prune -af" >&2
-    echo "Disposable host only, after stopping services: docker system prune -af --volumes" >&2
+    echo "Never remove Docker volumes (docker volume prune, docker system prune --volumes): they hold" >&2
+    echo "ShakerScan's database." >&2
 }
 
 fail_build() {
@@ -3992,6 +4012,15 @@ doctor() {
         echo -e "  ${GREEN}ok${NC} Docker daemon reachable"
         if [ "$DOCKER_NEEDS_SUDO" -eq 0 ]; then
             doctor_leftover_containers
+            local safety
+            safety="$(upgrade_safety_warnings)"
+            if [ -n "$safety" ]; then
+                printf '%s\n' "$safety" | while IFS= read -r warning; do
+                    echo -e "  ${YELLOW}warning${NC} $warning"
+                done
+            else
+                echo -e "  ${GREEN}ok${NC} disk space for the next upgrade; database volume present"
+            fi
         fi
     else
         echo -e "  ${YELLOW}not ready${NC} Docker daemon is not reachable"
