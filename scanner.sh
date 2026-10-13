@@ -2562,7 +2562,9 @@ start_services() {
         echo "  ui:      ${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
         echo "  signer:  ${SIGNER_IMAGE:-}"
         echo "  model intake: ${MODEL_INTAKE_IMAGE:-}"
-        # Before anything is downloaded or stopped: room for this release's images.
+        # Before anything is downloaded or stopped: keep the running release's images for rollback,
+        # and room for this release's.
+        remember_running_release
         ensure_upgrade_space || return 1
         pull_prebuilt_images
     else
@@ -2638,7 +2640,11 @@ start_services() {
         record_runtime_mode prebuilt
         # This release is running: remember it (and the one before it, for rollback) and remove
         # older ShakerScan images.
-        record_started_release
+        record_started_release prune
+    else
+        # Local builds: remember the release (so a restart is not taken for an upgrade); their
+        # images are the operator's, never pruned here.
+        record_started_release keep
     fi
     echo -e "${GREEN}Services started.${NC}"
     echo "  UI:  $(ui_base_url)"
@@ -2855,9 +2861,11 @@ show_status() {
     echo "  UI:  $(ui_base_url)"
     echo "  API: $(api_base_url)"
     local warning
-    upgrade_safety_warnings | while IFS= read -r warning; do
-        echo -e "${YELLOW}Warning:${NC} $warning"
-    done
+    if [ "${DOCKER_NEEDS_SUDO:-0}" -eq 0 ]; then
+        upgrade_safety_warnings | while IFS= read -r warning; do
+            echo -e "${YELLOW}Warning:${NC} $warning"
+        done
+    fi
 }
 
 show_logs() {

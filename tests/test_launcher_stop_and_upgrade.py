@@ -237,6 +237,11 @@ resolve_start_workers() { printf '2\n'; }
 restart_worker_count() { printf '4\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull\n'; }
+remember_running_release() { :; }
+ensure_upgrade_space() { printf 'space-check\n'; }
+ensure_pre_upgrade_backup() { printf 'pre-upgrade-backup\n'; }
+ensure_redis_ready() { printf 'redis-ready\n'; }
+record_started_release() { printf 'record-release:%s\n' "$1"; }
 resolve_docker_socket_gid() { printf '0\n'; }
 write_dotenv_value() { :; }
 record_api_sandbox_group() { :; }
@@ -325,6 +330,11 @@ def test_upgrade_start_stops_everything_then_restores_lanes_and_worker_count():
     assert output.index(primary_up) < output.index(device_up)
     assert output.index(primary_up) < output.index(gungnir_up)
     assert "specialized:0:1" in output
+    # Upgrade safety (2.10): room for the images before the pull, the database saved and Redis
+    # healthy before the services start, and the release recorded once they have.
+    assert output.index("space-check") < output.index("pull\n")
+    assert output.index("stop\n") < output.index("pre-upgrade-backup") < output.index("redis-ready")
+    assert output.index("redis-ready") < output.index(primary_up) < output.index("record-release:prune")
 
 
 def test_upgrade_start_keeps_an_explicit_worker_count():
