@@ -107,7 +107,7 @@ def _secret_store() -> Any:
     try:
         import secret_store
     except ModuleNotFoundError:  # package layout in host-side tests
-        from api import secret_store
+        from .. import secret_store
     return secret_store
 
 
