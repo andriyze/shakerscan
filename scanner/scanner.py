@@ -9207,7 +9207,6 @@ async def build_report(target: str,
                     "line_number": secret.get("line_number"),
                     "context": secret.get("context"),
                     "risk": secret["risk"],
-                    "_discovered_secret_values": secret.get("_discovered_secret_values") or [],
                 },
                 "CWE-798"
             ))

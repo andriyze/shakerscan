@@ -1854,7 +1854,16 @@ async def submit_broker_job_result(
                     status_code=413,
                     detail="broker result exceeds configured size limit",
                 )
-            result_hash = hashlib.sha256(encoded).hexdigest()
+            # Stored until the worker ingests it: mask any provider secret first. The hash covers
+            # the stored bytes (ingestion verifies it); masking is deterministic, so a node's
+            # retry of the same result still matches.
+            try:
+                from scan.finding_secrets import mask_payload
+            except ModuleNotFoundError:
+                from ..scan.finding_secrets import mask_payload
+            stored = json.dumps(
+                mask_payload(result_payload), sort_keys=True, separators=(",", ":"))
+            result_hash = hashlib.sha256(stored.encode("utf-8")).hexdigest()
             result_row = await conn.fetchrow(
                 """
                 INSERT INTO broker_job_results (lease_id, result_sha256, result)
@@ -1866,7 +1875,7 @@ async def submit_broker_job_result(
                 """,
                 row["id"],
                 result_hash,
-                encoded.decode("utf-8"),
+                stored,
             )
             if not result_row:
                 raise HTTPException(status_code=409, detail="a different result was already submitted")

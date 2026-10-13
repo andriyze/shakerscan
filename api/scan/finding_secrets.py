@@ -1,13 +1,12 @@
 """Secrets in Scan findings: keep them in the target's discovered-secrets store, never in evidence.
 
-Legacy checks (JavaScript bundle secrets, API data exposure, nuclei extractions) put the matched
-text into a finding's evidence. Before a Scan's result is written anywhere (the result artifact,
-the findings table), the worker runs :func:`scrub_report_secrets`: every self-evident provider
-secret in a finding's evidence (and the full value a check hands over privately in
-``_discovered_secret_values``) is kept, encrypted, in ``discovered_secrets`` for the Scan's target
-and replaced in the evidence by its ``secret://`` reference, or by ``[REDACTED:<kind>]`` when it
-cannot be kept (no target row, no encryption key). The replacement is idempotent: scrubbed text no
-longer matches.
+A defence in depth for every finding the worker writes: checks mask their own evidence, and before
+a Scan's result is written anywhere (the result artifact, a scan's stored result, the findings
+table, a fleet node's posted result), every self-evident provider secret still in a finding's
+evidence is kept, encrypted, in ``discovered_secrets`` for the Scan's target and replaced by its
+``secret://`` reference, or by ``[REDACTED:<kind>]`` when it cannot be kept (no target row, no
+encryption key, no database). A value handed over in ``_discovered_secret_values`` is masked and
+the key removed; it is not kept. The replacement is idempotent: scrubbed text no longer matches.
 """
 from __future__ import annotations
 
@@ -25,8 +24,9 @@ MAX_VALUES_PER_REPORT = 256
 
 def _matches(text: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
-    if not text or len(text) > MAX_STRING_CHARS:
+    if not text:
         return found
+    text = text[:MAX_STRING_CHARS]  # a longer string is searched in its first part
     for label, pattern in SELF_EVIDENT_SECRET_PATTERNS:
         if not pattern.groups:
             continue  # a structural marker (PEM header), not a value
@@ -70,44 +70,62 @@ async def scrub_findings(
     """Keep and mask the secrets in ``findings`` (dicts, changed in place). ``conn`` may be None:
     the values are then masked and not kept. Returns counts, never values."""
     values: dict[str, str] = {}
+    handed: dict[str, str] = {}
     for finding in findings:
         if not isinstance(finding, dict):
             continue
-        handed = list(finding.pop(PRIVATE_VALUES_KEY, None) or ())
-        if isinstance(finding.get("evidence"), dict):
-            handed += list(finding["evidence"].pop(PRIVATE_VALUES_KEY, None) or ())
-        for item in handed:
-            if isinstance(item, Mapping) and isinstance(item.get("value"), str) and item["value"]:
-                values.setdefault(item["value"], str(item.get("label") or "other"))
+        for holder in (finding, finding.get("evidence")):
+            if isinstance(holder, Mapping):
+                for item in holder.get(PRIVATE_VALUES_KEY) or ():
+                    if isinstance(item, Mapping) and isinstance(item.get("value"), str) and item["value"]:
+                        handed.setdefault(item["value"], str(item.get("label") or "other"))
         for key, nested in finding.items():
-            if key != "id":
+            if key not in {"id", PRIVATE_VALUES_KEY}:
                 _collect(nested, values)
-    if not values:
+    if not values and not handed:
         return {"found": 0, "kept": 0}
     pairs = list(values.items())[:MAX_VALUES_PER_REPORT]
     references: dict[str, str] = {}
-    if conn is not None and target_id:
+    if conn is not None and target_id and pairs:
         try:
-            from hunt.discovered_secrets import record_discovered, reference_for
-        except ModuleNotFoundError:
-            from ..hunt.discovered_secrets import record_discovered, reference_for
-        await record_discovered(
-            conn, target_id=target_id, values=[(value, label) for value, label in pairs],
-            source={"kind": "scan_finding", "id": str(scan_id or "")})
-        for value, _label in pairs:
-            reference = await reference_for(conn, target_id=target_id, value=value)
-            if reference:
-                references[value] = reference
+            try:
+                from hunt.discovered_secrets import record_discovered, reference_for
+            except ModuleNotFoundError:
+                from ..hunt.discovered_secrets import record_discovered, reference_for
+            await record_discovered(
+                conn, target_id=target_id, values=[(value, label) for value, label in pairs],
+                source={"kind": "scan_finding", "id": str(scan_id or "")})
+            for value, _label in pairs:
+                reference = await reference_for(conn, target_id=target_id, value=value)
+                if reference:
+                    references[value] = reference
+        except Exception:
+            references = {}  # nothing kept: every value is masked below
+    for value, label in handed.items():
+        values.setdefault(value, label)
     replacements = {
         value: (f"[{references[value]}]" if value in references else f"[REDACTED:{label}]")
         for value, label in values.items()
     }
     for finding in findings:
         if isinstance(finding, dict):
+            finding.pop(PRIVATE_VALUES_KEY, None)
+            if isinstance(finding.get("evidence"), dict):
+                finding["evidence"].pop(PRIVATE_VALUES_KEY, None)
             for key in list(finding):
                 if key != "id":
                     finding[key] = _replace(finding[key], replacements)
     return {"found": len(values), "kept": len(references)}
+
+
+def mask_payload(value: Any) -> Any:
+    """Mask (never keep) every self-evident provider secret anywhere in ``value``: for a payload
+    stored before the worker scrubs it, such as a fleet node's posted result."""
+    found: dict[str, str] = {}
+    _collect(value, found)
+    if not found:
+        return value
+    return _replace(value, {raw: f"[REDACTED:{label}]" for raw, label in found.items()})
 
 
 async def scrub_report_secrets(pool: Any, *, scan_id: Any, result: Any) -> dict[str, int]:

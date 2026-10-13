@@ -8262,6 +8262,8 @@ async def run_device_web_children(
         }
         child_score = (child_result.get("result") or {}).get("score") if isinstance(child_result.get("result"), dict) else None
         child_grade = (child_result.get("result") or {}).get("grade") if isinstance(child_result.get("result"), dict) else None
+        # The child's stored result is written before its artifact: scrub it first.
+        await scrub_report_secrets(db_pool, scan_id=child_scan_id, result=child_result)
         async with db_pool.acquire() as conn:
             child_updated = await conn.fetchval(
                 """UPDATE scans SET status=$1, result=$2, score=$3, grade=$4,

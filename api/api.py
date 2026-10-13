@@ -2719,6 +2719,15 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                         metadata["terminated_at_phase"] = (
                             checkpoint_phase or stage_checkpoint_phase
                         )
+                if isinstance(partial_result, dict):
+                    # The recovered result is stored before its findings are saved: scrub it first.
+                    try:
+                        from scan.finding_secrets import scrub_findings
+                    except ModuleNotFoundError:
+                        from .scan.finding_secrets import scrub_findings
+                    await scrub_findings(conn, target_id=scan['target_id'], scan_id=scan['id'],
+                                         findings=[f for f in partial_result.get('findings') or []
+                                                   if isinstance(f, dict)])
                 await conn.execute("""
                     UPDATE scans
                     SET status = $8,

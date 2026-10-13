@@ -53,8 +53,30 @@ def test_a_report_with_module_findings_is_scrubbed_even_when_the_database_fails(
     assert counts["found"] == 3 and AWS not in text and HANDED not in text
 
 
-def test_the_javascript_and_data_exposure_checks_keep_values_out_of_their_text():
-    source = (ROOT / "scanner" / "scanner_tools" / "client_side.py").read_text()
-    assert '"context": context.replace(full_value, masked_value)[:100]' in source
-    exposure = (ROOT / "scanner" / "scanner_tools" / "data_exposure.py").read_text()
-    assert '.replace(\n                        matched, f"[{family}:{len(matched)} chars]")' in exposure
+def test_the_javascript_context_keeps_no_raw_value_or_neighbouring_key():
+    from scanner_tools.client_side import _masked_context
+    value = "AIza" + "SyD-synthetic-google-key-1234567"
+    neighbour = "sk_test_" + "abcdefghijklmnopqrstuvwx"
+    before = f'var other="{neighbour[5:]}"; var k = "'
+    context = _masked_context(before, value, value, "AIza...4567", '"; init(k)')
+    assert value not in context and neighbour[5:] not in context
+    assert "AIza...4567" in context and "init(k)" in context
+
+
+def test_the_data_exposure_snippet_carries_no_response_text():
+    source = (ROOT / "scanner" / "scanner_tools" / "data_exposure.py").read_text()
+    assert 'snippet = f"[{family}: {len(m.group(0))} characters at offset {m.start()}]"' in source
+    assert "_discovered_secret_values" not in source
+
+
+def test_a_handed_over_value_is_masked_and_not_kept_and_long_strings_are_searched():
+    from scan.finding_secrets import mask_payload
+    findings = _findings()
+    long_text = "x" * 300_000
+    findings.append({"evidence": {"blob": AWS + long_text}})
+    asyncio.run(scrub_findings(None, target_id=None, scan_id=None, findings=findings))
+    text = json.dumps(findings)
+    assert HANDED not in text and AWS not in text and PRIVATE_VALUES_KEY not in text
+    posted = {"result": {"findings": [{"evidence": {"k": STRIPE}}]}, "note": [STRIPE]}
+    masked = mask_payload(posted)
+    assert STRIPE not in json.dumps(masked) and STRIPE in json.dumps(posted)  # a copy, not in place

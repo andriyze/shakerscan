@@ -1984,6 +1984,21 @@ def detect_server_versions(response_headers: dict[str, Any]) -> dict[str, Any]:
 # 2. SECRET LEAKS IN JAVASCRIPT BUNDLES
 # ============================================================================
 
+# A run of 16+ token characters near a secret is treated as one too: it may be a neighbouring key
+# (or a piece of one, cut at the window edge) that no pattern named.
+_TOKEN_RUN_RE = re.compile(r"[A-Za-z0-9_\-+/=.]{16,}")
+
+
+def _masked_context(before: str, matched: str, value: str, masked_value: str, after: str) -> str:
+    """The text around a JavaScript secret with the secret shown as its preview and every other
+    token-like run masked: no raw value stays in a finding's evidence."""
+    def scrub(text: str) -> str:
+        return _TOKEN_RUN_RE.sub("[...]", text.replace("\n", " "))
+
+    middle = scrub(matched.replace(value, "\x00")).replace("\x00", masked_value) if value else "***"
+    return (scrub(before) + middle + scrub(after))[-200:]
+
+
 async def test_js_secrets(
     url: str,
     discovered_urls: list[str] | None = None,
@@ -2065,10 +2080,10 @@ async def test_js_secrets(
                     # Find line number
                     line_num = js_content[:match.start()].count('\n') + 1
 
-                    # Extract context (50 chars before/after)
-                    start = max(0, match.start() - 50)
-                    end = min(len(js_content), match.end() + 50)
-                    context = js_content[start:end].replace('\n', ' ')
+                    # Context around the match, with the value and any other token-like run
+                    # (a neighbouring key, cut at the window edge or not) masked.
+                    before = js_content[max(0, match.start() - 50):match.start()]
+                    after = js_content[match.end():match.end() + 50]
 
                     # Mask sensitive value (show first 4 + last 4 chars)
                     full_value = match.group(0) if not match.groups() else (match.group(1) if len(match.groups()) > 0 else match.group(0))
@@ -2084,11 +2099,8 @@ async def test_js_secrets(
                         "file": js_url,
                         "value_preview": masked_value,
                         "line_number": line_num,
-                        # The value itself never stays in the context; the worker keeps it in
-                        # the target's discovered secrets (api/scan/finding_secrets.py).
-                        "context": context.replace(full_value, masked_value)[:100],
+                        "context": _masked_context(before, match.group(0), full_value, masked_value, after),
                         "risk": key_data.get("risk", "Unknown risk level"),
-                        "_discovered_secret_values": [{"value": full_value, "label": key_type}],
                     })
 
         except Exception:
