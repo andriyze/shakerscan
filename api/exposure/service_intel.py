@@ -129,6 +129,58 @@ def candidate_priority(row: Mapping[str, Any]) -> tuple[Any, ...]:
             -(row.get("cvss_score") or 0.0), str(row.get("id") or ""))
 
 
+# Product names fingerprints report without a CPE (httpx/tech detection, some nmap banners) ->
+# the NVD CPE vendor:product the snapshot keys on. Only unambiguous names; a version is required.
+PRODUCT_CPE_ALIASES: dict[str, tuple[str, ...]] = {
+    "nginx": ("f5:nginx", "nginx:nginx"),
+    "apache": ("apache:http_server",),
+    "apache httpd": ("apache:http_server",),
+    "apache http server": ("apache:http_server",),
+    "microsoft-iis": ("microsoft:internet_information_services",),
+    "microsoft iis httpd": ("microsoft:internet_information_services",),
+    "iis": ("microsoft:internet_information_services",),
+    "openssh": ("openbsd:openssh",),
+    "apache tomcat": ("apache:tomcat",),
+    "tomcat": ("apache:tomcat",),
+    "jetty": ("eclipse:jetty",),
+    "php": ("php:php",),
+    "mysql": ("oracle:mysql",),
+    "mariadb": ("mariadb:mariadb",),
+    "postgresql": ("postgresql:postgresql",),
+    "redis": ("redis:redis",),
+    "elasticsearch": ("elastic:elasticsearch",),
+    "jenkins": ("jenkins:jenkins",),
+    "grafana": ("grafana:grafana",),
+    "exim": ("exim:exim",),
+    "exim smtpd": ("exim:exim",),
+    "postfix": ("postfix:postfix",),
+    "postfix smtpd": ("postfix:postfix",),
+    "dovecot": ("dovecot:dovecot",),
+    "samba": ("samba:samba",),
+    "samba smbd": ("samba:samba",),
+    "isc bind": ("isc:bind",),
+    "squid": ("squid-cache:squid",),
+    "squid http proxy": ("squid-cache:squid",),
+    "haproxy": ("haproxy:haproxy",),
+    "lighttpd": ("lighttpd:lighttpd",),
+    "openssl": ("openssl:openssl",),
+    "vsftpd": ("vsftpd:vsftpd",),
+    "proftpd": ("proftpd:proftpd",),
+    "dnsmasq": ("thekelleys:dnsmasq",),
+    "dropbear sshd": ("dropbear_ssh_project:dropbear_ssh",),
+}
+_VERSION_TEXT = re.compile(r"^[0-9][0-9A-Za-z._+~-]{0,40}$")
+
+
+def derived_cpes(product: Any, version: Any) -> list[str]:
+    """CPEs for a fingerprint that names a known product and a version but carries no CPE."""
+    name = str(product or "").strip().lower()
+    version_text = str(version or "").strip().split()[0] if str(version or "").strip() else ""
+    if name not in PRODUCT_CPE_ALIASES or not _VERSION_TEXT.fullmatch(version_text):
+        return []
+    return [f"cpe:2.3:a:{alias}:{version_text}:*:*:*:*:*:*:*" for alias in PRODUCT_CPE_ALIASES[name]]
+
+
 def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher: Callable[..., Any]) -> None:
     """Attach separate applicability, reference and local-validation dimensions."""
     service["cve_candidates"] = []
@@ -150,7 +202,8 @@ def enrich_service(service: dict[str, Any], snapshot: Mapping[str, Any], matcher
             if CVE_ID.fullmatch(aid):
                 by_id.setdefault(aid, []).append(row)
     found: dict[str, dict[str, Any]] = {}
-    for cpe in service.get("cpes") or [None]:
+    cpes = list(service.get("cpes") or []) or derived_cpes(service.get("product"), service.get("version"))
+    for cpe in cpes or [None]:
         # Even authenticated identity is not proof of affected build/configuration
         # here. Findings and their verifier contract remain a separate source.
         matches = matcher(
