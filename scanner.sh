@@ -2605,6 +2605,13 @@ start_services() {
     # Everything else waits for a healthy Redis; one that cannot start is repaired here.
     ensure_redis_ready || return 1
     compose_up -d --scale worker=$start_workers || return 1
+    if [ "${REDIS_STATE_RESET:-0}" = 1 ]; then
+        # Redis started empty: services that kept running hold the old queue state (consumer
+        # groups, leases) and would not pick up new work until restarted.
+        echo "Reconnecting the API and workers to Redis..."
+        compose restart api worker agent-tool-worker || true
+        REDIS_STATE_RESET=0
+    fi
     if [ "${SHAKERSCAN_NETWORK_WORKER_ENABLED:-true}" = "false" ]; then
         compose --profile devices stop device-worker || return 1
         restore_device_workers=0

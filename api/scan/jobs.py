@@ -105,6 +105,8 @@ _BUDGET_CEILINGS: Mapping[str, int] = {
 }
 _OPTIONS_DIGEST_IGNORED_KEYS = frozenset({
     "queue_handoff_confirmed", "canonical_shard_authority",
+    # Queue lifecycle (2.10): the routing a lost job is resent with, and how often it was.
+    "queue_routing", "queue_loss_requeues",
 })
 _SHARD_ZERO_ALLOWED_BUDGET_KEYS = frozenset({
     "max_browser_actions", "max_tcp_ports", "max_tool_wall_seconds",
