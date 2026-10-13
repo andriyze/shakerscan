@@ -40,7 +40,7 @@ cleanup() {
             "$BIN_DIR/shakerscan" stop >/dev/null 2>&1 || true
         docker compose --project-name "$PROJECT" --project-directory "$RUNTIME" \
             --env-file "$RUNTIME/.env" -f "$RUNTIME/docker-compose.release.yml" \
-            down --volumes --remove-orphans >/dev/null 2>&1 || true
+            --profile model-intake down --volumes --remove-orphans >/dev/null 2>&1 || true
     fi
     # Containers write scan artifacts into the bind-mounted results tree as root. A cleanup that
     # cannot remove them must not turn a passed smoke into a failure: the runner is ephemeral, so
@@ -70,17 +70,46 @@ HOME="$SMOKE_HOME" SHAKERSCAN_HOME="$RUNTIME" SHAKERSCAN_BIN_DIR="$BIN_DIR" \
     SHAKERSCAN_RELEASE_ASSET_ROOT="file://$SMOKE_ROOT/assets" SHELL=/bin/bash \
     sh "$ROOT_DIR/install/index.sh" >/dev/null
 
-HOME="$SMOKE_HOME" COMPOSE_PROJECT_NAME="$PROJECT" WORKERS=1 \
-    SHAKERSCAN_DISABLE_IMAGE_LOCK=1 \
-    SCANNER_IMAGE="shakerscan-scanner:$VERSION" API_IMAGE="shakerscan-api:$VERSION" \
-    UI_IMAGE="shakerscan-ui:$VERSION" SIGNER_IMAGE="shakerscan-model-intake-signer:$VERSION" \
-            MODEL_INTAKE_IMAGE="shakerscan-model-intake:$VERSION" \
-    SCANNER_IMAGE_TAG="$VERSION" SCANNER_IMAGE_REPO=shakerscan-scanner \
-    API_IMAGE_REPO=shakerscan-api UI_IMAGE_REPO=shakerscan-ui \
-    MODEL_INTAKE_SIGNER_IMAGE_REPO=shakerscan-model-intake-signer \
-    SHAKERSCAN_PULL_IMAGES=0 SHAKERSCAN_API_PORT="$API_PORT" SHAKERSCAN_UI_PORT="$UI_PORT" \
-    POSTGRES_PORT="$POSTGRES_PORT" REDIS_PORT="$REDIS_PORT" \
-    "$BIN_DIR/shakerscan" start -y
+# The installed launcher with this smoke's exact images, ports and project (no pulls).
+launcher() {
+    HOME="$SMOKE_HOME" COMPOSE_PROJECT_NAME="$PROJECT" WORKERS=1 \
+        SHAKERSCAN_DISABLE_IMAGE_LOCK=1 \
+        SCANNER_IMAGE="shakerscan-scanner:$VERSION" API_IMAGE="shakerscan-api:$VERSION" \
+        UI_IMAGE="shakerscan-ui:$VERSION" SIGNER_IMAGE="shakerscan-model-intake-signer:$VERSION" \
+                MODEL_INTAKE_IMAGE="shakerscan-model-intake:$VERSION" \
+        SCANNER_IMAGE_TAG="$VERSION" SCANNER_IMAGE_REPO=shakerscan-scanner \
+        API_IMAGE_REPO=shakerscan-api UI_IMAGE_REPO=shakerscan-ui \
+        MODEL_INTAKE_SIGNER_IMAGE_REPO=shakerscan-model-intake-signer \
+        SHAKERSCAN_PULL_IMAGES=0 SHAKERSCAN_API_PORT="$API_PORT" SHAKERSCAN_UI_PORT="$UI_PORT" \
+        POSTGRES_PORT="$POSTGRES_PORT" REDIS_PORT="$REDIS_PORT" \
+        "$BIN_DIR/shakerscan" "$@"
+}
+
+launcher start -y
+
+# Model Intake is an optional module (2.10): a new install starts without it. Certify that mode,
+# then turn it on with the real command for every Model Intake check that follows.
+check_equal "new install Model Intake setting" \
+    "$(sed -n 's/^SHAKERSCAN_MODEL_INTAKE_ENABLED=//p' "$RUNTIME/.env" | tail -n 1)" "false"
+check_equal "Model Intake reported off" \
+    "$(curl -fsS "http://127.0.0.1:$API_PORT/health" | jq -r '.model_intake_worker.status')" "disabled"
+check_equal "no Model Intake container while off" \
+    "$(docker ps --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Label "com.docker.compose.service"}}' \
+        | grep -c '^model-intake-' || true)" "0"
+module_off_status="$(curl -sS -o "$SMOKE_ROOT/module-off.json" -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$API_PORT/model-intake/submissions")"
+check_equal "Model Intake change refused while off" "$module_off_status" "409"
+check_equal "Model Intake refusal reason" "$(jq -r '.detail.reason_code' "$SMOKE_ROOT/module-off.json")" \
+    "module_not_installed"
+launcher model-intake enable
+check_equal "Model Intake setting after enable" \
+    "$(sed -n 's/^SHAKERSCAN_MODEL_INTAKE_ENABLED=//p' "$RUNTIME/.env" | tail -n 1)" "true"
+for _ in $(seq 1 60); do
+    [ "$(curl -fsS "http://127.0.0.1:$API_PORT/health" | jq -r '.model_intake_worker.status')" = ready ] && break
+    sleep 2
+done
+check_equal "Model Intake worker after enable" \
+    "$(curl -fsS "http://127.0.0.1:$API_PORT/health" | jq -r '.model_intake_worker.status')" "ready"
 
 api_health="$(curl -fsS "http://127.0.0.1:$API_PORT/health")"
 ui_identity="$(curl -fsS "http://127.0.0.1:$UI_PORT/api/build-identity")"
