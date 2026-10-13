@@ -2896,14 +2896,19 @@ async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
         return 0
 
     repaired = 0
+    requeued = 0
     now = utc_now()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT id, job_id, parent_scan_id
-               FROM scans
-               WHERE status IN ('pending','queued')
-                 AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture','device_probe','device_web_dast')
-                 AND created_at < $1""",
+            """SELECT s.id, s.job_id, s.parent_scan_id, s.scan_role, s.scan_generation, s.options,
+                      s.scan_job_payload,
+                      (s.started_at IS NULL AND s.worker_id IS NULL AND NOT EXISTS (
+                          SELECT 1 FROM scan_capability_actions a
+                          WHERE a.scan_id=s.id AND a.status <> 'planned')) AS never_started
+               FROM scans s
+               WHERE s.status IN ('pending','queued')
+                 AND COALESCE(s.run_kind, 'web_dast') NOT IN ('device_posture','device_probe','device_web_dast')
+                 AND s.created_at < $1""",
             now - timedelta(minutes=10),
         )
         for row in rows:
@@ -2912,6 +2917,13 @@ async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
                 continue
             job_state = _decode_redis_hash(r.hgetall(f"job:{job_id}")) if job_id else {}
             if str(job_state.get("status") or "") == "running" and job_state.get("heartbeat"):
+                continue
+            # Provably never started (no start, no worker, no action past "planned") and lost from
+            # the queue, typically because Redis lost its data: send the persisted job again
+            # rather than leave the Scan pending forever. Anything that may have run keeps the
+            # conservative flag below (an unknown outcome is never replaced).
+            if row.get("never_started") and await _requeue_scan_lost_from_queue(conn, r, row):
+                requeued += 1
                 continue
             updated = await conn.fetchrow(
                 """UPDATE scans
@@ -2927,7 +2939,53 @@ async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
             repaired += 1
     if repaired:
         print(f"[cleanup] flagged {repaired} uncertain pending Scan handoff(s)", flush=True)
-    return repaired
+    if requeued:
+        print(f"[cleanup] queued {requeued} never-started Scan(s) lost from the queue again", flush=True)
+    return repaired + requeued
+
+
+QUEUE_LOSS_REQUEUE_LIMIT = 3
+
+
+async def _requeue_scan_lost_from_queue(conn, r, row) -> bool:
+    """Send a never-started Scan's persisted canonical job to the queue again (at most
+    QUEUE_LOSS_REQUEUE_LIMIT times). False when it cannot be rebuilt or was already resent."""
+    if str(row.get("scan_generation") or "") != "v2" or str(row.get("scan_role") or "") not in {
+        "standalone", "parent",
+    }:
+        return False
+    options = parse_json_field(row.get("options")) or {}
+    attempts = int(options.get("queue_loss_requeues") or 0)
+    if attempts >= QUEUE_LOSS_REQUEUE_LIMIT:
+        return False
+    try:
+        job = CanonicalScanJob.from_payload(parse_json_field(row.get("scan_job_payload")) or {})
+        payload = job.queue_payload(
+            placement=options.get("placement") if isinstance(options.get("placement"), Mapping) else None,
+        )
+    except CanonicalScanJobError:
+        return False
+    if str(row.get("scan_role")) == "parent":
+        _configure_scan_plan_job(payload, int(options.get("worker_fleet_size_at_submit") or 0) or None)
+    scan_id = str(row["id"])
+    if not r.set(f"scan:queue-loss-requeue:{scan_id}", "1", nx=True, ex=900):
+        return False
+    claimed = await conn.fetchval(
+        """UPDATE scans
+           SET options = jsonb_set(COALESCE(options, '{}'::jsonb), '{queue_loss_requeues}', to_jsonb($2::int)),
+               current_phase = 'queued_again', error_message = NULL
+           WHERE id=$1 AND status IN ('pending','queued') AND started_at IS NULL AND worker_id IS NULL
+           RETURNING id""",
+        row["id"], attempts + 1,
+    )
+    if not claimed:
+        return False
+    try:
+        enqueue_job(r, QUEUE_NAME, payload)
+    except Exception:
+        logger.exception("Could not queue Scan %s again after a queue loss", scan_id)
+        return False
+    return True
 
 
 async def recover_parallel_orchestration(pool: asyncpg.Pool) -> int:
