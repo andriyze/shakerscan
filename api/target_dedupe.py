@@ -140,6 +140,8 @@ MERGE_UNIQUE_TABLES: list[tuple[str, list[str]]] = [
     ("application_graph_nodes", ["node_type", "node_key"]),
     ("application_graph_edges", ["src_key", "dst_key", "edge_type"]),
     ("target_principal_provisioning_attempts", ["auth_state"]),
+    # Discovered secrets follow the surviving target; the same value on both keeps the survivor's.
+    ("discovered_secrets", ["value_digest"]),
 ]
 # target_id-bearing tables without a target_id unique constraint — plain reassignment.
 MERGE_PLAIN_TABLES: list[str] = [

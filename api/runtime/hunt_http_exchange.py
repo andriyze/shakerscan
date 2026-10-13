@@ -293,6 +293,19 @@ async def sealed_hunt_knowledge(conn: Any, *, run_id: Any, target: TargetBinding
             if isinstance(value, str) and len(value) >= _MIN_SEEDED_CHARS and len(value) <= budget and value not in values:
                 values.append(value)
                 budget -= len(value)
+    # Values this Hunt sent by secret:// reference were never sealed in it: they are seeded too,
+    # first, so a later response that echoes one withholds it.
+    try:
+        from hunt.discovered_secrets import values_used_by_hunt
+    except ModuleNotFoundError:  # package import layout
+        from ..hunt.discovered_secrets import values_used_by_hunt
+    try:
+        used = await values_used_by_hunt(conn, run_id)
+    except Exception:
+        used = []
+    for value in reversed(used):
+        if len(value) >= _MIN_SEEDED_CHARS and value not in values:
+            values.insert(0, value)
     return {"values": values, "sql_tables": tables, "context_bytes": context_bytes}
 
 
@@ -429,8 +442,11 @@ async def persist_withheld_values(
     tables: dict[str, dict[str, list[str]]] = {}
     seeded: Any = {}
     context_bytes = 0
+    already_held: set[str] = set()
     if not isinstance(values, Mapping):
         collector = values
+        # Values this action sent, or that the Hunt already held, are not new sightings.
+        already_held = {str(v) for v in (*getattr(collector, "known", ()), *getattr(collector, "found", ()))}
         values = collector.shown_values(json.dumps(observations, default=str))
         tables = collector.sql_tables if _sql_entries(collector.sql_tables) else {}
         seeded = getattr(collector, "sql_seeded", {}) or {}
@@ -496,7 +512,7 @@ async def persist_withheld_values(
     # The target's discovered-secrets store keeps what this action sealed, for later Hunts of the
     # same target (secret://<id>); its own savepoint, so a failure there never undoes the seal.
     found = [(str(value), "") for number, value in sorted(values.items())
-             if str(int(number)) in kept_numbers]
+             if str(int(number)) in kept_numbers and str(value) not in already_held]
     if found:
         try:
             from hunt.discovered_secrets import record_discovered

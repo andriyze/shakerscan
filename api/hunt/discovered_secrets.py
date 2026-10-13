@@ -40,6 +40,10 @@ MAX_VALUE_CHARS = 8_192
 MAX_LABEL_CHARS = 120
 MAX_LIST = 200
 MAX_PER_SIGHTING = 64
+# Rows kept per target; past it the least recently seen inactive, then active, rows go first.
+MAX_PER_TARGET = 2_000
+# An expired or revoked row's ciphertext is deleted this long after it stopped being usable.
+RETAIN_AFTER_EXPIRY_DAYS = 30
 
 SECRET_REF_PATTERN = (
     r"^secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -85,13 +89,15 @@ CREATE INDEX IF NOT EXISTS idx_discovered_secrets_target
 CREATE TABLE IF NOT EXISTS discovered_secret_uses (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
-    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
-    action_id UUID NOT NULL REFERENCES hunt_actions(id) ON DELETE CASCADE,
+    hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL,
+    action_id UUID REFERENCES hunt_actions(id) ON DELETE SET NULL,
     destination_host TEXT NOT NULL DEFAULT '' CHECK (length(destination_host) <= 255),
     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_secret
     ON discovered_secret_uses(secret_id, used_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_run
+    ON discovered_secret_uses(hunt_run_id);
 """
 
 
@@ -191,10 +197,14 @@ async def record_discovered(
                 digest = value_digest(text)
                 if digest is None:
                     return counts
+                # A sighting extends the expiry and revives an expired row only while no operator
+                # has decided about the row (revoked, or set its expiry): that decision stands.
                 refreshed = await conn.fetchval(
                     """UPDATE discovered_secrets SET last_seen_at=NOW(), seen_count=seen_count+1,
-                        expires_at=GREATEST(expires_at, NOW() + make_interval(days => $3)),
-                        state=CASE WHEN state='expired' THEN 'active' ELSE state END
+                        expires_at=CASE WHEN state_changed_by IS NULL
+                            THEN GREATEST(expires_at, NOW() + make_interval(days => $3)) ELSE expires_at END,
+                        state=CASE WHEN state='expired' AND state_changed_by IS NULL THEN 'active'
+                            ELSE state END
                     WHERE target_id=$1 AND value_digest=$2 RETURNING id""",
                     target, digest, ttl,
                 )
@@ -217,9 +227,41 @@ async def record_discovered(
                     json.dumps(clean_source), ttl,
                 )
                 counts["stored" if inserted else "refreshed"] += 1
+            if counts["stored"]:
+                await _cap_target(conn, target)
     except Exception:
         return {"stored": 0, "refreshed": 0}
     return counts
+
+
+async def _cap_target(conn: Any, target: uuid.UUID) -> None:
+    await conn.execute(
+        """DELETE FROM discovered_secrets WHERE id IN (
+            SELECT id FROM discovered_secrets WHERE target_id=$1
+            ORDER BY (state='active' AND expires_at > NOW()) DESC, last_seen_at DESC, id
+            OFFSET $2)""",
+        target, MAX_PER_TARGET,
+    )
+
+
+async def values_used_by_hunt(conn: Any, hunt_run_id: Any, *, limit: int = 64) -> list[str]:
+    """The values this Hunt sent by ``secret://`` reference, most recent first: the worker
+    withholds them wherever a later response of the Hunt echoes them, as it does for the values
+    the Hunt sealed itself. Worker-private; an unreadable row contributes nothing."""
+    rows = await conn.fetch(
+        """SELECT s.value_ciphertext FROM discovered_secrets s
+        JOIN (SELECT secret_id, max(used_at) AS used_at FROM discovered_secret_uses
+              WHERE hunt_run_id=$1 GROUP BY secret_id) u ON u.secret_id=s.id
+        ORDER BY u.used_at DESC LIMIT $2""",
+        uuid.UUID(str(hunt_run_id)), max(1, int(limit)),
+    )
+    values = []
+    for row in rows:
+        try:
+            values.append(str(_secret_store().decrypt_secret(str(row["value_ciphertext"]))))
+        except Exception:
+            continue
+    return values
 
 
 def parse_reference(reference: Any) -> uuid.UUID:
@@ -345,9 +387,16 @@ async def purge_target(conn: Any, *, target_id: Any) -> int:
     return int(str(result).rsplit(" ", 1)[-1] or 0)
 
 
-async def expire_due(conn: Any) -> int:
-    """Mark active rows past their expiry ``expired`` (a sweeper; resolution checks the time
-    itself, so this only keeps listings honest)."""
-    result = await conn.execute(
+async def expire_due(conn: Any) -> dict[str, int]:
+    """The sweeper: mark active rows past their expiry ``expired`` (resolution checks the time
+    itself), and delete the ciphertext of rows unusable for RETAIN_AFTER_EXPIRY_DAYS."""
+    expired = await conn.execute(
         "UPDATE discovered_secrets SET state='expired' WHERE state='active' AND expires_at <= NOW()")
-    return int(str(result).rsplit(" ", 1)[-1] or 0)
+    deleted = await conn.execute(
+        """DELETE FROM discovered_secrets WHERE state <> 'active'
+        AND GREATEST(expires_at, COALESCE(state_changed_at, expires_at))
+            <= NOW() - make_interval(days => $1)""",
+        RETAIN_AFTER_EXPIRY_DAYS,
+    )
+    return {"expired": int(str(expired).rsplit(" ", 1)[-1] or 0),
+            "deleted": int(str(deleted).rsplit(" ", 1)[-1] or 0)}

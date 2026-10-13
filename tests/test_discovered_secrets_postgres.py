@@ -142,11 +142,16 @@ def test_a_reference_resolves_only_for_its_target_while_active_and_records_the_u
         with pytest.raises(store.DiscoveredSecretError) as expired:
             await store.resolve_for_hunt(conn, reference=ref, target_id=target, hunt_run_id=hunt, action_id=action)
         assert expired.value.reason == store.SECRET_EXPIRED
-        assert await store.expire_due(conn) == 1
+        assert (await store.expire_due(conn))["expired"] == 1
         assert await store.list_for_target(conn, target, usable_only=True) == []
-        # Seen again after expiry: active again, with a fresh expiry.
+        # An operator decided about this row (revoked, then reactivated): a later sighting does not
+        # revive it after expiry; the operator can.
         await store.record_discovered(
             conn, target_id=target, values=[(SYNTHETIC, "")], source={"kind": "retest", "id": "r2"})
+        assert await store.list_for_target(conn, target, usable_only=True) == []
+        assert await store.set_state(conn, target_id=target, secret_id=secret_id, state="active",
+                                     actor="operator:test")
+        assert await store.set_expiry(conn, target_id=target, secret_id=secret_id, days=7, actor="operator:test")
         assert (await store.list_for_target(conn, target, usable_only=True))[0]["ref"] == ref
     run(scenario)
 
@@ -225,4 +230,91 @@ def test_sealing_a_hunt_actions_withheld_values_keeps_them_for_the_target():
         listed = await store.list_for_target(conn, target)
         assert len(listed) == 2 and {item["source"]["id"] for item in listed} == {str(action)}
         assert all(item["source"]["hunt_id"] == str(hunt) for item in listed)
+    run(scenario)
+
+
+def test_a_value_sent_by_reference_is_withheld_from_the_hunts_later_echoes():
+    from runtime.hunt_http_exchange import sealed_hunt_knowledge
+    from runtime.models import TargetBinding
+
+    async def scenario(conn):
+        target = await _target(conn)
+        await store.record_discovered(
+            conn, target_id=target, values=[(SYNTHETIC, "")], source={"kind": "hunt_action"})
+        ref = (await store.list_for_target(conn, target))[0]["ref"]
+        hunt, action = await _hunt(conn, target)
+        binding = TargetBinding(target_id=str(target), target_kind="web", canonical_host="app.example.invalid")
+        before = await sealed_hunt_knowledge(conn, run_id=hunt, target=binding)
+        assert SYNTHETIC not in before["values"]
+        await store.resolve_for_hunt(conn, reference=ref, target_id=target, hunt_run_id=hunt, action_id=action)
+        after = await sealed_hunt_knowledge(conn, run_id=hunt, target=binding)
+        assert after["values"][0] == SYNTHETIC  # seeded first: every later echo is withheld
+        other_hunt, _ = await _hunt(conn, target)
+        assert SYNTHETIC not in (await sealed_hunt_knowledge(conn, run_id=other_hunt, target=binding))["values"]
+    run(scenario)
+
+
+def test_an_operators_expiry_is_not_extended_by_sightings_and_expired_rows_are_swept():
+    async def scenario(conn):
+        target = await _target(conn)
+        await store.record_discovered(
+            conn, target_id=target, values=[(SYNTHETIC, "")], source={"kind": "hunt_action"})
+        ref = (await store.list_for_target(conn, target))[0]["ref"]
+        secret_id = ref.removeprefix("secret://")
+        assert await store.set_expiry(conn, target_id=target, secret_id=secret_id, days=1, actor="operator:test")
+        before = (await store.list_for_target(conn, target))[0]["expires_at"]
+        await store.record_discovered(
+            conn, target_id=target, values=[(SYNTHETIC, "")], source={"kind": "retest"})
+        assert (await store.list_for_target(conn, target))[0]["expires_at"] == before
+        await conn.execute(
+            "UPDATE discovered_secrets SET expires_at=NOW() - interval '1 second' WHERE id=$1::uuid", secret_id)
+        assert (await store.expire_due(conn))["expired"] >= 1
+        await store.record_discovered(
+            conn, target_id=target, values=[(SYNTHETIC, "")], source={"kind": "retest"})
+        assert (await store.list_for_target(conn, target))[0]["state"] == "expired"  # operator's call stands
+        await conn.execute(
+            """UPDATE discovered_secrets SET expires_at=NOW() - make_interval(days => $2),
+                state_changed_at=NOW() - make_interval(days => $2) WHERE id=$1::uuid""",
+            secret_id, store.RETAIN_AFTER_EXPIRY_DAYS + 1)
+        assert (await store.expire_due(conn))["deleted"] >= 1
+        assert await store.list_for_target(conn, target) == []
+    run(scenario)
+
+
+def test_deleting_a_hunt_erases_what_it_found_and_keeps_other_hunts_use_records():
+    from data_lifecycle import records
+
+    async def scenario(conn):
+        target = await _target(conn)
+        finder, finder_action = await _hunt(conn, target)
+        user, user_action = await _hunt(conn, target)
+        await store.record_discovered(
+            conn, target_id=target, values=[(SYNTHETIC, "")],
+            source={"kind": "hunt_action", "id": str(finder_action), "hunt_id": str(finder)})
+        await store.record_discovered(
+            conn, target_id=target, values=[(SYNTHETIC_JWT, "")], source={"kind": "scan_finding", "id": "s"})
+        jwt_ref = next(i["ref"] for i in await store.list_for_target(conn, target) if i["kind"] == "jwt")
+        await store.resolve_for_hunt(conn, reference=jwt_ref, target_id=target, hunt_run_id=user, action_id=user_action)
+        columns = {"discovered_secrets": {"source"}}
+        predicate = records.owned("hunt", columns)["discovered_secrets"]
+        await conn.execute(f"DELETE FROM discovered_secrets r WHERE {predicate}", [finder])
+        kinds = {i["kind"] for i in await store.list_for_target(conn, target)}
+        assert kinds == {"jwt"}  # the finder's secret is gone, the other stays
+        await conn.execute("DELETE FROM hunt_runs WHERE id=$1", user)
+        uses = await conn.fetch(
+            "SELECT hunt_run_id FROM discovered_secret_uses WHERE secret_id=$1::uuid",
+            jwt_ref.removeprefix("secret://"))
+        assert uses and all(row["hunt_run_id"] is None for row in uses)  # the use record survives
+    run(scenario)
+
+
+def test_a_target_keeps_at_most_its_cap(monkeypatch):
+    monkeypatch.setattr(store, "MAX_PER_TARGET", 3)
+
+    async def scenario(conn):
+        target = await _target(conn)
+        await store.record_discovered(
+            conn, target_id=target, values=[(f"synthetic-value-{i:03d}", "") for i in range(5)],
+            source={"kind": "hunt_action"})
+        assert await conn.fetchval("SELECT count(*) FROM discovered_secrets WHERE target_id=$1", target) == 3
     run(scenario)
