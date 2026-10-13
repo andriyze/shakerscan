@@ -69,7 +69,7 @@ make_install() {
     local project="$1" dir="$WORK/$1"
     mkdir -p "$dir/scripts" "$dir/db"
     cp "$ROOT/scanner.sh" "$ROOT/docker-compose.release.yml" "$ROOT/docker-compose.yml" "$dir/"
-    cp "$ROOT/scripts/postgres_upgrade.sh" "$dir/scripts/"
+    cp "$ROOT/scripts/postgres_upgrade.sh" "$ROOT/scripts/upgrade_safety.sh" "$dir/scripts/"
     cp "$ROOT/db/init.sql" "$dir/db/"
     [ ! -f "$ROOT/VERSION" ] || cp "$ROOT/VERSION" "$dir/"
     printf 'POSTGRES_PASSWORD=%s\n' "$PASSWORD" > "$dir/.env"

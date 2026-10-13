@@ -275,13 +275,16 @@ start_services "$@"
 
 
 def _start(*args: str, reason: str, network_enabled: str = 'true', device_failure: bool = False,
-           redis_reset: bool = False) -> str:
+           redis_reset: bool = False, model_intake: bool = False) -> str:
     harness = (
         START_HARNESS.replace("__COMPOSE_UP__", SCRIPT.split("\ncompose_up() {", 1)[1].split("\n}", 1)[0])
         .replace("__START_SERVICES__", SCRIPT.split("\nstart_services() {", 1)[1].split("\n}", 1)[0])
     )
     if device_failure:
         harness = harness.replace('compose() { printf', 'compose() { [[ "$*" != *"up --no-build -d device-worker"* ]] || return 9; printf')
+    if model_intake:
+        harness = harness.replace("wait_for_url() { :; }",
+                                  "wait_for_url() { printf 'wait:%s\\n' \"$1\"; }\nmodel_intake_enabled() { return 0; }")
     if redis_reset:
         assert "ensure_redis_ready() {" in harness
         harness = harness.replace("ensure_redis_ready() {", "ensure_redis_ready() { REDIS_STATE_RESET=1;")
@@ -461,3 +464,12 @@ def test_after_redis_starts_empty_the_api_and_workers_are_restarted_onto_it():
     assert "compose:restart api worker agent-tool-worker" in output
     assert output.index("compose:up --no-build -d --scale worker=2") < output.index("compose:restart api")
     assert "compose:restart" not in _start('2', '0', reason='')
+
+
+def test_model_intake_starts_only_after_the_api_is_healthy():
+    """2.10: on an upgraded database the API's startup migrations create the Model Intake tables
+    the signer's role is granted on; starting the signer init before them failed with exit 3
+    (release PR smoke, 2026-10-13)."""
+    output = _start('2', '0', reason='', model_intake=True)
+    assert "wait:API" in output
+    assert output.index("wait:API") < output.index("--profile model-intake up --no-build -d model-intake-signer-db-init")

@@ -2627,16 +2627,20 @@ start_services() {
         echo -e "${YELLOW}Recreating the Gungnir CT monitor from the selected image...${NC}"
         compose --profile gungnir up --no-build -d --force-recreate gungnir-worker || return 1
     fi
-    if model_intake_enabled; then
-        echo -e "${GREEN}Starting Model Intake...${NC}"
-        compose --profile model-intake up --no-build -d \
-            model-intake-signer-db-init model-intake-signer model-intake-worker model-intake-sandbox || return 1
-    elif [ "$(running_compose_service_count model-intake-worker)" -gt 0 ] \
-        || [ "$(running_compose_service_count model-intake-signer)" -gt 0 ]; then
+    if ! model_intake_enabled \
+        && { [ "$(running_compose_service_count model-intake-worker)" -gt 0 ] \
+            || [ "$(running_compose_service_count model-intake-signer)" -gt 0 ]; }; then
         compose --profile model-intake stop model-intake-worker model-intake-sandbox model-intake-signer || return 1
     fi
     echo ""
     wait_for_url "API" "$(api_probe_url)/health" 120
+    if model_intake_enabled; then
+        # After the API is healthy: its startup migrations create the Model Intake tables the
+        # signer's database role is granted on (an upgraded database may not have them yet).
+        echo -e "${GREEN}Starting Model Intake...${NC}"
+        compose --profile model-intake up --no-build -d \
+            model-intake-signer-db-init model-intake-signer model-intake-worker model-intake-sandbox || return 1
+    fi
     wait_for_url "UI" "$(ui_probe_url)" 120
     verify_running_build_identity
     verify_specialized_worker_identity \
