@@ -2795,6 +2795,16 @@ class DatabaseNeutralScanActionDispatcher:
                 attempt_observations.append(await asyncio.to_thread(
                     _exposure_observation, probe_url, discovered_via, signature, result,
                 ))
+                # The values themselves stay out of the observation; a backend that holds the
+                # installation key keeps them for the target (discovered secrets).
+                recorder = getattr(self.backend, "record_discovered_secrets", None)
+                if callable(recorder):
+                    found = [(item.value, item.key) for item in signature.secrets if item.value]
+                    keys, held = signature.withheld_keys, signature.withheld_values
+                    found += [(value, keys[index] if len(keys) == len(held) else "")
+                              for index, value in enumerate(held) if value]
+                    if found:
+                        await recorder(action.action_id, found, probe_url)
                 # A listing is metadata, not proof that children are confidential.
                 # Existing bounded follow-up still records content observations.
                 if (

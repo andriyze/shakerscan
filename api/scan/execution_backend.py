@@ -388,6 +388,30 @@ class PostgresScanExecutionBackend:
     def _token_hash(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
+    async def record_discovered_secrets(
+        self, action_id: str, values: list[tuple[str, str]], resource: str,
+    ) -> dict[str, int]:
+        """Keep the secret values an action of this Scan found (exposure probe) for the Scan's
+        target, encrypted, usable later by reference. Optional on a backend: a remote one does
+        not hold the values' key. Never raises; returns counts only."""
+        self._require_action(action_id)
+        try:
+            try:
+                from hunt.discovered_secrets import record_discovered
+            except ModuleNotFoundError:
+                from ..hunt.discovered_secrets import record_discovered
+            async with self._pool.acquire() as conn:
+                target_id = await conn.fetchval(
+                    "SELECT target_id FROM scans WHERE id=$1", uuid.UUID(self._plan.scan_id))
+                if not target_id:
+                    return {"stored": 0, "refreshed": 0}
+                return await record_discovered(
+                    conn, target_id=target_id, values=values,
+                    source={"kind": "scan_finding", "id": str(self._plan.scan_id),
+                            "resource": str(resource or "")[:200]})
+        except Exception:
+            return {"stored": 0, "refreshed": 0}
+
     async def _persist_recovered_terminal_action(
         self,
         conn: Any,
