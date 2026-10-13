@@ -238,6 +238,11 @@ warn_if_ui_port_has_foreign_listener() { :; }
 resolve_start_workers() { printf '1\\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { :; }
+remember_running_release() { :; }
+ensure_upgrade_space() { :; }
+ensure_pre_upgrade_backup() { :; }
+ensure_redis_ready() { :; }
+record_started_release() { :; }
 record_runtime_mode() { :; }
 compose() { :; }
 compose_up() { echo "up-key=$SHAKERSCAN_API_SANDBOX_GROUP_GID"; }
