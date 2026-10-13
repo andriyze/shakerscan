@@ -365,6 +365,12 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
         from .knowledge_changes import briefing_changes
         return await briefing_changes(conn, target, device=device, hunt_id=item.get("id"))
 
+    async def discovered_secrets() -> dict[str, Any]:
+        from .discovered_secrets import briefing_counts
+        if device:
+            return {"usable": 0, "never_used": 0, "by_kind": {}, "list_with": "secrets.inspect"}
+        return await briefing_counts(conn, target)
+
     async def continuation() -> dict[str, Any]:
         from .knowledge_continue import briefing_continuation
         return await briefing_continuation(conn, item)
@@ -376,6 +382,7 @@ async def live_sections(conn: Any, row: Mapping[str, Any]) -> dict[str, Any]:
     await section("proposals", proposals)
     await section("unresolved", unresolved)
     await section("delegation", delegation)
+    await section("discovered_secrets", discovered_secrets)
     return sections
 
 
@@ -395,6 +402,7 @@ async def with_live_briefing(conn: Any, result: dict[str, Any], row: Mapping[str
     briefing["continue_after_release"] = live.get("continue_after_release")
     briefing["proposals"] = live.get("proposals")
     briefing["unresolved"] = live.get("unresolved")
+    briefing["discovered_secrets"] = live.get("discovered_secrets")
     delegation = live.get("delegation")
     if isinstance(delegation, dict) and "available" not in delegation:
         authority = dict(briefing.get("authority") or {})

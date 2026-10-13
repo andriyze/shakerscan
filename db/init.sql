@@ -2716,3 +2716,13 @@ CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_secret
     ON discovered_secret_uses(secret_id, used_at DESC);
 CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_run
     ON discovered_secret_uses(hunt_run_id);
+CREATE TABLE IF NOT EXISTS discovered_secret_grants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    granted_by TEXT NOT NULL CHECK (length(granted_by) BETWEEN 1 AND 200),
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT discovered_secret_grants_unique UNIQUE (secret_id, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_discovered_secret_grants_target
+    ON discovered_secret_grants(target_id);

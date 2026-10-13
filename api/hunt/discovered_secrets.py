@@ -56,6 +56,7 @@ SECRET_UNAVAILABLE = "secret_unavailable"
 SECRET_TARGET_MISMATCH = "secret_target_mismatch"
 SECRET_NOT_ACTIVE = "secret_not_active"
 SECRET_EXPIRED = "secret_expired"
+MAX_GRANTS_PER_SECRET = 50
 
 
 def _values(values: tuple[str, ...]) -> str:
@@ -98,6 +99,16 @@ CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_secret
     ON discovered_secret_uses(secret_id, used_at DESC);
 CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_run
     ON discovered_secret_uses(hunt_run_id);
+CREATE TABLE IF NOT EXISTS discovered_secret_grants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    granted_by TEXT NOT NULL CHECK (length(granted_by) BETWEEN 1 AND 200),
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT discovered_secret_grants_unique UNIQUE (secret_id, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_discovered_secret_grants_target
+    ON discovered_secret_grants(target_id);
 """
 
 
@@ -275,6 +286,32 @@ async def reference_for(conn: Any, *, target_id: Any, value: str) -> str | None:
     return f"secret://{found}" if found else None
 
 
+async def briefing_counts(conn: Any, target_id: Any) -> dict[str, Any]:
+    """For a Hunt's briefing: how many secrets this target holds that a Hunt can use, how many
+    were never tried, by kind. Counts only."""
+    target = _target_uuid(target_id)
+    rows = await conn.fetch(
+        """SELECT s.kind, count(*) AS count,
+            count(*) FILTER (WHERE NOT EXISTS (
+                SELECT 1 FROM discovered_secret_uses u WHERE u.secret_id=s.id)) AS never_used
+        FROM discovered_secrets s
+        WHERE (s.target_id=$1 OR EXISTS (SELECT 1 FROM discovered_secret_grants g
+                                         WHERE g.secret_id=s.id AND g.target_id=$1))
+          AND s.state='active' AND s.expires_at > NOW()
+        GROUP BY s.kind ORDER BY s.kind""",
+        target,
+    ) if target is not None else []
+    by_kind = {str(row["kind"]): int(row["count"]) for row in rows}
+    return {
+        "usable": sum(by_kind.values()),
+        "never_used": sum(int(row["never_used"]) for row in rows),
+        "by_kind": by_kind,
+        "list_with": "secrets.inspect",
+        "use_with": 'http.request request_bindings: {"secret_ref": "secret://<id>", ...}; '
+                    "the worker sends the value, which is never shown",
+    }
+
+
 def parse_reference(reference: Any) -> uuid.UUID:
     text = str(reference or "")
     if not SECRET_REF_RE.fullmatch(text):
@@ -298,7 +335,10 @@ async def resolve_for_hunt(
     )
     if row is None:
         raise DiscoveredSecretError(SECRET_UNAVAILABLE, "secret reference is unavailable")
-    if str(row["target_id"]) != str(_target_uuid(target_id)):
+    if str(row["target_id"]) != str(_target_uuid(target_id)) and not await conn.fetchval(
+        "SELECT 1 FROM discovered_secret_grants WHERE secret_id=$1 AND target_id=$2",
+        secret_id, _target_uuid(target_id),
+    ):
         raise DiscoveredSecretError(
             SECRET_TARGET_MISMATCH,
             "secret reference belongs to another target; an operator grant is required")
@@ -336,6 +376,8 @@ def _public(row: Mapping[str, Any]) -> dict[str, Any]:
         "expires_at": row["expires_at"].isoformat(),
         "uses": row["uses"],
         "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None,
+        "found_on": str(row["target_id"]),
+        "granted_to": [str(item) for item in (row["granted_to"] or [])],
     }
 
 
@@ -347,14 +389,19 @@ async def list_for_target(
     target = _target_uuid(target_id)
     if target is None:
         return []
+    # The target's own secrets, and secrets of other targets an operator granted to it.
     rows = await conn.fetch(
-        f"""SELECT s.id, s.kind, s.label, s.length, s.source, s.first_seen_at, s.last_seen_at,
-            s.seen_count, s.state, s.expires_at,
+        f"""SELECT s.id, s.target_id, s.kind, s.label, s.length, s.source, s.first_seen_at,
+            s.last_seen_at, s.seen_count, s.state, s.expires_at,
             (SELECT count(*) FROM discovered_secret_uses u WHERE u.secret_id=s.id) AS uses,
-            (SELECT max(used_at) FROM discovered_secret_uses u WHERE u.secret_id=s.id) AS last_used_at
-        FROM discovered_secrets s WHERE s.target_id=$1
+            (SELECT max(used_at) FROM discovered_secret_uses u WHERE u.secret_id=s.id) AS last_used_at,
+            ARRAY(SELECT g.target_id FROM discovered_secret_grants g WHERE g.secret_id=s.id
+                  ORDER BY g.granted_at) AS granted_to
+        FROM discovered_secrets s
+        WHERE (s.target_id=$1 OR EXISTS (SELECT 1 FROM discovered_secret_grants g
+                                         WHERE g.secret_id=s.id AND g.target_id=$1))
         {"AND s.state='active' AND s.expires_at > NOW()" if usable_only else ""}
-        ORDER BY s.last_seen_at DESC, s.id LIMIT $2""",
+        ORDER BY (s.target_id=$1) DESC, s.last_seen_at DESC, s.id LIMIT $2""",
         target, max(1, min(int(limit), MAX_LIST)),
     )
     return [_public(row) for row in rows]
@@ -389,6 +436,41 @@ async def set_expiry(
         uuid.UUID(str(secret_id)), _target_uuid(target_id), days, str(actor)[:200],
     )
     return bool(updated)
+
+
+async def grant(
+    conn: Any, *, target_id: Any, secret_id: Any, to_target_id: Any, actor: str,
+) -> bool:
+    """Let Hunts of another target use this target's secret (by reference, never shown). It
+    never widens a Hunt's network scope: the value is sent only where that Hunt may already go."""
+    source, other = _target_uuid(target_id), _target_uuid(to_target_id)
+    if source is None or other is None or source == other:
+        raise ValueError("grant to another, existing target")
+    secret = uuid.UUID(str(secret_id))
+    if not await conn.fetchval(
+        "SELECT 1 FROM discovered_secrets WHERE id=$1 AND target_id=$2", secret, source):
+        return False
+    if not await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", other):
+        raise LookupError("target not found")
+    if await conn.fetchval(
+        "SELECT count(*) FROM discovered_secret_grants WHERE secret_id=$1", secret,
+    ) >= MAX_GRANTS_PER_SECRET:
+        raise ValueError(f"at most {MAX_GRANTS_PER_SECRET} targets per secret")
+    await conn.execute(
+        """INSERT INTO discovered_secret_grants(secret_id, target_id, granted_by)
+        VALUES($1,$2,$3) ON CONFLICT (secret_id, target_id) DO NOTHING""",
+        secret, other, str(actor)[:200],
+    )
+    return True
+
+
+async def revoke_grant(conn: Any, *, target_id: Any, secret_id: Any, to_target_id: Any) -> bool:
+    deleted = await conn.fetchval(
+        """DELETE FROM discovered_secret_grants g USING discovered_secrets s
+        WHERE g.secret_id=s.id AND s.id=$1 AND s.target_id=$2 AND g.target_id=$3 RETURNING g.id""",
+        uuid.UUID(str(secret_id)), _target_uuid(target_id), _target_uuid(to_target_id),
+    )
+    return bool(deleted)
 
 
 async def purge_target(conn: Any, *, target_id: Any) -> int:

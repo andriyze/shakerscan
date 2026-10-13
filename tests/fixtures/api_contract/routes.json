@@ -3077,6 +3077,20 @@
     "name": "post_discovered_secret_expiry"
   },
   {
+    "path": "/targets/{target_id}/discovered-secrets/{secret_id}/grants",
+    "methods": [
+      "POST"
+    ],
+    "name": "post_discovered_secret_grant"
+  },
+  {
+    "path": "/targets/{target_id}/discovered-secrets/{secret_id}/grants/{grant_target_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_discovered_secret_grant"
+  },
+  {
     "path": "/targets/{target_id}/discovered-secrets/{secret_id}/state",
     "methods": [
       "POST"

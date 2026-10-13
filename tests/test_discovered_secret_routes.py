@@ -29,12 +29,14 @@ class Conn:
         self.calls.append(query)
         if query.startswith("SELECT 1 FROM targets"):
             return 1 if str(args[0]) == TARGET else None
+        if "DELETE FROM discovered_secret_grants" in query:
+            return None
         return uuid.UUID(SECRET) if str(args[0]) == SECRET else None
 
     async def fetch(self, query, *args):
         self.calls.append(query)
         return [{
-            "id": uuid.UUID(SECRET), "kind": "password", "label": "DB_PASSWORD", "length": 22,
+            "id": uuid.UUID(SECRET), "target_id": uuid.UUID(TARGET), "granted_to": [], "kind": "password", "label": "DB_PASSWORD", "length": 22,
             "source": {"kind": "hunt_action", "id": "a", "hunt_id": "h"}, "first_seen_at": NOW,
             "last_seen_at": NOW, "seen_count": 1, "state": "active", "expires_at": NOW,
             "uses": 0, "last_used_at": None, "value_ciphertext": "enc:fernet:never-returned",
@@ -99,3 +101,13 @@ def test_the_planner_ingress_is_refused(client):
 
     refused = TestClient(app).get(f"/targets/{TARGET}/discovered-secrets")
     assert refused.status_code == 403 and refused.json()["detail"]["reason_code"] == "operator_only"
+
+
+def test_a_grant_to_the_same_target_is_refused_and_an_unknown_grant_is_404(client):
+    http, _ = client
+    same = http.post(f"/targets/{TARGET}/discovered-secrets/{SECRET}/grants", json={"target_id": TARGET})
+    assert same.status_code == 400
+    assert http.post(f"/targets/{TARGET}/discovered-secrets/{SECRET}/grants",
+                     json={"target_id": "short"}).status_code == 422
+    missing = http.delete(f"/targets/{TARGET}/discovered-secrets/{SECRET}/grants/{uuid.uuid4()}")
+    assert missing.status_code == 404

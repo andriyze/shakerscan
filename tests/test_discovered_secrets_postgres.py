@@ -333,3 +333,50 @@ def test_a_scan_findings_secret_is_kept_and_replaced_by_its_reference():
         assert listed[0]["source"]["kind"] == "scan_finding"
         assert findings[0]["evidence"]["match_snippet"] == f"key [{listed[0]['ref']}] here"
     run(scenario)
+
+
+def test_a_grant_lets_another_targets_hunt_use_a_secret_and_revoking_stops_it():
+    async def scenario(conn):
+        owner, other, third = await _target(conn), await _target(conn), await _target(conn)
+        await store.record_discovered(conn, target_id=owner, values=[(SYNTHETIC, "password")],
+                                      source={"kind": "hunt_action"})
+        ref = (await store.list_for_target(conn, owner))[0]["ref"]
+        secret_id = ref.removeprefix("secret://")
+        hunt, action = await _hunt(conn, other)
+        with pytest.raises(store.DiscoveredSecretError):
+            await store.resolve_for_hunt(conn, reference=ref, target_id=other, hunt_run_id=hunt, action_id=action)
+        assert await store.grant(conn, target_id=owner, secret_id=secret_id, to_target_id=other,
+                                 actor="operator:test")
+        assert await store.resolve_for_hunt(
+            conn, reference=ref, target_id=other, hunt_run_id=hunt, action_id=action) == SYNTHETIC
+        listed = await store.list_for_target(conn, other, usable_only=True)
+        assert [item["ref"] for item in listed] == [ref] and listed[0]["found_on"] == str(owner)
+        assert (await store.briefing_counts(conn, other))["usable"] == 1
+        # Only the owning target grants; a third target stays refused.
+        assert not await store.grant(conn, target_id=other, secret_id=secret_id, to_target_id=third,
+                                     actor="operator:test")
+        third_hunt, third_action = await _hunt(conn, third)
+        with pytest.raises(store.DiscoveredSecretError):
+            await store.resolve_for_hunt(conn, reference=ref, target_id=third, hunt_run_id=third_hunt,
+                                         action_id=third_action)
+        with pytest.raises(ValueError):
+            await store.grant(conn, target_id=owner, secret_id=secret_id, to_target_id=owner, actor="o")
+        assert await store.revoke_grant(conn, target_id=owner, secret_id=secret_id, to_target_id=other)
+        with pytest.raises(store.DiscoveredSecretError):
+            await store.resolve_for_hunt(conn, reference=ref, target_id=other, hunt_run_id=hunt, action_id=action)
+        assert (await store.briefing_counts(conn, other))["usable"] == 0
+    run(scenario)
+
+
+def test_the_briefing_counts_usable_and_never_used_secrets_by_kind():
+    async def scenario(conn):
+        target = await _target(conn)
+        await store.record_discovered(conn, target_id=target, values=[(SYNTHETIC, "password"),
+                                      (SYNTHETIC_JWT, "")], source={"kind": "hunt_action"})
+        hunt, action = await _hunt(conn, target)
+        jwt = next(i["ref"] for i in await store.list_for_target(conn, target) if i["kind"] == "jwt")
+        await store.resolve_for_hunt(conn, reference=jwt, target_id=target, hunt_run_id=hunt, action_id=action)
+        counts = await store.briefing_counts(conn, target)
+        assert counts["usable"] == 2 and counts["never_used"] == 1
+        assert counts["by_kind"] == {"jwt": 1, "password": 1} and SYNTHETIC not in str(counts)
+    run(scenario)

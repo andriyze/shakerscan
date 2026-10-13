@@ -1898,8 +1898,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 496 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 413 | `api/**/*.py` |
+| Public REST operations | 498 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 415 | `api/**/*.py` |
 | Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1916,7 +1916,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 115 | `db/init.sql` + migrations |
+| Durable tables | 116 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2365,6 +2365,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | `DELETE` | `/targets/{target_id}/discovered-secrets` | `delete_discovered_secrets` |
 | `GET` | `/targets/{target_id}/discovered-secrets` | `get_discovered_secrets` |
 | `POST` | `/targets/{target_id}/discovered-secrets/{secret_id}/expiry` | `post_discovered_secret_expiry` |
+| `POST` | `/targets/{target_id}/discovered-secrets/{secret_id}/grants` | `post_discovered_secret_grant` |
+| `DELETE` | `/targets/{target_id}/discovered-secrets/{secret_id}/grants/{grant_target_id}` | `delete_discovered_secret_grant` |
 | `POST` | `/targets/{target_id}/discovered-secrets/{secret_id}/state` | `post_discovered_secret_state` |
 | `POST` | `/targets/{target_id}/findings/{finding_id}/dismiss` | `post_dismiss_finding` |
 | `POST` | `/targets/{target_id}/findings/{finding_id}/reopen` | `post_reopen_finding` |
@@ -3269,6 +3271,7 @@ Scan feature or a second orchestration engine.
 | `device_request_collections` | `db/init.sql` |
 | `device_services` | `db/init.sql` |
 | `device_targets` | `db/init.sql` |
+| `discovered_secret_grants` | `db/init.sql` |
 | `discovered_secret_uses` | `db/init.sql` |
 | `discovered_secrets` | `db/init.sql` |
 | `discovery_runs` | `db/init.sql` |

@@ -26,6 +26,11 @@ class SecretState(BaseModel):
     state: Literal['active', 'revoked_by_operator']
 
 
+class SecretGrant(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    target_id: str = Field(min_length=36, max_length=36)
+
+
 class SecretExpiry(BaseModel):
     model_config = ConfigDict(extra='forbid')
     days: int = Field(ge=1, le=secrets_store.MAX_TTL_DAYS)
@@ -76,6 +81,37 @@ async def post_discovered_secret_expiry(target_id: str, secret_id: str, body: Se
     if not changed:
         raise HTTPException(404, 'secret not found on this target')
     return {'status': 'expiry_changed', 'days': body.days}
+
+
+@router.post('/targets/{target_id}/discovered-secrets/{secret_id}/grants', status_code=201)
+async def post_discovered_secret_grant(target_id: str, secret_id: str, body: SecretGrant, request: Request):
+    """Let Hunts of another target use this secret by reference. It never widens a Hunt's scope."""
+    actor = _operator(request)
+    async with pool().acquire() as conn:
+        try:
+            granted = await secrets_store.grant(
+                conn, target_id=_uuid(target_id, 'target'), secret_id=_uuid(secret_id, 'secret'),
+                to_target_id=_uuid(body.target_id, 'target'), actor=actor)
+        except LookupError:
+            raise HTTPException(404, 'target not found') from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+    if not granted:
+        raise HTTPException(404, 'secret not found on this target')
+    return {'status': 'granted', 'target_id': body.target_id}
+
+
+@router.delete('/targets/{target_id}/discovered-secrets/{secret_id}/grants/{grant_target_id}')
+async def delete_discovered_secret_grant(target_id: str, secret_id: str, grant_target_id: str,
+                                         request: Request):
+    _operator(request)
+    async with pool().acquire() as conn:
+        revoked = await secrets_store.revoke_grant(
+            conn, target_id=_uuid(target_id, 'target'), secret_id=_uuid(secret_id, 'secret'),
+            to_target_id=_uuid(grant_target_id, 'target'))
+    if not revoked:
+        raise HTTPException(404, 'grant not found')
+    return {'status': 'revoked'}
 
 
 @router.delete('/targets/{target_id}/discovered-secrets')
