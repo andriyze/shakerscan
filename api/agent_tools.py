@@ -489,7 +489,7 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
             "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
             "-timeout", "8", "-retry", "0", "-disable-redirects",
             "-jsonl", "-omit-raw", "-omit-body",
-            "-exclude-output-fields", "headers,response,raw", "-silent"]
+            "-exclude-output-fields", "headers,response,raw", "-silent", "-disable-update-check"]
 
 
 def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
@@ -517,7 +517,7 @@ def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
             "-rate-limit", "5", "-crawl-duration", "45s", "-field-scope", "fqdn",
             "-timeout", "10", "-retry", "0", "-disable-redirects",
             "-jsonl", "-omit-raw", "-omit-body",
-            "-exclude-output-fields", "headers,response,raw", "-silent"]
+            "-exclude-output-fields", "headers,response,raw", "-silent", "-disable-update-check"]
 
 
 # An inert placeholder for every body field the engine sends. The scanner supplies the attack; a
