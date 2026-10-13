@@ -354,7 +354,7 @@ ensure_redis_ready() {
             docker_cli volume rm "$(redis_volume)" >/dev/null 2>&1 || true
             compose up --no-build -d redis >/dev/null 2>&1 || true
             if wait_for_redis_healthy; then
-                echo -e "${GREEN}Redis started with empty state; scans that were running when it failed are shown as interrupted and can be started again.${NC}"
+                echo -e "${GREEN}Redis started with empty state. Scans that were waiting to start are queued again automatically within about 10 minutes; a scan that was already running is marked with an unknown outcome and can be started again from the Scans page.${NC}"
                 return 0
             fi
             redis_give_up "Redis does not start even with empty state."

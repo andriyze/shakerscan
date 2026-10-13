@@ -22888,3 +22888,63 @@ def test_the_api_redis_client_fails_within_timeouts_instead_of_hanging(monkeypat
     assert seen["socket_connect_timeout"] == 10
     assert seen["socket_timeout"] == 35  # above the longest blocking read (fleet lease: 30 s)
     assert seen["decode_responses"] is True
+
+
+@pytest.mark.parametrize("never_started,attempts,expect", [
+    (True, 0, "requeued"), (False, 0, "flagged"), (True, 3, "flagged"),
+])
+def test_a_never_started_scan_lost_from_the_queue_is_queued_again(monkeypatch, never_started, attempts, expect):
+    """2.10: a Redis that lost its data left Scans pending forever. One that provably never
+    started is sent again from its persisted canonical job (at most 3 times); one that may have
+    run keeps the "outcome unknown" flag. Unit fixture: the canonical job is a stub."""
+    scan_id = uuid.uuid4()
+    enqueued, updates = [], []
+
+    class Conn:
+        async def fetch(self, query, cutoff):
+            assert "never_started" in query and "a.status <> 'planned'" in query
+            return [{"id": scan_id, "job_id": "lost-job", "parent_scan_id": None, "scan_role": "standalone",
+                     "scan_generation": "v2", "options": {"queue_loss_requeues": attempts},
+                     "scan_job_payload": {"fixture": True}, "never_started": never_started}]
+
+        async def fetchval(self, query, row_id, count):
+            assert "started_at IS NULL AND worker_id IS NULL" in query
+            updates.append(("requeue", count))
+            return row_id
+
+        async def fetchrow(self, query, row_id):
+            updates.append(("flag", None))
+            return {"id": row_id, "parent_scan_id": None}
+
+    class Redis:
+        def __init__(self):
+            self.keys = set()
+
+        def hgetall(self, _key):
+            return {}
+
+        def set(self, key, value, nx=False, ex=None):
+            if nx and key in self.keys:
+                return False
+            self.keys.add(key)
+            return True
+
+    class Job:
+        def queue_payload(self, placement=None):
+            return {"job_id": "lost-job", "scan_id": str(scan_id), "fixture": True}
+
+    redis = Redis()
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(api_module, "queue_payloads", lambda *a, **k: [])
+    monkeypatch.setattr(api_module.CanonicalScanJob, "from_payload", classmethod(lambda cls, value: Job()))
+    monkeypatch.setattr(api_module, "enqueue_job", lambda r, queue, payload: enqueued.append(payload))
+
+    asyncio.run(api_module.cleanup_orphaned_scan_queue_handoffs(_FakePool(Conn())))
+    if expect == "requeued":
+        assert enqueued == [{"job_id": "lost-job", "scan_id": str(scan_id), "fixture": True}]
+        assert updates == [("requeue", 1)]
+        # A second sweep inside the guard window does not send it twice.
+        asyncio.run(api_module.cleanup_orphaned_scan_queue_handoffs(_FakePool(Conn())))
+        assert len(enqueued) == 1
+    else:
+        assert enqueued == [] and updates == [("flag", None)]
