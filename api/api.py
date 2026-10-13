@@ -2297,6 +2297,11 @@ async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.U
         return 0
 
     saved_count = 0
+    try:
+        from scan.finding_secrets import scrub_findings
+    except ModuleNotFoundError:
+        from .scan.finding_secrets import scrub_findings
+    await scrub_findings(conn, target_id=target_id, scan_id=scan_id, findings=findings)
     for finding in findings:
         fingerprint = generate_finding_fingerprint(finding)
         evidence_with_triage = _redact_finding_evidence(_build_evidence_with_triage(finding))

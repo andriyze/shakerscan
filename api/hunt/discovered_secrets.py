@@ -264,6 +264,17 @@ async def values_used_by_hunt(conn: Any, hunt_run_id: Any, *, limit: int = 64) -
     return values
 
 
+async def reference_for(conn: Any, *, target_id: Any, value: str) -> str | None:
+    """The ``secret://`` reference of a value kept for a target, or None."""
+    target = _target_uuid(target_id)
+    digest = value_digest(value)
+    if target is None or digest is None:
+        return None
+    found = await conn.fetchval(
+        "SELECT id FROM discovered_secrets WHERE target_id=$1 AND value_digest=$2", target, digest)
+    return f"secret://{found}" if found else None
+
+
 def parse_reference(reference: Any) -> uuid.UUID:
     text = str(reference or "")
     if not SECRET_REF_RE.fullmatch(text):
