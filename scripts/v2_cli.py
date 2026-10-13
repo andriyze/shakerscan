@@ -2279,10 +2279,10 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
     terminal = approval.Terminal()
     try:
         terminal.require(f"shakerscan secrets {command}")
-        terminal.say(approval._knowledge_summary(approval.secret_entry(action, target, ref_id, payload)))
+        terminal.say(approval._knowledge_summary(approval.reference_decision(action, target, ref_id, payload)))
         if approval.instance_kind(send) == "enterprise":
             stepup = approval.StepUp(send, client.base_url, terminal, account=args.account, method=args.method)
-            status, body = approval.decide_knowledge(stepup, approval.secret_entry(action, target, ref_id, payload))
+            status, body = approval.decide_knowledge(stepup, approval.reference_decision(action, target, ref_id, payload))
         else:
             with terminal.keypresses():
                 if terminal.key("  [y] yes  [n] cancel: ", "yn") != "y":
