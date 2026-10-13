@@ -9,6 +9,7 @@ on:
     paths:
       - 'scanner.sh'
       - 'scripts/postgres_upgrade.sh'
+      - 'scripts/upgrade_safety.sh'
       - 'scripts/postgres_upgrade_smoke.sh'
       - 'docker-compose.yml'
       - 'docker-compose.release.yml'

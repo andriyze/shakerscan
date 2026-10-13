@@ -1239,21 +1239,21 @@ def build_parser() -> argparse.ArgumentParser:
                        ("reactivate", "Let Hunts use a revoked secret again")):
         command = secret_commands.add_parser(name, help=text)
         command.add_argument("target_id")
-        command.add_argument("secret_id", help="the id or secret://<id> reference")
+        command.add_argument("reference", metavar="SECRET", help="the id or secret://<id> reference")
     expiry = secret_commands.add_parser("expiry", help="Set a secret's expiry, 1-365 days from now")
     expiry.add_argument("target_id")
-    expiry.add_argument("secret_id")
+    expiry.add_argument("reference", metavar="SECRET")
     expiry.add_argument("--days", type=int, required=True)
     for name, text in (("grant", "Let another target's Hunts use a secret (your step-up on Enterprise)"),
                        ("ungrant", "Stop another target's Hunts using a secret")):
         command = secret_commands.add_parser(name, help=text)
         command.add_argument("target_id")
-        command.add_argument("secret_id")
+        command.add_argument("reference", metavar="SECRET")
         command.add_argument("--to", required=True, metavar="TARGET_ID", help="the other target")
     promote = secret_commands.add_parser(
         "promote", help="Move a secret into a new credential profile of the target (your step-up on Enterprise)")
     promote.add_argument("target_id")
-    promote.add_argument("secret_id")
+    promote.add_argument("reference", metavar="SECRET")
     promote.add_argument("--name", required=True)
     promote.add_argument("--auth-kind", required=True,
                          help="bearer_token, api_key_header, authorization_header, cookie, basic_auth, ...")
@@ -1263,7 +1263,7 @@ def build_parser() -> argparse.ArgumentParser:
     reveal = secret_commands.add_parser(
         "reveal", help="Show a secret's value to you, in your own terminal (your step-up on Enterprise)")
     reveal.add_argument("target_id")
-    reveal.add_argument("secret_id")
+    reveal.add_argument("reference", metavar="SECRET")
     for command in (promote, reveal) + tuple(
             secret_commands.choices[name] for name in ("grant",)):
         command.add_argument("--account", default=None, help="Enterprise: your account (default: the token's)")
@@ -2224,7 +2224,7 @@ def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
         return 2
 
 
-def _secret_id(value: str) -> str:
+def _reference_id(value: str) -> str:
     return str(value or "").strip().removeprefix("secret://")
 
 
@@ -2249,20 +2249,20 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
                          f"{row.get('length')} chars  {row.get('state')}  seen {row.get('seen_count')}x, "
                          f"last {row.get('last_seen_at')}  uses {row.get('uses')}{origin}"))
         return 0
-    secret = _secret_id(args.secret_id)
-    path = f"{base}/{_quoted(secret)}"
+    ref_id = _reference_id(args.reference)
+    path = f"{base}/{_quoted(ref_id)}"
     if command in {"revoke", "reactivate"}:
         state = "revoked_by_operator" if command == "revoke" else "active"
         client.request("POST", path + "/state", payload={"state": state})
-        print(f"secret://{secret}: {state}")
+        print(f"secret://{ref_id}: {state}")
         return 0
     if command == "expiry":
         client.request("POST", path + "/expiry", payload={"days": args.days})
-        print(f"secret://{secret}: expires in {args.days} day(s)")
+        print(f"secret://{ref_id}: expires in {args.days} day(s)")
         return 0
     if command == "ungrant":
         client.request("DELETE", f"{path}/grants/{_quoted(str(args.to).strip().lower())}")
-        print(f"secret://{secret}: target {args.to} can no longer use it")
+        print(f"secret://{ref_id}: target {args.to} can no longer use it")
         return 0
     action = {"grant": "grants", "promote": "promote", "reveal": "reveal"}[command]
     payload: dict[str, Any] = {}
@@ -2279,10 +2279,10 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
     terminal = approval.Terminal()
     try:
         terminal.require(f"shakerscan secrets {command}")
-        terminal.say(approval._knowledge_summary(approval.secret_entry(action, target, secret, payload)))
+        terminal.say(approval._knowledge_summary(approval.secret_entry(action, target, ref_id, payload)))
         if approval.instance_kind(send) == "enterprise":
             stepup = approval.StepUp(send, client.base_url, terminal, account=args.account, method=args.method)
-            status, body = approval.decide_knowledge(stepup, approval.secret_entry(action, target, secret, payload))
+            status, body = approval.decide_knowledge(stepup, approval.secret_entry(action, target, ref_id, payload))
         else:
             with terminal.keypresses():
                 if terminal.key("  [y] yes  [n] cancel: ", "yn") != "y":
@@ -2304,7 +2304,7 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
         terminal.say(_shown(f"  credential profile {((body or {}).get('profile') or {}).get('id')} created; "
                             "the discovered secret is superseded"))
     else:
-        terminal.say(_shown(f"  target {args.to} may now use secret://{secret}"))
+        terminal.say(_shown(f"  target {args.to} may now use secret://{ref_id}"))
     return 0
 
 
