@@ -374,6 +374,29 @@ On Enterprise this asks for your step-up once, before the agent starts. `shakers
 --allow …` does the same for one Hunt. Bounds an agent proposes itself become one pending request
 you approve like any other.
 
+## Secrets found on a target: `shakerscan secrets`
+
+Values ShakerScan finds on a target (a password in an exposed configuration file, an API key in a
+response, a value a Hunt withheld) are kept for that target, encrypted. A Hunt uses one by
+reference and never sees it; these commands are yours.
+
+```bash
+shakerscan secrets list 4e1f…                    # reference, kind, field, length, sightings, uses; never a value
+shakerscan secrets list 4e1f… --usable           # only those a Hunt can use now
+shakerscan secrets revoke 4e1f… secret://9b2c…   # stop Hunts using it (later sightings keep it revoked)
+shakerscan secrets reactivate 4e1f… 9b2c…
+shakerscan secrets expiry 4e1f… 9b2c… --days 7
+shakerscan secrets grant 4e1f… 9b2c… --to 7d3a…  # let another target's Hunts use it
+shakerscan secrets ungrant 4e1f… 9b2c… --to 7d3a…
+shakerscan secrets promote 4e1f… 9b2c… --name "Found API key" --auth-kind api_key_header --header-name X-Api-Key
+shakerscan secrets reveal 4e1f… 9b2c…            # show the value, to you, in this terminal
+```
+
+`grant`, `promote` and `reveal` are your decisions and run only in your own interactive terminal:
+on an open-source engine after a `y` keypress (a pipe or a paste never decides), on Enterprise with
+your step-up for that one decision (the gateway applies it; a token alone never can). A revealed
+value is shown in that terminal only, with control characters escaped.
+
 ## Hunt from a script
 
 ```bash
@@ -397,8 +420,8 @@ follow `next_cursor`.
 
 A client built from a repository checkout (a release, or `pipx install
 "git+https://github.com/andriyze/shakerscan@<commit>#subdirectory=client"`) also records the commit
-it was built from: `shakerscan version` prints `shakerscan client 0.9.0 (source 1a2b3c4d5e6f)`,
-`doctor` shows the same, and the MCP `serverInfo.version` is `client-0.9.0+1a2b3c4d5e6f`.
+it was built from: `shakerscan version` prints `shakerscan client 0.10.0 (source 1a2b3c4d5e6f)`,
+`doctor` shows the same, and the MCP `serverInfo.version` is `client-0.10.0+1a2b3c4d5e6f`.
 
 The client has its own version (`client/src/shakerscan/__init__.py`), tagged `client-vX.Y.Z`,
 independent of the engine release: because tool catalogues come from the live contracts, one
