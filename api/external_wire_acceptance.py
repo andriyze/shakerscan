@@ -128,7 +128,7 @@ def _assert_wire_bound(
             f"({request_count}>{http_limit})"
         )
     if http_limit and request_count < 1:
-        raise RuntimeError(f"{tool} produced no target-observed HTTP traffic")
+        raise RuntimeError(f"{tool} produced no target-observed HTTP traffic: {_diagnostic(result)}")
     if connection_limit and connections > connection_limit:
         raise RuntimeError(
             f"{tool} exceeded its target-observed connection ceiling "
@@ -146,6 +146,19 @@ def _assert_wire_bound(
         },
         "enforcement_schema": enforcement.get("schema_version"),
     }
+
+
+def _diagnostic(result: Mapping[str, Any]) -> str:
+    """What the run returned, for a failure message: its scalar fields and the enforcement
+    counters (the fixture is local and synthetic; nothing here is a secret)."""
+    shown = {key: value for key, value in result.items()
+             if isinstance(value, (str, int, float, bool)) or value is None}
+    enforcement = result.get("process_enforcement")
+    if isinstance(enforcement, Mapping):
+        shown["process_enforcement"] = {key: value for key, value in enforcement.items()
+                                        if not isinstance(value, (Mapping, list))}
+    text = json.dumps(shown, sort_keys=True, default=str)
+    return text if len(text) <= 2000 else text[:2000] + "..."
 
 
 async def _run_tool_case(
