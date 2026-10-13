@@ -250,7 +250,7 @@ COPY scanner/payloads /app/payloads
 COPY scanner/data /app/data
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/doc/shakerscan/
 ENV DEVICE_INTEL_DB_PATH=/app/data/device_advisories.json
-ENV DEVICE_INTEL_DB_SHA256=d8d614b63f39cce836938ecd3fe5e1e134efac21b7759a928eeeb7d1d7b18b13
+ENV DEVICE_INTEL_DB_SHA256=bdab781f78f07ab87e27e3e0bcc8d6d4c7131e84f131d37a465d1bfbeeeb191e
 
 # Copy API/worker files used by prebuilt images.
 # Globbed (like the scanner modules above) so the image can't drift from the

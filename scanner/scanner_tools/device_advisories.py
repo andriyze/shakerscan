@@ -18,7 +18,7 @@ BUNDLED_SNAPSHOT_PATH = os.path.join(
     "data",
     "device_advisories.json",
 )
-BUNDLED_SNAPSHOT_SHA256 = "d8d614b63f39cce836938ecd3fe5e1e134efac21b7759a928eeeb7d1d7b18b13"
+BUNDLED_SNAPSHOT_SHA256 = "bdab781f78f07ab87e27e3e0bcc8d6d4c7131e84f131d37a465d1bfbeeeb191e"
 
 # A network banner, Nmap guess, or unauthenticated protocol response can produce a
 # syntactically exact CPE without proving which firmware is installed. Only authenticated or
@@ -170,6 +170,11 @@ def identity_evidence_tier(service: Any) -> dict[str, Any]:
     }
 
 
+# The verified snapshot, parsed once per process and file version (path, pinned digest, inode,
+# size, mtime): a page of services must not re-read and re-hash a multi-megabyte file each time.
+_SNAPSHOT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+
+
 def load_verified_snapshot(
     path: Any, expected_sha256: Any, *, max_bytes: int = MAX_SNAPSHOT_BYTES,
 ) -> dict[str, Any]:
@@ -190,6 +195,10 @@ def load_verified_snapshot(
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             return {"status": "unavailable", "advisories": [], "error": "not_regular_file"}
+        cache_key = (location, expected, before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        cached = _SNAPSHOT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         if before.st_size > max(1, int(max_bytes)):
             return {
                 "status": "snapshot_too_large", "advisories": [],
@@ -217,11 +226,22 @@ def load_verified_snapshot(
         decoded = json.loads(bytes(raw).decode("utf-8"))
         records = decoded if isinstance(decoded, list) else decoded.get("advisories", []) if isinstance(decoded, dict) else []
         records = [item for item in records if isinstance(item, dict)][:100_000]
-        return {
+        # Snapshot v2 keeps each CVE's title once, in "titles"; records carry it again here.
+        titles = decoded.get("titles") if isinstance(decoded, dict) else None
+        if isinstance(titles, dict):
+            for item in records:
+                if not item.get("title"):
+                    title = titles.get(str(item.get("cve") or item.get("advisory_id") or ""))
+                    if isinstance(title, str):
+                        item["title"] = title[:500]
+        result = {
             "status": "available", "advisories": records,
             "snapshot_sha256": actual, "record_count": len(records),
             "generated_at": decoded.get("generated_at") if isinstance(decoded, dict) else None,
         }
+        _SNAPSHOT_CACHE.clear()  # one snapshot per process: the one in use
+        _SNAPSHOT_CACHE[cache_key] = result
+        return result
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         return {"status": "unavailable", "advisories": [], "error": type(exc).__name__}
     finally:
@@ -374,7 +394,16 @@ def match_advisories(
         if not exact_identity and not heuristic_identity:
             continue
         evaluation_record = raw
-        if advisory_identity and not any(
+        versions = raw.get("versions")
+        if isinstance(versions, list) and versions:
+            # Snapshot v2 groups the exact versions NVD lists for one CVE and product: the record
+            # applies to exactly these versions, as if each were its own exact-version record.
+            listed = [str(item) for item in versions[:5000] if isinstance(item, (str, int, float))]
+            same = next((item for item in listed if query_version and compare_versions(query_version, item) == 0), None)
+            if query_version and same is None:
+                continue
+            evaluation_record = {**raw, "version": same or (listed[0] if listed else "")}
+        elif advisory_identity and not any(
             raw.get(key) not in (None, "") for key in (
                 "version", "version_start_including", "version_start_excluding",
                 "version_end_including", "version_end_excluding",

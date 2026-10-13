@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import runpy
 import subprocess
 import sys
@@ -18,19 +19,17 @@ BOUNDED_KEYS = (
 
 
 def _probe_versions(record):
-    """Candidate versions that should fall inside the advisory's affected range."""
-    if record.get("version"):
-        return [str(record["version"])]
-    candidates = []
-    start_including = record.get("version_start_including")
-    if start_including:
-        candidates.extend([str(start_including), f"{start_including}a"])
-    if record.get("version_start_excluding"):
-        candidates.append("9999")
-    if record.get("version_end_including") or record.get("version_end_excluding"):
-        candidates.append("0")
-    candidates.append("1.0")
-    return candidates
+    """Candidate versions that should fall inside the advisory's affected range: the release
+    generator's own probes, so the test and the generator's self-check cannot disagree."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "generate_device_advisories",
+        os.path.join(os.path.dirname(__file__), "..", "scripts", "generate_device_advisories.py"),
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.probe_versions_for(record)
 
 
 def test_cpe_version_range_match_requires_authoritative_identity_to_promote():
@@ -168,8 +167,13 @@ def test_default_install_uses_the_hash_pinned_bundled_snapshot():
     loaded = device_advisories.load_verified_snapshot(None, None)
     assert loaded["status"] == "available"
     assert loaded["snapshot_sha256"] == device_advisories.BUNDLED_SNAPSHOT_SHA256
-    assert loaded["record_count"] >= 5
-    assert all(item.get("reference", "").startswith("https://nvd.nist.gov/") for item in loaded["advisories"])
+    # 2.10: the network and web services the scanner fingerprints, not only embedded products.
+    assert loaded["record_count"] >= 10_000
+    assert all(re.fullmatch(r"CVE-\d{4}-\d{4,}", item.get("cve", "")) for item in loaded["advisories"])
+    # Snapshot v2 keeps titles once per CVE; the loader attaches them to every record.
+    assert all(item.get("title") for item in loaded["advisories"])
+    products = {item.get("product") for item in loaded["advisories"]}
+    assert {"openssh", "http_server", "nginx", "tomcat", "mysql", "openssl"} <= products
 
 
 def test_bundled_snapshot_hash_and_release_image_defaults_cannot_drift():
@@ -195,7 +199,9 @@ def test_every_bundled_advisory_is_version_bounded_and_promotable():
     loaded = device_advisories.load_verified_snapshot(None, None)
     assert loaded["status"] == "available"
     for record in loaded["advisories"]:
-        assert any(record.get(key) not in (None, "", "*", "-") for key in BOUNDED_KEYS), record
+        assert record.get("versions") or any(
+            record.get(key) not in (None, "", "*", "-") for key in BOUNDED_KEYS
+        ), record
         promoted = False
         for version in _probe_versions(record):
             components = str(record.get("cpe") or "").split(":")
@@ -241,7 +247,7 @@ def test_generator_offline_mode_emits_a_loadable_curated_snapshot(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     snapshot = json.loads(output.read_text(encoding="utf-8"))
-    assert snapshot["schema_version"] == "shakerscan-device-advisories/v1"
+    assert snapshot["schema_version"] == "shakerscan-device-advisories/v2"
     assert len(snapshot["advisories"]) >= 5
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     loaded = device_advisories.load_verified_snapshot(str(output), digest)
@@ -331,3 +337,60 @@ def test_authenticated_tier_promotes_only_with_curated_cpe():
         identity_evidence_tier="authenticated_package_inventory",
     )
     assert all(m["promotable"] is False for m in heuristic)
+
+
+def test_a_grouped_versions_record_matches_exactly_its_listed_versions():
+    record = {"cve": "CVE-2024-1000", "cpe": "cpe:2.3:a:oracle:mysql:*:*:*:*:*:*:*:*",
+              "product": "mysql", "versions": ["5.7.10", "5.7.11"], "severity": "high"}
+    query = "cpe:2.3:a:oracle:mysql:{}:*:*:*:*:*:*:*"
+    listed = device_advisories.match_advisories([record], cpe=query.format("5.7.11"), product=None,
+                                                version="5.7.11")
+    assert listed and listed[0]["version_evaluation"] == "affected"
+    assert listed[0]["match_type"] == "exact_cpe_version_range"
+    assert device_advisories.match_advisories([record], cpe=query.format("5.7.12"), product=None,
+                                              version="5.7.12") == []
+
+
+def test_the_loader_attaches_titles_and_reloads_only_a_changed_file(tmp_path):
+    path = tmp_path / "snapshot.json"
+
+    def write(title):
+        raw = json.dumps({"schema_version": "shakerscan-device-advisories/v2",
+                          "titles": {"CVE-2024-1000": title},
+                          "advisories": [{"cve": "CVE-2024-1000", "product": "x", "version": "1.0"}]}).encode()
+        path.write_bytes(raw)
+        return hashlib.sha256(raw).hexdigest()
+
+    first = write("First title")
+    loaded = device_advisories.load_verified_snapshot(str(path), first)
+    assert loaded["advisories"][0]["title"] == "First title"
+    assert device_advisories.load_verified_snapshot(str(path), first) is loaded  # cached
+    second = write("Second, longer title")
+    reloaded = device_advisories.load_verified_snapshot(str(path), second)
+    assert reloaded["advisories"][0]["title"] == "Second, longer title"
+    # The old digest no longer matches the changed file: never served from the cache.
+    assert device_advisories.load_verified_snapshot(str(path), first)["status"] == "integrity_mismatch"
+
+
+def test_the_generator_drops_empty_ranges_and_groups_exact_versions():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "generate_device_advisories",
+        os.path.join(os.path.dirname(__file__), "..", "scripts", "generate_device_advisories.py"),
+    )
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    snapshot = generator.normalize_snapshot({"schema_version": generator.SCHEMA_VERSION, "advisories": [
+        {"cve": "CVE-1", "title": "a", "cpe": "cpe:2.3:a:v:p:1.0:*:*:*:*:*:*:*", "product": "p", "version": "1.0"},
+        {"cve": "CVE-1", "title": "a", "cpe": "cpe:2.3:a:v:p:1.1:*:*:*:*:*:*:*", "product": "p", "version": "1.1"},
+        {"cve": "CVE-2", "title": "b", "cpe": "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", "product": "p",
+         "version_start_including": "1.5", "version_end_excluding": "1.5.0"},
+        {"cve": "CVE-3", "title": "c", "cpe": "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", "product": "p",
+         "version_end_excluding": "2.0", "reference": "https://nvd.nist.gov/vuln/detail/CVE-3"},
+    ]})
+    rows = snapshot["advisories"]
+    assert snapshot["titles"] == {"CVE-1": "a", "CVE-3": "c"}
+    assert [row["cve"] for row in rows] == ["CVE-3", "CVE-1"]
+    assert rows[1]["versions"] == ["1.0", "1.1"] and rows[1]["cpe"] == "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*"
+    assert all("title" not in row and "reference" not in row for row in rows)
