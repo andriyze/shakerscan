@@ -124,3 +124,17 @@ def test_late_worker_never_restores_capture_after_terminal_hunt(status, complete
         await state.persist(SimpleNamespace(execute=execute), run={'status': status, 'completed_at': completed}, status='success')
         assert not writes and not state.public_result() and state.encrypted_result is None
     asyncio.run(scenario())
+
+
+def test_a_discovered_secret_reference_is_a_binding_source():
+    validate(request_bindings=[{'secret_ref': 'secret://11111111-2222-4333-8444-555555555555',
+                                'header': 'Authorization', 'prefix': 'Bearer '}])
+    for bad in (
+        {'secret_ref': 'secret://not-a-uuid', 'header': 'X-Key'},
+        {'secret_ref': 'secret://11111111-2222-4333-8444-555555555555',
+         'withheld_ref': 'withheld://hunt/11111111-2222-4333-8444-555555555555/1', 'header': 'X-Key'},
+        {'secret_ref': 'secret://11111111-2222-4333-8444-555555555555', 'capture_name': 'x',
+         'header': 'X-Key'},
+    ):
+        with pytest.raises(ValueError):
+            validate(request_bindings=[bad])

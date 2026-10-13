@@ -2681,3 +2681,36 @@ BEGIN
     END IF;
 END
 $release_marker_index$;
+
+-- Discovered secrets (2.10): api/hunt/discovered_secrets.py, installed by the startup migration too.
+CREATE TABLE IF NOT EXISTS discovered_secrets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    value_ciphertext TEXT NOT NULL CHECK (value_ciphertext LIKE 'enc:fernet:%'),
+    value_digest TEXT NOT NULL CHECK (value_digest ~ '^[0-9a-f]{64}$'),
+    kind TEXT NOT NULL CHECK (kind IN ('password','api_key','bearer_token','jwt','private_key','connection_url','cookie','other')),
+    label TEXT NOT NULL DEFAULT '' CHECK (length(label) <= 120),
+    length INTEGER NOT NULL CHECK (length BETWEEN 1 AND 8192),
+    source JSONB NOT NULL CHECK (jsonb_typeof(source) = 'object'
+        AND source->>'kind' IN ('hunt_action','scan_finding','retest')),
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    seen_count INTEGER NOT NULL DEFAULT 1 CHECK (seen_count > 0),
+    state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','revoked_by_operator','expired','superseded')),
+    state_changed_by TEXT CHECK (state_changed_by IS NULL OR length(state_changed_by) <= 200),
+    state_changed_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT discovered_secrets_target_value_unique UNIQUE (target_id, value_digest)
+);
+CREATE INDEX IF NOT EXISTS idx_discovered_secrets_target
+    ON discovered_secrets(target_id, last_seen_at DESC);
+CREATE TABLE IF NOT EXISTS discovered_secret_uses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    action_id UUID NOT NULL REFERENCES hunt_actions(id) ON DELETE CASCADE,
+    destination_host TEXT NOT NULL DEFAULT '' CHECK (length(destination_host) <= 255),
+    used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_secret
+    ON discovered_secret_uses(secret_id, used_at DESC);

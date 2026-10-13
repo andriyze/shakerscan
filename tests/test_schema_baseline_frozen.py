@@ -177,3 +177,13 @@ def test_the_interpretation_schema_is_installed_by_the_always_run_path():
     assert INTERPRETATION_SCHEMA_SQL.strip() in init_sql  # a fresh install gets the same definition
     for entry in baseline_entries():
         assert "target_interpretations" not in entry and "import_knowledge_notes" not in entry
+
+
+def test_the_discovered_secrets_schema_is_installed_by_the_always_run_path():
+    startup = _startup_source()
+    assert "DISCOVERED_SECRETS_SCHEMA_SQL" in startup
+    init_sql = (ROOT / "db" / "init.sql").read_text(encoding="utf-8")
+    from hunt.discovered_secrets import DISCOVERED_SECRETS_SCHEMA_SQL
+    assert DISCOVERED_SECRETS_SCHEMA_SQL.strip() in init_sql  # a fresh install gets the same definition
+    for entry in baseline_entries():
+        assert "discovered_secrets" not in entry

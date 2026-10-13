@@ -493,6 +493,19 @@ async def persist_withheld_values(
         "sealed": sealed_new,
         "status": ("sealed" if sealed_new == len(values) else "partially_sealed") if values else "knowledge_only",
     }
+    # The target's discovered-secrets store keeps what this action sealed, for later Hunts of the
+    # same target (secret://<id>); its own savepoint, so a failure there never undoes the seal.
+    found = [(str(value), "") for number, value in sorted(values.items())
+             if str(int(number)) in kept_numbers]
+    if found:
+        try:
+            from hunt.discovered_secrets import record_discovered
+        except ModuleNotFoundError:  # package import layout
+            from api.hunt.discovered_secrets import record_discovered
+        stored = await record_discovered(conn, target_id=target.target_id, values=found,
+            source={"kind": "hunt_action", "id": source_id, "hunt_id": run_id})
+        if stored["stored"] or stored["refreshed"]:
+            result["discovered_secrets"] = stored
     unresolvable = sum(1 for value in values.values() if not _resolvable(str(value)))
     dropped_values, dropped_tables = len(candidates) - kept_count + unresolvable, len(entries) - table_count
     if dropped_values or dropped_tables:
@@ -563,6 +576,20 @@ async def prepare_http_exchange(
     for binding in values.get("request_bindings") or ():
         if "withheld_ref" in binding:
             value = await _withheld_value(conn, run=run, target=target, reference=binding["withheld_ref"])
+            exchange.bound_values.append(str(value))
+        elif "secret_ref" in binding:
+            try:
+                from hunt.discovered_secrets import DiscoveredSecretError, resolve_for_hunt
+            except ModuleNotFoundError:  # package import layout
+                from api.hunt.discovered_secrets import DiscoveredSecretError, resolve_for_hunt
+            if not _hunt_is_live(run):
+                raise ValueError("secret reference belongs to a Hunt that is no longer live")
+            try:
+                value = await resolve_for_hunt(conn, reference=binding["secret_ref"],
+                    target_id=target.target_id, hunt_run_id=run_id, action_id=action_id,
+                    destination_host=str(target.canonical_host or ""))
+            except DiscoveredSecretError as exc:
+                raise ValueError(f"{exc.reason}: {exc}") from None
             exchange.bound_values.append(str(value))
         elif "source_action_id" in binding:
             value = await _captured_value(conn, run_id=run_id, target=target, binding=binding)
