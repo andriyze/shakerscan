@@ -24,15 +24,15 @@ test('query filter history preserves the App Router route identity', () => {
   assert.match(source, /new URLSearchParams\(searchString\)/)
 })
 
-test('exposure filters drive metrics, map, and priorities with one asset set', () => {
+test('exposure is the service view only; the removed lenses leave nothing behind', () => {
+  // 2.10 removed Triage, Map and Attack paths (they restated Targets and Findings). An old ?lens=
+  // link lands on the service view; no lens tabs or graph code remain.
   const page = read('src/app/exposure/page.tsx')
-  const paths = read('src/app/exposure/AttackPaths.tsx')
-  assert.match(page, /const filteredAssets = useMemo/)
-  assert.match(page, /filteredAssets\.filter\(\(a\) => a\.needs_action\)/)
-  assert.match(page, /nodes=\{graphView\?\.nodes/)
-  assert.match(page, /metrics=\{displayedMetrics\}/)
-  assert.match(page, /Active critical findings/)
-  assert.doesNotMatch(paths, /smart or full scans/i)
+  assert.match(page, /<ServicesView rootDomain=/)
+  assert.doesNotMatch(page, /filters\.lens|setLens|TriageTable|AttackPaths|ExposureGraph/)
+  for (const removed of ['src/app/exposure/TriageTable.tsx', 'src/app/exposure/AttackPaths.tsx', 'src/components/ExposureGraph.tsx']) {
+    assert.equal(fs.existsSync(path.join(root, removed)), false, removed)
+  }
 })
 
 test('target groups distinguish domains from hosts and internal identities', async () => {
@@ -82,13 +82,15 @@ test('docs and mobile operations expose truthful accessible labels', () => {
 test('executive posture defaults to an explicit operational cohort scope', () => {
   const dashboard = read('src/app/page.tsx')
   const targets = read('src/components/targets/inventory/AddTargetsDialog.tsx')
-  const triage = read('src/app/exposure/TriageTable.tsx')
+  const detail = read('src/components/targets/TargetAssetDetail.tsx')
   assert.match(dashboard, /useState<CohortView>\('operational'\)/)
   assert.match(dashboard, /Lab data is never silently mixed into it/)
   assert.match(dashboard, /buildCohortActions\(scopedExposure\)/)
   assert.match(targets, /<option value="calibration">Calibration<\/option>/)
-  assert.match(triage, /Executive cohort/)
-  assert.match(triage, /<option value="unclassified">unclassified<\/option>/)
+  // Ownership moved from the removed Exposure triage drawer to the target page.
+  assert.match(detail, /Reporting cohort/)
+  assert.match(detail, /<option value="unclassified">unclassified<\/option>/)
+  assert.match(detail, /updateTargetMetadata\(data\.target\.id, \{owner:/)
   const targetsApi = read('../api/targets/router.py')
   assert.match(targetsApi, /TargetUpdate[\s\S]+"unclassified"/)
 })

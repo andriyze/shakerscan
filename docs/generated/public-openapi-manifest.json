@@ -217,9 +217,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "e86aac27e883cefcff89b9086dcddc17f16e48e761ef1c9c2bf79a143ac0fb47",
+  "contract_sha256": "cbbd49b6d1e6c5018aceefaee005d7784397729e8ff8dabeeee0cb63704f38c5",
   "openapi": "3.1.0",
-  "operation_count": 484,
+  "operation_count": 482,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1599,19 +1599,6 @@
       "surface": null,
       "tags": []
     },
-    "GET /exposure/attack-paths": {
-      "deprecated": false,
-      "operation_id": "exposure_attack_paths_exposure_attack_paths_get",
-      "parameters_sha256": "133aa037d7ef9869d10bd3ff8a963355025f30ebea5fa9dd6414a37182f7c522",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
     "GET /exposure/changes": {
       "deprecated": false,
       "operation_id": "exposure_changes_exposure_changes_get",
@@ -1629,19 +1616,6 @@
       "deprecated": false,
       "operation_id": "exposure_graph_exposure_graph_get",
       "parameters_sha256": "5fd9b2ddb52d4911d66b0fbbf62e63bde06b539fa4b10a5ac470506f74e3fd65",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": null,
-      "tags": []
-    },
-    "GET /exposure/nodes": {
-      "deprecated": false,
-      "operation_id": "exposure_nodes_exposure_nodes_get",
-      "parameters_sha256": "83baad71862789eeab2b5fe1d76734a80943992bcc3cb58f0c029125c8fe6677",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",

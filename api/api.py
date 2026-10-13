@@ -5745,10 +5745,8 @@ try:
         _focus_exposure_subgraph,
         configure_exposure_router,
         exposure_assets,
-        exposure_attack_paths,
         exposure_changes,
         exposure_graph,
-        exposure_nodes,
         router as exposure_router,
     )
 except ModuleNotFoundError:  # package import in host-side tests
@@ -5757,10 +5755,8 @@ except ModuleNotFoundError:  # package import in host-side tests
         _focus_exposure_subgraph,
         configure_exposure_router,
         exposure_assets,
-        exposure_attack_paths,
         exposure_changes,
         exposure_graph,
-        exposure_nodes,
         router as exposure_router,
     )
 configure_exposure_router(lambda: db_pool)

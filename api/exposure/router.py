@@ -12,15 +12,12 @@ The database pool is supplied by the composition root through
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import math
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timedelta, timezone
-import json
 import re
 from typing import Any, Callable, Optional
 import urllib.parse
-import uuid
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -28,20 +25,18 @@ try:
     from ai_assurance import build_agent_blast_radius
     from asset_cohorts import target_cohort, target_exposure_class
     from api_utils import (
-        SEVERITY_ORDER, extract_root_domain, _graph_get, _graph_list, _int_or_none, _iso_or_none, _optional_uuid,
-        _parse_graph_json, _row_value, _scan_completion_flags, _severity_sort_value,
-        _short_url_label, _uuid_or_400,
+        SEVERITY_ORDER, extract_root_domain, _graph_get, _graph_list, _parse_graph_json, _scan_completion_flags,
+        _severity_sort_value, _short_url_label,
     )
-    from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
+    from serialization import row_to_dict
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_assurance import build_agent_blast_radius
     from ..asset_cohorts import target_cohort, target_exposure_class
     from ..api_utils import (
-        SEVERITY_ORDER, extract_root_domain, _graph_get, _graph_list, _int_or_none, _iso_or_none, _optional_uuid,
-        _parse_graph_json, _row_value, _scan_completion_flags, _severity_sort_value,
-        _short_url_label, _uuid_or_400,
+        SEVERITY_ORDER, extract_root_domain, _graph_get, _graph_list, _parse_graph_json, _scan_completion_flags,
+        _severity_sort_value, _short_url_label,
     )
-    from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
+    from ..serialization import row_to_dict
 
 
 from .services_router import router as services_router
@@ -776,92 +771,6 @@ async def exposure_graph(
     )
 
 
-@router.get("/exposure/nodes")
-async def exposure_nodes(
-    root_domain: Optional[str] = None,
-    include_inactive: bool = False,
-    include_resolved: bool = False,
-    limit: int = Query(2000, ge=1, le=5000),
-):
-    """Lightweight searchable index of exposure nodes (id/label/type/severity).
-
-    Node ids match those produced by the graph builder so a selected result can
-    be passed straight back as ``focus`` to /exposure/graph. Fetched once by the
-    UI and filtered client-side as the user types.
-    """
-    nodes: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def emit(node_id: str, node_type: str, label: str, severity: str | None = None) -> None:
-        if not label or node_id in seen:
-            return
-        seen.add(node_id)
-        nodes.append({"id": node_id, "type": node_type, "label": label, "severity": severity})
-
-    async with _pool().acquire() as conn:
-        target_rows = await conn.fetch(
-            """
-            SELECT id, url, name, root_domain, discovery_source
-            FROM targets
-            WHERE ($1::boolean = true OR is_active = true)
-              AND ($2::text IS NULL OR root_domain = $2::text)
-            ORDER BY active_findings_count DESC NULLS LAST
-            LIMIT $3
-            """,
-            include_inactive,
-            root_domain,
-            limit,
-        )
-        for row in target_rows:
-            row = row_to_dict(row)
-            node_type = "model_artifact" if row.get("discovery_source") == "model-intake" else "web_target"
-            emit(f"target:{row['id']}", node_type, _short_url_label(row.get("url")) or str(row.get("name") or ""))
-            if row.get("root_domain"):
-                emit(f"domain:{row['root_domain']}", "domain", str(row["root_domain"]))
-
-        ai_rows = await conn.fetch(
-            """
-            SELECT id, name, endpoint_url, target_type
-            FROM ai_targets
-            WHERE ($1::boolean = true OR is_active = true)
-              AND ($2::text IS NULL OR LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')
-            ORDER BY production_mode DESC, updated_at DESC
-            LIMIT $3
-            """,
-            include_inactive,
-            root_domain,
-            limit,
-        )
-        for row in ai_rows:
-            row = row_to_dict(row)
-            emit(f"ai_target:{row['id']}", "ai_target", str(row.get("name") or _short_url_label(row.get("endpoint_url"))))
-
-        finding_rows = await conn.fetch(
-            """
-            SELECT f.id, f.title, f.severity
-            FROM findings f
-            LEFT JOIN targets t ON f.target_id = t.id
-            LEFT JOIN ai_targets a ON f.ai_target_id = a.id
-            WHERE ($1::boolean = true OR f.status = 'active')
-              AND ($2::text IS NULL OR t.root_domain = $2::text
-                   OR LOWER(a.endpoint_url) LIKE '%' || LOWER($2::text) || '%')
-            ORDER BY
-                CASE f.severity
-                    WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3
-                    WHEN 'low' THEN 4 ELSE 5
-                END,
-                f.last_seen_at DESC NULLS LAST
-            LIMIT $3
-            """,
-            include_resolved,
-            root_domain,
-            limit,
-        )
-        for row in finding_rows:
-            row = row_to_dict(row)
-            emit(f"finding:{row['id']}", "finding", str(row.get("title") or "Finding"), row.get("severity"))
-
-    return {"nodes": nodes, "count": len(nodes)}
 
 
 def _exposure_datetime(value: Any) -> datetime | None:
@@ -1590,7 +1499,8 @@ async def exposure_changes(
         from urllib.parse import urlencode
         clean = {k: v for k, v in params.items() if v not in (None, "")}
         if root_domain:
-            clean["domain"] = root_domain
+            # The Targets page narrows by its search box; the other pages by domain.
+            clean["search" if path == "/targets" else "domain"] = root_domain
         return f"{path}?{urlencode(clean)}" if clean else path
 
     new_asset_examples = [
@@ -1624,7 +1534,7 @@ async def exposure_changes(
             "key": "new_assets",
             "label": "New assets",
             "count": len(new_targets) + len(new_ai),
-            "href": href("/exposure", posture="new", window=window_days),
+            "href": href("/targets", sort="created"),
             "examples": new_asset_examples[:examples],
         },
         {
@@ -1668,7 +1578,7 @@ async def exposure_changes(
             "key": "went_stale",
             "label": "Went stale",
             "count": len(went_stale),
-            "href": href("/exposure", posture="stale", sort="stale", window=window_days),
+            "href": href("/targets", activity="scanned"),
             "examples": [
                 {
                     "label": r["label"],
@@ -1686,178 +1596,6 @@ async def exposure_changes(
     }
 
 
-@router.get("/exposure/attack-paths")
-async def exposure_attack_paths(
-    root_domain: Optional[str] = None,
-    limit_scans: int = Query(150, ge=1, le=300),
-    include_partial: bool = True,
-):
-    """Flat, severity-ranked list of correlated attack chains across scans.
-
-    Extracts ``attack_chains`` from recent completed scan results, dedupes a
-    chain type to its most recent occurrence per asset, and surfaces the step
-    narrative so the UI can render each path as a walkable sequence.
-    """
-    async with _pool().acquire() as conn:
-        scan_rows = await conn.fetch(
-            """
-            SELECT s.id, s.target_id, s.ai_target_id, s.target_url, s.scan_type,
-                   s.created_at, s.result, t.root_domain, ait.endpoint_url AS ai_endpoint_url
-            FROM scans s
-            LEFT JOIN targets t ON s.target_id = t.id
-            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
-            WHERE s.status = 'completed' AND s.result IS NOT NULL
-              AND (s.scan_role IS NULL OR s.scan_role <> 'shard')
-              AND ($1::text IS NULL OR t.root_domain = $1::text
-                   OR LOWER(ait.endpoint_url) LIKE '%' || LOWER($1::text) || '%')
-            ORDER BY s.created_at DESC
-            LIMIT $2
-            """,
-            root_domain,
-            limit_scans,
-        )
-
-    paths: list[dict[str, Any]] = []
-    seen: set[tuple[str | None, str]] = set()
-
-    for row in scan_rows:
-        row = row_to_dict(row)
-        result = _parse_graph_json(row.get("result"))
-        attack_chains = _parse_graph_json(result.get("attack_chains"))
-        chains = list(attack_chains.get("chains") or [])
-        if include_partial:
-            chains += list(attack_chains.get("partial_chains") or [])
-
-        if row.get("ai_target_id"):
-            subject_node = f"ai_target:{row['ai_target_id']}"
-        elif row.get("target_id"):
-            subject_node = f"target:{row['target_id']}"
-        else:
-            subject_node = None
-
-        for idx, chain in enumerate(chains):
-            if not isinstance(chain, dict):
-                continue
-            chain_type = str(chain.get("chain_type") or chain.get("name") or idx)
-            key = (subject_node, chain_type)
-            if key in seen:
-                continue
-            seen.add(key)
-            steps = [
-                {
-                    "step_number": st.get("step_number"),
-                    "description": st.get("description"),
-                    "impact": st.get("impact"),
-                    "finding_type": st.get("finding_type"),
-                    "finding_id": st.get("finding_id") or st.get("source_finding_id"),
-                    "evidence": st.get("evidence"),
-                }
-                for st in (chain.get("steps") or [])
-                if isinstance(st, dict)
-            ]
-            severity = str(chain.get("severity") or "").lower() or None
-            missing_required = chain.get("missing_required") or chain.get("missing_steps") or []
-            if isinstance(missing_required, str):
-                missing_required = [missing_required]
-            elif not isinstance(missing_required, list):
-                missing_required = []
-            chain_evidence = chain.get("evidence") if isinstance(chain.get("evidence"), dict) else {}
-            supporting = [
-                sf for sf in (chain_evidence.get("supporting_findings") or [])
-                if isinstance(sf, dict) and sf.get("id")
-            ]
-            paths.append({
-                "_supporting": supporting,
-                "id": f"{row['id']}:{chain_type}:{idx}",
-                "name": chain.get("name") or chain_type,
-                "chain_type": chain.get("chain_type"),
-                "severity": severity,
-                "status": chain.get("status"),
-                "confidence": chain.get("confidence"),
-                "completeness": chain.get("completeness"),
-                "missing_required": missing_required,
-                "business_impact": chain.get("business_impact"),
-                "description": chain.get("description"),
-                "remediation": chain.get("remediation"),
-                "steps": steps,
-                "asset_label": _short_url_label(row.get("target_url")),
-                "asset_node_id": subject_node,
-                "scan_id": str(row["id"]),
-                "scan_href": f"/scans/{row['id']}",
-            })
-
-    # Resolve chain-step findings to DB finding ids so each step can deep-link
-    # to its exact finding. Chains carry scanner fingerprints ("tool:hash") in
-    # their supporting_findings evidence, which map onto findings.fingerprint
-    # (with a suffix-only fallback for pre-rename findings).
-    fingerprints: set[str] = set()
-    for p in paths:
-        for sf in p["_supporting"]:
-            fid = str(sf.get("id") or "")
-            if fid:
-                fingerprints.add(fid)
-                if ":" in fid:
-                    fingerprints.add(fid.split(":")[-1])
-    fp_map: dict[str, str] = {}
-    if fingerprints:
-        async with _pool().acquire() as conn:
-            finding_rows = await conn.fetch(
-                "SELECT id, fingerprint FROM findings WHERE fingerprint = ANY($1::text[])",
-                list(fingerprints),
-            )
-        for fr in finding_rows:
-            fp = str(fr["fingerprint"])
-            fp_map[fp] = str(fr["id"])
-            if ":" in fp:
-                fp_map.setdefault(fp.split(":")[-1], str(fr["id"]))
-
-    def _types_align(step_type: str, matched: str) -> bool:
-        # Chain steps use template vocabulary ("sqli"); supporting findings use
-        # the correlator's ("sqli_confirmed", "admin_panel_found") — treat a
-        # shared underscore-prefix family as the same type.
-        if not step_type or not matched:
-            return False
-        return matched == step_type or matched.startswith(f"{step_type}_") or step_type.startswith(f"{matched}_")
-
-    def _resolve_step_finding(step: dict[str, Any], supporting: list[dict[str, Any]]) -> tuple[str | None, str | None]:
-        raw = str(step.get("finding_id") or "")
-        if raw:
-            if raw in fp_map:
-                return fp_map[raw], None
-            try:
-                uuid.UUID(raw)
-                return raw, None
-            except ValueError:
-                pass
-        step_type = str(step.get("finding_type") or "")
-        for sf in supporting:
-            if _types_align(step_type, str(sf.get("matched_type") or "")):
-                sf_id = str(sf.get("id") or "")
-                resolved = fp_map.get(sf_id) or (fp_map.get(sf_id.split(":")[-1]) if ":" in sf_id else None)
-                if resolved:
-                    return resolved, sf.get("title")
-        return None, None
-
-    for p in paths:
-        supporting = p.pop("_supporting")
-        for step in p["steps"]:
-            resolved_id, resolved_title = _resolve_step_finding(step, supporting)
-            step["finding_id"] = resolved_id
-            if resolved_title:
-                step["finding_title"] = resolved_title
-        # Card-level fallback drill-down when steps can't be resolved 1:1.
-        p["findings_href"] = f"/findings?scan_id={p['scan_id']}"
-
-    severity_rank = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
-    paths.sort(
-        key=lambda p: (
-            severity_rank.get(p["severity"] or "", 0),
-            1 if p["status"] == "complete" else 0,
-            len(p["steps"]),
-        ),
-        reverse=True,
-    )
-    return {"attack_paths": paths, "count": len(paths)}
 def _graph_node(
     node_id: str,
     node_type: str,
@@ -2162,12 +1900,6 @@ def _cluster_exposure_findings(
     return new_nodes, new_edges
 
 
-def _exposure_hostname(value: str | None) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    parsed = urllib.parse.urlparse(raw if "://" in raw else f"//{raw}")
-    return (parsed.hostname or "").lower()
 
 
 _EXPOSURE_PRIORITY_WEIGHT = {"P1": 300, "P2": 200, "P3": 100}

@@ -5,9 +5,13 @@ product vocabulary and support boundary of that release; do not rewrite old note
 current product. For current behavior use `../functionality-reference.md`, and for publication state
 use `../release-process.md` plus `RELEASES.md` at the repository root.
 
+## 2.10 line
+
+- [`2.10.0.md`](2.10.0.md) — in development on the `release/2.10.0` integration branch.
+
 ## 2.9 line
 
-- [`2.9.0.md`](2.9.0.md) — in development on the `release/2.9.0` integration branch.
+- [`2.9.0.md`](2.9.0.md) — the stable channel since 2026-10-13.
 
 ## 2.8 line
 
