@@ -2155,6 +2155,26 @@
     "operation_id": "enable_device_profile_targets__target_id__device_profile_post"
   },
   {
+    "path": "/targets/{target_id}/discovered-secrets",
+    "method": "delete",
+    "operation_id": "delete_discovered_secrets_targets__target_id__discovered_secrets_delete"
+  },
+  {
+    "path": "/targets/{target_id}/discovered-secrets",
+    "method": "get",
+    "operation_id": "get_discovered_secrets_targets__target_id__discovered_secrets_get"
+  },
+  {
+    "path": "/targets/{target_id}/discovered-secrets/{secret_id}/expiry",
+    "method": "post",
+    "operation_id": "post_discovered_secret_expiry_targets__target_id__discovered_secrets__secret_id__expiry_post"
+  },
+  {
+    "path": "/targets/{target_id}/discovered-secrets/{secret_id}/state",
+    "method": "post",
+    "operation_id": "post_discovered_secret_state_targets__target_id__discovered_secrets__secret_id__state_post"
+  },
+  {
     "path": "/targets/{target_id}/findings/{finding_id}/dismiss",
     "method": "post",
     "operation_id": "post_dismiss_finding_targets__target_id__findings__finding_id__dismiss_post"

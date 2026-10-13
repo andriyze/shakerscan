@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 211,
+  "component_schema_count": 213,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -180,6 +180,8 @@
     "ScheduleCreate": "7230e00073484dc22b21ab387323ec1c8a2f3596134b7712e04e892052d7d731",
     "ScheduleUpdate": "9f5f80c7c72b527f331d60e33ff63dcc73f96dc510d5c97333ce01bb1df704ad",
     "ScopePreviewRequest": "c9d558119d4bec6e7ce3004de47ff76117a0e18331c77ef0034568525354fade",
+    "SecretExpiry": "cf4b01ac4d279fb0ba0a74b34215039845df43f35a2cfde10fecca353137ae78",
+    "SecretState": "be21f9de83440322ad09a9b6eb34a69e345a937a14d10238b8dbe46b696bc978",
     "SessionActionRequest": "4f6d384ac03d0b3f64e4d68b866f76125457e865dceb0637ed91e73ab52aee98",
     "SessionFindingCreate": "c6f7e1d0cbe91306da47b3706b686c6e1a2055d0c4b4f54c6bdf12300342ddd0",
     "SessionStartRequest": "3ba5b96c9a0935a8640f50459338df4b864061011cda33a22385a5a0753b57ec",
@@ -217,9 +219,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "cbbd49b6d1e6c5018aceefaee005d7784397729e8ff8dabeeee0cb63704f38c5",
+  "contract_sha256": "d785ace15c4436285121c3b382230f75cb262fba26c699fca7706c1cb6bf20f0",
   "openapi": "3.1.0",
-  "operation_count": 482,
+  "operation_count": 486,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -589,6 +591,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "DELETE /targets/{target_id}/discovered-secrets": {
+      "deprecated": false,
+      "operation_id": "delete_discovered_secrets_targets__target_id__discovered_secrets_delete",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
     },
     "DELETE /targets/{target_id}/principal-matrix/{expectation_id}": {
       "deprecated": false,
@@ -3187,6 +3204,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "GET /targets/{target_id}/discovered-secrets": {
+      "deprecated": false,
+      "operation_id": "get_discovered_secrets_targets__target_id__discovered_secrets_get",
+      "parameters_sha256": "5333d192e73d8e342a8301f4269f3b8d7a233d7e0ac11675299de612de58b580",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
     },
     "GET /targets/{target_id}/graph": {
       "deprecated": false,
@@ -6138,6 +6170,36 @@
       "operation_id": "enable_device_profile_targets__target_id__device_profile_post",
       "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
       "request_schema_sha256": "81ac96a224d989bea983d9ef89e190a551ba93faadbaae80c5c9181ca8a97f6a",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "POST /targets/{target_id}/discovered-secrets/{secret_id}/expiry": {
+      "deprecated": false,
+      "operation_id": "post_discovered_secret_expiry_targets__target_id__discovered_secrets__secret_id__expiry_post",
+      "parameters_sha256": "5f19acc46dc1aafcf04230f04310934134994bb790afc12bce681b3cc0ae0309",
+      "request_schema_sha256": "bec3d74da1918f444394fa7543f51e12bd6b64f924449400ebc2b21ed055da3b",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
+    "POST /targets/{target_id}/discovered-secrets/{secret_id}/state": {
+      "deprecated": false,
+      "operation_id": "post_discovered_secret_state_targets__target_id__discovered_secrets__secret_id__state_post",
+      "parameters_sha256": "5f19acc46dc1aafcf04230f04310934134994bb790afc12bce681b3cc0ae0309",
+      "request_schema_sha256": "83a4314ea313c37fefb5d8ba9aa245476b6a1130ee4ddf890e2a7c929a8c9b23",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
