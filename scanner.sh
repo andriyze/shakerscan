@@ -182,6 +182,16 @@ load_access_env() {
         *) echo "SHAKERSCAN_NETWORK_WORKER_ENABLED must be true or false" >&2; return 1 ;;
     esac
 
+    # Model Intake is an optional module (2.10): its images are pulled and its services started
+    # only when it is on. An install that predates the setting keeps it on (nothing is removed
+    # silently); a new install records it off, and `shakerscan model-intake enable` turns it on.
+    value="${SHAKERSCAN_MODEL_INTAKE_ENABLED:-$(read_dotenv_value SHAKERSCAN_MODEL_INTAKE_ENABLED)}"
+    case "${value:-true}" in
+        1|true|TRUE|yes|YES|on|ON) export SHAKERSCAN_MODEL_INTAKE_ENABLED=true ;;
+        0|false|FALSE|no|NO|off|OFF) export SHAKERSCAN_MODEL_INTAKE_ENABLED=false ;;
+        *) echo "SHAKERSCAN_MODEL_INTAKE_ENABLED must be true or false" >&2; return 1 ;;
+    esac
+
     # Record whether the user set BIND/PUBLIC host in their shell *before* we
     # pull defaults out of .env, so configure_access_mode can distinguish a
     # user override from a cached value that may be stale (e.g. Tailscale IP
@@ -682,6 +692,24 @@ compose_config_is_valid() {
     return 1
 }
 
+model_intake_enabled() {
+    [ "${SHAKERSCAN_MODEL_INTAKE_ENABLED:-true}" = "true" ]
+}
+
+# The release images this install uses: the three core images, and the two Model Intake images
+# when the module is on.
+release_image_refs() {
+    printf '%s\n' \
+        "${API_IMAGE:-${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
+        "${SCANNER_IMAGE:-${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
+        "${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+    if model_intake_enabled; then
+        printf '%s\n' \
+            "${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
+            "${MODEL_INTAKE_IMAGE:-${MODEL_INTAKE_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+    fi
+}
+
 pull_prebuilt_images() {
     if [ "$USE_PREBUILT" -ne 1 ]; then
         return 0
@@ -697,14 +725,16 @@ pull_prebuilt_images() {
     # instead of as a pull or network problem.
     compose_config_is_valid || return 1
     echo -e "${BLUE}Pulling prebuilt Docker images...${NC}"
-    if ! compose pull api worker ui model-intake-signer model-intake-worker model-intake-sandbox; then
+    # The Model Intake images (about 4.8 GB of each release) are pulled only when the module is on.
+    local pull_ok=0
+    if model_intake_enabled; then
+        compose --profile model-intake pull api worker ui model-intake-signer model-intake-worker model-intake-sandbox && pull_ok=1
+    else
+        compose pull api worker ui && pull_ok=1
+    fi
+    if [ "$pull_ok" -ne 1 ]; then
         local image
-        for image in \
-            "${API_IMAGE:-${API_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
-            "${SCANNER_IMAGE:-${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
-            "${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
-            "${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
-            "${MODEL_INTAKE_IMAGE:-${MODEL_INTAKE_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"; do
+        for image in $(release_image_refs); do
             if ! docker image inspect "$image" >/dev/null 2>&1; then
                 echo -e "${RED}Error: image pull failed and $image is not cached.${NC}" >&2
                 echo "Docker Compose's reason is printed above (commonly Docker Hub/network access);" >&2
@@ -713,7 +743,7 @@ pull_prebuilt_images() {
             fi
         done
         echo -e "${YELLOW}Image pull failed; using the complete cached ${SCANNER_IMAGE_TAG} image set.${NC}"
-        echo "Startup will still verify UI, API, worker, and Model Intake worker build identity before reporting ready."
+        echo "Startup will still verify the build identity of every running service before reporting ready."
     fi
 }
 
@@ -1518,6 +1548,10 @@ command_needs_curl() {
             [ "${subcmd:-status}" = "status" ]
             return $?
             ;;
+        model-intake)
+            [ "${subcmd:-status}" = "status" ]
+            return $?
+            ;;
         *)
             return 1
             ;;
@@ -2049,6 +2083,7 @@ ensure_directory_mode() {
 
 prepare_runtime_files() {
     write_dotenv_value SHAKERSCAN_NETWORK_WORKER_ENABLED "${SHAKERSCAN_NETWORK_WORKER_ENABLED:-true}"
+    write_dotenv_value SHAKERSCAN_MODEL_INTAKE_ENABLED "${SHAKERSCAN_MODEL_INTAKE_ENABLED:-true}"
     detect_platform
     export SHAKERSCAN_HOST_PLATFORM="$PLATFORM"
     write_dotenv_value SHAKERSCAN_HOST_PLATFORM "$SHAKERSCAN_HOST_PLATFORM"
@@ -2424,6 +2459,7 @@ print_help() {
     echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
     echo "  devices <cmd>      Network worker: start, stop, restart, status, logs"
+    echo "  model-intake <cmd> Optional Model Intake module: enable, disable [--remove-images], status"
     echo "  fleet init [...]   Initialize a WireGuard or outbound-HTTPS broker fleet"
     echo "  fleet preflight    Validate fleet prerequisites without changing state"
     echo "  fleet join-token   Mint a bounded ready-to-paste worker join command"
@@ -2569,6 +2605,14 @@ start_services() {
     if [ "$restore_gungnir" -gt 0 ]; then
         echo -e "${YELLOW}Recreating the Gungnir CT monitor from the selected image...${NC}"
         compose --profile gungnir up --no-build -d --force-recreate gungnir-worker || return 1
+    fi
+    if model_intake_enabled; then
+        echo -e "${GREEN}Starting Model Intake...${NC}"
+        compose --profile model-intake up --no-build -d \
+            model-intake-signer-db-init model-intake-signer model-intake-worker model-intake-sandbox || return 1
+    elif [ "$(running_compose_service_count model-intake-worker)" -gt 0 ] \
+        || [ "$(running_compose_service_count model-intake-signer)" -gt 0 ]; then
+        compose --profile model-intake stop model-intake-worker model-intake-sandbox model-intake-signer || return 1
     fi
     echo ""
     wait_for_url "API" "$(api_probe_url)/health" 120
@@ -2886,12 +2930,12 @@ containers_started_outside_compose() {
     project_container_rows | awk -F'|' '$3 == "" { print $1 }' | sort
 }
 
-# Containers a plain `compose down` leaves behind: the network and Gungnir lanes (their
-# profiles are not active for `down`), containers started outside Compose, and one-off
+# Containers a plain `compose down` leaves behind: the network, Gungnir and Model Intake lanes
+# (their profiles are not active for `down`), containers started outside Compose, and one-off
 # `compose run` containers. Each one still attached keeps the project networks "in use", and
 # survives an upgrade on its old image.
 containers_outside_compose_down() {
-    project_container_rows | awk -F'|' '$2 == "device-worker" || $2 == "gungnir-worker" || $3 == "" || $4 == "True" { print $1 }' | sort
+    project_container_rows | awk -F'|' '$2 == "device-worker" || $2 == "gungnir-worker" || $2 ~ /^model-intake-/ || $3 == "" || $4 == "True" { print $1 }' | sort
 }
 
 remove_containers_outside_compose_down() {
@@ -4172,6 +4216,54 @@ gungnir_cmd() {
     esac
 }
 
+MODEL_INTAKE_SERVICES="model-intake-signer-db-init model-intake-signer model-intake-worker model-intake-sandbox"
+
+# The optional Model Intake module (2.10): off for a new install, kept on for an install that
+# predates the setting. Enabling pulls only its two images (by the same release lock) and starts
+# its services; disabling stops and removes them, and with --remove-images also its images.
+model_intake_cmd() {
+    local subcmd="${1:-status}" option="${2:-}"
+    case "$subcmd" in
+        enable)
+            if [ "$USE_PREBUILT" -eq 1 ] && is_truthy "${SHAKERSCAN_PULL_IMAGES:-1}"; then
+                echo -e "${BLUE}Pulling the Model Intake images (about 4.8 GB)...${NC}"
+                compose --profile model-intake pull model-intake-signer model-intake-worker model-intake-sandbox || return 1
+            fi
+            export SHAKERSCAN_MODEL_INTAKE_ENABLED=true
+            write_dotenv_value SHAKERSCAN_MODEL_INTAKE_ENABLED true
+            # shellcheck disable=SC2086
+            compose --profile model-intake up --no-build -d $MODEL_INTAKE_SERVICES || return 1
+            # The API reports the module from its environment: recreate it so /health says so.
+            compose up --no-build -d --force-recreate api || return 1
+            echo -e "${GREEN}Model Intake enabled; it starts with the stack from now on${NC}"
+            ;;
+        disable)
+            export SHAKERSCAN_MODEL_INTAKE_ENABLED=false
+            write_dotenv_value SHAKERSCAN_MODEL_INTAKE_ENABLED false
+            # shellcheck disable=SC2086
+            compose --profile model-intake rm -s -f $MODEL_INTAKE_SERVICES || return 1
+            compose up --no-build -d --force-recreate api || return 1
+            if [ "$option" = "--remove-images" ]; then
+                local image
+                for image in "${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
+                    "${MODEL_INTAKE_IMAGE:-${MODEL_INTAKE_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"; do
+                    docker image rm "$image" >/dev/null 2>&1 && echo "Removed $image" || echo "Kept $image (in use or not present)"
+                done
+            fi
+            echo -e "${GREEN}Model Intake disabled; existing Model Intake records are kept${NC}"
+            ;;
+        status)
+            echo "Model Intake: $([ "${SHAKERSCAN_MODEL_INTAKE_ENABLED:-true}" = "true" ] && echo enabled || echo disabled)"
+            # shellcheck disable=SC2086
+            compose --profile model-intake ps $MODEL_INTAKE_SERVICES
+            ;;
+        *)
+            echo "Usage: ./scanner.sh model-intake {enable|disable [--remove-images]|status}" >&2
+            return 1
+            ;;
+    esac
+}
+
 devices_cmd() {
     local subcmd=${1:-"status"}
 
@@ -4351,6 +4443,10 @@ if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
             ;;
         devices)
             echo "Usage: ./scanner.sh devices {start|stop|restart|status|logs}"
+            exit 0
+            ;;
+        model-intake)
+            echo "Usage: ./scanner.sh model-intake {enable|disable [--remove-images]|status}"
             exit 0
             ;;
         *)
@@ -4542,6 +4638,9 @@ case $COMMAND in
         ;;
     devices)
         devices_cmd "${ARGS[0]}"
+        ;;
+    model-intake)
+        model_intake_cmd "${ARGS[@]}"
         ;;
     build)
         build_images

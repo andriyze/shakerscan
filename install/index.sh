@@ -437,6 +437,7 @@ print_next_steps() {
     fi
     say ""
     say "Optional: for AI semantic judging, add AI_API_KEY to $INSTALL_DIR/.env"
+    say "Optional: Model Intake (scan AI models before deployment, about 4.8 GB): shakerscan model-intake enable"
     say "Docs & more commands:  $(sk) env   |   $INSTALL_DIR/README.md"
     say ""
 }
@@ -561,6 +562,12 @@ mkdir -p "$INSTALL_STAGE/skills/shakerscan/agents" "$INSTALL_STAGE/skills/shaker
 mkdir -p "$INSTALL_STAGE/skills/web/core"
 mkdir -p "$INSTALL_STAGE/.claude/agents" "$INSTALL_STAGE/.claude/commands" "$INSTALL_STAGE/.claude/hooks"
 touch "$INSTALL_STAGE/.env"
+# A new install leaves the optional Model Intake module off (2.10; about 4.8 GB of images it never
+# pulls); `shakerscan model-intake enable` installs it. An existing install keeps its setting, and
+# one that predates the setting keeps Model Intake on: nothing is removed by an upgrade.
+if [ ! -f "$INSTALL_DIR/.env" ] && ! grep -q '^SHAKERSCAN_MODEL_INTAKE_ENABLED=' "$INSTALL_STAGE/.env"; then
+    printf 'SHAKERSCAN_MODEL_INTAKE_ENABLED=false\n' >> "$INSTALL_STAGE/.env"
+fi
 : > "$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
 
 # Docker created this path as a directory on affected 0.8.x installs when the

@@ -179,11 +179,19 @@ def test_a_malformed_lock_fails_closed(tmp_path):
     assert "unsupported release image lock key: EXTRA_KEY" in err
 
 
-def test_pull_and_cache_fallback_cover_all_five_images():
+def test_pull_and_cache_fallback_cover_the_core_images_and_model_intake_only_when_on():
+    # 2.10: Model Intake is an optional module; its two images are pulled only when it is on.
     pull = _fn("pull_prebuilt_images")
-    assert "compose pull api worker ui model-intake-signer model-intake-worker model-intake-sandbox" in pull
-    for key in ("API_IMAGE", "SCANNER_IMAGE", "UI_IMAGE", "SIGNER_IMAGE", "MODEL_INTAKE_IMAGE"):
-        assert f'"${{{key}:-' in pull, key
+    assert ("compose --profile model-intake pull api worker ui model-intake-signer model-intake-worker "
+            "model-intake-sandbox") in pull
+    assert "compose pull api worker ui && pull_ok=1" in pull
+    assert "if model_intake_enabled; then" in pull and "$(release_image_refs)" in pull
+    refs = _fn("release_image_refs")
+    core, _, optional = refs.partition("if model_intake_enabled; then")
+    for key in ("API_IMAGE", "SCANNER_IMAGE", "UI_IMAGE"):
+        assert f'"${{{key}:-' in core, key
+    for key in ("SIGNER_IMAGE", "MODEL_INTAKE_IMAGE"):
+        assert f'"${{{key}:-' in optional, key
 
 
 def test_lifecycle_paths_include_the_model_intake_worker():

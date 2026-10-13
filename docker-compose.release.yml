@@ -194,6 +194,7 @@ services:
       - SHAKERSCAN_POSTURE_RESOLVER=${SHAKERSCAN_POSTURE_RESOLVER:-}
       - SHAKERSCAN_POSTURE_IPINFO_TOKEN=${SHAKERSCAN_POSTURE_IPINFO_TOKEN:-}
       - MODEL_INTAKE_SIGNER_URL=http://model-intake-signer:8091/internal/model-intake/admissions/issue
+      - SHAKERSCAN_MODEL_INTAKE_ENABLED=${SHAKERSCAN_MODEL_INTAKE_ENABLED:-true}
       - MODEL_INTAKE_SIGNER_INTERNAL_TOKEN=${MODEL_INTAKE_SIGNER_INTERNAL_TOKEN:-}
       - MODEL_INTAKE_OPERATOR_TOKEN=${MODEL_INTAKE_OPERATOR_TOKEN:-}
       - MODEL_INTAKE_LOCAL_SESSION_SECRET=${MODEL_INTAKE_LOCAL_SESSION_SECRET:-}
@@ -291,6 +292,7 @@ services:
       - signer-control
 
   model-intake-signer-db-init:
+    profiles: ["model-intake"]
     image: ${MODEL_INTAKE_SIGNER_POSTGRES_IMAGE:-postgres:18.6-alpine3.23@sha256:885cf05d376c7cf27afef02073e6bdac3841252537f16e244fd1c1e6a7c99fb1}
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -313,6 +315,7 @@ services:
     restart: "no"
 
   model-intake-signer:
+    profiles: ["model-intake"]
     image: ${SIGNER_IMAGE:-shakerscan/shakerscan-model-intake-signer:latest}
     environment:
       - DATABASE_URL=postgresql://model_intake_signer:${MODEL_INTAKE_SIGNER_DATABASE_PASSWORD:?MODEL_INTAKE_SIGNER_DATABASE_PASSWORD is required}@postgres:5432/scanner
@@ -545,6 +548,7 @@ services:
   # DAST slots. On the scanner image for now; the Model Intake image split points this at
   # ${MODEL_INTAKE_IMAGE}.
   model-intake-worker:
+    profiles: ["model-intake"]
     init: true
     hostname: shakerscan-model-intake-worker
     image: ${MODEL_INTAKE_IMAGE:-shakerscan/shakerscan-model-intake:latest}
@@ -649,6 +653,7 @@ services:
     restart: unless-stopped
 
   model-intake-sandbox:
+    profiles: ["model-intake"]
     init: true
     image: ${MODEL_INTAKE_IMAGE:-shakerscan/shakerscan-model-intake:latest}
     user: "${MODEL_INTAKE_SANDBOX_UID:-10001}:${MODEL_INTAKE_SANDBOX_GID:-10001}"

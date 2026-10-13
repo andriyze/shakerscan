@@ -132,7 +132,7 @@ const navGroups: {
     heading: 'AI security',
     items: [
       { href: '/ai-gate', label: 'AI Gate', icon: <Bot className="w-5 h-5" /> },
-      { href: '/model-intake', label: 'Model Intake', icon: <PackageCheck className="w-5 h-5" /> },
+      { href: '/model-intake', label: 'Model Intake', icon: <PackageCheck className="w-5 h-5" />, advanced: true },
     ],
   },
   {
@@ -317,7 +317,7 @@ function NavContent({
             GitHub
           </a>
           <div className="flex items-center gap-2">
-          <span title="Show advanced sections (Records, Governance, Developer)" className="inline-flex">
+          <span title="Show advanced sections (Records, Governance, Developer, Model Intake)" className="inline-flex">
             <Toggle checked={showAll} onChange={onToggleShowAll} label="Show all sidebar sections" />
           </span>
           <Link

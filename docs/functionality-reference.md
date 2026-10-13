@@ -1905,11 +1905,11 @@ for the profile contract, invocation, limits and acceptance gates.
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
-| Canonical scanner wrapper commands | 37 | `scanner.sh` |
+| Canonical scanner wrapper commands | 38 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 410 | Python sources + Compose manifests |
+| Runtime environment keys | 411 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 132 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2716,7 +2716,7 @@ opaque profile, and collection-reference fields.
 
 | Surface | Names |
 |---|---|
-| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `db-upgrade`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `knowledge`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop`, `version` |
+| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `db-upgrade`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop`, `version` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-hunt-ssh`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
@@ -3074,6 +3074,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MCP_CALL_SECONDS` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MODEL_INTAKE_ADAPTER_SELF_TEST` | `scanner/scanner_tools/model_intake_scanners.py` |
+| `SHAKERSCAN_MODEL_INTAKE_ENABLED` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_MODEL_INTAKE_RUNTIME_LOCK` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_NAT64_PREFIXES` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml`, `scanner/scanner_tools/address_classes.py` |
 | `SHAKERSCAN_NETWORK_WORKER_ENABLED` | `api/devices/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |

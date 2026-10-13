@@ -75,7 +75,7 @@ test('docs and mobile operations expose truthful accessible labels', () => {
   assert.match(docs, /h1: \(\{ children \}\) => \(\s*<h2/)
   assert.match(dashboard, />Emergency clear<\/span>/)
   assert.match(dashboard, /ready to scan/)
-  assert.match(sidebar, /Show advanced sections \(Records, Governance, Developer\)/)
+  assert.match(sidebar, /Show advanced sections \(Records, Governance, Developer, Model Intake\)/)
   assert.doesNotMatch(sidebar, /Interactive Testing, Leads/)
 })
 
