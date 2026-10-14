@@ -37,10 +37,13 @@ docker() {
     "image inspect")
       local ref="${@: -1}" line
       line="$(awk -v ref="$ref" '$1 == ref || $2 == ref' "$WORK/images" 2>/dev/null | head -1)"
-      [ -n "$line" ] || return 1
-      case "$*" in *--format*) echo "$line" | awk '{print $2}' ;; esac ;;
+      [ -n "$line" ] || { echo "Error: No such image: $ref" >&2; return 1; }
+      case "$*" in
+        *RepoTags*) awk -v id="$(echo "$line" | awk '{print $2}')" '$2 == id {print $1}' "$WORK/images" ;;
+        *--format*) echo "$line" | awk '{print $2}' ;;
+      esac ;;
     "image rm")
-      awk -v id="$3" '$2 != id' "$WORK/images" > "$WORK/images.new"; mv "$WORK/images.new" "$WORK/images"
+      awk -v id="$3" '$1 != id && $2 != id' "$WORK/images" > "$WORK/images.new"; mv "$WORK/images.new" "$WORK/images"
       echo $(( $(cat "$WORK/free_gb") + ${FREED_PER_IMAGE:-4} )) > "$WORK/free_gb" ;;
     "images --no-trunc")
       awk -v repo="${@: -1}" '$3 == repo {print $2}' "$WORK/images" ;;
@@ -257,6 +260,7 @@ def test_the_first_upgrade_backup_names_the_version_the_running_api_reported(tmp
 
 def test_the_running_release_is_recorded_with_its_api_version(tmp_path):
     body = """
+    echo "ghcr.io/x/shakerscan-api@sha256:run id-running ghcr.io/x/shakerscan-api" > "$WORK/images"
     echo id-running > "$WORK/containers"
     running_api_version() { echo 2.9.0; }
     remember_running_release
@@ -452,3 +456,82 @@ def test_a_redis_that_is_really_loading_is_still_waited_for(tmp_path):
     result = run(tmp_path, body)
     assert "rc=1" in result.stdout, result.stdout + result.stderr
     assert int(result.stdout.split("clock=")[1].split()[0]) >= 300  # waited out the loading allowance
+
+
+def test_routine_cleanup_never_removes_a_third_party_image_recorded_with_a_release(tmp_path):
+    """Review F1: the first upgrade records the running project's images, postgres and caddy
+    included; two releases later the routine cleanup must remove only ShakerScan's."""
+    body = """
+    cat > "$WORK/images" <<'X'
+    ghcr.io/x/shakerscan-api@sha256:a29 id-api29 ghcr.io/x/shakerscan-api
+    postgres:18.6-alpine id-postgres postgres
+    caddy:2 id-caddy caddy
+    ghcr.io/x/shakerscan-api@sha256:a210 id-api210 ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-api@sha256:a211 id-api211 ghcr.io/x/shakerscan-api
+    X
+    sed -i.bak 's/^ *//' "$WORK/images"
+    printf 'id-api29\\nid-postgres\\nid-caddy\\n' > "$WORK/containers"
+    running_api_version() { echo 2.9.0; }
+    remember_running_release
+    : > "$WORK/containers"
+    REFS="ghcr.io/x/shakerscan-api@sha256:a210"; SCANNER_VERSION=2.10.0; record_started_release prune
+    REFS="ghcr.io/x/shakerscan-api@sha256:a211"; SCANNER_VERSION=2.11.0; record_started_release prune
+    head -3 "$WORK/.release-images.previous" >&2
+    """
+    result = run(tmp_path, body)
+    removed = [line for line in calls(tmp_path).splitlines() if line.startswith("docker image rm")]
+    assert removed == ["docker image rm id-api29"], removed
+    assert "id-postgres" not in (tmp_path / ".release-images.superseded").read_text() \
+        if (tmp_path / ".release-images.superseded").exists() else True
+
+
+def test_the_same_version_with_other_image_names_keeps_the_previous_release(tmp_path):
+    """Review F3: a CURRENT written without the optional module's images must not push the 2.9
+    rollback release out when the same 2.10 starts again with them recorded."""
+    body = """
+    echo "ghcr.io/x/shakerscan-api@sha256:old1 id-old1 ghcr.io/x/shakerscan-api" > "$WORK/images"
+    printf '# release 2.9.0\\nghcr.io/x/shakerscan-api@sha256:old1\\n' > "$WORK/.release-images.previous"
+    printf '# release 2.10.0\\nghcr.io/x/shakerscan-api@sha256:new1\\n' > "$WORK/.release-images.current"
+    REFS="ghcr.io/x/shakerscan-api@sha256:new1 ghcr.io/x/shakerscan-model-intake@sha256:mi"
+    SCANNER_VERSION=2.10.0; record_started_release prune
+    cat "$WORK/.release-images.previous"; echo ---; cat "$WORK/.release-images.current"
+    """
+    result = run(tmp_path, body)
+    previous, current = result.stdout.split("---")
+    assert "# release 2.9.0" in previous and "old1" in previous
+    assert "shakerscan-model-intake@sha256:mi" in current
+    assert "image rm" not in calls(tmp_path)
+
+
+def test_a_superseded_entry_survives_a_docker_error_other_than_no_such_image(tmp_path):
+    """Review F5."""
+    body = """
+    printf '# s\\nghcr.io/x/shakerscan-api@sha256:old\\n' > "$WORK/.release-images.superseded"
+    docker() { echo "docker $*" >> "$CALLS"; case "$1 $2" in "image inspect") echo "permission denied" >&2; return 1 ;; esac; }
+    echo "n=$(prune_superseded_release_images)"; cat "$WORK/.release-images.superseded"
+    """
+    result = run(tmp_path, body)
+    assert "n=0" in result.stdout and "shakerscan-api@sha256:old" in result.stdout
+
+
+def test_redis_loading_a_truncated_file_anyway_is_not_a_failure(tmp_path):
+    """Review F2: "loaded anyway because aof-load-truncated is enabled" is Redis recovering by
+    itself; the wait must keep waiting for healthy instead of starting a repair."""
+    body = _CLOCK + """
+    redis_container_state() { echo running; }
+    redis_health() { n=$(( $(cat "$WORK/polls" 2>/dev/null || echo 0) + 1 )); echo $n > "$WORK/polls"
+                     [ "$n" -ge 3 ] && echo healthy || echo starting; }
+    printf '%s\\n' "# Short read while loading the AOF file appendonly.aof.1.incr.aof!" \
+        "# AOF appendonly.aof.1.incr.aof loaded anyway because aof-load-truncated is enabled" > "$WORK/redis.log"
+    wait_for_redis_healthy; echo "rc=$?"
+    echo "kind=$(redis_failure_kind)"
+    """
+    result = run(tmp_path, body)
+    assert "rc=0" in result.stdout, result.stdout + result.stderr
+    assert "kind=unknown" in result.stdout
+
+
+def test_the_backup_of_an_unversioned_running_release_says_earlier(tmp_path):
+    """Review F8: the release compose defaults SCANNER_VERSION to "latest"."""
+    assert "-earlier-to-2.10.0" in _backup(tmp_path, None, "t", previous="latest").stdout
+    assert "-earlier-to-2.10.0" in _backup(tmp_path, None, "t", previous="2.10.0").stdout

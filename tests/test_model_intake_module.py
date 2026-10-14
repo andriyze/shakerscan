@@ -58,7 +58,7 @@ def test_the_launcher_starts_model_intake_only_when_on_and_removes_it_on_stop():
                    "write_dotenv_value SHAKERSCAN_MODEL_INTAKE_ENABLED true",
                    "write_dotenv_value SHAKERSCAN_MODEL_INTAKE_ENABLED false",
                    "compose --profile model-intake rm -s -f $MODEL_INTAKE_SERVICES",
-                   'docker image rm "$image"'):
+                   'docker_cli image rm "$image"'):
         assert needle in command, needle
     assert "docker image rm -f" not in command and "docker image rm --force" not in command
 
