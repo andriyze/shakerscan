@@ -199,8 +199,38 @@ def _decoded_triage(evidence: str) -> str:
         ELSE '{{}}'::jsonb END)"""
 
 
+# Top-level evidence keys at least one of which every scan-time proof reads; without one of them
+# (or without an object) the proof is false. Testing them first keeps the long expression off the
+# rows that cannot be proven, which is nearly all of them.
+SCAN_TIME_PROOF_KEYS = (
+    "proof_of_exploitation", "payload_executed", "executed", "extraction_evidence", "extracted_data",
+    "browser_proof", "proof_producer", "proof_type", "proof_contract", "proof_contract_v2",
+)
+# Likewise for the candidate (suspected) evidence: a triage block or a proof_state.
+CANDIDATE_EVIDENCE_KEYS = ("triage", "proof_state")
+
+
+def _has_any_key(evidence: str, keys) -> str:
+    """Cheap gate: ``evidence`` is a JSON object with at least one of ``keys`` at the top level."""
+    return (
+        f"COALESCE(jsonb_typeof({evidence}) = 'object' AND {evidence} ?| ARRAY{_words(keys).replace('(', '[').replace(')', ']')}::text[], false)"
+    )
+
+
+def scan_time_proof_gate_sql(evidence: str) -> str:
+    """The key gate ``scan_time_proof_sql`` tests first (planner statistics exist for it)."""
+    return _has_any_key(evidence, SCAN_TIME_PROOF_KEYS)
+
+
 def scan_time_proof_sql(evidence: str) -> str:
     """scan_verification_state.scan_time_verification_fields(...) == 'exploited' for a findings row."""
+    return (
+        f"(CASE WHEN {_has_any_key(evidence, SCAN_TIME_PROOF_KEYS)}"
+        f" THEN {_scan_time_proof_full(evidence)} ELSE false END)"
+    )
+
+
+def _scan_time_proof_full(evidence: str) -> str:
     evidence_object = f"COALESCE(jsonb_typeof({evidence}) = 'object', false)"
     return "(" + " OR ".join([
         _flag(f"{evidence} -> 'proof_of_exploitation'"),
@@ -224,6 +254,46 @@ def scan_time_proof_sql(evidence: str) -> str:
     ]) + ")"
 
 
+def _is_exploited(verdict: str) -> str:
+    return f"{_fold(f'COALESCE({verdict}, {chr(39)}{chr(39)})')} = 'exploited'"
+
+
+def verified_sql(*, evidence: str, verdict: str, retest_mode: str) -> str:
+    """SQL text: finding_proof_fields(...)["is_verified"] (the first branch of proof_state_sql)."""
+    return (
+        f"({scan_time_proof_sql(evidence)} OR ("
+        f"{_is_exploited(verdict)}"
+        f" AND {_fold(f'COALESCE({retest_mode}, {chr(39)}{chr(39)})')} = 'deterministic'))"
+    )
+
+
+def verified_candidate_sql(*, evidence: str, verdict: str) -> str:
+    """A cheap superset of ``verified_sql``: evidence that could carry scan-time proof, or a verdict.
+
+    ``verified_sql`` implies it, so adding it to a verified filter changes nothing but lets the
+    planner read the partial index idx_findings_proof_candidates (the same expression) instead of
+    evaluating the proof on every row.
+    """
+    return f"({scan_time_proof_gate_sql(evidence)} OR {verdict} IS NOT NULL)"
+
+
+def latest_retest_mode_sql(*, finding_id: str, verdict: str) -> str:
+    """The latest retest's mode wherever the proof projection reads it, with no join.
+
+    The projection reads the mode only when the stored verdict folds to 'exploited', so the
+    lookup (one index probe of finding_verifications) runs for those rows alone; every other row
+    gets NULL, which the projection treats the same. A list can then filter on proof without a
+    per-row LATERAL over every candidate row.
+    """
+    return (
+        f"(CASE WHEN {_is_exploited(verdict)} THEN ("
+        "SELECT CASE WHEN fv.verdict IS NOT NULL THEN fv.verification_mode END"
+        " FROM finding_verifications fv"
+        f" WHERE fv.finding_id = {finding_id}"
+        " ORDER BY fv.created_at DESC, fv.id DESC LIMIT 1) END)"
+    )
+
+
 def proof_state_sql(*, evidence: str, severity: str, verdict: str, retest_mode: str) -> str:
     """SQL text: 'verified' | 'suspected' | 'unverified', exactly as finding_proof_fields answers."""
     triage = "decoded.triage"
@@ -231,20 +301,20 @@ def proof_state_sql(*, evidence: str, severity: str, verdict: str, retest_mode: 
         WHEN {_truthy(f"{evidence} -> 'proof_state'")} THEN {evidence} -> 'proof_state'
         WHEN {_truthy(f"{triage} -> 'proof_state'")} THEN {triage} -> 'proof_state'
         END)"""
-    verified = (
-        f"({scan_time_proof_sql(evidence)} OR ("
-        f"{_fold(f'COALESCE({verdict}, {chr(39)}{chr(39)})')} = 'exploited'"
-        f" AND {_fold(f'COALESCE({retest_mode}, {chr(39)}{chr(39)})')} = 'deterministic'))"
-    )
-    suspected = "(" + " OR ".join([
-        f"{_fold(f'COALESCE({severity}, {chr(39)}{chr(39)})')} IN ('critical', 'high')",
+    verified = verified_sql(evidence=evidence, verdict=verdict, retest_mode=retest_mode)
+    high = f"{_fold(f'COALESCE({severity}, {chr(39)}{chr(39)})')} IN ('critical', 'high')"
+    candidate = "(" + " OR ".join([
         _is_true(f"{triage} -> 'suspected'"),
         _is_true(f"{triage} -> 'needs_verification'"),
         _lower_word_in(selected_state, CANDIDATE_PROOF_STATES),
     ]) + ")"
+    # The triage decode (a sub-select) runs only for evidence that has a triage or proof_state.
     return (
-        f"(SELECT CASE WHEN {verified} THEN 'verified' WHEN {suspected} THEN 'suspected'"
-        f" ELSE 'unverified' END FROM (SELECT {_decoded_triage(evidence)} AS triage) AS decoded)"
+        f"(CASE WHEN {verified} THEN 'verified' WHEN {high} THEN 'suspected'"
+        f" WHEN {_has_any_key(evidence, CANDIDATE_EVIDENCE_KEYS)} THEN"
+        f" (SELECT CASE WHEN {candidate} THEN 'suspected' ELSE 'unverified' END"
+        f" FROM (SELECT {_decoded_triage(evidence)} AS triage) AS decoded)"
+        f" ELSE 'unverified' END)"
     )
 
 
@@ -257,12 +327,26 @@ def undetermined_proof_sql(evidence: str) -> str:
     )
 
 
+def triage_string_sql(evidence: str) -> str:
+    """The indexed precondition of ``undetermined_proof_sql`` (idx_findings_triage_string).
+
+    Every undetermined row satisfies it, and it matches the partial index predicate exactly, so
+    ``<this> AND <undetermined>`` reads the few rows whose triage is a string instead of every row.
+    """
+    return f"jsonb_typeof({evidence} -> 'triage') = 'string'"
+
+
 __all__ = [
     "CANDIDATE_PROOF_STATES",
     "FOLD_FROM",
     "FOLD_TO",
     "PY_WHITESPACE",
+    "latest_retest_mode_sql",
     "proof_state_sql",
+    "scan_time_proof_gate_sql",
     "scan_time_proof_sql",
+    "triage_string_sql",
     "undetermined_proof_sql",
+    "verified_candidate_sql",
+    "verified_sql",
 ]

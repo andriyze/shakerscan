@@ -79,6 +79,13 @@ class _Conn:
         self.rows = rows
         self.queries: list[tuple[str, tuple]] = []
 
+    @asynccontextmanager
+    async def transaction(self):
+        yield
+
+    async def execute(self, query, *args):
+        assert query == "SET LOCAL jit = off", query
+
     async def fetch(self, query, *args):
         self.queries.append((query, args))
         return [dict(row) for row in self.rows]
@@ -116,9 +123,10 @@ from finding_routes.list_filters import host_in_domain_sql  # noqa: E402
 def test_a_domain_filter_matches_ai_and_device_hosts_exactly(monkeypatch):
     _, conn = _list(monkeypatch, [], root_domain="example.com")
     query, args = conn.queries[0]
-    assert "t.root_domain = $1" in query
-    assert host_in_domain_sql("ait.endpoint_url", "$1") in query
-    assert host_in_domain_sql("dt.primary_locator", "$1") in query
+    # Each side is a predicate on the finding's own key, so the page query reads findings alone.
+    assert "f.target_id = ANY(ARRAY(SELECT id FROM targets WHERE root_domain = $1))" in query
+    assert host_in_domain_sql("endpoint_url", "$1") in query and "f.ai_target_id = ANY(" in query
+    assert host_in_domain_sql("primary_locator", "$1") in query and "f.device_target_id = ANY(" in query
     # The substring match that let example.com select notexample.com is gone.
     assert "LIKE '%' || LOWER($1) || '%'" not in query
     assert args[0] == "example.com"
@@ -133,8 +141,13 @@ def test_host_matching_is_exact_or_subdomain_and_avoids_like_wildcards():
 def test_search_covers_target_and_device_names(monkeypatch):
     _, conn = _list(monkeypatch, [], search="lab-router")
     query, args = conn.queries[0]
-    for column in ("t.name", "dt.name", "dt.primary_locator", "ait.name", "f.title"):
+    for column in ("f.title", "f.url"):
         assert f"{column} ILIKE $1" in query, column
+    targets, ai_targets, devices = (query.split(f"FROM {table}", 1)[1].split(")", 1)[0]
+                                    for table in ("targets", "ai_targets", "device_targets"))
+    assert "url ILIKE $1" in targets and "name ILIKE $1" in targets
+    assert "endpoint_url ILIKE $1" in ai_targets and "name ILIKE $1" in ai_targets
+    assert "name ILIKE $1" in devices and "primary_locator ILIKE $1" in devices
     assert args[0] == "%lab-router%"
 
 

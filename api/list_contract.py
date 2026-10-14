@@ -69,7 +69,9 @@ Rules the helpers rely on:
 * Filters are added before the keyset clause, so ``params.snapshot()`` taken between the two
   is exactly the count query's argument list.
 * A sort expression must be NOT NULL (wrap a nullable column in ``COALESCE``) and should have a
-  btree index over ``(sort expression, id)`` so the keyset clause is an index range scan.
+  btree index over ``(sort expression, id)`` so the keyset clause is an index range scan. A
+  ``SortKey`` may add further keys (``then=((expr, kind), ...)``, same direction, before the id):
+  the cursor carries every key and the index is ``(expr, then..., id)``.
 * Pass every filter that changes the result to ``plan(filters=...)``: a cursor issued for one
   filter set is refused (400 ``cursor_mismatch``) under another instead of skipping rows.
 * List projections never include the heavy record bodies in ``LIST_HEAVY_FIELDS``; a spec that
@@ -79,7 +81,7 @@ Rules the helpers rely on:
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -168,10 +170,19 @@ PageDep = Annotated[Page, Depends(page_params)]
 
 @dataclass(frozen=True)
 class SortKey:
-    """A declared sort: a NOT NULL SQL expression and the type its cursor value decodes to."""
+    """A declared sort: a NOT NULL SQL expression and the type its cursor value decodes to.
+
+    ``then`` adds further NOT NULL ``(expression, kind)`` keys, ordered in the same direction
+    before the id tiebreaker (severity, then last seen); the cursor carries every key.
+    """
 
     expr: str
     kind: SortKind
+    then: tuple[tuple[str, SortKind], ...] = ()
+
+    @property
+    def columns(self) -> tuple[tuple[str, SortKind], ...]:
+        return ((self.expr, self.kind), *self.then)
 
 
 class SqlParams:
@@ -236,7 +247,7 @@ class ListSpec:
         fingerprint = _fingerprint(self.scope, sort, filters or {}, page.since)
         position = None
         if page.cursor is not None:
-            position = _decode_cursor(page.cursor, fingerprint, self.sorts[name].kind, self.id_kind)
+            position = _decode_cursor(page.cursor, fingerprint, self.sorts[name].columns, self.id_kind)
         return ListPlan(self, page, name, descending, chosen, fingerprint, position)
 
 
@@ -250,29 +261,49 @@ class ListPlan:
     descending: bool
     fields: tuple[str, ...]
     fingerprint: str
-    position: tuple[Any, Any] | None = field(default=None)
+    #: The previous page's last row: every sort key value, then the id.
+    position: tuple[Any, ...] | None = field(default=None)
 
     @property
     def sort_expr(self) -> str:
         return self.spec.sorts[self.sort_name].expr
 
     @property
+    def _sort_columns(self) -> tuple[tuple[str, SortKind], ...]:
+        return self.spec.sorts[self.sort_name].columns
+
+    @staticmethod
+    def _sort_alias(index: int) -> str:
+        return _SORT_COLUMN if index == 0 else f"{_SORT_COLUMN}_{index}"
+
+    @property
     def select_list(self) -> str:
-        """The requested fields plus the two keyset columns ``envelope`` reads and strips."""
+        """The requested fields plus the keyset columns ``envelope`` reads and strips."""
         columns = [f"{self.spec.fields[name]} AS {name}" for name in self.fields]
-        columns.append(f"{self.sort_expr} AS {_SORT_COLUMN}")
+        for index, (expr, _kind) in enumerate(self._sort_columns):
+            columns.append(f"{expr} AS {self._sort_alias(index)}")
         columns.append(f"{self.spec.id_expr} AS {_ID_COLUMN}")
         return ", ".join(columns)
 
     @property
     def order_by(self) -> str:
         direction = "DESC" if self.descending else "ASC"
-        return f"{self.sort_expr} {direction}, {self.spec.id_expr} {direction}"
+        keys = [expr for expr, _kind in self._sort_columns] + [self.spec.id_expr]
+        return ", ".join(f"{key} {direction}" for key in keys)
 
     @property
     def fetch_limit(self) -> int:
         """One more than the page: the extra row only proves ``has_more``."""
         return self.page.limit + 1
+
+    def after(self, row: Mapping[str, Any]) -> "ListPlan":
+        """This plan positioned after ``row`` (a row fetched with ``select_list``).
+
+        For an endpoint that drops some fetched rows in Python and fetches again to fill the
+        page; the cursor ``envelope`` issues still comes from the last row it returns.
+        """
+        values = [row[self._sort_alias(index)] for index in range(len(self._sort_columns))]
+        return replace(self, position=(*values, row[_ID_COLUMN]))
 
     def filter_clauses(self, params: SqlParams) -> list[str]:
         """Contract-level filters (``since``) that the count must also honour."""
@@ -284,10 +315,10 @@ class ListPlan:
         """The position after the previous page; empty on the first page."""
         if self.position is None:
             return []
-        sort_value, id_value = self.position
         operator = "<" if self.descending else ">"
-        return [f"({self.sort_expr}, {self.spec.id_expr}) {operator} "
-                f"({params.add(sort_value)}, {params.add(id_value)})"]
+        keys = [expr for expr, _kind in self._sort_columns] + [self.spec.id_expr]
+        values = [params.add(value) for value in self.position]
+        return [f"({', '.join(keys)}) {operator} ({', '.join(values)})"]
 
     def envelope(
         self, rows: Sequence[Mapping[str, Any]], *, total: int | None = None,
@@ -301,8 +332,9 @@ class ListPlan:
         if has_more and page_rows:
             last = page_rows[-1]
             next_cursor = _encode_cursor(
-                self.fingerprint, last[_SORT_COLUMN], last[_ID_COLUMN],
-                self.spec.sorts[self.sort_name].kind, self.spec.id_kind,
+                self.fingerprint,
+                [last[self._sort_alias(index)] for index in range(len(self._sort_columns))],
+                last[_ID_COLUMN], self._sort_columns, self.spec.id_kind,
             )
         items = []
         for row in page_rows:
@@ -449,18 +481,18 @@ def _mac(payload: str) -> str:
     return _b64(hmac.new(_key(), payload.encode("ascii"), hashlib.sha256).digest()[:16])
 
 
-def _encode_cursor(fingerprint: str, sort_value: Any, id_value: Any, sort_kind: SortKind,
-                   id_kind: SortKind) -> str:
+def _encode_cursor(fingerprint: str, sort_values: Sequence[Any], id_value: Any,
+                   sort_columns: Sequence[tuple[str, SortKind]], id_kind: SortKind) -> str:
+    keys = [_encode_value(value, kind) for value, (_expr, kind) in zip(sort_values, sort_columns, strict=True)]
     payload = _b64(json.dumps(
-        {"v": 1, "q": fingerprint,
-         "k": [_encode_value(sort_value, sort_kind), _encode_value(id_value, id_kind)]},
+        {"v": 1, "q": fingerprint, "k": [*keys, _encode_value(id_value, id_kind)]},
         separators=(",", ":"),
     ).encode("utf-8"))
     return f"{payload}.{_mac(payload)}"
 
 
-def _decode_cursor(cursor: str, fingerprint: str, sort_kind: SortKind,
-                   id_kind: SortKind) -> tuple[Any, Any]:
+def _decode_cursor(cursor: str, fingerprint: str, sort_columns: Sequence[tuple[str, SortKind]],
+                   id_kind: SortKind) -> tuple[Any, ...]:
     invalid = _bad_request("invalid_cursor", "the cursor is malformed or was not issued by this server")
     payload, _, tag = cursor.partition(".")
     if not payload or not tag or len(cursor) > CURSOR_MAX_LENGTH:
@@ -479,8 +511,11 @@ def _decode_cursor(cursor: str, fingerprint: str, sort_kind: SortKind,
             "the cursor belongs to a different filter, sort or since; restart without a cursor",
         )
     try:
-        sort_raw, id_raw = body["k"]
-        return _decode_value(sort_raw, sort_kind), _decode_value(id_raw, id_kind)
+        raw = body["k"]
+        if not isinstance(raw, list) or len(raw) != len(sort_columns) + 1:
+            raise ValueError("key count")
+        values = [_decode_value(value, kind) for value, (_expr, kind) in zip(raw, sort_columns)]
+        return (*values, _decode_value(raw[-1], id_kind))
     except (KeyError, TypeError, ValueError) as exc:
         raise invalid from exc
 
