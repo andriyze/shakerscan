@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { BUSY_RETRY_ATTEMPTS, busyNotice, fetchRetryingBusy, retryAfterSeconds } from './busyRetry.mjs'
+import { BUSY_RETRY_ATTEMPTS, BUSY_STATUSES, busyNotice, fetchRetryingBusy, retryAfterSeconds } from './busyRetry.mjs'
 
 // R2 review: a download holding the archive export slots made the UI's own browse pages fail with
 // "Export failed (503)". A 503 is now retried after Retry-After, with a notice while waiting.
@@ -42,4 +42,17 @@ test('other failures are returned at once', async () => {
   const response = await fetchRetryingBusy('/x', undefined, { fetchImpl: async () => { calls += 1; return reply(404, null) } })
   assert.equal(response.status, 404)
   assert.equal(calls, 1)
+})
+
+// Heavy reads (dashboard, exposure, inventory facets, exports) are admission-controlled: a full
+// group answers 429 with Retry-After, which is waited out exactly like a busy archive's 503.
+test('a 429 from heavy-read admission is retried after its Retry-After', async () => {
+  assert.ok(BUSY_STATUSES.has(429) && BUSY_STATUSES.has(503))
+  const answers = [reply(429, '5'), reply(200, null)]
+  const waits = []
+  const response = await fetchRetryingBusy('/dashboard', undefined, {
+    fetchImpl: async () => answers.shift(), sleep: async (ms) => { waits.push(ms) },
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(waits, [5000])
 })

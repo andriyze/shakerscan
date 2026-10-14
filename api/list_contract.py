@@ -21,7 +21,9 @@ Response (``ListPlan.envelope``)::
 
 ``total_kind == "at_least"`` means there are more than ``EXACT_COUNT_CAP`` matches and
 ``total`` is the cap: render it as "10,000+". ``estimate`` comes from planner statistics and is
-for "about N" displays only. ``generated_at`` is the value a poller passes back as ``since``.
+for "about N" displays only. ``generated_at`` is the value a poller passes back as ``since``;
+take it from ``snapshot_time(conn)`` BEFORE the page query (see there), never from the API clock
+after it, or a delta poll can miss rows written by transactions that were still open.
 
 Applying it to an endpoint::
 
@@ -51,6 +53,7 @@ Applying it to an endpoint::
         count_values = params.snapshot()                # count query: filters only
         page_where = where + plan.keyset_clauses(params)
         async with pool.acquire() as conn:
+            generated_at = await snapshot_time(conn)   # before the page query
             rows = await conn.fetch(
                 f"SELECT {plan.select_list} FROM scans s WHERE {' AND '.join(page_where)} "
                 f"ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}",
@@ -60,7 +63,7 @@ Applying it to an endpoint::
                 conn, page.count, from_sql="scans s", where=where, values=count_values,
                 table=SCANS.table,
             )
-        return plan.envelope(rows, total=total, total_kind=kind)
+        return plan.envelope(rows, total=total, total_kind=kind, generated_at=generated_at)
 
 Rules the helpers rely on:
 
@@ -72,6 +75,10 @@ Rules the helpers rely on:
   btree index over ``(sort expression, id)`` so the keyset clause is an index range scan. A
   ``SortKey`` may add further keys (``then=((expr, kind), ...)``, same direction, before the id):
   the cursor carries every key and the index is ``(expr, then..., id)``.
+* A ``text`` sort key is ordered by its first ``max_chars`` (default 200) characters,
+  ``left(expr, max_chars)``, everywhere: in ``order_by``, the keyset clause and the cursor. That
+  bound keeps every cursor the server issues within the accepted cursor length whatever the
+  column holds; index ``left(expr, max_chars)`` (plus id), not the bare column.
 * Pass every filter that changes the result to ``plan(filters=...)``: a cursor issued for one
   filter set is refused (400 ``cursor_mismatch``) under another instead of skipping rows.
 * List projections never include the heavy record bodies in ``LIST_HEAVY_FIELDS``; a spec that
@@ -82,7 +89,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
@@ -99,6 +106,11 @@ MAX_LIMIT = 200
 EXACT_COUNT_CAP = 10_000
 CURSOR_MAX_LENGTH = 2048
 MAX_FIELDS = 64
+#: Worst case for a text key: every character a 6-character JSON escape still fits the cursor.
+MAX_TEXT_SORT_CHARS = 200
+#: ``snapshot_time``: clock margin, and the oldest open transaction it waits for.
+SNAPSHOT_MARGIN = timedelta(seconds=2)
+SNAPSHOT_MAX_LOOKBACK = timedelta(minutes=10)
 LIST_CONTRACT_VERSION = "list/v1"
 
 #: Record bodies a list view never returns; the detail endpoint serves them.
@@ -179,10 +191,25 @@ class SortKey:
     expr: str
     kind: SortKind
     then: tuple[tuple[str, SortKind], ...] = ()
+    max_chars: int = 200
+
+    def __post_init__(self) -> None:
+        kinds = [self.kind, *(kind for _expr, kind in self.then)]
+        if "text" in kinds and not 1 <= self.max_chars <= MAX_TEXT_SORT_CHARS:
+            raise ValueError(f"a text sort key is bounded to 1..{MAX_TEXT_SORT_CHARS} characters")
+
+    def _bounded(self, expr: str, kind: SortKind) -> str:
+        return f"left(({expr}), {int(self.max_chars)})" if kind == "text" else expr
+
+    @property
+    def sql(self) -> str:
+        """The ordering expression: text keys are bounded so their cursor always fits."""
+        return self._bounded(self.expr, self.kind)
 
     @property
     def columns(self) -> tuple[tuple[str, SortKind], ...]:
-        return ((self.expr, self.kind), *self.then)
+        """Every ordering expression (bounded like ``sql``) with its kind, before the id."""
+        return ((self.sql, self.kind), *((self._bounded(expr, kind), kind) for expr, kind in self.then))
 
 
 class SqlParams:
@@ -266,7 +293,7 @@ class ListPlan:
 
     @property
     def sort_expr(self) -> str:
-        return self.spec.sorts[self.sort_name].expr
+        return self.spec.sorts[self.sort_name].sql
 
     @property
     def _sort_columns(self) -> tuple[tuple[str, SortKind], ...]:
@@ -331,10 +358,13 @@ class ListPlan:
         next_cursor = None
         if has_more and page_rows:
             last = page_rows[-1]
+            key = self.spec.sorts[self.sort_name]
+            sort_values = [last[self._sort_alias(index)] for index in range(len(self._sort_columns))]
+            for value, (_expr, kind) in zip(sort_values, self._sort_columns):
+                if kind == "text" and value is not None and len(str(value)) > key.max_chars:
+                    raise ValueError("a text sort value is longer than its bound; select plan.select_list")
             next_cursor = _encode_cursor(
-                self.fingerprint,
-                [last[self._sort_alias(index)] for index in range(len(self._sort_columns))],
-                last[_ID_COLUMN], self._sort_columns, self.spec.id_kind,
+                self.fingerprint, sort_values, last[_ID_COLUMN], self._sort_columns, self.spec.id_kind,
             )
         items = []
         for row in page_rows:
@@ -348,6 +378,41 @@ class ListPlan:
         if total_kind != "none":
             body["total"] = total
         return body
+
+
+# --- The delta watermark -----------------------------------------------------------------------
+
+
+async def snapshot_time(
+    conn: Any, *, margin: timedelta = SNAPSHOT_MARGIN, max_lookback: timedelta = SNAPSHOT_MAX_LOOKBACK,
+) -> datetime:
+    """The ``generated_at`` for a page: call it on the page's connection BEFORE the page query.
+
+    A row's ``updated_at`` is normally ``now()``, its writer's transaction start, but the row
+    becomes visible only when that transaction commits. A watermark taken from the API clock
+    after the query would be later than the ``updated_at`` of rows still being written, and the
+    next ``since=`` poll would skip them for good. This returns the database time minus
+    ``margin``, moved back to the start of the oldest transaction open in this database (as far
+    as ``pg_stat_activity`` shows it to this role), but never more than ``max_lookback``: a
+    transaction open longer than that can still be missed. Rows written after the watermark come
+    back on the next poll (``since`` is inclusive), so clients must treat items as upserts.
+    """
+    value = await conn.fetchval(
+        """
+        SELECT LEAST(
+            clock_timestamp() - $1::interval,
+            GREATEST(
+                clock_timestamp() - $2::interval,
+                COALESCE((SELECT min(xact_start) FROM pg_stat_activity
+                          WHERE datname = current_database() AND pid <> pg_backend_pid()
+                            AND backend_type = 'client backend'
+                            AND xact_start IS NOT NULL), clock_timestamp())
+            ) - $1::interval
+        )
+        """,
+        margin, max_lookback,
+    )
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 # --- Counts ------------------------------------------------------------------------------------
@@ -486,7 +551,7 @@ def _encode_cursor(fingerprint: str, sort_values: Sequence[Any], id_value: Any,
     keys = [_encode_value(value, kind) for value, (_expr, kind) in zip(sort_values, sort_columns, strict=True)]
     payload = _b64(json.dumps(
         {"v": 1, "q": fingerprint, "k": [*keys, _encode_value(id_value, id_kind)]},
-        separators=(",", ":"),
+        separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8"))
     return f"{payload}.{_mac(payload)}"
 
@@ -494,6 +559,8 @@ def _encode_cursor(fingerprint: str, sort_values: Sequence[Any], id_value: Any,
 def _decode_cursor(cursor: str, fingerprint: str, sort_columns: Sequence[tuple[str, SortKind]],
                    id_kind: SortKind) -> tuple[Any, ...]:
     invalid = _bad_request("invalid_cursor", "the cursor is malformed or was not issued by this server")
+    if not cursor.isascii():
+        raise invalid
     payload, _, tag = cursor.partition(".")
     if not payload or not tag or len(cursor) > CURSOR_MAX_LENGTH:
         raise invalid
@@ -533,7 +600,9 @@ __all__ = [
     "PageDep",
     "SortKey",
     "SqlParams",
+    "MAX_TEXT_SORT_CHARS",
     "configure_cursor_key",
     "count_total",
     "page_params",
+    "snapshot_time",
 ]

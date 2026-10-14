@@ -27,9 +27,13 @@ import uuid
 from fastapi import HTTPException
 
 try:
-    from list_contract import EXACT_COUNT_CAP, ListPlan, ListSpec, Page, SortKey, SqlParams, count_total
+    from list_contract import (
+        EXACT_COUNT_CAP, ListPlan, ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time,
+    )
 except ModuleNotFoundError:  # package import in host-side tests
-    from ..list_contract import EXACT_COUNT_CAP, ListPlan, ListSpec, Page, SortKey, SqlParams, count_total
+    from ..list_contract import (
+        EXACT_COUNT_CAP, ListPlan, ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time,
+    )
 
 from .hunt_scope import finding_hunt_predicate
 from .list_filters import host_in_domain_sql
@@ -432,6 +436,8 @@ async def v1_page(
         # An undetermined row's proof is decided in Python below, so the SQL keeps it for that.
         where.append(f"({proof_clause} OR {INDEXED_UNDETERMINED_SQL})" if undetermined else proof_clause)
     count_values = params.snapshot()
+    # The poll watermark, taken before the page query (list_contract.snapshot_time).
+    generated_at = await snapshot_time(conn)
 
     kept: list[dict[str, Any]] = []
     current: ListPlan = plan
@@ -472,7 +478,7 @@ async def v1_page(
 
     total, kind = await _v1_total(conn, page, where=where, values=count_values,
                                   undetermined=undetermined, proof_states=proof_states, project=project)
-    return plan.envelope(kept, total=total, total_kind=kind)
+    return plan.envelope(kept, total=total, total_kind=kind, generated_at=generated_at)
 
 
 async def _v1_total(

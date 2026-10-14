@@ -1,10 +1,13 @@
 /**
- * Archive exports answer 503 with Retry-After while every export slot is busy. The request is
- * worth repeating, not failing: wait as told (bounded), say so, and try again a few times.
+ * Archive exports answer 503 with Retry-After while every export slot is busy, and heavy reads
+ * (dashboard, exposure, grouped targets and inventory facets, exports) answer 429 with
+ * Retry-After while their admission slots are full. Either request is worth repeating, not
+ * failing: wait as told (bounded), say so, and try again a few times.
  */
 export const BUSY_RETRY_ATTEMPTS = 4
 export const BUSY_RETRY_DEFAULT_SECONDS = 5
 export const BUSY_RETRY_MAX_SECONDS = 30
+export const BUSY_STATUSES = new Set([429, 503])
 
 export function retryAfterSeconds(response) {
   const raw = response?.headers?.get?.('retry-after')
@@ -24,7 +27,7 @@ export async function fetchRetryingBusy(input, init, {
 } = {}) {
   for (let attempt = 1; ; attempt += 1) {
     const response = await fetchImpl(input, init)
-    if (response.status !== 503 || attempt >= attempts) {
+    if (!BUSY_STATUSES.has(response.status) || attempt >= attempts) {
       onBusy(null)
       return response
     }
@@ -32,4 +35,9 @@ export async function fetchRetryingBusy(input, init, {
     onBusy(seconds)
     await sleep(seconds * 1000)
   }
+}
+
+/** ``fetch`` for a heavy read: retried while the server answers busy (429/503 + Retry-After). */
+export function fetchHeavyRead(input, init) {
+  return fetchRetryingBusy(input, init)
 }
