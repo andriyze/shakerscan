@@ -116,7 +116,7 @@ def test_not_enough_space_refuses_with_nothing_changed(tmp_path):
     assert "volume" not in calls(tmp_path)
 
 
-def test_the_prune_keeps_this_release_the_previous_one_and_images_in_use(tmp_path):
+def test_the_low_disk_prune_keeps_this_release_the_previous_one_and_images_in_use(tmp_path):
     body = """
     cat > "$WORK/images" <<'X'
     ghcr.io/x/shakerscan-api@sha256:new1 id-current ghcr.io/x/shakerscan-api
@@ -127,7 +127,7 @@ def test_the_prune_keeps_this_release_the_previous_one_and_images_in_use(tmp_pat
     sed -i.bak 's/^ *//' "$WORK/images"
     printf '# release 2.9.0\\nghcr.io/x/shakerscan-api@sha256:prev1\\n' > "$WORK/.release-images.previous"
     echo id-used > "$WORK/containers"
-    echo "removed=$(prune_superseded_release_images)"
+    echo "removed=$(prune_unused_release_images)"
     """
     result = run(tmp_path, body)
     assert "removed=1" in result.stdout, result.stdout + result.stderr
@@ -215,12 +215,13 @@ def test_a_redis_that_cannot_write_gets_room_from_old_images_never_a_reset(tmp_p
     assert "volume rm" not in calls(tmp_path)
 
 
-def _backup(tmp_path: Path, state: str | None, has_data: str, previous: bool = False,
+def _backup(tmp_path: Path, state: str | None, has_data: str, previous: bool | str = False,
             **env: str) -> subprocess.CompletedProcess[str]:
     if state is not None:
         (tmp_path / ".release-images.current").write_text(f"# release {state}\nref\n")
     if previous:
-        (tmp_path / ".release-images.previous").write_text("# release running-before-upgrade\nid\n")
+        label = previous if isinstance(previous, str) else "running-before-upgrade"
+        (tmp_path / ".release-images.previous").write_text(f"# release {label}\nid\n")
     body = """
     compose() {
       echo "compose $*" >> "$CALLS"
@@ -246,6 +247,23 @@ def test_a_version_changing_start_saves_the_database_first(tmp_path):
 def test_the_first_upgrade_from_a_release_without_this_record_is_backed_up(tmp_path):
     result = _backup(tmp_path, None, "t", previous=True)
     assert "-earlier-to-2.10.0" in result.stdout
+
+
+def test_the_first_upgrade_backup_names_the_version_the_running_api_reported(tmp_path):
+    """2.10 acceptance (D5): the backup was named "earlier-to-2.10.0" although 2.9.0 was running."""
+    result = _backup(tmp_path, None, "t", previous="2.9.0")
+    assert "-2.9.0-to-2.10.0" in result.stdout, result.stdout
+
+
+def test_the_running_release_is_recorded_with_its_api_version(tmp_path):
+    body = """
+    echo id-running > "$WORK/containers"
+    running_api_version() { echo 2.9.0; }
+    remember_running_release
+    cat "$WORK/.release-images.previous"
+    """
+    result = run(tmp_path, body)
+    assert result.stdout.startswith("# release 2.9.0\nid-running"), result.stdout
 
 
 def test_a_first_start_without_any_record_is_not_taken_for_an_upgrade(tmp_path):
@@ -324,16 +342,17 @@ def test_the_first_upgrade_keeps_the_running_releases_images_for_rollback(tmp_pa
     SHAKERSCAN_PRUNE_OLD_IMAGES=1 record_started_release prune
     """
     run(tmp_path, body)
-    removed = [line for line in calls(tmp_path).splitlines() if line.startswith("docker image rm")]
-    assert removed == ["docker image rm id-older"]
+    # 2.10 acceptance (D4): the routine cleanup removes only images this install recorded and has
+    # superseded; an image it never recorded (another install's, or older leftovers) stays.
+    assert "image rm" not in calls(tmp_path)
 
 
 def test_nothing_is_pruned_without_any_release_record(tmp_path):
     body = """
     echo "ghcr.io/x/shakerscan-api@sha256:x id-x ghcr.io/x/shakerscan-api" > "$WORK/images"
-    echo "n=$(prune_superseded_release_images)"
+    echo "n=$(prune_unused_release_images) m=$(prune_superseded_release_images)"
     """
-    assert "n=0" in run(tmp_path, body).stdout and "image rm" not in calls(tmp_path)
+    assert "n=0 m=0" in run(tmp_path, body).stdout and "image rm" not in calls(tmp_path)
 
 
 def test_local_builds_are_recorded_and_never_pruned(tmp_path):
@@ -356,3 +375,80 @@ def test_every_docker_call_goes_through_the_launchers_wrapper():
             if re.search(r"(^|[^_a-z])docker (image|images|ps|inspect|volume|info|rm)\b", line)
             and "docker_cli" not in line and "docker image ls" not in line]
     assert bare == [], bare
+
+
+def test_routine_cleanup_removes_only_this_installs_release_before_the_previous_one(tmp_path):
+    """Three releases started in turn: after the third, the first one's images go; the second
+    (previous) and third (current) stay, and an image this install never recorded stays."""
+    body = """
+    cat > "$WORK/images" <<'X'
+    ghcr.io/x/shakerscan-api@sha256:r1 id-r1 ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-api@sha256:r2 id-r2 ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-api@sha256:r3 id-r3 ghcr.io/x/shakerscan-api
+    ghcr.io/x/shakerscan-api@sha256:other id-other ghcr.io/x/shakerscan-api
+    X
+    sed -i.bak 's/^ *//' "$WORK/images"
+    REFS="ghcr.io/x/shakerscan-api@sha256:r1"; SCANNER_VERSION=2.8.0; record_started_release prune
+    REFS="ghcr.io/x/shakerscan-api@sha256:r2"; SCANNER_VERSION=2.9.0; record_started_release prune
+    REFS="ghcr.io/x/shakerscan-api@sha256:r3"; SCANNER_VERSION=2.10.0; record_started_release prune
+    """
+    result = run(tmp_path, body)
+    removed = [line for line in calls(tmp_path).splitlines() if line.startswith("docker image rm")]
+    assert removed == ["docker image rm ghcr.io/x/shakerscan-api@sha256:r1"], result.stdout + result.stderr
+    assert "Removed 1 image(s) of older ShakerScan releases" in result.stdout
+    assert not (tmp_path / ".release-images.superseded").exists()
+
+
+def test_a_superseded_image_still_in_use_stays_listed_for_next_time(tmp_path):
+    body = """
+    echo "ghcr.io/x/shakerscan-api@sha256:old id-old ghcr.io/x/shakerscan-api" > "$WORK/images"
+    printf '# superseded\\nghcr.io/x/shakerscan-api@sha256:old\\n' > "$WORK/.release-images.superseded"
+    echo id-old > "$WORK/containers"
+    echo "n=$(prune_superseded_release_images)"
+    cat "$WORK/.release-images.superseded"
+    """
+    result = run(tmp_path, body)
+    assert "n=0" in result.stdout and "ghcr.io/x/shakerscan-api@sha256:old" in result.stdout
+    assert "image rm" not in calls(tmp_path)
+
+
+def test_this_releases_model_intake_images_are_protected_while_the_module_is_off():
+    script = SCRIPT.read_text()
+    assert "for ref in $(release_image_refs_all)" in script.split("protected_image_ids()", 1)[1].split("}", 1)[0]
+    assert 'current="$(release_image_refs_all | sort)"' in script
+    launcher = (ROOT / "scanner.sh").read_text()
+    body = launcher.split("release_image_refs_all() {", 1)[1].split("\n}", 1)[0]
+    assert "release_image_refs" in body and "model_intake_enabled || model_intake_image_refs" in body
+
+
+_CLOCK = r"""
+echo 0 > "$WORK/clock"
+date() { case "$*" in *%s*) local t; t=$(( $(cat "$WORK/clock") + 10 )); echo "$t" > "$WORK/clock"; echo "$t" ;;
+         *) command date "$@" ;; esac; }
+redis_health() { echo $(( $(cat "$WORK/polls" 2>/dev/null || echo 0) + 1 )) > "$WORK/polls"; echo starting; }
+"""
+
+
+def test_a_crash_looping_redis_with_a_damaged_file_is_not_waited_on(tmp_path):
+    """2.10 acceptance (D3): a Redis that fails on a damaged append-only file prints "Loading ..."
+    on every restart; the wait took it for loading and delayed the repair by ~16 minutes."""
+    body = _CLOCK + """
+    printf '%s\\n' "* Loading RDB produced by version 8.10.2" "* Reading RDB base file on AOF loading..." \
+        "# Bad file format reading the append only file appendonly.aof.1.incr.aof" > "$WORK/redis.log"
+    wait_for_redis_healthy; echo "rc=$? polls=$(cat "$WORK/polls")"
+    """
+    result = run(tmp_path, body)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert int(result.stdout.split("polls=")[1].split()[0]) <= 2  # gave up at once (old code: 450 polls)
+
+
+def test_a_redis_that_is_really_loading_is_still_waited_for(tmp_path):
+    body = _CLOCK + """
+    redis_container_state() { echo running; }
+    printf '%s\\n' "* Loading RDB produced by version 8.10.2" "* DB loaded from base file" > "$WORK/redis.log"
+    REDIS_READY_SECONDS=60; REDIS_LOADING_SECONDS=300
+    wait_for_redis_healthy; echo "rc=$? clock=$(cat "$WORK/clock")"
+    """
+    result = run(tmp_path, body)
+    assert "rc=1" in result.stdout, result.stdout + result.stderr
+    assert int(result.stdout.split("clock=")[1].split()[0]) >= 300  # waited out the loading allowance

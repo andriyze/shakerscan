@@ -26,10 +26,16 @@ REDIS_LOADING_SECONDS="${SHAKERSCAN_REDIS_LOADING_SECONDS:-900}"
 REDIS_STATE_RESET=0
 RELEASE_STATE_CURRENT="${SCRIPT_DIR}/.release-images.current"
 RELEASE_STATE_PREVIOUS="${SCRIPT_DIR}/.release-images.previous"
+# Images this install recorded and has since superseded (older than the previous release): the
+# only images the routine cleanup after a start removes.
+RELEASE_STATE_SUPERSEDED="${SCRIPT_DIR}/.release-images.superseded"
 
 # The launcher defines docker_cli (sudo when needed) later in scanner.sh, which replaces this.
 if ! declare -F docker_cli >/dev/null 2>&1; then
     docker_cli() { docker "$@"; }
+fi
+if ! declare -F release_image_refs_all >/dev/null 2>&1; then
+    release_image_refs_all() { release_image_refs; }
 fi
 
 # Estimated unpacked size of a release image that is not present yet, in GB, by repository.
@@ -76,11 +82,22 @@ project_container_image_ids() {
 # Before a start replaces the running release, with no record of the release before it yet (the
 # first upgrade with this launcher): record the images its containers use, so they are kept.
 remember_running_release() {
-    local images
+    local images version
     [ ! -f "$RELEASE_STATE_CURRENT" ] && [ ! -f "$RELEASE_STATE_PREVIOUS" ] || return 0
     images="$(project_container_image_ids | sed '/^$/d' | sort -u)"
     [ -n "$images" ] || return 0
-    { printf '# release running-before-upgrade\n'; printf '%s\n' "$images"; } > "$RELEASE_STATE_PREVIOUS"
+    version="$(running_api_version)"
+    { printf '# release %s\n' "${version:-running-before-upgrade}"; printf '%s\n' "$images"; } > "$RELEASE_STATE_PREVIOUS"
+}
+
+# The version the running API reports in its environment (empty when unknown).
+running_api_version() {
+    local container
+    container="$(docker_cli ps -q --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-shakerscan}" \
+        --filter "label=com.docker.compose.service=api" 2>/dev/null | head -1)"
+    [ -n "$container" ] || return 0
+    docker_cli inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null \
+        | sed -n 's/^SCANNER_VERSION=//p' | head -1 | tr -cd 'A-Za-z0-9._-'
 }
 
 # Image ids that must stay: this release's, the recorded current and previous releases', and every
@@ -88,7 +105,7 @@ remember_running_release() {
 protected_image_ids() {
     local ref container
     {
-        for ref in $(release_image_refs) $(release_state_refs "$RELEASE_STATE_CURRENT" "$RELEASE_STATE_PREVIOUS"); do
+        for ref in $(release_image_refs_all) $(release_state_refs "$RELEASE_STATE_CURRENT" "$RELEASE_STATE_PREVIOUS"); do
             docker_cli image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true
         done
         docker_cli ps -aq 2>/dev/null | while read -r container; do
@@ -97,11 +114,37 @@ protected_image_ids() {
     } | sed '/^$/d' | sort -u
 }
 
-# Remove ShakerScan release images that are neither this release's, nor the recorded releases',
-# nor used by any container. Never a volume, never another product's image, never forced. Without
-# any record of a previous release nothing is removed (nothing would protect a rollback).
-# Prints how many were removed.
+# Routine cleanup after a start: remove the images this install recorded and has since superseded
+# (.release-images.superseded), unless protected. Never an image this install did not record, so
+# never another install's or project's image; never a volume; never forced. An image still in use
+# stays listed and is retried next time. Prints how many were removed.
 prune_superseded_release_images() {
+    local protected ref id removed=0 keep=""
+    [ -f "$RELEASE_STATE_SUPERSEDED" ] || { echo 0; return 0; }
+    protected="$(protected_image_ids)"
+    for ref in $(release_state_refs "$RELEASE_STATE_SUPERSEDED" | sort -u); do
+        id="$(docker_cli image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)"
+        [ -n "$id" ] || continue
+        if ! printf '%s\n' "$protected" | grep -qxF "$id" && docker_cli image rm "$ref" >/dev/null 2>&1; then
+            removed=$((removed + 1))
+        else
+            keep="$keep$ref"$'\n'
+        fi
+    done
+    if [ -n "$keep" ]; then
+        printf '# superseded release images still present\n%s' "$keep" > "$RELEASE_STATE_SUPERSEDED"
+    else
+        rm -f "$RELEASE_STATE_SUPERSEDED"
+    fi
+    echo "$removed"
+}
+
+# Only when disk space would otherwise stop an upgrade or Redis: remove every ShakerScan release
+# image on this host that is neither this release's, nor this install's recorded releases', nor
+# used by any container (running or stopped). Never a volume, never another product's image, never
+# forced. Without any record of a previous release nothing is removed (nothing would protect a
+# rollback). Prints how many were removed.
+prune_unused_release_images() {
     local protected repo id
     if [ ! -f "$RELEASE_STATE_PREVIOUS" ] && [ ! -f "$RELEASE_STATE_CURRENT" ]; then
         echo 0
@@ -145,7 +188,7 @@ ensure_upgrade_space() {
     need=$((missing + UPGRADE_MARGIN_GB))
     [ "$free" -lt "$need" ] || return 0
     echo -e "${YELLOW}Docker has ${free} GB free; this release needs about ${need} GB (new images and room for the databases). Removing older ShakerScan images...${NC}"
-    removed="$(prune_superseded_release_images)"
+    removed="$(prune_unused_release_images)"
     free="$(docker_storage_free_gb || echo 0)"
     echo "Removed ${removed} older ShakerScan image(s); ${free} GB free now."
     [ "$free" -lt "$need" ] || return 0
@@ -168,10 +211,12 @@ started_release_version() {
 # rollback). In prebuilt mode ("prune") older ShakerScan images are then removed.
 record_started_release() {
     local current tmp removed prune="${1:-prune}"
-    current="$(release_image_refs | sort)"
+    current="$(release_image_refs_all | sort)"
     if [ -f "$RELEASE_STATE_CURRENT" ]; then
         if [ "$(release_state_refs "$RELEASE_STATE_CURRENT" | sort)" != "$current" ] \
             || [ "$(started_release_version)" != "${SCANNER_VERSION:-unknown}" ]; then
+            # The release before the previous one is superseded: the routine cleanup may remove it.
+            [ ! -f "$RELEASE_STATE_PREVIOUS" ] || release_state_refs "$RELEASE_STATE_PREVIOUS" >> "$RELEASE_STATE_SUPERSEDED"
             cp "$RELEASE_STATE_CURRENT" "$RELEASE_STATE_PREVIOUS"
         fi
     fi
@@ -195,7 +240,9 @@ ensure_pre_upgrade_backup() {
     if [ -f "$RELEASE_STATE_CURRENT" ]; then
         from="$(started_release_version)"
     elif [ -f "$RELEASE_STATE_PREVIOUS" ]; then
-        from="earlier"  # the first upgrade with this launcher: the running release was recorded
+        # the first upgrade with this launcher: the running release was recorded from its containers
+        from="$(sed -n 's/^# release //p' "$RELEASE_STATE_PREVIOUS" 2>/dev/null | head -1 | tr -cd 'A-Za-z0-9._-')"
+        [ -n "$from" ] && [ "$from" != running-before-upgrade ] || from="earlier"
     else
         return 0        # no release ever recorded and none running: a first start, not an upgrade
     fi
@@ -247,26 +294,51 @@ redis_health() {
     echo "${state:-unknown}"
 }
 
+# The Redis container's own state (running, restarting, exited, ...), not its healthcheck.
+redis_container_state() {
+    local container
+    container="$(compose ps -a -q redis 2>/dev/null | head -1)"
+    [ -n "$container" ] || { echo missing; return; }
+    docker_cli inspect --format '{{.State.Status}}' "$container" 2>/dev/null || echo unknown
+}
+
+redis_restart_count() {
+    local container
+    container="$(compose ps -a -q redis 2>/dev/null | head -1)"
+    [ -n "$container" ] || { echo 0; return; }
+    docker_cli inspect --format '{{.RestartCount}}' "$container" 2>/dev/null || echo 0
+}
+
+# Still loading its data: running (not crash-looping) with a loading message in its latest output.
+# A Redis that fails on a damaged file prints the same "Loading ..." lines on every restart.
 redis_is_loading() {
+    [ "$(redis_container_state)" = running ] || return 1
     compose logs --no-color --tail 40 redis 2>/dev/null | grep -qiE "Loading|AOF loading"
 }
 
-# Healthy within `seconds`; a Redis still loading its data gets up to REDIS_LOADING_SECONDS.
+# Healthy within `seconds`; a Redis still loading its data gets up to REDIS_LOADING_SECONDS (wall
+# clock). Stops waiting at once when Redis reports a known failure (damaged file, no space) or
+# keeps restarting, so the repair is not delayed.
 wait_for_redis_healthy() {
-    local seconds="${1:-$REDIS_READY_SECONDS}" waited=0 state
+    local seconds="${1:-$REDIS_READY_SECONDS}" start since state restarts
+    start=$(date +%s)
+    since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"  # only what Redis says from now on (not before a repair)
+    restarts="$(redis_restart_count)"
     while :; do
         state="$(redis_health)"
         [ "$state" = healthy ] && return 0
         [ "$state" = unknown ] && return 1
-        if [ "$waited" -ge "$seconds" ]; then
-            if { [ "$state" = starting ] || redis_is_loading; } && [ "$waited" -lt "$REDIS_LOADING_SECONDS" ]; then
+        [ "$(redis_failure_kind "$since")" = unknown ] || return 1
+        [ "$(redis_restart_count)" -le $((restarts + 1)) ] || return 1
+        if [ $(( $(date +%s) - start )) -ge "$seconds" ]; then
+            if { [ "$state" = starting ] || redis_is_loading; } \
+                && [ $(( $(date +%s) - start )) -lt "$REDIS_LOADING_SECONDS" ]; then
                 :
             else
                 return 1
             fi
         fi
         sleep 2
-        waited=$((waited + 2))
     done
 }
 
@@ -276,8 +348,12 @@ redis_volume() {
 
 # Redis's own reason for not becoming healthy: damaged, no_space, or unknown.
 redis_failure_kind() {
-    local logs
-    logs="$(compose logs --no-color --tail 120 redis 2>/dev/null || true)"
+    local logs since="${1:-}"
+    if [ -n "$since" ]; then
+        logs="$(compose logs --no-color --since "$since" redis 2>/dev/null || true)"
+    else
+        logs="$(compose logs --no-color --tail 120 redis 2>/dev/null || true)"
+    fi
     if printf '%s' "$logs" | grep -qiE "No space left on device|MISCONF|Read-only file system|Can't open the append-only file|Failed opening the temp RDB file"; then
         echo no_space
     elif printf '%s' "$logs" | grep -qiE "Bad file format reading the append only file|AOF.*(truncated|corrupt)|Unexpected end of file|Short read or OOM loading|redis-check-aof"; then
@@ -324,7 +400,7 @@ ensure_redis_ready() {
     case "$kind" in
         no_space)
             echo -e "${YELLOW}Redis cannot write to disk. Removing older ShakerScan images to make room...${NC}"
-            echo "Removed $(prune_superseded_release_images) older ShakerScan image(s); $(docker_storage_free_gb 2>/dev/null || echo '?') GB free now."
+            echo "Removed $(prune_unused_release_images) older ShakerScan image(s); $(docker_storage_free_gb 2>/dev/null || echo '?') GB free now."
             compose up --no-build -d --force-recreate redis >/dev/null 2>&1 || true
             wait_for_redis_healthy && return 0
             redis_give_up "Redis still cannot write to disk. Free disk space on this host, then run '$(cli_hint) start' again."
@@ -334,7 +410,7 @@ ensure_redis_ready() {
             echo -e "${YELLOW}Redis's saved state is damaged (an interrupted write, often a full disk). Repairing it...${NC}"
             if ! archive_redis_data; then
                 echo "Making room to keep a copy first..."
-                prune_superseded_release_images >/dev/null
+                prune_unused_release_images >/dev/null
                 if ! archive_redis_data; then
                     redis_give_up "Could not keep a copy of Redis's damaged data (disk full?), so it was left as it is. Free disk space, then run '$(cli_hint) start' again."
                     return 1

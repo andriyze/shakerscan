@@ -710,10 +710,21 @@ release_image_refs() {
         "${SCANNER_IMAGE:-${SCANNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
         "${UI_IMAGE:-${UI_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
     if model_intake_enabled; then
-        printf '%s\n' \
-            "${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
-            "${MODEL_INTAKE_IMAGE:-${MODEL_INTAKE_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+        model_intake_image_refs
     fi
+}
+
+model_intake_image_refs() {
+    printf '%s\n' \
+        "${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
+        "${MODEL_INTAKE_IMAGE:-${MODEL_INTAKE_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"
+}
+
+# Every image of this release, the optional modules' included whether on or off (what the image
+# cleanup records and never removes; `model-intake disable --remove-images` removes those).
+release_image_refs_all() {
+    release_image_refs
+    model_intake_enabled || model_intake_image_refs
 }
 
 pull_prebuilt_images() {
@@ -2452,6 +2463,7 @@ print_help() {
     echo "  approve <id>       Allow a Hunt permission request (y/N here); --all-pending, --watch"
     echo "  deny <id>          Deny a Hunt permission request"
     echo "  knowledge review   Review proposed target-instruction changes (diff, keypress per proposal)"
+    echo "  secrets <cmd>      Secrets found on a target: list, revoke, expiry, grant, promote, reveal"
     echo "  credentials <cmd>  Create, rotate, or admission-test encrypted profiles"
     echo "  collections <cmd>  Upload, bind, or select request collections"
     echo "  evidence export    Export content-free evidence manifests or bundles"
@@ -4577,6 +4589,11 @@ case $COMMAND in
     knowledge)
         # Instruction proposals are decided by the person at this terminal, like approve.
         run_v2_product_cli "knowledge" "${ARGS[@]}"
+        ;;
+    secrets)
+        # A target's discovered secrets: listing never shows a value; reveal, grant and promote
+        # are the person's decisions at this terminal, like approve.
+        run_v2_product_cli "secrets" "${ARGS[@]}"
         ;;
     api)
         if [ ! -f "$SCRIPT_DIR/scripts/api_cli.py" ]; then
