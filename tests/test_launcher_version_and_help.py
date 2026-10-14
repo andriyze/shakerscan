@@ -66,3 +66,18 @@ def test_secrets_reaches_the_product_cli_and_is_in_the_help(install):
     assert "Unknown command" not in result.stdout + result.stderr
     assert "scripts/v2_cli.py --api-url" in result.stdout and result.stdout.rstrip().endswith("secrets list t-1")
     assert "  secrets <cmd>  " in _run(install, "help").stdout
+
+
+def test_secrets_help_is_the_commands_own(install):
+    """Review F7: `shakerscan secrets --help` printed the launcher's global help."""
+    (install / "scripts" / "v2_cli.py").write_text("", encoding="utf-8")
+    bin_dir = install / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").write_text('#!/bin/sh\necho "python3 $*"\n', encoding="utf-8")
+    (bin_dir / "python3").chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(install / "scanner.sh"), "secrets", "--help"],
+        cwd=install, env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(install)},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.stdout.rstrip().endswith("secrets --help"), result.stdout[-300:]

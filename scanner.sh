@@ -3104,7 +3104,7 @@ run_v2_product_cli() {
 
 docker_storage_free_kb() {
     local docker_root
-    docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+    docker_root="$(docker_cli info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
     # Docker Desktop keeps this path inside its VM, so the host cannot measure
     # it reliably. The admission gate is authoritative only when the daemon's
     # storage root is visible on this host (normal Linux/VPS installs).
@@ -4310,7 +4310,7 @@ model_intake_cmd() {
                 local image
                 for image in "${SIGNER_IMAGE:-${MODEL_INTAKE_SIGNER_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}" \
                     "${MODEL_INTAKE_IMAGE:-${MODEL_INTAKE_IMAGE_REPO}:${SCANNER_IMAGE_TAG}}"; do
-                    docker image rm "$image" >/dev/null 2>&1 && echo "Removed $image" || echo "Kept $image (in use or not present)"
+                    docker_cli image rm "$image" >/dev/null 2>&1 && echo "Removed $image" || echo "Kept $image (in use or not present)"
                 done
             fi
             echo -e "${GREEN}Model Intake disabled; existing Model Intake records are kept${NC}"
@@ -4487,7 +4487,7 @@ done
 
 if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     case "$COMMAND" in
-        scan|hunt|approve|deny|knowledge|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild)
+        scan|hunt|approve|deny|knowledge|secrets|credentials|collections|evidence|agent|ai|fleet|join|model-intake-runner|report-rebuild)
             # Forward to the command's own help implementation below.
             ;;
         mcp)
