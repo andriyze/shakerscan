@@ -40,12 +40,12 @@ def active_finding_proof_counts(rows: Iterable[Mapping[str, Any]]) -> dict[tuple
 
 try:
     from finding_routes.list_query import (
-        INDEXED_UNDETERMINED_SQL, UNDETERMINED_SQL, VERIFIED_CANDIDATE_SQL, without_jit,
+        INDEXED_UNDETERMINED_SQL, UNDETERMINED_SQL, VERIFIED_CANDIDATE_SQL,
     )
     from finding_routes.proof_sql import latest_retest_mode_sql, verified_sql
 except ModuleNotFoundError:  # package import in host-side tests
     from ..finding_routes.list_query import (
-        INDEXED_UNDETERMINED_SQL, UNDETERMINED_SQL, VERIFIED_CANDIDATE_SQL, without_jit,
+        INDEXED_UNDETERMINED_SQL, UNDETERMINED_SQL, VERIFIED_CANDIDATE_SQL,
     )
     from ..finding_routes.proof_sql import latest_retest_mode_sql, verified_sql
 

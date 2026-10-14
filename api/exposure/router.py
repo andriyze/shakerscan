@@ -29,6 +29,7 @@ try:
         _severity_sort_value, _short_url_label,
     )
     from serialization import row_to_dict
+    from finding_routes.list_query import without_jit
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_assurance import build_agent_blast_radius
     from ..asset_cohorts import target_cohort, target_exposure_class
@@ -37,13 +38,12 @@ except ModuleNotFoundError:  # package import in host-side tests
         _severity_sort_value, _short_url_label,
     )
     from ..serialization import row_to_dict
+    from ..finding_routes.list_query import without_jit
 
 
 from .services_router import router as services_router
 from .service_inventory import origin as _service_origin
-from .proof_rollup import (
-    asset_finding_counts_sql, undetermined_adjustments, undetermined_rows_sql, without_jit,
-)
+from .proof_rollup import asset_finding_counts_sql, undetermined_adjustments, undetermined_rows_sql
 
 router = APIRouter()
 router.include_router(services_router)

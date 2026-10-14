@@ -52,7 +52,7 @@ from fastapi import HTTPException  # noqa: E402
 import exposure.router as exposure_router  # noqa: E402
 from exposure.proof_rollup import active_finding_proof_counts  # noqa: E402
 import finding_routes.router as findings_router  # noqa: E402
-from finding_routes import list_query, list_schema  # noqa: E402
+from finding_routes import list_schema  # noqa: E402
 import list_contract  # noqa: E402
 
 T0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
