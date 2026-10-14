@@ -27,17 +27,23 @@ def _dependencies(*, edge: bool = False):
 
     async def create_pool(url, **options):
         events.append(f"pool:{url}:{options['min_size']}:{options['max_size']}")
+        # The timeout is the session default, which survives asyncpg's RESET ALL on release.
+        assert "init" not in options
+        events.append(f"session statement_timeout={options['server_settings']['statement_timeout']}")
         connection = SimpleNamespace()
 
         async def execute(statement):
             events.append(statement)
 
         connection.execute = execute
-        await options["init"](connection)
+        pool.setup = options["setup"]
+        pool.connection = connection
         return pool
 
     async def ensure_schema(candidate):
         assert candidate is pool
+        # Startup migrations acquire with no statement timeout at all.
+        await pool.setup(pool.connection)
         events.append("schema")
 
     async def controller(name, candidate):
@@ -91,10 +97,11 @@ def test_lifespan_owns_exact_pool_controller_and_shutdown_order():
 
     asyncio.run(exercise())
 
-    assert events[:6] == [
+    assert events[:7] == [
         "pool:postgresql://fixture:7:31",
-        "SET statement_timeout = 12345",
+        "session statement_timeout=12345",
         "published",
+        "SET statement_timeout = 0",
         "schema",
         "capacity",
         "version",
