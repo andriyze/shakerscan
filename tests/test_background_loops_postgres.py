@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "api"), str(ROOT / "scanner")]
 
 import asm_dispatch_selection as selection  # noqa: E402
+import loop_leader  # noqa: E402
 import asm_inventory  # noqa: E402
 import job_queue  # noqa: E402
 from operations import queue_health  # noqa: E402
@@ -95,8 +96,13 @@ async def _scan(conn, target, *, status, created_minutes_ago=0, job_id=None, sta
     return scan
 
 
-def test_startup_builds_the_loop_indexes_and_rebuilds_an_interrupted_one():
+def test_startup_leaves_the_index_build_to_a_background_task_that_rebuilds_an_interrupted_one():
     async def scenario(pool):
+        async with pool.acquire() as conn:
+            # The startup migrations no longer build them: the API's background task does.
+            for name, _table, _definition in loop_scale_indexes.LOOP_SCALE_INDEXES:
+                assert await conn.fetchval("SELECT to_regclass($1)", name) is None, name
+        await loop_scale_indexes.build_loop_scale_indexes_in_background(pool, delay=0)
         async with pool.acquire() as conn:
             for name, _table, _definition in loop_scale_indexes.LOOP_SCALE_INDEXES:
                 assert await conn.fetchval(
@@ -173,7 +179,7 @@ def test_incremental_repair_terminalizes_exactly_the_open_actions_of_settled_res
                             "already-done": "success", "settled-just-now": "leased"}
         stamp, _sep, _id = cursor_store.values[reconciliation.REPAIR_CURSOR_KEY].partition("|")
         # The cursor passed what it examined, but never a reservation inside the skew margin.
-        assert datetime.fromisoformat(stamp) < datetime.now(timezone.utc) - timedelta(minutes=15)
+        assert datetime.fromisoformat(stamp) < datetime.now(timezone.utc) - timedelta(minutes=30)
         assert await reconciliation.repair_settled_reservation_actions(pool, cursor_store) == 0
     run(scenario)
 
@@ -376,3 +382,30 @@ def test_json_round_trip_keeps_asm_decisions_comparable():
                                     "recorded_at": "2026-10-14T00:00:00"}))
     assert selection.same_decision(stored, {"action": "none", "blocked_by": "min_interval", "claimable": 3,
                                             "recorded_at": "later"})
+
+
+def test_leader_shutdown_returns_the_connection_so_the_pool_closes_and_keepalives_are_set():
+    async def work():
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
+        assert await loop_leader.lead(pool, "shutdown-check") is True
+        leader_conn = loop_leader.leadership_for(pool)._conn
+        assert await leader_conn.fetchval("SHOW tcp_keepalives_idle") == "30"
+        await loop_leader.leadership_for(pool).close()  # what the worker and API do first
+        await asyncio.wait_for(pool.close(), 5)  # would wait forever for the held connection
+
+    asyncio.run(work())
+
+
+def test_job_hash_repair_is_compare_and_set_in_real_redis(redis_client):
+    redis_client.hset("job:raced", mapping={"status": "running"})
+    redis_client.hset("job:stale", mapping={"status": "running"})
+    repairs = [
+        ("job:raced", {"status": "orphaned", "error": "x"}, True, "running"),
+        ("job:stale", {"status": "orphaned", "error": "x"}, True, "running"),
+    ]
+    redis_client.hset("job:raced", "status", "completed")  # finished after the read
+    assert queue_health.apply_repairs(redis_client, repairs) == 1
+    assert redis_client.hget("job:raced", "status") == "completed"
+    assert redis_client.ttl("job:raced") == -1
+    assert redis_client.hgetall("job:stale") == {"status": "orphaned", "error": "x"}
+    assert 0 < redis_client.ttl("job:stale") <= queue_health.ORPHAN_EXPIRE_SECONDS

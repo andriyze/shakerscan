@@ -163,8 +163,10 @@ async def sweep_lost_queue_handoffs(
     record: resend those that provably never started (``resend``), and flag the others "queue
     handoff unknown" without claiming non-execution or freeing capacity.
 
-    ``queue_membership(redis, job_ids)`` answers ``presence(job_id)`` from a bounded queue read:
-    a job it could not confirm absent (an unreadable or larger-than-bounded queue) is left alone."""
+    ``queue_membership(redis, job_ids)`` answers ``presence(job_id)`` from a bounded queue read
+    (``job_queue.scan_queue_job_ids``, at most 20,000 entries by default): a job it could not
+    confirm absent (an unreadable queue, or a backlog past the bound) is left alone, so during a
+    backlog larger than the bound a lost handoff waits until the backlog drains below it."""
     state = state if state is not None else {}
     flagged = requeued = 0
     async with pool.acquire() as conn:

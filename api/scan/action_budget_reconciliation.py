@@ -134,8 +134,16 @@ async def scan_action_budget_reconciliation(conn: Any) -> dict[str, Any]:
 # action through its unique key, instead of joining every settled reservation in history to its
 # action through a text cast on every sweep. Rows newer than the settle delay plus a clock-skew
 # margin are examined but never passed by the cursor, so a late writer cannot be skipped.
+#
+# The margin exists because ``budget_reservations.updated_at`` comes from the writing process's
+# clock, not the database's: it is part of the reservation's content-addressed state (its
+# ``state_digest``), so it cannot simply be set by ``now()``. The cursor compares it with the
+# database clock, so a worker host whose clock runs behind the database by more than the margin
+# could settle a reservation "before" the cursor and have its action skipped. Thirty minutes is far
+# beyond the drift of an NTP-synchronised host; rows inside the margin are re-examined on every
+# sweep (within the batch bound), so the margin costs latency only for hosts that are that far off.
 REPAIR_SETTLE_DELAY = "5 minutes"
-REPAIR_CURSOR_MARGIN = "15 minutes"
+REPAIR_CURSOR_MARGIN = "30 minutes"
 
 _SETTLED_BATCH_SQL = r"""
 WITH batch AS (

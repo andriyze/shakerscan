@@ -70,6 +70,7 @@ try:
 except ModuleNotFoundError:
     from api import asm_dispatch_selection as asm_selection
     from api import loop_leader
+from runtime.loop_scale_indexes import build_loop_scale_indexes_in_background
 from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
 from scan.finding_reconciliation import reconcile_legacy_finding_row
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
@@ -1287,6 +1288,8 @@ _ASM_DUE = asm_selection.AsmDueSchedule()  # which ASM targets the dispatcher ev
 _NOT_GIVEN: Any = object()
 _JOB_HASH_RECONCILE_CURSOR: dict[str, Any] = {}  # where the bounded job-hash repair walk resumes
 ARTIFACT_RETENTION_BATCH_SIZE, ARTIFACT_RETENTION_MAX_BATCHES = 500, 20
+# A leader's tick past this is cancelled and its leadership given up (loop_leader.run_tick).
+LOOP_TICK_TIMEOUT_SECONDS, ARTIFACT_RETENTION_TICK_TIMEOUT = 600.0, 1800.0
 # §9: when an ASM-policy schedule's enqueue fails, retry after this short backoff
 # instead of advancing a full cadence (so a transient failure doesn't silently skip
 # a coverage wave). Kept well above the checker interval to avoid tight retries.
@@ -2473,6 +2476,7 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
         # heartbeat; they are finalized by the merge job and reconciled below,
         # so exclude them from heartbeat/duration staleness here.
         running_scans = await scan_job_lookup.fetch_running_scan_batch(conn, _STALE_SCAN_CURSOR)
+        await scan_job_lookup.retain_running(conn, _STALE_JOB_HASH_FALLBACK)
         job_hashes = await asyncio.to_thread(
             scan_job_lookup.load_scan_job_hashes, r, running_scans,
             decode=_decode_redis_hash, fallback=_STALE_JOB_HASH_FALLBACK)
@@ -3010,24 +3014,28 @@ async def recover_parallel_orchestration(pool: asyncpg.Pool) -> int:
     return repaired
 
 
+async def _stale_scan_tick(pool: asyncpg.Pool) -> None:
+    await recover_parallel_orchestration(pool)
+    await cleanup_stale_scans(pool)
+    await cleanup_stale_parents(pool)
+    await cleanup_stale_device_lifecycle(pool)
+    await cleanup_orphaned_scan_queue_handoffs(pool)
+    await cleanup_expired_auth_sessions_once(pool)
+    await queue_health.reconcile_job_hashes(
+        pool, get_redis(), state=_JOB_HASH_RECONCILE_CURSOR, now=utc_now(), queue_name=QUEUE_NAME,
+        scan_queue_job_ids=scan_queue_job_ids, heartbeat_timeout_minutes=QUEUE_HASH_HEARTBEAT_TIMEOUT_MINUTES,
+        retest_timeout_minutes=RETEST_RUNNING_TIMEOUT_MINUTES)
+
+
 async def stale_scan_checker(pool: asyncpg.Pool):
     """Background task to periodically check for stale scans."""
     print("[cleanup] Stale scan checker started", flush=True)
     while True:
         try:
             await asyncio.sleep(STALE_CHECK_INTERVAL_SECONDS)
-            if not await loop_leader.lead(pool, "stale_scan_checker"):
-                continue  # another API process leads this loop
-            await recover_parallel_orchestration(pool)
-            await cleanup_stale_scans(pool)
-            await cleanup_stale_parents(pool)
-            await cleanup_stale_device_lifecycle(pool)
-            await cleanup_orphaned_scan_queue_handoffs(pool)
-            await cleanup_expired_auth_sessions_once(pool)
-            await queue_health.reconcile_job_hashes(
-                pool, get_redis(), state=_JOB_HASH_RECONCILE_CURSOR, now=utc_now(), queue_name=QUEUE_NAME,
-                scan_queue_job_ids=scan_queue_job_ids, heartbeat_timeout_minutes=QUEUE_HASH_HEARTBEAT_TIMEOUT_MINUTES,
-                retest_timeout_minutes=RETEST_RUNNING_TIMEOUT_MINUTES)
+            # Only the leading API process runs a tick; a tick past the bound gives up leadership.
+            await loop_leader.run_tick(pool, "stale_scan_checker", lambda: _stale_scan_tick(pool),
+                                       timeout=LOOP_TICK_TIMEOUT_SECONDS)
         except asyncio.CancelledError:
             print("[cleanup] Stale scan checker stopped", flush=True)
             break
@@ -3564,8 +3572,8 @@ async def schedule_runner(pool: asyncpg.Pool):
     while True:
         try:
             await asyncio.sleep(SCHEDULE_CHECK_INTERVAL_SECONDS)
-            if await loop_leader.lead(pool, "schedule_runner"):
-                await run_due_schedules(pool)
+            await loop_leader.run_tick(pool, "schedule_runner", lambda: run_due_schedules(pool),
+                                       timeout=LOOP_TICK_TIMEOUT_SECONDS)
         except asyncio.CancelledError:
             print("[scheduler] Schedule runner stopped", flush=True)
             break
@@ -3785,8 +3793,8 @@ async def asm_dispatcher(pool: asyncpg.Pool):
     while True:
         try:
             await asyncio.sleep(ASM_DISPATCH_INTERVAL_SECONDS)
-            if await loop_leader.lead(pool, "asm_dispatcher"):
-                await run_asm_dispatch(pool)
+            await loop_leader.run_tick(pool, "asm_dispatcher", lambda: run_asm_dispatch(pool),
+                                       timeout=LOOP_TICK_TIMEOUT_SECONDS)
         except asyncio.CancelledError:
             print("[asm] Continuous ASM dispatcher stopped", flush=True)
             break
@@ -3893,21 +3901,25 @@ async def cleanup_expired_scan_artifacts_once(
     return {"claimed": len(rows), "deleted": deleted, "failed": failed}
 
 
+async def _artifact_retention_tick(pool: asyncpg.Pool) -> None:
+    # Up to ARTIFACT_RETENTION_MAX_BATCHES full batches per sweep, so expiry keeps up
+    # with a large install instead of 100 objects an hour.
+    outcome = {"claimed": 0, "deleted": 0, "failed": 0}
+    for _batch in range(ARTIFACT_RETENTION_MAX_BATCHES):
+        batch = await cleanup_expired_scan_artifacts_once(pool, limit=ARTIFACT_RETENTION_BATCH_SIZE)
+        outcome = {key: outcome[key] + int(batch.get(key) or 0) for key in outcome}
+        if batch["claimed"] < ARTIFACT_RETENTION_BATCH_SIZE:
+            break
+    if outcome["claimed"]:
+        print(f"[artifact-retention] {outcome}", flush=True)
+
+
 async def scan_artifact_retention_runner(pool: asyncpg.Pool) -> None:
     interval = max(60, _int_env("ARTIFACT_RETENTION_SWEEP_SECONDS", 3600))
     while True:
         try:
-            if await loop_leader.lead(pool, "scan_artifact_retention_runner"):
-                # Up to ARTIFACT_RETENTION_MAX_BATCHES full batches per sweep, so expiry keeps up
-                # with a large install instead of 100 objects an hour.
-                outcome = {"claimed": 0, "deleted": 0, "failed": 0}
-                for _batch in range(ARTIFACT_RETENTION_MAX_BATCHES):
-                    batch = await cleanup_expired_scan_artifacts_once(pool, limit=ARTIFACT_RETENTION_BATCH_SIZE)
-                    outcome = {key: outcome[key] + int(batch.get(key) or 0) for key in outcome}
-                    if batch["claimed"] < ARTIFACT_RETENTION_BATCH_SIZE:
-                        break
-                if outcome["claimed"]:
-                    print(f"[artifact-retention] {outcome}", flush=True)
+            await loop_leader.run_tick(pool, "scan_artifact_retention_runner",
+                                       lambda: _artifact_retention_tick(pool), timeout=ARTIFACT_RETENTION_TICK_TIMEOUT)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -3959,6 +3971,7 @@ lifespan = create_api_lifespan(ApiLifecycleDependencies(
             lambda pool: model_intake_automatic_review_runner(pool),
         ),
     ),
+    background_maintenance=(("loop_scale_indexes", lambda pool: build_loop_scale_indexes_in_background(pool)),),
 ))
 
 

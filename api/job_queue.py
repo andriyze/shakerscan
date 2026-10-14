@@ -759,8 +759,12 @@ def scan_queue_job_ids(
 ) -> QueueJobIds:
     """Read the job ids of a queue (its routes and legacy list included) in bounded pages.
 
-    ``wanted`` stops the read once every named job id was seen. ``max_entries`` caps the entries
-    read; past it, and on any Redis error, the result is incomplete, never a proof of absence.
+    ``wanted`` stops the read once every named job id was seen. ``max_entries`` (default
+    ``SHAKERSCAN_QUEUE_SCAN_MAX_ENTRIES``, 20,000) caps the entries read; past it, and on any Redis
+    error, the result is incomplete, never a proof of absence (``presence`` answers None). Callers
+    deciding that work was lost (the lost-handoff sweep, the stale-parent and device reapers, the
+    research reconciler) therefore leave such a job alone: while a backlog exceeds the bound, a
+    lost handoff is neither resent nor flagged until the backlog drains below it.
     """
     limit = max(1, int(max_entries if max_entries is not None else QUEUE_SCAN_MAX_ENTRIES))
     page = max(1, int(page_size))

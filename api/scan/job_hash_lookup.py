@@ -58,7 +58,10 @@ class JobHashFallback:
     """The incremental SCAN walk for Scans whose recorded job hash does not name them.
 
     Owned by one process (the loop leader); a new leader starts a fresh walk, which only delays a
-    verdict, never reverses one.
+    verdict, never reverses one. Scans waiting for a verdict stay tracked across ticks, whichever
+    stale-check batch they fall in, until they stop running (``retain``), so a rotating batch never
+    restarts their walk. A verdict is kept only while it holds: a found hash that no longer names
+    the Scan is forgotten (``invalidate``) and the Scan waits for a new walk.
     """
 
     def __init__(self, *, keys_per_tick: int = DEFAULT_FALLBACK_KEYS_PER_TICK) -> None:
@@ -67,14 +70,30 @@ class JobHashFallback:
         self.passes = 0
         self._pending: dict[str, int] = {}  # scan id -> pass number when first missed
         self._found: dict[str, str] = {}
+        self._absent: set[str] = set()  # a complete walk since the miss found no hash naming it
+
+    def tracked(self) -> set[str]:
+        return set(self._pending) | set(self._found) | self._absent
+
+    def retain(self, running: Iterable[str]) -> None:
+        """Forget every Scan that is no longer running."""
+        keep = {str(scan_id) for scan_id in running}
+        self._pending = {sid: p for sid, p in self._pending.items() if sid in keep}
+        self._found = {sid: key for sid, key in self._found.items() if sid in keep}
+        self._absent &= keep
+
+    def invalidate(self, scan_id: str) -> None:
+        """The found hash no longer names the Scan (deleted, expired, rewritten): walk again."""
+        sid = str(scan_id)
+        self._found.pop(sid, None)
+        self._absent.discard(sid)
+        self._pending[sid] = self.passes
 
     def resolve(self, redis_client: Any, scan_ids: Iterable[str]) -> dict[str, Any]:
         """Return scan id -> key of a hash naming it, None (no hash after a full pass) or UNKNOWN."""
         wanted = {str(scan_id) for scan_id in scan_ids}
-        self._pending = {sid: p for sid, p in self._pending.items() if sid in wanted}
-        self._found = {sid: key for sid, key in self._found.items() if sid in wanted}
         for sid in wanted:
-            if sid not in self._found and sid not in self._pending:
+            if sid not in self._found and sid not in self._pending and sid not in self._absent:
                 self._pending[sid] = self.passes
         if self._pending:
             self._walk(redis_client)
@@ -82,10 +101,13 @@ class JobHashFallback:
         for sid in wanted:
             if sid in self._found:
                 out[sid] = self._found[sid]
+            elif sid in self._absent:
+                out[sid] = None
             elif self.passes >= self._pending.get(sid, self.passes) + 2:
                 # A complete pass started after this Scan was first missed: no hash names it.
-                out[sid] = None
                 self._pending.pop(sid, None)
+                self._absent.add(sid)
+                out[sid] = None
             else:
                 out[sid] = UNKNOWN
         return out
@@ -105,21 +127,35 @@ class JobHashFallback:
                     break
 
     def _match(self, redis_client: Any, keys: list[str]) -> None:
-        if not keys:
+        watched = set(self._pending) | self._absent
+        if not keys or not watched:
             return
-        by_suffix = [sid for sid in self._pending]
+        suffix_lengths = sorted({len(sid) for sid in watched})
         scan_ids = _pipelined(redis_client, keys, lambda client, key: client.hget(key, "scan_id"))
         for key, raw in zip(keys, scan_ids):
             named = _text(raw) if raw is not None else ""
-            if named in self._pending:
-                self._found[named] = key
-                self._pending.pop(named, None)
+            sid = named if named in watched else next(
+                (key[-length:] for length in suffix_lengths if key[-length:] in watched), None)
+            if sid is None:
                 continue
-            for sid in by_suffix:
-                if sid in self._pending and key.endswith(sid):
-                    self._found[sid] = key
-                    self._pending.pop(sid, None)
-                    break
+            self._found[sid] = key
+            self._pending.pop(sid, None)
+            self._absent.discard(sid)
+            watched.discard(sid)
+
+
+async def retain_running(conn: Any, fallback: JobHashFallback) -> None:
+    """Prune the fallback's tracked Scans to those still running (one indexed lookup)."""
+    import uuid
+
+    tracked = fallback.tracked()
+    if not tracked:
+        return
+    rows = await conn.fetch(
+        "SELECT id FROM scans WHERE id = ANY($1::uuid[]) AND status = 'running'",
+        [uuid.UUID(sid) for sid in tracked],
+    )
+    fallback.retain(str(row["id"]) for row in rows)
 
 
 def load_scan_job_hashes(
@@ -149,7 +185,11 @@ def load_scan_job_hashes(
         verdict = resolved.get(sid, UNKNOWN)
         if isinstance(verdict, str):
             data = decode(redis_client.hgetall(verdict))
-            found[sid] = data if data and hash_names_scan(verdict, data, sid) else UNKNOWN
+            if data and hash_names_scan(verdict, data, sid):
+                found[sid] = data
+            else:
+                fallback.invalidate(sid)
+                found[sid] = UNKNOWN
         else:
             found[sid] = verdict
     return found
@@ -278,4 +318,5 @@ __all__ = [
     "heartbeat_verdict",
     "job_key",
     "load_scan_job_hashes",
+    "retain_running",
 ]

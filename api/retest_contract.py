@@ -26,7 +26,6 @@ from runtime.credential_migration import (
     migrate_scan_execute_capabilities,
 )
 from runtime.reservation_store import PostgresBudgetReservationStore
-from runtime.loop_scale_indexes import ensure_loop_scale_indexes
 from runtime.observation_store import PostgresObservationManifestStore
 from runtime.request_collection_store import PostgresRequestCollectionStore
 from scan.stage_store import PostgresScanStageCheckpointStore
@@ -1081,12 +1080,8 @@ async def run_schema_migrations(pool, redis_provider=None) -> None:
             if exc.__class__.__name__ != "DeadlockDetectedError" or attempt >= 2:
                 raise
             await asyncio.sleep(0.2 * (attempt + 1))
-    # After the startup lock is released: concurrent builds must not wait on processes queued
-    # behind that lock (runtime/loop_scale_indexes.py).
-    try:
-        await ensure_loop_scale_indexes(pool)
-    except Exception as exc:  # performance indexes never stop startup
-        print(f"[schema] loop index build skipped: {type(exc).__name__}", flush=True)
+    # The loop indexes are built later, in the background, once the API serves
+    # (runtime/loop_scale_indexes.py, started by the API lifespan).
 
 
 class MissingBaseSchemaError(RuntimeError):

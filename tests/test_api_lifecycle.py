@@ -163,3 +163,33 @@ def test_api_remains_the_composition_root_without_lifecycle_reimplementation():
     assert "async def lifespan(" not in api_source
     assert "from api import" not in lifecycle_source
     assert "from api.api import" not in lifecycle_source
+
+
+def test_background_maintenance_starts_after_the_schema_and_never_holds_startup():
+    """The CONCURRENTLY index build is a task: startup completes (the app serves) while it runs,
+    and shutdown cancels it before the pool closes."""
+    import dataclasses
+
+    dependencies, pool, events = _dependencies()
+    build_started = asyncio.Event()
+
+    async def slow_build(candidate):
+        assert candidate is pool
+        events.append("build:start")
+        build_started.set()
+        try:
+            await asyncio.Event().wait()  # a build that would take hours
+        finally:
+            events.append("build:stop")
+
+    dependencies = dataclasses.replace(dependencies, background_maintenance=(("loop_scale_indexes", slow_build),))
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    async def exercise():
+        async with create_api_lifespan(dependencies)(app):
+            await asyncio.wait_for(build_started.wait(), 1)  # serving while the build runs
+            assert "build:stop" not in events
+
+    asyncio.run(exercise())
+    assert events.index("schema") < events.index("build:start")
+    assert "build:stop" in events and pool.closed is True

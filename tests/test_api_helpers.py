@@ -22514,6 +22514,9 @@ class _BoundedQueueRedis:
     def hgetall(self, key):
         return dict(self.jobs.get(key) or {})
 
+    def hget(self, key, field):
+        return (self.jobs.get(key) or {}).get(field)
+
     def hset(self, key, field=None, value=None, mapping=None):
         self.writes.append(("hset", key))
         self.jobs.setdefault(key, {})
@@ -22609,6 +22612,18 @@ def test_job_hash_repair_reaps_orphaned_running_hashes_as_the_get_used_to(monkey
     assert redis.jobs["retest_job:slow"]["status"] == "failed"
     assert redis.jobs["job:planning-job"]["status"] == "running"
     assert redis.jobs["job:parent-job"]["status"] == "running"
+
+
+def test_job_hash_repair_never_overwrites_a_status_that_changed_after_it_was_read():
+    """A scan finishing between the hash read and the repair keeps its fresh "completed" hash."""
+    redis = _BoundedQueueRedis({"job:just-finished": {"status": "running"}})
+    rows = [("job:just-finished", {"status": "running", "heartbeat": "", "started_at": ""})]
+    _counts, repairs = ops_router_module.queue_health.classify_job_hashes(
+        rows, now=api_module.utc_now(), active_job_status={}, queue_presence=lambda _j: True,
+        unleased=lambda _j: True, heartbeat_timeout_minutes=10)
+    redis.jobs["job:just-finished"]["status"] = "completed"  # the worker finished meanwhile
+    assert ops_router_module.queue_health.apply_repairs(redis, repairs) == 0
+    assert redis.jobs["job:just-finished"]["status"] == "completed"
 
 
 def test_job_hash_repair_never_orphans_a_queued_hash_a_bounded_read_could_not_rule_out(monkeypatch):

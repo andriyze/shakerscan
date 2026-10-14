@@ -1459,6 +1459,7 @@ _reservation_sweep_interval = int(
 BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS = (
     0 if _reservation_sweep_interval <= 0 else max(10, _reservation_sweep_interval)
 )
+BUDGET_RESERVATION_SWEEP_TICK_TIMEOUT = 300.0  # a hung sweep gives up leadership
 BUDGET_RESERVATION_SWEEP_BATCH_SIZE = max(
     1, min(1000, int(os.environ.get("BUDGET_RESERVATION_SWEEP_BATCH_SIZE", "100")))
 )
@@ -22943,9 +22944,8 @@ async def sweep_discovered_secrets() -> dict[str, int]:
 async def sweep_stale_budget_reservations() -> dict[str, int]:
     """Recover expired durable holds without allowing uncertain traffic refunds.
 
-    One worker (the advisory-lock leader) sweeps; the others skip the tick."""
-    if not await loop_leader.lead(db_pool, "sweep_stale_budget_reservations"):
-        return {"recovered": 0, "released": 0, "failed_uncertain": 0, "scan_actions_repaired": 0}
+    Runs as its own task (``loop_leader.run_led_loop``), on the one worker that leads it, whatever
+    job that worker is executing; the other workers skip the tick."""
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             events = await recover_stale_reservations(
@@ -23005,11 +23005,15 @@ async def async_main():
 
     loop = asyncio.get_event_loop()
     last_stale_check_monotonic = 0.0
-    last_reservation_sweep_monotonic = 0.0
     last_secret_sweep_monotonic = 0.0
     build_report_task = asyncio.create_task(worker_queue_policy_module.heartbeat_worker_build_report(
         report_worker_build_fingerprint, interval_seconds=WORKER_BUILD_REPORT_INTERVAL_SECONDS,
     ))
+    # The budget sweep is a task of its own: a leader busy with a long job still sweeps.
+    reservation_sweep_task = asyncio.create_task(loop_leader.run_led_loop(
+        db_pool, "sweep_stale_budget_reservations", sweep_stale_budget_reservations,
+        interval=BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS, timeout=BUDGET_RESERVATION_SWEEP_TICK_TIMEOUT,
+    )) if BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS > 0 else None
 
     try:
         while True:
@@ -23026,21 +23030,6 @@ async def async_main():
                         print(f"[watchdog] stale retest sweep error: {stale_err}", flush=True)
                     finally:
                         last_stale_check_monotonic = now_mono
-
-                if (
-                    BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS > 0
-                    and now_mono - last_reservation_sweep_monotonic
-                    >= BUDGET_RESERVATION_SWEEP_INTERVAL_SECONDS
-                ):
-                    try:
-                        await sweep_stale_budget_reservations()
-                    except Exception as reservation_err:
-                        print(
-                            f"[watchdog] stale budget reservation sweep error: {reservation_err}",
-                            flush=True,
-                        )
-                    finally:
-                        last_reservation_sweep_monotonic = now_mono
 
                 if now_mono - last_secret_sweep_monotonic >= DISCOVERED_SECRET_SWEEP_INTERVAL_SECONDS:
                     try:
@@ -23117,6 +23106,9 @@ async def async_main():
             await worker_queue_policy_module.finish_cancelled_task(ssh_task)
         build_report_task.cancel()
         await worker_queue_policy_module.finish_cancelled_task(build_report_task)
+        if reservation_sweep_task is not None:
+            reservation_sweep_task.cancel()
+            await worker_queue_policy_module.finish_cancelled_task(reservation_sweep_task)
         # A clean container replacement should disappear from lightweight fleet identity
         # immediately. Crash/kill remnants still age out server-side, while graceful rebuilds do
         # not leave a transient false mismatch in the sidebar.
@@ -23126,6 +23118,8 @@ async def async_main():
             pass
         # Close database pool
         if db_pool:
+            # Loop leadership holds one pool connection; pool.close() would wait for it forever.
+            await loop_leader.leadership_for(db_pool).close()
             await db_pool.close()
         print("Worker shutdown complete", flush=True)
 

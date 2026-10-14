@@ -101,7 +101,7 @@ def classify_job_hashes(
     queue_presence: Callable[[str], bool | None],
     unleased: Callable[[str], bool | None],
     heartbeat_timeout_minutes: float,
-) -> tuple[dict[str, int], list[tuple[str, dict[str, str], bool]]]:
+) -> tuple[dict[str, int], list[tuple[str, dict[str, str], bool, str]]]:
     """Counts and repairs for ``job:*`` hashes, by the rules the GET applied.
 
     ``active_job_status`` maps the job id of every active Scan among these hashes to its status
@@ -110,7 +110,7 @@ def classify_job_hashes(
     rather than leased. A hash is only repaired when the evidence is certain."""
     counts = {"running": 0, "completed": 0, "failed": 0, "queued": 0,
               "stale_running_job_hashes": 0, "stale_queued_job_hashes": 0, "unknown": 0}
-    repairs: list[tuple[str, dict[str, str], bool]] = []
+    repairs: list[tuple[str, dict[str, str], bool, str]] = []
     for key, data in rows:
         status = data.get("status", "")
         job_id = _job_id(key, "job:")
@@ -120,10 +120,10 @@ def classify_job_hashes(
                 repairs.append((key, {
                     "status": "orphaned",
                     "error": "Running job hash has no matching running scan",
-                }, True))
+                }, True, status))
                 continue
             if _heartbeat_overdue(data.get("heartbeat", ""), now=now, minutes=heartbeat_timeout_minutes):
-                repairs.append((key, {"status": "failed", "error": "Worker stopped responding"}, False))
+                repairs.append((key, {"status": "failed", "error": "Worker stopped responding"}, False, status))
                 counts["failed"] += 1
                 continue
             counts["running"] += 1
@@ -146,7 +146,7 @@ def classify_job_hashes(
                 repairs.append((key, {
                     "status": "orphaned",
                     "error": "Queued job hash has no matching queued scan",
-                }, True))
+                }, True, status))
         elif status == "failed":
             counts["failed"] += 1
     return counts, repairs
@@ -154,9 +154,9 @@ def classify_job_hashes(
 
 def classify_retest_hashes(
     rows: Iterable[tuple[str, dict[str, str]]], *, now: datetime, timeout_minutes: float,
-) -> tuple[dict[str, int], list[tuple[str, dict[str, str], bool]]]:
+) -> tuple[dict[str, int], list[tuple[str, dict[str, str], bool, str]]]:
     counts = {"retest_running": 0, "retest_completed": 0, "retest_queued": 0, "retest_failed": 0}
-    repairs: list[tuple[str, dict[str, str], bool]] = []
+    repairs: list[tuple[str, dict[str, str], bool, str]] = []
     for key, data in rows:
         status = data.get("status", "")
         if status == "running":
@@ -164,7 +164,7 @@ def classify_retest_hashes(
                 repairs.append((key, {
                     "status": "failed",
                     "error": "Retest worker did not complete in time",
-                }, False))
+                }, False, status))
                 counts["retest_failed"] += 1
                 continue
             counts["retest_running"] += 1
@@ -177,12 +177,38 @@ def classify_retest_hashes(
     return counts, repairs
 
 
-def apply_repairs(redis_client: Any, repairs: Iterable[tuple[str, dict[str, str], bool]]) -> int:
+# Compare-and-set: the repair applies only while the hash still has the status it was judged on.
+# A Scan that finished between the read and the repair has a fresh status ("completed", ...),
+# which must not be overwritten with "orphaned".
+_REPAIR_IF_UNCHANGED_LUA = """
+if redis.call('HGET', KEYS[1], 'status') ~= ARGV[1] then
+  return 0
+end
+for i = 3, #ARGV, 2 do
+  redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+end
+if tonumber(ARGV[2]) > 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 1
+"""
+
+
+def apply_repairs(redis_client: Any, repairs: Iterable[tuple[str, dict[str, str], bool, str]]) -> int:
     applied = 0
-    for key, mapping, expire in repairs:
+    evaluate = getattr(redis_client, "eval", None)
+    for key, mapping, expire, expected_status in repairs:
+        ttl = ORPHAN_EXPIRE_SECONDS if expire else 0
+        if callable(evaluate):
+            fields = [item for pair in mapping.items() for item in pair]
+            applied += int(evaluate(_REPAIR_IF_UNCHANGED_LUA, 1, key, expected_status, ttl, *fields) or 0)
+            continue
+        # Clients without scripting (test doubles): the same check, not atomic.
+        if _text(redis_client.hget(key, "status")) != expected_status:
+            continue
         redis_client.hset(key, mapping=mapping)
-        if expire:
-            redis_client.expire(key, ORPHAN_EXPIRE_SECONDS)
+        if ttl:
+            redis_client.expire(key, ttl)
         applied += 1
     return applied
 

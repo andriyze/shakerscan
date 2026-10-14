@@ -379,3 +379,112 @@ def test_loop_indexes_are_left_to_the_builder_and_never_built_inside_a_transacti
     for conn in (IndexConn({}, lock_free=False), IndexConn({}, in_transaction=True)):
         assert asyncio.run(loop_scale_indexes.ensure_loop_scale_indexes(SimplePool(conn))) == []
         assert not any(s.startswith("CREATE INDEX") for s in conn.statements)
+
+
+def test_fallback_resolves_rotating_batches_of_lost_hashes_in_a_large_keyspace_within_bounded_ticks():
+    """600 running scans (rotating stale-check batches of 500) whose hashes are lost, among 30k
+    unrelated job hashes: each gets its verdict within a few ticks; rotation never restarts it."""
+    hashes = {f"job:old-{i}": {"scan_id": f"other-{i}"} for i in range(30_000)}
+    redis = KeyspaceRedis(hashes, page=1000)
+    fallback = JobHashFallback(keys_per_tick=20_000)
+    lost = [f"lost-{i:04d}" for i in range(600)]
+    verdicts: dict[str, object] = {}
+    offset = 0
+    for tick in range(8):
+        batch = (lost + lost)[offset:offset + 500]
+        offset = (offset + 500) % len(lost)
+        fallback.retain(lost)  # all still running
+        verdicts.update(fallback.resolve(redis, batch))
+        assert redis.scanned <= 20_000 * (tick + 1)
+    assert all(verdicts[sid] is None for sid in lost)
+
+
+def test_fallback_forgets_a_found_hash_that_no_longer_names_the_scan():
+    redis = KeyspaceRedis({"job:legacy": {"scan_id": "s1", "heartbeat": "h"}})
+    fallback = JobHashFallback()
+    scans = [{"id": "s1", "job_id": "missing"}]
+    assert load_scan_job_hashes(redis, scans, decode=lambda raw: dict(raw or {}), fallback=fallback)["s1"]["heartbeat"] == "h"
+    del redis.hashes["job:legacy"]
+    redis.order.remove("job:legacy")
+    seen = [load_scan_job_hashes(redis, scans, decode=lambda raw: dict(raw or {}), fallback=fallback)["s1"]
+            for _tick in range(4)]
+    assert seen[0] is UNKNOWN  # not trusted any more, not yet proven absent
+    assert seen[-1] is None  # a complete walk since then found nothing
+    fallback.retain([])  # the scan stopped running: nothing is tracked for it any more
+    assert fallback.tracked() == set()
+
+
+def test_a_busy_leader_still_runs_its_led_loop():
+    """The worker's budget sweep is its own task: a leader busy with a long job still sweeps."""
+    from api.loop_leader import run_led_loop
+
+    server = LockServer()
+    pool = LockPool(server)
+    ticks = []
+
+    async def tick():
+        ticks.append(1)
+
+    async def scenario():
+        sweep = asyncio.create_task(run_led_loop(pool, "sweep", tick, interval=0.01, timeout=5))
+        await asyncio.sleep(0.2)  # "a long job" occupying the worker's main loop
+        sweep.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sweep
+
+    asyncio.run(scenario())
+    assert len(ticks) >= 5
+
+
+def test_a_hung_tick_gives_up_leadership_so_another_process_takes_over():
+    from api import loop_leader
+
+    server = LockServer()
+    first_pool, second_pool = LockPool(server), LockPool(server)
+
+    async def hang():
+        await asyncio.sleep(3600)
+
+    class TerminatingConn(LockConn):
+        def terminate(self):
+            self.alive = False  # the server ends the session: its locks go with it
+
+    async def acquire_terminating():
+        conn = TerminatingConn(server)
+        first_pool.out.append(conn)
+        return conn
+
+    first_pool.acquire = acquire_terminating
+    ran = []
+
+    async def scenario():
+        assert await loop_leader.run_tick(first_pool, "loop", hang, timeout=0.05) is True
+        assert first_pool.out == []  # the hung session was closed and given back
+
+        async def tick():
+            ran.append(1)
+        assert await loop_leader.run_tick(second_pool, "loop", tick, timeout=1) is True
+
+    asyncio.run(scenario())
+    assert ran == [1]
+
+
+def test_the_leader_session_asks_the_server_for_tcp_keepalives():
+    from api.loop_leader import LEADER_KEEPALIVE_SQL
+
+    server = LockServer()
+    executed = []
+
+    class RecordingConn(LockConn):
+        async def execute(self, query, *args):
+            executed.append(query)
+            await super().execute(query, *args)
+
+    class RecordingPool(LockPool):
+        async def acquire(self):
+            conn = RecordingConn(self.server)
+            self.out.append(conn)
+            return conn
+
+    assert asyncio.run(LoopLeadership(RecordingPool(server)).lead("loop")) is True
+    assert LEADER_KEEPALIVE_SQL in executed and "tcp_keepalives_idle" in LEADER_KEEPALIVE_SQL

@@ -48,6 +48,8 @@ class ApiLifecycleDependencies:
     publish_scanner_version: Callable[[], Any]
     fleet_edge_mode: ValueProvider
     background_controllers: tuple[tuple[str, PoolCallback], ...]
+    # One-off background maintenance started once the API serves (never fatal, never awaited).
+    background_maintenance: tuple[tuple[str, PoolCallback], ...] = ()
 
     def validate(self) -> None:
         names = tuple(name for name, _callback in self.background_controllers)
@@ -101,7 +103,8 @@ def create_api_lifespan(dependencies: ApiLifecycleDependencies):
         if not bool(dependencies.fleet_edge_mode()):
             tasks = [
                 asyncio.create_task(callback(pool), name=name)
-                for name, callback in dependencies.background_controllers
+                for name, callback in (
+                    *dependencies.background_controllers, *dependencies.background_maintenance)
             ]
 
         try:

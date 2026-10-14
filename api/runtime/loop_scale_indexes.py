@@ -6,7 +6,8 @@ for that lock holds a snapshot the build would wait for), so it runs after the s
 under its own try-lock: the first process to start builds, the others carry on without waiting and
 use the indexes once they exist. A build interrupted by a restart leaves an invalid index; the next
 start drops and rebuilds it. A failed build is logged and never stops startup: the loops are
-correct without these indexes, only slower.
+correct without these indexes, only slower. The API starts the build as a background task after it
+begins serving (``build_loop_scale_indexes_in_background``), so a long build never delays startup.
 """
 
 from __future__ import annotations
@@ -59,8 +60,9 @@ async def _index_state(conn: Any, name: str) -> bool | None:
     return None if valid is None else bool(valid)
 
 
-async def ensure_loop_scale_indexes(pool: Any) -> list[str]:
+async def ensure_loop_scale_indexes(pool: Any, *, progress: Any = None) -> list[str]:
     """Build any missing index concurrently; return the names built (or rebuilt)."""
+    report = progress if callable(progress) else (lambda _message: None)
     built: list[str] = []
     async with pool.acquire() as conn:
         in_transaction = getattr(conn, "is_in_transaction", None)
@@ -80,9 +82,12 @@ async def ensure_loop_scale_indexes(pool: Any) -> list[str]:
                     if state:
                         continue
                     if state is False:
+                        report(f"dropping interrupted build of {name}")
                         await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+                    report(f"building {name} concurrently")
                     await conn.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {definition}")
                     built.append(name)
+                    report(f"built {name}")
                 except Exception as exc:  # never stop startup over a performance index
                     logger.warning("Could not build index %s: %s", name, type(exc).__name__)
         finally:
@@ -93,4 +98,24 @@ async def ensure_loop_scale_indexes(pool: Any) -> list[str]:
     return built
 
 
-__all__ = ["LOOP_SCALE_INDEXES", "ensure_loop_scale_indexes"]
+BACKGROUND_START_DELAY_SECONDS = 10.0
+
+
+async def build_loop_scale_indexes_in_background(pool: Any, *, delay: float = BACKGROUND_START_DELAY_SECONDS) -> None:
+    """The API lifespan's background task: wait until the API serves, then build; never fatal."""
+    import asyncio
+
+    await asyncio.sleep(delay)
+    print("[schema] loop index build: checking", flush=True)
+    try:
+        built = await ensure_loop_scale_indexes(pool, progress=lambda message: print(f"[schema] {message}", flush=True))
+    except asyncio.CancelledError:
+        print("[schema] loop index build interrupted (an invalid index is rebuilt on the next start)", flush=True)
+        raise
+    except Exception as exc:  # performance indexes never stop the API
+        print(f"[schema] loop index build skipped: {type(exc).__name__}", flush=True)
+        return
+    print(f"[schema] loop index build done ({len(built)} built)", flush=True)
+
+
+__all__ = ["LOOP_SCALE_INDEXES", "build_loop_scale_indexes_in_background", "ensure_loop_scale_indexes"]
