@@ -8,6 +8,7 @@ and /health reports the module as disabled rather than as a missing worker.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -113,3 +114,28 @@ def test_the_module_is_on_by_default_and_when_set(monkeypatch, value):
         monkeypatch.setenv("SHAKERSCAN_MODEL_INTAKE_ENABLED", value)
     assert module.model_intake_enabled()
     asyncio.run(module._require_module_for_changes(_Request("POST")))
+
+
+@pytest.mark.parametrize("subcommand", ["enable", "disable"])
+def test_enabling_or_disabling_recreates_the_api_with_the_start_environment(tmp_path, subcommand):
+    """2.10 candidate certification: `model-intake enable` recreated the API without the
+    launcher's environment, so it lost its install directory and reported a runner command for
+    ~/.shakerscan instead of the install it runs from."""
+    script = "\n".join([
+        "set -eu",
+        f'SCRIPT_DIR="{tmp_path}"; USE_PREBUILT=1; DEFAULT_PREBUILT_IMAGE_TAG=2.10.0',
+        'GREEN=""; BLUE=""; NC=""; SHAKERSCAN_PULL_IMAGES=0',
+        "is_truthy() { case \"${1:-}\" in 1|true|yes|on) return 0;; *) return 1;; esac; }",
+        "get_build_version() { echo abc1234; }",
+        "get_release_version() { echo 2.10.0; }",
+        "write_dotenv_value() { :; }",
+        'compose() { case "$*" in *"--force-recreate api"*) '
+        'printf "api-recreated dir=%s release=%s\\n" "${SHAKERSCAN_RUNTIME_DIR:-}" "${SCANNER_RELEASE_VERSION:-}";; esac; }',
+        'MODEL_INTAKE_SERVICES="model-intake-signer"',
+        "set_build_env() {\n" + _launcher_function("set_build_env") + "}",
+        "model_intake_cmd() {\n" + _launcher_function("model_intake_cmd") + "}",
+        f"model_intake_cmd {subcommand}",
+    ])
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True,
+                         env={"PATH": os.environ["PATH"], "HOME": str(tmp_path / "home")}).stdout
+    assert f"api-recreated dir={tmp_path} release=2.10.0" in out
