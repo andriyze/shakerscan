@@ -280,7 +280,7 @@ def test_cleanup_keeps_the_backup_just_made_whatever_the_version_names(tmp_path)
     for name in ("pre-upgrade-20261001T000000Z-earlier-to-2.9.0", "pre-upgrade-20261005T000000Z-2.9.0-to-2.10.0"):
         (backups / name).mkdir(parents=True)
     result = _backup(tmp_path, "2.10.0", "t", SCANNER_VERSION="2.11.0")
-    kept = sorted(path.name for path in backups.iterdir())
+    kept = sorted(path.name for path in backups.glob("pre-upgrade-*"))
     assert len(kept) == 2 and kept[-1].endswith("-2.10.0-to-2.11.0"), (kept, result.stdout)
     assert "pre-upgrade-20261005T000000Z-2.9.0-to-2.10.0" in kept
 
@@ -582,3 +582,35 @@ def test_a_restart_of_the_recorded_release_is_still_not_an_upgrade(tmp_path):
     unversioned.mkdir()
     latest = _backup(unversioned, "2.10.0", "t", before="running_api_version() { echo latest; }")
     assert "pre-upgrade" not in latest.stdout, latest.stdout
+
+
+def test_without_any_record_a_running_release_of_another_version_is_backed_up(tmp_path):
+    """A local build, or a release whose images were not recognised, leaves no record; the version
+    its API reports still makes the start an upgrade."""
+    result = _backup(tmp_path, None, "t", before="running_api_version() { echo 2.9.0; }")
+    assert "rc=0" in result.stdout and "-2.9.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+    same = tmp_path / "same"
+    same.mkdir()
+    assert "pre-upgrade" not in _backup(same, None, "t", before="running_api_version() { echo 2.10.0; }").stdout
+
+
+def test_failed_attempts_never_rotate_out_the_first_dump_of_an_upgrade(tmp_path):
+    """An API that exits mid-migration fails the start; each retry dumps the partly migrated
+    database. The dump taken before any migration ran stays until a start succeeds."""
+    # One distinct, ordered timestamp per attempt.
+    clock = 'date() { n=$(cat "$WORK/n" 2>/dev/null || echo 0); echo $((n + 1)) > "$WORK/n"; echo "2026101${n}T000000Z"; }'
+    for _ in range(4):
+        result = _backup(tmp_path, "2.9.0", "t", before=clock)
+        assert "rc=0" in result.stdout, result.stdout + result.stderr
+    kept = sorted(path.name for path in (tmp_path / "backups").glob("pre-upgrade-*"))
+    assert kept == ["pre-upgrade-20261010T000000Z-2.9.0-to-2.10.0",   # before any migration ran
+                    "pre-upgrade-20261012T000000Z-2.9.0-to-2.10.0",
+                    "pre-upgrade-20261013T000000Z-2.9.0-to-2.10.0"], kept
+
+
+def test_a_successful_start_releases_the_first_dump_for_rotation(tmp_path):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    (backups / ".pre-upgrade-pending").write_text("pre-upgrade-20261010T000000Z-2.9.0-to-2.10.0\n")
+    result = run(tmp_path, "record_started_release keep; echo rc=$?")
+    assert "rc=0" in result.stdout and not (backups / ".pre-upgrade-pending").exists()

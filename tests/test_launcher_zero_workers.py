@@ -33,10 +33,16 @@ def test_zero_workers_is_accepted():
     assert result.returncode == 0 and result.stdout.strip() == "0", result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("workers", ["-1", "21", "two", ""])
+@pytest.mark.parametrize("workers", ["-1", "21", "two", "", "021", "0x1", "0000"])
 def test_other_values_outside_the_range_are_still_refused(workers):
     result = _resolve(workers)
     assert result.returncode == 1 and "between 0 and 20" in result.stderr, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(("workers", "count"), [("00", "0"), ("007", "7"), ("08", "8"), ("020", "20")])
+def test_leading_zeros_are_read_as_decimal_numbers(workers, count):
+    result = _resolve(workers)
+    assert result.returncode == 0 and result.stdout.strip() == count, result.stdout + result.stderr
 
 
 def test_auto_and_numbers_are_unchanged():
@@ -66,8 +72,12 @@ curl() {
 """
 
 
-def _identity(args: str) -> subprocess.CompletedProcess[str]:
-    harness = IDENTITY + _fn("build_versions_match") + "\n" + _fn("verify_running_build_identity") \
+def _identity(args: str, worker_build: str = "") -> subprocess.CompletedProcess[str]:
+    identity = IDENTITY
+    if worker_build:
+        identity = identity.replace('{"available":true,"fleet_uniform":false,"scanner_version":null}', worker_build)
+        assert worker_build in identity
+    harness = identity + _fn("build_versions_match") + "\n" + _fn("verify_running_build_identity") \
         + f"\nverify_running_build_identity {args}\n"
     return subprocess.run(["bash", "-c", harness], capture_output=True, text=True, timeout=20, check=False,
                           env=dict(os.environ))
@@ -86,3 +96,14 @@ def test_with_local_workers_a_missing_worker_report_still_fails_closed():
 
 def test_start_passes_its_worker_count_to_the_identity_check():
     assert 'verify_running_build_identity "$start_workers"' in _fn("start_services")
+
+
+def test_without_local_workers_a_stale_reporting_worker_still_fails_closed():
+    stale = '{"available":true,"fleet_uniform":false,"stale_count":1,"scanner_version":null}'
+    assert _identity("0", stale).returncode == 1
+    assert _identity("00", stale).returncode == 1
+
+
+def test_without_local_workers_no_worker_inventory_is_accepted():
+    assert _identity("0", '{"available":false}').returncode == 0
+    assert _identity("00").returncode == 0

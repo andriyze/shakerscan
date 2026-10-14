@@ -16,6 +16,8 @@ import os
 import pathlib
 import subprocess
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "scanner.sh").read_text(encoding="utf-8")
 
@@ -478,3 +480,52 @@ def test_model_intake_starts_only_after_the_api_is_healthy():
     output = _start('2', '0', reason='', model_intake=True)
     assert "wait:API" in output
     assert output.index("wait:API") < output.index("--profile model-intake up --no-build -d model-intake-signer-db-init")
+
+
+def _real_start_harness(failing: str, tail: str) -> str:
+    """START_HARNESS with the real start_services and compose_up, `failing` stubbed to fail."""
+    harness = (
+        START_HARNESS.replace("__COMPOSE_UP__", SCRIPT.split("\ncompose_up() {", 1)[1].split("\n}", 1)[0])
+        .replace("__START_SERVICES__", SCRIPT.split("\nstart_services() {", 1)[1].split("\n}", 1)[0])
+    )
+    stub = next(line for line in harness.splitlines() if line.startswith(f"{failing}() {{"))
+    harness = harness.replace(stub, f"{failing}() {{ printf '{failing}-failed\\n'; return 1; }}")
+    assert harness.rstrip().endswith('start_services "$@"')
+    return harness.rstrip()[: -len('start_services "$@"')] + tail
+
+
+FAIL_CLOSED_STEPS = ["pull_prebuilt_images", "wait_for_url", "verify_running_build_identity",
+                     "verify_specialized_worker_identity", "set_build_env", "record_started_release"]
+
+
+@pytest.mark.parametrize("failing", FAIL_CLOSED_STEPS)
+def test_start_fails_closed_even_where_set_e_does_not_apply(failing):
+    """`reset` calls start_services in an `||` list, where `set -e` is off: each step must return."""
+    harness = _real_start_harness(failing, "\nif start_services; then echo START-OK; else echo START-FAILED; fi\n")
+    result = subprocess.run(["bash", "-c", harness], cwd=ROOT, capture_output=True, text=True, timeout=20,
+                            check=False, env={**os.environ, "REASON": "", "SCRIPT_DIR": str(ROOT)})
+    assert f"{failing}-failed" in result.stdout, result.stdout + result.stderr
+    assert "START-FAILED" in result.stdout and "Services started." not in result.stdout, result.stdout
+
+
+def test_reset_fails_when_the_fresh_stack_fails_its_identity_check(tmp_path):
+    reset = SCRIPT.split("\nreset_database() {", 1)[1].split("\n}", 1)[0]
+    tail = (
+        "\nremove_containers_outside_compose_down() { :; }\nremove_scan_worker_containers() { :; }"
+        "\ndocker_cli() { :; }\npostgres_legacy_volume() { echo v; }\n"
+        f"reset_database() {{{reset}\n}}\nreset_database\necho rc=$?\n"
+    )
+    harness = "set +e\n" + _real_start_harness("verify_running_build_identity", tail).replace("set -eu", "set -u", 1)
+    result = subprocess.run(["bash", "-c", harness], input="yes\n", cwd=ROOT, capture_output=True, text=True,
+                            timeout=20, check=False, env={**os.environ, "REASON": "", "SCRIPT_DIR": str(ROOT)})
+    assert "verify_running_build_identity-failed" in result.stdout, result.stdout + result.stderr
+    assert "rc=1" in result.stdout and "Database reset complete" not in result.stdout, result.stdout
+    assert "record-release" not in result.stdout
+
+
+@pytest.mark.parametrize("function", ["wait_for_url", "verify_running_build_identity",
+                                      "verify_running_ui_identity", "verify_specialized_worker_identity"])
+def test_start_probes_cannot_hang_on_an_unresponsive_api(function):
+    body = SCRIPT.split(f"\n{function}() {{", 1)[1].split("\n}", 1)[0]
+    probes = [line for line in body.splitlines() if "curl " in line]
+    assert probes and all("--max-time" in line for line in probes), probes

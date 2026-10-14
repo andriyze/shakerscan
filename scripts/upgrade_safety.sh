@@ -32,6 +32,8 @@ RELEASE_STATE_PREVIOUS="${SCRIPT_DIR}/.release-images.previous"
 # Images this install recorded and has since superseded (older than the previous release): the
 # only images the routine cleanup after a start removes.
 RELEASE_STATE_SUPERSEDED="${SCRIPT_DIR}/.release-images.superseded"
+# The first pre-upgrade dump of an upgrade that has not started successfully yet (kept from rotation).
+RELEASE_BACKUP_PENDING="${SCRIPT_DIR}/backups/.pre-upgrade-pending"
 
 # The launcher defines docker_cli (sudo when needed) later in scanner.sh, which replaces this.
 if ! declare -F docker_cli >/dev/null 2>&1; then
@@ -256,6 +258,8 @@ started_release_version() {
 # rollback). In prebuilt mode ("prune") older ShakerScan images are then removed.
 record_started_release() {
     local current tmp removed prune="${1:-prune}"
+    # This release started: its pre-upgrade dump no longer needs protecting from rotation.
+    rm -f "$RELEASE_BACKUP_PENDING"
     current="$(release_image_refs_all | sort)"
     # A new version moves the current release to previous (kept for rollback) and the one before
     # it to superseded. The same version with other image names (an optional module recorded, the
@@ -278,7 +282,7 @@ record_started_release() {
 # Before a version-changing start against an existing database: dump PostgreSQL to
 # backups/pre-upgrade-<time>-<from>-to-<to>/ (the newest two are kept). Needs PostgreSQL up.
 ensure_pre_upgrade_backup() {
-    local from to has_data size_kb free_kb dir stamp old
+    local from to has_data size_kb free_kb dir stamp old pending
     is_truthy "${SHAKERSCAN_PRE_UPGRADE_BACKUP:-1}" || return 0
     to="${SCANNER_VERSION:-}"
     note_running_release
@@ -296,6 +300,10 @@ ensure_pre_upgrade_backup() {
         # the first upgrade with this launcher: the running release was recorded from its containers
         from="$(sed -n 's/^# release //p' "$RELEASE_STATE_PREVIOUS" 2>/dev/null | head -1 | tr -cd 'A-Za-z0-9._-')"
         case "$from" in ''|running-before-upgrade|latest|dev|"${SCANNER_VERSION:-}") from="earlier" ;; esac
+    elif [ -n "$RELEASE_RUNNING_BEFORE_START" ]; then
+        # No record, but a release runs (a local build, or a release whose images were not
+        # recognised): it is what this start upgrades from.
+        from="$RELEASE_RUNNING_BEFORE_START"
     else
         return 0        # no release ever recorded and none running: a first start, not an upgrade
     fi
@@ -331,9 +339,17 @@ ensure_pre_upgrade_backup() {
         "$SCRIPT_DIR/.env" > "$dir/runtime.env" || true
     printf 'created_at=%s\nfrom_release=%s\nto_release=%s\nkind=pre-upgrade\n' "$stamp" "$from" "$to" > "$dir/manifest.txt"
     echo "Database saved: $dir"
-    # Names start with the time: the newest two are kept, and never the one just made.
+    # Until a start succeeds, the first dump of this upgrade is the only one taken before any
+    # migration ran: later attempts (after one that failed mid-migration) must not rotate it out.
+    pending="$(cat "$RELEASE_BACKUP_PENDING" 2>/dev/null || true)"
+    if [ -z "$pending" ] || [ ! -d "$SCRIPT_DIR/backups/$pending" ]; then
+        pending="$(basename "$dir")"
+        printf '%s\n' "$pending" > "$RELEASE_BACKUP_PENDING"
+    fi
+    # Names start with the time: the newest two are kept, never the one just made, and never the
+    # pending upgrade's first one.
     for old in $(ls -1d "$SCRIPT_DIR"/backups/pre-upgrade-* 2>/dev/null | sort -r | tail -n +3); do
-        [ "$old" = "$dir" ] || rm -rf -- "$old"
+        [ "$old" = "$dir" ] || [ "$(basename "$old")" = "$pending" ] || rm -rf -- "$old"
     done
 }
 
