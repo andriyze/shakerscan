@@ -28,13 +28,17 @@ statement timeouts.
   small pool of slots (``SHAKERSCAN_API_HEAVY_CONCURRENCY``, default 2). A request waits up to
   ``SHAKERSCAN_API_HEAVY_ADMISSION_WAIT_SECONDS`` for a slot, then gets 429 with
   ``Retry-After``. The slot is returned as soon as the response body has been produced (before
-  the last body chunk is written), so a slow client does not hold it.
+  the last body chunk is written), so a slow client does not hold it. Instead, every body write
+  of a heavy response must complete within ``SHAKERSCAN_API_HEAVY_SEND_TIMEOUT_SECONDS`` (30 s)
+  or the connection is aborted, so rendered bodies parked behind clients that do not read are
+  bounded too.
 
 * **In-flight request ceiling.** At most ``SHAKERSCAN_API_MAX_IN_FLIGHT_REQUESTS`` (256)
   requests may be producing a response at once; beyond that a request gets 503 with
   ``Retry-After`` (and CORS headers, since this middleware sits inside CORS). A request counts
-  from its first byte reaching the app until its response starts, so open idle connections and
-  long event streams never count. (uvicorn's ``limit_concurrency`` is deliberately not used: it
+  from reaching the app until its response starts, except while it waits on the client
+  (``receive``: a request body still arriving, a disconnect): open idle connections, slow
+  uploaders and long event streams never fill the ceiling. (uvicorn's ``limit_concurrency`` is deliberately not used: it
   counts idle connections, so a few hundred bare TCP sockets would refuse every request.)
 
 * **Response byte budget (wire bytes only).** A JSON response larger than
@@ -106,6 +110,7 @@ class GuardSettings:
     response_max_bytes: int = 50 * MIB
     export_response_max_bytes: int = 512 * MIB
     max_in_flight: int = 256
+    heavy_send_timeout_seconds: float = 30.0
 
     @classmethod
     def from_env(cls) -> "GuardSettings":
@@ -120,6 +125,7 @@ class GuardSettings:
             response_max_bytes=_env_int("SHAKERSCAN_API_RESPONSE_MAX_BYTES", 50 * MIB),
             export_response_max_bytes=_env_int("SHAKERSCAN_API_EXPORT_RESPONSE_MAX_BYTES", 512 * MIB),
             max_in_flight=_env_int("SHAKERSCAN_API_MAX_IN_FLIGHT_REQUESTS", 256),
+            heavy_send_timeout_seconds=_env_float("SHAKERSCAN_API_HEAVY_SEND_TIMEOUT_SECONDS", 30.0),
         )
 
     def timeout_for(self, kind: str) -> int:
@@ -401,6 +407,14 @@ class _InFlight:
     def leave(self) -> None:
         self.active -= 1
 
+    def resume(self) -> None:
+        """Back after waiting on the client: already admitted, so never refused here."""
+        self.active += 1
+
+
+class SlowClientAborted(RuntimeError):
+    """A heavy response's body write did not complete within the send deadline."""
+
 
 class RequestGuardMiddleware:
     def __init__(self, app: Any, *, settings: GuardSettings | None = None,
@@ -426,7 +440,9 @@ class RequestGuardMiddleware:
                 "retry_after": retry_after,
             }, headers=retry_header)
             return
-        held = {"in_flight": counted, "slot": False}
+        held = {"in_flight": counted, "slot": False, "started": False}
+        group: str | None = None
+        token = None
 
         def leave_in_flight() -> None:
             if held["in_flight"]:
@@ -438,12 +454,23 @@ class RequestGuardMiddleware:
                 held["slot"] = False
                 await self.gate.release(group)
 
-        request_class = classify_request(
-            str(scope.get("method") or "GET"), path, scope.get("query_string") or b"",
-        )
-        group = request_class.admission_group
-        token = None
+        async def receiving() -> Mapping[str, Any]:
+            # Waiting for the client (a request body arriving slowly, or a disconnect) is not
+            # producing a response: a slow uploader must not hold a place under the ceiling.
+            waiting = held["in_flight"]
+            leave_in_flight()
+            try:
+                return await receive()
+            finally:
+                if waiting and not held["started"]:
+                    self.in_flight.resume()
+                    held["in_flight"] = True
+
         try:
+            request_class = classify_request(
+                str(scope.get("method") or "GET"), path, scope.get("query_string") or b"",
+            )
+            group = request_class.admission_group
             if group:
                 if not await self.gate.acquire(group):
                     await _send_json(send, 429, {
@@ -455,22 +482,41 @@ class RequestGuardMiddleware:
                 held["slot"] = True
             if request_class.kind != DEFAULT:
                 token = _statement_timeout_ms.set(self.settings.timeout_for(request_class.kind))
-            budgeted = self._budgeted(send, self.settings.response_budget_for(request_class.kind), path)
+            transport = send
+            if group and self.settings.heavy_send_timeout_seconds > 0:
+                transport = self._deadlined(send, self.settings.heavy_send_timeout_seconds, path)
+            budgeted = self._budgeted(transport, self.settings.response_budget_for(request_class.kind), path)
 
             async def releasing(message: Mapping[str, Any]) -> None:
                 kind = message.get("type")
                 if kind == "http.response.start":
+                    held["started"] = True
                     leave_in_flight()  # an event stream or slow body no longer counts
                 elif kind == "http.response.body" and not message.get("more_body", False):
                     await release_slot()  # produced: never wait on a slow client with the slot
                 await budgeted(message)
 
-            await self.app(scope, receive, releasing)
+            await self.app(scope, receiving, releasing)
         finally:
             if token is not None:
                 _statement_timeout_ms.reset(token)
             leave_in_flight()
             await release_slot()
+
+    @staticmethod
+    def _deadlined(send: Send, seconds: float, path: str) -> Send:
+        """Bound how long a rendered heavy body can sit waiting for a client that does not read:
+        a write that has not completed in ``seconds`` aborts the connection."""
+
+        async def deadlined(message: Mapping[str, Any]) -> None:
+            try:
+                await asyncio.wait_for(send(message), seconds)
+            except TimeoutError as exc:
+                logger.warning("aborted a heavy response for %s: the client read nothing for %s s",
+                               path, seconds)
+                raise SlowClientAborted(f"client did not read the response for {path}") from exc
+
+        return deadlined
 
     @staticmethod
     def _budgeted(send: Send, budget: int, path: str) -> Send:
@@ -547,6 +593,7 @@ __all__ = [
     "ResponseBudgetExceeded",
     "RouteRule",
     "SETTINGS",
+    "SlowClientAborted",
     "classify_request",
     "configure_request_guards",
     "detached_statements",

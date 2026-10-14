@@ -19,7 +19,7 @@ for path in (ROOT / "api", ROOT / "scanner"):
         sys.path.insert(0, str(path))
 
 import httpx  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
 
 import request_guards as rg  # noqa: E402
@@ -121,6 +121,7 @@ def test_settings_from_environment(monkeypatch):
         export_timeout_ms=120_000, heavy_concurrency=2, admission_wait_seconds=1.0,
         retry_after_seconds=5, response_max_bytes=50 * 1024 * 1024,
         export_response_max_bytes=512 * 1024 * 1024, max_in_flight=256,
+        heavy_send_timeout_seconds=30.0,
     )
 
 
@@ -565,6 +566,132 @@ def test_compose_caps_api_memory_and_passes_the_guard_knobs(compose):
         "SHAKERSCAN_API_HEAVY_CONCURRENCY", "SHAKERSCAN_API_HEAVY_ADMISSION_WAIT_SECONDS",
         "SHAKERSCAN_API_HEAVY_RETRY_AFTER_SECONDS", "SHAKERSCAN_API_RESPONSE_MAX_BYTES",
         "SHAKERSCAN_API_EXPORT_RESPONSE_MAX_BYTES", "SHAKERSCAN_API_MAX_IN_FLIGHT_REQUESTS",
+        "SHAKERSCAN_API_HEAVY_SEND_TIMEOUT_SECONDS",
     } <= names
     assert "SHAKERSCAN_API_LIMIT_CONCURRENCY" not in names
     json.dumps(api)  # plain data
+
+
+
+# --- Slow uploaders and parked heavy bodies --------------------------------------------------------
+
+
+def test_a_request_waiting_for_its_body_does_not_count_in_flight():
+    body_arrives = asyncio.Event()
+
+    async def app(scope, receive, send):
+        await receive()  # the request body
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    async def run():
+        middleware = _guarded(app, max_in_flight=1)
+
+        async def slow_receive():
+            await body_arrives.wait()
+            return {"type": "http.request", "body": b"x", "more_body": False}
+
+        async def fast_receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        statuses: list[int] = []
+
+        async def record(message):
+            if message["type"] == "http.response.start":
+                statuses.append(message["status"])
+
+        async def ignore(message):
+            pass
+
+        uploads = [asyncio.create_task(middleware(_scope("/scans", "POST"), slow_receive, ignore))
+                   for _ in range(5)]
+        await asyncio.sleep(0.05)
+        waiting = middleware.in_flight.active
+        await middleware(_scope("/scans"), fast_receive, record)
+        body_arrives.set()
+        await asyncio.gather(*uploads)
+        return waiting, statuses, middleware.in_flight.active
+
+    waiting, statuses, after = asyncio.run(run())
+    assert waiting == 0
+    assert statuses == [200]
+    assert after == 0
+
+
+def test_slow_uploaders_cannot_fill_the_ceiling_on_a_real_server():
+    """Headers + Content-Length 1000000 + 2 bytes, held open, against a body-reading POST."""
+    uvicorn = pytest.importorskip("uvicorn")
+    app = FastAPI()
+
+    @app.post("/upload")
+    async def upload(request: Request):
+        return {"bytes": len(await request.body())}
+
+    @app.get("/scans")
+    async def scans():
+        return {"ok": True}
+
+    rg.configure_request_guards(app, rg.GuardSettings(**{**SETTINGS.__dict__, "max_in_flight": 4}))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error", lifespan="off"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    uploaders: list[socket.socket] = []
+    try:
+        deadline = time.time() + 10
+        while not server.started and time.time() < deadline:
+            time.sleep(0.02)
+        for _ in range(12):
+            sock = socket.create_connection(("127.0.0.1", port))
+            sock.sendall(b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Type: application/octet-stream\r\n"
+                         b"Content-Length: 1000000\r\n\r\nab")
+            uploaders.append(sock)
+        time.sleep(0.3)
+        response = httpx.get(f"http://127.0.0.1:{port}/scans", timeout=10)
+        # The uploaders are really still sending: none of them has been answered.
+        for sock in uploaders:
+            sock.setblocking(False)
+            with pytest.raises(BlockingIOError):
+                sock.recv(1)
+    finally:
+        for sock in uploaders:
+            sock.close()
+        server.should_exit = True
+        thread.join(10)
+    assert response.status_code == 200
+
+
+def test_a_heavy_body_a_client_does_not_read_is_aborted_and_frees_its_slot():
+    never_read = asyncio.Event()
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b"{}", "more_body": False})
+
+    async def run():
+        gate = rg.AdmissionGate(1, 0.01)
+        settings = rg.GuardSettings(**{**SETTINGS.__dict__, "heavy_send_timeout_seconds": 0.1})
+        middleware = rg.RequestGuardMiddleware(app, settings=settings, gate=gate)
+
+        async def parked(message):
+            if message["type"] == "http.response.body":
+                await never_read.wait()
+
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(rg.SlowClientAborted):
+            await asyncio.wait_for(middleware(_scope("/dashboard"), None, parked), 5)
+        elapsed = asyncio.get_running_loop().time() - started
+        # An ordinary read has no send deadline: the same parked client is not aborted.
+        plain = asyncio.create_task(middleware(_scope("/scans"), None, parked))
+        await asyncio.sleep(0.3)
+        plain_pending = not plain.done()
+        plain.cancel()
+        return elapsed, gate.active("dashboard"), plain_pending
+
+    elapsed, active, plain_pending = asyncio.run(run())
+    assert elapsed < 2
+    assert active == 0
+    assert plain_pending

@@ -1909,7 +1909,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 422 | Python sources + Compose manifests |
+| Runtime environment keys | 423 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 132 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -3028,6 +3028,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_API_HEAVY_ADMISSION_WAIT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_HEAVY_CONCURRENCY` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_HEAVY_RETRY_AFTER_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_HEAVY_SEND_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_HEAVY_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_MAX_IN_FLIGHT_REQUESTS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_MEMORY_LIMIT` | `docker-compose.release.yml`, `docker-compose.yml` |
