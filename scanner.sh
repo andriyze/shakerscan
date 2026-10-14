@@ -2071,11 +2071,12 @@ resolve_start_workers() {
     local memory_gb
 
     if [ "$WORKERS" != "auto" ]; then
-        if ! [[ "$WORKERS" =~ ^[0-9]+$ ]] || [ "$WORKERS" -lt 1 ] || [ "$WORKERS" -gt 20 ]; then
-            echo -e "${RED}Error: workers must be auto or a number between 1 and 20${NC}" >&2
+        # 0: a control-plane or broker-only install (start_services warns).
+        if ! [[ "$WORKERS" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$WORKERS))" -gt 20 ]; then
+            echo -e "${RED}Error: workers must be auto or a number between 0 and 20${NC}" >&2
             return 1
         fi
-        echo "$WORKERS"
+        echo "$((10#$WORKERS))"   # 00 and 007 are 0 and 7
         return 0
     fi
 
@@ -2293,7 +2294,7 @@ wait_for_url() {
     local elapsed=0
 
     while [ "$elapsed" -lt "$timeout" ]; do
-        if curl -fsS "$url" > /dev/null 2>&1; then
+        if curl -fsS --max-time 10 "$url" > /dev/null 2>&1; then
             echo -e "${GREEN}$label is ready${NC}"
             return 0
         fi
@@ -2321,18 +2322,27 @@ build_versions_match() {
     fi
 }
 
+# $1: the number of local scan workers started (0: a broker-only install, nothing to compare).
 verify_running_build_identity() {
-    local expected="${SCANNER_VERSION:-}"
+    local expected="${SCANNER_VERSION:-}" local_workers="${1:-1}"
     local api_json ui_json api_version ui_version worker_version
     local elapsed=0 timeout="${SHAKERSCAN_BUILD_IDENTITY_TIMEOUT:-90}"
 
     while [ "$elapsed" -lt "$timeout" ]; do
-        api_json="$(curl -fsS "$(api_probe_url)/health" 2>/dev/null || true)"
-        ui_json="$(curl -fsS "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
+        api_json="$(curl -fsS --max-time 10 "$(api_probe_url)/health" 2>/dev/null || true)"
+        ui_json="$(curl -fsS --max-time 10 "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
         api_version="$(printf '%s' "$api_json" | jq -r '.scanner_version // empty' 2>/dev/null || true)"
         ui_version="$(printf '%s' "$ui_json" | jq -r '.ui_version // empty' 2>/dev/null || true)"
         worker_version="$(printf '%s' "$api_json" | jq -r '.worker_build.scanner_version // empty' 2>/dev/null || true)"
 
+        # No local worker reports a build; any worker that does report (one still running from
+        # before, or a broker node) must not be stale.
+        if [[ "$local_workers" =~ ^0+$ ]] && build_versions_match "$expected" "$api_version" \
+            && build_versions_match "$expected" "$ui_version" \
+            && [ "$(printf '%s' "$api_json" | jq -r '(.worker_build.available != true) or ((.worker_build.stale_count // 0) == 0)' 2>/dev/null || true)" = "true" ]; then
+            echo -e "${GREEN}Build identity verified: UI and API are $expected (no local scan workers)${NC}"
+            return 0
+        fi
         if build_versions_match "$expected" "$api_version" \
             && build_versions_match "$expected" "$ui_version" \
             && [ "$(printf '%s' "$api_json" | jq -r '.worker_build.available == true and .worker_build.fleet_uniform == true and (.worker_build.stale_count // 0) == 0 and (.worker_build.pending_count // 0) == 0' 2>/dev/null || true)" = "true" ] \
@@ -2365,7 +2375,7 @@ verify_running_ui_identity() {
     local elapsed=0 timeout="${SHAKERSCAN_BUILD_IDENTITY_TIMEOUT:-90}"
 
     while [ "$elapsed" -lt "$timeout" ]; do
-        ui_json="$(curl -fsS "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
+        ui_json="$(curl -fsS --max-time 10 "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
         ui_version="$(printf '%s' "$ui_json" | jq -r '.ui_version // empty' 2>/dev/null || true)"
         ui_revision="$(printf '%s' "$ui_json" | jq -r '.source_revision // empty' 2>/dev/null || true)"
         ui_api_fingerprint="$(printf '%s' "$ui_json" | jq -r '.expected_api_build_fingerprint // empty' 2>/dev/null || true)"
@@ -2399,7 +2409,7 @@ verify_specialized_worker_identity() {
 
     [ "$expect_agent" -gt 0 ] || [ "$expect_device" -gt 0 ] || [ "$expect_model_intake" -gt 0 ] || return 0
     while [ "$elapsed" -lt "$timeout" ]; do
-        health="$(curl -fsS "$(api_probe_url)/health" 2>/dev/null || true)"
+        health="$(curl -fsS --max-time 10 "$(api_probe_url)/health" 2>/dev/null || true)"
         agent_status="$(printf '%s' "$health" | jq -r '.agent_tool_worker.status // empty' 2>/dev/null || true)"
         device_status="$(printf '%s' "$health" | jq -r '.device_worker.status // empty' 2>/dev/null || true)"
         model_intake_status="$(printf '%s' "$health" | jq -r '.model_intake_worker.status // empty' 2>/dev/null || true)"
@@ -2502,7 +2512,7 @@ print_help() {
     echo "  shell              Open shell in scanner container"
     echo ""
     echo "Options:"
-    echo "  -w, --workers N    Number of workers (default: $WORKERS)"
+    echo "  -w, --workers N    Number of workers, 0-20 or auto; 0 for a broker-only install (default: $WORKERS)"
     echo "  -f, --follow       Follow logs"
     echo "  -y, --yes          Auto-confirm dependency installation"
     echo "  --local            Force local Docker build instead of prebuilt images"
@@ -2554,16 +2564,23 @@ start_services() {
     local restore_gungnir="${3:-0}"
     local clean_slate_reason
 
-    prepare_runtime_files
-    persist_remote_access_env
-    warn_if_ui_port_has_foreign_listener
+    # Before anything is stopped: the version running now decides whether this start is an upgrade.
+    # Every step fails closed with an explicit return: callers such as `reset` call this in an
+    # `||` list, where `set -e` does not apply.
+    note_running_release
+    prepare_runtime_files || return 1
+    persist_remote_access_env || return 1
+    warn_if_ui_port_has_foreign_listener || return 1
     if [ -n "$requested_workers" ]; then
         start_workers="$requested_workers"
     else
-        start_workers="$(resolve_start_workers)"
+        start_workers="$(resolve_start_workers)" || return 1
     fi
-    set_build_env
+    set_build_env || return 1
     echo -e "${GREEN}Starting ShakerScan with $start_workers worker(s)...${NC}"
+    if [ "$start_workers" -eq 0 ]; then
+        echo -e "${YELLOW}Starting with no local scan workers: scans run only on connected broker nodes. Add local workers with '$(cli_hint) start --workers N'.${NC}"
+    fi
     if [ "$WORKERS" = "auto" ]; then
         echo "Worker sizing: auto ($(runtime_memory_gb)GB container RAM; ${SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB:-7}GB platform reserve; ${SHAKERSCAN_PER_WORKER_MEM_GB:-1}GB/worker)"
     fi
@@ -2578,15 +2595,15 @@ start_services() {
         # and room for this release's.
         remember_running_release
         ensure_upgrade_space || return 1
-        pull_prebuilt_images
+        pull_prebuilt_images || return 1
     else
         echo "Mode: local build"
         if local_application_images_ready; then
             echo -e "${GREEN}Using the complete application image set from the successful full build receipt.${NC}"
         else
             echo -e "${GREEN}Building application images from this checkout...${NC}"
-            build_local_images
-            record_runtime_mode local
+            build_local_images || return 1
+            record_runtime_mode local || return 1
         fi
     fi
     if [ "$USE_PREBUILT" -eq 1 ]; then
@@ -2608,9 +2625,9 @@ start_services() {
             restore_gungnir=1
         fi
         echo -e "${YELLOW}Stopping the running stack first (${clean_slate_reason}); it restarts with $start_workers worker(s).${NC}"
-        stop_services
+        stop_services || return 1
     fi
-    source "$SCRIPT_DIR/scripts/target_upgrade_backup.sh"
+    source "$SCRIPT_DIR/scripts/target_upgrade_backup.sh" || return 1
     ensure_target_upgrade_backup || return 1
     compose_up -d postgres || return 1
     ensure_pre_upgrade_backup || return 1
@@ -2645,7 +2662,7 @@ start_services() {
         compose --profile model-intake stop model-intake-worker model-intake-sandbox model-intake-signer || return 1
     fi
     echo ""
-    wait_for_url "API" "$(api_probe_url)/health" 120
+    wait_for_url "API" "$(api_probe_url)/health" 120 || return 1
     if model_intake_enabled; then
         # After the API is healthy: its startup migrations create the Model Intake tables the
         # signer's database role is granted on (an upgraded database may not have them yet).
@@ -2653,21 +2670,21 @@ start_services() {
         compose --profile model-intake up --no-build -d \
             model-intake-signer-db-init model-intake-signer model-intake-worker model-intake-sandbox || return 1
     fi
-    wait_for_url "UI" "$(ui_probe_url)" 120
-    verify_running_build_identity
+    wait_for_url "UI" "$(ui_probe_url)" 120 || return 1
+    verify_running_build_identity "$start_workers" || return 1
     verify_specialized_worker_identity \
         "$(running_compose_service_count agent-tool-worker)" \
         "$restore_device_workers" \
-        "$(running_compose_service_count model-intake-worker)"
+        "$(running_compose_service_count model-intake-worker)" || return 1
     if [ "$USE_PREBUILT" -eq 1 ]; then
-        record_runtime_mode prebuilt
+        record_runtime_mode prebuilt || return 1
         # This release is running: remember it (and the one before it, for rollback) and remove
         # older ShakerScan images.
-        record_started_release prune
+        record_started_release prune || return 1
     else
         # Local builds: remember the release (so a restart is not taken for an upgrade); their
         # images are the operator's, never pruned here.
-        record_started_release keep
+        record_started_release keep || return 1
     fi
     echo -e "${GREEN}Services started.${NC}"
     echo "  UI:  $(ui_base_url)"
@@ -2696,6 +2713,7 @@ restart_services() {
     # selected image. start_services also enables missing default network capacity.
     restart_device_workers="$(running_device_worker_count)"
     restart_gungnir="$(running_compose_service_count gungnir-worker)"
+    note_running_release
     stop_services
     start_services "$restart_workers" "$restart_device_workers" "$restart_gungnir"
 }
@@ -2793,8 +2811,8 @@ show_status() {
     echo ""
 
     # Check API health
-    if curl -s "$api_url/health" > /dev/null 2>&1; then
-        HEALTH=$(curl -s "$api_url/health")
+    if curl -s --max-time 10 "$api_url/health" > /dev/null 2>&1; then
+        HEALTH=$(curl -s --max-time 10 "$api_url/health")
         echo -e "API Health: ${GREEN}$(echo $HEALTH | jq -r '.status')${NC}"
         echo "  Database: $(echo $HEALTH | jq -r '.database')"
         echo "  Redis: $(echo $HEALTH | jq -r '.redis')"
@@ -2804,8 +2822,8 @@ show_status() {
     fi
 
     # Check queue stats
-    if curl -s "$api_url/queue/stats" > /dev/null 2>&1; then
-        QUEUE=$(curl -s "$api_url/queue/stats")
+    if curl -s --max-time 10 "$api_url/queue/stats" > /dev/null 2>&1; then
+        QUEUE=$(curl -s --max-time 10 "$api_url/queue/stats")
         echo ""
         echo -e "${BLUE}Queue Status:${NC}"
         echo "  Pending: $(echo $QUEUE | jq -r '.pending')"
@@ -2816,8 +2834,8 @@ show_status() {
     # Worker fleet truth — read the SAME /workers source the API and benchmark
     # runner use, so CLI status can never disagree with them about how many
     # workers are real and which are running stale code (docs proposed-next-steps §3).
-    if curl -s "$api_url/workers" > /dev/null 2>&1; then
-        WK=$(curl -s "$api_url/workers")
+    if curl -s --max-time 10 "$api_url/workers" > /dev/null 2>&1; then
+        WK=$(curl -s --max-time 10 "$api_url/workers")
         echo ""
         echo -e "${BLUE}Worker Fleet:${NC}"
         echo "  Running:  $(echo "$WK" | jq -r '.count')"
@@ -2845,10 +2863,10 @@ show_status() {
     # reported here; UI staleness was not, and a UI serving hours-old code
     # reads to an operator as a flaky page rather than a stale build.
     local ui_json ui_revision local_revision ui_expected_api api_fingerprint
-    ui_json="$(curl -fsS "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
+    ui_json="$(curl -fsS --max-time 10 "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
     ui_revision="$(printf '%s' "$ui_json" | jq -r '.source_revision // empty' 2>/dev/null || true)"
     ui_expected_api="$(printf '%s' "$ui_json" | jq -r '.expected_api_build_fingerprint // empty' 2>/dev/null || true)"
-    api_fingerprint="$(curl -fsS "$api_url/health" 2>/dev/null | jq -r '.build_fingerprint // empty' 2>/dev/null || true)"
+    api_fingerprint="$(curl -fsS --max-time 10 "$api_url/health" 2>/dev/null | jq -r '.build_fingerprint // empty' 2>/dev/null || true)"
     local_revision="$(git -C "$SCRIPT_DIR" rev-parse --short=8 HEAD 2>/dev/null || true)"
     if [ -n "$ui_revision" ]; then
         echo ""
@@ -3564,17 +3582,25 @@ refresh_device_worker_after_rebuild() {
 
 reset_database() {
     local start_workers
-    start_workers="$(resolve_start_workers)"
+    start_workers="$(resolve_start_workers)" || return 1
     echo -e "${RED}WARNING: This will delete all scan data!${NC}"
     read -p "Are you sure? (yes/no): " CONFIRM
     if [ "$CONFIRM" = "yes" ]; then
+        note_running_release
         echo "Stopping services..."
-        compose down -v
+        # As `stop`: the opt-in lanes and API-started workers `compose down` leaves running would
+        # keep the old database connections, networks and images.
+        remove_containers_outside_compose_down
+        compose down -v --remove-orphans
+        remove_scan_worker_containers "Removing API-scaled worker containers left outside Compose..."
         # Data kept for rolling back a PostgreSQL upgrade is not a Compose volume; without removing
         # it the fresh start would migrate the old data straight back in.
         docker_cli volume rm -f "$(postgres_legacy_volume)" > /dev/null 2>&1 || true
         echo "Starting fresh..."
-        compose_up -d --scale worker=$start_workers
+        # Exactly as `start`: the build environment (release version and image identity), the
+        # runtime files, Redis readiness and the health and identity checks. The database was just
+        # emptied, so there is nothing to save before it.
+        SHAKERSCAN_PRE_UPGRADE_BACKUP=0 start_services "$start_workers" || return 1
         echo -e "${GREEN}Database reset complete${NC}"
     else
         echo "Cancelled"
