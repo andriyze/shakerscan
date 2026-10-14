@@ -3029,7 +3029,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_API_HEAVY_CONCURRENCY` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_HEAVY_RETRY_AFTER_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_HEAVY_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_API_LIMIT_CONCURRENCY` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_MAX_IN_FLIGHT_REQUESTS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_MEMORY_LIMIT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_READ_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |

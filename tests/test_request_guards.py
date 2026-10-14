@@ -28,7 +28,7 @@ SETTINGS = rg.GuardSettings(
     default_timeout_ms=30_000, interactive_timeout_ms=5_000, heavy_timeout_ms=31_000,
     export_timeout_ms=120_000, heavy_concurrency=2, admission_wait_seconds=0.05,
     retry_after_seconds=7, response_max_bytes=1_000, export_response_max_bytes=100_000,
-    limit_concurrency=256,
+    max_in_flight=256,
 )
 
 
@@ -53,8 +53,25 @@ SETTINGS = rg.GuardSettings(
     # Archive exports and Hunt records take their own export slots: timeout class only.
     ("GET", "/scans/abc/http-transactions", "format=har", "export", None),
     ("GET", "/hunts/abc/record", "", "export", None),
-    ("HEAD", "/findings", "", "interactive", None),
-    ("GET", "/findings", "limit=50", "interactive", None),
+    # include_facets is read exactly as the endpoint's pydantic bool reads it.
+    ("GET", "/targets/inventory", "include_facets=Y", "heavy", "inventory"),
+    ("GET", "/targets/inventory", "include_facets=t", "heavy", "inventory"),
+    ("GET", "/targets/inventory", "include_facets=ON", "heavy", "inventory"),
+    ("GET", "/targets/inventory", "include_facets=1", "heavy", "inventory"),
+    ("GET", "/targets/inventory", "include_facets=off", "interactive", None),
+    ("GET", "/targets/inventory", "include_facets=maybe", "interactive", None),
+    # Interim heavy rows until their endpoints are bounded.
+    ("HEAD", "/findings", "", "heavy", "findings"),
+    ("GET", "/findings", "limit=50&offset=400000", "heavy", "findings"),
+    ("GET", "/targets/abc/graph", "", "heavy", "target_graph"),
+    ("GET", "/targets/abc/asm/coverage", "", "heavy", "asm"),
+    ("GET", "/arsenal/campaigns", "", "heavy", "arsenal"),
+    ("GET", "/arsenal/refuter-reviews/summary", "", "heavy", "arsenal"),
+    ("GET", "/queue/stats", "", "heavy", "queue"),
+    ("GET", "/results", "", "heavy", "results"),
+    ("GET", "/findings/abc", "", "interactive", None),
+    ("GET", "/scans", "limit=50", "interactive", None),
+    ("GET", "/results/folder/latest", "", "interactive", None),
     ("POST", "/dashboard", "", "default", None),
     ("POST", "/scans", "", "default", None),
     ("DELETE", "/exposure/assets", "", "default", None),
@@ -63,23 +80,47 @@ def test_classification(method, path, query, kind, group):
     assert rg.classify_request(method, path, query.encode()) == rg.RequestClass(kind, group)
 
 
+def test_include_facets_parsing_matches_the_endpoint_bool():
+    from pydantic import TypeAdapter, ValidationError
+
+    for raw in ["1", "0", "true", "False", "yes", "NO", "y", "n", "t", "f", "on", "Off", "2", "", "x"]:
+        try:
+            expected = TypeAdapter(bool).validate_python(raw)
+        except ValidationError:
+            expected = False
+        heavy = rg.classify_request("GET", "/targets/inventory", f"include_facets={raw}").kind == "heavy"
+        assert heavy is expected, raw
+
+
+def test_the_classification_is_one_table_a_row_can_leave():
+    rows = [rule for rule in rg.ROUTE_CLASSES if rule.pattern.pattern == "^/findings$"]
+    assert len(rows) == 1
+    remaining = tuple(rule for rule in rg.ROUTE_CLASSES if rule is not rows[0])
+    original = rg.ROUTE_CLASSES
+    try:
+        rg.ROUTE_CLASSES = remaining
+        assert rg.classify_request("GET", "/findings") == rg.RequestClass("interactive", None)
+    finally:
+        rg.ROUTE_CLASSES = original
+
+
 def test_settings_from_environment(monkeypatch):
     monkeypatch.setenv("SHAKERSCAN_API_READ_STATEMENT_TIMEOUT_MS", "2500")
     monkeypatch.setenv("SHAKERSCAN_API_HEAVY_CONCURRENCY", "3")
     monkeypatch.setenv("SHAKERSCAN_API_RESPONSE_MAX_BYTES", "0")
-    monkeypatch.setenv("SHAKERSCAN_API_LIMIT_CONCURRENCY", "junk")
+    monkeypatch.setenv("SHAKERSCAN_API_MAX_IN_FLIGHT_REQUESTS", "junk")
     monkeypatch.setenv("DB_STATEMENT_TIMEOUT_MS", "-5")
     settings = rg.GuardSettings.from_env()
     assert settings.interactive_timeout_ms == 2500
     assert settings.heavy_concurrency == 3
     assert settings.response_max_bytes == 0
-    assert settings.limit_concurrency == 256
+    assert settings.max_in_flight == 256
     assert settings.default_timeout_ms == 0
     assert rg.GuardSettings() == rg.GuardSettings(
         default_timeout_ms=30_000, interactive_timeout_ms=5_000, heavy_timeout_ms=30_000,
         export_timeout_ms=120_000, heavy_concurrency=2, admission_wait_seconds=1.0,
         retry_after_seconds=5, response_max_bytes=50 * 1024 * 1024,
-        export_response_max_bytes=512 * 1024 * 1024, limit_concurrency=256,
+        export_response_max_bytes=512 * 1024 * 1024, max_in_flight=256,
     )
 
 
@@ -303,64 +344,214 @@ def test_a_cancelled_statement_answers_504():
     assert response.json()["detail"]["error"] == "statement_timeout"
 
 
-# --- uvicorn's concurrency ceiling ---------------------------------------------------------------
+# --- In-flight ceiling, slow clients, cancellations in broad excepts -------------------------
 
 
-def test_uvicorn_options():
-    assert rg.uvicorn_options(SETTINGS) == {"limit_concurrency": 256}
-    assert rg.uvicorn_options(rg.GuardSettings(limit_concurrency=0)) == {}
+def _guarded(app, **overrides):
+    settings = rg.GuardSettings(**{**SETTINGS.__dict__, **overrides})
+    return rg.RequestGuardMiddleware(app, settings=settings)
 
 
-def test_limit_concurrency_answers_503_beyond_the_ceiling():
-    uvicorn = pytest.importorskip("uvicorn")
-    release = threading.Event()
+def _scope(path, method="GET"):
+    return {"type": "http", "method": method, "path": path, "query_string": b"", "headers": []}
+
+
+def test_in_flight_ceiling_answers_503_with_retry_after_and_health_still_answers():
+    release = None
+    entered = []
 
     async def app(scope, receive, send):
-        while not release.is_set():
-            await asyncio.sleep(0.01)
+        entered.append(scope["path"])
+        if scope["path"] != "/health":
+            await release.wait()
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok"})
 
+    async def run():
+        nonlocal release
+        release = asyncio.Event()
+        middleware = _guarded(app, max_in_flight=2)
+        sent: list[list] = [[] for _ in range(4)]
+
+        def recorder(index):
+            async def send(message):
+                sent[index].append(message)
+            return send
+
+        held = [asyncio.create_task(middleware(_scope("/scans"), None, recorder(i))) for i in range(2)]
+        while len(entered) < 2:
+            await asyncio.sleep(0.01)
+        await middleware(_scope("/targets"), None, recorder(2))
+        await middleware(_scope("/health"), None, recorder(3))
+        release.set()
+        await asyncio.gather(*held)
+        after = middleware.in_flight.active
+        return sent, after
+
+    sent, after = asyncio.run(run())
+    refused = sent[2][0]
+    assert refused["status"] == 503
+    assert (b"retry-after", b"7") in refused["headers"]
+    assert json.loads(sent[2][1]["body"])["detail"]["error"] == "server_overloaded"
+    assert sent[3][0]["status"] == 200  # liveness is never capped
+    assert [m[0]["status"] for m in sent[:2]] == [200, 200]
+    assert after == 0
+
+
+def test_a_response_that_has_started_no_longer_counts_in_flight():
+    """An event stream (or a slow body) must not hold a request slot for its whole life."""
+    streaming = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"text/event-stream")]})
+        streaming.set()
+        await finish.wait()
+        await send({"type": "http.response.body", "body": b"data: x\n\n"})
+
+    async def run():
+        middleware = _guarded(app, max_in_flight=1)
+
+        async def send(message):
+            pass
+
+        stream = asyncio.create_task(middleware(_scope("/scans/abc/logs/stream"), None, send))
+        await streaming.wait()
+        during = middleware.in_flight.active
+        statuses = []
+
+        async def record(message):
+            if message["type"] == "http.response.start":
+                statuses.append(message["status"])
+
+        async def quick(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        middleware.app = quick
+        await middleware(_scope("/scans"), None, record)
+        finish.set()
+        middleware.app = app
+        await stream
+        return during, statuses
+
+    during, statuses = asyncio.run(run())
+    assert during == 0
+    assert statuses == [200]
+
+
+def test_idle_connections_never_refuse_requests():
+    """The outage the uvicorn ceiling allowed: bare sockets that never send a byte."""
+    uvicorn = pytest.importorskip("uvicorn")
+    app = FastAPI()
+
+    @app.get("/scans")
+    async def scans():
+        return {"ok": True}
+
+    rg.configure_request_guards(app, rg.GuardSettings(**{**SETTINGS.__dict__, "max_in_flight": 2}))
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    options = rg.uvicorn_options(rg.GuardSettings(limit_concurrency=2))  # open connections count too
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error",
-                                                lifespan="off", **options))
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error", lifespan="off"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
+    idle: list[socket.socket] = []
     try:
         deadline = time.time() + 10
         while not server.started and time.time() < deadline:
             time.sleep(0.02)
-        first: dict = {}
-        holder = threading.Thread(target=lambda: first.update(
-            response=httpx.get(f"http://127.0.0.1:{port}/", timeout=10)))
-        holder.start()
-        time.sleep(0.3)
-        refused = httpx.get(f"http://127.0.0.1:{port}/", timeout=10)
-        release.set()
-        holder.join(10)
+        for _ in range(20):
+            idle.append(socket.create_connection(("127.0.0.1", port)))
+        time.sleep(0.2)
+        response = httpx.get(f"http://127.0.0.1:{port}/scans", timeout=10)
     finally:
-        release.set()
+        for sock in idle:
+            sock.close()
         server.should_exit = True
         thread.join(10)
-    assert refused.status_code == 503
-    assert first["response"].status_code == 200
+    assert response.status_code == 200
 
 
-def test_api_entry_point_runs_uvicorn_with_the_guard_options():
-    import ast
+def test_the_admission_slot_is_returned_before_a_slow_client_reads_the_body():
+    client_reading = asyncio.Event()
+    client_done = asyncio.Event()
 
-    tree = ast.parse((ROOT / "api" / "api.py").read_text(encoding="utf-8"))
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-             and getattr(node.func, "attr", None) == "run"
-             and getattr(node.func, "value", None) is not None
-             and getattr(node.func.value, "id", None) == "uvicorn"]
-    assert len(calls) == 1
-    assert any(keyword.arg is None and getattr(keyword.value.func, "id", None) == "_uvicorn_guard_options"
-               for keyword in calls[0].keywords)
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b"{}", "more_body": False})
 
+    async def run():
+        gate = rg.AdmissionGate(1, 0.01)
+        middleware = rg.RequestGuardMiddleware(app, settings=SETTINGS, gate=gate)
+
+        async def slow_send(message):
+            if message["type"] == "http.response.body":
+                client_reading.set()
+                await client_done.wait()
+
+        slow = asyncio.create_task(middleware(_scope("/dashboard"), None, slow_send))
+        await client_reading.wait()
+        free_while_sending = gate.active("dashboard")
+        second: list[int] = []
+
+        async def record(message):
+            if message["type"] == "http.response.start":
+                second.append(message["status"])
+
+        await middleware(_scope("/dashboard"), None, record)
+        client_done.set()
+        await slow
+        return free_while_sending, second, gate.active("dashboard")
+
+    free_while_sending, second, after = asyncio.run(run())
+    assert free_while_sending == 0
+    assert second == [200]
+    assert after == 0
+
+
+def test_detached_statements_drop_the_request_class():
+    options = rg.statement_timeout_pool_options(30_000)
+    executed: list[str] = []
+
+    class Conn:
+        async def execute(self, sql):
+            executed.append(sql)
+
+    async def run():
+        with rg.statement_timeout(5_000):
+            with rg.detached_statements():
+                task = asyncio.create_task(options["setup"](Conn()))
+            await task
+            await options["setup"](Conn())
+
+    asyncio.run(run())
+    assert executed == ["SET statement_timeout = 5000"]  # only the request's own acquire
+
+
+def test_reraise_statement_timeout_only_reraises_cancellations():
+    asyncpg = pytest.importorskip("asyncpg")
+    rg.reraise_statement_timeout(ValueError("x"))
+    with pytest.raises(asyncpg.exceptions.QueryCanceledError):
+        rg.reraise_statement_timeout(asyncpg.exceptions.QueryCanceledError("timeout"))
+
+
+def test_dashboard_status_cards_let_a_cancelled_query_answer_504():
+    asyncpg = pytest.importorskip("asyncpg")
+    from operations import router as operations_router
+
+    class Conn:
+        async def fetchrow(self, *args, **kwargs):
+            raise asyncpg.exceptions.QueryCanceledError("canceling statement due to statement timeout")
+
+        fetch = fetchval = fetchrow
+
+    with pytest.raises(asyncpg.exceptions.QueryCanceledError):
+        asyncio.run(operations_router._build_dashboard_product_status(Conn(), worker_snapshot={}))
+    with pytest.raises(asyncpg.exceptions.QueryCanceledError):
+        asyncio.run(operations_router._build_dashboard_action_center(Conn(), worker_snapshot={}))
 
 @pytest.mark.parametrize("compose", ["docker-compose.yml", "docker-compose.release.yml"])
 def test_compose_caps_api_memory_and_passes_the_guard_knobs(compose):
@@ -373,6 +564,7 @@ def test_compose_caps_api_memory_and_passes_the_guard_knobs(compose):
         "SHAKERSCAN_API_HEAVY_STATEMENT_TIMEOUT_MS", "SHAKERSCAN_API_EXPORT_STATEMENT_TIMEOUT_MS",
         "SHAKERSCAN_API_HEAVY_CONCURRENCY", "SHAKERSCAN_API_HEAVY_ADMISSION_WAIT_SECONDS",
         "SHAKERSCAN_API_HEAVY_RETRY_AFTER_SECONDS", "SHAKERSCAN_API_RESPONSE_MAX_BYTES",
-        "SHAKERSCAN_API_EXPORT_RESPONSE_MAX_BYTES", "SHAKERSCAN_API_LIMIT_CONCURRENCY",
+        "SHAKERSCAN_API_EXPORT_RESPONSE_MAX_BYTES", "SHAKERSCAN_API_MAX_IN_FLIGHT_REQUESTS",
     } <= names
+    assert "SHAKERSCAN_API_LIMIT_CONCURRENCY" not in names
     json.dumps(api)  # plain data

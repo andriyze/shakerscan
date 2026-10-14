@@ -4014,7 +4014,7 @@ except ModuleNotFoundError:
 try:
     from gateway_identity import GatewayIdentityMiddleware, capture_key as _capture_gateway_identity_key
     from host_guard import configure_host_guard
-    from request_guards import configure_request_guards, uvicorn_options as _uvicorn_guard_options
+    from request_guards import configure_request_guards
     from public_api_contract import (
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
@@ -4027,7 +4027,7 @@ try:
 except ModuleNotFoundError:
     from api.gateway_identity import GatewayIdentityMiddleware, capture_key as _capture_gateway_identity_key
     from api.host_guard import configure_host_guard
-    from api.request_guards import configure_request_guards, uvicorn_options as _uvicorn_guard_options
+    from api.request_guards import configure_request_guards
     from api.public_api_contract import (
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
@@ -7282,8 +7282,8 @@ if _cors_regex:
 app.add_middleware(LegacyHuntIsolationMiddleware)
 app.add_middleware(PublicV2IdempotencyMiddleware)
 app.add_middleware(PublicV2BodyLimitMiddleware)
-# Admission (429 + Retry-After), per-class statement timeouts and the response byte budget
-# (request_guards.py). Inside CORS, so a refusal still carries CORS and an exposed Retry-After.
+# In-flight ceiling (503), admission (429), per-class statement timeouts and the response byte
+# budget (request_guards.py). Inside CORS, so a refusal still carries CORS and Retry-After.
 configure_request_guards(app)
 # Outermost layers, added last (Starlette wraps the last-added middleware around the rest).
 # The origin guard runs before the idempotency replay so a disallowed browser origin is rejected
@@ -20809,4 +20809,4 @@ def strip_target_scheme(target: str) -> str:
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host='0.0.0.0', port=8080, **_uvicorn_guard_options())
+    uvicorn.run(app, host='0.0.0.0', port=8080)
