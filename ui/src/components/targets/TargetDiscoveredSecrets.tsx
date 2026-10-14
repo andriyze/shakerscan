@@ -19,8 +19,12 @@ const STATE_TONE: Record<DiscoveredSecret['state'], string> = {
 
 /** Secrets ShakerScan found on this target. Hunts use them by reference and never see them; this
  *  list never holds a value. Revealing one to a person, granting it to another target and moving it
- *  into a credential profile are explicit decisions (on Enterprise, with the person's step-up). */
-export function TargetDiscoveredSecrets({ targetId }: { targetId: string }) {
+ *  into a credential profile are explicit decisions (on Enterprise, with the person's step-up).
+ *  A web Scan records its secrets on the application origin it ran on, not on the host asset: the
+ *  asset page shows one card per origin (`origin`, its URL), each only when it holds any. */
+export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = false }: {
+  targetId: string; origin?: string; hideWhenEmpty?: boolean
+}) {
   const [rows, setRows] = useState<DiscoveredSecret[] | null>(null)
   const [error, setError] = useState('')
   const [stepUp, setStepUp] = useState('')
@@ -72,8 +76,9 @@ export function TargetDiscoveredSecrets({ targetId }: { targetId: string }) {
 
   const own = (rows || []).filter(row => row.found_on === targetId)
   const granted = (rows || []).filter(row => row.found_on !== targetId)
+  if (hideWhenEmpty && !error && !stepUp && !dialog && (!rows || rows.length === 0)) return null
   return <Card className="mb-6">
-    <h2 className="text-lg font-semibold text-white">Discovered secrets</h2>
+    <h2 className="text-lg font-semibold text-white">{origin ? <>Discovered secrets <span className="break-all text-sm font-normal text-gray-400">· {origin}</span></> : 'Discovered secrets'}</h2>
     <p className="mt-1 text-xs text-gray-500">Values ShakerScan found on this target (a configuration file, a response, a Hunt&apos;s output). Hunts use them by reference and never see them; this list never shows a value.</p>
     {stepUp && <div className="mt-3 rounded border border-amber-700 bg-amber-950/40 p-3 text-sm text-amber-100" role="status">
       This decision needs your step-up. Make it in your own terminal: <code className="break-all font-mono text-xs">{stepUp}</code>

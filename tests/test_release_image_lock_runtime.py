@@ -190,8 +190,10 @@ def test_pull_and_cache_fallback_cover_the_core_images_and_model_intake_only_whe
     core, _, optional = refs.partition("if model_intake_enabled; then")
     for key in ("API_IMAGE", "SCANNER_IMAGE", "UI_IMAGE"):
         assert f'"${{{key}:-' in core, key
+    assert "model_intake_image_refs" in optional
+    module = _fn("model_intake_image_refs")
     for key in ("SIGNER_IMAGE", "MODEL_INTAKE_IMAGE"):
-        assert f'"${{{key}:-' in optional, key
+        assert f'"${{{key}:-' in module, key
 
 
 def test_lifecycle_paths_include_the_model_intake_worker():

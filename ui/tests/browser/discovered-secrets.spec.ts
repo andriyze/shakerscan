@@ -12,14 +12,19 @@ const VALUE = 'synthetic-db-password-7f3a9c'
 const target = {id:assetId,asset_id:assetId,name:'Secrets fixture',url:'https://app.example.test',locator:'app.example.test',is_active:true,environment:'lab',connected_device:false,origin_count:0,service_count:0,active_findings_count:0,created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z'}
 const secret = {ref,kind:'password',label:'DB_PASSWORD',length:VALUE.length,source:{kind:'hunt_action'},first_seen_at:'2026-10-12T00:00:00Z',last_seen_at:'2026-10-13T00:00:00Z',seen_count:2,state:'active',expires_at:'2026-11-12T00:00:00Z',uses:1,reveals:0,last_used_at:null,found_on:assetId,granted_to:[],promoted_profile_id:null}
 
-async function mock(page: Page, opts: {stepUp?: boolean} = {}) {
+const originId = '00000000-0000-4000-8000-000000000413'
+const originUrl = 'https://app.example.test'
+const origin = {id:originId,url:originUrl,name:'Web app',is_active:true,current_membership:true,authorized:true,last_scanned_at:null,active_findings_count:0}
+
+async function mock(page: Page, opts: {stepUp?: boolean; onOrigin?: boolean} = {}) {
   const writes: {method: string; path: string; body: unknown}[] = []
   await pinMockApiOrigin(page)
   await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
     const request = route.request(), url = new URL(request.url())
     if (!['GET','OPTIONS'].includes(request.method())) writes.push({method:request.method(),path:url.pathname,body:request.postDataJSON()})
-    if (url.pathname === `/targets/${assetId}/asset`) return route.fulfill({json:{target,origins:[],services:[],service_intelligence:{services:[],warnings:[]},credentials:[],request_collections:[],history:{items:[],total:0},active_findings:{},authorization:{approved_by:'fixture'}}})
-    if (url.pathname === `/targets/${assetId}/discovered-secrets`) return route.fulfill({json:{target_id:assetId,secrets:[secret],count:1,values_visible:false}})
+    if (url.pathname === `/targets/${assetId}/asset`) return route.fulfill({json:{target,origins:opts.onOrigin ? [origin] : [],services:[],service_intelligence:{services:[],warnings:[]},credentials:[],request_collections:[],history:{items:[],total:0},active_findings:{},authorization:{approved_by:'fixture'}}})
+    if (url.pathname === `/targets/${assetId}/discovered-secrets`) return route.fulfill({json:{target_id:assetId,secrets:opts.onOrigin ? [] : [secret],count:opts.onOrigin ? 0 : 1,values_visible:false}})
+    if (url.pathname === `/targets/${originId}/discovered-secrets`) return route.fulfill({json:{target_id:originId,secrets:[{...secret,found_on:originId}],count:1,values_visible:false}})
     if (url.pathname.endsWith('/reveal') || url.pathname.endsWith('/grants') || url.pathname.endsWith('/promote')) {
       if (opts.stepUp) return route.fulfill({status:403,headers:{'x-shakerscan-step-up':'required','access-control-expose-headers':'x-shakerscan-step-up'},json:{detail:'revealing, granting or promoting a discovered secret needs your step-up'}})
       if (url.pathname.endsWith('/reveal')) return route.fulfill({json:{value:VALUE}})
@@ -82,4 +87,16 @@ test('SECRETS-004 grant sends exactly the other target id', async ({page}) => {
   await dialog.getByRole('button', {name: 'Grant'}).click()
   await expect(dialog).toBeHidden()
   expect(writes).toEqual([{method:'POST',path:`/targets/${assetId}/discovered-secrets/${secretId}/grants`,body:{target_id:otherId}}])
+})
+
+test('SECRETS-005 a web Scan records secrets on its origin: the asset page shows them under that origin', async ({page}) => {
+  // 2.10 acceptance (D1): the card read only the host asset, so a web target's secrets never showed.
+  const writes = await mock(page, {onOrigin: true})
+  await page.goto(`/targets/${assetId}/asset`)
+  const card = page.locator('div').filter({has: page.getByRole('heading', {name: `Discovered secrets · ${originUrl}`})}).last()
+  await expect(card.getByText('DB_PASSWORD')).toBeVisible()
+  await expect(page.getByText('None found yet')).toBeVisible()  // the host's own card stays, empty
+  await expect(page.locator('body')).not.toContainText(VALUE)
+  await card.getByRole('button', {name: 'Revoke'}).click()
+  await expect.poll(() => writes.map(w => `${w.method} ${w.path}`)).toContain(`POST /targets/${originId}/discovered-secrets/${secretId}/state`)
 })
