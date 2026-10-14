@@ -248,7 +248,8 @@ def test_findings_endpoint_keeps_candidates_opt_in_and_only_on_the_deep_hunt_sur
 
 def test_dashboard_counts_open_candidates_with_a_single_bounded_query():
     source = api_tree_source()
-    dashboard = route_source("GET", "/dashboard")
+    route_source("GET", "/dashboard")  # served from a cache; computed by _compute_dashboard
+    dashboard = definition_source("_compute_dashboard")
 
     assert "suspected_candidates_count" in dashboard
     assert "SELECT COUNT(*) FROM investigation_candidates" in dashboard

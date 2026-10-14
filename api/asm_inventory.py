@@ -1309,6 +1309,90 @@ def attempt_coverage_from_rows(
     return summary
 
 
+# The latest attempt per live endpoint, normalized and counted in SQL, so a target with many
+# endpoints and attempts returns one row instead of every attempt's telemetry. The normalization
+# is ``normalize_attempt_status_for_coverage``: status trimmed and lowercased, and "completed"
+# counts as completed only with per-endpoint telemetry ("per_endpoint_telemetry" true as a JSON
+# boolean or the string "true", any case) and the declared endpoint-attempt schema; otherwise it
+# is partial. idx_asm_endpoint_attempts_latest serves the per-endpoint LIMIT 1.
+LATEST_ATTEMPT_COUNTS_SQL = """
+    WITH latest AS (
+        SELECT lower(btrim(COALESCE(la.status, ''), E' \\t\\n\\r\\x0b\\x0c')) AS status,
+               la.scanner_telemetry_json AS telemetry
+        FROM target_endpoints te
+        CROSS JOIN LATERAL (
+            SELECT aea.status, aea.scanner_telemetry_json
+            FROM asm_endpoint_attempts aea
+            WHERE aea.endpoint_id = te.id
+            ORDER BY COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC
+            LIMIT 1
+        ) la
+        WHERE te.target_id = $1 AND te.test_status <> 'gone'
+    ),
+    normalized AS (
+        SELECT CASE
+            WHEN status = 'completed' AND NOT (
+                CASE jsonb_typeof(telemetry -> 'per_endpoint_telemetry')
+                    WHEN 'boolean' THEN (telemetry -> 'per_endpoint_telemetry')::text = 'true'
+                    WHEN 'string' THEN lower(btrim(telemetry ->> 'per_endpoint_telemetry',
+                                                   E' \\t\\n\\r\\x0b\\x0c')) = 'true'
+                    ELSE false
+                END
+                AND COALESCE(jsonb_typeof(telemetry -> 'endpoint_attempt') = 'object'
+                             AND telemetry -> 'endpoint_attempt' -> 'schema_version' = to_jsonb($2::text), false)
+            ) THEN 'partial'
+            ELSE status
+        END AS status
+        FROM latest
+    )
+    SELECT count(*) AS attempted,
+           count(*) FILTER (WHERE status = 'completed') AS completed,
+           count(*) FILTER (WHERE status IN ('partial', 'timeout')) AS partial,
+           count(*) FILTER (WHERE status IN ('auth_missing', 'auth_failed')) AS auth_blocked,
+           count(*) FILTER (WHERE status = 'rate_limited') AS rate_limited,
+           count(*) FILTER (WHERE status = 'error') AS error
+    FROM normalized
+"""
+
+
+def attempt_coverage_from_counts(
+    counts: Any,
+    *,
+    total: int,
+    basis: str,
+    coverage_denominator: str | None = None,
+) -> dict[str, Any]:
+    """``attempt_coverage_from_rows`` for counts already aggregated (LATEST_ATTEMPT_COUNTS_SQL)."""
+
+    def _count(key: str) -> int:
+        try:
+            return int((counts or {})[key] or 0)
+        except (KeyError, TypeError, ValueError):
+            return 0
+
+    attempted = _count("attempted")
+    completed = _count("completed")
+    total = max(0, int(total or 0), attempted)
+    summary = {
+        "total": total,
+        "denominator": total,
+        "denominator_label": coverage_denominator or "testable",
+        "attempted": attempted,
+        "completed": completed,
+        "tested": completed,
+        "untested": max(0, total - attempted),
+        "partial": _count("partial"),
+        "auth_blocked": _count("auth_blocked"),
+        "rate_limited": _count("rate_limited"),
+        "error": _count("error"),
+        "coverage": round(completed / total, 3) if total else 0.0,
+        "basis": basis,
+    }
+    if coverage_denominator:
+        summary["coverage_denominator"] = coverage_denominator
+    return summary
+
+
 async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
     """Per-target coverage counts for the ASM surface.
 
@@ -1347,23 +1431,7 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         """,
         tid,
     )
-    attempt_rows = await conn.fetch(
-        """
-        WITH latest_attempt AS (
-            SELECT DISTINCT ON (te.id)
-                te.id AS endpoint_id,
-                aea.status,
-                aea.scanner_telemetry_json
-            FROM target_endpoints te
-            JOIN asm_endpoint_attempts aea ON aea.endpoint_id = te.id
-            WHERE te.target_id = $1 AND te.test_status <> 'gone'
-            ORDER BY te.id, COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC
-        )
-        SELECT status, scanner_telemetry_json
-        FROM latest_attempt
-        """,
-        tid,
-    )
+    attempt_counts = await conn.fetchrow(LATEST_ATTEMPT_COUNTS_SQL, tid, ENDPOINT_ATTEMPT_SCHEMA_V1)
     total = int(row["total"] or 0)
     status_tested = int(row["tested"] or 0)
     testable = total - int(row["gone"] or 0)
@@ -1381,8 +1449,8 @@ async def coverage_summary(conn, target_id: str) -> dict[str, Any]:
         "basis": "endpoint_status",
     }
 
-    attempt_summary = attempt_coverage_from_rows(
-        list(attempt_rows or []),
+    attempt_summary = attempt_coverage_from_counts(
+        attempt_counts,
         total=testable,
         basis="latest_attempt_per_endpoint",
     )

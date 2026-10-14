@@ -34,6 +34,7 @@ import uuid
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 try:
@@ -48,6 +49,9 @@ try:
     )
     import asm_inventory
     import check_registry
+    from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from targets import grouped_list
+    from list_contract import CURSOR_MAX_LENGTH, ListSpec, SortKey, SqlParams, count_total, snapshot_time
     import invariant_contracts
     import target_authorization
     import target_resolution
@@ -94,6 +98,9 @@ except ModuleNotFoundError:  # package import in host-side tests
         extract_root_domain, utc_now, utc_now_iso,
     )
     from .. import asm_inventory, check_registry, invariant_contracts, invariant_proposals, parallel_scan
+    from ..list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from . import grouped_list
+    from ..list_contract import CURSOR_MAX_LENGTH, ListSpec, SortKey, SqlParams, count_total, snapshot_time
     from .. import target_authorization
     from .. import target_resolution
     from .. import target_dns_alias
@@ -409,20 +416,8 @@ async def dedupe_targets(
         }
 
 
-@router.get("/targets/grouped")
-async def list_targets_grouped(
-    include_inactive: bool = False,
-    search: Optional[str] = None,
-    discovery_source: Optional[str] = Query(None, pattern="^(manual|subfinder|gungnir-monitor|import|model-intake)$"),
-    grade: Optional[str] = Query(None, pattern="^[A-Fa-f]$"),
-    has_findings: Optional[bool] = None,
-    sort_by: Optional[str] = Query("root_domain", pattern="^(root_domain|last_scanned_at|active_findings_count|last_score|created_at)$"),
-    sort_order: Optional[str] = Query("asc", pattern="^(asc|desc)$")
-):
-    """List all targets grouped by root domain for hierarchical display."""
-    async with _pool().acquire() as conn:
-        query = f"""
-            SELECT
+# The grouped listing's target projection; the route adds the authorization flag.
+_GROUPED_TARGET_COLUMNS = """
                 t.id,
                 LEFT(t.url, 2049) AS url,
                 LEFT(t.name, 512) AS name,
@@ -431,12 +426,67 @@ async def list_targets_grouped(
                 t.discovery_source, t.is_active, t.metadata_json,
                 t.last_scanned_at, t.last_score, t.last_grade,
                 t.total_scans, t.active_findings_count,
-                t.created_at,
-                -- The targets page reads this grouped shape, not the flat list. Without the flag
-                -- every row rendered "Authorize for active testing (once)" forever: the click
-                -- recorded a real authorization and said so, then the row was unchanged on the
-                -- next load, so an operator had no way to tell it had worked.
-                {_authorized_for_active_testing_sql()}
+                t.created_at"""
+
+
+@router.get("/targets/grouped")
+async def list_targets_grouped(
+    response: Response = None,
+    include_inactive: bool = False,
+    search: Optional[str] = None,
+    discovery_source: Optional[str] = Query(None, pattern="^(manual|subfinder|gungnir-monitor|import|model-intake)$"),
+    grade: Optional[str] = Query(None, pattern="^[A-Fa-f]$"),
+    has_findings: Optional[bool] = None,
+    sort_by: Optional[str] = Query("root_domain", pattern="^(root_domain|last_scanned_at|active_findings_count|last_score|created_at)$"),
+    sort_order: Optional[str] = Query("asc", pattern="^(asc|desc)$"),
+    limit: Optional[int] = Query(None, ge=1, description="list/v1 groups per page, 1..200"),
+    cursor: Optional[str] = Query(None, max_length=CURSOR_MAX_LENGTH),
+    sort: Optional[str] = Query(None, max_length=65, description="list/v1 sort; defaults to sort_by/sort_order"),
+    fields: Optional[str] = Query(None, max_length=2048),
+    count: Optional[Literal["none", "estimate", "exact"]] = None,
+    since: Optional[datetime] = None,
+    member_limit: int = Query(
+        grouped_list.DEFAULT_MEMBER_LIMIT, ge=1, le=grouped_list.MAX_MEMBER_LIMIT,
+        description="list/v1 subdomains returned per group (subdomain_count is always the full number)",
+    ),
+):
+    """List all targets grouped by root domain for hierarchical display.
+
+    list/v1 (any of ``cursor``/``count``/``fields``/``since``): a keyset page of groups with at
+    most ``member_limit`` subdomains each. Without them, the deprecated legacy response with every
+    group and every target."""
+    # The targets page reads this grouped shape, not the flat list. Without the flag every row
+    # rendered "Authorize for active testing (once)" forever: the click recorded a real
+    # authorization and said so, then the row was unchanged on the next load, so an operator had
+    # no way to tell it had worked.
+    target_columns = f"{_GROUPED_TARGET_COLUMNS},\n                {_authorized_for_active_testing_sql()}"
+    limit, cursor, sort, fields, count, since, member_limit = (direct(value) for value in (
+        limit, cursor, sort, fields, count, since, member_limit))
+    if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
+        if fields is not None:
+            raise HTTPException(status_code=400, detail={
+                "error": "fields_unsupported", "message": "grouped targets do not support fields="})
+        if since is not None:
+            raise HTTPException(status_code=400, detail={
+                "error": "since_unsupported", "message": "this list does not support since="})
+        if sort is None:
+            sort = ("-" if sort_order == "desc" else "") + str(sort_by or "root_domain")
+        page = v1_page(limit=limit, cursor=cursor, sort=sort, fields=None, count=count, since=None)
+        filters = {
+            "include_inactive": include_inactive, "search": search, "discovery_source": discovery_source,
+            "grade": grade, "has_findings": has_findings, "member_limit": member_limit,
+        }
+        async with _pool().acquire() as conn, grouped_list.without_jit(conn):
+            return await grouped_list.grouped_page(
+                conn, page, filters=filters, member_limit=member_limit,
+                member_columns=target_columns, public_row=_public_target_row,
+            )
+
+    mark_deprecated(response)
+    async with _pool().acquire() as conn, grouped_list.without_jit(conn):
+        query = f"""
+            SELECT
+                {target_columns}
             FROM targets t
             WHERE 1=1
         """
@@ -481,94 +531,9 @@ async def list_targets_grouped(
         rows = _dedupe_canonical_target_rows(rows)
 
         # Per-target ASM coverage and exact AI Investigator trust-tier counts.
-        asm_by_target: dict[str, dict] = {}
-        investigator_findings_by_target: dict[str, dict[str, int]] = {}
         target_ids = [row['id'] for row in rows]
-        if target_ids:
-            investigator_rows = await conn.fetch(
-                """
-                SELECT ids.target_id,
-                       COALESCE(f.investigator_verified_count, 0) AS investigator_verified_count,
-                       COALESCE(c.investigator_suspected_count, 0) AS investigator_suspected_count
-                FROM unnest($1::uuid[]) AS ids(target_id)
-                LEFT JOIN LATERAL (
-                    SELECT COUNT(*) AS investigator_verified_count
-                    FROM findings
-                    WHERE target_id=ids.target_id AND status='active'
-                      AND last_verification_verdict='exploited'
-                      AND tool IN ('autonomous_workflow','bola')
-                ) f ON true
-                LEFT JOIN LATERAL (
-                    SELECT COUNT(*) AS investigator_suspected_count
-                    FROM investigation_candidates
-                    WHERE target_id=ids.target_id AND plane='web'
-                      AND status IN ('new','verification_queued','verifying','inconclusive','blocked')
-                ) c ON true
-                """,
-                target_ids,
-            )
-            investigator_findings_by_target = {
-                str(row['target_id']): {
-                    'investigator_verified_count': int(row['investigator_verified_count'] or 0),
-                    'investigator_suspected_count': int(row['investigator_suspected_count'] or 0),
-                }
-                for row in investigator_rows
-            }
-            asm_rows = await conn.fetch(
-                """
-                WITH inventory AS (
-                    SELECT target_id,
-                           COUNT(*) AS total,
-                           COUNT(*) FILTER (WHERE test_status <> 'gone') AS testable,
-                           COUNT(*) FILTER (WHERE test_status = 'tested') AS status_tested
-                    FROM target_endpoints
-                    WHERE target_id = ANY($1::uuid[])
-                    GROUP BY target_id
-                ),
-                latest_attempt AS (
-                    SELECT DISTINCT ON (te.id)
-                        te.target_id,
-                        te.id AS endpoint_id,
-                        CASE
-                            WHEN aea.status = 'completed'
-                             AND lower(COALESCE(aea.scanner_telemetry_json->>'per_endpoint_telemetry', 'false')) <> 'true'
-                            THEN 'partial'
-                            ELSE aea.status
-                        END AS status
-                    FROM target_endpoints te
-                    JOIN asm_endpoint_attempts aea ON aea.endpoint_id = te.id
-                    WHERE te.target_id = ANY($1::uuid[]) AND te.test_status <> 'gone'
-                    ORDER BY te.id, COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC
-                ),
-                attempts AS (
-                    SELECT target_id,
-                           COUNT(*) AS attempted,
-                           COUNT(*) FILTER (WHERE status = 'completed') AS completed
-                    FROM latest_attempt
-                    GROUP BY target_id
-                )
-                SELECT i.target_id, i.total, i.testable, i.status_tested,
-                       COALESCE(a.attempted, 0) AS attempted,
-                       COALESCE(a.completed, 0) AS attempt_completed
-                FROM inventory i
-                LEFT JOIN attempts a ON a.target_id = i.target_id
-                """,
-                target_ids,
-            )
-            for ar in asm_rows:
-                total = int(ar['total'] or 0)
-                testable = int(ar['testable'] or total)
-                attempted = int(ar['attempted'] or 0)
-                tested = int(ar['attempt_completed'] if attempted > 0 else (ar['status_tested'] or 0))
-                denominator = testable
-                asm_by_target[str(ar['target_id'])] = {
-                    'total': total,
-                    'tested': tested,
-                    'untested': max(0, denominator - tested),
-                    'coverage': round(tested / denominator, 4) if denominator else 0.0,
-                    'coverage_basis': 'attempt_ledger' if attempted > 0 else 'endpoint_status',
-                    'attempted': attempted,
-                }
+        investigator_findings_by_target = await grouped_list.investigator_counts(conn, target_ids)
+        asm_by_target = await grouped_list.asm_coverage_by_target(conn, target_ids)
 
     def _attach_asm(target_data):
         if target_data:
@@ -612,14 +577,7 @@ async def list_targets_grouped(
         )
         # Domain-level ASM coverage rollup across root + subdomains.
         cov_targets = ([data['root_target']] if data['root_target'] else []) + data['subdomains']
-        cov_total = sum((t.get('asm_coverage') or {}).get('total', 0) for t in cov_targets)
-        cov_tested = sum((t.get('asm_coverage') or {}).get('tested', 0) for t in cov_targets)
-        data['asm_coverage'] = {
-            'total': cov_total,
-            'tested': cov_tested,
-            'untested': cov_total - cov_tested,
-            'coverage': round(cov_tested / cov_total, 4) if cov_total else 0.0,
-        } if cov_total else None
+        data['asm_coverage'] = grouped_list.group_asm_rollup([t.get('asm_coverage') for t in cov_targets])
         result.append(data)
 
     # Sort based on sort_by and sort_order
@@ -2088,11 +2046,108 @@ async def scan_target(
     return await _submit_scan(scan_request, stored_scheme_inferred=stored_scheme_inferred)
 
 
+GRAPH_NODES_LIST = ListSpec(
+    scope="targets.graph.nodes",
+    sorts={"node_type": SortKey("n.node_type", "text")},
+    default_sort="node_type",
+    fields={
+        "id": "n.id", "node_type": "n.node_type", "node_key": "n.node_key", "label": "n.label",
+        "attributes": "n.attributes", "scan_id": "n.scan_id",
+        "first_seen_at": "n.first_seen_at", "last_seen_at": "n.last_seen_at",
+    },
+    # (node_type, node_key) is unique per target: the legacy order, and an index range scan.
+    id_expr="n.node_key",
+    id_kind="text",
+    since_expr="n.last_seen_at",
+)
+GRAPH_EDGES_LIST = ListSpec(
+    scope="targets.graph.edges",
+    sorts={"edge_type": SortKey("e.edge_type", "text")},
+    default_sort="edge_type",
+    fields={
+        "id": "e.id", "edge_type": "e.edge_type", "src_key": "e.src_key", "dst_key": "e.dst_key",
+        "attributes": "e.attributes", "scan_id": "e.scan_id",
+        "first_seen_at": "e.first_seen_at", "last_seen_at": "e.last_seen_at",
+    },
+    id_expr="e.id",
+    since_expr="e.last_seen_at",
+)
+
+
+def _graph_item(item: dict[str, Any]) -> dict[str, Any]:
+    row = row_to_dict(item)
+    if isinstance(row.get("attributes"), str):
+        row["attributes"] = _decode_json_value(row["attributes"])
+    return row
+
+
+async def _graph_summary(conn, target: uuid.UUID) -> dict[str, Any]:
+    nodes = await conn.fetch(
+        "SELECT node_type, COUNT(*) AS n FROM application_graph_nodes WHERE target_id = $1 GROUP BY node_type",
+        target)
+    edges = await conn.fetch(
+        "SELECT edge_type, COUNT(*) AS n FROM application_graph_edges WHERE target_id = $1 GROUP BY edge_type",
+        target)
+    by_node = {str(row["node_type"]): int(row["n"]) for row in nodes}
+    by_edge = {str(row["edge_type"]): int(row["n"]) for row in edges}
+    return {"node_count": sum(by_node.values()), "edge_count": sum(by_edge.values()),
+            "by_node_type": by_node, "by_edge_type": by_edge}
+
+
 @router.get("/targets/{target_id}/graph")
-async def get_application_graph(target_id: str, node_type: Optional[str] = None, edge_type: Optional[str] = None):
+async def get_application_graph(
+    target_id: str,
+    response: Response = None,
+    node_type: Optional[str] = None,
+    edge_type: Optional[str] = None,
+    kind: Literal["nodes", "edges"] = Query("nodes", description="list/v1: which list to page"),
+    limit: Optional[int] = Query(None, ge=1, description="list/v1 page size, 1..200"),
+    cursor: Optional[str] = Query(None, max_length=CURSOR_MAX_LENGTH),
+    sort: Optional[str] = Query(None, max_length=65),
+    fields: Optional[str] = Query(None, max_length=2048),
+    count: Optional[Literal["none", "estimate", "exact"]] = None,
+    since: Optional[datetime] = None,
+):
     """The first-class application graph for a target: routes, objects,
-    producer/consumer links, and auth boundaries persisted from scans."""
+    producer/consumer links, and auth boundaries persisted from scans.
+
+    list/v1 (any of ``cursor``/``count``/``fields``/``since``): one page of ``kind`` (nodes or
+    edges) plus the whole graph's ``summary``. Without them, the deprecated legacy response with
+    every node and edge."""
     tgt = uuid.UUID(target_id)
+    kind, limit, cursor, sort, fields, count, since = (direct(value) for value in (
+        kind, limit, cursor, sort, fields, count, since))
+    if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
+        page = v1_page(limit=limit, cursor=cursor, sort=sort, fields=fields, count=count, since=since)
+        spec, table, alias, type_column, type_value = (
+            (GRAPH_NODES_LIST, "application_graph_nodes", "n", "node_type", node_type) if kind == "nodes"
+            else (GRAPH_EDGES_LIST, "application_graph_edges", "e", "edge_type", edge_type)
+        )
+        plan = spec.plan(page, filters={"target_id": str(tgt), "kind": kind, "type": type_value})
+        params = SqlParams()
+        where = [f"{alias}.target_id = {params.add(tgt)}"]
+        if type_value:
+            where.append(f"{alias}.{type_column} = {params.add(type_value)}")
+        where += plan.filter_clauses(params)
+        count_values = params.snapshot()
+        page_where = where + plan.keyset_clauses(params)
+        async with _pool().acquire() as conn:
+            generated_at = await snapshot_time(conn)  # before the page query
+            rows = await conn.fetch(
+                f"SELECT {plan.select_list} FROM {table} {alias} WHERE {' AND '.join(page_where)} "
+                f"ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}",
+                *params.values,
+            )
+            total, total_kind = await count_total(
+                conn, page.count, from_sql=f"{table} {alias}", where=where, values=count_values,
+            )
+            summary = await _graph_summary(conn, tgt)
+        body = plan.envelope(rows, total=total, total_kind=total_kind, transform=_graph_item,
+                             generated_at=generated_at)
+        body.update({"target_id": target_id, "kind": kind, "summary": summary})
+        return body
+
+    mark_deprecated(response)
     async with _pool().acquire() as conn:
         node_clause = " AND node_type = $2" if node_type else ""
         nparams = [tgt] + ([node_type] if node_type else [])

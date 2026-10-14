@@ -746,8 +746,7 @@ async def list_schedules(
 ):
     """List scan schedules."""
     async with _pool().acquire() as conn:
-        query = """
-            SELECT s.*, t.url as target_url, t.name as target_name
+        from_where = """
             FROM schedules s
             JOIN targets t ON s.target_id = t.id
             WHERE 1=1
@@ -756,16 +755,19 @@ async def list_schedules(
         param_idx = 1
 
         if target_id:
-            query += f" AND s.target_id = ${param_idx}"
+            from_where += f" AND s.target_id = ${param_idx}"
             params.append(uuid.UUID(target_id))
             param_idx += 1
 
         if is_active is not None:
-            query += f" AND s.is_active = ${param_idx}"
+            from_where += f" AND s.is_active = ${param_idx}"
             params.append(is_active)
             param_idx += 1
 
-        query += f" ORDER BY s.created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        # ``total`` counts every matching schedule, not the rows on this page.
+        total = await conn.fetchval(f"SELECT COUNT(*) {from_where}", *params)
+        query = (f"SELECT s.*, t.url as target_url, t.name as target_name {from_where}"
+                 f" ORDER BY s.created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}")
         params.extend([limit, offset])
 
         rows = await conn.fetch(query, *params)
@@ -781,7 +783,7 @@ async def list_schedules(
 
     return {
         'schedules': schedules,
-        'total': len(rows)
+        'total': int(total or 0),
     }
 
 

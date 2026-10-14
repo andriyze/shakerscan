@@ -172,6 +172,12 @@ def _inventory_is_heavy(query: Mapping[str, list[str]]) -> bool:
             or (query.get("sort") or [""])[-1] == "risk")
 
 
+def _legacy_list_shape(query: Mapping[str, list[str]]) -> bool:
+    """A reworked list answered in its deprecated legacy shape: no list/v1 opt-in parameter
+    (``list_compat.LIST_V1_OPT_IN``) is present."""
+    return not any(name in query for name in ("cursor", "count", "fields", "since"))
+
+
 @dataclass(frozen=True)
 class RouteRule:
     """One row of ``ROUTE_CLASSES``: GET/HEAD paths matching ``pattern`` (and ``when``, if
@@ -198,10 +204,10 @@ ROUTE_CLASSES: tuple[RouteRule, ...] = (
     # Unbounded today, measured or suspected over 5 s at scale. Interim rows until each
     # endpoint's rework lands; then delete the row.
     _rule(r"^/findings$", HEAVY, "findings"),
-    _rule(r"^/targets/[^/]+/graph$", HEAVY, "target_graph"),
-    _rule(r"^/targets/[^/]+/asm/.+$", HEAVY, "asm"),
-    _rule(r"^/arsenal/campaigns$", HEAVY, "arsenal"),
-    _rule(r"^/arsenal/refuter-reviews/summary$", HEAVY, "arsenal"),
+    # The graph's list/v1 pages are bounded; its deprecated whole-graph response is not.
+    _rule(r"^/targets/[^/]+/graph$", HEAVY, "target_graph", _legacy_list_shape),
+    # /asm/coverage is counted in SQL (one row); the other ASM reads are not reworked yet.
+    _rule(r"^/targets/[^/]+/asm/(?!coverage$).+$", HEAVY, "asm"),
     _rule(r"^/queue/stats$", HEAVY, "queue"),
     _rule(r"^/results$", HEAVY, "results"),
     # Exports with no admission of their own share one slot pool.

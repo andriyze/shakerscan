@@ -51,6 +51,7 @@ try:
     from operations.discovery import (
         DiscoveryRefused, admit_discovery, discovery_domain, requester,
     )
+    from operations import dashboard_data
 except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_control_requirements import AI_CONTROL_REQUIREMENTS
     from ..api_utils import (
@@ -66,6 +67,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.compatibility import record_compatibility_call
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..request_guards import reraise_statement_timeout
+    from . import dashboard_data
     from .discovery import (
         DiscoveryRefused, admit_discovery, discovery_domain, requester,
     )
@@ -1412,62 +1414,38 @@ async def get_artifact_storage_health(probe: bool = False):
     return result
 
 
+_DASHBOARD_CACHE = dashboard_data.SingleFlightCache()
+
+
 @router.get("/dashboard")
 async def dashboard():
-    """Get dashboard metrics."""
-    async with _pool().acquire() as conn:
-        metrics = await conn.fetchrow("SELECT * FROM dashboard_metrics")
-        recent_scans = await conn.fetch("""
-            SELECT id, target_id, ai_target_id, target_url, status, score, grade,
-                   scan_type, run_kind, findings_count, created_at, completed_at
-            FROM (
-                SELECT DISTINCT ON (
-                    COALESCE(
-                        'target:' || target_id::text,
-                        'ai:' || ai_target_id::text,
-                        'url:' || target_url
-                    )
-                )
-                    id, target_id, ai_target_id, target_url, status, score, grade,
-                    scan_type, run_kind, findings_count, created_at, completed_at
-                FROM scans
-                WHERE (scan_role IS NULL OR scan_role <> 'shard')
-                  AND status = 'completed'
-                  AND COALESCE(run_kind, '') <> 'model_intake'
-                  AND COALESCE(scan_type, '') <> 'model_intake'
-                  AND device_target_id IS NULL
-                  AND COALESCE(scan_role, '') <> 'device_web_origin'
-                  AND COALESCE(run_kind, '') NOT IN ('device_posture','device_probe','device_web_dast')
-                ORDER BY
-                    COALESCE(
-                        'target:' || target_id::text,
-                        'ai:' || ai_target_id::text,
-                        'url:' || target_url
-                    ),
-                    created_at DESC
-            ) latest_per_target
-            ORDER BY created_at DESC
-            LIMIT 10
-        """)
-        recent_findings = await conn.fetch("""
-            SELECT id, title, severity, status, tool, first_seen_at
-            FROM findings
-            WHERE status = 'active' AND severity IN ('critical', 'high')
-              AND COALESCE(source, '') <> 'device'
-            ORDER BY
-                CASE severity
-                    WHEN 'critical' THEN 1
-                    WHEN 'high' THEN 2
-                    WHEN 'medium' THEN 3
-                    WHEN 'low' THEN 4
-                    ELSE 5
-                END,
-                first_seen_at DESC
-            LIMIT 10
-        """)
+    """Get dashboard metrics.
+
+    Served from a single-flight cache (``DASHBOARD_CACHE_SECONDS``, default 15 s): any number of
+    open dashboards cost one computation per interval. ``generated_at`` says when it was computed.
+    """
+    return await _DASHBOARD_CACHE.get(_compute_dashboard)
+
+
+async def _compute_dashboard() -> dict[str, Any]:
+    async with _pool().acquire() as conn, dashboard_data.without_jit(conn):
+        # Fold pending summary deltas first (non-blocking; another compactor may hold it).
+        await dashboard_data.compact(conn)
+        counts = await dashboard_data.load_dashboard_counts(conn)
+        metrics = await dashboard_data.dashboard_metrics(conn, counts)
+        # Completed scans only: the latest per target/AI target/URL, outside the device plane
+        # (device_target_id IS NULL, no device_web_origin role or device run kinds).
+        recent_scans = await dashboard_data.recent_latest_scans(conn, limit=10)
+        # Active critical/high findings outside the device plane (COALESCE(source, '') <> 'device').
+        recent_findings = await dashboard_data.recent_blocker_findings(conn, limit=10)
         worker_snapshot = _worker_freshness_snapshot()
-        action_center = await _build_dashboard_action_center(conn, worker_snapshot=worker_snapshot)
-        product_status = await _build_dashboard_product_status(conn, worker_snapshot=worker_snapshot)
+        asm_state = await _dashboard_asm_state(conn)
+        action_center = await _build_dashboard_action_center(
+            conn, worker_snapshot=worker_snapshot, counts=counts, asm_state=asm_state,
+        )
+        product_status = await _build_dashboard_product_status(
+            conn, worker_snapshot=worker_snapshot, counts=counts, asm_state=asm_state,
+        )
         # Open hunt leads across both planes: not yet verified (promoted to a real
         # finding), refuted, or expired. Single COUNT, no joins.
         suspected_candidates_count = await conn.fetchval(
@@ -1476,14 +1454,56 @@ async def dashboard():
         ) or 0
 
     return {
-        "metrics": dict(metrics) if metrics else {},
-        "recent_scans": [dict(s) for s in recent_scans],
-        "recent_findings": [dict(f) for f in recent_findings],
+        "metrics": metrics,
+        "recent_scans": recent_scans,
+        "recent_findings": recent_findings,
         "action_center": action_center,
         "product_status": product_status,
         "suspected_candidates_count": suspected_candidates_count,
+        "generated_at": dashboard_data.generated_at(),
     }
-async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+
+
+# Continuous-ASM state for the dashboard (product status and action center share one read).
+_DASHBOARD_ASM_STATE_SQL = """
+            WITH per_target AS (
+                SELECT
+                    t.id,
+                    COUNT(te.id) FILTER (WHERE COALESCE(te.test_status, 'untested') <> 'gone') AS total,
+                    COUNT(te.id) FILTER (
+                        WHERE COALESCE(te.test_status, 'untested') IN ('untested', 'stale', 'partial')
+                           OR COALESCE(te.last_attempt_status, '') IN ('partial', 'partial_timeout', 'auth_missing')
+                    ) AS needs_work
+                FROM targets t
+                LEFT JOIN target_endpoints te ON te.target_id = t.id
+                WHERE t.is_active = true AND t.asm_enabled = true
+                GROUP BY t.id
+            )
+            SELECT
+                COUNT(*) AS enabled_targets,
+                COUNT(*) FILTER (WHERE total = 0) AS no_inventory_targets,
+                COUNT(*) FILTER (WHERE needs_work > 0) AS targets_with_gaps,
+                COALESCE(SUM(needs_work), 0) AS endpoints_needing_work,
+                MIN(id::text) FILTER (WHERE total = 0 OR needs_work > 0) AS sample_target_id
+            FROM per_target
+        """
+
+
+async def _dashboard_asm_state(conn) -> Any:
+    try:
+        return await conn.fetchrow(_DASHBOARD_ASM_STATE_SQL)
+    except Exception as exc:
+        reraise_statement_timeout(exc)
+        return None
+
+
+async def _build_dashboard_product_status(
+    conn,
+    *,
+    worker_snapshot: dict[str, Any] | None = None,
+    counts: "dashboard_data.DashboardCounts | None" = None,
+    asm_state: Any = None,
+) -> list[dict[str, Any]]:
     """Compact cross-product status cards for dashboard navigation.
 
     This intentionally complements the prioritized Action Center. The Action
@@ -1492,39 +1512,21 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
     state from several unrelated API responses.
     """
     items: list[dict[str, Any]] = []
+    if counts is None:
+        try:
+            counts = await dashboard_data.load_dashboard_counts(conn)
+        except Exception as exc:
+            reraise_statement_timeout(exc)
+            counts = None
 
     try:
-        row = await conn.fetchrow("""
-            SELECT
-                COUNT(*) FILTER (
-                    WHERE status = 'active'
-                      AND severity IN ('critical', 'high')
-                      AND COALESCE(source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake', 'asm', 'manual')
-                      AND ai_target_id IS NULL
-                      AND COALESCE(tool, '') <> 'model_intake'
-                ) AS blockers,
-                COUNT(*) FILTER (
-                    WHERE status = 'active'
-                      AND COALESCE(source, 'scan') NOT IN ('ai_gate', 'ai_session', 'model_intake', 'asm', 'manual')
-                      AND ai_target_id IS NULL
-                      AND COALESCE(tool, '') <> 'model_intake'
-                ) AS active_findings
-            FROM findings
-        """)
-        counts = _record_map(row)
-        scan_row = await conn.fetchrow("""
-            SELECT
-                COUNT(*) FILTER (WHERE status IN ('pending', 'queued', 'running')) AS active_scans,
-                COUNT(*) FILTER (WHERE status = 'failed' AND created_at >= NOW() - INTERVAL '7 days') AS recent_failed
-            FROM scans
-            WHERE (scan_role IS NULL OR scan_role <> 'shard')
-              AND COALESCE(run_kind, 'dast') NOT IN ('ai_api', 'ai_widget', 'ai_rag', 'ai_trace', 'ai_mcp', 'model_intake')
-        """)
-        scan_counts = _record_map(scan_row)
-        blockers = int(counts.get("blockers") or 0)
-        active_findings = int(counts.get("active_findings") or 0)
-        active_scans = int(scan_counts.get("active_scans") or 0)
-        recent_failed = int(scan_counts.get("recent_failed") or 0)
+        if counts is None:
+            raise LookupError("summary counts unavailable")
+        # Active findings outside AI Gate, AI sessions, Model Intake, ASM and manual entry.
+        blockers = counts.dast_active(blockers=True)
+        active_findings = counts.dast_active(blockers=False)
+        active_scans = counts.dast_active_scans()
+        recent_failed = counts.recent_failed_dast_scans
         if blockers:
             status = "critical"
             summary = f"{blockers} critical/high active DAST finding(s) need triage."
@@ -1580,34 +1582,13 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
         ))
 
     try:
-        row = await conn.fetchrow("""
-            WITH per_target AS (
-                SELECT
-                    t.id,
-                    COUNT(te.id) FILTER (WHERE COALESCE(te.test_status, 'untested') <> 'gone') AS total,
-                    COUNT(te.id) FILTER (
-                        WHERE COALESCE(te.test_status, 'untested') IN ('untested', 'stale', 'partial')
-                           OR COALESCE(te.last_attempt_status, '') IN ('partial', 'partial_timeout', 'auth_missing')
-                    ) AS needs_work
-                FROM targets t
-                LEFT JOIN target_endpoints te ON te.target_id = t.id
-                WHERE t.is_active = true AND t.asm_enabled = true
-                GROUP BY t.id
-            )
-            SELECT
-                COUNT(*) AS enabled_targets,
-                COUNT(*) FILTER (WHERE total = 0) AS no_inventory_targets,
-                COUNT(*) FILTER (WHERE needs_work > 0) AS targets_with_gaps,
-                COALESCE(SUM(needs_work), 0) AS endpoints_needing_work,
-                MIN(id::text) FILTER (WHERE total = 0 OR needs_work > 0) AS sample_target_id
-            FROM per_target
-        """)
-        counts = _record_map(row)
-        enabled = int(counts.get("enabled_targets") or 0)
-        targets_with_gaps = int(counts.get("targets_with_gaps") or 0)
-        no_inventory = int(counts.get("no_inventory_targets") or 0)
-        endpoints_needing_work = int(counts.get("endpoints_needing_work") or 0)
-        sample_target_id = str(counts.get("sample_target_id") or "")
+        row = asm_state if asm_state is not None else await conn.fetchrow(_DASHBOARD_ASM_STATE_SQL)
+        asm_counts = _record_map(row)
+        enabled = int(asm_counts.get("enabled_targets") or 0)
+        targets_with_gaps = int(asm_counts.get("targets_with_gaps") or 0)
+        no_inventory = int(asm_counts.get("no_inventory_targets") or 0)
+        endpoints_needing_work = int(asm_counts.get("endpoints_needing_work") or 0)
+        sample_target_id = str(asm_counts.get("sample_target_id") or "")
         href = f"/asm?target_id={sample_target_id}" if sample_target_id else "/asm"
         if no_inventory or targets_with_gaps:
             status = "warning"
@@ -1646,12 +1627,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
         ))
 
     try:
-        findings_row = await conn.fetchrow("""
-            SELECT COUNT(*) AS active_findings
-            FROM findings
-            WHERE status = 'active'
-              AND (source = 'ai_gate' OR ai_target_id IS NOT NULL)
-        """)
+        if counts is None:
+            raise LookupError("summary counts unavailable")
         target_rows = await conn.fetch("""
             SELECT id, name, target_type, endpoint_url, production_mode, metadata_json
             FROM ai_targets
@@ -1659,7 +1636,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             ORDER BY production_mode DESC, updated_at DESC
             LIMIT 250
         """)
-        active_findings = int(_record_map(findings_row).get("active_findings") or 0)
+        # Active findings from AI Gate or against an AI target.
+        active_findings = counts.ai_gate_active()
         missing_controls = 0
         for row in target_rows:
             target = row_to_dict(row)
@@ -1720,12 +1698,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
         ))
 
     try:
-        finding_row = await conn.fetchrow("""
-            SELECT COUNT(*) AS active_findings
-            FROM findings
-            WHERE status = 'active'
-              AND (source = 'model_intake' OR tool = 'model_intake')
-        """)
+        if counts is None:
+            raise LookupError("summary counts unavailable")
         trust_row = await conn.fetchrow("""
             WITH latest AS (
                 SELECT DISTINCT ON (COALESCE(target_id::text, target_url))
@@ -1740,7 +1714,8 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
             FROM latest
             WHERE signature_status <> 'verified' OR signature_verified <> 'true'
         """)
-        active_findings = int(_record_map(finding_row).get("active_findings") or 0)
+        # Active findings from Model Intake (source or tool).
+        active_findings = counts.model_intake_active()
         untrusted = int(_record_map(trust_row).get("untrusted_latest") or 0)
         if active_findings:
             status = "critical"
@@ -1777,15 +1752,11 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
         ))
 
     try:
-        row = await conn.fetchrow("""
-            SELECT
-                COUNT(*) FILTER (WHERE status = 'active' AND severity = 'critical') AS critical,
-                COUNT(*) FILTER (WHERE status = 'active' AND severity = 'high') AS high
-            FROM findings
-        """)
-        counts = _record_map(row)
-        critical = int(counts.get("critical") or 0)
-        high = int(counts.get("high") or 0)
+        if counts is None:
+            raise LookupError("summary counts unavailable")
+        # Active critical/high findings in every plane.
+        critical = counts.active_any_source("critical")
+        high = counts.active_any_source("high")
         blockers = critical + high
         if critical:
             status = "critical"
@@ -1886,7 +1857,13 @@ async def _build_dashboard_product_status(conn, *, worker_snapshot: dict[str, An
     return [by_id[item_id] for item_id in order if item_id in by_id]
 
 
-async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+async def _build_dashboard_action_center(
+    conn,
+    *,
+    worker_snapshot: dict[str, Any] | None = None,
+    counts: "dashboard_data.DashboardCounts | None" = None,
+    asm_state: Any = None,
+) -> list[dict[str, Any]]:
     """Server-derived operator action feed for the dashboard.
 
     Keep this best-effort: dashboard availability must not depend on every
@@ -1923,17 +1900,11 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
             ))
 
     try:
-        blockers = await conn.fetchrow("""
-            SELECT
-                COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
-                COUNT(*) FILTER (WHERE severity = 'high') AS high
-            FROM findings
-            WHERE status = 'active' AND severity IN ('critical', 'high')
-              AND COALESCE(source, '') <> 'device'
-        """)
-        blocker_map = _record_map(blockers)
-        critical = int(blocker_map.get("critical") or 0)
-        high = int(blocker_map.get("high") or 0)
+        if counts is None:
+            counts = await dashboard_data.load_dashboard_counts(conn)
+        # Active critical/high findings outside the device plane (COALESCE(source, '') <> 'device').
+        critical = counts.active_findings("critical")
+        high = counts.active_findings("high")
         if critical or high:
             priority = "critical" if critical else "high"
             href = "/findings?status=active&severity=critical" if critical else "/findings?status=active&severity=high"
@@ -2056,28 +2027,8 @@ async def _build_dashboard_action_center(conn, *, worker_snapshot: dict[str, Any
         pass
 
     try:
-        asm_state = await conn.fetchrow("""
-            WITH per_target AS (
-                SELECT
-                    t.id,
-                    COUNT(te.id) FILTER (WHERE COALESCE(te.test_status, 'untested') <> 'gone') AS total,
-                    COUNT(te.id) FILTER (
-                        WHERE COALESCE(te.test_status, 'untested') IN ('untested', 'stale', 'partial')
-                           OR COALESCE(te.last_attempt_status, '') IN ('partial', 'partial_timeout', 'auth_missing')
-                    ) AS needs_work
-                FROM targets t
-                LEFT JOIN target_endpoints te ON te.target_id = t.id
-                WHERE t.is_active = true AND t.asm_enabled = true
-                GROUP BY t.id
-            )
-            SELECT
-                COUNT(*) AS enabled_targets,
-                COUNT(*) FILTER (WHERE total = 0) AS no_inventory_targets,
-                COUNT(*) FILTER (WHERE needs_work > 0) AS targets_with_gaps,
-                COALESCE(SUM(needs_work), 0) AS endpoints_needing_work,
-                MIN(id::text) FILTER (WHERE total = 0 OR needs_work > 0) AS sample_target_id
-            FROM per_target
-        """)
+        if asm_state is None:
+            asm_state = await conn.fetchrow(_DASHBOARD_ASM_STATE_SQL)
         asm_map = _record_map(asm_state)
         enabled_targets = int(asm_map.get("enabled_targets") or 0)
         no_inventory = int(asm_map.get("no_inventory_targets") or 0)

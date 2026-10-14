@@ -64,9 +64,15 @@ SETTINGS = rg.GuardSettings(
     ("HEAD", "/findings", "", "heavy", "findings"),
     ("GET", "/findings", "limit=50&offset=400000", "heavy", "findings"),
     ("GET", "/targets/abc/graph", "", "heavy", "target_graph"),
-    ("GET", "/targets/abc/asm/coverage", "", "heavy", "asm"),
-    ("GET", "/arsenal/campaigns", "", "heavy", "arsenal"),
-    ("GET", "/arsenal/refuter-reviews/summary", "", "heavy", "arsenal"),
+    ("GET", "/targets/abc/asm/gaps", "", "heavy", "asm"),
+    ("GET", "/targets/abc/asm/endpoints", "limit=1000", "heavy", "asm"),
+    # Bounded since 2.11: list/v1 graph pages, SQL-counted ASM coverage, campaign impact and
+    # the refuter window.
+    ("GET", "/targets/abc/graph", "count=none&limit=200", "interactive", None),
+    ("GET", "/targets/abc/graph", "cursor=x", "interactive", None),
+    ("GET", "/targets/abc/asm/coverage", "", "interactive", None),
+    ("GET", "/arsenal/campaigns", "", "interactive", None),
+    ("GET", "/arsenal/refuter-reviews/summary", "", "interactive", None),
     ("GET", "/queue/stats", "", "heavy", "queue"),
     ("GET", "/results", "", "heavy", "results"),
     ("GET", "/findings/abc", "", "interactive", None),

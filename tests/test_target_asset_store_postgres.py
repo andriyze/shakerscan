@@ -6,6 +6,7 @@ import pytest
 
 from targets.asset_migration import migrate_target_assets
 from targets.asset_inputs_migration import migrate_asset_inputs
+from targets.scale_summary import install_summary_counts
 from targets.asset_store import list_assets, asset_detail, asset_history
 from targets.asset_router import ensure_device_profile, DeviceProfileCreate
 from tests.test_target_asset_migration_postgres import database
@@ -20,6 +21,7 @@ def test_web_and_network_filters_apply_before_complete_group_pagination(monkeypa
             async with conn.transaction():
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
+                await install_summary_counts(conn)
             ids={}
             for host in ['example.test','api.example.test','tv.example.test','192.0.2.8','2001:db8::8','router.local']:
                 from targets.asset_migration import host_url
@@ -50,6 +52,7 @@ def test_inventory_groups_origins_and_profile_addition_reuses_the_asset(monkeypa
             async with conn.transaction():
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
+                await install_summary_counts(conn)
             inventory = await list_assets(conn)
             assert inventory['total'] == 1
             assert inventory['targets'][0]['origin_count'] == 2
@@ -88,6 +91,7 @@ def test_domain_hierarchy_pages_complete_groups_without_merging_asset_authority(
             async with conn.transaction():
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
+                await install_summary_counts(conn)
             hosts = ['example.test','api.example.test','tv.example.test','other.test',
                      '192.0.2.1','192.0.2.2','2001:db8::1','router.local',
                      'example.co.uk','api.example.co.uk','other.co.uk']
@@ -124,6 +128,7 @@ def test_inventory_filters_counts_and_sorts_before_paging(monkeypatch):
             async with conn.transaction():
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
+                await install_summary_counts(conn)
             from targets.asset_migration import host_url
             import target_authorization
             ids = {}
@@ -186,6 +191,7 @@ def test_alphabetical_groups_follow_the_domain_not_member_names(monkeypatch):
             async with conn.transaction():
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
+                await install_summary_counts(conn)
             from targets.asset_migration import host_url
             for locator, name in [('zeta.test', 'Alpha storefront'), ('alpha.test', 'Zulu portal'), ('mid.test', None)]:
                 await conn.execute("INSERT INTO targets(url,name,discovery_source) VALUES($1,$2,'host')", host_url(locator), name or locator)
@@ -205,6 +211,7 @@ def test_inventory_authorization_follows_the_authority_the_scan_path_resolves(mo
             async with conn.transaction():
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
+                await install_summary_counts(conn)
             from targets.asset_migration import host_url
             import target_authorization
             hosts, origins = {}, {}
@@ -269,6 +276,7 @@ def test_a_leading_zero_ipv4_target_is_never_authorized_in_the_list(monkeypatch)
             async with conn.transaction():
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
+                await install_summary_counts(conn)
             import target_authorization
             from targets.router import TargetNormalizationError, normalize_target_url
             for spelling in ('https://010.000.000.001/', 'https://10.1/', 'https://0x0a.0.0.1/'):
@@ -322,6 +330,7 @@ def test_an_ipv6_address_embedding_ipv4_is_authorized_in_the_list_as_the_scan_pa
             async with conn.transaction():
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
+                await install_summary_counts(conn)
             import target_authorization
             from targets.router import normalize_target_url
             normalized, _note = normalize_target_url(url)
@@ -344,6 +353,7 @@ def test_an_ipv6_web_address_is_authorized_in_the_list_as_the_scan_path_reads_it
             async with conn.transaction():
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
+                await install_summary_counts(conn)
             import target_authorization
             origin = await conn.fetchval("INSERT INTO targets(url) VALUES('https://[2001:DB8::0001]:8443/') RETURNING id")
             other = await conn.fetchval("INSERT INTO targets(url) VALUES('https://[2001:db8::2]:8443/') RETURNING id")

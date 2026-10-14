@@ -68,12 +68,19 @@ def test_device_agent_shell_is_immutable_user_confirmed_and_remote_only():
 
 def test_dashboard_queries_explicitly_exclude_the_device_product_plane():
     action_center = definition_source("_build_dashboard_action_center")
-    dashboard = route_source("GET", "/dashboard")
-    assert "COALESCE(source, '') <> 'device'" in action_center
+    route_source("GET", "/dashboard")  # still routed
+    # Counts come from the finding summary; the device plane is excluded there (a NULL source
+    # stays included, as COALESCE(source, '') <> 'device' did).
+    data = (ROOT / "api" / "operations" / "dashboard_data.py").read_text()
+    active = data[data.index("def active_findings("):data.index("def active_any_source(")]
+    assert 'src != "device"' in active
+    assert "counts.active_findings(" in action_center
     assert "device_target_id IS NULL" in action_center
-    assert "COALESCE(source, '') <> 'device'" in dashboard
-    assert "device_target_id IS NULL" in dashboard
-    assert "device_web_origin" in dashboard
+    # The recent lists still filter in SQL.
+    recent = data[data.index("_RECENT_SCAN_FILTER = "):data.index("def _recent_scan_key(")]
+    assert "device_target_id IS NULL" in recent and "device_web_origin" in recent
+    findings = data[data.index("async def recent_blocker_findings("):data.index("# --- Single-flight cache")]
+    assert "COALESCE(source, '') <> 'device'" in findings
 
 
 def test_bootstrap_schema_contains_device_agent_runs():
