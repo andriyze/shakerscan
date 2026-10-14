@@ -238,6 +238,7 @@ restart_worker_count() { printf '4\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull\n'; }
 remember_running_release() { :; }
+note_running_release() { printf 'note-running\n'; }
 ensure_upgrade_space() { printf 'space-check\n'; }
 ensure_pre_upgrade_backup() { printf 'pre-upgrade-backup\n'; }
 ensure_redis_ready() { printf 'redis-ready\n'; }
@@ -341,6 +342,8 @@ def test_upgrade_start_stops_everything_then_restores_lanes_and_worker_count():
     # healthy before the services start, and the release recorded once they have.
     assert output.index("space-check") < output.index("pull\n")
     assert output.index("stop\n") < output.index("pre-upgrade-backup") < output.index("redis-ready")
+    # The version that was running is noted before the stack is stopped (it decides the backup).
+    assert output.index("note-running") < output.index("stop\n")
     assert output.index("redis-ready") < output.index(primary_up) < output.index("record-release:prune")
 
 
@@ -373,6 +376,8 @@ running_compose_service_count() {
         *) printf '0\n' ;;
     esac
 }
+# The running version is noted while the stack still runs (it decides the pre-upgrade backup).
+note_running_release() { if [ -e "$STOPPED" ]; then printf 'note:stopped\n'; else printf 'note:running\n'; fi; }
 stop_services() { printf 'stop\n'; : > "$STOPPED"; }
 start_services() { printf 'start:%s\n' "$*"; }
 restart_services() {
@@ -398,7 +403,7 @@ def test_restart_counts_the_opt_in_lanes_before_stop_removes_them(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     # workers, device-worker lane, Gungnir lane: all taken while the lanes were still running.
-    assert result.stdout.splitlines() == ["stop", "start:3 1 1"]
+    assert result.stdout.splitlines() == ["note:running", "stop", "start:3 1 1"]
 
 
 def test_running_service_count_ignores_one_off_runs(tmp_path):

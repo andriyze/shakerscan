@@ -2071,8 +2071,9 @@ resolve_start_workers() {
     local memory_gb
 
     if [ "$WORKERS" != "auto" ]; then
-        if ! [[ "$WORKERS" =~ ^[0-9]+$ ]] || [ "$WORKERS" -lt 1 ] || [ "$WORKERS" -gt 20 ]; then
-            echo -e "${RED}Error: workers must be auto or a number between 1 and 20${NC}" >&2
+        # 0: a control-plane or broker-only install (start_services warns).
+        if ! [[ "$WORKERS" =~ ^[0-9]+$ ]] || [ "$WORKERS" -gt 20 ]; then
+            echo -e "${RED}Error: workers must be auto or a number between 0 and 20${NC}" >&2
             return 1
         fi
         echo "$WORKERS"
@@ -2321,8 +2322,9 @@ build_versions_match() {
     fi
 }
 
+# $1: the number of local scan workers started (0: a broker-only install, nothing to compare).
 verify_running_build_identity() {
-    local expected="${SCANNER_VERSION:-}"
+    local expected="${SCANNER_VERSION:-}" local_workers="${1:-1}"
     local api_json ui_json api_version ui_version worker_version
     local elapsed=0 timeout="${SHAKERSCAN_BUILD_IDENTITY_TIMEOUT:-90}"
 
@@ -2333,6 +2335,11 @@ verify_running_build_identity() {
         ui_version="$(printf '%s' "$ui_json" | jq -r '.ui_version // empty' 2>/dev/null || true)"
         worker_version="$(printf '%s' "$api_json" | jq -r '.worker_build.scanner_version // empty' 2>/dev/null || true)"
 
+        if [ "$local_workers" = 0 ] && build_versions_match "$expected" "$api_version" \
+            && build_versions_match "$expected" "$ui_version"; then
+            echo -e "${GREEN}Build identity verified: UI and API are $expected (no local scan workers)${NC}"
+            return 0
+        fi
         if build_versions_match "$expected" "$api_version" \
             && build_versions_match "$expected" "$ui_version" \
             && [ "$(printf '%s' "$api_json" | jq -r '.worker_build.available == true and .worker_build.fleet_uniform == true and (.worker_build.stale_count // 0) == 0 and (.worker_build.pending_count // 0) == 0' 2>/dev/null || true)" = "true" ] \
@@ -2502,7 +2509,7 @@ print_help() {
     echo "  shell              Open shell in scanner container"
     echo ""
     echo "Options:"
-    echo "  -w, --workers N    Number of workers (default: $WORKERS)"
+    echo "  -w, --workers N    Number of workers, 0-20 or auto; 0 for a broker-only install (default: $WORKERS)"
     echo "  -f, --follow       Follow logs"
     echo "  -y, --yes          Auto-confirm dependency installation"
     echo "  --local            Force local Docker build instead of prebuilt images"
@@ -2554,6 +2561,8 @@ start_services() {
     local restore_gungnir="${3:-0}"
     local clean_slate_reason
 
+    # Before anything is stopped: the version running now decides whether this start is an upgrade.
+    note_running_release
     prepare_runtime_files
     persist_remote_access_env
     warn_if_ui_port_has_foreign_listener
@@ -2564,6 +2573,9 @@ start_services() {
     fi
     set_build_env
     echo -e "${GREEN}Starting ShakerScan with $start_workers worker(s)...${NC}"
+    if [ "$start_workers" -eq 0 ]; then
+        echo -e "${YELLOW}Starting with no local scan workers: scans run only on connected broker nodes. Add local workers with '$(cli_hint) start --workers N'.${NC}"
+    fi
     if [ "$WORKERS" = "auto" ]; then
         echo "Worker sizing: auto ($(runtime_memory_gb)GB container RAM; ${SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB:-7}GB platform reserve; ${SHAKERSCAN_PER_WORKER_MEM_GB:-1}GB/worker)"
     fi
@@ -2654,7 +2666,7 @@ start_services() {
             model-intake-signer-db-init model-intake-signer model-intake-worker model-intake-sandbox || return 1
     fi
     wait_for_url "UI" "$(ui_probe_url)" 120
-    verify_running_build_identity
+    verify_running_build_identity "$start_workers"
     verify_specialized_worker_identity \
         "$(running_compose_service_count agent-tool-worker)" \
         "$restore_device_workers" \
@@ -2696,6 +2708,7 @@ restart_services() {
     # selected image. start_services also enables missing default network capacity.
     restart_device_workers="$(running_device_worker_count)"
     restart_gungnir="$(running_compose_service_count gungnir-worker)"
+    note_running_release
     stop_services
     start_services "$restart_workers" "$restart_device_workers" "$restart_gungnir"
 }
@@ -3568,13 +3581,21 @@ reset_database() {
     echo -e "${RED}WARNING: This will delete all scan data!${NC}"
     read -p "Are you sure? (yes/no): " CONFIRM
     if [ "$CONFIRM" = "yes" ]; then
+        note_running_release
         echo "Stopping services..."
-        compose down -v
+        # As `stop`: the opt-in lanes and API-started workers `compose down` leaves running would
+        # keep the old database connections, networks and images.
+        remove_containers_outside_compose_down
+        compose down -v --remove-orphans
+        remove_scan_worker_containers "Removing API-scaled worker containers left outside Compose..."
         # Data kept for rolling back a PostgreSQL upgrade is not a Compose volume; without removing
         # it the fresh start would migrate the old data straight back in.
         docker_cli volume rm -f "$(postgres_legacy_volume)" > /dev/null 2>&1 || true
         echo "Starting fresh..."
-        compose_up -d --scale worker=$start_workers
+        # Exactly as `start`: the build environment (release version and image identity), the
+        # runtime files, Redis readiness and the health and identity checks. The database was just
+        # emptied, so there is nothing to save before it.
+        SHAKERSCAN_PRE_UPGRADE_BACKUP=0 start_services "$start_workers" || return 1
         echo -e "${GREEN}Database reset complete${NC}"
     else
         echo "Cancelled"

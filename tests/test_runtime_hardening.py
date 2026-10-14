@@ -802,6 +802,7 @@ resolve_start_workers() { printf '1\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull-prebuilt\n'; }
 remember_running_release() { :; }
+note_running_release() { :; }
 ensure_upgrade_space() { printf 'space-check\n'; }
 ensure_pre_upgrade_backup() { printf 'pre-upgrade-backup\n'; }
 ensure_redis_ready() { printf 'redis-ready\n'; }
@@ -1175,6 +1176,7 @@ restart_worker_count() { printf '3\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull-prebuilt\n'; }
 remember_running_release() { :; }
+note_running_release() { :; }
 ensure_upgrade_space() { printf 'space-check\n'; }
 ensure_pre_upgrade_backup() { printf 'pre-upgrade-backup\n'; }
 ensure_redis_ready() { printf 'redis-ready\n'; }

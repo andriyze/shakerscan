@@ -9,6 +9,9 @@
 #     previous release); otherwise it refuses, naming the numbers, with nothing changed. A start
 #     with nothing to download never needs this room.
 #   - ensure_pre_upgrade_backup: a version-changing start dumps PostgreSQL first (outside Docker).
+#     The version it upgrades from is the one the running API reports; the release record only
+#     when nothing runs, and a record that an older launcher's start (or a reinstall) may have left
+#     out of date means a backup.
 #   - ensure_redis_ready: Redis must be healthy before anything that depends on it. A damaged
 #     append-only file is repaired (a copy of its data is kept first); a Redis that cannot write
 #     gets room from old images. Only a damaged Redis whose data was copied may start empty: it
@@ -111,6 +114,26 @@ running_api_version() {
     [ -n "$container" ] || return 0
     docker_cli inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null \
         | sed -n 's/^SCANNER_VERSION=//p' | head -1 | tr -cd 'A-Za-z0-9._-'
+}
+
+# The version the API reported before this start stopped anything; empty when nothing ran or it did
+# not say. Noted once per launcher run, before the first stop (restart, clean-slate start).
+RELEASE_RUNNING_BEFORE_START=""
+RELEASE_RUNNING_NOTED=0
+note_running_release() {
+    [ "$RELEASE_RUNNING_NOTED" = 1 ] && return 0
+    RELEASE_RUNNING_BEFORE_START="$(running_api_version)"
+    case "$RELEASE_RUNNING_BEFORE_START" in latest|dev|unknown) RELEASE_RUNNING_BEFORE_START="" ;; esac
+    RELEASE_RUNNING_NOTED=1
+}
+
+# The release record may not describe the database: since it was written, this install was started
+# by a launcher that keeps no record (one older than 2.10, e.g. after a rollback) or reinstalled.
+# Every launcher writes its runtime marker on a successful start (this one before the record), and
+# the installer writes it too. With nothing running to ask, the two cannot be told apart.
+release_record_is_stale() {
+    local marker="${LOCAL_BUILD_MARKER:-$SCRIPT_DIR/.shakerscan-local-build}"
+    [ -f "$marker" ] && [ -f "$RELEASE_STATE_CURRENT" ] && [ "$marker" -nt "$RELEASE_STATE_CURRENT" ]
 }
 
 # Image ids that must stay: this release's, the recorded current and previous releases', and every
@@ -258,8 +281,17 @@ ensure_pre_upgrade_backup() {
     local from to has_data size_kb free_kb dir stamp old
     is_truthy "${SHAKERSCAN_PRE_UPGRADE_BACKUP:-1}" || return 0
     to="${SCANNER_VERSION:-}"
+    note_running_release
     if [ -f "$RELEASE_STATE_CURRENT" ]; then
-        from="$(started_release_version)"
+        # The running API is the truth; the record only when nothing ran to ask. A record that may
+        # be out of date is not trusted: the database is saved, named for the recorded version.
+        if [ -n "$RELEASE_RUNNING_BEFORE_START" ]; then
+            from="$RELEASE_RUNNING_BEFORE_START"
+        elif release_record_is_stale; then
+            from="unverified-$(started_release_version | tr -cd 'A-Za-z0-9._-')"
+        else
+            from="$(started_release_version)"
+        fi
     elif [ -f "$RELEASE_STATE_PREVIOUS" ]; then
         # the first upgrade with this launcher: the running release was recorded from its containers
         from="$(sed -n 's/^# release //p' "$RELEASE_STATE_PREVIOUS" 2>/dev/null | head -1 | tr -cd 'A-Za-z0-9._-')"
@@ -286,7 +318,10 @@ ensure_pre_upgrade_backup() {
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     dir="$SCRIPT_DIR/backups/pre-upgrade-${stamp}-${from}-to-${to}"
     ( umask 077; mkdir -p "$dir" )
-    echo "Saving the database before upgrading ${from} to ${to}..."
+    case "$from" in
+        unverified-*) echo "Saving the database before starting ${to}: the release it last ran is not known for certain (recorded: ${from#unverified-})..." ;;
+        *) echo "Saving the database before upgrading ${from} to ${to}..." ;;
+    esac
     if ! compose exec -T postgres pg_dump -U scanner -d scanner -Fc > "$dir/postgres.dump"; then
         echo -e "${RED}The pre-upgrade database backup failed; nothing was changed.${NC}" >&2
         rm -rf -- "$dir"
