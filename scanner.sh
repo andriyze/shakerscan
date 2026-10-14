@@ -4271,6 +4271,9 @@ MODEL_INTAKE_SERVICES="model-intake-signer-db-init model-intake-signer model-int
 # its services; disabling stops and removes them, and with --remove-images also its images.
 model_intake_cmd() {
     local subcmd="${1:-status}" option="${2:-}"
+    # enable/disable recreate the API: it needs the environment `start` gives it (its install
+    # directory, release identity), or it reports a runner command for ~/.shakerscan.
+    case "$subcmd" in enable|disable) set_build_env ;; esac
     case "$subcmd" in
         enable)
             if [ "$USE_PREBUILT" -eq 1 ] && is_truthy "${SHAKERSCAN_PULL_IMAGES:-1}"; then
