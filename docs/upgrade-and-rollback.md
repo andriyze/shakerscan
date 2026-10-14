@@ -45,6 +45,15 @@ shakerscan backup delete shakerscan-TIMESTAMP
 shakerscan backup delete all                # every backup, including PostgreSQL upgrade copies
 ```
 
+A `start` that changes the release version also saves the database first, to
+`backups/pre-upgrade-<time>-<from>-to-<to>/` (the newest two are kept, and until a start succeeds
+also the first one of that upgrade, taken before any migration ran), and stops if that fails. The
+version it upgrades from is the one the running API reports. When nothing is running, the launcher
+uses the release it recorded at its last start; if a launcher older than 2.10 (which keeps no such
+record, for example after a rollback) or the installer has run since, it saves the database anyway
+and names the backup `unverified-<recorded>`. `shakerscan reset` starts the emptied stack exactly as
+`start` does, without this backup.
+
 Target unification replaces the legacy device and input tables with compatibility views. Before
 starting the new API/workers against an existing legacy database, the launcher automatically creates
 a backup and stops the upgrade if that backup fails. Rebuilds of a running API use the same check.

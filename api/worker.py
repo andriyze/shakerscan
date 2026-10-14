@@ -40,6 +40,7 @@ except ModuleNotFoundError:
     from scanner.release_identity import published_scanner_version
 
 import deployment_policy
+from request_guards import statement_timeout_pool_options, unbounded_statements
 from scan import coverage_rollup
 from retest_contract import (
     AI_ONLY_RETEST_TYPES,
@@ -2382,19 +2383,16 @@ async def init_db():
     db_pool_max = _int_env("DB_POOL_MAX_SIZE", 8)
     db_statement_timeout_ms = _int_env("DB_STATEMENT_TIMEOUT_MS", 60000)
 
-    async def _init_conn(conn):
-        # Per-worker statement timeout. Longer than the API default because
-        # save_findings can run a tight loop of inserts under heavy churn.
-        if db_statement_timeout_ms > 0:
-            await conn.execute(f"SET statement_timeout = {db_statement_timeout_ms}")
-
+    # Per-worker statement timeout, longer than the API default because save_findings can run a
+    # tight loop of inserts under heavy churn. A session default, so the release reset keeps it.
     db_pool = await asyncpg.create_pool(
         DATABASE_URL,
         min_size=db_pool_min,
         max_size=db_pool_max,
-        init=_init_conn,
+        **statement_timeout_pool_options(db_statement_timeout_ms),
     )
-    await run_schema_migrations(db_pool, redis_provider=get_redis)
+    with unbounded_statements():
+        await run_schema_migrations(db_pool, redis_provider=get_redis)
 
 
 def _scanner_process_kwargs() -> dict[str, Any]:

@@ -15,9 +15,9 @@ from typing import Any, Awaitable, Callable
 try:
     import deployment_policy
     import loop_leader
+    import request_guards
 except ModuleNotFoundError:  # package import (api.app_lifecycle)
-    from . import deployment_policy
-    from . import loop_leader
+    from . import deployment_policy, loop_leader, request_guards
 
 
 AsyncPoolFactory = Callable[..., Awaitable[Any]]
@@ -75,21 +75,20 @@ def create_api_lifespan(dependencies: ApiLifecycleDependencies):
             "DB_STATEMENT_TIMEOUT_MS", 30_000
         )
 
-        async def initialize_connection(connection: Any) -> None:
-            if statement_timeout_ms > 0:
-                await connection.execute(
-                    f"SET statement_timeout = {statement_timeout_ms}"
-                )
-
+        # The timeout is the session default (server_settings), not a SET in ``init``: asyncpg
+        # runs RESET ALL on every release, which silently removed an ``init`` SET after each
+        # connection's first use. Request classes narrow or widen it per acquire.
         pool = await dependencies.create_pool(
             dependencies.database_url,
             min_size=pool_min,
             max_size=pool_max,
-            init=initialize_connection,
+            **request_guards.statement_timeout_pool_options(statement_timeout_ms),
         )
         dependencies.set_pool(pool)
         app.state.db_pool = pool
-        await dependencies.ensure_schema(pool)
+        # Startup migrations may build an index over a large table: never cancel them.
+        with request_guards.unbounded_statements():
+            await dependencies.ensure_schema(pool)
 
         try:
             dependencies.publish_max_active_scans()

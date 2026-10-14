@@ -15,7 +15,16 @@ from __future__ import annotations
 
 import asyncio
 import zlib
+from contextlib import nullcontext
 from typing import Any, Awaitable, Callable
+
+try:
+    from request_guards import detached_statements as _detached_statements
+except ModuleNotFoundError:
+    try:
+        from api.request_guards import detached_statements as _detached_statements
+    except ModuleNotFoundError:  # a stripped-down runtime without the request guards
+        _detached_statements = nullcontext
 
 # The first key of the two-key advisory lock form: one namespace for every loop lock, so a loop
 # lock can never collide with the single-key schema lock taken at startup.
@@ -67,7 +76,10 @@ class LoopLeadership:
             pass
 
     async def _connect(self) -> Any:
-        conn = await self._pool.acquire()
+        # The pool's per-acquire hook applies the acquiring task's request class; leadership is
+        # never a request's, so take the connection with the pool's session default.
+        with _detached_statements():
+            conn = await self._pool.acquire()
         try:
             # The server, not only this process, must notice a partitioned leader: keepalives make
             # it end the session (and release the loop locks) within about a minute and a half.

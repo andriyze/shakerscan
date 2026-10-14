@@ -409,3 +409,29 @@ def test_job_hash_repair_is_compare_and_set_in_real_redis(redis_client):
     assert redis_client.ttl("job:raced") == -1
     assert redis_client.hgetall("job:stale") == {"status": "orphaned", "error": "x"}
     assert 0 < redis_client.ttl("job:stale") <= queue_health.ORPHAN_EXPIRE_SECONDS
+
+
+def test_leader_connection_never_inherits_a_request_class_statement_timeout():
+    import request_guards
+
+    async def work():
+        pool = await asyncpg.create_pool(
+            DSN, min_size=1, max_size=3, **request_guards.statement_timeout_pool_options(30_000))
+        try:
+            # A loop first led from inside a request's context (a 5 s interactive class).
+            with request_guards.statement_timeout(5_000):
+                assert await loop_leader.lead(pool, "request-context") is True
+            leader_conn = loop_leader.leadership_for(pool)._conn
+            assert await leader_conn.fetchval("SHOW statement_timeout") == "30s"
+            assert await leader_conn.fetchval("SHOW tcp_keepalives_idle") == "30"
+            # The index build sets its own unbounded limit and gives the session back as it was.
+            async with pool.acquire() as conn:
+                before = await conn.fetchval("SHOW statement_timeout")
+            await loop_scale_indexes.ensure_loop_scale_indexes(pool)
+            async with pool.acquire() as conn:
+                assert await conn.fetchval("SHOW statement_timeout") == before == "30s"
+        finally:
+            await loop_leader.leadership_for(pool).close()
+            await asyncio.wait_for(pool.close(), 5)
+
+    asyncio.run(work())

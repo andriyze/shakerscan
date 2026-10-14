@@ -108,6 +108,7 @@ async def build_loop_scale_indexes_in_background(pool: Any, *, delay: float = BA
     await asyncio.sleep(delay)
     print("[schema] loop index build: checking", flush=True)
     try:
+        # It sets its own unbounded statement_timeout for the build session and restores it.
         built = await ensure_loop_scale_indexes(pool, progress=lambda message: print(f"[schema] {message}", flush=True))
     except asyncio.CancelledError:
         print("[schema] loop index build interrupted (an invalid index is rebuilt on the next start)", flush=True)

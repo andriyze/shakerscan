@@ -1909,7 +1909,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 412 | Python sources + Compose manifests |
+| Runtime environment keys | 424 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 132 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2816,6 +2816,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `COMPOSE_PROJECT_NAME` | `api/api.py`, `scripts/fleet_cli.py` |
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
+| `DB_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
 | `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py` |
@@ -3021,8 +3022,19 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_AGENT_TOOL_OUTPUT_BYTES` | `api/worker.py` |
 | `SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_ALLOWED_HOSTS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_EXPORT_RESPONSE_MAX_BYTES` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_EXPORT_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_GID` | `docker-compose.release.yml` |
+| `SHAKERSCAN_API_HEAVY_ADMISSION_WAIT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_HEAVY_CONCURRENCY` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_HEAVY_RETRY_AFTER_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_HEAVY_SEND_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_HEAVY_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_MAX_IN_FLIGHT_REQUESTS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_MEMORY_LIMIT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_READ_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_RESPONSE_MAX_BYTES` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_SANDBOX_GROUP_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_API_TOKEN` | `scripts/scan_cli.py`, `scripts/v2_cli.py` |
 | `SHAKERSCAN_API_TOKEN_FILE` | `scripts/scan_cli.py` |

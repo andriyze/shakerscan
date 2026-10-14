@@ -13,6 +13,7 @@ import type {
   ModelIntakeScanRequest as GeneratedModelIntakeScanRequest,
 } from './publicApi.generated'
 import { API_URL, getApiErrorMessage } from './apiConfig'
+import { fetchHeavyRead } from './busyRetry.mjs'
 
 export { API_URL, getApiUrl } from './apiConfig'
 
@@ -3158,7 +3159,7 @@ export interface ExposureGraph {
 
 // Dashboard
 export async function getDashboard(): Promise<DashboardResponse> {
-  const res = await fetch(`${API_URL}/dashboard`)
+  const res = await fetchHeavyRead(`${API_URL}/dashboard`)
   if (!res.ok) throw new Error('Failed to fetch dashboard')
   return res.json()
 }
@@ -3278,7 +3279,7 @@ export async function getCampaigns(params?: {
   if (params?.target_id) searchParams.set('target_id', params.target_id)
   if (params?.status) searchParams.set('status', params.status)
   const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/arsenal/campaigns${query ? `?${query}` : ''}`)
+  const res = await fetchHeavyRead(`${API_URL}/arsenal/campaigns${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaigns'))
   return res.json()
 }
@@ -3374,7 +3375,7 @@ export async function getEvidenceExportManifest(params?: {
   limit?: number
 }): Promise<EvidenceExportManifest> {
   const query = evidenceQuery(params).toString()
-  const res = await fetch(`${API_URL}/evidence/export-manifest${query ? `?${query}` : ''}`)
+  const res = await fetchHeavyRead(`${API_URL}/evidence/export-manifest${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence export manifest'))
   return res.json()
 }
@@ -3755,7 +3756,7 @@ export async function getHypothesisSituationReport(
 
 export async function getRefuterWorkSummary(limit: number = 5, findingWindow: number = 200): Promise<RefuterWorkSummary> {
   const params = new URLSearchParams({ limit: String(limit), finding_window: String(findingWindow) })
-  const res = await fetch(`${API_URL}/arsenal/refuter-reviews/summary?${params.toString()}`)
+  const res = await fetchHeavyRead(`${API_URL}/arsenal/refuter-reviews/summary?${params.toString()}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load refuter review summary'))
   return res.json()
 }
@@ -4053,7 +4054,7 @@ export async function getExposureAssets(params?: {
   if (params?.limit) searchParams.set('limit', String(params.limit))
   if (params?.offset) searchParams.set('offset', String(params.offset))
   const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`)
+  const res = await fetchHeavyRead(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure assets'))
   return res.json()
 }
@@ -4133,7 +4134,7 @@ export async function getExposureChanges(params?: {
   if (params?.since) searchParams.set('since', params.since)
   if (params?.days) searchParams.set('days', String(params.days))
   const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/exposure/changes${query ? `?${query}` : ''}`)
+  const res = await fetchHeavyRead(`${API_URL}/exposure/changes${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure changes'))
   return res.json()
 }
@@ -5537,14 +5538,14 @@ export async function getTargetsGrouped(params?: {
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
 
-  const res = await fetch(`${API_URL}/targets/grouped?${searchParams}`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/grouped?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch grouped targets')
   return res.json()
 }
 
 // Continuous ASM — persistent attack-surface inventory (docs/dast-asm-architecture.md)
 export async function getAsmCoverage(targetId: string): Promise<AsmCoverage> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/asm/coverage`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/coverage`)
   if (!res.ok) throw new Error('Failed to fetch ASM coverage')
   return res.json()
 }
@@ -5562,7 +5563,7 @@ export async function getAsmEndpoints(
   if (params?.limit) searchParams.set('limit', params.limit.toString())
   if (params?.offset) searchParams.set('offset', params.offset.toString())
 
-  const res = await fetch(`${API_URL}/targets/${targetId}/asm/endpoints?${searchParams}`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/endpoints?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch ASM endpoints')
   return res.json()
 }
@@ -5656,7 +5657,7 @@ export interface AsmPolicy {
 }
 
 export async function getAsmPolicy(targetId: string): Promise<AsmPolicy> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/asm/policy`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/policy`)
   if (!res.ok) throw new Error('Failed to fetch ASM policy')
   return res.json()
 }
@@ -5684,13 +5685,13 @@ export async function getAsmDiff(
   const searchParams = new URLSearchParams()
   if (params?.days) searchParams.set('days', params.days.toString())
   if (params?.limit) searchParams.set('limit', params.limit.toString())
-  const res = await fetch(`${API_URL}/targets/${targetId}/asm/diff?${searchParams}`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/diff?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch ASM diff')
   return res.json()
 }
 
 export async function getAsmGaps(targetId: string): Promise<AsmGaps> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/asm/gaps`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/gaps`)
   if (!res.ok) throw new Error('Failed to fetch ASM gaps')
   return res.json()
 }
@@ -5701,7 +5702,7 @@ export async function getAsmActivity(
 ): Promise<AsmActivityResponse> {
   const searchParams = new URLSearchParams()
   if (params?.limit) searchParams.set('limit', params.limit.toString())
-  const res = await fetch(`${API_URL}/targets/${targetId}/asm/activity?${searchParams}`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/activity?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch ASM activity')
   return res.json()
 }
@@ -5874,7 +5875,7 @@ export async function getFindings(params?: {
   if (params?.include_candidates === true) searchParams.set('include_candidates', 'true')
   if (params?.include_details === true) searchParams.set('include_details', 'true')
 
-  const res = await fetch(`${API_URL}/findings?${searchParams}`)
+  const res = await fetchHeavyRead(`${API_URL}/findings?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch findings')
   return res.json()
 }
@@ -5973,7 +5974,7 @@ export interface GraphHypothesisGenerationResult {
 // First-class application graph for a target: routes, objects, and
 // producer/consumer/auth-boundary edges persisted from scans.
 export async function getApplicationGraph(targetId: string): Promise<ApplicationGraph> {
-  const res = await fetch(`${API_URL}/targets/${targetId}/graph`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/graph`)
   if (!res.ok) throw new Error('Failed to fetch application graph')
   return res.json()
 }
@@ -6570,7 +6571,7 @@ Promise<{ would_delete?: number; deleted?: number; dry_run: boolean }> {
 
 // Queue
 export async function getQueueStats(): Promise<QueueStats> {
-  const res = await fetch(`${API_URL}/queue/stats`)
+  const res = await fetchHeavyRead(`${API_URL}/queue/stats`)
   if (!res.ok) throw new Error('Failed to fetch queue stats')
   return res.json()
 }
