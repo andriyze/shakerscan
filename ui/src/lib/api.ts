@@ -13,6 +13,7 @@ import type {
   ModelIntakeScanRequest as GeneratedModelIntakeScanRequest,
 } from './publicApi.generated'
 import { API_URL, getApiErrorMessage } from './apiConfig'
+import { fetchHeavyRead } from './busyRetry.mjs'
 
 export { API_URL, getApiUrl } from './apiConfig'
 
@@ -3158,7 +3159,7 @@ export interface ExposureGraph {
 
 // Dashboard
 export async function getDashboard(): Promise<DashboardResponse> {
-  const res = await fetch(`${API_URL}/dashboard`)
+  const res = await fetchHeavyRead(`${API_URL}/dashboard`)
   if (!res.ok) throw new Error('Failed to fetch dashboard')
   return res.json()
 }
@@ -3374,7 +3375,7 @@ export async function getEvidenceExportManifest(params?: {
   limit?: number
 }): Promise<EvidenceExportManifest> {
   const query = evidenceQuery(params).toString()
-  const res = await fetch(`${API_URL}/evidence/export-manifest${query ? `?${query}` : ''}`)
+  const res = await fetchHeavyRead(`${API_URL}/evidence/export-manifest${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence export manifest'))
   return res.json()
 }
@@ -4053,7 +4054,7 @@ export async function getExposureAssets(params?: {
   if (params?.limit) searchParams.set('limit', String(params.limit))
   if (params?.offset) searchParams.set('offset', String(params.offset))
   const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`)
+  const res = await fetchHeavyRead(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure assets'))
   return res.json()
 }
@@ -4133,7 +4134,7 @@ export async function getExposureChanges(params?: {
   if (params?.since) searchParams.set('since', params.since)
   if (params?.days) searchParams.set('days', String(params.days))
   const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/exposure/changes${query ? `?${query}` : ''}`)
+  const res = await fetchHeavyRead(`${API_URL}/exposure/changes${query ? `?${query}` : ''}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure changes'))
   return res.json()
 }
@@ -5537,7 +5538,7 @@ export async function getTargetsGrouped(params?: {
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
   if (params?.sort_order) searchParams.set('sort_order', params.sort_order)
 
-  const res = await fetch(`${API_URL}/targets/grouped?${searchParams}`)
+  const res = await fetchHeavyRead(`${API_URL}/targets/grouped?${searchParams}`)
   if (!res.ok) throw new Error('Failed to fetch grouped targets')
   return res.json()
 }

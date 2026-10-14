@@ -1,6 +1,7 @@
 export const BUSY_RETRY_ATTEMPTS: number
 export const BUSY_RETRY_DEFAULT_SECONDS: number
 export const BUSY_RETRY_MAX_SECONDS: number
+export const BUSY_STATUSES: ReadonlySet<number>
 export function retryAfterSeconds(response: { headers?: { get(name: string): string | null } } | null | undefined): number
 export function busyNotice(seconds: number | null): string | null
 export function fetchRetryingBusy(
@@ -13,3 +14,4 @@ export function fetchRetryingBusy(
     fetchImpl?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
   },
 ): Promise<Response>
+export function fetchHeavyRead(input: RequestInfo | URL, init?: RequestInit): Promise<Response>

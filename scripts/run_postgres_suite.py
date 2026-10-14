@@ -65,6 +65,7 @@ POSTGRES_DATABASES = {
     "HUNT_TEST_POSTGRES_DSN": "hunt_records",
     "LIFECYCLE_TEST_DATABASE_URL": "shakerscan_lifecycle_test",
     "LIST_CONTRACT_TEST_DATABASE_URL": "shakerscan_list_contract_test",
+    "REQUEST_GUARDS_TEST_DATABASE_URL": "shakerscan_request_guards_test",
     "SERVICE_INTELLIGENCE_TEST_DATABASE_URL": "shakerscan_service_intelligence_test",
     "SHAKERSCAN_TEST_HUNT_LEDGER_DSN": "shakerscan_hunt_ledger_test",
     "SHAKERSCAN_TEST_PUBLIC_RETRY_DSN": "shakerscan_public_retry_test",
