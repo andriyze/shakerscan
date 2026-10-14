@@ -83,6 +83,43 @@ def test_list_results_tolerates_null_and_mixed_legacy_timestamps(tmp_path, monke
     assert response["results"][0]["folder"] == "current.test"
 
 
+def test_list_results_parses_only_new_or_changed_files_and_a_bounded_number_per_call(tmp_path, monkeypatch):
+    results = tmp_path / "results"
+    results.mkdir()
+    for index in range(5):
+        (results / f"t{index}.test").mkdir()
+        (results / f"t{index}.test" / "latest.json").write_text(json.dumps({
+            "input": {"target": f"https://t{index}.test"}, "timestamp_utc": f"2026-01-0{index + 1}"}))
+    monkeypatch.setattr(api_module, "RESULTS_DIR", results)
+    monkeypatch.setattr(ops_router_module, "_RESULT_SUMMARIES", {})
+    monkeypatch.setattr(ops_router_module, "RESULTS_PARSE_BUDGET", 3)
+    parsed = []
+    original = ops_router_module._result_summary
+    monkeypatch.setattr(ops_router_module, "_result_summary",
+                        lambda folder, path: parsed.append(folder) or original(folder, path))
+
+    first = asyncio.run(ops_router_module.list_results(limit=50))
+    assert len(parsed) == 3 and first["count"] == 3  # bounded work per listing
+    second = asyncio.run(ops_router_module.list_results(limit=50))
+    assert len(parsed) == 5 and second["count"] == 5  # the rest, never the already-parsed ones
+    asyncio.run(ops_router_module.list_results(limit=50))
+    assert len(parsed) == 5
+    (results / "t0.test" / "latest.json").write_text(json.dumps({"timestamp_utc": "2026-02-01"}))
+    os.utime(results / "t0.test" / "latest.json", (2_000_000_000, 2_000_000_000))
+    latest = asyncio.run(ops_router_module.list_results(limit=1))
+    assert parsed[-1] == "t0.test" and latest["results"][0]["folder"] == "t0.test"
+
+
+def test_model_intake_review_controller_does_not_start_when_model_intake_is_off(monkeypatch, capsys):
+    class NoPool:
+        def acquire(self):
+            raise AssertionError("a disabled module's controller must not poll the database")
+
+    monkeypatch.setattr(api_module, "model_intake_enabled", lambda: False)
+    asyncio.run(asyncio.wait_for(api_module.model_intake_automatic_review_runner(NoPool()), timeout=2))
+    assert "Model Intake is off" in capsys.readouterr().out
+
+
 def test_model_intake_platform_detection_requires_exact_provider_hosts():
     assert mi_router_module._detect_model_intake_platform("https://acct.blob.core.windows.net/c/m") == "azure"
     assert mi_router_module._detect_model_intake_platform("https://acct.blob.core.windows.net.evil.test/c/m") == "http"
@@ -671,8 +708,12 @@ def test_stale_scan_stage_checkpoint_preserves_failure_truth(monkeypatch, tmp_pa
     }
 
     class _Redis:
-        def keys(self, _pattern):
-            return []
+        # No ``keys``: the stale check must never walk the keyspace with blocking KEYS.
+        def hgetall(self, _key):
+            return {}
+
+        def scan(self, cursor=0, match=None, count=None):
+            return 0, []
 
         def lrange(self, *_args):
             return []
@@ -742,6 +783,147 @@ def test_stale_scan_stage_checkpoint_preserves_failure_truth(monkeypatch, tmp_pa
     assert persisted["scan_metadata"]["degraded"] is True
     assert persisted["scan_metadata"]["durable_stage_checkpoint_recovered"] is True
     assert persisted["scan_metadata"]["terminated_at_phase"] == "discover_surface"
+
+
+class _NoKeysRedis:
+    """Labelled double: job hashes plus SCAN pages; ``keys`` fails the test (KEYS blocks Redis)."""
+
+    def __init__(self, hashes, *, endless_scan=False):
+        self.hashes = {key: dict(value) for key, value in hashes.items()}
+        self.endless_scan = endless_scan
+        self.scan_calls = 0
+
+    def keys(self, _pattern):
+        raise AssertionError("KEYS job:* must never run")
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key) or {})
+
+    def hget(self, key, field):
+        return (self.hashes.get(key) or {}).get(field)
+
+    def hset(self, key, field=None, value=None, mapping=None):
+        self.hashes.setdefault(key, {})
+        if mapping:
+            self.hashes[key].update(mapping)
+        else:
+            self.hashes[key][field] = value
+
+    def expire(self, *_args):
+        return True
+
+    def set(self, *_args, **_kwargs):
+        return True
+
+    def scan(self, cursor=0, match=None, count=None):
+        self.scan_calls += 1
+        if self.endless_scan:  # a keyspace far larger than one tick's walk
+            return int(cursor) + 1, [f"job:unrelated-{cursor}"]
+        return 0, list(self.hashes)
+
+    def lrange(self, *_args):
+        return []
+
+
+def _running_scan_conn(scan_id, *, started_minutes_ago, job_id="job-1"):
+    class Conn:
+        def __init__(self):
+            self.updates = []
+            self.running_queries = []
+
+        async def fetch(self, query, *args):
+            if "WHERE status = 'running'" in query:
+                self.running_queries.append((query, args))
+                return [{
+                    "id": scan_id, "job_id": job_id, "scan_type": "balanced",
+                    "started_at": api_module.utc_now() - timedelta(minutes=started_minutes_ago),
+                    "target_id": None, "current_phase": "discover_surface", "progress": 35,
+                    "options": {}, "scan_role": "standalone", "parent_scan_id": None,
+                }]
+            return []
+
+        async def fetchrow(self, query, *args):
+            return None
+
+        async def execute(self, query, *args):
+            self.updates.append(query)
+            return "UPDATE 1"
+
+    return Conn()
+
+
+def test_stale_check_reads_the_scan_job_hash_directly_and_is_bounded(monkeypatch, tmp_path):
+    scan_id = uuid.UUID("21212121-2121-4121-8121-212121212121")
+    conn = _running_scan_conn(scan_id, started_minutes_ago=20)
+    redis = _NoKeysRedis({"job:job-1": {"scan_id": str(scan_id), "heartbeat": api_module.utc_now_iso()}})
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(api_module, "RESULTS_DIR", tmp_path)
+
+    asyncio.run(api_module.cleanup_stale_scans(_FakePool(conn)))
+
+    assert conn.updates == []  # a fresh heartbeat: still running
+    assert redis.scan_calls == 0  # found by its recorded job id, no keyspace walk
+    query, args = conn.running_queries[0]
+    assert "LIMIT $2" in query and args[1] == api_module.scan_job_lookup.STALE_CHECK_BATCH_SIZE
+
+
+def test_stale_check_never_reaps_a_scan_whose_hash_a_bounded_walk_could_not_rule_out(monkeypatch, tmp_path):
+    scan_id = uuid.UUID("31313131-3131-4131-8131-313131313131")
+    conn = _running_scan_conn(scan_id, started_minutes_ago=20, job_id=None)
+    redis = _NoKeysRedis({}, endless_scan=True)
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(api_module, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(api_module, "_STALE_JOB_HASH_FALLBACK",
+                        api_module.scan_job_lookup.JobHashFallback(keys_per_tick=5))
+    monkeypatch.setattr(api_module, "_STALE_SCAN_CURSOR", {})
+
+    asyncio.run(api_module.cleanup_stale_scans(_FakePool(conn)))
+
+    assert not any("UPDATE scans" in query for query in conn.updates)
+    assert 1 <= redis.scan_calls <= 5  # bounded per tick
+
+
+def test_stale_check_finds_a_legacy_hash_by_its_scan_id_through_the_bounded_walk(monkeypatch, tmp_path):
+    scan_id = uuid.UUID("41414141-4141-4141-8141-414141414141")
+    conn = _running_scan_conn(scan_id, started_minutes_ago=20)
+    redis = _NoKeysRedis({"job:legacy-key": {"scan_id": str(scan_id), "heartbeat": api_module.utc_now_iso()}})
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(api_module, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(api_module, "_STALE_JOB_HASH_FALLBACK", api_module.scan_job_lookup.JobHashFallback())
+
+    asyncio.run(api_module.cleanup_stale_scans(_FakePool(conn)))
+
+    assert conn.updates == []  # its heartbeat was found under the other key
+
+
+def test_cancel_marks_the_hash_naming_the_scan_without_keys(monkeypatch):
+    scan_id = uuid.UUID("51515151-5151-4151-8151-515151515151")
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            return {"id": scan_id, "status": "running", "target_url": "https://example.test",
+                    "job_id": "job-1", "scan_role": "standalone", "parent_scan_id": None, "run_kind": None}
+
+        async def execute(self, query, *args):
+            return "UPDATE 1"
+
+        async def fetch(self, query, *args):
+            return []
+
+    async def settle(*_args, **_kwargs):
+        return None
+
+    redis = _NoKeysRedis({"job:job-1": {"status": "running"},
+                          "job:older": {"scan_id": str(scan_id), "status": "running"}})
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
+    monkeypatch.setattr(api_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(api_module.asm_inventory, "settle_campaign_after_scan", settle)
+
+    result = asyncio.run(api_module.cancel_scan(str(scan_id)))
+
+    assert result["status"] == "cancelled"
+    assert redis.hashes["job:job-1"]["status"] == "cancelled"
+    assert redis.hashes["job:older"]["status"] == "cancelled"
 
 
 def test_expired_auth_session_cleanup_uses_bounded_store_operation(monkeypatch):
@@ -22306,53 +22488,90 @@ def test_broker_early_failure_reconciles_terminal_shard_parent(monkeypatch):
     assert reconciled == [(conn, str(parent_id), redis_client, api_module.QUEUE_NAME)]
 
 
-def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monkeypatch):
-    class Conn:
-        async def fetch(self, _query, *_args):
-            return [
-                {"job_id": "parent-job", "status": "running", "scan_role": "parent"},
-                {"job_id": "shard-job", "status": "running", "scan_role": "shard"},
-                {"job_id": "asm-job", "status": "running", "scan_role": "asm_batch"},
-                {"job_id": "planning-job", "status": "pending", "scan_role": "parent"},
-            ]
+class _BoundedQueueRedis:
+    """Labelled double of the Redis surface the bounded queue reads use. It has no ``keys`` and
+    no ``scan_iter``: a blocking keyspace walk fails the test; writes are recorded."""
 
-    class Redis:
-        def __init__(self):
-            self.jobs = {
-                "job:parent-job": {"status": "running"},
-                "job:shard-job": {"status": "running"},
-                "job:asm-job": {"status": "running"},
-                "job:planning-job": {"status": "running"},
-                "job:stale-job": {"status": "running"},
-            }
+    def __init__(self, jobs):
+        self.jobs = {key: dict(value) for key, value in jobs.items()}
+        self.writes = []
 
-        def get(self, _key):
-            return None
+    def get(self, _key):
+        return None
 
-        def set(self, *_args, **_kwargs):
-            return True
+    def set(self, key, *_args, **_kwargs):
+        self.writes.append(("set", key))
+        return True
 
-        def scan_iter(self, pattern):
-            return list(self.jobs) if pattern == "job:*" else []
+    def scan(self, cursor=0, match=None, count=None):
+        prefix = (match or "*").rstrip("*")
+        return 0, [key for key in self.jobs if key.startswith(prefix)]
 
-        def hgetall(self, key):
-            return dict(self.jobs.get(key) or {})
+    def hmget(self, key, fields):
+        data = self.jobs.get(key) or {}
+        return [data.get(field) for field in fields]
 
-        def hset(self, key, field=None, value=None, mapping=None):
-            self.jobs.setdefault(key, {})
-            if mapping:
-                self.jobs[key].update(mapping)
-            elif field is not None:
-                self.jobs[key][field] = value
+    def hgetall(self, key):
+        return dict(self.jobs.get(key) or {})
 
-        def expire(self, *_args):
-            return True
+    def hset(self, key, field=None, value=None, mapping=None):
+        self.writes.append(("hset", key))
+        self.jobs.setdefault(key, {})
+        if mapping:
+            self.jobs[key].update(mapping)
+        elif field is not None:
+            self.jobs[key][field] = value
 
-    redis = Redis()
-    monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
-    monkeypatch.setattr(api_module, "get_redis", lambda: redis)
-    monkeypatch.setattr(api_module, "queue_payloads", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(api_module, "pending_depth", lambda *_args, **_kwargs: 0)
+    def expire(self, key, *_args):
+        self.writes.append(("expire", key))
+        return True
+
+
+def _queue_ids(job_ids=(), unleased=(), complete=True):
+    from job_queue import QueueJobIds
+    return QueueJobIds(job_ids=set(job_ids), unleased_job_ids=set(unleased), complete=complete)
+
+
+class _QueueStatsConn:
+    """Answers the three bounded queries /queue/stats and the job-hash repair make."""
+
+    def __init__(self, active):
+        self.active = active  # job_id -> (status, scan_role)
+        self.queries = []
+
+    async def fetch(self, query, *args):
+        self.queries.append(query)
+        if "GROUP BY status, scan_role" in query:
+            counts = Counter(self.active.values())
+            return [{"status": status, "scan_role": role, "n": n} for (status, role), n in counts.items()]
+        if "job_id = ANY" in query:
+            return [{"job_id": job_id, "status": self.active[job_id][0]}
+                    for job_id in args[0] if job_id in self.active]
+        if "LIMIT $1" in query:
+            return [{"job_id": job_id} for job_id, (status, _role) in self.active.items()
+                    if status in {"pending", "queued"}][:args[0]]
+        raise AssertionError(query)
+
+
+def test_queue_stats_counts_logical_scans_and_writes_nothing_but_its_cache(monkeypatch):
+    """2.11: the GET reads bounded slices and never repairs hashes (the stale-check leader does)."""
+    conn = _QueueStatsConn({
+        "parent-job": ("running", "parent"),
+        "shard-job": ("running", "shard"),
+        "asm-job": ("running", "asm_batch"),
+        "planning-job": ("pending", "parent"),
+    })
+    redis = _BoundedQueueRedis({
+        "job:parent-job": {"status": "running"},
+        "job:shard-job": {"status": "running"},
+        "job:asm-job": {"status": "running"},
+        "job:planning-job": {"status": "running"},
+        "job:stale-job": {"status": "running"},
+    })
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+    monkeypatch.setattr(ops_router_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(ops_router_module, "scan_queue_job_ids", lambda *_a, **_k: _queue_ids())
+    monkeypatch.setattr(ops_router_module, "pending_depth", lambda *_args, **_kwargs: 0)
 
     result = asyncio.run(ops_router_module.queue_stats())
 
@@ -22360,58 +22579,59 @@ def test_queue_stats_counts_logical_scans_and_reaps_orphaned_running_hashes(monk
     assert result["work_running"] == 4
     assert result["pending"] == 1
     assert result["queue_consistency"]["stale_running_job_hashes"] == 1
-    assert redis.jobs["job:planning-job"]["status"] == "running"
+    assert result["queue_consistency"]["complete"] is True
+    assert redis.writes == [("set", "queue:stats_cache")]  # read-only apart from the cache
+    assert redis.jobs["job:stale-job"]["status"] == "running"
+    assert all("job_id IS NOT NULL" not in q or "GROUP BY" in q or "LIMIT" in q for q in conn.queries)
+
+
+def test_job_hash_repair_reaps_orphaned_running_hashes_as_the_get_used_to(monkeypatch):
+    conn = _QueueStatsConn({
+        "parent-job": ("running", "parent"),
+        "planning-job": ("pending", "parent"),
+    })
+    redis = _BoundedQueueRedis({
+        "job:parent-job": {"status": "running"},
+        "job:planning-job": {"status": "running"},
+        "job:stale-job": {"status": "running"},
+        "job:orphan-queued": {"status": "queued"},
+        "retest_job:slow": {"status": "running", "started_at": "2000-01-01T00:00:00"},
+    })
+
+    repaired = asyncio.run(ops_router_module.queue_health.reconcile_job_hashes(
+        _FakePool(conn), redis, state={}, now=api_module.utc_now(), queue_name="scan_jobs",
+        scan_queue_job_ids=lambda *_a, **_k: _queue_ids(),
+        heartbeat_timeout_minutes=10, retest_timeout_minutes=30))
+
+    assert repaired == 3
     assert redis.jobs["job:stale-job"]["status"] == "orphaned"
+    assert redis.jobs["job:orphan-queued"]["status"] == "orphaned"
+    assert redis.jobs["retest_job:slow"]["status"] == "failed"
+    assert redis.jobs["job:planning-job"]["status"] == "running"
+    assert redis.jobs["job:parent-job"]["status"] == "running"
+
+
+def test_job_hash_repair_never_orphans_a_queued_hash_a_bounded_read_could_not_rule_out(monkeypatch):
+    conn = _QueueStatsConn({"waiting-job": ("pending", "standalone")})
+    redis = _BoundedQueueRedis({"job:waiting-job": {"status": "queued"}})
+
+    repaired = asyncio.run(ops_router_module.queue_health.reconcile_job_hashes(
+        _FakePool(conn), redis, state={}, now=api_module.utc_now(), queue_name="scan_jobs",
+        scan_queue_job_ids=lambda *_a, **_k: _queue_ids(complete=False),
+        heartbeat_timeout_minutes=10, retest_timeout_minutes=30))
+
+    assert repaired == 0
+    assert redis.jobs["job:waiting-job"]["status"] == "queued"
 
 
 def test_queue_stats_treats_worker_leased_pending_handoff_as_consistent(monkeypatch):
-    class Conn:
-        async def fetch(self, _query, *_args):
-            return [{
-                "job_id": "leased-planning-job",
-                "status": "pending",
-                "scan_role": "parent",
-            }]
-
-    class Redis:
-        def __init__(self):
-            self.jobs = {
-                "job:leased-planning-job": {"status": "queued"},
-            }
-
-        def get(self, _key):
-            return None
-
-        def set(self, *_args, **_kwargs):
-            return True
-
-        def scan_iter(self, pattern):
-            return list(self.jobs) if pattern == "job:*" else []
-
-        def hgetall(self, key):
-            return dict(self.jobs.get(key) or {})
-
-        def hset(self, key, field=None, value=None, mapping=None):
-            self.jobs.setdefault(key, {})
-            if mapping:
-                self.jobs[key].update(mapping)
-            elif field is not None:
-                self.jobs[key][field] = value
-
-        def expire(self, *_args):
-            return True
-
-    redis = Redis()
-    payload = json.dumps({"job_id": "leased-planning-job"})
-    monkeypatch.setattr(api_module, "db_pool", _FakePool(Conn()))
+    conn = _QueueStatsConn({"leased-planning-job": ("pending", "parent")})
+    redis = _BoundedQueueRedis({"job:leased-planning-job": {"status": "queued"}})
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
     monkeypatch.setattr(ops_router_module, "get_redis", lambda: redis)
-    monkeypatch.setattr(
-        ops_router_module,
-        "queue_payloads",
-        lambda *_args, include_leased=True, **_kwargs: (
-            [payload] if include_leased else []
-        ),
-    )
+    # In the queue, leased by a worker (so not among the unleased entries).
+    monkeypatch.setattr(ops_router_module, "scan_queue_job_ids",
+                        lambda *_a, **_k: _queue_ids(job_ids={"leased-planning-job"}))
     monkeypatch.setattr(ops_router_module, "pending_depth", lambda *_args, **_kwargs: 0)
 
     result = asyncio.run(ops_router_module.queue_stats())
@@ -22423,18 +22643,37 @@ def test_queue_stats_treats_worker_leased_pending_handoff_as_consistent(monkeypa
     assert redis.jobs["job:leased-planning-job"] == {"status": "queued"}
 
 
-@pytest.mark.parametrize("visibility", ["missing", "queued", "running", "unavailable", "claimed"])
+def test_queue_stats_says_when_a_read_bound_was_reached(monkeypatch):
+    conn = _QueueStatsConn({"a": ("pending", "standalone")})
+    redis = _BoundedQueueRedis({"job:a": {"status": "queued"}})
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+    monkeypatch.setattr(ops_router_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(ops_router_module, "scan_queue_job_ids", lambda *_a, **_k: _queue_ids(complete=False))
+    monkeypatch.setattr(ops_router_module, "pending_depth", lambda *_args, **_kwargs: 0)
+
+    consistency = asyncio.run(ops_router_module.queue_stats())["queue_consistency"]
+
+    assert consistency["complete"] is False
+    assert consistency["reconciled"] is None  # unknown, not "fine" and not "broken"
+    assert consistency["stale_queued_job_hashes"] == 0
+
+
+@pytest.mark.parametrize("visibility", ["missing", "queued", "running", "unavailable", "claimed", "beyond_bound"])
 def test_orphaned_pending_scan_handoff_retains_uncertainty(monkeypatch, visibility):
     scan_id = uuid.UUID("56565656-5656-4656-8656-565656565656")
 
     class Conn:
         def __init__(self):
             self.updated = []
+            self.limits = []
 
-        async def fetch(self, query, cutoff):
-            assert "created_at < $1" in query
+        async def fetch(self, query, cutoff, after_at, after_id, limit):
+            assert "created_at < $1" in query and "LIMIT $4" in query
+            assert "scan_job_payload" not in query and "s.options" not in query  # summary columns only
             assert cutoff < api_module.utc_now()
-            return [{"id": scan_id, "job_id": "lost-job", "parent_scan_id": None}]
+            self.limits.append(limit)
+            return [{"id": scan_id, "job_id": "lost-job", "parent_scan_id": None,
+                     "created_at": api_module.utc_now(), "never_started": False}]
 
         async def fetchrow(self, query, row_id):
             assert "queue_handoff_unknown" in query
@@ -22465,19 +22704,59 @@ def test_orphaned_pending_scan_handoff_retains_uncertainty(monkeypatch, visibili
     conn = Conn()
     redis = Redis()
     monkeypatch.setattr(api_module, "get_redis", lambda: redis)
-    def queue_snapshot(*args, **kwargs):
-        assert kwargs["include_leased"] is True
+
+    def membership(_redis, _queue, wanted=None, **_kwargs):
         if visibility == "unavailable":
             raise TimeoutError("queue visibility unavailable")
-        return [json.dumps({"job_id": "lost-job"})] if visibility == "queued" else []
+        if visibility == "queued":
+            return _queue_ids(job_ids={"lost-job"})
+        return _queue_ids(complete=visibility != "beyond_bound")
 
-    monkeypatch.setattr(api_module, "queue_payloads", queue_snapshot)
+    monkeypatch.setattr(api_module, "scan_queue_job_ids", membership)
 
     repaired = asyncio.run(api_module.cleanup_orphaned_scan_queue_handoffs(_FakePool(conn)))
 
     assert repaired == int(visibility == "missing")
     assert conn.updated == ([scan_id] if visibility == "missing" else [])
+    assert conn.limits == [scan_queue_recovery_module().LOST_HANDOFF_SWEEP_LIMIT]
     assert redis.jobs == {}
+
+
+def scan_queue_recovery_module():
+    return api_module.scan_queue_recovery
+
+
+def test_lost_handoff_sweep_resumes_after_its_bounded_batch(monkeypatch):
+    """A backlog larger than one sweep's LIMIT is covered over several sweeps, oldest first."""
+    rows = [{"id": uuid.UUID(int=index + 1), "job_id": f"job-{index}", "parent_scan_id": None,
+             "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=index),
+             "never_started": False} for index in range(5)]
+    seen_cursors = []
+
+    class Conn:
+        async def fetch(self, query, cutoff, after_at, after_id, limit):
+            seen_cursors.append((after_at, after_id))
+            start = 0 if after_at is None else next(
+                i + 1 for i, row in enumerate(rows) if (row["created_at"], row["id"]) == (after_at, after_id))
+            return rows[start:start + limit]
+
+        async def fetchrow(self, query, row_id):
+            return None
+
+    class Redis:
+        def hgetall(self, _key):
+            return {}
+
+    state = {}
+    recovery = api_module.scan_queue_recovery
+    for _sweep in range(3):
+        asyncio.run(recovery.sweep_lost_queue_handoffs(
+            _FakePool(Conn()), Redis(), now=api_module.utc_now(), decode_hash=lambda raw: raw or {},
+            resend=None, queue_membership=lambda _r, _wanted: _queue_ids(), state=state, limit=2))
+
+    assert seen_cursors[0] == (None, None)
+    assert seen_cursors[1] == (rows[1]["created_at"], rows[1]["id"])
+    assert seen_cursors[2] == (rows[3]["created_at"], rows[3]["id"])
 
 
 def test_model_intake_report_summary_preserves_only_safe_file_identity():
@@ -22901,11 +23180,10 @@ def test_a_never_started_scan_lost_from_the_queue_is_queued_again(monkeypatch, n
     enqueued, updates = [], []
 
     class Conn:
-        async def fetch(self, query, cutoff):
+        async def fetch(self, query, cutoff, *_cursor_and_limit):
             assert "never_started" in query and "a.status <> 'planned'" in query
-            return [{"id": scan_id, "job_id": "lost-job", "parent_scan_id": None, "scan_role": "standalone",
-                     "scan_generation": "v2", "options": {"queue_loss_requeues": attempts},
-                     "scan_job_payload": {"fixture": True}, "never_started": never_started}]
+            return [{"id": scan_id, "job_id": "lost-job", "parent_scan_id": None,
+                     "created_at": api_module.utc_now(), "never_started": never_started}]
 
         async def fetchval(self, query, row_id, count):
             assert "started_at IS NULL AND worker_id IS NULL" in query
@@ -22913,6 +23191,11 @@ def test_a_never_started_scan_lost_from_the_queue_is_queued_again(monkeypatch, n
             return row_id
 
         async def fetchrow(self, query, row_id):
+            if "scan_job_payload" in query:  # the persisted job is loaded only for a resend
+                assert never_started
+                return {"id": scan_id, "job_id": "lost-job", "parent_scan_id": None, "scan_role": "standalone",
+                        "scan_generation": "v2", "options": {"queue_loss_requeues": attempts},
+                        "scan_job_payload": {"fixture": True}}
             updates.append(("flag", None))
             return {"id": row_id, "parent_scan_id": None}
 
@@ -22935,7 +23218,7 @@ def test_a_never_started_scan_lost_from_the_queue_is_queued_again(monkeypatch, n
 
     redis = Redis()
     monkeypatch.setattr(api_module, "get_redis", lambda: redis)
-    monkeypatch.setattr(api_module, "queue_payloads", lambda *a, **k: [])
+    monkeypatch.setattr(api_module, "scan_queue_job_ids", lambda *a, **k: _queue_ids())
     monkeypatch.setattr(api_module.CanonicalScanJob, "from_payload", classmethod(lambda cls, value: Job()))
     monkeypatch.setattr(api_module, "enqueue_job", lambda r, queue, payload: enqueued.append(payload))
 

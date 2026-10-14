@@ -1909,7 +1909,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 411 | Python sources + Compose manifests |
+| Runtime environment keys | 412 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 132 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -3106,6 +3106,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS` | `api/fleet_routes/router.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_PROBE_INTERVAL_MS` | `api/job_queue.py` |
 | `SHAKERSCAN_QUEUE_ROUTE_MAX` | `api/job_queue.py` |
+| `SHAKERSCAN_QUEUE_SCAN_MAX_ENTRIES` | `api/job_queue.py` |
 | `SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_RELEASE_MANIFEST` | `scanner/release_identity.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_DOMAIN` | `scanner/scanner.py` |

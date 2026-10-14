@@ -30,21 +30,29 @@ async def initialize(pool):
         await conn.execute(SCHEMA)
 
 
-async def fetch_dispatchable(pool, *, now):
+DISPATCHABLE_PER_TICK = 200
+
+
+async def fetch_dispatchable(pool, *, now, limit=DISPATCHABLE_PER_TICK):
     """Include unresolved active intent even if its next cadence was edited.
 
     Paused schedules are not dispatched: a retry may still create work at the
     gateway. Their pending receipts require a future read-only reconciliation path.
     """
+    # Two index-friendly halves (due by next_run_at; holding a pending occurrence) instead of one
+    # OR that scanned every schedule, most overdue first, bounded per tick.
     async with pool.acquire() as conn:
         return list(await conn.fetch(
             """SELECT s.*, t.url AS target_url FROM schedules s
             JOIN targets t ON t.id=s.target_id
-            WHERE s.is_active=true AND t.is_active=true AND (s.next_run_at <= $1 OR EXISTS (
-                SELECT 1 FROM managed_schedule_occurrences o
-                WHERE o.schedule_id=s.id AND o.state='pending'
-            ))""",
-            now,
+            WHERE s.is_active=true AND t.is_active=true AND s.id IN (
+                SELECT id FROM schedules WHERE is_active=true AND next_run_at <= $1
+                UNION
+                SELECT o.schedule_id FROM managed_schedule_occurrences o WHERE o.state='pending'
+            )
+            ORDER BY s.next_run_at NULLS FIRST, s.id
+            LIMIT $2""",
+            now, max(1, int(limit)),
         ))
 
 

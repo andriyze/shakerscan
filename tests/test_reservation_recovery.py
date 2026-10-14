@@ -207,7 +207,8 @@ def test_worker_watchdog_wires_transactional_reservation_recovery():
     helper = source[start:end]
     assert "async with conn.transaction()" in helper
     assert "await recover_stale_reservations" in helper
-    assert "await repair_terminal_reservation_actions" in helper
+    assert "await repair_settled_reservation_actions" in helper
+    assert "loop_leader.lead(db_pool" in helper  # one worker sweeps, not every worker
     assert "BUDGET_RESERVATION_SWEEP_BATCH_SIZE" in helper
     main = source[source.index("async def async_main"):]
     assert "await sweep_stale_budget_reservations()" in main

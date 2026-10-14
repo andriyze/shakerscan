@@ -64,6 +64,7 @@ POSTGRES_DATABASES = {
     "FINDING_VERDICT_TEST_DATABASE_URL": "shakerscan_verdict_test",
     "HUNT_TEST_POSTGRES_DSN": "hunt_records",
     "LIFECYCLE_TEST_DATABASE_URL": "shakerscan_lifecycle_test",
+    "LOOPS_TEST_DATABASE_URL": "shakerscan_loops_test",
     "SERVICE_INTELLIGENCE_TEST_DATABASE_URL": "shakerscan_service_intelligence_test",
     "SHAKERSCAN_TEST_HUNT_LEDGER_DSN": "shakerscan_hunt_ledger_test",
     "SHAKERSCAN_TEST_PUBLIC_RETRY_DSN": "shakerscan_public_retry_test",
@@ -72,6 +73,7 @@ POSTGRES_DATABASES = {
     "TARGET_ASSET_TEST_DATABASE_URL": "target_assets_test",
 }
 REDIS_DATABASES = {
+    "LOOPS_TEST_REDIS_URL": 13,
     "SHAKERSCAN_TEST_REDIS_URL": 14,
     "SSH_TEST_REDIS_URL": 15,
 }

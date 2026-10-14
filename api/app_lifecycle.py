@@ -14,8 +14,10 @@ from typing import Any, Awaitable, Callable
 
 try:
     import deployment_policy
+    import loop_leader
 except ModuleNotFoundError:  # package import (api.app_lifecycle)
     from . import deployment_policy
+    from . import loop_leader
 
 
 AsyncPoolFactory = Callable[..., Awaitable[Any]]
@@ -112,6 +114,8 @@ def create_api_lifespan(dependencies: ApiLifecycleDependencies):
                     await task
                 except asyncio.CancelledError:
                     pass
+            # Loop leadership holds one pool connection; give it back before the pool closes.
+            await loop_leader.leadership_for(pool).close()
             await pool.close()
 
     return lifespan

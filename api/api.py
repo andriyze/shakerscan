@@ -63,6 +63,13 @@ from scan.deployment_gate_rows import (
 )
 from scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
 from scan import queue_recovery as scan_queue_recovery
+from scan import job_hash_lookup as scan_job_lookup
+try:
+    import asm_dispatch_selection as asm_selection
+    import loop_leader
+except ModuleNotFoundError:
+    from api import asm_dispatch_selection as asm_selection
+    from api import loop_leader
 from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
 from scan.finding_reconciliation import reconcile_legacy_finding_row
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
@@ -1062,7 +1069,7 @@ from job_queue import (
     normalize_placement,
     pending_depth,
     qualified_route_queues,
-    queue_payloads,
+    scan_queue_job_ids,
     stream_key,
     worker_matches_placement,
 )
@@ -1273,6 +1280,13 @@ FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES = int(
     os.environ.get("FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES", "30")
 )
 STALE_CHECK_INTERVAL_SECONDS = 60  # How often to check for stale scans
+_STALE_SCAN_CURSOR: dict[str, Any] = {}  # where the next bounded stale-check batch starts
+_STALE_JOB_HASH_FALLBACK = scan_job_lookup.JobHashFallback()
+_LOST_HANDOFF_CURSOR: dict[str, Any] = {}
+_ASM_DUE = asm_selection.AsmDueSchedule()  # which ASM targets the dispatcher evaluates next
+_NOT_GIVEN: Any = object()
+_JOB_HASH_RECONCILE_CURSOR: dict[str, Any] = {}  # where the bounded job-hash repair walk resumes
+ARTIFACT_RETENTION_BATCH_SIZE, ARTIFACT_RETENTION_MAX_BATCHES = 500, 20
 # §9: when an ASM-policy schedule's enqueue fails, retry after this short backoff
 # instead of advancing a full cadence (so a transient failure doesn't silently skip
 # a coverage wave). Kept well above the checker interval to avoid tight retries.
@@ -2454,17 +2468,14 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
     now = utc_now()
 
     async with pool.acquire() as conn:
-        # Get all running scans. Parent rows of a parallel scan never run a
-        # scanner subprocess (they only wait on shards) so they emit no
+        # A bounded batch of running scans per tick. Parent rows of a parallel scan
+        # never run a scanner subprocess (they only wait on shards) so they emit no
         # heartbeat; they are finalized by the merge job and reconciled below,
         # so exclude them from heartbeat/duration staleness here.
-        running_scans = await conn.fetch("""
-            SELECT id, job_id, scan_type, started_at, target_id, current_phase,
-                   progress, options, scan_role, parent_scan_id
-            FROM scans
-            WHERE status = 'running' AND started_at IS NOT NULL
-              AND (scan_role IS NULL OR scan_role <> 'parent')
-        """)
+        running_scans = await scan_job_lookup.fetch_running_scan_batch(conn, _STALE_SCAN_CURSOR)
+        job_hashes = await asyncio.to_thread(
+            scan_job_lookup.load_scan_job_hashes, r, running_scans,
+            decode=_decode_redis_hash, fallback=_STALE_JOB_HASH_FALLBACK)
 
         for scan in running_scans:
             scan_id = str(scan['id'])
@@ -2481,62 +2492,11 @@ async def cleanup_stale_scans(pool: asyncpg.Pool):
                     FINALIZATION_HEARTBEAT_TIMEOUT_MINUTES,
                 )
 
-            is_stale = False
             duration_exceeded = False
-            reason = ""
-
-            # Check 1: Heartbeat timeout
-            # Look for job with this scan_id
-            job_keys = r.keys("job:*")
-            heartbeat_found = False
-            delivery_reclaimed = False
-            delivery_attempts = 0
-
-            for key in job_keys:
-                job_data = _decode_redis_hash(r.hgetall(key))
-                if job_data.get('scan_id') == scan_id or _redis_text(key).endswith(scan_id):
-                    try:
-                        delivery_attempts = int(job_data.get('queue_delivery_attempts') or 0)
-                    except (TypeError, ValueError):
-                        delivery_attempts = 0
-                    delivery_reclaimed = (
-                        str(job_data.get('queue_reclaimed') or '').strip().lower() == 'true'
-                        or delivery_attempts >= 2
-                    )
-                    heartbeat_str = job_data.get('heartbeat')
-                    if heartbeat_str:
-                        try:
-                            heartbeat_time = datetime.fromisoformat(heartbeat_str.replace('Z', '+00:00').replace('+00:00', ''))
-                            heartbeat_age = (now - heartbeat_time).total_seconds() / 60
-                            heartbeat_found = True
-
-                            if heartbeat_age > heartbeat_timeout_minutes:
-                                is_stale = True
-                                if delivery_reclaimed:
-                                    reason = (
-                                        "Worker execution stopped after its queue lease was reclaimed "
-                                        f"(delivery attempt {delivery_attempts}); automatic replay was withheld "
-                                        "to avoid duplicate requests"
-                                    )
-                                else:
-                                    reason = (
-                                        f"Worker stopped heartbeating for {heartbeat_age:.1f} minutes "
-                                        f"(timeout {heartbeat_timeout_minutes} min, "
-                                        f"last phase={current_phase or 'unknown'}, progress={progress})"
-                                    )
-                        except (ValueError, TypeError):
-                            pass
-                    break
-
-            # If no heartbeat found at all and scan started beyond timeout, it's stale
-            if not heartbeat_found:
-                scan_age = (now - started_at.replace(tzinfo=None)).total_seconds() / 60
-                if scan_age > heartbeat_timeout_minutes:
-                    is_stale = True
-                    reason = (
-                        "The scan was claimed but no worker heartbeat was recorded; "
-                        f"claim age {scan_age:.1f} minutes (timeout {heartbeat_timeout_minutes} min)"
-                    )
+            # Check 1: heartbeat timeout, from the job hash that names this Scan.
+            is_stale, reason = scan_job_lookup.heartbeat_verdict(
+                job_hashes.get(scan_id, scan_job_lookup.UNKNOWN), now=now, started_at=started_at,
+                timeout_minutes=heartbeat_timeout_minutes, current_phase=current_phase, progress=progress)
 
             # Check 2: Max duration exceeded (safety net)
             if not is_stale and started_at:
@@ -2789,31 +2749,22 @@ async def cleanup_stale_parents(pool: asyncpg.Pool):
         )
         if not parents:
             return
-        # Snapshot queued job_ids once for orphan detection. If the queue can't be
-        # read, leave pending children alone (conservative — never fail a child we
-        # can't prove is orphaned).
-        queued_job_ids: set[str] | None = set()
-        try:
-            for raw in queue_payloads(r, QUEUE_NAME):
-                try:
-                    jid = json.loads(raw).get("job_id")
-                except Exception:
-                    continue
-                if jid:
-                    queued_job_ids.add(str(jid))
-        except Exception:
-            queued_job_ids = None
+        # Orphan detection reads the queue for exactly these children's jobs, in bounded pages.
+        # A child the read cannot prove absent (Redis error, or a queue past the read bound)
+        # is left alone (conservative — never fail a child we can't prove is orphaned).
+        children = await conn.fetch(
+            "SELECT id, job_id, parent_scan_id FROM scans WHERE parent_scan_id = ANY($1::uuid[]) AND status = 'pending'",
+            [parent["id"] for parent in parents],
+        )
+        membership = await asyncio.to_thread(
+            scan_queue_job_ids, r, QUEUE_NAME, wanted={str(c["job_id"]) for c in children if c["job_id"]})
 
         for parent in parents:
             parent_id = str(parent["id"])
-            pending = await conn.fetch(
-                "SELECT id, job_id FROM scans WHERE parent_scan_id = $1 AND status = 'pending'",
-                parent["id"],
-            )
             failed = 0
-            for child in pending:
+            for child in (c for c in children if c["parent_scan_id"] == parent["id"]):
                 jid = str(child["job_id"]) if child["job_id"] else None
-                if queued_job_ids is not None and jid not in queued_job_ids:
+                if (membership.presence(jid) is False) if jid else not membership.error:
                     await conn.execute(
                         """
                         UPDATE scans SET status = 'failed', current_phase = 'terminated',
@@ -2836,25 +2787,20 @@ async def cleanup_stale_device_lifecycle(pool: asyncpg.Pool) -> None:
     """Recover device queue and agent planning states left by process crashes."""
     r = get_redis()
     now = utc_now()
-    try:
-        queued_job_ids = {
-            str(json.loads(raw).get("job_id") or "")
-            for raw in queue_payloads(r, DEVICE_QUEUE_NAME)
-        }
-    except Exception:
-        # Queue visibility is required before declaring a pending job orphaned.
-        queued_job_ids = None
     async with pool.acquire() as conn:
-        if queued_job_ids is not None:
-            pending = await conn.fetch(
-                """SELECT id, job_id FROM scans
-                   WHERE run_kind IN ('device_posture','device_probe') AND status IN ('pending','queued')
-                     AND created_at < $1""",
-                now - timedelta(minutes=10),
-            )
+        pending = await conn.fetch(
+            """SELECT id, job_id FROM scans
+               WHERE run_kind IN ('device_posture','device_probe') AND status IN ('pending','queued')
+                 AND created_at < $1""",
+            now - timedelta(minutes=10),
+        )
+        # Queue visibility is required before declaring a pending job orphaned.
+        membership = await asyncio.to_thread(
+            scan_queue_job_ids, r, DEVICE_QUEUE_NAME, wanted={str(s["job_id"]) for s in pending if s["job_id"]})
+        if not membership.error:
             for scan in pending:
                 job_id = str(scan["job_id"] or "")
-                if job_id in queued_job_ids:
+                if job_id and membership.presence(job_id) is not False:
                     continue
                 job_state = _decode_redis_hash(r.hgetall(f"job:{job_id}")) if job_id else {}
                 if str(job_state.get("status") or "") == "running" and job_state.get("heartbeat"):
@@ -2887,8 +2833,8 @@ async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
     """Flag uncertain old handoffs; resend never-started Scans lost from the queue."""
     return await scan_queue_recovery.sweep_lost_queue_handoffs(
         pool, get_redis(), now=utc_now(), decode_hash=_decode_redis_hash,
-        resend=_requeue_scan_lost_from_queue,
-        queue_snapshot=lambda r: queue_payloads(r, QUEUE_NAME, include_leased=True))
+        resend=_requeue_scan_lost_from_queue, state=_LOST_HANDOFF_CURSOR,
+        queue_membership=lambda r, wanted: scan_queue_job_ids(r, QUEUE_NAME, wanted=wanted))
 
 
 async def _requeue_scan_lost_from_queue(conn, r, row) -> str:
@@ -3070,12 +3016,18 @@ async def stale_scan_checker(pool: asyncpg.Pool):
     while True:
         try:
             await asyncio.sleep(STALE_CHECK_INTERVAL_SECONDS)
+            if not await loop_leader.lead(pool, "stale_scan_checker"):
+                continue  # another API process leads this loop
             await recover_parallel_orchestration(pool)
             await cleanup_stale_scans(pool)
             await cleanup_stale_parents(pool)
             await cleanup_stale_device_lifecycle(pool)
             await cleanup_orphaned_scan_queue_handoffs(pool)
             await cleanup_expired_auth_sessions_once(pool)
+            await queue_health.reconcile_job_hashes(
+                pool, get_redis(), state=_JOB_HASH_RECONCILE_CURSOR, now=utc_now(), queue_name=QUEUE_NAME,
+                scan_queue_job_ids=scan_queue_job_ids, heartbeat_timeout_minutes=QUEUE_HASH_HEARTBEAT_TIMEOUT_MINUTES,
+                retest_timeout_minutes=RETEST_RUNNING_TIMEOUT_MINUTES)
         except asyncio.CancelledError:
             print("[cleanup] Stale scan checker stopped", flush=True)
             break
@@ -3612,7 +3564,8 @@ async def schedule_runner(pool: asyncpg.Pool):
     while True:
         try:
             await asyncio.sleep(SCHEDULE_CHECK_INTERVAL_SECONDS)
-            await run_due_schedules(pool)
+            if await loop_leader.lead(pool, "schedule_runner"):
+                await run_due_schedules(pool)
         except asyncio.CancelledError:
             print("[scheduler] Schedule runner stopped", flush=True)
             break
@@ -3659,39 +3612,39 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
     r = get_redis()
     now = utc_now()
 
+    # Only the targets due this tick (bounded), with their counts loaded in one query per kind.
     async with pool.acquire() as conn:
-        targets = await conn.fetch("""
-            SELECT id, url, root_domain, scan_options, asm_config,
-                   asm_last_test_at, asm_last_recon_at, metadata_json
-            FROM targets
-            WHERE asm_enabled = true AND is_active = true
-        """)
+        targets = []
+        for t in await asm_selection.load_due_targets(conn, _ASM_DUE, now=now):
+            backoff_until = _asm_dispatch_backoff_until({"asm_last_decision": asm_selection.decode_json(t['last_decision'])})
+            if backoff_until is not None and backoff_until > _asm_dispatch_as_utc(now):
+                # The previous dispatch of this target failed (typically a host that no
+                # longer resolves) and was recorded with a backoff; until it elapses the
+                # target is parked rather than retried -- and logged -- on every tick.
+                _ASM_DUE.schedule(str(t['id']), t['fingerprint'], {"next_eligible_at": backoff_until.isoformat()}, now=now)
+                continue
+            targets.append(t)
+        configs = {str(t['id']): asm_inventory.merge_asm_config(_decode_asm_config(t['asm_config'])) for t in targets}
+        counts = await asm_selection.load_counts(
+            conn, targets, stale_days={tid: cfg['stale_days'] for tid, cfg in configs.items()})
 
     for t in targets:
         target_id = str(t['id'])
         target_url = t['url']
         root_domain = t['root_domain']
         raw_config = _decode_asm_config(t['asm_config'])
-        cfg = asm_inventory.merge_asm_config(raw_config)
-        backoff_until = _asm_dispatch_backoff_until(t['metadata_json'])
-        if backoff_until is not None and backoff_until > _asm_dispatch_as_utc(now):
-            # The previous dispatch of this target failed (typically a host that no
-            # longer resolves) and was recorded with a backoff; until it elapses the
-            # target is parked rather than retried -- and logged -- on every tick.
-            continue
+        cfg = configs[target_id]
+        recorded = None
         try:
             async with pool.acquire() as conn:
-                active = await conn.fetchval("""
-                    SELECT COUNT(*) FROM scans
-                    WHERE target_id = $1 AND status IN ('pending', 'queued', 'running')
-                """, t['id'])
-                claimable = await asm_inventory.claimable_count(conn, target_id, stale_days=cfg['stale_days'])
-                tested_today = await asm_inventory.tested_recently_count(conn, target_id, hours=24)
+                active = counts["active"].get(target_id, 0)
+                claimable = counts["claimable"].get(target_id, 0)
+                tested_today = counts["tested_today"].get(target_id, 0)
                 domain_rate_exceeded = False
                 cap = cfg['max_requests_per_hour_per_domain']
                 used = 0
                 if cap > 0 and root_domain:
-                    used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
+                    used = counts["domain_used"].get(str(root_domain), 0)
                     reserved = _asm_reserved_count(r, root_domain)
                     domain_rate_exceeded = (used + reserved) >= cap
 
@@ -3709,27 +3662,28 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                 action = decision['action']
                 if action == 'none':
                     active_ids = await _asm_active_scan_ids(conn, target_id) if decision.get("blocked_by") == "active_scan" else None
-                    await _persist_asm_decision(
+                    recorded = await _persist_asm_decision(
                         conn,
                         target_id,
                         decision,
-                        source="dispatcher",
+                        source="dispatcher", previous=t['last_decision'],
                         active_scan_ids=active_ids,
                     )
                     continue
 
-                decoded_opts = _decode_json_value(t['scan_options']) or {}
+                decoded_opts = _decode_json_value(
+                    await conn.fetchval("SELECT scan_options FROM targets WHERE id = $1", t['id'])) or {}
                 base_opts = _clear_asm_approval_context(
                     decoded_opts if isinstance(decoded_opts, dict) else {}
                 )
                 if action == 'recon':
                     enq = await _enqueue_asm_recon(conn, r, target_id, target_url, base_opts)
                     await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", t['id'])
-                    await _persist_asm_decision(
+                    recorded = await _persist_asm_decision(
                         conn,
                         target_id,
                         {**decision, "active_scan_id": enq["scan_id"], "active_scan_ids": [enq["scan_id"]]},
-                        source="dispatcher",
+                        source="dispatcher", previous=t['last_decision'],
                         active_scan_ids=[enq["scan_id"]],
                     )
                     print(f"[asm] recon queued for {target_url} -> scan {enq['scan_id'][:8]}", flush=True)
@@ -3748,7 +3702,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                             require_expiry=True,
                         )
                     except HTTPException as exc:
-                        await _persist_asm_decision(
+                        recorded = await _persist_asm_decision(
                             conn,
                             target_id,
                             {
@@ -3757,7 +3711,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                                 "reason": str(exc.detail),
                                 "blocked_by": "approval_required_or_invalid",
                             },
-                            source="dispatcher",
+                            source="dispatcher", previous=t['last_decision'],
                         )
                         continue
                     if approval_context:
@@ -3772,11 +3726,11 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                             r, root_domain, max(0, cap - used), dispatch_batch_size, hold_id=hold_id,
                         )
                     if dispatch_batch_size <= 0:
-                        await _persist_asm_decision(
+                        recorded = await _persist_asm_decision(
                             conn,
                             target_id,
                             {**decision, "action": "none", "reason": "no dispatch budget remaining", "blocked_by": "rate_or_daily_cap"},
-                            source="dispatcher",
+                            source="dispatcher", previous=t['last_decision'],
                         )
                         continue
                     try:
@@ -3790,11 +3744,11 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                         domain_rate.settle(r, root_domain, entry_id=hold_id, consumed=0, finalized=False)
                         raise
                     await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", t['id'])
-                    await _persist_asm_decision(
+                    recorded = await _persist_asm_decision(
                         conn,
                         target_id,
                         {**decision, "active_scan_id": enq["scan_id"], "active_scan_ids": [enq["scan_id"]]},
-                        source="dispatcher",
+                        source="dispatcher", previous=t['last_decision'],
                         active_scan_ids=[enq["scan_id"]],
                     )
                     print(f"[asm] test batch queued for {target_url} "
@@ -3808,7 +3762,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
             try:
                 eligible_at = _asm_dispatch_as_utc(now) + timedelta(minutes=cfg['min_interval_minutes'])
                 async with pool.acquire() as conn:
-                    await _persist_asm_decision(
+                    recorded = await _persist_asm_decision(
                         conn,
                         target_id,
                         {
@@ -3817,10 +3771,12 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                             "blocked_by": "dispatch_failed",
                             "next_eligible_at": eligible_at.isoformat(),
                         },
-                        source="dispatcher",
+                        source="dispatcher", previous=t['last_decision'],
                     )
             except Exception as record_exc:
                 print(f"[asm] could not record dispatch failure for {target_url}: {record_exc}", flush=True)
+        finally:
+            _ASM_DUE.schedule(target_id, t['fingerprint'], recorded, now=now)
 
 
 async def asm_dispatcher(pool: asyncpg.Pool):
@@ -3829,7 +3785,8 @@ async def asm_dispatcher(pool: asyncpg.Pool):
     while True:
         try:
             await asyncio.sleep(ASM_DISPATCH_INTERVAL_SECONDS)
-            await run_asm_dispatch(pool)
+            if await loop_leader.lead(pool, "asm_dispatcher"):
+                await run_asm_dispatch(pool)
         except asyncio.CancelledError:
             print("[asm] Continuous ASM dispatcher stopped", flush=True)
             break
@@ -3940,9 +3897,17 @@ async def scan_artifact_retention_runner(pool: asyncpg.Pool) -> None:
     interval = max(60, _int_env("ARTIFACT_RETENTION_SWEEP_SECONDS", 3600))
     while True:
         try:
-            outcome = await cleanup_expired_scan_artifacts_once(pool)
-            if outcome["claimed"]:
-                print(f"[artifact-retention] {outcome}", flush=True)
+            if await loop_leader.lead(pool, "scan_artifact_retention_runner"):
+                # Up to ARTIFACT_RETENTION_MAX_BATCHES full batches per sweep, so expiry keeps up
+                # with a large install instead of 100 objects an hour.
+                outcome = {"claimed": 0, "deleted": 0, "failed": 0}
+                for _batch in range(ARTIFACT_RETENTION_MAX_BATCHES):
+                    batch = await cleanup_expired_scan_artifacts_once(pool, limit=ARTIFACT_RETENTION_BATCH_SIZE)
+                    outcome = {key: outcome[key] + int(batch.get(key) or 0) for key in outcome}
+                    if batch["claimed"] < ARTIFACT_RETENTION_BATCH_SIZE:
+                        break
+                if outcome["claimed"]:
+                    print(f"[artifact-retention] {outcome}", flush=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4091,6 +4056,8 @@ try:
         router as operations_router,
         DEVICE_WEB_ORIGIN_ROLE,
         RETEST_RUNNING_TIMEOUT_MINUTES,
+        HEARTBEAT_TIMEOUT_MINUTES as QUEUE_HASH_HEARTBEAT_TIMEOUT_MINUTES,
+        queue_health,
         TIMELINE_STATUSES,
         _SCAN_STATUS_TO_TIMELINE,
         _campaign_action_timeline_event,
@@ -4137,6 +4104,8 @@ except ModuleNotFoundError:  # package import in host-side tests
         router as operations_router,
         DEVICE_WEB_ORIGIN_ROLE,
         RETEST_RUNNING_TIMEOUT_MINUTES,
+        HEARTBEAT_TIMEOUT_MINUTES as QUEUE_HASH_HEARTBEAT_TIMEOUT_MINUTES,
+        queue_health,
         TIMELINE_STATUSES,
         _SCAN_STATUS_TO_TIMELINE,
         _campaign_action_timeline_event,
@@ -4306,6 +4275,7 @@ configure_settings_router(
 app.include_router(settings_router)
 try:
     from model_intake.router import (
+        model_intake_enabled,
         POLICY_PROFILES,
         _model_intake_worker_readiness,
         configure_model_intake_router,
@@ -4482,6 +4452,7 @@ try:
     )
 except ModuleNotFoundError:  # package import in host-side tests
     from api.model_intake.router import (
+        model_intake_enabled,
         POLICY_PROFILES,
         _model_intake_worker_readiness,
         configure_model_intake_router,
@@ -6788,12 +6759,11 @@ async def cancel_scan(scan_id: str):
             )
             r.expire(f"job:{job_id}", 86400)
 
-    # Backward-compatible fallback for older/odd job hashes.
-    for key in r.keys("job:*"):
-        job_data = r.hgetall(key)
-        if job_data.get('scan_id') == scan_id:
-            r.hset(key, 'status', 'cancelled')
-            break
+    # Backward-compatible fallback for older/odd job hashes: the hash naming this scan (its
+    # recorded job's hash first, else a bounded non-blocking SCAN walk) is marked cancelled.
+    named_key = await asyncio.to_thread(scan_job_lookup.hash_key_naming_scan, r, scan_id, scan['job_id'])
+    if named_key:
+        r.hset(named_key, 'status', 'cancelled')
 
     if parent_to_reconcile:
         async with db_pool.acquire() as conn:
@@ -9811,6 +9781,9 @@ async def advance_model_intake_automatic_reviews(pool: asyncpg.Pool) -> None:
 
 
 async def model_intake_automatic_review_runner(pool: asyncpg.Pool) -> None:
+    if not model_intake_enabled():
+        print("[model-intake-auto] Model Intake is off; automatic review controller not started", flush=True)
+        return
     print("[model-intake-auto] Automatic review controller started", flush=True)
     while True:
         try:
@@ -18903,18 +18876,6 @@ async def _reconcile_stale_research_dispatches(conn) -> int:
     return repaired
 
 
-def _research_queued_job_ids(redis_client, queue_name: str) -> set[str]:
-    queued: set[str] = set()
-    for raw in queue_payloads(redis_client, queue_name):
-        try:
-            payload = json.loads(raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict) and payload.get("job_id"):
-            queued.add(str(payload["job_id"]))
-    return queued
-
-
 RESEARCH_PROCESSING_LEASE_MAX_AGE_SECONDS = 120
 
 
@@ -18960,16 +18921,19 @@ def _research_fresh_processing_lease(
 def _research_queue_presence(
     redis_client,
     *,
-    queue_ids: set[str],
+    queue_ids: Any,
     job_id: str,
     metadata_key: str,
     now: datetime | None = None,
 ) -> bool | None:
-    """Return True for durable/fresh work, False for proven orphan, None if unknown."""
+    """Return True for durable/fresh work, False for proven orphan, None if unknown.
+
+    ``queue_ids`` is a set of queued job ids or a bounded read (``scan_queue_job_ids``)."""
     if not job_id:
         return False
-    if job_id in queue_ids:
-        return True
+    queued = queue_ids.presence(job_id) if hasattr(queue_ids, "presence") else job_id in queue_ids
+    if queued is not False:
+        return queued  # queued (True), or not provably absent from a bounded read (None)
     try:
         metadata = redis_client.hgetall(metadata_key)
     except Exception:
@@ -19016,15 +18980,6 @@ async def _reconcile_unconfirmed_queue_handoffs(conn) -> int:
 
 async def _reconcile_research_orphaned_queue_work(conn) -> int:
     """Fail closed work committed to Postgres but lost before its Redis enqueue."""
-    try:
-        redis_client = get_redis()
-        redis_client.ping()
-        scan_queue_ids = _research_queued_job_ids(redis_client, QUEUE_NAME)
-        retest_queue_ids = _research_queued_job_ids(redis_client, RETEST_QUEUE_NAME)
-    except Exception:
-        # Queue visibility is required to prove a job is orphaned.
-        return 0
-
     scan_rows = await conn.fetch(
         """
         SELECT re.id AS episode_id, s.id, s.job_id
@@ -19045,7 +19000,7 @@ async def _reconcile_research_orphaned_queue_work(conn) -> int:
         FROM research_episodes re
         JOIN research_decisions rd ON rd.episode_id=re.id
         JOIN command_results cr ON cr.id=rd.command_result_id
-        JOIN finding_verifications fv ON fv.id::text=cr.result_json->>'retest_id'
+        JOIN finding_verifications fv ON fv.id=(CASE WHEN cr.result_json->>'retest_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (cr.result_json->>'retest_id')::uuid END)
         WHERE re.status='awaiting_observation' AND re.cancel_requested=false
           AND fv.status='queued'
           AND fv.created_at < NOW() - INTERVAL '5 minutes'
@@ -19053,6 +19008,23 @@ async def _reconcile_research_orphaned_queue_work(conn) -> int:
         LIMIT 25
         """
     )
+    if not scan_rows and not retest_rows:
+        return 0  # nothing to prove: the queues are not read at all
+    try:
+        redis_client = get_redis()
+        redis_client.ping()
+        # Bounded reads for exactly these jobs: a job not seen in an incomplete read is unknown.
+        scan_queue_ids = await asyncio.to_thread(
+            scan_queue_job_ids, redis_client, QUEUE_NAME, wanted={str(row["job_id"] or "") for row in scan_rows})
+        retest_queue_ids = await asyncio.to_thread(
+            scan_queue_job_ids, redis_client, RETEST_QUEUE_NAME,
+            wanted={str(row["job_id"] or "") for row in retest_rows})
+        if scan_queue_ids.error or retest_queue_ids.error:
+            return 0
+    except Exception:
+        # Queue visibility is required to prove a job is orphaned.
+        return 0
+
     repaired = 0
     for row in scan_rows:
         job_id = str(row["job_id"] or "")
@@ -19184,7 +19156,7 @@ async def research_autopilot_runner(pool) -> None:
                               SELECT 1
                               FROM research_decisions rd
                               JOIN command_results cr ON cr.id=rd.command_result_id
-                              JOIN finding_verifications fv ON fv.id::text=cr.result_json->>'retest_id'
+                              JOIN finding_verifications fv ON fv.id=(CASE WHEN cr.result_json->>'retest_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (cr.result_json->>'retest_id')::uuid END)
                               WHERE rd.episode_id=re.id AND fv.status IN ('queued','running')
                           )
                         ORDER BY re.updated_at ASC
@@ -19403,13 +19375,17 @@ async def _persist_asm_decision(
     *,
     source: str,
     active_scan_ids: list[str] | None = None,
-) -> None:
+    previous: Any = _NOT_GIVEN,
+) -> dict[str, Any]:
+    """Record the decision on the target; with ``previous`` (the stored one), only when it changed."""
     public = _public_asm_decision(decision) or {}
     public["source"] = source
     public["recorded_at"] = utc_now_iso()
     if active_scan_ids:
         public["active_scan_id"] = active_scan_ids[0]
         public["active_scan_ids"] = active_scan_ids
+    if previous is not _NOT_GIVEN and asm_selection.same_decision(previous, public):
+        return public
     await conn.execute(
         """
         UPDATE targets
@@ -19425,6 +19401,7 @@ async def _persist_asm_decision(
         json.dumps(public),
         uuid.UUID(str(target_id)),
     )
+    return public
 
 
 

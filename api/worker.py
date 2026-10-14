@@ -369,7 +369,8 @@ from runtime.request_replay_executor import (
     replay_reservation_budget,
 )
 from runtime.reservation_recovery import recover_stale_reservations
-from scan.action_budget_reconciliation import repair_terminal_reservation_actions
+from scan.action_budget_reconciliation import repair_settled_reservation_actions
+import loop_leader
 from runtime.reservation_store import (
     PostgresBudgetReservationStore,
     ReservationConflict,
@@ -22940,7 +22941,11 @@ async def sweep_discovered_secrets() -> dict[str, int]:
 
 
 async def sweep_stale_budget_reservations() -> dict[str, int]:
-    """Recover expired durable holds without allowing uncertain traffic refunds."""
+    """Recover expired durable holds without allowing uncertain traffic refunds.
+
+    One worker (the advisory-lock leader) sweeps; the others skip the tick."""
+    if not await loop_leader.lead(db_pool, "sweep_stale_budget_reservations"):
+        return {"recovered": 0, "released": 0, "failed_uncertain": 0, "scan_actions_repaired": 0}
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             events = await recover_stale_reservations(
@@ -22948,10 +22953,7 @@ async def sweep_stale_budget_reservations() -> dict[str, int]:
                 now=datetime.now(timezone.utc),
                 limit=BUDGET_RESERVATION_SWEEP_BATCH_SIZE,
             )
-            repaired_scan_actions = await repair_terminal_reservation_actions(
-                conn,
-                limit=BUDGET_RESERVATION_SWEEP_BATCH_SIZE,
-            )
+    repaired_scan_actions = await repair_settled_reservation_actions(db_pool, get_redis())
     summary = {
         "recovered": len(events),
         "released": sum(event.terminal_status == "released" for event in events),
