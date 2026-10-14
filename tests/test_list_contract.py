@@ -335,3 +335,49 @@ def test_legacy_list_contract_is_marked_deprecated():
     legacy = public_api_contract.LEGACY_LIST_CONTRACT
     assert legacy["status"] == "deprecated"
     assert legacy["replacement"] == public_api_contract.LIST_CONTRACT == lc.LIST_CONTRACT_VERSION
+
+
+# --- Review fixes: bounded text keys, non-ASCII cursors -----------------------------------------
+
+
+def test_text_sort_keys_are_bounded_in_sql():
+    key = lc.SortKey("w.name", "text")
+    assert key.sql == "left((w.name), 200)"
+    assert lc.SortKey("w.created_at", "datetime").sql == "w.created_at"
+    plan = SPEC.plan(lc.Page(sort="-name"))
+    assert plan.order_by == "left((w.name), 200) DESC, w.id DESC"
+    assert "left((w.name), 200) AS __list_sort" in plan.select_list
+    for bad in (0, lc.MAX_TEXT_SORT_CHARS + 1):
+        with pytest.raises(ValueError):
+            lc.SortKey("w.name", "text", max_chars=bad)
+
+
+@pytest.mark.parametrize("value", [
+    "界" * 200,                       # the bound in 3-byte characters
+    "\U0001F600" * 200,               # 4-byte characters
+    "\x01" * 200,                     # every character a 6-character JSON escape
+    "a" * 200,
+])
+def test_every_cursor_the_server_issues_is_accepted_over_http(value):
+    plan = SPEC.plan(lc.Page(limit=1, sort="name"))
+    rows = [{**r, "__list_sort": value} for r in _rows(2)]
+    cursor = plan.envelope(rows)["next_cursor"]
+    assert len(cursor) <= lc.CURSOR_MAX_LENGTH
+    body = _app().get("/widgets", params={"cursor": cursor, "sort": "name", "limit": 1}).json()
+    resumed = SPEC.plan(lc.Page(limit=1, sort="name", cursor=body["cursor"]))
+    assert resumed.position == (value, rows[0]["id"])
+
+
+@pytest.mark.parametrize("value", ["x" * 1100, "界" * 260])
+def test_an_unbounded_text_value_is_a_programming_error_not_a_bad_cursor(value):
+    plan = SPEC.plan(lc.Page(limit=1, sort="name"))
+    with pytest.raises(ValueError, match="bound"):
+        plan.envelope([{**r, "__list_sort": value} for r in _rows(2)])
+
+
+@pytest.mark.parametrize("cursor", ["é.abc", "abc.é", "界" * 10])
+def test_non_ascii_cursor_is_a_400(cursor):
+    with pytest.raises(HTTPException) as caught:
+        SPEC.plan(lc.Page(cursor=cursor))
+    assert caught.value.status_code == 400
+    assert caught.value.detail["error"] == "invalid_cursor"

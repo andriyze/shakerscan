@@ -240,3 +240,77 @@ def test_estimate_falls_back_to_the_planner_for_a_never_analyzed_table():
         finally:
             await conn.execute("DROP TABLE list_contract_fresh")
     _run(check)
+
+
+def test_long_and_cjk_text_sort_values_walk_with_every_cursor_accepted():
+    """Text keys are ordered by left(expr, 200): every issued cursor fits and decodes."""
+    async def check(conn):
+        await conn.execute("DROP TABLE IF EXISTS list_contract_names")
+        await conn.execute("CREATE TABLE list_contract_names (id uuid PRIMARY KEY, name text NOT NULL)")
+        values = []
+        for i in range(30):
+            values.append((uuid.UUID(int=10_000 + i), f"{i % 3}" + "x" * 1100))      # 1101 chars
+            values.append((uuid.UUID(int=20_000 + i), "界" * 260 + f"{i % 4}"))      # 261 CJK chars
+        await conn.copy_records_to_table("list_contract_names", records=values)
+        spec = lc.ListSpec(scope="names", sorts={"name": lc.SortKey("n.name", "text")},
+                           default_sort="name", fields={"id": "n.id"}, id_expr="n.id")
+        try:
+            for sort in ("name", "-name"):
+                seen, cursor = [], None
+                while True:
+                    plan = spec.plan(lc.Page(limit=7, sort=sort, cursor=cursor))
+                    params = lc.SqlParams()
+                    where = ["TRUE", *plan.keyset_clauses(params)]
+                    rows = await conn.fetch(
+                        f"SELECT {plan.select_list} FROM list_contract_names n "
+                        f"WHERE {' AND '.join(where)} ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}",
+                        *params.values)
+                    body = plan.envelope(rows)
+                    seen.extend(item["id"] for item in body["items"])
+                    if not body["has_more"]:
+                        break
+                    cursor = body["next_cursor"]
+                    assert cursor.isascii() and len(cursor) <= lc.CURSOR_MAX_LENGTH
+                assert sorted(seen) == sorted(v[0] for v in values)
+                assert len(seen) == len(set(seen))
+        finally:
+            await conn.execute("DROP TABLE list_contract_names")
+    _run(check)
+
+
+def test_snapshot_time_waits_for_open_writers_so_since_polling_loses_nothing():
+    async def check(conn):
+        await conn.execute("DROP TABLE IF EXISTS list_contract_deltas")
+        await conn.execute("CREATE TABLE list_contract_deltas (id uuid PRIMARY KEY, "
+                           "updated_at timestamptz NOT NULL)")
+        writer = await _connect()
+        try:
+            tx = writer.transaction()
+            await tx.start()
+            late = uuid.uuid4()
+            # updated_at = now(): the writer's transaction start, before the page below runs.
+            await writer.execute("INSERT INTO list_contract_deltas VALUES ($1, now())", late)
+            await asyncio.sleep(0.3)
+            watermark = await lc.snapshot_time(conn)
+            page = await conn.fetch("SELECT id FROM list_contract_deltas")
+            api_clock = datetime.now(timezone.utc)
+            await tx.commit()
+            assert late not in {r["id"] for r in page}  # not visible yet
+            committed_at = await conn.fetchval(
+                "SELECT updated_at FROM list_contract_deltas WHERE id = $1", late)
+            # An API-clock watermark taken after the query would skip the row for good ...
+            assert committed_at < api_clock
+            # ... the snapshot watermark makes the next since= poll return it.
+            assert watermark <= committed_at
+            again = await conn.fetch(
+                "SELECT id FROM list_contract_deltas WHERE updated_at >= $1", watermark)
+            assert late in {r["id"] for r in again}
+            # With no open writer the watermark is the database clock minus the margin.
+            quiet = await lc.snapshot_time(conn)
+            now = await conn.fetchval("SELECT clock_timestamp()")
+            assert timedelta(seconds=1) < now - quiet < timedelta(seconds=10)
+            assert quiet.tzinfo is not None
+        finally:
+            await writer.close()
+            await conn.execute("DROP TABLE IF EXISTS list_contract_deltas")
+    _run(check)
