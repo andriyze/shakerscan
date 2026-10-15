@@ -21,7 +21,8 @@ compose() {
     case "$*" in
         *"/proc/1/comm"*) printf 'postgres\\n' ;;
         *"SELECT relkind"*) printf '%s\\n' "$KIND" ;;
-        *"SELECT to_regclass"*) printf '%s\\n' "$INITIALIZED" ;;
+        *"SELECT string_agg"*) printf 'targets device_targets\\n' ;;
+        *"SELECT false OR EXISTS"*) printf '%s\\n' "$INITIALIZED" ;;
     esac
 }
 create_backup() { echo backup; return "$BACKUP_STATUS"; }
@@ -53,7 +54,8 @@ compose() {
             if [ "$(wc -l < "$POLLS")" -lt 3 ]; then printf 'bash\\n'; else printf 'postgres\\n'; fi ;;
         *"pg_isready"*) return 0 ;;  # the init server answers too: readiness alone is not enough
         *"SELECT relkind"*) echo query >> "$POLLS"; printf 'r\\n' ;;
-        *"SELECT to_regclass"*) printf 't\\n' ;;
+        *"SELECT string_agg"*) printf 'targets\\n' ;;
+        *"SELECT false OR EXISTS"*) printf 't\\n' ;;
     esac
 }
 create_backup() { echo backup; }
