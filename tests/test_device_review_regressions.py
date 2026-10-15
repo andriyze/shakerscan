@@ -164,7 +164,7 @@ def test_device_detail_makes_exact_scan_open_ports_prominent():
     assert "Confirmed responses only. Silent or ambiguous probes are never shown as open." in ui
     assert "review this scan&apos;s confirmed responses" in ui
     assert "Track scan activity" in ui
-    assert "export async function getScan(id: string): Promise<Scan>" in api_client
+    assert "export async function getScan(id: string, signal?: AbortSignal): Promise<Scan>" in api_client
 
 
 def test_device_views_expose_last_scan_reachability_without_assuming_online():
