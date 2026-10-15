@@ -712,6 +712,53 @@ async def raise_request(
     return dict(row), True
 
 
+# Hunts whose requests a person can still decide (the engine withdraws them when a Hunt ends).
+OPEN_HUNT_STATUSES = ("active", "awaiting_planner", "budget_exhausted")
+#: At most this many due requests are settled, and Hunts reconciled, per cross-Hunt read.
+FEED_HOUSEKEEPING_BATCH = 500
+FEED_RECONCILE_HUNTS = 50
+
+
+async def expire_due_everywhere(conn: Any, *, hunt_id: Any = None, limit: int = FEED_HOUSEKEEPING_BATCH) -> int:
+    """``expire_due`` across Hunts (or one), in bounded batches, for the cross-Hunt read.
+
+    Each settled request gets its audit event, exactly as ``expire_due`` records it. Rows another
+    transaction holds are left for the next read instead of waited for."""
+    rows = await conn.fetch(
+        """UPDATE hunt_permission_requests SET status='expired', decided_at=NOW()
+           WHERE id IN (
+               SELECT id FROM hunt_permission_requests
+               WHERE status='pending' AND expires_at <= NOW()
+                 AND ($1::uuid IS NULL OR hunt_run_id=$1)
+               ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED)
+           RETURNING id, hunt_run_id""",
+        uuid.UUID(str(hunt_id)) if hunt_id else None, int(limit),
+    )
+    for row in rows:
+        await record_event(conn, hunt_id=row["hunt_run_id"], request_id=row["id"], event="expired",
+                           actor="system", source="expiry")
+    return len(rows)
+
+
+async def hunts_to_reconcile(conn: Any, *, hunt_id: Any = None, limit: int = FEED_RECONCILE_HUNTS) -> list[uuid.UUID]:
+    """Open Hunts for which ``reconcile_host_encoding_if_needed`` has work: a pending proposal, or
+    a legacy pre-authorization row (both rare). The cross-Hunt read reconciles them first, as the
+    per-Hunt read does, so a legacy proposal is replaced before a person can approve it."""
+    rows = await conn.fetch(
+        """SELECT DISTINCT r.hunt_run_id AS hunt_id FROM hunt_permission_requests r
+           WHERE r.status='pending' AND r.kind=$1 AND ($2::uuid IS NULL OR r.hunt_run_id=$2)
+           UNION
+           SELECT DISTINCT p.hunt_run_id FROM hunt_preauthorizations p
+           JOIN hunt_runs h ON h.id = p.hunt_run_id
+           WHERE NOT (p.bounds_json ? 'host_canonicalization') AND h.status = ANY($3::text[])
+             AND ($2::uuid IS NULL OR p.hunt_run_id=$2)
+           LIMIT $4""",
+        KIND_PREAUTHORIZATION, uuid.UUID(str(hunt_id)) if hunt_id else None,
+        list(OPEN_HUNT_STATUSES), int(limit),
+    )
+    return [row["hunt_id"] for row in rows]
+
+
 async def load_request(conn: Any, hunt_id: Any, request_id: Any, *, for_update: bool = False) -> dict[str, Any] | None:
     row = await conn.fetchrow(
         "SELECT * FROM hunt_permission_requests WHERE id=$1 AND hunt_run_id=$2"
@@ -980,8 +1027,8 @@ def covering_preauthorization(rows: list[dict[str, Any]], predicate: Any) -> dic
 
 __all__ = [
     "DECISION_VIA", "DENIAL_COOLDOWN", "EVENTS", "HUNT_ACTION_STATUSES", "HUNT_PERMISSION_SCHEMA_SQL",
-    "MAX_PENDING_PER_HUNT", "PREAUTHORIZATION_PROOFS", "REQUEST_STATUSES", "canonical_digest", "cooldown_identity",
-    "covering_preauthorization", "expire_due", "hunt_bounds", "hunt_deadline", "list_events",
+    "MAX_PENDING_PER_HUNT", "OPEN_HUNT_STATUSES", "PREAUTHORIZATION_PROOFS", "REQUEST_STATUSES", "canonical_digest", "cooldown_identity",
+    "covering_preauthorization", "expire_due", "expire_due_everywhere", "hunt_bounds", "hunts_to_reconcile", "hunt_deadline", "list_events",
     "list_grants", "list_requests", "live_credential_grants", "load_preauthorizations", "load_request",
     "offer_reapproval", "pending_summary", "reconcile_host_encoding", "reconcile_host_encoding_if_needed",
     "supersede_legacy_proposals",

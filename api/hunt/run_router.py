@@ -14,6 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .run_service import HuntRunService
 
 try:
+    from list_contract import PageDep
+except ModuleNotFoundError:  # package import layout
+    from ..list_contract import PageDep
+
+try:
     from runtime.http_archive_reader import EXPORT_RETRY_AFTER_SECONDS, ExportBusy, ExportUnavailable
     from runtime.http_archive_router import export_caller
 except ModuleNotFoundError:  # package import layout
@@ -368,6 +373,20 @@ async def start_hunt(request: Request, response: Response):
 @router.get("/hunts/contract", tags=["Hunt"])
 async def get_hunt_contract():
     return hunt_start_public_contract()
+
+
+@router.get("/hunts/permission-requests", tags=["Hunt"])
+async def list_permission_requests(
+    page: PageDep,
+    status: str | None = Query(None),
+    hunt_id: str | None = Query(None),
+):
+    """Permission requests of every Hunt (or of ``hunt_id``) as one ``list/v1`` feed, oldest
+    first; ``since=`` the previous page's ``generated_at`` for what was raised or decided since.
+    Declared here, ahead of ``/hunts/{hunt_id}``, which would otherwise take the path."""
+    from .permission_router import list_permission_request_feed
+
+    return await list_permission_request_feed(page, status=status, hunt_id=hunt_id)
 
 
 @router.get("/hunt/skills", tags=["Hunt"])

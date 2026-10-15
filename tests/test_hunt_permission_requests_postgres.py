@@ -1170,3 +1170,82 @@ def test_the_routes_list_long_poll_decide_and_revoke(env):
             assert (await client.post(f"{base}/permission-requests", json={})).status_code == 405
 
     run(env, exchange())
+
+
+def test_the_cross_hunt_feed_pages_expires_and_returns_deltas(env):
+    """GET /hunts/permission-requests: one list/v1 feed over every Hunt, oldest first, with
+    since= deltas, so a terminal watching every open Hunt makes one read instead of one per Hunt
+    (and does not miss Hunts past the first page of each status)."""
+    import httpx
+    from fastapi import FastAPI
+
+    from hunt import permission_router, run_router
+
+    hunts = [run(env, env.hunt(budget={"max_http_requests": 5}, used={"http_requests": 2})) for _ in range(3)]
+    for index, hunt in enumerate(hunts):
+        with pytest.raises(HTTPException):
+            run(env, env.call(hunt, f"feed-{index:04d}", values={"method": "GET", "path": "/", "follow_redirects": True}))
+    # One more Hunt whose request is past its expiry: the feed settles it (with its audit event).
+    stale = run(env, env.hunt(budget={"max_http_requests": 5}, used={"http_requests": 2}))
+    with pytest.raises(HTTPException):
+        run(env, env.call(stale, "feed-stale", values={"method": "GET", "path": "/", "follow_redirects": True}))
+    run(env, env.conn.execute(
+        "UPDATE hunt_permission_requests SET created_at=NOW()-interval '2 days', expires_at=NOW()-interval '1 hour'"
+        " WHERE hunt_run_id=$1", stale["id"]))
+    app = FastAPI()
+    app.include_router(run_router.router)  # the feed is declared ahead of /hunts/{hunt_id}
+    permission_router.configure_permission_router(lambda: env.pool)
+
+    async def exchange():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+            first = await client.get("/hunts/permission-requests?status=pending&limit=2&count=exact")
+            assert first.status_code == 200, first.text
+            page = first.json()
+            assert page["has_more"] is True and page["total"] == 3 and page["total_kind"] == "exact"
+            assert [item["hunt_id"] for item in page["items"]] == [str(hunts[0]["id"]), str(hunts[1]["id"])]
+            assert all(item["status"] == "pending" and item["approve_command"] for item in page["items"])
+            rest = (await client.get(
+                f"/hunts/permission-requests?status=pending&limit=2&cursor={page['next_cursor']}")).json()
+            assert [item["hunt_id"] for item in rest["items"]] == [str(hunts[2]["id"])]
+            assert rest["has_more"] is False and rest["next_cursor"] is None
+            # The stale request was expired and audited, not listed as pending.
+            (stale_row,) = await env.pool.fetch(
+                "SELECT status FROM hunt_permission_requests WHERE hunt_run_id=$1", stale["id"])
+            assert stale_row["status"] == "expired"
+            events = await env.pool.fetch(
+                "SELECT event FROM hunt_permission_events WHERE hunt_run_id=$1 ORDER BY created_at", stale["id"])
+            assert [row["event"] for row in events] == ["requested", "expired"]
+            # A cursor belongs to its filter set.
+            mismatch = await client.get(f"/hunts/permission-requests?status=granted&cursor={page['next_cursor']}")
+            assert mismatch.status_code == 400 and mismatch.json()["detail"]["error"] == "cursor_mismatch"
+            # One Hunt's requests.
+            one = (await client.get(f"/hunts/permission-requests?hunt_id={hunts[1]['id']}")).json()
+            assert [item["hunt_id"] for item in one["items"]] == [str(hunts[1]["id"])]
+            # Deltas: nothing new since the last page, then the newly raised request.
+            since = rest["generated_at"]
+            quiet = (await client.get("/hunts/permission-requests",
+                                      params={"status": "pending", "since": since})).json()
+            assert {item["hunt_id"] for item in quiet["items"]} <= {str(hunt["id"]) for hunt in hunts}
+            return since
+
+    since = run(env, exchange())
+    fourth = run(env, env.hunt(budget={"max_http_requests": 5}, used={"http_requests": 2}))
+    with pytest.raises(HTTPException):
+        run(env, env.call(fourth, "feed-fourth", values={"method": "GET", "path": "/", "follow_redirects": True}))
+
+    async def delta():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+            changed = (await client.get("/hunts/permission-requests",
+                                        params={"status": "pending", "since": since})).json()
+            assert str(fourth["id"]) in {item["hunt_id"] for item in changed["items"]}
+            for query, status, error in (
+                ("fields=id", 400, "fields_unsupported"), ("status=bogus", 422, None),
+                ("hunt_id=not-a-uuid", 400, None), (f"hunt_id={uuid.uuid4()}", 404, None),
+                ("limit=201", 422, None),
+            ):
+                answer = await client.get(f"/hunts/permission-requests?{query}")
+                assert answer.status_code == status, (query, answer.text)
+                if error:
+                    assert answer.json()["detail"]["error"] == error
+
+    run(env, delta())

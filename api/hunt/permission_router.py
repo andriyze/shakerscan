@@ -16,10 +16,17 @@ import uuid
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+try:
+    from list_contract import ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
+except ModuleNotFoundError:  # package import layout
+    from ..list_contract import ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
+
 from .permission_grants import decide, revoke_grant
 from .permission_store import (
     REQUEST_STATUSES,
     expire_due,
+    expire_due_everywhere,
+    hunts_to_reconcile,
     list_events,
     list_grants,
     list_requests,
@@ -161,6 +168,75 @@ async def list_hunt_permission_events(hunt_id: str, limit: int = Query(500, ge=1
         return {"hunt_id": str(hunt_uuid), "events": await list_events(conn, hunt_uuid, limit=limit)}
 
 
+# The cross-Hunt feed (GET /hunts/permission-requests, registered in run_router.py ahead of
+# /hunts/{hunt_id}): one read for a terminal that watches every open Hunt, instead of one list of
+# open Hunts per status plus one list of requests per Hunt. Every column public_request reads is
+# selected; a caller cannot choose a projection (fields= is refused).
+_FEED_COLUMNS = (
+    "id", "hunt_run_id", "kind", "reason_code", "status", "subject_json", "subject_digest",
+    "display_json", "action_id", "capability_name", "created_at", "expires_at", "decided_at",
+    "decided_by", "decision_via", "decision_scope", "grant_id",
+)
+PERMISSION_REQUEST_FEED = ListSpec(
+    scope="hunt_permission_requests",
+    sorts={"created_at": SortKey("r.created_at", "datetime")},
+    default_sort="created_at",
+    fields={name: f"r.{name}" for name in _FEED_COLUMNS},
+    id_expr="r.id",
+    # A request changes when it is raised and when it is decided, expired or withdrawn.
+    since_expr="COALESCE(r.decided_at, r.created_at)",
+    table="hunt_permission_requests",
+)
+
+
+async def list_permission_request_feed(page: Page, *, status: str | None, hunt_id: str | None) -> dict[str, Any]:
+    """Permission requests across Hunts (or of one), oldest first, as a ``list/v1`` page.
+
+    ``since`` (the previous page's ``generated_at``) returns the requests raised or decided at or
+    after it, so a watcher polls deltas; items are upserts. Due requests are expired and legacy
+    proposals reconciled first, as the per-Hunt read does."""
+    if page.fields is not None:
+        raise HTTPException(status_code=400, detail={
+            "error": "fields_unsupported", "message": "this list always returns whole requests",
+        })
+    if status is not None and status not in REQUEST_STATUSES:
+        raise HTTPException(status_code=422, detail=f"status must be one of {', '.join(REQUEST_STATUSES)}")
+    hunt_uuid = _uuid(hunt_id, "hunt id") if hunt_id else None
+    plan = PERMISSION_REQUEST_FEED.plan(page, filters={
+        "status": status, "hunt_id": str(hunt_uuid) if hunt_uuid else None,
+    })
+    params = SqlParams()
+    where: list[str] = []
+    if status is not None:
+        where.append(f"r.status = {params.add(status)}")
+    if hunt_uuid is not None:
+        where.append(f"r.hunt_run_id = {params.add(hunt_uuid)}")
+    where += plan.filter_clauses(params)
+    count_values = params.snapshot()
+    page_where = where + plan.keyset_clauses(params)
+    async with _pool().acquire() as conn:
+        if hunt_uuid is not None:
+            await _hunt_exists(conn, hunt_uuid)
+        async with conn.transaction():
+            await expire_due_everywhere(conn, hunt_id=hunt_uuid)
+        for hunt in await hunts_to_reconcile(conn, hunt_id=hunt_uuid):
+            await reconcile_host_encoding_if_needed(conn, hunt)
+        generated_at = await snapshot_time(conn)  # before the page query (list_contract)
+        rows = await conn.fetch(
+            f"SELECT {plan.select_list} FROM hunt_permission_requests r"
+            + (f" WHERE {' AND '.join(page_where)}" if page_where else "")
+            + f" ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}",
+            *params.values,
+        )
+        total, total_kind = await count_total(
+            conn, page.count, from_sql="hunt_permission_requests r", where=where, values=count_values,
+            table=PERMISSION_REQUEST_FEED.table,
+        )
+    return plan.envelope(rows, total=total, total_kind=total_kind, transform=public_request,
+                         generated_at=generated_at)
+
+
 __all__ = [
-    "PermissionDecisionRequest", "PermissionRevokeRequest", "configure_permission_router", "router",
+    "PERMISSION_REQUEST_FEED", "PermissionDecisionRequest", "PermissionRevokeRequest",
+    "configure_permission_router", "list_permission_request_feed", "router",
 ]
