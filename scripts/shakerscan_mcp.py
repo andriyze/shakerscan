@@ -1464,6 +1464,28 @@ def _capability_call_hint(unknown: Sequence[str]) -> str:
             "shakerscan_hunt_get lists them). Example call: " + CAPABILITY_CALL_EXAMPLE)
 
 
+def _normalized_capability_arguments(
+    arguments: Mapping[str, Any], properties: Mapping[str, Any],
+) -> dict[str, Any]:
+    """B19: GLM sent http.request with no input sixteen times in one Hunt. Two shapes models send
+    are taken for what they mean instead of refused: ``input`` as a JSON object encoded in a string,
+    and the capability's fields at the top level with no (or an empty) ``input``. The capability's
+    own input schema still validates the result, and anything else is refused as before."""
+    normalized = dict(arguments)
+    raw_input = normalized.get("input")
+    if isinstance(raw_input, str) and raw_input.strip().startswith("{"):
+        try:
+            decoded = json.loads(raw_input)
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, dict):
+            normalized["input"] = decoded
+    stray = [key for key in normalized if key not in properties]
+    if stray and normalized.get("input") in (None, {}):
+        normalized["input"] = {key: normalized.pop(key) for key in stray}
+    return normalized
+
+
 def _example_value(name: str, schema: Any) -> Any:
     """A value of the right shape for an example call (the schema's own example when it has one)."""
     schema = schema if isinstance(schema, Mapping) else {}
@@ -2174,6 +2196,8 @@ class ArsenalClient:
         if hunt_tool:
             if name == "shakerscan_hunt_start":
                 hunt_tool = _hunt_start_tool(self.hunt_contract())
+            if name == "shakerscan_hunt_capability" and not streaming_ssh:
+                arguments = _normalized_capability_arguments(arguments, hunt_tool.properties)
             unknown = sorted(set(arguments) - set(hunt_tool.properties))
             missing = sorted(set(hunt_tool.required) - set(arguments))
             hint = _capability_call_hint(unknown) if name == "shakerscan_hunt_capability" and not streaming_ssh else ""
@@ -2294,6 +2318,9 @@ class ArsenalClient:
                     try:
                         self._validate_argument("input", capability_input, input_schema)
                     except MCPError as exc:
+                        if not capability_input:
+                            exc = MCPError(exc.code, (
+                                f"No input was sent (input is missing or {{}}). {exc.message}"), exc.data)
                         raise _capability_input_error(exc, hunt_id, capability_name, input_schema) from None
                 idempotency_key = str(payload.get("idempotency_key") or "").strip()
                 if not idempotency_key:

@@ -92,6 +92,27 @@ def test_secret_like_text_and_labels_are_refused():
     assert _entry(agent="opencode", model="glm-5.3-flash").model == "glm-5.3-flash"
 
 
+
+@pytest.mark.parametrize("title", [
+    "password_hash: not returned by /api/users",
+    "password_hash=present in profile JSON (bcrypt)",
+    "password_hash test: hash algorithm bcrypt, field hidden",
+    "token: none on the anonymous route",
+])
+def test_b19_a_title_that_describes_a_credential_test_is_accepted(title):
+    assert _entry(title=title).title == title
+
+
+@pytest.mark.parametrize("title", [
+    "password_hash: $2b$10$abcdefghijklmnopqrstuv",
+    "DB_PASSWORD=Winter2023!",
+    "password: none; token: Zx81kq0Pz91a",
+])
+def test_b19_a_title_that_carries_a_value_is_still_refused(title):
+    with pytest.raises(ValidationError):
+        _entry(title=title)
+
+
 def test_conditions_are_exact_canonical_and_never_broadened():
     canonical = validate_conditions(EXACT, required=True)
     assert canonical["method"] == "GET" and canonical["principals"] == ["tenant-a", "tenant-b"]

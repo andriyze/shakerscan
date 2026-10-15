@@ -460,3 +460,26 @@ def test_review_fixes_planner_view_promote_once_and_grant_to_an_active_target(mo
         profiles = await conn.fetchval("SELECT count(*) FROM credential_profiles WHERE target_id=$1", owner)
         assert profiles == 1
     run(scenario)
+
+
+def test_a_hunts_record_lists_each_reference_it_sent_and_never_a_reveal_or_value():
+    async def scenario(conn):
+        target = await _target(conn)
+        await store.record_discovered(
+            conn, target_id=target, values=[(SYNTHETIC, "DB_PASSWORD")],
+            source={"kind": "scan_finding", "id": str(uuid4())})
+        ref = (await store.list_for_target(conn, target))[0]["ref"]
+        hunt, action = await _hunt(conn, target)
+        other_hunt, other_action = await _hunt(conn, target)
+        await store.resolve_for_hunt(conn, reference=ref, target_id=target, hunt_run_id=hunt,
+                                     action_id=action, destination_host="app.example.invalid")
+        await store.resolve_for_hunt(conn, reference=ref, target_id=target, hunt_run_id=other_hunt,
+                                     action_id=other_action, destination_host="other.example.invalid")
+        await store.value_for_operator(conn, target_id=target, secret_id=ref.removeprefix("secret://"),
+                                       actor="operator:test", purpose="reveal")
+        uses = await store.read_hunt_uses(conn, hunt)
+        assert [(use["ref"], use["kind"], use["label"], use["action_id"], use["destination_host"])
+                for use in uses] == [(ref, "password", "DB_PASSWORD", str(action), "app.example.invalid")]
+        assert uses[0]["found_on"] == str(target) and uses[0]["secret_values_visible"] is False
+        assert SYNTHETIC not in str(uses)
+    run(scenario)
