@@ -11827,7 +11827,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
             except ScanStageCheckpointError as exc:
                 logger.warning(
                     "Rejected corrupt Scan stage checkpoint",
-                    extra={"scan_id": scan_id, "error": str(exc)},
+                    extra={"scan_id": str(scan["id"]), "error": str(exc)},
                 )
 
         execution_explanation = _public_scan_execution_explanation(dict(scan), action_rows)

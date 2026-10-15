@@ -1314,7 +1314,8 @@ async def get_ai_scan_transcript(scan_id: str, request: Request, include_sensiti
         client_host = getattr(getattr(request, "client", None), "host", "unknown")
         logger.warning(
             "AI transcript RAW (unredacted) access: scan_id=%s client=%s sensitivity=%s count=%s",
-            scan_id, client_host, sensitivity_label, len(transcripts),
+            str(uuid.UUID(scan_id)), client_host,
+            str(sensitivity_label)[:64].replace("\r", " ").replace("\n", " "), len(transcripts),
         )
         response_transcripts = transcripts
         redaction_applied = False
