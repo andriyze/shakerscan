@@ -2257,10 +2257,15 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
         asked = min(args.limit + 1, SECRETS_LIST_MAX)
         query = urllib.parse.urlencode({**({"usable_only": "true"} if args.usable else {}), "limit": asked})
         body = client.request("GET", f"{base}?{query}")
-        if args.json:
-            print(json.dumps(body, indent=2, sort_keys=True))
-            return 0
         rows = body.get("secrets") or [] if isinstance(body, Mapping) else []
+        if args.json:
+            # The extra row only answers "are there more"; it is never printed.
+            listed = {**body, "secrets": rows[: args.limit], "count": len(rows[: args.limit]),
+                      "has_more": len(rows) > args.limit,
+                      "may_have_more": len(rows) > args.limit or len(rows) >= SECRETS_LIST_MAX} \
+                if isinstance(body, Mapping) else body
+            print(json.dumps(listed, indent=2, sort_keys=True))
+            return 0
         if not rows:
             print("no discovered secrets" + (" a Hunt can use" if args.usable else "") + " on this target")
             return 0

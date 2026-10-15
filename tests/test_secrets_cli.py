@@ -215,6 +215,15 @@ def test_list_sends_a_limit_and_says_when_there_are_more(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert out.count("secret://") == 200 and "there may be more" in out
 
+    with ManyStub(30) as stub:
+        assert _run(stub, None, "list", TARGET, "--limit", "5", "--json", monkeypatch=monkeypatch) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert len(printed["secrets"]) == 5 and printed["count"] == 5 and printed["has_more"] is True
+    with ManyStub(3) as stub:
+        assert _run(stub, None, "list", TARGET, "--json", monkeypatch=monkeypatch) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert len(printed["secrets"]) == 3 and printed["has_more"] is False and printed["may_have_more"] is False
+
     for bad in ("0", "201", "x"):
         with pytest.raises(SystemExit):
             v2_cli.main(["--api-url", "http://127.0.0.1:9", "secrets", "list", TARGET, "--limit", bad])
