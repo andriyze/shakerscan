@@ -17146,10 +17146,10 @@ async def _fold_cancelled_parallel_parent(parent_id: str | None, log_prefix: str
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 parent = await conn.fetchrow(
-                    "SELECT status, target_id, target_url FROM scans WHERE id=$1 FOR UPDATE",
+                    "SELECT status, scan_role, target_id, target_url FROM scans WHERE id=$1 FOR UPDATE",
                     uuid.UUID(str(parent_id)),
                 )
-                if not parent or parent['status'] != 'cancelled':
+                if not parent or parent['status'] != 'cancelled' or parent['scan_role'] != 'parent':
                     return None
                 children = await conn.fetch(
                     """SELECT id, status, shard_index, result FROM scans
