@@ -350,6 +350,8 @@ class IndexConn:
             return self.lock_free
         if "SHOW statement_timeout" in query:
             return "30s"
+        if "pg_extension" in query:
+            return True
         if "to_regclass" in query:
             return args[0]
         if "indisvalid" in query:
@@ -361,18 +363,70 @@ class IndexConn:
 
 
 def test_loop_indexes_build_concurrently_and_rebuild_an_interrupted_build():
+    # One builder for every bounded list's indexes: the loop indexes and the findings list's.
     names = [name for name, _table, _definition in loop_scale_indexes.LOOP_SCALE_INDEXES]
+    assert {"idx_findings_severity_keyset", "idx_findings_title_trgm"} <= set(names)
     states = {name: True for name in names}
     states[names[0]] = False  # an interrupted CONCURRENTLY build leaves an invalid index
     states[names[1]] = None
+    states["idx_findings_severity_keyset"] = None
     conn = IndexConn(states)
     built = asyncio.run(loop_scale_indexes.ensure_loop_scale_indexes(SimplePool(conn)))
-    assert built == names[:2]
+    assert built == [*names[:2], "idx_findings_severity_keyset"]
     creates = [s for s in conn.statements if s.startswith("CREATE INDEX")]
     assert creates and all("CONCURRENTLY" in s for s in creates)
     assert any(s.startswith(f"DROP INDEX CONCURRENTLY IF EXISTS {names[0]}") for s in conn.statements)
     assert conn.statements[0] == "SET statement_timeout = 0"
+    # Only findings is re-analyzed after a build (its proof-gate statistics); loop tables are not.
+    assert "ANALYZE findings" in conn.statements and "ANALYZE scans" not in conn.statements
     assert conn.statements[-2] == "SET statement_timeout = '30s'"  # the session's own limit is restored
+
+
+class FlakyIndexConn(IndexConn):
+    """The first CREATE of one index fails (a deadlock victim); it is absent afterwards."""
+
+    def __init__(self, states, flaky):
+        super().__init__(states)
+        self.flaky = flaky
+        self.failures = 0
+
+    async def execute(self, query, *args):
+        if query.startswith(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {self.flaky} ") and not self.failures:
+            self.failures += 1
+            raise RuntimeError("deadlock detected")
+        await super().execute(query, *args)
+        if query.startswith("CREATE INDEX CONCURRENTLY"):
+            self.states[query.split()[6]] = True
+
+
+def test_a_failed_build_is_retried_in_the_same_run_after_a_pause(monkeypatch):
+    names = [name for name, _table, _definition in loop_scale_indexes.LOOP_SCALE_INDEXES]
+    states = {name: True for name in names}
+    states[names[0]] = None
+    conn = FlakyIndexConn(states, names[0])
+    pauses = []
+
+    async def sleep(seconds):
+        pauses.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    built = asyncio.run(loop_scale_indexes.ensure_loop_scale_indexes(SimplePool(conn), retry_delays=(7.0, 9.0)))
+    assert built == [names[0]] and conn.failures == 1 and pauses == [7.0]
+    # Bounded: an index that keeps failing is given up after the last pause (the next start retries).
+    always = FlakyIndexConn({name: True for name in names} | {names[0]: None}, names[0])
+    always.failures = -10**6  # fails every time
+    always.execute = _always_fail(always, names[0])
+    pauses.clear()
+    assert asyncio.run(loop_scale_indexes.ensure_loop_scale_indexes(SimplePool(always), retry_delays=(1.0, 2.0))) == []
+    assert pauses == [1.0, 2.0]
+
+
+def _always_fail(conn, name):
+    async def execute(query, *args):
+        if query.startswith(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} "):
+            raise RuntimeError("lock timeout")
+        conn.statements.append(query)
+    return execute
 
 
 def test_loop_indexes_are_left_to_the_builder_and_never_built_inside_a_transaction():

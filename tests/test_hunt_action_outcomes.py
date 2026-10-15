@@ -284,6 +284,8 @@ def test_unified_startup_installs_the_candidate_schema_on_converted_instances(mo
         # Data migrations over targets (their own Postgres tests cover them).
         ("scope.roots", "recompute_spanning_target_roots"),
         ("targets.host_canonical_repair", "repair_target_host_spellings"),
+        # Findings list rank backfill (tests/test_findings_list_scale_postgres.py).
+        ("finding_routes.list_schema", "finish_findings_list_schema"),
         # Summary counts (tests/test_targets_dashboard_scale_postgres.py).
         ("api.targets.scale_summary", "install_summary_counts"),
     ):

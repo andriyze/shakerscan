@@ -237,6 +237,7 @@ def test_the_sql_projection_matches_finding_proof_fields_on_every_row():
         rows = await conn.fetch(
             findings_router.FINDINGS_LIST_SELECT_SQL
             + f", {findings_router.FINDING_PROOF_STATE_SQL} AS sql_proof_state"
+            + f", {findings_router.FINDING_PROOF_ROW_STATE_SQL} AS sql_row_proof_state"
             + f", {findings_router.FINDING_PROOF_UNDETERMINED_SQL} AS sql_undetermined"
             + findings_router.FINDINGS_LIST_FROM_SQL
         )
@@ -244,14 +245,17 @@ def test_the_sql_projection_matches_finding_proof_fields_on_every_row():
         for row in rows:
             item = dict(row)
             sql_state, flagged = item.pop("sql_proof_state"), item.pop("sql_undetermined")
+            # The page form (latest retest from the row's LATERAL) answers like the filter form.
+            row_state = item.pop("sql_row_proof_state")
             python = findings_router.finding_proof_fields(dict(item))["proof_state"]
             states[python] = states.get(python, 0) + 1
             if flagged:
                 undetermined.append(json.loads(item["evidence"])["triage"])
                 continue
-            if python != sql_state:
-                mismatches.append((python, sql_state, item["severity"], item["last_verification_verdict"],
-                                   item["latest_retest_mode"], item["evidence"]))
+            if python != sql_state or python != row_state:
+                mismatches.append((python, sql_state, row_state, item["severity"],
+                                   item["last_verification_verdict"], item["latest_retest_mode"],
+                                   item["evidence"]))
         assert mismatches == [], f"{len(mismatches)} rows differ, e.g. {mismatches[:3]}"
         # Undetermined rows are triage strings opening with "{" that PostgreSQL's jsonb rejects: the
         # ones Python can still decode, and malformed ones (the route projects both in Python).
@@ -283,7 +287,7 @@ def _params(**overrides):
 
 
 class _Recording:
-    """A connection that notes whether the streaming fallback ran."""
+    """A connection that notes whether anything streamed every row through Python (nothing may)."""
 
     def __init__(self, conn):
         self._conn = conn
@@ -354,7 +358,8 @@ def test_an_undecidable_row_is_projected_in_python_and_still_exact(monkeypatch):
         result_coro, recording = _list(conn, monkeypatch, proof_state="suspected", limit=20, offset=10)
         result = await result_coro
         total, page = await _expected(conn, ["suspected"], limit=20, offset=10)
-        assert recording.streamed
+        # The undetermined row is projected in Python; the page and the count stay in SQL.
+        assert not recording.streamed
         assert result["total"] == total and [str(item["id"]) for item in result["findings"]] == page
         everything_coro, _ = _list(conn, monkeypatch, proof_state="suspected", limit=500)
         assert "nan triage" in {item["title"] for item in (await everything_coro)["findings"]}

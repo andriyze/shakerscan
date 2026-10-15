@@ -259,6 +259,14 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 except ModuleNotFoundError:
                     from api.hunt.discovered_secrets import DISCOVERED_SECRETS_SCHEMA_SQL
                 await conn.execute(DISCOVERED_SECRETS_SCHEMA_SQL)
+                # Stored severity rank behind the bounded findings list (2.11). Cheap DDL only;
+                # the backfill and the concurrent index builds run after this transaction.
+                try:
+                    from finding_routes.list_schema import FINDINGS_LIST_SCHEMA_STATEMENTS
+                except ModuleNotFoundError:
+                    from api.finding_routes.list_schema import FINDINGS_LIST_SCHEMA_STATEMENTS
+                for statement in FINDINGS_LIST_SCHEMA_STATEMENTS:
+                    await conn.execute(statement)
                 # Data migrations added after the conversion must run here: the baseline above
                 # never runs again on a converted database. Each is marker-gated.
                 try:
@@ -339,6 +347,15 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
             except ModuleNotFoundError:
                 from api.hunt.interpretations import import_knowledge_notes
             await import_knowledge_notes(conn)
+            # Outside any transaction, still under the lock: the one-time severity rank backfill
+            # (short batches, resumable). Its indexes are built CONCURRENTLY by the background
+            # builder (runtime/loop_scale_indexes.py): a concurrent build here would wait for the
+            # snapshot of every process waiting for this lock.
+            try:
+                from finding_routes.list_schema import finish_findings_list_schema
+            except ModuleNotFoundError:
+                from api.finding_routes.list_schema import finish_findings_list_schema
+            await finish_findings_list_schema(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
         # Redis only after the lock is released, off the event loop and bounded: an unreachable
