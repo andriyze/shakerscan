@@ -690,7 +690,7 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
 
     redis_client = get_redis()
     labels = _broker_node_labels(node)
-    queue_names = [*qualified_route_queues(redis_client, [QUEUE_NAME], worker_labels=labels), QUEUE_NAME]
+    queue_names = _broker_lease_queue_names(redis_client, labels)
     consumer_name = f"broker:{node_id}:{body.worker_id}"[:250]
     lease = await asyncio.to_thread(
         lease_job,
@@ -2448,6 +2448,15 @@ def _fleet_acceptance_lease_probe() -> dict[str, Any]:
             redis_client.delete(queue, stream_key(queue))
         except Exception:
             pass
+
+
+def _broker_lease_queue_names(redis_client: Any, labels: Mapping[str, Any]) -> list[str]:
+    """The queues the control plane reads for one broker node: the placement routes the node
+    matches first (remote-scoped and node-pinned work waits there for it), then the base queue."""
+    return [
+        *qualified_route_queues(redis_client, [QUEUE_NAME], worker_labels=dict(labels)),
+        QUEUE_NAME,
+    ]
 
 
 def _broker_node_labels(node: dict[str, Any]) -> dict[str, Any]:

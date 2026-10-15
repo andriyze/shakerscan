@@ -23047,14 +23047,7 @@ async def async_main():
 
                 # Lease a Stream message. Legacy list entries are drained only
                 # as an upgrade bridge; all new work is explicitly acked.
-                queue_keys = [
-                    *base_queue_keys,
-                    *qualified_route_queues(
-                        r,
-                        base_queue_keys,
-                        worker_labels=_worker_placement_labels(),
-                    ),
-                ]
+                queue_keys = _worker_lease_queue_keys(r, base_queue_keys)
                 consumer_name = _worker_runtime_identity()
                 lease = await agent_job_concurrency.lease_when_ready(
                     lambda: lease_job(
@@ -23136,6 +23129,21 @@ def _worker_runtime_identity() -> str:
     if configured and hostname and hostname not in configured:
         return f"{configured}:{hostname[:12]}"
     return configured or hostname
+
+
+def _worker_lease_queue_keys(redis_client: Any, base_queue_keys: list[str]) -> list[str]:
+    """The queues this worker polls: its role's base queues and the placement routes it matches.
+
+    A routed job (``node_scope``/``node_id``/region and similar constraints) sits on its own route;
+    a worker whose labels do not satisfy that placement never reads the route, so remote-scoped or
+    node-pinned work waits for a matching fleet node instead of running here.
+    """
+    return [
+        *base_queue_keys,
+        *qualified_route_queues(
+            redis_client, base_queue_keys, worker_labels=_worker_placement_labels(),
+        ),
+    ]
 
 
 @functools.lru_cache(maxsize=1)
