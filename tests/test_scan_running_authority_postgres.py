@@ -6,7 +6,7 @@ product handlers (``worker._NON_DAST_WORKER_HANDLER``, so the worker's stop wiri
 under test), with the real ``ScanAuthorityGuard`` over the installed schema. Only the scanner
 functions are fixtures (``fixture_scanner``): they run a fixture ``sleep`` process and stop it
 when the run's stop check says so, as the device and AI scanners do; one ignores its stop
-check, as the AI target scan has none. No target is contacted.
+check (a run stopped hard keeps only what it checkpointed). No target is contacted.
 
 Requires ``TARGET_ASSET_TEST_DATABASE_URL`` (a disposable local PostgreSQL).
 """
@@ -58,8 +58,12 @@ class FixtureScanner:
         self.stopped_at: float | None = None
         self.returncode: int | None = None
 
-    async def run(self, stop_check):
+    async def run(self, stop_check, checkpoint=None):
         self.calls += 1
+        if checkpoint is not None:
+            # What a probe found before the stop, checkpointed as the AI target scan does.
+            checkpoint.setdefault("findings", []).append(
+                {"title": "observed before the stop", "severity": "medium"})
         process = await asyncio.create_subprocess_exec("sleep", str(self.seconds))
         try:
             while process.returncode is None:
@@ -303,8 +307,10 @@ async def _run_ai(pool, scanner, monkeypatch, *, ai_id, approval, scope_id, duri
     else:
         import ai_gate_scan
 
-        async def fixture_ai_scan(_target, _options):  # no stop check, as the real one has none
-            return await scanner.run(_await_stop(lambda: False))
+        async def fixture_ai_scan(_target, _options, *, cancelled=None, checkpoint=None):
+            # The worker hands the AI target scan its stop check and its findings checkpoint.
+            assert cancelled is not None and isinstance(checkpoint, dict)
+            return await scanner.run(_await_stop(cancelled), checkpoint=checkpoint)
         monkeypatch.setattr(ai_gate_scan, "run_ai_target_scan", fixture_ai_scan)
     options = {**(options or {"run_kind": "ai_api", "approval_receipt_id": approval, "scope_receipt_id": scope_id}),
                **({"ai_probe_pack": "shaker-ai-boundary"} if boundary else {})}
@@ -313,12 +319,19 @@ async def _run_ai(pool, scanner, monkeypatch, *, ai_id, approval, scope_id, duri
     if grace is not None:
         authority.grace_seconds = grace
     hook = asyncio.create_task(during()) if during else None
+    checkpoint: dict = {}
+    token = worker.AI_SCAN_CHECKPOINT.set(checkpoint)
     try:
-        async with authority:
-            result = await worker._NON_DAST_WORKER_HANDLER.ai_gate.run(
-                "http://model.fixture.test/v1/chat", options, scan_id=scan_id, job_id=str(uuid.uuid4()))
-        result = await authority.annotate(result, scan_id=scan_id)
+        try:
+            async with authority:
+                result = await worker._NON_DAST_WORKER_HANDLER.ai_gate.run(
+                    "http://model.fixture.test/v1/chat", options, scan_id=scan_id, job_id=str(uuid.uuid4()))
+            result = await authority.annotate(result, scan_id=scan_id)
+        except ScanAuthorityStopped as stopped:
+            stopped.checkpoint = checkpoint
+            raise
     finally:
+        worker.AI_SCAN_CHECKPOINT.reset(token)
         if hook is not None:
             await hook
     return result, authority
@@ -350,7 +363,7 @@ def test_revoking_an_ai_scan_approval_stops_a_running_boundary_scan(template_dat
     asyncio.run(run())
 
 
-def test_an_ai_scan_without_a_stop_check_is_cancelled_after_the_grace(template_database, monkeypatch):
+def test_an_ai_scan_that_ignores_its_stop_check_is_cancelled_after_the_grace(template_database, monkeypatch):
     async def run():
         async with scan_database(template_database) as pool:
             ai_id, approval, scope_id = await _ai_target(pool)
@@ -375,6 +388,52 @@ def test_an_ai_scan_without_a_stop_check_is_cancelled_after_the_grace(template_d
             # One poll to see the revoke, then the grace, then the cancelled scan's process is gone.
             assert scanner.stopped_at - marks["revoked_at"] < 0.2 + 0.5 + 0.5
             assert scanner.returncode is not None and scanner.returncode < 0
+    asyncio.run(run())
+
+
+def test_revoking_an_ai_target_scan_approval_stops_it_and_keeps_its_findings(template_database, monkeypatch):
+    """B6: the AI target scan polls its stop check; a revoke ends it with what it had found."""
+    async def run():
+        async with scan_database(template_database) as pool:
+            ai_id, approval, scope_id = await _ai_target(pool)
+            scanner = FixtureScanner()
+
+            async def revoke_soon():
+                await asyncio.sleep(0.3)
+                await _revoke_approval(pool, approval)
+
+            result, authority = await _run_ai(pool, scanner, monkeypatch, ai_id=ai_id, approval=approval,
+                                              scope_id=scope_id, during=revoke_soon, poll_seconds=0.2)
+            assert authority.reason == "authorization_revoked" and scanner.returncode < 0
+            assert result["findings"] == [{"title": "observed before the stop"}]
+            assert result["coverage"]["status"] == "partial"
+            assert result["scan_metadata"]["authority_stop"]["reason_code"] == "authorization_revoked"
+    asyncio.run(run())
+
+
+def test_an_ai_target_scan_stopped_hard_keeps_its_checkpointed_findings(template_database, monkeypatch):
+    """B6: a run that does not return within the grace keeps what its finished probes found."""
+    async def run():
+        async with scan_database(template_database) as pool:
+            ai_id, approval, scope_id = await _ai_target(pool)
+            scanner = FixtureScanner(honours_stop=False)
+
+            async def revoke_soon():
+                await asyncio.sleep(0.3)
+                await _revoke_approval(pool, approval)
+
+            with pytest.raises(ScanAuthorityStopped) as stopped:
+                await _run_ai(pool, scanner, monkeypatch, ai_id=ai_id, approval=approval, scope_id=scope_id,
+                              during=revoke_soon, grace=0.5, poll_seconds=0.2)
+            # process_scan_job's handling of the stop (worker.authority_stopped_result).
+            result = worker.authority_stopped_result(stopped.value, "http://model.fixture.test", stopped.value.checkpoint)
+            assert "error" not in result and result["ai_gate_stopped_hard"] is True
+            assert [item["title"] for item in result["findings"]] == ["observed before the stop"]
+            assert result["coverage"]["status"] == "partial"
+            assert result["scan_metadata"]["authority_stop"]["reason_code"] == "authorization_revoked"
+            # Without a checkpoint the stop error is recorded, as before.
+            bare = worker.authority_stopped_result(stopped.value, "http://model.fixture.test", {})
+            assert "authorization_revoked" in bare["error"] and bare["findings"] == []
     asyncio.run(run())
 
 

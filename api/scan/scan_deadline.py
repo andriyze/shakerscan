@@ -200,8 +200,11 @@ async def load_scan_deadline(
     that cannot be read is measured from now, never unlimited.
     """
     authority = options.get("_v2_worker_authority")
+    shard = options.get("canonical_shard_authority")
     root_id = (
         str(authority.get("parent_scan_id") or "") if isinstance(authority, Mapping) else ""
+    ) or (
+        str(shard.get("parent_scan_id") or "") if isinstance(shard, Mapping) else ""
     ) or str(scan_id)
     starts: dict[str, Any] = {}
     try:
@@ -235,24 +238,66 @@ def _limit(value: Any) -> int | None:
     return limit if limit > 0 else None
 
 
-def node_scan_deadline(
-    options: Mapping[str, Any], *, clock: Callable[[], float] = time.time,
-) -> ScanDeadline | None:
-    """The time limit a fleet node keeps, measured from when it starts the Scan.
-
-    A node has no database to read the Scan's start from; it starts the work as soon as it
-    leases it, so its own start is the nearest it can measure. A shard keeps the smaller of the
-    Scan's limit and its own.
-    """
-    limits: list[int] = []
+def scan_time_limits(options: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """``(the Scan's limit, a shard's own limit)`` from a canonical job's options."""
     plan = options.get("scan_execution_plan")
     budget = plan.get("budget") if isinstance(plan, Mapping) else None
-    if isinstance(budget, Mapping) and _limit(budget.get("max_duration_seconds")):
-        limits.append(int(budget["max_duration_seconds"]))
+    scan_limit = _limit(budget.get("max_duration_seconds")) if isinstance(budget, Mapping) else None
     shard = options.get("canonical_shard_authority")
     sub_budget = shard.get("sub_budget") if isinstance(shard, Mapping) else None
-    if isinstance(sub_budget, Mapping) and _limit(sub_budget.get("max_duration_seconds")):
-        limits.append(int(sub_budget["max_duration_seconds"]))
+    own_limit = (
+        _limit(sub_budget.get("max_duration_seconds")) if isinstance(sub_budget, Mapping) else None
+    )
+    return scan_limit, own_limit
+
+
+async def lease_time_limit(
+    pool: Any, *, scan_id: str, options: Mapping[str, Any], clock: Callable[[], float] = time.time,
+) -> dict[str, int] | None:
+    """The time limit the control plane hands a fleet node with its lease.
+
+    It is measured from the Scan's own start (a shard's parent start), which only the control
+    plane can read, and sent as elapsed seconds rather than a timestamp, so a node's clock
+    does not move it. ``None`` for a Scan without a limit.
+    """
+    scan_limit, own_limit = scan_time_limits(options)
+    if scan_limit is None and own_limit is None:
+        return None
+    deadline = await load_scan_deadline(
+        pool, scan_id=scan_id, options=options,
+        max_duration_seconds=scan_limit or own_limit, own_max_duration_seconds=own_limit,
+    )
+    if deadline is None:
+        return None
+    return {
+        "max_duration_seconds": int(deadline.max_duration_seconds),
+        "elapsed_seconds": max(0, int(clock() - deadline.started_at)),
+    }
+
+
+def node_scan_deadline(
+    options: Mapping[str, Any], *, clock: Callable[[], float] = time.time,
+    lease_limit: Any = None,
+) -> ScanDeadline | None:
+    """The time limit a fleet node keeps.
+
+    ``lease_limit`` is the limit its lease carried (``lease_time_limit``): measured from the
+    Scan's start, so a Scan that waited in the queue, or a shard leased long after its parent
+    started, stops when its Scan's limit ends. A lease from a control plane that sends none
+    falls back to the node's own start, the nearest it can measure; a shard keeps the smaller
+    of the Scan's limit and its own.
+    """
+    if isinstance(lease_limit, Mapping):
+        limit = _limit(lease_limit.get("max_duration_seconds"))
+        try:
+            elapsed = max(0.0, float(lease_limit.get("elapsed_seconds") or 0))
+        except (TypeError, ValueError):
+            elapsed = None
+        if limit is not None and elapsed is not None and math.isfinite(elapsed):
+            return ScanDeadline.for_scan(
+                started_at=clock() - elapsed, max_duration_seconds=limit, clock=clock,
+            )
+    limits = [item for item in scan_time_limits(options) if item is not None]
     if not limits:
         return None
     return ScanDeadline.for_scan(started_at=clock(), max_duration_seconds=min(limits), clock=clock)
@@ -264,6 +309,8 @@ __all__ = [
     "ScanDeadline",
     "TIME_LIMIT_STOP_GRACE_SECONDS",
     "finalization_reserve_seconds",
+    "lease_time_limit",
     "load_scan_deadline",
     "node_scan_deadline",
+    "scan_time_limits",
 ]
