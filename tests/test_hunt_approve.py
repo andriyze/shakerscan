@@ -21,6 +21,7 @@ import threading
 import time
 import types
 import urllib.error
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,9 @@ class Gateway:
     def __call__(self, method, path, payload=None, headers=None, *, timeout=None):
         self.sent.append((method, path, payload))
         self.timeouts[path] = timeout
+        if path.startswith(approval.FEED_PATH + "?"):
+            # A gateway that does not pass the cross-Hunt feed refuses it as an unknown route.
+            return 403, {"detail": "route not allowed"}
         if path.startswith(f"/hunts/{HUNT}/permission-requests?status=pending"):
             return 200, {"requests": [item for item in self.requests.values() if item["status"] == "pending"]}
         if path.startswith("/hunts?status="):
@@ -340,7 +344,9 @@ def _parse(*argv):
 
 def test_hunt_permissions_list_show_and_wait_print_the_servers_text():
     base = f"/hunts/{HUNT}/permission-requests"
+    older = v2_cli.CliError("HTTP 404", error_type="api_error", http_status=404, api_detail="Hunt not found")
     client = Client({
+        ("GET", approval.FEED_PATH): older,  # an engine before the cross-Hunt feed
         ("GET", "/hunts"): {"hunts": [{"hunt_id": HUNT}]},
         ("GET", base): {"requests": [_request()]},
         ("GET", f"{base}/{REQUEST}"): _request(status="granted"),
@@ -573,6 +579,8 @@ def test_a_key_meant_for_a_request_that_ended_never_decides_the_next_one():
     decisions = []
 
     def engine(method, path, payload=None, headers=None):
+        if path.startswith(approval.FEED_PATH + "?"):
+            return 404, {"detail": "Hunt not found"}  # an engine before the feed (2.10)
         if path.startswith(f"/hunts/{HUNT}/permission-requests?status=pending"):
             state["lists"] += 1
             return 200, {"requests": [first] if state["lists"] == 1 else
@@ -658,3 +666,140 @@ def test_the_prompt_says_why_a_request_the_start_bounds_covered_is_asked_again()
     rendered = approval.render_request({**_request(), "auto_grant_withheld_note": note})
     assert f"    note:     {note}" in rendered.splitlines()
     assert "note:" not in approval.render_request(_request())
+
+
+# --- the cross-Hunt feed (engine 2.11) ---------------------------------------------------------
+
+
+OTHER_HUNT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+class FeedEngine:
+    """An engine with GET /hunts/permission-requests (list/v1), scripted (unit fixture)."""
+
+    def __init__(self, pending, *, page=2):
+        self.pending, self.page, self.sent, self.stamp = list(pending), page, [], 0
+
+    def __call__(self, method, path, payload=None, headers=None, *, timeout=None):
+        self.sent.append((method, path, payload))
+        if path.endswith("/decision"):
+            request_id = path.split("/")[-2]
+            self.pending = [item for item in self.pending if item["id"] != request_id]
+            return 200, {"request": {**_request(id=request_id), "status": payload["decision"] + "ed"}}
+        parsed = urllib.parse.urlsplit(path)
+        assert method == "GET" and parsed.path == approval.FEED_PATH, path
+        query = dict(urllib.parse.parse_qsl(parsed.query))
+        assert query["status"] == "pending" and query["limit"] == str(approval.FEED_PAGE)
+        since = int(query.get("since", "0"))
+        rows = [item for item in self.pending if item["stamp"] >= since]
+        start = int(query.get("cursor", "0"))
+        chunk = rows[start:start + self.page]
+        more = start + self.page < len(rows)
+        self.stamp += 1
+        return 200, {"items": [{k: v for k, v in item.items() if k != "stamp"} for item in chunk],
+                     "has_more": more, "next_cursor": str(start + self.page) if more else None,
+                     "total_kind": "none", "generated_at": str(self.stamp)}
+
+    def reads(self):
+        return [path for _m, path, _p in self.sent if not path.endswith("/decision")]
+
+
+def _feed_request(index, stamp=0, hunt=HUNT):
+    return {**_request(id=f"{index:08d}-aaaa-4aaa-8aaa-aaaaaaaaaaaa", hunt_id=hunt,
+                       created_at=f"2026-10-09T10:{index:02d}:00Z"), "stamp": stamp}
+
+
+def test_all_pending_reads_the_feed_page_by_page_and_never_lists_hunts():
+    engine = FeedEngine([_feed_request(3, hunt=OTHER_HUNT), _feed_request(1), _feed_request(2)], page=2)
+    listed = approval.list_pending(engine)
+    assert [item["id"][:8] for item in listed] == ["00000001", "00000002", "00000003"]
+    assert {item["hunt_id"] for item in listed} == {HUNT, OTHER_HUNT}
+    reads = engine.reads()
+    assert len(reads) == 2 and "cursor=2" in reads[1], reads
+    assert not any(path.startswith("/hunts?") for path in reads), "no list of Hunts per status"
+
+
+def test_watch_reads_one_feed_with_deltas_and_backs_off_while_nothing_arrives():
+    engine = FeedEngine([_feed_request(1)], page=50)
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            # Raised while the watch waits: it must come back on the next (delta) read.
+            engine.pending.append(_feed_request(2, stamp=engine.stamp))
+        if len(sleeps) == 7:
+            raise KeyboardInterrupt
+
+    terminal = Terminal(keys=["s", "s"])
+    assert approval.watch(engine, terminal, enterprise=False, origin="http://127.0.0.1:8080", sleep=sleep) == 0
+    reads = engine.reads()
+    assert "since=" not in reads[0] and all("since=" in path for path in reads[1:]), reads
+    assert len(reads) == 7, "one read per poll, whatever the number of open Hunts"
+    assert terminal.text.count(TITLE) == 2
+    # 3 s after a request was shown, then doubling while nothing new comes, up to 15 s.
+    assert sleeps == [3.0, 6.0, 3.0, 6.0, 12.0, 15.0, 15.0], sleeps
+
+
+def test_watch_falls_back_to_the_per_hunt_reads_on_an_engine_without_the_feed():
+    sent = []
+
+    def engine(method, path, payload=None, headers=None):
+        sent.append(path)
+        if path.startswith(approval.FEED_PATH):
+            return 404, {"detail": "Hunt not found"}  # 2.10: /hunts/{hunt_id} took the path
+        if path.startswith("/hunts?status="):
+            return 200, {"hunts": [{"hunt_id": HUNT}] if "status=active" in path else [], "total": 1}
+        return 200, {"requests": [_request()]}
+
+    count = {"n": 0}
+
+    def sleep(seconds):
+        count["n"] += 1
+        if count["n"] == 2:
+            raise KeyboardInterrupt
+
+    approval.watch(engine, Terminal(keys=["s"]), enterprise=False, origin="http://127.0.0.1:8080", sleep=sleep)
+    assert [path for path in sent if path.startswith(approval.FEED_PATH)] == [sent[0]], "asked once, then never again"
+    assert sum(path.startswith(f"/hunts/{HUNT}/permission-requests?status=pending") for path in sent) == 2
+
+
+def test_a_feed_failure_after_it_answered_is_reported_not_taken_for_an_old_engine():
+    feed = approval.PendingFeed(FeedEngine([_feed_request(1)]))
+    assert len(feed.poll()) == 1
+    feed.send = lambda *a, **k: (404, {"detail": "gone"})
+    with pytest.raises(approval.ApprovalError, match="HTTP 404"):
+        feed.poll()
+
+
+def test_open_hunts_past_one_page_per_status_are_all_read():
+    """An engine without the feed: a status with more than 200 Hunts was cut at the first page."""
+    hunts = [f"{index:08d}-cccc-4ccc-8ccc-cccccccccccc" for index in range(450)]
+    pages = []
+
+    def engine(method, path, payload=None, headers=None):
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(path).query))
+        if query.get("status") != "active":
+            return 200, {"hunts": [], "total": 0}
+        offset, limit = int(query["offset"]), int(query["limit"])
+        pages.append(offset)
+        return 200, {"hunts": [{"hunt_id": item} for item in hunts[offset:offset + limit]], "total": len(hunts)}
+
+    assert approval._open_hunts(engine) == hunts
+    assert pages == [0, 200, 400]
+
+
+def test_a_request_named_without_its_hunt_is_found_through_the_feed():
+    engine = FeedEngine([_feed_request(1, hunt=OTHER_HUNT)])
+    wanted = _feed_request(1)["id"]
+    original = engine.__call__
+
+    def with_reads(method, path, payload=None, headers=None, **kw):
+        if path == f"/hunts/{OTHER_HUNT}/permission-requests/{wanted}":
+            engine.sent.append((method, path, payload))
+            return 200, _request(id=wanted, hunt_id=OTHER_HUNT)
+        return original(method, path, payload, headers, **kw)
+
+    found = approval.find_request(with_reads, wanted)
+    assert found["hunt_id"] == OTHER_HUNT
+    assert not any(path.startswith("/hunts?") for _m, path, _p in engine.sent), "no scan of every open Hunt"
