@@ -47,8 +47,9 @@ def test_the_mcp_capability_tool_sends_only_what_the_engine_accepts():
         try:
             schema = _advertised_capability_schema()
             engine = set(HuntCapabilityRequest.model_fields)
-            # Everything the tool takes is a path parameter or a field of the engine's body.
-            assert set(schema["properties"]) - {"hunt_id", "capability_name"} == engine
+            # Everything the tool takes is a path parameter, a field of the engine's body, or one
+            # of the adapter's own presentation arguments (view, page), which are never sent.
+            assert set(schema["properties"]) - {"hunt_id", "capability_name", "view", "page"} == engine
             refused = adapter.call("shakerscan_hunt_capability", {
                 "hunt_id": HUNT, "capability_name": "web.crawl", "input": {},
                 "experiment_key": "a" * 32, "idempotency_key": "agent-key-crawl-0042",
@@ -59,7 +60,7 @@ def test_the_mcp_capability_tool_sends_only_what_the_engine_accepts():
             )
             done = adapter.call("shakerscan_hunt_capability", {
                 "hunt_id": HUNT, "capability_name": "web.crawl", "input": {},
-                "idempotency_key": "agent-key-crawl-0042",
+                "idempotency_key": "agent-key-crawl-0042", "view": "compact",
             })
             assert "result" in done, done
         finally:

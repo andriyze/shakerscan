@@ -74,7 +74,27 @@ Target-bound Hunt V2 (including state-changing and target-facing operations):
 - `shakerscan_hunt_verify`, `shakerscan_hunt_finish`, and `shakerscan_hunt_cancel`
 
 Arsenal tools read `GET /arsenal/commands`, require the mapped command to remain `read_only` risk,
-and dispatch through the audited Arsenal endpoint. Hunt discovery reads `GET /hunts/contract` and
+and dispatch through the audited Arsenal endpoint.
+
+Every list tool (`shakerscan_targets`, `_findings`, `_evidence_manifest`, `_timeline`, `_plans`)
+takes `limit` (default 20, at most 100) and `cursor`, the previous answer's `next_cursor`, and
+answers with `returned`, `has_more`, `next_cursor`, `total` where the engine states it, and
+`mcp_view`. Findings and plans are summary rows unless `view: "full"`. The cursor is the
+adapter's own and is bound to the tool and its filters (another filter set is refused). When the
+command's catalog entry takes `limit` and `offset` (target.list; finding.list from 2.11) the engine
+pages; otherwise (finding.list on an older engine, which refuses unknown parameters; the manifest,
+the timeline and the plans) the adapter pages over the first rows the engine answers (its limit
+maximum, the manifest's newest 200, or 100 findings) and `mcp_view.note` says when there are more
+than it can reach and which filters narrow the list.
+
+No tool answer is larger than 64 KB (`MCP_ANSWER_BYTES`). A list page that would be is cut on a
+row boundary and `next_cursor` resumes at the first row left out; any other answer keeps the
+fields that fit whole and `mcp_view.omitted` names the others with their sizes. A
+`shakerscan_hunt_capability` answer is compact by default: the observations appear once (under
+`action_result`; the raw `result` points there), strings over 16,000 characters are cut, and
+observations that still do not fit are left out, all named in `mcp_view.reduced`. Calling again
+with the same `idempotency_key`, unchanged input and `view: "full"` replays the recorded answer
+(nothing runs again) in pages (`page`, `mcp_view.pages`). Hunt discovery reads `GET /hunts/contract` and
 generates the start schema from the live authority contract. The MCP boundary uses only the
 canonical `goal` name and sends the complete V2 body: schema version, target kind, policy, budgets,
 credential references, capability allowlist, request-collection references, and optional
@@ -101,8 +121,8 @@ key named by its path (`actions[3]`, `context_pack.prior_knowledge[12]`), and
 `shakerscan_hunt_get` takes `page` to read on (`mcp_view.pages`, `next_page`); the other lifecycle
 tools answer page 1 and point at `shakerscan_hunt_get`, so reading on never repeats a start, finish
 or cancel. `shakerscan_hunt_get` with `capability: "<name>"` adds that capability's full manifest
-entry. None of these arguments is sent to the server. `shakerscan_hunt_query` asks for 25 rows when
-no `limit` is given, and a page larger than 32 KB is cut to fit, with `next_cursor` cleared and
+entry. None of these arguments is sent to the server. `shakerscan_hunt_query` asks for 20 rows when
+no `limit` is given (at most 100), and a page larger than 32 KB is cut to fit, with `next_cursor` cleared and
 `mcp_view` naming the smaller `limit` to read it with.
 
 The start answer carries `budget_warnings` (every limit lowered below what a capability in the
