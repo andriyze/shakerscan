@@ -199,3 +199,73 @@ def test_a_verified_exposure_hands_its_values_to_the_backend_and_never_to_the_re
 def test_a_body_served_everywhere_hands_nothing_to_the_backend(monkeypatch):
     _run(monkeypatch, lambda _url: (200, DOTENV), backend_cls=_KeepingBackend)
     assert _run.backend.kept == []
+
+
+ACTUATOR_TYPE = "application/vnd.spring-boot.actuator.v3+json"
+AUDIT_KEY = "39ebcb9f-3cc8-47e4-b459-c926c3c82656"
+
+
+def test_the_actuator_index_leads_to_its_audit_event_log_and_never_to_the_heap_dump(monkeypatch):
+    base = "https://app.example.test/actuator"
+    index = json.dumps({"_links": {
+        "self": {"href": base, "templated": False},
+        "auditevents": {"href": f"{base}/auditevents", "templated": False},
+        "heapdump": {"href": f"{base}/heapdump", "templated": False},
+        "loggers-name": {"href": f"{base}/loggers/{{name}}", "templated": True},
+        "env": {"href": "https://elsewhere.example.test/actuator/env", "templated": False},
+    }}).encode()
+    events = json.dumps({"events": [{
+        "data": {"apiKey": AUDIT_KEY}, "principal": "john", "type": "API_KEY_RECEIVED",
+        "timestamp": "2026-10-14T20:10:04Z",
+    }]}).encode()
+
+    class _ActuatorTransport(_Transport):
+        async def send(self, request, *, target, timeout_seconds, follow_redirects):
+            self.sent.append(request.url)
+            path = request.url.split("app.example.test", 1)[1]
+            status, body = {"/actuator": (200, index), "/actuator/auditevents": (200, events)}.get(
+                path, (404, b"not found"))
+            return ReplayTransportResult(
+                status_code=status, connected_address="192.0.2.10", final_url=request.url,
+                response_headers={"Content-Type": ACTUATOR_TYPE if status == 200 else "text/plain"},
+                response_body=body, elapsed_ms=3,
+            )
+
+    transport = _ActuatorTransport(None)
+    receipt, proofs, _ = _run_with(monkeypatch, transport)
+    verified = [item for item in proofs if item.get("proof_state") == "verified"]
+    # The index itself proves the heap dump is served; the followed event log proves the key.
+    assert sorted(item["exposure_class"] for item in verified) == [
+        "actuator_heapdump_exposed", "actuator_secret_disclosure"]
+    audit = [item for item in verified if item["exposure_class"] == "actuator_secret_disclosure"]
+    assert audit[0]["request_url"].endswith("/actuator/auditevents")
+    assert not [url for url in transport.sent if url.rstrip("/").endswith("/heapdump")]
+    assert not [url for url in transport.sent if "elsewhere" in url or "{name}" in url]
+    # The env link named another host; its path is read on the probed origin, once (a seed).
+    assert transport.sent.count("https://app.example.test/actuator/env") == 1
+    assert AUDIT_KEY not in json.dumps([receipt.observations, receipt.redacted_execution], default=str)
+
+
+def _run_with(monkeypatch, transport, paths=("/app",)):
+    scan_id = str(uuid.uuid4())
+    manifest = _manifest(scan_id, paths)
+    monkeypatch.setattr(action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: transport)
+    action = _action(
+        "verify.exposure", "exposure.verify_batch", 0,
+        capability_args={
+            "endpoint_manifest_ref": manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 100},
+            "profile": "balanced",
+            "proof_policy": "deterministic_proof_contract_required",
+        },
+    )
+    action = type(action)(**{**action.__dict__, "requested_budget": {
+        "http_requests": 300, "tool_wall_seconds": 180,
+    }})
+    plan = ScanActionPlan(scan_id=scan_id, execution_plan_digest="a" * 64,
+                          target_binding_digest=TARGET.digest, actions=(action,))
+    backend = Backend(manifests={manifest.manifest_id: manifest})
+    dispatcher = _dispatcher(plan, backend, policy=ScanPolicy())
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    proofs = [item for item in receipt.observations if item.get("kind") == "sensitive_exposure_proof"]
+    return receipt, proofs, transport

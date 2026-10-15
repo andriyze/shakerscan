@@ -40,6 +40,8 @@ from .graphql_probe import (
     seed_endpoint_urls as graphql_seed_endpoint_urls,
 )
 from .secret_material import (
+    is_masked_or_indirect_value,
+    normalized_key_name,
     SecretEvidence,
     fingerprinted_secret_evidence,
     is_structured_secret_value,
@@ -222,6 +224,10 @@ _CLASS_SEVERITY: Mapping[str, str] = {
     "phpinfo_disclosure": "medium",
     "debug_interface_exposure": "medium",
     "verbose_error_disclosure": "medium",
+    # A developer left a credential in an HTML comment that every visitor receives.
+    "html_comment_secret": "high",
+    # An anonymous response lists several user records with their plaintext passwords.
+    "credential_record_disclosure": "critical",
     # The whole schema is readable without credentials, and an in-browser IDE is served to
     # anyone; both are configuration that production GraphQL deployments turn off.
     "graphql_introspection_enabled": "low",
@@ -246,6 +252,8 @@ EXPOSURE_PROOF_CONTRACTS: Mapping[str, str] = {
     "phpinfo_disclosure": "phpinfo_exposure/v1",
     "debug_interface_exposure": "debug_interface_exposure/v1",
     "verbose_error_disclosure": "verbose_error_exposure/v1",
+    "html_comment_secret": "html_comment_secret_exposure/v1",
+    "credential_record_disclosure": "credential_record_exposure/v1",
     "graphql_introspection_enabled": "graphql_introspection_exposure/v1",
     "graphql_ide_exposure": "graphql_ide_exposure/v1",
 }
@@ -509,7 +517,7 @@ def _scalar(value: Any) -> bool:
 
 
 def _actuator_pairs(document: Any) -> list[tuple[str, object]] | None:
-    """Property pairs of a Spring actuator ``env`` or ``configprops`` body, else None."""
+    """Property pairs of a Spring actuator ``env``, ``configprops`` or ``auditevents`` body, else None."""
     if not isinstance(document, Mapping):
         return None
     sources = document.get("propertySources")
@@ -523,6 +531,19 @@ def _actuator_pairs(document: Any) -> list[tuple[str, object]] | None:
                 value = item.get("value") if isinstance(item, Mapping) else item
                 if _scalar(value):
                     pairs.append((str(key), value))
+            if len(pairs) >= _MAX_DOCUMENT_PAIRS:
+                break
+        return pairs[:_MAX_DOCUMENT_PAIRS]
+    events = document.get("events")
+    if isinstance(events, list) and events and all(
+        isinstance(event, Mapping) and "type" in event and "timestamp" in event
+        for event in events[:200]
+    ):  # Boot 2/3 auditevents: each event's data is what the application recorded
+        pairs = []
+        for event in events[:2_000]:
+            data = event.get("data")
+            if isinstance(data, Mapping):
+                pairs.extend((_leaf_key(key), value) for key, value in _flatten(data))
             if len(pairs) >= _MAX_DOCUMENT_PAIRS:
                 break
         return pairs[:_MAX_DOCUMENT_PAIRS]
@@ -568,6 +589,34 @@ def _actuator_index_advertises_heapdump(document: Any) -> bool:
     heapdump = links.get("heapdump")
     href = heapdump.get("href") if isinstance(heapdump, Mapping) else None
     return isinstance(href, str) and href.rstrip("/").endswith("/heapdump")
+
+
+# Actuator endpoints the index may lead to: read-only property and event dumps. Only these are
+# followed, only same-origin, never templated hrefs, and never the heap dump.
+ACTUATOR_FOLLOW_ENDPOINTS: tuple[str, ...] = ("auditevents", "env", "configprops")
+
+
+def actuator_index_links(body: bytes, base_url: str) -> tuple[str, ...]:
+    """Same-origin URLs of the read-only endpoints an anonymous actuator index advertises."""
+    document = _json_document(_decode(body))
+    links = document.get("_links") if isinstance(document, Mapping) else None
+    if not isinstance(links, Mapping) or not isinstance(links.get("self"), Mapping):
+        return ()
+    origin = urllib.parse.urlsplit(base_url)
+    found: list[str] = []
+    for name in ACTUATOR_FOLLOW_ENDPOINTS:
+        entry = links.get(name)
+        if not isinstance(entry, Mapping) or entry.get("templated") is True:
+            continue
+        href = entry.get("href")
+        if not isinstance(href, str) or not href:
+            continue
+        parts = urllib.parse.urlsplit(urllib.parse.urljoin(base_url, href))
+        # The index names its own host; follow the path on the origin actually probed.
+        if parts.path.rstrip("/").rsplit("/", 1)[-1] != name or is_never_requested(parts.path):
+            continue
+        found.append(urllib.parse.urlunsplit((origin.scheme, origin.netloc, parts.path, "", "")))
+    return tuple(found)
 
 
 def _openapi_secrets(document: Any) -> tuple[SecretEvidence, ...] | None:
@@ -649,6 +698,9 @@ def _json_signature(path: str, text: str, document: Any) -> ExposureSignature | 
     # served as a static document says nothing about the server answering introspection.
     if graphql_introspection_request(path) and graphql_introspection_summary(document) is not None:
         return _sig("graphql_introspection_enabled", '"__schema"')
+    records = _credential_record_signature(document)
+    if records is not None:
+        return records
     actuator = _actuator_pairs(document)
     if actuator is not None:
         secrets = _secrets(text, actuator, server_side=True)
@@ -814,7 +866,7 @@ def _credential_store(path: str, text: str) -> ExposureSignature | None:
     return None
 
 
-def _structured_text(path: str, text: str) -> ExposureSignature | None:
+def _structured_text(path: str, text: str, content_type: str = "") -> ExposureSignature | None:
     """Proofs for non-HTML bodies whose own grammar identifies the file type."""
     credential_store = _credential_store(path, text)
     if credential_store is not None:
@@ -824,6 +876,9 @@ def _structured_text(path: str, text: str) -> ExposureSignature | None:
                     _dedupe(selfevident_secret_evidence(text)))
     if _GIT_HEAD_RE.match(text):
         return _sig("version_control_exposure", "git_head_ref")
+    markdown = _markdown_env_blocks(path, content_type, text)
+    if markdown is not None:
+        return markdown
     document = _json_document(text)
     if document is not None:
         return _json_signature(path, text, document)
@@ -864,7 +919,226 @@ def _structured_html(text: str, path: str = "") -> ExposureSignature | None:
     ide = graphql_ide_page(text) if graphql_ide_location(path) else None
     if ide is not None:
         return _sig("graphql_ide_exposure", "(?i)graphiql|graphqlplayground")
-    return None
+    return _html_comment_secret(text)
+
+
+# --- Source and document grammars --------------------------------------------------------------
+# A PHP file that reaches the client starting with its own open tag was served as source, not
+# executed: an interpreter never emits ``<?php``. The statement check keeps a text file that
+# merely starts with the tag (a one-line note) from counting as source.
+_PHP_OPEN_RE = re.compile(r"^﻿?[ \t\r\n]{0,64}<\?php\b")
+_PHP_STATEMENT_RE = re.compile(
+    r"(?m)^[ \t]*(?:\$[A-Za-z_]\w{0,63}[ \t]*(?:\[[^\]\r\n]{1,128}\][ \t]*){0,4}=[^=]"
+    r"|define[ \t]*\(|(?:require|include)(?:_once)?\b|(?:abstract[ \t]+|final[ \t]+)?class[ \t]+\w"
+    r"|function[ \t]+\w|namespace[ \t]+\w|use[ \t]+[A-Z\\]|if[ \t]*\(|echo\b|return\b)"
+)
+# ``$name = ...;`` / ``$_CONF['db_password'] = ...;`` and ``define('DB_PASSWORD', ...);`` --
+# every repetition bounded and each statement read on one line, so the scan is linear.
+_PHP_ASSIGN_RE = re.compile(
+    r"(?m)^[ \t]*\$([A-Za-z_]\w{0,63})((?:[ \t]*\[[ \t]*['\"][^'\"\r\n]{1,128}['\"][ \t]*\]){0,4})"
+    r"[ \t]*=[ \t]*([^;\r\n]{1,1024});"
+)
+_PHP_DEFINE_RE = re.compile(
+    r"(?im)^[ \t]*define[ \t]*\([ \t]*['\"]([A-Za-z_][\w.\-]{0,127})['\"][ \t]*,[ \t]*([^;\r\n]{1,1024})\)[ \t]*;"
+)
+_PHP_LAST_KEY_RE = re.compile(r"\[[ \t]*['\"]([^'\"\r\n]{1,128})['\"][ \t]*\][ \t]*$")
+_PHP_LITERAL_RE = re.compile(r"^'((?:[^'\\\r\n]|\\.){0,512})'$|^\"((?:[^\"\\\r\n$]|\\.){0,512})\"$")
+# A literal default after ``?:`` / ``??`` is the value used whenever the environment is unset.
+_PHP_DEFAULT_RE = re.compile(r"(?:\?:|\?\?)[ \t]*('(?:[^'\\\r\n]|\\.){0,512}'|\"(?:[^\"\\\r\n$]|\\.){0,512}\")[ \t]*\)?$")
+
+
+def _php_literal(expression: str) -> str | None:
+    """The string a PHP right-hand side evaluates to when it is a literal or a literal default."""
+    expression = expression.strip()
+    match = _PHP_LITERAL_RE.match(expression)
+    if match is None:
+        default = _PHP_DEFAULT_RE.search(expression)
+        match = _PHP_LITERAL_RE.match(default.group(1)) if default else None
+    if match is None:
+        return None
+    return match.group(1) if match.group(1) is not None else match.group(2)
+
+
+def _php_source(text: str) -> ExposureSignature | None:
+    """PHP source served instead of executed, with its literal configuration assignments."""
+    if not _PHP_OPEN_RE.match(text[:256]) or not _PHP_STATEMENT_RE.search(text[:_PARSE_MAX_CHARS]):
+        return None
+    body = text[:_PARSE_MAX_CHARS]
+    pairs: list[tuple[str, object]] = []
+    for match in _PHP_ASSIGN_RE.finditer(body):
+        last_key = _PHP_LAST_KEY_RE.search(match.group(2) or "")
+        value = _php_literal(match.group(3))
+        if value is not None:
+            pairs.append((last_key.group(1) if last_key else match.group(1), value))
+        if len(pairs) >= _MAX_DOCUMENT_PAIRS:
+            break
+    for match in _PHP_DEFINE_RE.finditer(body):
+        value = _php_literal(match.group(2))
+        if value is not None:
+            pairs.append((match.group(1), value))
+        if len(pairs) >= _MAX_DOCUMENT_PAIRS:
+            break
+    secrets = _secrets(text, pairs, server_side=True)
+    if secrets:
+        return _sig("configuration_secret_file", "php_configuration_secret", secrets, pairs=pairs)
+    return _sig("backup_or_source_artifact", "php_source_served",
+                _dedupe(selfevident_secret_evidence(body)), pairs=pairs)
+
+
+# A fenced code block in a Markdown document (CommonMark ``` or ~~~ fences).
+_MARKDOWN_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+# ``NAME=value`` / ``export NAME="value"``: an environment name in the conventional upper case.
+_ENV_ASSIGNMENT_RE = re.compile(r"[ \t]*(?:export[ \t]+)?([A-Z][A-Z0-9_]{1,127})[ \t]*=[ \t]*(\S.{0,1023})")
+_MARKDOWN_NAME_RE = re.compile(r"(?i)\.(?:md|markdown|mdx)$")
+
+
+def _markdown_env_blocks(path: str, headers_type: str, text: str) -> ExposureSignature | None:
+    """Environment assignments inside the fenced code blocks of a served Markdown document.
+
+    Prose never counts: only lines inside a fence, in the ``NAME=value`` grammar a shell or a
+    dotenv file reads, and only values that pass the shared screen. A README showing
+    ``API_TOKEN=<your-token>`` proves nothing; a runbook that inlines the real token does.
+    """
+    if "markdown" not in headers_type and not _MARKDOWN_NAME_RE.search(_last_segment(path)):
+        return None
+    pairs: list[tuple[str, object]] = []
+    fence = ""
+    for line in text[:_PARSE_MAX_CHARS].splitlines():
+        marker = _MARKDOWN_FENCE_RE.match(line)
+        if marker:
+            token = marker.group(1)
+            if not fence:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = ""
+            continue
+        if not fence:
+            continue
+        match = _ENV_ASSIGNMENT_RE.fullmatch(line.rstrip())
+        if match:
+            pairs.append((match.group(1), match.group(2).strip().strip("\"'")))
+            if len(pairs) >= _MAX_DOCUMENT_PAIRS:
+                break
+    if not pairs:
+        return None
+    secrets = _dedupe(structured_secret_assignments(pairs, server_side=True))
+    if not secrets:
+        return None
+    return _sig("environment_secret_file", "markdown_env_block_secret", secrets, pairs=pairs)
+
+
+# A credential a developer left in an HTML comment: ``<!-- db_password = ... -->``. Comments are
+# read one by one (bounded count and length) and only a secret-named key with a screened value
+# counts, so a comment that talks about passwords proves nothing.
+_HTML_COMMENT_OPEN = "<!--"
+_HTML_COMMENT_CLOSE = "-->"
+_MAX_HTML_COMMENTS = 500
+_MAX_HTML_COMMENT_CHARS = 2_000
+_COMMENT_ASSIGNMENT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.\-])([A-Za-z][A-Za-z0-9_.\-]{0,80})[ \t]*[:=][ \t]*(\S[^\r\n]{0,511})"
+)
+
+
+def _html_comment_pairs(text: str) -> list[tuple[str, object]]:
+    pairs: list[tuple[str, object]] = []
+    position = 0
+    body = text[:_PARSE_MAX_CHARS]
+    for _ in range(_MAX_HTML_COMMENTS):
+        start = body.find(_HTML_COMMENT_OPEN, position)
+        if start < 0:
+            break
+        end = body.find(_HTML_COMMENT_CLOSE, start + 4)
+        if end < 0:
+            break
+        position = end + 3
+        comment = body[start + 4:end]
+        if len(comment) > _MAX_HTML_COMMENT_CHARS or comment.lstrip().startswith(("[if", "<![endif")):
+            continue
+        for line in comment.splitlines():
+            for match in _COMMENT_ASSIGNMENT_RE.finditer(line):
+                value = match.group(2).strip().rstrip("-").strip().strip("\"'")
+                pairs.append((match.group(1), value))
+    return pairs[:_MAX_DOCUMENT_PAIRS]
+
+
+def _html_comment_secret(text: str) -> ExposureSignature | None:
+    if _HTML_COMMENT_OPEN not in text:
+        return None
+    pairs = _html_comment_pairs(text)
+    if not pairs:
+        return None
+    secrets = _dedupe(structured_secret_assignments(pairs, server_side=False))
+    if not secrets:
+        return None
+    return _sig("html_comment_secret", "html_comment_credential", secrets, pairs=pairs)
+
+
+# Records that pair an account identity with its password, served to an anonymous reader. The
+# record shape is the proof: several objects in one list, each naming an account and carrying a
+# plaintext password value. Hashes are left to the self-evident ``password_hash`` contract.
+_IDENTITY_KEYS = frozenset({"username", "user_name", "login", "email", "email_address", "user", "account"})
+_PASSWORD_KEYS = frozenset({"password", "passwd", "pwd", "pass", "user_password", "plain_password",
+                            "plaintext_password", "cleartext_password"})
+_HASH_SHAPE_RE = re.compile(r"^(?:\$[0-9a-z]{1,8}\$\S{8,}|[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}|[0-9a-f]{128}|\{[A-Z0-9-]{2,16}\}\S{8,}|pbkdf2[_:$]\S{8,}|scrypt[:$]\S{8,})$", re.IGNORECASE)
+_MIN_CREDENTIAL_RECORDS = 2
+
+
+def _credential_records(document: Any) -> list[tuple[str, object]]:
+    """``(field, plaintext password)`` of each account record in the first list that has two."""
+    found: list[tuple[str, object]] = []
+
+    def plaintext(value: object) -> str | None:
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            return None
+        text = str(value).strip()
+        if (not text or len(text) > 256 or is_masked_or_indirect_value(text)
+                or _HASH_SHAPE_RE.match(text) or text.lower() in {"null", "none", "n/a", "-"}):
+            return None
+        return text
+
+    def records(items: list[Any], name: str) -> list[tuple[str, object]]:
+        out: list[tuple[str, object]] = []
+        for index, item in enumerate(items[:2_000]):
+            if not isinstance(item, Mapping):
+                continue
+            keys = {normalized_key_name(str(key)): value for key, value in list(item.items())[:200]}
+            if not any(key in _IDENTITY_KEYS and isinstance(keys[key], str) and keys[key].strip()
+                       for key in keys):
+                continue
+            for key, value in keys.items():
+                if key in _PASSWORD_KEYS and (secret := plaintext(value)) is not None:
+                    out.append((f"{name}[{index}].{key}", secret))
+                    break
+        return out
+
+    def walk(value: Any, name: str, depth: int) -> None:
+        if found or depth > 4:
+            return
+        if isinstance(value, list):
+            hits = records(value, name)
+            if len(hits) >= _MIN_CREDENTIAL_RECORDS:
+                found.extend(hits[:_MAX_DOCUMENT_PAIRS])
+                return
+            for index, item in enumerate(value[:50]):
+                walk(item, f"{name}[{index}]", depth + 1)
+        elif isinstance(value, Mapping):
+            for key, item in list(value.items())[:200]:
+                walk(item, f"{name}.{key}" if name else str(key), depth + 1)
+
+    walk(document, "", 0)
+    return found
+
+
+def _credential_record_signature(document: Any) -> ExposureSignature | None:
+    pairs = _credential_records(document)
+    if not pairs:
+        return None
+    secrets = _dedupe([
+        secret_evidence(str(field_name), "plaintext_password_record", str(value))
+        for field_name, value in pairs
+    ])
+    return _sig("credential_record_disclosure", "account_records_with_plaintext_passwords",
+                secrets, pairs=[(f"{name}.password", value) for name, value in pairs])
 
 
 def _cloud_credentials(text: str) -> tuple[SecretEvidence, ...]:
@@ -911,7 +1185,13 @@ def classify_exposure(
         _HTML_PREFIX_RE.match(text[:512])
     )
 
-    structured = _structured_html(text, path) if is_html else _structured_text(path, text)
+    # Source served instead of executed, whatever content type the server guessed for it.
+    php = _php_source(text)
+    if php is not None:
+        return php
+    structured = (
+        _structured_html(text, path) if is_html else _structured_text(path, text, content_type)
+    )
     if structured is not None:
         return structured
 
@@ -996,6 +1276,8 @@ SECRET_MATERIAL_CLASSES = frozenset({
     "actuator_secret_disclosure",
     "api_specification_secret",
     "configuration_secret_file",
+    "html_comment_secret",
+    "credential_record_disclosure",
 })
 _SECRET_MATERIAL_CLASSES = SECRET_MATERIAL_CLASSES
 
@@ -1009,7 +1291,8 @@ _CONFIG_DOCUMENT_PATTERNS = frozenset({
     "dotenv_secret_assignment", "dotenv_assignments", "aspnet_web_config",
     "aspnet_web_config_backup", "actuator_property_sources", "json_configuration_secret",
     "sql_dump", "git_credentials_store", "netrc_credentials", "npmrc_auth_token",
-    "pypirc_credentials",
+    "pypirc_credentials", "php_configuration_secret", "php_source_served",
+    "markdown_env_block_secret",
 })
 # A known value shorter than this is too common to scrub or to test an excerpt for.
 _MIN_SCRUBBED_VALUE_LENGTH = 4
