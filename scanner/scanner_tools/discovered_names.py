@@ -12,8 +12,14 @@ lower case, no trailing dot, and IDNA 2008 with the UTS #46 mapping for a non-AS
 ``*.`` wildcard label from a certificate is dropped. A name that is not a syntactically valid DNS
 name after that is refused rather than guessed at.
 
-Standard library and ``idna`` only, so the scanner package (which does not import the API
-package) and the API share it.
+Label boundaries are not registrant boundaries. An apex that is itself a public suffix
+(``co.uk``, ``github.io``) would admit every registrant below it, and an apex with a public-suffix
+rule below it (``amazonaws.com`` above ``s3.amazonaws.com``) would admit other registrants' sites
+under that rule. A name is therefore also refused unless its registrable domain (eTLD+1, from the
+one bundled Public Suffix List in ``api/scope/psl.py`` via ``registrable``) is the apex or lies
+above it.
+
+Standard library, ``idna`` and the bundled PSL only, so the scanner package and the API share it.
 """
 
 from __future__ import annotations
@@ -22,6 +28,11 @@ import re
 from typing import Any, Iterable
 
 import idna
+
+try:
+    from .registrable import registrable_domain
+except ImportError:  # pragma: no cover - flat-module fallback
+    from registrable import registrable_domain
 
 _DNS_NAME = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?![0-9]+$)[a-z0-9-]{2,63}$"
@@ -49,17 +60,23 @@ def canonical_name(value: Any) -> str | None:
 
 
 def name_under_apex(value: Any, apex: Any) -> str | None:
-    """The canonical name when it is the apex or a name below it; None otherwise.
-
-    TODO(fix/scope-boundaries): an apex that is itself a public suffix (``co.uk``) would admit
-    every registrant below it. The public-suffix check lands with the PSL helper on that branch;
-    reuse it here once merged rather than duplicating it.
-    """
+    """The canonical name when it is the apex or a name below it in the apex's own registrable
+    domain; None otherwise (including every name under a public-suffix apex such as ``co.uk``)."""
     root = canonical_name(apex)
     name = canonical_name(value)
     if not root or not name:
         return None
-    return name if name == root or name.endswith("." + root) else None
+    if name != root and not name.endswith("." + root):
+        return None
+    return name if _same_registrant(name, root) else None
+
+
+def _same_registrant(name: str, root: str) -> bool:
+    """True when ``name`` (already at or below ``root``) belongs to the registrant of ``root``:
+    its registrable domain is ``root`` or an ancestor of it. A public suffix at or below ``root``
+    makes the registrable domain longer than ``root`` (or absent), so the name is refused."""
+    site = registrable_domain(name)
+    return bool(site) and (site == root or root.endswith("." + site))
 
 
 def subdomain_of(value: Any, apex: Any) -> str | None:
@@ -82,7 +99,8 @@ def filter_subdomains(names: Iterable[Any], apex: Any) -> tuple[list[str], int]:
         name = canonical_name(value)
         if root and name == root:
             continue
-        if not root or not name or not name.endswith("." + root):
+        if (not root or not name or not name.endswith("." + root)
+                or not _same_registrant(name, root)):
             refused += 1
             continue
         if name not in seen:

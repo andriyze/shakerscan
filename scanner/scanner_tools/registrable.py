@@ -33,4 +33,9 @@ def same_site(left: str, right: str) -> bool:
     return bool(a) and a == b
 
 
-__all__ = ["same_site", "site_of", "spans_public_suffix"]
+def registrable_domain(host: str) -> str | None:
+    """eTLD+1 of ``host``; None for a public suffix, an address, or an invalid host."""
+    return _registrable_domain(host)
+
+
+__all__ = ["registrable_domain", "same_site", "site_of", "spans_public_suffix"]

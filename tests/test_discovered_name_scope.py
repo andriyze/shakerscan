@@ -309,3 +309,73 @@ def test_storing_inserts_the_canonical_name_and_root_it_validated():
         Conn(), {"scannable": ["API.Example.com.", "api.example.com"]}, "Example.COM.",
     ))
     assert inserted == [("https://api.example.com", "example.com", "subfinder")]
+
+
+# ----------------------------------------------------------- public-suffix apexes (registrants)
+
+# An apex that is a public suffix (or that has a public-suffix rule below it) is not one
+# registrant's root: label boundaries alone would hand every other registrant's site to it.
+SUFFIX_APEX_CASES = (
+    ("co.uk", "victim.co.uk"),
+    ("co.uk", "www.victim.co.uk"),
+    ("github.io", "someone.github.io"),
+    ("amazonaws.com", "bucket.s3.amazonaws.com"),
+)
+
+
+@pytest.mark.parametrize(("apex", "name"), SUFFIX_APEX_CASES)
+def test_a_name_of_another_registrant_is_never_under_a_public_suffix_apex(apex, name):
+    assert discovered_names.name_under_apex(name, apex) is None
+    assert discovered_names.subdomain_of(name, apex) is None
+    assert discovered_names.filter_subdomains([name], apex) == ([], 1)
+
+
+@pytest.mark.parametrize(("apex", "name"), [
+    ("example.co.uk", "api.example.co.uk"),
+    ("dev.example.com", "a.dev.example.com"),
+    ("example.com", "a.b.example.com"),
+    ("someone.github.io", "docs.someone.github.io"),
+])
+def test_names_inside_the_apex_registrant_are_still_accepted(apex, name):
+    assert discovered_names.subdomain_of(name, apex) == name
+    assert discovered_names.filter_subdomains([name], apex) == ([name], 0)
+
+
+def test_the_public_suffix_apex_itself_is_not_a_root():
+    assert discovered_names.name_under_apex("co.uk", "co.uk") is None
+
+
+def test_targets_page_discovery_of_a_public_suffix_apex_keeps_nothing(monkeypatch):
+    """Entry point: Targets-page discovery for ``co.uk`` must not admit registrants below it."""
+    returned = ["victim.co.uk", "www.other.co.uk"]
+
+    async def available():
+        return True
+
+    async def source(domain, **_kwargs):
+        return {"subdomains": list(returned)}
+
+    async def crtsh(domain, **_kwargs):
+        return {"subdomain_discovery": {"subdomains": list(returned)}}
+
+    monkeypatch.setattr(subdomain_discovery, "check_gungnir_available", available)
+    monkeypatch.setattr(subdomain_discovery, "gungnir_scan", source)
+    monkeypatch.setattr(subdomain_discovery, "subfinder_scan", source)
+    monkeypatch.setattr(subdomain_discovery, "check_certificate_transparency", crtsh)
+    result = asyncio.run(subdomain_discovery.discover_subdomains("co.uk"))
+    assert result["subdomains"] == []
+
+
+def test_storing_under_a_public_suffix_apex_inserts_nothing():
+    """Entry point: the insert path refuses another registrant whichever planner produced it."""
+    conn = _Conn()
+    outcome = asyncio.run(target_resolution.store_discovered_targets(
+        conn, {"scannable": ["victim.co.uk", "www.victim.co.uk"]}, "co.uk",
+    ))
+    assert conn.inserted == []
+    assert outcome["outside_root_count"] == 2
+
+
+def test_ct_parsing_under_a_public_suffix_apex_keeps_nothing():
+    certs = [{"common_name": "victim.co.uk", "name_value": "*.other.co.uk"}]
+    assert ct_monitor._discover_subdomains_from_ct(certs, "co.uk")["subdomains"] == []
