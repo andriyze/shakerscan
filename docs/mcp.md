@@ -92,9 +92,14 @@ row boundary and `next_cursor` resumes at the first row left out; any other answ
 fields that fit whole and `mcp_view.omitted` names the others with their sizes. A
 `shakerscan_hunt_capability` answer is compact by default: the observations appear once (under
 `action_result`; the raw `result` points there), strings over 16,000 characters are cut, and
-observations that still do not fit are left out, all named in `mcp_view.reduced`. Calling again
-with the same `idempotency_key`, unchanged input and `view: "full"` replays the recorded answer
-(nothing runs again) in pages (`page`, `mcp_view.pages`). Hunt discovery reads `GET /hunts/contract` and
+observations that still do not fit are left out, all named in `mcp_view.reduced`. `view: "full"`
+needs the caller's `idempotency_key` and reads back what the server recorded for that action
+(nothing runs again): the canonical `action_result` with every recorded observation and the
+stored, redacted result summary, not the raw worker output of the first answer, so a raw field
+the server did not store cannot be read back. It is paged (`page`, `mcp_view.pages`) from one
+projection of the record; each part carries its `index` and `mcp_view.parts` the total, so a gap
+or repeat across pages shows. With a key no action was recorded under yet, the call runs the
+action and answers compact, saying to call again for the record. Hunt discovery reads `GET /hunts/contract` and
 generates the start schema from the live authority contract. The MCP boundary uses only the
 canonical `goal` name and sends the complete V2 body: schema version, target kind, policy, budgets,
 credential references, capability allowlist, request-collection references, and optional

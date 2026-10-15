@@ -658,9 +658,15 @@ TRIMMED_LIST_ITEMS = 20
 CAPABILITY_VIEW_PROPERTY = {
     "type": "string", "enum": ["compact", "full"],
     "description": "Leave it out: compact (the default) keeps one copy of the observations and fits one "
-                   "answer, and mcp_view says what was reduced. full, with the idempotency_key of a call "
-                   "already made and unchanged input, replays the recorded answer whole, in pages.",
+                   "answer, and mcp_view says what was reduced. full reads back an action already "
+                   "recorded under your idempotency_key (send it, with unchanged input): what the server "
+                   "stored for it, in pages. That is the action's canonical result with every recorded "
+                   "observation and the server's stored, redacted result summary, not the raw worker "
+                   "output of the first answer; a field the server did not store is not in it.",
 }
+# The fields of a replayed action that view=full pages: the server's record, without anything
+# the adapter adds per call (mcp_*), so every page is cut from the same projection.
+RECORDED_CAPABILITY_KEYS = ("hunt_id", "capability", "action_id", "status", "receipt_id", "action_result", "result")
 CAPABILITY_PAGE_PROPERTY = {
     "type": "integer", "minimum": 1, "maximum": 1000,
     "description": "With view=full: which page of the answer (default 1); mcp_view.pages says how many.",
@@ -853,8 +859,10 @@ def _full_view_page(record: Any, page: int, *, tool: str) -> Any:
     pages: list[list[dict[str, Any]]] = [[]]
     used = 0
     budget = FULL_VIEW_PAGE_BYTES - 2_000  # room for hunt_id, status and mcp_view
-    for path, value in (unit for key in sorted(record) for unit in _full_view_units(record[key], (key,))):
-        part = {"path": _path_text(path), "value": value}
+    units = [unit for key in sorted(record) for unit in _full_view_units(record[key], (key,))]
+    for index, (path, value) in enumerate(units):
+        # index: the part's place among all parts, so a gap or repeat across pages shows.
+        part = {"index": index, "path": _path_text(path), "value": value}
         if _size(part) > budget:
             part["value"] = {"mcp_omitted": f"{_size(value)} bytes, larger than one page of the full view",
                              "read_with": "shakerscan_hunt_get capability=<name>, or shakerscan_hunt_query"}
@@ -880,7 +888,8 @@ def _full_view_page(record: Any, page: int, *, tool: str) -> Any:
                 + ("" if tool == "shakerscan_hunt_get" else " Pages after the first come from shakerscan_hunt_get."))
     return {
         "hunt_id": record.get("hunt_id"), "status": record.get("status"), "parts": pages[page - 1],
-        "mcp_view": {"view": "full", "page": page, "pages": len(pages), "next_page": next_page, "note": note},
+        "mcp_view": {"view": "full", "page": page, "pages": len(pages), "next_page": next_page,
+                     "parts": len(units), "note": note},
     }
 
 
@@ -1038,8 +1047,9 @@ def _rows_page(
     """One page of a list tool: ``rows`` (the window offset..offset+limit), summarised, cut on a
     row boundary to MCP_ANSWER_BYTES. ``more``: rows follow this window; ``past_reach``: rows
     follow (or may) that the engine does not answer here, so the window cannot move on."""
-    shaped = [paging.summary(row) for row in rows] if paging.summary and view == "summary" else list(rows)
-    shaped = [row for row in shaped if row is not None]
+    # A row the summary cannot read stays as it is, so every row keeps its place (offsets).
+    shaped = ([summary if (summary := paging.summary(row)) is not None else row for row in rows]
+              if paging.summary and view == "summary" else list(rows))
     base = {key: value for key, value in (structured.items() if isinstance(structured, Mapping) else ())
             if key not in {paging.rows_key, "limit", "offset", "total", "returned", "has_more", "next_cursor"}}
     notes: list[str] = []
@@ -1153,9 +1163,11 @@ def _compact_capability_answer(result: Any, *, idempotency_key: str) -> Any:
     compact["mcp_view"] = {
         "view": "compact",
         "reduced": dict(sorted(reduced.items())),
-        "full_view": ("For the whole answer call again with the same idempotency_key "
-                      f"({idempotency_key}), unchanged input and view=full: the server replays the "
-                      "recorded action and runs nothing again. view=full answers in pages (page=2, ...)."),
+        "full_view": ("For what the server recorded for this action, call again with the same "
+                      f"idempotency_key ({idempotency_key}), unchanged input and view=full: nothing runs "
+                      "again. It holds every recorded observation and the stored, redacted result "
+                      "summary, in pages (page=2, ...); raw output the server did not store (a cut "
+                      "string above) cannot be read back."),
     }
     return _bounded_answer(compact, tool="shakerscan_hunt_capability")
 
@@ -2184,10 +2196,10 @@ class ArsenalClient:
                 capability_page = payload.pop("page", 1)
                 if capability_page != 1 and capability_view != "full":
                     raise MCPError(-32602, "page applies to view=full only")
-                if capability_page != 1 and not str(payload.get("idempotency_key") or "").strip():
+                if capability_view == "full" and not str(payload.get("idempotency_key") or "").strip():
                     raise MCPError(-32602, (
-                        "page applies to a replay: send the idempotency_key of the call whose answer you "
-                        "are reading (its mcp_idempotency_key), with unchanged input"))
+                        "view=full reads back a recorded action: send the idempotency_key of the call whose "
+                        "answer you are reading (its mcp_idempotency_key), with unchanged input"))
             start_headers: dict[str, str] = {}
             if name == "shakerscan_hunt_query":
                 payload.setdefault("limit", DEFAULT_QUERY_LIMIT)
@@ -2335,8 +2347,25 @@ class ArsenalClient:
                 }
                 result = {**result, **identity_keys}
                 if not streaming_ssh:
-                    if capability_view == "full":
-                        result = {**_full_view_page(result, capability_page, tool=name), **identity_keys}
+                    if capability_view == "full" and result.get("idempotent_replay") is True and not _in_flight(result):
+                        # Every page comes from the same source, the server's record of the action,
+                        # in a projection that does not change between calls.
+                        recorded = {key: result[key] for key in RECORDED_CAPABILITY_KEYS if key in result}
+                        result = {**_full_view_page(recorded, capability_page, tool=name), **identity_keys}
+                    elif capability_view == "full":
+                        # The key was new (the action ran now) or the action is still running: the
+                        # first answer is not the record, so no page of it is served.
+                        result = _compact_capability_answer(result, idempotency_key=payload["idempotency_key"])
+                        result = {**result, "mcp_view": {
+                            **(result.get("mcp_view") if isinstance(result.get("mcp_view"), dict) else {}),
+                            "full_view_unavailable": (
+                                "The action is still running; call again with the same idempotency_key to "
+                                "collect it, then view=full to read its record."
+                                if _in_flight(result) else
+                                "This call ran the action (no action was recorded under this "
+                                "idempotency_key yet), so this is its compact answer. Call again with the "
+                                "same idempotency_key, unchanged input and view=full to read its record."),
+                        }}
                     else:
                         result = _compact_capability_answer(result, idempotency_key=payload["idempotency_key"])
             if detail_capability is not None:

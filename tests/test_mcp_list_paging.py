@@ -12,6 +12,7 @@ a scripted catalog and executor, not a live instance.
 from __future__ import annotations
 
 import base64
+import json
 import sys
 from pathlib import Path
 
@@ -246,15 +247,22 @@ class CapabilityEngine(ManifestHuntClient):
     def __init__(self, observations):
         super().__init__()
         self.observations = observations
+        self.keys = set()
 
     def request_json(self, method, path, payload=None):
         if path.endswith("/capabilities/http.request"):
             self.calls.append((method, path, payload))
-            return {"hunt_id": self.HUNT_ID, "capability": "http.request", "action_id": "act-1",
-                    "status": "completed", "idempotent_replay": False,
-                    "action_result": {"status": "success", "observations": list(self.observations)},
-                    "result": {"observations": list(self.observations), "budget_consumed": {"http_requests": 1},
-                               "typed_output": {"records": list(self.observations), "parser": "http/v1"}}}
+            replay = payload["idempotency_key"] in self.keys
+            self.keys.add(payload["idempotency_key"])
+            answer = {"hunt_id": self.HUNT_ID, "capability": "http.request", "action_id": "act-1",
+                      "status": "completed", "idempotent_replay": replay,
+                      "action_result": {"status": "success", "observations": list(self.observations)}}
+            if replay:  # the engine's replay: the stored, redacted summary, not the raw result
+                answer["result"] = {"observations": list(self.observations), "budget_consumed": {"http_requests": 1}}
+            else:
+                answer["result"] = {"observations": list(self.observations), "budget_consumed": {"http_requests": 1},
+                                    "typed_output": {"records": list(self.observations), "parser": "http/v1"}}
+            return answer
         return super().request_json(method, path, payload)
 
 
@@ -282,20 +290,34 @@ def test_a_large_capability_answer_is_compacted_and_readable_whole_on_a_replay()
     reduced = compact["mcp_view"]["reduced"]
     assert any(key.startswith("action_result.observations") for key in reduced), reduced
     key = compact["mcp_idempotency_key"]
-    with pytest.raises(mcp.MCPError, match="replay"):
-        _call(engine, view="full", page=2)
+    for page in (1, 2):
+        with pytest.raises(mcp.MCPError, match="recorded action"):
+            _call(engine, view="full", page=page)
     with pytest.raises(mcp.MCPError, match="view=full only"):
         _call(engine, idempotency_key=key, page=2)
     first = _answer(_call(engine, idempotency_key=key, view="full"))
     pages = first["mcp_view"]["pages"]
     assert pages > 1 and "view=full page=2" in first["mcp_view"]["note"]
     assert first["mcp_idempotency_key"] == key
-    bodies = 0
+    indices, bodies = [], 0
     for page in range(1, pages + 1):
         part = _answer(_call(engine, idempotency_key=key, view="full", page=page))
+        assert part["mcp_view"]["parts"] == first["mcp_view"]["parts"], "the same projection on every page"
+        indices += [item["index"] for item in part["parts"]]
+        assert not any(str(item["path"]).startswith("mcp_") for item in part["parts"])
         bodies += sum(1 for item in part["parts"] if str(item["path"]).endswith(".body")
                       or (isinstance(item["value"], dict) and "body" in item["value"]))
-    assert bodies >= 12, "every observation is readable whole across the pages"
+    assert indices == list(range(first["mcp_view"]["parts"])), "no part missing or repeated"
+    assert bodies >= 12, "every recorded observation is readable whole across the pages"
+
+
+def test_view_full_with_a_new_key_runs_the_action_once_and_pages_only_its_record():
+    engine = CapabilityEngine([{"kind": "http.response", "path": "/", "body": "b" * 20_000}] * 6)
+    answer = _answer(_call(engine, idempotency_key="agent-key-new-0001", view="full"))
+    assert "parts" not in answer and "ran the action" in answer["mcp_view"]["full_view_unavailable"]
+    replayed = _answer(_call(engine, idempotency_key="agent-key-new-0001", view="full"))
+    assert replayed["mcp_view"]["view"] == "full" and replayed["parts"][0]["index"] == 0
+    assert "typed_output" not in json.dumps(replayed["parts"]), "the record, not the first raw answer"
     sent = [payload for _m, path, payload in engine.calls if path.endswith("/capabilities/http.request")]
     assert all(set(payload) == {"idempotency_key", "input"} for payload in sent), "view and page stay in the adapter"
 
@@ -337,3 +359,12 @@ def test_against_this_engines_own_catalog_findings_are_paged_by_the_engine():
                  "shakerscan_timeline", "shakerscan_plans"):
         _answer(engine.call_tool(tool, {"limit": 5}))
     assert ("finding.list", {"limit": 5, "offset": 0}) in engine.executed
+
+
+def test_a_row_the_summary_cannot_read_keeps_its_place():
+    targets = [{"id": "t-0", "url": "u"}, "not-a-row", {"id": "t-2", "url": "u"}]
+    engine = Engine(rows={"targets": targets})
+    page = _answer(engine.call_tool("shakerscan_targets", {"limit": 2}))
+    assert page["targets"][1] == "not-a-row" and page["returned"] == 2
+    rest = _answer(engine.call_tool("shakerscan_targets", {"limit": 2, "cursor": page["next_cursor"]}))
+    assert rest["targets"][0]["id"] == "t-2", "the cursor resumes after the rows shown, none skipped"
