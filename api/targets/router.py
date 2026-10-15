@@ -51,6 +51,7 @@ try:
     import check_registry
     from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from targets import grouped_list
+    from targets.insert_race import fetch_target_upsert
     from list_contract import CURSOR_MAX_LENGTH, ListSpec, SortKey, SqlParams, count_total, snapshot_time
     import invariant_contracts
     import target_authorization
@@ -100,6 +101,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from .. import asm_inventory, check_registry, invariant_contracts, invariant_proposals, parallel_scan
     from ..list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from . import grouped_list
+    from .insert_race import fetch_target_upsert
     from ..list_contract import CURSOR_MAX_LENGTH, ListSpec, SortKey, SqlParams, count_total, snapshot_time
     from .. import target_authorization
     from .. import target_resolution
@@ -685,7 +687,9 @@ async def create_target(request: TargetCreate):
                     if promoted is not None:
                         row = {**dict(row), **dict(promoted)}
                 if row is None:
-                    row = await conn.fetchrow("""
+                    # Retried after a concurrent create of the same URL (insert_race): the
+                    # second request then reuses the row like any later one (already_exists).
+                    row = await fetch_target_upsert(conn, """
                     INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url,

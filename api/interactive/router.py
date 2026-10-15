@@ -25,12 +25,14 @@ from pydantic import BaseModel, Field
 
 try:
     from api_utils import _uuid_or_400
+    from targets.insert_race import fetch_target_upsert
     from evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from secret_store import decrypt_secret
     from serialization import row_to_dict
     from session_manager import InteractiveSession, InteractiveSessionManager
 except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import _uuid_or_400
+    from ..targets.insert_race import fetch_target_upsert
     from ..evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from ..secret_store import decrypt_secret
     from ..serialization import row_to_dict
@@ -496,14 +498,14 @@ async def create_session_finding(session_id: str, request: SessionFindingCreate)
             target_id = target['id']
         else:
             # Create new target
-            target_id = await conn.fetchval("""
+            target_id = await fetch_target_upsert(conn, """
                 INSERT INTO targets (url, name, root_domain, discovery_source, asm_enabled, asm_config)
                 VALUES ($1, $2, $3, 'ai_session', $4, $5)
                 ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id
             """, normalized_target, parsed.hostname, parsed.hostname,
                  _default_asm_enabled_for_new_web_target("ai_session"),
-                 json.dumps(_default_asm_config_for_new_web_target("ai_session")))
+                 json.dumps(_default_asm_config_for_new_web_target("ai_session")), method="fetchval")
 
         # Check for existing finding with same fingerprint
         existing = await conn.fetchrow(

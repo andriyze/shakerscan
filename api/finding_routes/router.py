@@ -32,6 +32,7 @@ try:
     )
     import asm_inventory
     import family_proof
+    from targets.insert_race import fetch_target_upsert
     from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
     from evidence_storage import hydrate_evidence_content, public_evidence_object
     from evidence_triage import redact_finding_evidence as _redact_finding_evidence
@@ -49,6 +50,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         _optional_uuid, _row_value, _uuid_or_400, utc_now, utc_now_iso,
     )
     from .. import asm_inventory, family_proof
+    from ..targets.insert_race import fetch_target_upsert
     from ..scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
     from ..evidence_storage import hydrate_evidence_content, public_evidence_object
     from ..evidence_triage import redact_finding_evidence as _redact_finding_evidence
@@ -1570,14 +1572,14 @@ async def create_manual_finding(request: ManualFindingCreate):
             target_id = target['id']
         else:
             # Create new target
-            target_id = await conn.fetchval("""
+            target_id = await fetch_target_upsert(conn, """
                 INSERT INTO targets (url, name, root_domain, discovery_source, asm_enabled, asm_config)
                 VALUES ($1, $2, $3, 'manual', $4, $5)
                 ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id
             """, normalized_target, parsed.hostname, parsed.hostname,
                  _default_asm_enabled_for_new_web_target("manual"),
-                 json.dumps(_default_asm_config_for_new_web_target("manual")))
+                 json.dumps(_default_asm_config_for_new_web_target("manual")), method="fetchval")
 
         # Check for existing finding with same fingerprint
         existing = await conn.fetchrow(

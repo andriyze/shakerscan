@@ -73,6 +73,7 @@ except ModuleNotFoundError:
 from runtime.loop_scale_indexes import build_loop_scale_indexes_in_background
 from finding_routes.list_schema import repair_severity_rank_in_background
 from targets.scale_summary import summary_compactor as _summary_compactor
+from targets.insert_race import fetch_target_upsert
 from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
 from scan.finding_reconciliation import reconcile_legacy_finding_row
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
@@ -11156,14 +11157,14 @@ async def _submit_scan(
             target_id = target['id']
         else:
             # Create new target
-            target_id = await conn.fetchval("""
+            target_id = await fetch_target_upsert(conn, """
                 INSERT INTO targets (url, name, root_domain, asm_enabled, asm_config, discovery_source)
                 VALUES ($1, $2, $3, $4, $5, 'scan')
                 ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id
             """, normalized_target, request.name, extract_root_domain(normalized_target),
                  _default_asm_enabled_for_new_web_target("manual"),
-                 json.dumps(_default_asm_config_for_new_web_target("manual")))
+                 json.dumps(_default_asm_config_for_new_web_target("manual")), method="fetchval")
 
         (
             collection_refs,
