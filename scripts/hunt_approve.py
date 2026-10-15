@@ -267,10 +267,12 @@ def _open_hunts(send: Send) -> list[str]:
             if not _ok(status):
                 raise ApprovalError(f"cannot list Hunts: HTTP {status}: {_detail_text(body)}")
             rows = [item for item in (body or {}).get("hunts") or () if isinstance(item, Mapping)]
+            before = len(set(found))
             found += [str(item.get("hunt_id")) for item in rows if item.get("hunt_id")]
             total = (body or {}).get("total") if isinstance(body, Mapping) else None
             more = (page + 1) * HUNT_PAGE < total if isinstance(total, int) else len(rows) >= HUNT_PAGE
-            if not rows or not more:
+            # A page with nothing new (an instance that ignored offset) ends the status too.
+            if not rows or not more or len(set(found)) == before:
                 break
     return list(dict.fromkeys(found))
 

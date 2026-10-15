@@ -788,6 +788,15 @@ def test_open_hunts_past_one_page_per_status_are_all_read():
     assert approval._open_hunts(engine) == hunts
     assert pages == [0, 200, 400]
 
+    def ignores_offset(method, path, payload=None, headers=None):
+        pages.append(path)
+        active = "status=active" in path
+        return 200, {"hunts": [{"hunt_id": item} for item in hunts[:200]] if active else [], "total": 450 if active else 0}
+
+    pages.clear()
+    assert approval._open_hunts(ignores_offset) == hunts[:200]
+    assert sum("status=active" in path for path in pages) == 2, "a page with nothing new ends the status"
+
 
 def test_a_request_named_without_its_hunt_is_found_through_the_feed():
     engine = FeedEngine([_feed_request(1, hunt=OTHER_HUNT)])
