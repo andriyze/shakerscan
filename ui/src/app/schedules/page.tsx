@@ -562,6 +562,7 @@ function SchedulesContent() {
                     value={formTargetId}
                     onChange={setFormTargetId}
                     accept={scheduleTargetChoice}
+                    webOnly
                     placeholder="Select target..."
                   />
                 )}

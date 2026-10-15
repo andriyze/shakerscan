@@ -52,8 +52,9 @@ test('historical malformed target labels stay bounded in read-only selectors', (
   for (const surface of [evidencePanel, targetsPage, targetSearchPicker]) {
     assert.match(surface, /boundedTargetDisplay/)
   }
-  // Timeline and Schedules pick targets through the server-searched picker, which bounds labels.
-  for (const surface of [timelinePage, schedulesPage]) {
+  // Timeline, Schedules and the evidence retention sweep pick targets through the server-searched
+  // picker, which bounds labels; none of them loads a first page of every target.
+  for (const surface of [timelinePage, schedulesPage, evidencePanel]) {
     assert.match(surface, /<TargetSearchCombobox/)
     assert.doesNotMatch(surface, /getTargets\(/)
   }

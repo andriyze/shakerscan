@@ -360,3 +360,68 @@ def test_timeline_cohort_filter_and_labels(monkeypatch):
             scoped = await operations.mission_timeline(limit=20, cohort=view, **flags)
             assert [e["event_id"] for e in scoped["events"]] == want, view
     _run(body)
+
+
+WEB_RULE_URLS = [
+    "https://ok.example.invalid", "HTTP://UPPER.example.invalid/x", "  https://padded.example.invalid  ",
+    " https://nbsp.example.invalid﻿", "http:noslash.example.invalid", "http:/one.example.invalid",
+    "http:\\\\back.example.invalid", "https://user:pw@auth.example.invalid:8443/p", "http://@empty-user.example.invalid",
+    "https://[::1]:8443", "http://10.0.0.5", "http://", "https://", "http:///nohost", "http://?q", "http://#f",
+    "https://in side.example.invalid", "https://tab\t.example.invalid", "ftp://ftp.example.invalid",
+    "host.example.invalid", "10.0.0.9:8080", "https://" + "a" * 2040 + ".invalid", "https://" + "b" * 2030 + ".in",
+    "javascript:alert(1)", "https://bad port.example.invalid:99999", "https://exa mple.invalid",
+]
+
+
+def _js_usable(urls: list[str]) -> list[bool]:
+    """The UI's own rule, evaluated by Node on the same strings (targetChoices.ts isUsableWebTarget)."""
+    import subprocess
+    script = (
+        "const urls = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+        "const ok = (value) => { if (typeof value !== 'string') return false; const target = value.trim();"
+        " if (!target || target.length > 2048 || /\\s/.test(target)) return false;"
+        " try { const url = new URL(target); return Boolean(url.hostname) && ['http:', 'https:'].includes(url.protocol) }"
+        " catch { return false } };"
+        "process.stdout.write(JSON.stringify(urls.map(ok)))"
+    )
+    out = subprocess.run(["node", "-e", script], input=json.dumps(urls), capture_output=True, text=True, check=True)
+    return json.loads(out.stdout)
+
+
+def test_inventory_web_only_never_drops_a_row_the_ui_accepts_and_drops_what_it_cannot():
+    from targets import asset_inventory as inv
+
+    source = (ROOT / "ui" / "src" / "lib" / "targetChoices.ts").read_text()
+    # The rule evaluated above is the UI's current one, character for character.
+    assert "if (!target || target.length > MAX_SCAN_TARGET_CHARS || /\\s/.test(target)) return false" in source
+    assert "return Boolean(url.hostname) && ['http:', 'https:'].includes(url.protocol)" in source
+
+    async def body(conn):
+        ids = []
+        try:
+            for index, url in enumerate(WEB_RULE_URLS):
+                row = await conn.fetchrow(
+                    "INSERT INTO targets(url, name, root_domain, is_active) VALUES ($1, $2, 'webrule.invalid', $3) "
+                    "ON CONFLICT DO NOTHING RETURNING id", url, f"webrule {index}", index != 0)
+                ids.append(row["id"] if row else None)
+            rows = await conn.fetch(
+                f"SELECT t.id, t.url FROM targets t WHERE t.id = ANY($1::uuid[]) AND {inv.WEB_ONLY}",
+                [i for i in ids if i])
+            server = {row["id"] for row in rows}
+            ui = _js_usable(WEB_RULE_URLS)
+            for index, (url, target_id) in enumerate(zip(WEB_RULE_URLS, ids)):
+                if target_id is None:
+                    continue
+                accepted = ui[index] and index != 0  # row 0 is inactive: the UI drops it too
+                if accepted:
+                    assert target_id in server, url
+            # It is a real filter: every row the UI rejects for scheme, whitespace or length is gone.
+            for url in ("ftp://ftp.example.invalid", "host.example.invalid", "10.0.0.9:8080", "javascript:alert(1)",
+                        "https://in side.example.invalid", "https://tab\t.example.invalid", "http://", "https://",
+                        "https://" + "a" * 2040 + ".invalid", "https://ok.example.invalid"):
+                index = WEB_RULE_URLS.index(url)
+                if ids[index] is not None:
+                    assert ids[index] not in server, url
+        finally:
+            await conn.execute("DELETE FROM targets WHERE root_domain = 'webrule.invalid' OR name LIKE 'webrule %'")
+    _run(body)
