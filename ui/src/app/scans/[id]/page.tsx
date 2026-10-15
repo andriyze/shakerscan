@@ -1,9 +1,11 @@
 'use client'
 
 import { useEffect, useMemo, useState, Suspense, useRef } from 'react'
+import { usePoll } from '@/lib/usePoll'
+import { isAbortError } from '@/lib/fetchLayer.mjs'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
-import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFindings, getScanDeploymentDecision, getTargetPosture, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding, type TargetPosture } from '@/lib/api'
+import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFindingsPage, getScanDeploymentDecision, getTargetPosture, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding, type TargetPosture } from '@/lib/api'
 import { TargetPostureCard } from '@/components/TargetPostureCard'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
@@ -125,7 +127,11 @@ function scanLogBadgeTone(kind: string): string {
 }
 
 // Active rows loaded for the carried-over summary. Past this, history is reported partial.
-const HISTORY_ROW_CAP = 5000
+// One page of the target's earlier active findings (never a loop over all of them).
+const HISTORY_PAGE_SIZE = 200
+const SCAN_REFRESH_MS = 5000
+// Unchanged log tail: re-read every 5 s x 1, 2, 4, then at most 6 (30 s).
+const LOG_MAX_SKIP = 6
 
 // What qualifies a run's conclusion: posture weaknesses, coverage gaps, unfinished families,
 // families with no candidates, and assurance gaps. Counted on the verdict, listed in Coverage.
@@ -1935,10 +1941,6 @@ function ScanDetailContent() {
   const [targetPostureError, setTargetPostureError] = useState<string | null>(null)
   const [reportTab, setReportTab] = useSectionTab(SCAN_REPORT_TABS, 'findings')
   const logsRef = useRef<HTMLDivElement | null>(null)
-  // Latest known scan status, read inside the polling interval so the "should we
-  // keep polling?" decision always sees the current value (not a stale closure
-  // capture). Kept in sync with `scan?.status` below.
-  const statusRef = useRef<string | null>(null)
 
   // Build back URL with preserved filters
   const buildBackUrl = () => {
@@ -1983,88 +1985,136 @@ function ScanDetailContent() {
     return () => { cancelled = true }
   }, [postureTargetId, scan?.id])
 
+  const scanStatus: string | null = scan?.status ?? null
+  const scanLive = scanStatus === 'running' || scanStatus === 'pending'
+  const scanTerminal = scanStatus === 'completed' || scanStatus === 'failed'
+  const scanRef = useRef<any | null>(null)
+  scanRef.current = scan
   useEffect(() => {
-    async function fetchScanAndLogs() {
+    // A different scan (or a retry) starts from nothing: no stale rows from the previous one.
+    setScan(null)
+    setLogs([])
+    setLoading(true)
+  }, [scanId])
+
+  // The scan record: every 5 s while it is pending or running, then the loop stops (idle null).
+  // Paused in a hidden tab and backed off on errors/429 by usePoll; a late answer for another scan
+  // is aborted with the loop.
+  usePoll(async (signal) => {
+    try {
+      const data = await getScan(scanId, signal)
+      if (signal.aborted) return
+      setScan(data)
+      setError(null)
+    } catch (err) {
+      if (isAbortError(err)) return
+      // A failed background refresh keeps the page; only a scan never loaded shows the error.
+      if (!scanRef.current) setError('Failed to load scan details')
+      throw err
+    } finally {
+      if (!signal.aborted) setLoading(false)
+    }
+  }, { intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: scan === null || scanLive, deps: [scanId, retryNonce] })
+
+  // The log tail. /scans/{id}/logs has no after-seq cursor, so the tail is re-read, but slower
+  // while it does not change: every 5 s while it moves, then 10, 20 and 30 s while it is still.
+  // Only while the scan is live, plus one final read when it turns terminal.
+  const logTailRef = useRef<string>('')
+  const logSkipRef = useRef({ every: 1, since: 0 })
+  const logForceRef = useRef(true)
+  const fetchLogs = async (signal: AbortSignal) => {
+    const current = scanRef.current
+    const logData = await getScanLogs(scanId, 500, signal)
+    let nextLogs: string[] = logData?.lines || []
+    const isDeviceScan = ['device_posture', 'device_probe'].includes(
+      String(current?.run_kind || current?.scan_type),
+    )
+    if (isDeviceScan && nextLogs.length === 0) {
       try {
-        const data = await getScan(scanId)
-        // Track the freshest status so the interval below polls correctly even
-        // though this effect only runs once per scanId/retry.
-        statusRef.current = data?.status ?? null
-        setScan(data)
-        setError(null)
-        if (data?.target_id && ['completed', 'failed'].includes(String(data?.status))) {
-          setTargetFindingsLoading(true)
-          try {
-            // The carried-over summary is only true over the complete set of active rows.
-            // Page through all of them; a cap that cannot be reached is reported as a
-            // partial history, never as an all-clear.
-            const pageSize = 200
-            const rows: Finding[] = []
-            let total = 0
-            for (let offset = 0; offset < HISTORY_ROW_CAP; offset += pageSize) {
-              const page = await getFindings({
-                target_id: data.target_id,
-                status: 'active',
-                limit: pageSize,
-                offset,
-                sort_by: 'severity',
-                sort_order: 'desc',
-              })
-              const batch = page.findings || []
-              rows.push(...batch)
-              total = Math.max(Number(page.total || 0), rows.length)
-              if (batch.length < pageSize || rows.length >= total) break
-            }
-            setTargetFindings(rows)
-            setTargetFindingsTotal(total)
-            setTargetFindingsPartial(rows.length < total)
-            setTargetFindingsError(null)
-          } catch {
-            setTargetFindingsError('Could not load earlier findings for this target.')
-          } finally {
-            setTargetFindingsLoading(false)
-          }
-        }
-        if (data?.status === 'completed' || data?.status === 'failed') {
-          refreshDeploymentDecision()
-        }
-        try {
-          const logData = await getScanLogs(scanId, 500)
-          let nextLogs = logData?.lines || []
-          const isDeviceScan = ['device_posture', 'device_probe'].includes(
-            String(data?.run_kind || data?.scan_type),
-          )
-          if (isDeviceScan && nextLogs.length === 0) {
-            try {
-              nextLogs = deviceActivityLogLines(await getDeviceScanActivity(scanId))
-            } catch {
-              // The ordinary log endpoint remains authoritative when the
-              // content-free device activity feed is unavailable.
-            }
-          }
-          setLogs(nextLogs)
-          setLogsUpdatedAt(new Date())
-          setLogsError(null)
-        } catch {
-          setLogsError('Failed to load logs')
-        }
-      } catch (err) {
-        setError('Failed to load scan details')
-      } finally {
-        setLoading(false)
+        nextLogs = deviceActivityLogLines(await getDeviceScanActivity(scanId))
+      } catch {
+        // The ordinary log endpoint remains authoritative when the
+        // content-free device activity feed is unavailable.
       }
     }
-
-    fetchScanAndLogs()
-    // Read the live status from the ref (not a captured closure value) so polling
-    // keeps running through status transitions and stops once terminal.
-    const interval = setInterval(() => {
-      if (statusRef.current === 'running' || statusRef.current === 'pending') {
-        fetchScanAndLogs()
-      }
-    }, 3000)
-    return () => clearInterval(interval)
+    if (signal.aborted) return
+    const tail = `${nextLogs.length}:${nextLogs[nextLogs.length - 1] ?? ''}`
+    if (tail !== logTailRef.current) {
+      logTailRef.current = tail
+      logSkipRef.current.every = 1
+      setLogs(nextLogs)
+    } else {
+      logSkipRef.current.every = Math.min(LOG_MAX_SKIP, logSkipRef.current.every * 2)
+    }
+    setLogsUpdatedAt(new Date())
+    setLogsError(null)
+  }
+  const logsPoll = usePoll(async (signal) => {
+    const skip = logSkipRef.current
+    if (!logForceRef.current) {
+      skip.since += 1
+      if (skip.since < skip.every) return
+    }
+    logForceRef.current = false
+    skip.since = 0
+    try {
+      await fetchLogs(signal)
+    } catch (err) {
+      if (isAbortError(err)) return
+      setLogsError('Failed to load logs')
+      throw err
+    }
+  }, { intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: scanLive, enabled: scan !== null, deps: [scanId, retryNonce] })
+  useEffect(() => {
+    logTailRef.current = ''
+    logSkipRef.current = { every: 1, since: 0 }
+    logForceRef.current = true
   }, [scanId, retryNonce])
+  // Live -> terminal: one final read of the tail, whatever the backoff said.
+  const previousStatus = useRef<string | null>(null)
+  useEffect(() => {
+    const before = previousStatus.current
+    previousStatus.current = scanStatus
+    if (scanTerminal && (before === 'running' || before === 'pending')) {
+      logForceRef.current = true
+      logsPoll.refresh()
+    }
+  }, [scanStatus, scanTerminal, logsPoll.refresh])
+
+  // Earlier findings on the target, read once per terminal scan (not per tick): ONE bounded page,
+  // newest observation first so the rows this scan re-observed are on it for linkage. The total
+  // comes from the page; more rows than the page holds make it a partial history, whose
+  // carried-over count is a lower bound and never an all-clear. The release gate's server-side
+  // carried-over summary (deployment decision) stays the authoritative number.
+  const historyTargetId: string | null = scanTerminal && scan?.target_id ? String(scan.target_id) : null
+  useEffect(() => {
+    if (!scanTerminal) return
+    refreshDeploymentDecision()
+    if (!historyTargetId) return
+    const controller = new AbortController()
+    setTargetFindingsLoading(true)
+    getFindingsPage(
+      { target_id: historyTargetId, status: 'active' },
+      { limit: HISTORY_PAGE_SIZE, sort: '-last_seen', count: 'exact' },
+      controller.signal,
+    )
+      .then((page) => {
+        const rows = page.findings || []
+        const total = Math.max(Number(page.total ?? 0), rows.length)
+        setTargetFindings(rows)
+        setTargetFindingsTotal(total)
+        setTargetFindingsPartial(page.has_more || page.total_kind === 'at_least' || rows.length < total)
+        setTargetFindingsError(null)
+      })
+      .catch((cause) => {
+        if (isAbortError(cause)) return
+        setTargetFindingsError('Could not load earlier findings for this target.')
+      })
+      .finally(() => { if (!controller.signal.aborted) setTargetFindingsLoading(false) })
+    return () => controller.abort()
+    // refreshDeploymentDecision reads only scanId.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanTerminal, historyTargetId, scanId, retryNonce])
 
   useEffect(() => {
     getHealth()
@@ -2123,7 +2173,7 @@ function ScanDetailContent() {
               </div>
               <p className="mt-1 text-xs text-gray-500">
                 {live
-                  ? `Updates every 3 seconds${logsUpdatedAt ? ` · last checked ${logsUpdatedAt.toLocaleTimeString()}` : ''}`
+                  ? `Updates every 5–30 seconds (slower while quiet)${logsUpdatedAt ? ` · last checked ${logsUpdatedAt.toLocaleTimeString()}` : ''}`
                   : 'A durable record of the worker activity captured for this scan.'}
               </p>
             </div>
@@ -2188,7 +2238,9 @@ function ScanDetailContent() {
         >
           {filteredLogs.length > 0 ? (
             filteredLogs.map((entry: any, idx: number) => (
-              <div key={`${idx}-${entry.raw}`} className={`rounded-sm border px-3 py-2 ${scanLogTone(entry.kind)}`}>
+              // content-visibility: off-screen lines skip layout and paint (no dependency, and
+              // scrollHeight stays right for auto-follow through contain-intrinsic-size).
+              <div key={`${idx}-${entry.raw}`} className={`rounded-sm border px-3 py-2 [content-visibility:auto] [contain-intrinsic-size:auto_40px] ${scanLogTone(entry.kind)}`}>
                 <div className="flex flex-wrap items-start gap-2">
                   <span className={`mt-0.5 shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${scanLogBadgeTone(entry.kind)}`}>
                     {entry.label}
