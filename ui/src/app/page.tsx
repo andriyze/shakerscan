@@ -16,6 +16,7 @@ import {
 import { isAbortError } from '@/lib/fetchLayer.mjs'
 import { totalLabel, type ListV1Page } from '@/lib/listPage.mjs'
 import { usePoll } from '@/lib/usePoll'
+import { cohortScopingNote, coverageScope as describeCoverageScope, postureState, type CoverageScope, type PostureState } from '@/lib/dashboardScope.mjs'
 import {
   Badge,
   Card,
@@ -55,7 +56,9 @@ export default function Dashboard() {
   // The exposure answer remembers the cohort it was asked for: a cohort switch in flight shows
   // the loading state, never the previous cohort's numbers (or numbers recomputed in the browser).
   const [exposure, setExposure] = useState<{ view: CohortView; body: ExposureAssetsResponse } | null>(null)
-  const [exposureFailed, setExposureFailed] = useState(false)
+  // The cohort whose exposure read failed: a failure belongs to that cohort only, so switching
+  // cohorts never carries it over (and never leaves zeros standing in for unavailable data).
+  const [exposureFailedView, setExposureFailedView] = useState<CohortView | null>(null)
   const [groupsPage, setGroupsPage] = useState<ListV1Page<GroupedDomain> | null>(null)
   const [timeline, setTimeline] = useState<TimelineEvent[]>([])
   const [overviewLoading, setOverviewLoading] = useState(true)
@@ -146,10 +149,10 @@ export default function Dashboard() {
       const body = await getExposureAssets({ limit: EXPOSURE_PAGE, cohort: view }, signal)
       if (signal?.aborted) return
       setExposure({ view, body })
-      setExposureFailed(false)
+      setExposureFailedView((current) => current === view ? null : current)
     } catch (err) {
       if (isAbortError(err)) return
-      setExposureFailed(true)
+      setExposureFailedView(view)
       throw err
     }
   }, [cohortView])
@@ -176,7 +179,7 @@ export default function Dashboard() {
   usePoll(fetchQueueStats, { intervalMs: QUEUE_REFRESH_MS })
   usePoll(fetchWorkers, { intervalMs: WORKERS_REFRESH_MS, enabled: workersVisible })
   usePoll(fetchGungnirStatus, { intervalMs: GUNGNIR_REFRESH_MS, enabled: gungnirVisible })
-  usePoll(fetchExposure, { intervalMs: OVERVIEW_REFRESH_MS, deps: [cohortView] })
+  const exposurePoll = usePoll(fetchExposure, { intervalMs: OVERVIEW_REFRESH_MS, deps: [cohortView] })
   usePoll(fetchOverview, { intervalMs: OVERVIEW_REFRESH_MS })
 
   const settle = (work: Promise<unknown>) => work.then(() => true, () => false)
@@ -262,7 +265,11 @@ export default function Dashboard() {
   // Server counts over every asset; never recomputed from the bounded page in the browser.
   const cohortCounts = useMemo(() => exposure?.body.cohort_counts || {}, [exposure])
   const scopedExposure = exposure && exposure.view === cohortView ? exposure.body : null
-  const exposureLoading = featureEnabled('exposure') && !scopedExposure && !exposureFailed
+  const posture: PostureState = postureState({
+    enabled: featureEnabled('exposure'), exposure: scopedExposure, failed: exposureFailedView === cohortView,
+  })
+  const exposureLoading = posture === 'loading'
+  const cohortNote = cohortScopingNote({ view: cohortView, exposure: scopedExposure })
   const groupedTargets = useMemo(() => groupsPage?.items || [], [groupsPage])
   const scopedTargets = useMemo(() => scopeTargetGroups(groupedTargets, cohortView), [groupedTargets, cohortView])
   // Cohort membership for recent scans and activity comes from the exposure page for this cohort
@@ -276,10 +283,9 @@ export default function Dashboard() {
   ]), [scopedExposure, scopedTargets])
   const scopedUrls = useMemo(() => new Set((scopedExposure?.assets || []).flatMap((asset) => [asset.url, asset.root_domain].filter((value): value is string => Boolean(value)).map(normalizeScopeLocator))), [scopedExposure])
   const coverage = useMemo(() => buildCoverageRollup(scopedTargets), [scopedTargets])
-  const coverageScope = useMemo<CoverageScope>(() => ({
-    domains: groupedTargets.length,
-    hasMore: Boolean(groupsPage?.has_more),
-    total: totalLabel(groupsPage),
+  // Members are bounded per group as well as groups per page: either cut is said on the card.
+  const coverageScope = useMemo<CoverageScope>(() => describeCoverageScope({
+    groups: groupedTargets, hasMore: Boolean(groupsPage?.has_more), total: totalLabel(groupsPage),
   }), [groupedTargets, groupsPage])
   const meaningfulActivity = useMemo(
     () => timeline.filter((event) => isMeaningfulActivity(event) && (
@@ -477,7 +483,7 @@ export default function Dashboard() {
 
       <CohortScopeBar value={cohortView} onChange={setCohortView} counts={cohortCounts} />
 
-      <WorkspaceFeature name="exposure"><SecurityPosture exposure={scopedExposure} loading={exposureLoading} /></WorkspaceFeature>
+      <WorkspaceFeature name="exposure"><SecurityPosture exposure={scopedExposure} state={posture} onRetry={exposurePoll.refresh} /></WorkspaceFeature>
 
       <WorkspaceFeature name="timeline">{cohortView === 'all' ? (
         <ChangesStrip storageKey="dashboard" />
@@ -489,14 +495,17 @@ export default function Dashboard() {
       )}
 
       </WorkspaceFeature>
-      <WorkspaceFeature name="asm"><CoverageOverview exposure={scopedExposure} coverage={coverage} scope={coverageScope} loading={exposureLoading || overviewLoading} /></WorkspaceFeature>
+      <WorkspaceFeature name="asm"><CoverageOverview exposure={scopedExposure} exposureState={posture} onRetry={exposurePoll.refresh} coverage={coverage} scope={coverageScope} loading={exposureLoading || overviewLoading} /></WorkspaceFeature>
 
-      <ActionCenter items={scopedActions.filter(item => item.href && navigationAllowed(item.href))} loading={dashboardLoading && !data} />
+      <ActionCenter items={scopedActions.filter(item => item.href && navigationAllowed(item.href))}
+        loading={(dashboardLoading && !data) || (cohortView !== 'all' && posture === 'loading')}
+        unavailable={cohortView !== 'all' && posture === 'unavailable' ? exposurePoll.refresh : null} />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <LatestResults scans={recentScans} loading={dashboardLoading && !data} />
         <WorkspaceFeature name="timeline"><RecentActivity events={meaningfulActivity} loading={overviewLoading} /></WorkspaceFeature>
       </div>
+      {cohortNote ? <p className="text-xs text-gray-500" data-testid="cohort-scoping-note">{cohortNote}</p> : null}
     </div>
   )
 }
@@ -580,9 +589,12 @@ function CohortScopeBar({ value, onChange, counts }: { value: CohortView; onChan
 function ActionCenter({
   items,
   loading,
+  unavailable = null,
 }: {
   items: DashboardActionItem[]
   loading: boolean
+  /** The cohort's actions come from its exposure; when that read failed, say so (with retry). */
+  unavailable?: (() => void) | null
 }) {
   const actionableItems = items.filter((item) => item.id !== 'worker-build-freshness' && item.priority !== 'info')
   const visibleItems = actionableItems.slice(0, 3)
@@ -599,7 +611,7 @@ function ActionCenter({
         </Link>
       </div>
 
-      {loading ? (
+      {unavailable ? <ExposureUnavailable onRetry={unavailable} compact /> : loading ? (
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
           <Skeleton className="h-20" />
           <Skeleton className="h-20" />
@@ -682,8 +694,19 @@ function actionPriorityTone(priority: DashboardActionItem['priority']) {
   }
 }
 
-function SecurityPosture({ exposure, loading }: { exposure: ExposureAssetsResponse | null; loading: boolean }) {
-  const metrics = exposure?.metrics
+function ExposureUnavailable({ onRetry, compact = false }: { onRetry: () => void; compact?: boolean }) {
+  return (
+    <div role="alert" data-testid="exposure-unavailable" className={`flex flex-wrap items-center gap-3 ${compact ? '' : 'p-4'} text-sm text-amber-200`}>
+      <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+      <span>Exposure unavailable for this cohort: the posture could not be read, so no numbers are shown.</span>
+      <button type="button" onClick={onRetry} className={`rounded-md border border-amber-500/40 px-2.5 py-1 text-xs hover:bg-amber-500/10 ${FOCUS_RING}`}>Retry</button>
+    </div>
+  )
+}
+
+function SecurityPosture({ exposure, state, onRetry }: { exposure: ExposureAssetsResponse | null; state: PostureState; onRetry: () => void }) {
+  const loading = state === 'loading'
+  const metrics = state === 'ready' ? exposure?.metrics : undefined
   const verified = metrics?.active_verified || 0
   const needsVerification = metrics?.active_needs_verification || 0
   const p1 = metrics?.p1_count || 0
@@ -706,11 +729,13 @@ function SecurityPosture({ exposure, loading }: { exposure: ExposureAssetsRespon
           <h2 className="font-medium text-white">Security posture</h2>
           <p className="mt-1 text-sm text-gray-400">Verified risk, uncertain signals, and assets that need attention</p>
         </div>
-        <Link href={primary.href} className={`inline-flex items-center gap-1 self-start rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-blue-500/20 ${FOCUS_RING}`}>
-          {primary.label} <ArrowRight className="h-4 w-4" />
-        </Link>
+        {state === 'ready' ? (
+          <Link href={primary.href} className={`inline-flex items-center gap-1 self-start rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-blue-500/20 ${FOCUS_RING}`}>
+            {primary.label} <ArrowRight className="h-4 w-4" />
+          </Link>
+        ) : null}
       </div>
-      {loading && !metrics ? (
+      {state === 'unavailable' ? <ExposureUnavailable onRetry={onRetry} /> : loading || !metrics ? (
         <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
           {Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-24" />)}
         </div>
@@ -773,14 +798,6 @@ interface CoverageTarget {
   coverage: number
 }
 
-interface CoverageScope {
-  /** Domains on the loaded page. */
-  domains: number
-  /** More domains exist than the page holds. */
-  hasMore: boolean
-  /** The server's total of domains, as displayed ("1,234", "10,000+"), when known. */
-  total: string | null
-}
 
 interface CoverageRollup {
   targets: CoverageTarget[]
@@ -821,13 +838,15 @@ function buildCoverageRollup(domains: GroupedDomain[]): CoverageRollup {
   }
 }
 
-function CoverageOverview({ exposure, coverage, scope, loading }: {
+function CoverageOverview({ exposure, exposureState, onRetry, coverage, scope, loading }: {
   exposure: ExposureAssetsResponse | null
+  exposureState: PostureState
+  onRetry: () => void
   coverage: CoverageRollup
   scope: CoverageScope
   loading: boolean
 }) {
-  const metrics = exposure?.metrics
+  const metrics = exposureState === 'ready' ? exposure?.metrics : undefined
   const totalAssets = metrics?.asset_count || 0
   const freshness = [
     { label: 'Fresh', value: metrics?.fresh_scans || 0, color: 'bg-emerald-500' },
@@ -846,19 +865,21 @@ function CoverageOverview({ exposure, coverage, scope, loading }: {
           Open Coverage <ArrowRight className="h-3.5 w-3.5" />
         </Link>
       </div>
-      {loading && !metrics ? <Skeleton className="h-40" /> : (
+      {loading && !metrics && exposureState !== 'unavailable' ? <Skeleton className="h-40" /> : (
         <div className="grid gap-6 lg:grid-cols-2">
           <section>
             <div className="mb-3 flex items-center gap-2">
               <Target className="h-4 w-4 text-gray-500" />
               <h3 className="text-sm font-medium text-gray-200">Asset freshness</h3>
-              <span className="ml-auto text-xs text-gray-600">{totalAssets} assets</span>
+              {metrics ? <span className="ml-auto text-xs text-gray-600">{totalAssets} assets</span> : null}
             </div>
-            <div className="grid gap-2.5">
-              {freshness.map((item) => (
-                <ProgressRow key={item.label} label={item.label} value={item.value} total={totalAssets} color={item.color} />
-              ))}
-            </div>
+            {exposureState === 'unavailable' ? <ExposureUnavailable onRetry={onRetry} compact /> : (
+              <div className="grid gap-2.5">
+                {freshness.map((item) => (
+                  <ProgressRow key={item.label} label={item.label} value={item.value} total={totalAssets} color={item.color} />
+                ))}
+              </div>
+            )}
           </section>
           <section className="border-t border-gray-800 pt-5 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
             <div className="mb-3 flex items-center gap-2">
@@ -868,9 +889,9 @@ function CoverageOverview({ exposure, coverage, scope, loading }: {
             </div>
             <ProgressRow label="Tested endpoints" value={coverage.tested} total={coverage.denominator} color="bg-blue-500" />
             <p className="mt-2 text-xs text-gray-600">{coverage.tested.toLocaleString()} tested · {coverage.remaining.toLocaleString()} remaining across {coverage.targets.length} inventoried targets</p>
-            {scope.hasMore ? (
+            {scope.show ? (
               <p className="mt-1 text-xs text-gray-600" data-testid="coverage-scope">
-                Across the {scope.domains.toLocaleString()} domains with the most findings{scope.total ? `, of ${scope.total}` : ''}.{' '}
+                {scope.text}{' '}
                 <Link href="/asm" className={`text-blue-300 hover:text-blue-200 ${FOCUS_RING}`}>See every domain</Link>
               </p>
             ) : null}

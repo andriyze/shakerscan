@@ -200,6 +200,8 @@ function RollupView({
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState(false)
+  // A failed "Load more" keeps every row already loaded; only the next page is retried.
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
   const controllerRef = useRef<AbortController | null>(null)
   const domainFilter = filters.domain ?? ''
@@ -220,6 +222,7 @@ function RollupView({
     controllerRef.current = controller
     setLoading(true)
     setError(false)
+    setLoadMoreError(null)
     setGroups([])
     fetchPage(null, controller.signal)
       .then((page) => {
@@ -239,13 +242,17 @@ function RollupView({
     const controller = controllerRef.current
     if (!nextCursor || !controller || controller.signal.aborted) return
     setLoadingMore(true)
+    setLoadMoreError(null)
     fetchPage(nextCursor, controller.signal)
       .then((page) => {
         setGroups((current) => [...current, ...page.items])
         setNextCursor(page.next_cursor)
         setHasMore(page.has_more)
       })
-      .catch((cause) => { if (!isAbortError(cause)) setError(true) })
+      .catch((cause) => {
+        if (isAbortError(cause)) return
+        setLoadMoreError(cause instanceof Error && cause.message ? cause.message : 'Could not load more domains')
+      })
       .finally(() => { if (!controller.signal.aborted) setLoadingMore(false) })
   }, [fetchPage, nextCursor])
 
@@ -360,9 +367,14 @@ function RollupView({
         </div>
       )}
       {hasMore && (
-        <div className="flex justify-center">
+        <div className="flex flex-col items-center gap-2">
+          {loadMoreError ? (
+            <p role="alert" data-testid="asm-load-more-error" className="text-xs text-amber-300">
+              {loadMoreError}. The domains above are still shown; retry to load the next page.
+            </p>
+          ) : null}
           <Button variant="secondary" size="sm" onClick={loadMore} disabled={loadingMore}>
-            {loadingMore ? 'Loading…' : `Load ${ROLLUP_GROUPS} more domains`}
+            {loadingMore ? 'Loading…' : loadMoreError ? 'Retry loading more domains' : `Load ${ROLLUP_GROUPS} more domains`}
           </Button>
         </div>
       )}
