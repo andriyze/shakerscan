@@ -382,7 +382,7 @@ test('the microVM tier is offered as an opt-in install, not executed by the API'
   assert.match(shell, /\{plan && \(/)
   assert.doesNotMatch(shell, /\{!installed && plan && \(/)
   assert.match(shell, /Receipt signer/)
-  assert.match(shell, /navigator\.clipboard\.writeText\(command\)/)
+  assert.match(shell, /<CopyButton text=\{command\}/)
   assert.match(shell, /Run this one command/)
   assert.match(shell, /enters the correct ShakerScan folder for you/)
   assert.match(shell, /plan\.runtime_dir/)

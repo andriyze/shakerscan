@@ -1,9 +1,11 @@
 'use client'
 
 import React, { useState } from 'react'
-import { ChevronDown, ChevronRight, Copy, Check, ExternalLink, AlertTriangle, Shield, Bug, Zap } from 'lucide-react'
+import { ChevronDown, ChevronRight, ExternalLink, AlertTriangle, Shield, Bug, Zap } from 'lucide-react'
 import { parseEvidence, extractEndpoint, formatAnomaly, decodePayload, type ParsedEvidence } from '@/lib/evidence-parser'
 import { findingFreshness } from '@/lib/findingFreshness'
+import { findingLink } from '@/lib/copyText'
+import { CopyButton } from '@/components/CopyButton'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 
 interface Finding {
@@ -81,6 +83,8 @@ function readFindingTriage(finding: Finding): FindingTriage | null {
 interface FindingCardProps {
   finding: Finding
   defaultExpanded?: boolean
+  /** Saved finding id; when set the card offers a link to its finding page. */
+  findingId?: string | null
 }
 
 function getSeverityConfig(severity: string) {
@@ -98,37 +102,6 @@ function getSeverityConfig(severity: string) {
     default:
       return { badge, border: 'border-slate-500', icon: Zap }
   }
-}
-
-function CopyButton({ text, label }: { text: string; label?: string }) {
-  const [copied, setCopied] = useState(false)
-
-  const handleCopy = async (e: React.MouseEvent) => {
-    e.stopPropagation()
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch (err) {
-      console.error('Failed to copy:', err)
-    }
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={handleCopy}
-      className="p-1.5 rounded-sm hover:bg-gray-700 transition-colors group focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
-      title={label || 'Copy to clipboard'}
-      aria-label={label || 'Copy to clipboard'}
-    >
-      {copied ? (
-        <Check className="w-4 h-4 text-green-400" />
-      ) : (
-        <Copy className="w-4 h-4 text-gray-400 group-hover:text-white" />
-      )}
-    </button>
-  )
 }
 
 function CollapsibleSection({
@@ -185,7 +158,7 @@ function UrlList({ urls, parameter }: { urls: string[]; parameter?: string }) {
               <code className="text-xs text-blue-300 break-all">{endpoint}</code>
             </div>
             <div className="flex items-center gap-1 shrink-0">
-              <CopyButton text={url} label="Copy full URL" />
+              <CopyButton text={url} label="Copy full URL" size="md" stopPropagation />
               <a
                 href={url}
                 target="_blank"
@@ -236,7 +209,7 @@ function PayloadList({ payloads }: { payloads: string[] }) {
         return (
           <div key={i} className="bg-gray-900/60 rounded-sm p-2 flex items-start justify-between gap-2">
             <code className="text-xs text-yellow-300 break-all flex-1">{decoded}</code>
-            <CopyButton text={decoded} label="Copy payload" />
+            <CopyButton text={decoded} label="Copy payload" size="md" stopPropagation />
           </div>
         )
       })}
@@ -298,7 +271,7 @@ function RawEvidence({ value }: { value: object }) {
     <div className="mb-4">
       <div className="flex items-center justify-between gap-2 mb-2">
         <h4 className="text-sm font-medium text-gray-400">Evidence</h4>
-        <CopyButton text={fullRaw} label="Copy raw evidence" />
+        <CopyButton text={fullRaw} label="Copy raw evidence" size="md" stopPropagation />
       </div>
 
       {summary.length > 0 && (
@@ -324,7 +297,7 @@ function RawEvidence({ value }: { value: object }) {
   )
 }
 
-export default function FindingCard({ finding, defaultExpanded = false }: FindingCardProps) {
+export default function FindingCard({ finding, defaultExpanded = false, findingId = null }: FindingCardProps) {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded)
   const severityConfig = getSeverityConfig(finding.severity)
   const SeverityIcon = severityConfig.icon
@@ -506,6 +479,17 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
 
           {/* Tool badge and expand button */}
           <div className="flex flex-col items-end gap-2 shrink-0">
+            {findingId && (
+              <CopyButton
+                text={() => findingLink(findingId)}
+                label="Copy link to this finding"
+                stopPropagation
+                testId="finding-card-copy-link"
+                className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-sm bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                Copy link
+              </CopyButton>
+            )}
             {finding.tool && (
               <span className="px-2 py-1 text-xs rounded-sm bg-gray-800 text-gray-400">
                 {finding.tool}
