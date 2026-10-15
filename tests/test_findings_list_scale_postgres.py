@@ -52,7 +52,7 @@ from fastapi import HTTPException  # noqa: E402
 import exposure.router as exposure_router  # noqa: E402
 from exposure.proof_rollup import active_finding_proof_counts  # noqa: E402
 import finding_routes.router as findings_router  # noqa: E402
-from finding_routes import list_schema  # noqa: E402
+from finding_routes import list_query, list_schema  # noqa: E402
 import list_contract  # noqa: E402
 from runtime import loop_scale_indexes  # noqa: E402
 
@@ -520,6 +520,13 @@ def test_the_list_contract_refuses_what_it_does_not_declare(monkeypatch):
         assert {item["id"] for item in suspected} == {item["id"] for item in expected}
         counted, _ = await route(pool, monkeypatch, proof_state="suspected", count="exact")
         assert counted["total"] == total
+        # Too many undetermined rows under one filter: a 422 the caller acts on, not a retryable 503.
+        monkeypatch.setattr(list_query, "UNDETERMINED_LIMIT", 1)
+        for params in ({"proof_state": "suspected"}, {"proof_state": "suspected", "count": "exact"}):
+            with pytest.raises(HTTPException) as broad:
+                await route(pool, monkeypatch, **params)
+            assert broad.value.status_code == 422
+            assert broad.value.detail["error"] == "proof_filter_too_broad", params
 
     run(scenario)
 
@@ -775,6 +782,62 @@ def test_api_and_worker_starting_together_on_a_2_10_database_do_not_deadlock():
             "SELECT count(*) FROM findings WHERE severity_rank <> finding_severity_rank(severity)") == 0
         assert await conn.fetchval("SELECT count(*) FROM findings WHERE updated_at <> $1", T0) == 0
         assert await loop_scale_indexes.ensure_loop_scale_indexes(pool)
+
+    run(scenario)
+
+
+def test_a_restart_during_concurrent_builds_on_every_builder_table_completes_without_deadlock():
+    """The background builder is mid-CREATE INDEX CONCURRENTLY on findings, scans and every other
+    table it builds on (stalled on an open snapshot, holding its lock), a process restarts and runs
+    the startup migrations, and another process queues on the startup lock. Every statement the
+    startup runs on an up-to-date database must be a catalog check that takes no lock the builds
+    hold: the startup completes while the builds are still waiting, and nothing deadlocks."""
+    async def scenario(conn, pool):
+        from retest_contract import run_schema_migrations
+        dsn = require_disposable_database(DSN or "", "shakerscan_findings_list_test")
+        picks = {}
+        for name, table, definition in loop_scale_indexes.LOOP_SCALE_INDEXES:
+            if table not in picks and await conn.fetchval("SELECT to_regclass($1)", table):
+                picks[table] = (name, definition)
+        assert {"findings", "scans", "targets"} <= set(picks)
+        for name, _definition in picks.values():
+            await conn.execute(f"DROP INDEX IF EXISTS {name}")
+        before = await _deadlocks(conn)
+        holder = await asyncpg.connect(dsn)
+        builders = []
+        startup_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+        waiter = await asyncpg.connect(dsn)
+        try:
+            # An open snapshot stalls every concurrent build after it has taken its table lock.
+            await holder.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
+            await holder.fetchval("SELECT 1")
+            for name, definition in picks.values():
+                session = await asyncpg.connect(dsn)
+                builders.append((session, asyncio.create_task(
+                    session.execute(f"CREATE INDEX CONCURRENTLY {name} ON {definition}"))))
+            await asyncio.sleep(1.0)
+            assert not any(task.done() for _session, task in builders)
+            startup = asyncio.create_task(run_schema_migrations(startup_pool))
+            await asyncio.sleep(0.2)
+            queued = asyncio.create_task(waiter.execute("SELECT pg_advisory_lock(8675309)"))
+            await asyncio.wait_for(startup, 60)  # blocked behind a build, it would never finish
+            assert not any(task.done() for _session, task in builders)
+            await asyncio.wait_for(queued, 30)
+            await waiter.execute("SELECT pg_advisory_unlock(8675309)")
+            await holder.execute("ROLLBACK")
+            for _session, task in builders:
+                await asyncio.wait_for(task, 60)
+        finally:
+            for session, _task in builders:
+                await session.close()
+            await holder.close()
+            await waiter.close()
+            await startup_pool.close()
+        await asyncio.sleep(1.5)  # backends flush their statistics when they go idle
+        assert await _deadlocks(conn) == before
+        for name, _definition in picks.values():
+            assert await conn.fetchval(
+                "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)", name) is True, name
 
     run(scenario)
 

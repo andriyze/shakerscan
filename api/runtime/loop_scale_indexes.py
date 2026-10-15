@@ -122,9 +122,40 @@ async def _index_state(conn: Any, name: str) -> bool | None:
     return None if valid is None else bool(valid)
 
 
-async def ensure_loop_scale_indexes(pool: Any, *, progress: Any = None) -> list[str]:
+#: A build that fails (a deadlock victim, a cancelled statement, a lock timeout) is tried again
+#: in the same run after these pauses, then logged and left to the next start.
+RETRY_DELAYS_SECONDS: tuple[float, ...] = (5.0, 30.0, 120.0)
+
+
+async def _build_one(conn: Any, name: str, table: str, definition: str, trgm: dict[str, bool],
+                     report: Any) -> bool | None:
+    """True when built now, None when nothing was needed or possible; raises on a failed build."""
+    if not await conn.fetchval("SELECT to_regclass($1)", table):
+        return None
+    state = await _index_state(conn, name)
+    if state:
+        return None
+    if _needs_trgm(definition):
+        if "available" not in trgm:
+            trgm["available"] = await _ensure_trgm(conn)
+        if not trgm["available"]:
+            return None
+    if state is False:
+        report(f"dropping interrupted build of {name}")
+        await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+    report(f"building {name} concurrently")
+    await conn.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {definition}")
+    report(f"built {name}")
+    return True
+
+
+async def ensure_loop_scale_indexes(pool: Any, *, progress: Any = None,
+                                    retry_delays: tuple[float, ...] | None = None) -> list[str]:
     """Build any missing index concurrently; return the names built (or rebuilt)."""
+    import asyncio
+
     report = progress if callable(progress) else (lambda _message: None)
+    delays = RETRY_DELAYS_SECONDS if retry_delays is None else retry_delays
     built: list[str] = []
     async with pool.acquire() as conn:
         in_transaction = getattr(conn, "is_in_transaction", None)
@@ -136,28 +167,27 @@ async def ensure_loop_scale_indexes(pool: Any, *, progress: Any = None) -> list[
         try:
             # A build on a large table may take longer than an interactive statement may.
             await conn.execute("SET statement_timeout = 0")
-            trgm = None
-            for name, table, definition in LOOP_SCALE_INDEXES:
-                try:
-                    if not await conn.fetchval("SELECT to_regclass($1)", table):
-                        continue
-                    state = await _index_state(conn, name)
-                    if state:
-                        continue
-                    if _needs_trgm(definition):
-                        if trgm is None:
-                            trgm = await _ensure_trgm(conn)
-                        if not trgm:
-                            continue
-                    if state is False:
-                        report(f"dropping interrupted build of {name}")
-                        await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
-                    report(f"building {name} concurrently")
-                    await conn.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {definition}")
-                    built.append(name)
-                    report(f"built {name}")
-                except Exception as exc:  # never stop startup over a performance index
-                    logger.warning("Could not build index %s: %s", name, type(exc).__name__)
+            trgm: dict[str, bool] = {}
+            pending = list(LOOP_SCALE_INDEXES)
+            for attempt in range(len(delays) + 1):
+                if attempt:
+                    report(f"retrying {len(pending)} failed index build(s) in {delays[attempt - 1]:g} s")
+                    await asyncio.sleep(delays[attempt - 1])
+                failed = []
+                for name, table, definition in pending:
+                    try:
+                        if await _build_one(conn, name, table, definition, trgm, report):
+                            built.append(name)
+                    except Exception as exc:  # never stop startup over a performance index
+                        logger.warning("Could not build index %s (attempt %d): %s",
+                                       name, attempt + 1, type(exc).__name__)
+                        failed.append((name, table, definition))
+                pending = failed
+                if not pending:
+                    break
+            for name, _table, _definition in pending:
+                logger.warning("Index %s still not built after %d attempts; the next start retries it",
+                               name, len(delays) + 1)
             for table in dict.fromkeys(table for name, table, _definition in LOOP_SCALE_INDEXES
                                        if name in built and table in ANALYZE_AFTER_BUILD):
                 try:

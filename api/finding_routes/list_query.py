@@ -289,7 +289,7 @@ def where_sql(clauses: Iterable[str]) -> str:
 
 
 #: Rows whose proof only Python can decide are rare (a triage string PostgreSQL's JSON reader
-#: refuses, such as one holding NaN). More than this many under one filter is refused.
+#: refuses, such as one holding NaN). More than this many under one filter is a 422.
 UNDETERMINED_LIMIT = 10_000
 
 
@@ -312,10 +312,15 @@ async def resolved_proof_filter(
         *params.values,
     )
     if len(rows) > UNDETERMINED_LIMIT:
-        raise HTTPException(status_code=503, detail=(
-            f"more than {UNDETERMINED_LIMIT} findings under this filter carry a triage block the "
-            "database cannot read; narrow the filter or drop proof_state"
-        ))
+        # Not transient: a retry gets the same answer, so this is the request's to change.
+        raise HTTPException(status_code=422, detail={
+            "error": "proof_filter_too_broad",
+            "message": (
+                f"more than {UNDETERMINED_LIMIT} findings under this filter carry a triage block the "
+                "database cannot read (for example one holding NaN); add a target_id, scan_id, "
+                "severity or seen_within_days filter, or drop proof_state"
+            ),
+        })
     decided = proof_filter_sql(proof_states, params)
     if not rows:
         return decided

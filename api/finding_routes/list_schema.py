@@ -117,7 +117,15 @@ PROOF_GATE_STATISTICS_SQL = (
     "CREATE STATISTICS IF NOT EXISTS findings_proof_gate_stats ON ("
     + scan_time_proof_gate_sql("evidence") + ") FROM findings"
 )
-FINDINGS_LIST_SCHEMA_STATEMENTS += (PROOF_GATE_STATISTICS_SQL,)
+# Checked first: CREATE STATISTICS takes a lock on findings even when the object exists, and that
+# lock waits behind the background builder's CREATE INDEX CONCURRENTLY on findings.
+FINDINGS_LIST_SCHEMA_STATEMENTS += (f"""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_statistic_ext WHERE stxname = 'findings_proof_gate_stats') THEN
+            {PROOF_GATE_STATISTICS_SQL};
+        END IF;
+    END $$""",)
 
 #: (name, definition after ``ON``), built by runtime/loop_scale_indexes.py.
 FINDINGS_LIST_INDEXES: tuple[tuple[str, str], ...] = (

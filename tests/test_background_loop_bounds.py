@@ -382,6 +382,53 @@ def test_loop_indexes_build_concurrently_and_rebuild_an_interrupted_build():
     assert conn.statements[-2] == "SET statement_timeout = '30s'"  # the session's own limit is restored
 
 
+class FlakyIndexConn(IndexConn):
+    """The first CREATE of one index fails (a deadlock victim); it is absent afterwards."""
+
+    def __init__(self, states, flaky):
+        super().__init__(states)
+        self.flaky = flaky
+        self.failures = 0
+
+    async def execute(self, query, *args):
+        if query.startswith(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {self.flaky} ") and not self.failures:
+            self.failures += 1
+            raise RuntimeError("deadlock detected")
+        await super().execute(query, *args)
+        if query.startswith("CREATE INDEX CONCURRENTLY"):
+            self.states[query.split()[6]] = True
+
+
+def test_a_failed_build_is_retried_in_the_same_run_after_a_pause(monkeypatch):
+    names = [name for name, _table, _definition in loop_scale_indexes.LOOP_SCALE_INDEXES]
+    states = {name: True for name in names}
+    states[names[0]] = None
+    conn = FlakyIndexConn(states, names[0])
+    pauses = []
+
+    async def sleep(seconds):
+        pauses.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    built = asyncio.run(loop_scale_indexes.ensure_loop_scale_indexes(SimplePool(conn), retry_delays=(7.0, 9.0)))
+    assert built == [names[0]] and conn.failures == 1 and pauses == [7.0]
+    # Bounded: an index that keeps failing is given up after the last pause (the next start retries).
+    always = FlakyIndexConn({name: True for name in names} | {names[0]: None}, names[0])
+    always.failures = -10**6  # fails every time
+    always.execute = _always_fail(always, names[0])
+    pauses.clear()
+    assert asyncio.run(loop_scale_indexes.ensure_loop_scale_indexes(SimplePool(always), retry_delays=(1.0, 2.0))) == []
+    assert pauses == [1.0, 2.0]
+
+
+def _always_fail(conn, name):
+    async def execute(query, *args):
+        if query.startswith(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} "):
+            raise RuntimeError("lock timeout")
+        conn.statements.append(query)
+    return execute
+
+
 def test_loop_indexes_are_left_to_the_builder_and_never_built_inside_a_transaction():
     for conn in (IndexConn({}, lock_free=False), IndexConn({}, in_transaction=True)):
         assert asyncio.run(loop_scale_indexes.ensure_loop_scale_indexes(SimplePool(conn))) == []
