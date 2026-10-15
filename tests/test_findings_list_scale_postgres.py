@@ -707,7 +707,7 @@ def test_a_hunt_filter_reads_the_runs_findings_once_not_a_probe_per_row(monkeypa
 
         result, queries = await route(pool, monkeypatch, limit=50, hunt_id=str(hunt))
         assert {str(item["id"]) for item in result["findings"]} == {str(value) for value in picked}
-        legacy = await conn.fetch(f"""SELECT f.id FROM findings f WHERE (
+        legacy = await conn.fetch("""SELECT f.id FROM findings f WHERE (
             f.hunt_run_id = $1 OR EXISTS (SELECT 1 FROM finding_hunt_verifications fhv
                 WHERE fhv.finding_id = f.id AND fhv.hunt_run_id = $1)
             OR EXISTS (SELECT 1 FROM finding_verifications hv JOIN hunt_runs hr ON hr.id = $1
@@ -852,60 +852,8 @@ def test_api_and_worker_starting_together_on_a_2_10_database_do_not_deadlock():
     run(scenario)
 
 
-def test_a_restart_during_concurrent_builds_on_every_builder_table_completes_without_deadlock():
-    """The background builder is mid-CREATE INDEX CONCURRENTLY on findings, scans and every other
-    table it builds on (stalled on an open snapshot, holding its lock), a process restarts and runs
-    the startup migrations, and another process queues on the startup lock. Every statement the
-    startup runs on an up-to-date database must be a catalog check that takes no lock the builds
-    hold: the startup completes while the builds are still waiting, and nothing deadlocks."""
-    async def scenario(conn, pool):
-        from retest_contract import run_schema_migrations
-        dsn = require_disposable_database(DSN or "", "shakerscan_findings_list_test")
-        picks = {}
-        for name, table, definition in loop_scale_indexes.LOOP_SCALE_INDEXES:
-            if table not in picks and await conn.fetchval("SELECT to_regclass($1)", table):
-                picks[table] = (name, definition)
-        assert {"findings", "scans", "targets"} <= set(picks)
-        for name, _definition in picks.values():
-            await conn.execute(f"DROP INDEX IF EXISTS {name}")
-        before = await _deadlocks(conn)
-        holder = await asyncpg.connect(dsn)
-        builders = []
-        startup_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
-        waiter = await asyncpg.connect(dsn)
-        try:
-            # An open snapshot stalls every concurrent build after it has taken its table lock.
-            await holder.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
-            await holder.fetchval("SELECT 1")
-            for name, definition in picks.values():
-                session = await asyncpg.connect(dsn)
-                builders.append((session, asyncio.create_task(
-                    session.execute(f"CREATE INDEX CONCURRENTLY {name} ON {definition}"))))
-            await asyncio.sleep(1.0)
-            assert not any(task.done() for _session, task in builders)
-            startup = asyncio.create_task(run_schema_migrations(startup_pool))
-            await asyncio.sleep(0.2)
-            queued = asyncio.create_task(waiter.execute("SELECT pg_advisory_lock(8675309)"))
-            await asyncio.wait_for(startup, 60)  # blocked behind a build, it would never finish
-            assert not any(task.done() for _session, task in builders)
-            await asyncio.wait_for(queued, 30)
-            await waiter.execute("SELECT pg_advisory_unlock(8675309)")
-            await holder.execute("ROLLBACK")
-            for _session, task in builders:
-                await asyncio.wait_for(task, 60)
-        finally:
-            for session, _task in builders:
-                await session.close()
-            await holder.close()
-            await waiter.close()
-            await startup_pool.close()
-        await asyncio.sleep(1.5)  # backends flush their statistics when they go idle
-        assert await _deadlocks(conn) == before
-        for name, _definition in picks.values():
-            assert await conn.fetchval(
-                "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)", name) is True, name
-
-    run(scenario)
+# A restart during the background builds (every builder table, findings included) is covered by
+# tests/test_targets_dashboard_scale_postgres.py::test_a_restart_during_builds_on_every_loop_index_table_completes_without_deadlock.
 
 
 def test_a_load_that_bypasses_the_trigger_succeeds_and_is_repaired():
