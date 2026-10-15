@@ -64,12 +64,12 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 from .hunt_scope import candidate_hunt_predicate
 from .list_filters import (
-    PROOF_STATES, SEVERITIES, host_in_domain_sql, parse_choice_list, stream_proof_matches,
+    PROOF_STATES, SEVERITIES, host_in_domain_sql, parse_choice_list,
 )
 from .list_query import (
     LEGACY_ONLY_PARAMETERS, LIST_V1_PARAMETERS, PROOF_STATE_FILTER_SQL, PROOF_STATE_ROW_SQL,
-    ROW_JOINS_SQL, UNDETERMINED_SQL, FindingFilters, _source_type_clause, has_undetermined,
-    legacy_order, legacy_page, legacy_stream_sql, proof_filter_sql, row_select_sql, v1_page,
+    ROW_JOINS_SQL, UNDETERMINED_SQL, FindingFilters, _source_type_clause,
+    legacy_order, legacy_page, resolved_proof_filter, row_select_sql, v1_page,
     without_jit,
 )
 from .remediation import finding_remediation
@@ -494,31 +494,18 @@ async def list_findings(
         params = SqlParams()
         where = filters.clauses(params)
         # Proof is the canonical projection stated in SQL (proof_sql.py), so a proof filter is one
-        # more WHERE clause: the database counts and paginates it like any other. A row whose proof
-        # SQL cannot decide exactly sends the request through the streaming projection instead.
-        stream_proof = False
+        # more WHERE clause the database pages and counts; the rare row SQL cannot decide is
+        # projected in Python first and enters that clause by id.
         if proof_states:
-            stream_proof = await has_undetermined(conn, where, params.snapshot())
-            if not stream_proof:
-                where.append(proof_filter_sql(proof_states, params))
-
-        if stream_proof:
-            # Every row the other filters leave is projected in Python, streamed from a cursor:
-            # memory holds the requested prefix only, and nothing is refused or sampled.
-            proof_matches, total = await stream_proof_matches(
-                conn, legacy_stream_sql(where, order), params.values, proof_states,
-                finding_proof_fields, keep=offset + limit,
-            )
-            page_rows = proof_matches[:offset + limit] if candidates_included else proof_matches[offset:offset + limit]
-        else:
-            # With candidates the merge below cuts the page, so the findings side takes the same
-            # offset+limit prefix window instead of its own OFFSET.
-            page_rows, total = await legacy_page(
-                conn, where=where, values=params.values, order=order,
-                limit=limit + offset if candidates_included else limit,
-                offset=0 if candidates_included else offset,
-                details=include_details, project=finding_proof_fields,
-            )
+            where.append(await resolved_proof_filter(conn, where, params, proof_states, finding_proof_fields))
+        # With candidates the merge below cuts the page, so the findings side takes the same
+        # offset+limit prefix window instead of its own OFFSET.
+        page_rows, total = await legacy_page(
+            conn, where=where, values=params.values, order=order,
+            limit=limit + offset if candidates_included else limit,
+            offset=0 if candidates_included else offset,
+            details=include_details, project=finding_proof_fields,
+        )
 
         candidates_total = 0
         candidate_items: list[dict[str, Any]] = []

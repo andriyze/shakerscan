@@ -172,6 +172,17 @@ def _inventory_is_heavy(query: Mapping[str, list[str]]) -> bool:
             or (query.get("sort") or [""])[-1] == "risk")
 
 
+_LIST_CONTRACT_PARAMETERS = ("cursor", "sort", "fields", "count", "since")
+
+
+def _legacy_findings_proof_filter(query: Mapping[str, list[str]]) -> bool:
+    """GET /findings?proof_state=... in the limit/offset shape: its exact total projects proof
+    over every row the other filters leave (about a second at 500k findings)."""
+    if any(name in query for name in _LIST_CONTRACT_PARAMETERS):
+        return False
+    return any(value.strip(" ,") for value in query.get("proof_state") or [])
+
+
 @dataclass(frozen=True)
 class RouteRule:
     """One row of ``ROUTE_CLASSES``: GET/HEAD paths matching ``pattern`` (and ``when``, if
@@ -197,6 +208,8 @@ ROUTE_CLASSES: tuple[RouteRule, ...] = (
     _rule(r"^/targets/inventory$", HEAVY, "inventory", _inventory_is_heavy),
     # Unbounded today, measured or suspected over 5 s at scale. Interim rows until each
     # endpoint's rework lands; then delete the row.
+    # The findings list is bounded (2.11) except the legacy shape's exact proof-filtered total.
+    _rule(r"^/findings$", HEAVY, "findings", _legacy_findings_proof_filter),
     _rule(r"^/targets/[^/]+/graph$", HEAVY, "target_graph"),
     _rule(r"^/targets/[^/]+/asm/.+$", HEAVY, "asm"),
     _rule(r"^/arsenal/campaigns$", HEAVY, "arsenal"),

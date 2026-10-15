@@ -124,9 +124,11 @@ def test_a_domain_filter_matches_ai_and_device_hosts_exactly(monkeypatch):
     _, conn = _list(monkeypatch, [], root_domain="example.com")
     query, args = conn.queries[0]
     # Each side is a predicate on the finding's own key, so the page query reads findings alone.
-    assert "f.target_id = ANY(ARRAY(SELECT id FROM targets WHERE root_domain = $1))" in query
-    assert host_in_domain_sql("endpoint_url", "$1") in query and "f.ai_target_id = ANY(" in query
-    assert host_in_domain_sql("primary_locator", "$1") in query and "f.device_target_id = ANY(" in query
+    # IN (subquery): a hashed lookup, never a per-row scan of an id array (10k targets per domain).
+    assert "f.target_id IN (SELECT id FROM targets WHERE root_domain = $1)" in query
+    assert host_in_domain_sql("endpoint_url", "$1") in query and "f.ai_target_id IN (" in query
+    assert host_in_domain_sql("primary_locator", "$1") in query and "f.device_target_id IN (" in query
+    assert "ANY(ARRAY(" not in query
     # The substring match that let example.com select notexample.com is gone.
     assert "LIKE '%' || LOWER($1) || '%'" not in query
     assert args[0] == "example.com"

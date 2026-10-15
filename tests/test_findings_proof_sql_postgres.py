@@ -287,7 +287,7 @@ def _params(**overrides):
 
 
 class _Recording:
-    """A connection that notes whether the streaming fallback ran."""
+    """A connection that notes whether anything streamed every row through Python (nothing may)."""
 
     def __init__(self, conn):
         self._conn = conn
@@ -358,7 +358,8 @@ def test_an_undecidable_row_is_projected_in_python_and_still_exact(monkeypatch):
         result_coro, recording = _list(conn, monkeypatch, proof_state="suspected", limit=20, offset=10)
         result = await result_coro
         total, page = await _expected(conn, ["suspected"], limit=20, offset=10)
-        assert recording.streamed
+        # The undetermined row is projected in Python; the page and the count stay in SQL.
+        assert not recording.streamed
         assert result["total"] == total and [str(item["id"]) for item in result["findings"]] == page
         everything_coro, _ = _list(conn, monkeypatch, proof_state="suspected", limit=500)
         assert "nan triage" in {item["title"] for item in (await everything_coro)["findings"]}

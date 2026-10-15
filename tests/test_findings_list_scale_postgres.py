@@ -54,6 +54,7 @@ from exposure.proof_rollup import active_finding_proof_counts  # noqa: E402
 import finding_routes.router as findings_router  # noqa: E402
 from finding_routes import list_schema  # noqa: E402
 import list_contract  # noqa: E402
+from runtime import loop_scale_indexes  # noqa: E402
 
 T0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
 DETAIL = set(findings_router._FINDING_DETAIL_ONLY_FIELDS)
@@ -260,6 +261,8 @@ def run(scenario, *, data=True, **seed_options):
                 pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
                 try:
                     await run_schema_migrations(pool)
+                    # The list indexes come from the API's background builder, after startup.
+                    assert await loop_scale_indexes.ensure_loop_scale_indexes(pool)
                 finally:
                     await pool.close()
                 _SCHEMA_READY = True
@@ -662,71 +665,137 @@ def test_a_page_reads_a_page_of_rows_from_an_index(monkeypatch):
 
 # --- the upgrade migration -------------------------------------------------------------------------
 
+LIST_INDEX_NAMES = [name for name, _table, _definition, _extension in list_schema.FINDINGS_SCALE_INDEXES]
+
+
 async def _definitions(conn) -> dict[str, str]:
     rows = await conn.fetch(
         "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'findings' AND indexname = ANY($1::text[])",
-        [name for name, _ in (*list_schema.FINDINGS_LIST_INDEXES, *list_schema.FINDINGS_TRGM_INDEXES)])
+        LIST_INDEX_NAMES)
     definitions = {row["indexname"]: row["indexdef"] for row in rows}
-    stats = await conn.fetchval(
+    definitions["findings_proof_gate_stats"] = await conn.fetchval(
         "SELECT pg_get_statisticsobjdef(oid) FROM pg_statistic_ext WHERE stxname = 'findings_proof_gate_stats'")
-    definitions["findings_proof_gate_stats"] = stats
     definitions["finding_severity_rank"] = await conn.fetchval(
         "SELECT pg_get_functiondef('finding_severity_rank(text)'::regprocedure)")
     definitions["trg_finding_severity_rank"] = await conn.fetchval(
         "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'trg_finding_severity_rank'")
+    definitions["severity_rank column"] = await conn.fetchval(
+        """SELECT format_type(a.atttypid, a.atttypmod) || ' notnull=' || a.attnotnull || ' default='
+                  || pg_get_expr(d.adbin, d.adrelid)
+           FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+           WHERE a.attrelid = 'findings'::regclass AND a.attname = 'severity_rank'""")
     return definitions
 
 
-def test_the_upgrade_backfills_without_touching_updated_at_and_ends_like_a_fresh_install():
+async def _back_to_2_10(conn) -> None:
+    """A 2.10 database: no rank, no list indexes or statistics, the old timestamp trigger."""
+    for name in LIST_INDEX_NAMES:
+        await conn.execute(f"DROP INDEX IF EXISTS {name}")
+    await conn.execute("DROP STATISTICS findings_proof_gate_stats")
+    await conn.execute("DROP TRIGGER trg_finding_severity_rank ON findings")
+    await conn.execute("ALTER TABLE findings DROP COLUMN severity_rank")
+    await conn.execute("""CREATE OR REPLACE FUNCTION update_finding_timestamps() RETURNS TRIGGER AS $$
+        BEGIN NEW.updated_at = NOW();
+          IF NEW.status = 'resolved' AND OLD.status != 'resolved' THEN NEW.resolved_at = NOW(); END IF;
+          RETURN NEW; END; $$ LANGUAGE plpgsql""")
+    await conn.execute("DELETE FROM app_schema_migrations WHERE name = $1", list_schema.SEVERITY_RANK_MIGRATION)
+    await conn.execute("ALTER TABLE findings DISABLE TRIGGER trigger_update_finding_timestamps")
+    await conn.execute("UPDATE findings SET updated_at = $1", T0)
+    await conn.execute("ALTER TABLE findings ENABLE TRIGGER trigger_update_finding_timestamps")
+
+
+def test_the_upgrade_ranks_without_touching_updated_at_and_ends_like_a_fresh_install():
     async def scenario(conn, pool):
         fresh = await _definitions(conn)
-        assert len(fresh) == len(list_schema.FINDINGS_LIST_INDEXES) + len(list_schema.FINDINGS_TRGM_INDEXES) + 3
-        assert all(fresh.values())
-        # Back to a 2.10 database: no rank, no list indexes, the old timestamp trigger.
-        for name, _ in (*list_schema.FINDINGS_LIST_INDEXES, *list_schema.FINDINGS_TRGM_INDEXES):
-            await conn.execute(f"DROP INDEX {name}")
-        await conn.execute("DROP STATISTICS findings_proof_gate_stats")
-        await conn.execute("DROP TRIGGER trg_finding_severity_rank ON findings")
-        await conn.execute("ALTER TABLE findings DROP COLUMN severity_rank")
-        await conn.execute("""CREATE OR REPLACE FUNCTION update_finding_timestamps() RETURNS TRIGGER AS $$
-            BEGIN NEW.updated_at = NOW();
-              IF NEW.status = 'resolved' AND OLD.status != 'resolved' THEN NEW.resolved_at = NOW(); END IF;
-              RETURN NEW; END; $$ LANGUAGE plpgsql""")
-        await conn.execute("DELETE FROM app_schema_migrations WHERE name = $1", list_schema.SEVERITY_RANK_MIGRATION)
-        await conn.execute("ALTER TABLE findings DISABLE TRIGGER trigger_update_finding_timestamps")
-        await conn.execute("UPDATE findings SET updated_at = $1", T0)
-        await conn.execute("ALTER TABLE findings ENABLE TRIGGER trigger_update_finding_timestamps")
+        assert len(fresh) == len(LIST_INDEX_NAMES) + 4 and all(fresh.values())
+        assert fresh["severity_rank column"] == "smallint notnull=true default=1"
+        await _back_to_2_10(conn)
         # An interrupted concurrent build leaves an INVALID index under a list index's name.
         with pytest.raises(asyncpg.UniqueViolationError):
             await conn.execute("CREATE UNIQUE INDEX CONCURRENTLY idx_findings_scan_severity ON findings (severity)")
-        assert await conn.fetchval(
-            "SELECT NOT indisvalid FROM pg_index WHERE indexrelid = 'idx_findings_scan_severity'::regclass")
 
+        # The startup schema (the column is added with its default: no rewrite, no NULLs) ...
         async with conn.transaction():
             for statement in list_schema.FINDINGS_LIST_SCHEMA_STATEMENTS:
                 await conn.execute(statement)
-        filled = await list_schema.backfill_severity_rank(conn, batch=97)
-        assert filled == await conn.fetchval("SELECT count(*) FROM findings")
+        assert await conn.fetchval("SELECT count(*) FILTER (WHERE severity_rank = 1) FROM findings") == \
+            await conn.fetchval("SELECT count(*) FROM findings")
+        # ... the one-time rank under the startup lock (small batches, updated_at untouched) ...
+        expected = await conn.fetchval(
+            "SELECT count(*) FROM findings WHERE finding_severity_rank(severity) <> 1")
+        assert await list_schema.backfill_severity_rank(conn, batch=97) == expected > 0
         await list_schema.finish_findings_list_schema(conn)
-
         assert await conn.fetchval("SELECT count(*) FROM findings WHERE updated_at <> $1", T0) == 0
         assert await conn.fetchval(
-            "SELECT count(*) FROM findings WHERE severity_rank IS DISTINCT FROM finding_severity_rank(severity)") == 0
-        assert await conn.fetchval(
-            "SELECT attnotnull FROM pg_attribute WHERE attrelid = 'findings'::regclass AND attname = 'severity_rank'")
-        assert await conn.fetchval(
-            "SELECT bool_and(indisvalid) FROM pg_index WHERE indrelid = 'findings'::regclass")
+            "SELECT count(*) FROM findings WHERE severity_rank <> finding_severity_rank(severity)") == 0
+        # ... builds no index: the background builder does, and rebuilds the interrupted one.
+        assert await conn.fetchval("SELECT to_regclass('idx_findings_severity_keyset')") is None
+        built = await loop_scale_indexes.ensure_loop_scale_indexes(pool)
+        assert set(LIST_INDEX_NAMES) <= set(built)
+        assert await conn.fetchval("SELECT bool_and(indisvalid) FROM pg_index WHERE indrelid = 'findings'::regclass")
         assert await _definitions(conn) == fresh
         # Kept in step afterwards, and an ordinary update still stamps updated_at.
         changed = await conn.fetchval("SELECT id FROM findings WHERE severity = 'info' LIMIT 1")
         await conn.execute("UPDATE findings SET severity = 'critical' WHERE id = $1", changed)
         assert await conn.fetchval("SELECT (severity_rank, updated_at > $2) FROM findings WHERE id = $1",
                                    changed, T0) == (5, True)
-        inserted = await conn.fetchval(
-            "INSERT INTO findings (fingerprint, title, severity) VALUES ('new', 'new', 'high') RETURNING severity_rank")
-        assert inserted == 4
+        assert await conn.fetchval(
+            "INSERT INTO findings (fingerprint, title, severity) VALUES ('new', 'new', 'high') RETURNING severity_rank") == 4
         # Idempotent: a second start changes nothing.
         await list_schema.finish_findings_list_schema(conn)
+        assert await loop_scale_indexes.ensure_loop_scale_indexes(pool) == []
         assert await _definitions(conn) == fresh
+
+    run(scenario)
+
+
+async def _deadlocks(conn) -> int:
+    await conn.execute("SELECT pg_stat_clear_snapshot()")
+    return await conn.fetchval("SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()")
+
+
+def test_api_and_worker_starting_together_on_a_2_10_database_do_not_deadlock():
+    """Processes start together: while one upgrades under the startup lock, the others wait for it
+    (each wait holds a snapshot). Nothing under that lock may wait for snapshots (a CONCURRENTLY
+    index build does): PostgreSQL would break that cycle by killing a waiter with a deadlock."""
+    async def scenario(conn, pool):
+        await _back_to_2_10(conn)
+        from retest_contract import run_schema_migrations
+        dsn = require_disposable_database(DSN or "", "shakerscan_findings_list_test")
+        pools = [await asyncpg.create_pool(dsn, min_size=1, max_size=2) for _ in range(3)]
+        before = await _deadlocks(conn)
+        try:
+            await asyncio.wait_for(asyncio.gather(*(run_schema_migrations(p) for p in pools)), 120)
+        finally:
+            for p in pools:
+                await p.close()
+        await asyncio.sleep(1.5)  # backends flush their statistics when they go idle
+        assert await _deadlocks(conn) == before
+        assert await conn.fetchval(
+            "SELECT count(*) FROM findings WHERE severity_rank <> finding_severity_rank(severity)") == 0
+        assert await conn.fetchval("SELECT count(*) FROM findings WHERE updated_at <> $1", T0) == 0
+        assert await loop_scale_indexes.ensure_loop_scale_indexes(pool)
+
+    run(scenario)
+
+
+def test_a_load_that_bypasses_the_trigger_succeeds_and_is_repaired():
+    async def scenario(conn, pool):
+        # A data-only restore of an older dump: no rank in the data, triggers disabled.
+        await conn.execute("ALTER TABLE findings DISABLE TRIGGER USER")
+        try:
+            await conn.execute(
+                "INSERT INTO findings (fingerprint, title, severity, updated_at)"
+                " SELECT 'restored-' || i, 'restored', 'critical', $1 FROM generate_series(1, 300) AS i", T0)
+        finally:
+            await conn.execute("ALTER TABLE findings ENABLE TRIGGER USER")
+        assert await conn.fetchval("SELECT count(*) FROM findings WHERE severity_rank = 1 AND severity = 'critical'") == 300
+        assert await list_schema.repair_severity_rank(pool) >= 300
+        assert await conn.fetchval(
+            "SELECT count(*) FROM findings WHERE severity_rank <> finding_severity_rank(severity)") == 0
+        assert await conn.fetchval(
+            "SELECT count(*) FROM findings WHERE fingerprint LIKE 'restored-%' AND updated_at <> $1", T0) == 0
+        # The API's maintenance task runs the same repair after it starts serving.
+        await list_schema.repair_severity_rank_in_background(pool, delay=0)
 
     run(scenario)

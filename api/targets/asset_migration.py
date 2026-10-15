@@ -343,9 +343,10 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
             except ModuleNotFoundError:
                 from api.hunt.interpretations import import_knowledge_notes
             await import_knowledge_notes(conn)
-            # Outside any transaction, still under the lock: the severity rank backfill (short
-            # batches, resumable) and the findings list indexes, built CONCURRENTLY so writers are
-            # never blocked behind a build on a large table.
+            # Outside any transaction, still under the lock: the one-time severity rank backfill
+            # (short batches, resumable). Its indexes are built CONCURRENTLY by the background
+            # builder (runtime/loop_scale_indexes.py): a concurrent build here would wait for the
+            # snapshot of every process waiting for this lock.
             try:
                 from finding_routes.list_schema import finish_findings_list_schema
             except ModuleNotFoundError:

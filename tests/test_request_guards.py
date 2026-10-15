@@ -64,6 +64,10 @@ SETTINGS = rg.GuardSettings(
     # Bounded since 2.11 (index-ordered page, separate count): an interactive read again.
     ("HEAD", "/findings", "", "interactive", None),
     ("GET", "/findings", "limit=50&offset=400000", "interactive", None),
+    ("GET", "/findings", "proof_state=suspected&limit=50", "heavy", "findings"),
+    ("GET", "/findings", "proof_state=%2C", "interactive", None),
+    ("GET", "/findings", "proof_state=suspected&cursor=abc", "interactive", None),
+    ("GET", "/findings", "proof_state=verified&count=exact", "interactive", None),
     ("GET", "/targets/abc/graph", "", "heavy", "target_graph"),
     ("GET", "/targets/abc/asm/coverage", "", "heavy", "asm"),
     ("GET", "/arsenal/campaigns", "", "heavy", "arsenal"),
@@ -95,13 +99,14 @@ def test_include_facets_parsing_matches_the_endpoint_bool():
 
 
 def test_the_classification_is_one_table_a_row_can_leave():
-    rows = [rule for rule in rg.ROUTE_CLASSES if rule.pattern.pattern == "^/results$"]
+    rows = [rule for rule in rg.ROUTE_CLASSES if rule.pattern.pattern == "^/findings$"]
     assert len(rows) == 1
     remaining = tuple(rule for rule in rg.ROUTE_CLASSES if rule is not rows[0])
     original = rg.ROUTE_CLASSES
     try:
         rg.ROUTE_CLASSES = remaining
-        assert rg.classify_request("GET", "/results") == rg.RequestClass("interactive", None)
+        assert rg.classify_request("GET", "/findings", b"proof_state=suspected") == rg.RequestClass(
+            "interactive", None)
     finally:
         rg.ROUTE_CLASSES = original
 

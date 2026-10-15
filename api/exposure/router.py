@@ -1388,9 +1388,9 @@ async def exposure_changes(
 
     findings_scope = """
               AND ($2::text IS NULL
-                   OR f.target_id = ANY(ARRAY(SELECT id FROM targets WHERE root_domain = $2::text))
-                   OR f.ai_target_id = ANY(ARRAY(SELECT id FROM ai_targets
-                                                WHERE LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%')))"""
+                   OR f.target_id IN (SELECT id FROM targets WHERE root_domain = $2::text)
+                   OR f.ai_target_id IN (SELECT id FROM ai_targets
+                                         WHERE LOWER(endpoint_url) LIKE '%' || LOWER($2::text) || '%'))"""
     finding_columns = """f.title, f.severity, f.first_seen_at, f.resolved_at,
                    COALESCE((SELECT root_domain FROM targets WHERE id = f.target_id),
                             (SELECT name FROM ai_targets WHERE id = f.ai_target_id), f.url) AS subject"""

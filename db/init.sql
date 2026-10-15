@@ -1305,8 +1305,9 @@ CREATE TABLE findings (
     analyst_verdict_at TIMESTAMPTZ,
     analyst_verdict_notes TEXT,
 
-    -- Indexed list order (critical 5 .. info/other 1), set by trg_finding_severity_rank.
-    severity_rank SMALLINT NOT NULL
+    -- Indexed list order (critical 5 .. info/other 1), set by trg_finding_severity_rank; a load
+    -- that bypasses the trigger gets 1 and the API's background repair corrects it.
+    severity_rank SMALLINT NOT NULL DEFAULT 1
 );
 
 -- Every Hunt that deterministically verified a finding (D21). findings.hunt_run_id names the
@@ -1803,7 +1804,7 @@ CREATE UNIQUE INDEX idx_findings_target_fingerprint
     WHERE target_id IS NOT NULL;
 
 -- Bounded findings lists (2.11): api/finding_routes/list_schema.py installs the same rank function,
--- trigger and indexes on upgraded databases (indexes concurrently).
+-- trigger and statistics on upgraded databases.
 CREATE OR REPLACE FUNCTION finding_severity_rank(severity TEXT) RETURNS SMALLINT
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
     SELECT (CASE severity
@@ -1819,27 +1820,10 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_finding_severity_rank
 BEFORE INSERT OR UPDATE OF severity, severity_rank ON findings
 FOR EACH ROW EXECUTE FUNCTION set_finding_severity_rank();
-CREATE INDEX idx_findings_severity_keyset
-    ON findings(severity_rank, (COALESCE(last_seen_at, '1970-01-01 00:00:00+00'::timestamptz)), id);
-CREATE INDEX idx_findings_last_seen_keyset
-    ON findings((COALESCE(last_seen_at, '1970-01-01 00:00:00+00'::timestamptz)), id);
-CREATE INDEX idx_findings_first_seen_keyset
-    ON findings((COALESCE(first_seen_at, '1970-01-01 00:00:00+00'::timestamptz)), id);
-CREATE INDEX idx_findings_active_target_counts ON findings(target_id, severity)
-    INCLUDE (last_verification_verdict, analyst_verdict) WHERE status = 'active';
-CREATE INDEX idx_findings_active_ai_target_counts ON findings(ai_target_id, severity)
-    INCLUDE (target_id, last_verification_verdict, analyst_verdict)
-    WHERE status = 'active' AND ai_target_id IS NOT NULL;
-CREATE INDEX idx_findings_target_created ON findings(target_id, created_at DESC);
-CREATE INDEX idx_findings_scan_severity ON findings(scan_id, severity);
-CREATE INDEX idx_findings_resolved_at ON findings(resolved_at DESC) WHERE status = 'resolved';
-CREATE INDEX idx_findings_triage_string ON findings(id) WHERE jsonb_typeof(evidence -> 'triage') = 'string';
-CREATE INDEX idx_findings_proof_candidates ON findings(target_id)
-    WHERE (COALESCE(jsonb_typeof(evidence) = 'object' AND evidence ?| ARRAY['browser_proof', 'executed', 'extracted_data', 'extraction_evidence', 'payload_executed', 'proof_contract', 'proof_contract_v2', 'proof_of_exploitation', 'proof_producer', 'proof_type']::text[], false) OR last_verification_verdict IS NOT NULL);
 CREATE STATISTICS findings_proof_gate_stats ON (COALESCE(jsonb_typeof(evidence) = 'object' AND evidence ?| ARRAY['browser_proof', 'executed', 'extracted_data', 'extraction_evidence', 'payload_executed', 'proof_contract', 'proof_contract_v2', 'proof_of_exploitation', 'proof_producer', 'proof_type']::text[], false)) FROM findings;
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-CREATE INDEX idx_findings_title_trgm ON findings USING gin (title gin_trgm_ops);
-CREATE INDEX idx_findings_url_trgm ON findings USING gin (url gin_trgm_ops);
+-- The list indexes (keyset, per-asset counts, proof candidates, trigram search) are built
+-- CONCURRENTLY by the API's background builder (api/runtime/loop_scale_indexes.py), on fresh and
+-- upgraded databases alike; pg_trgm is installed there when this role may.
 
 -- Finding verifications
 CREATE INDEX idx_finding_verifications_finding_id ON finding_verifications(finding_id, created_at DESC);

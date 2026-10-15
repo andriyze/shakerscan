@@ -9,7 +9,8 @@ Both response shapes share this module:
   of its own parameters.
 
 Every filter is a predicate on ``findings f`` (a filter on the joined target, AI target or device
-becomes ``f.<fk> = ANY(ARRAY(SELECT id ...))``), so the page query reads only findings and an
+becomes ``f.<fk> IN (SELECT id ...)`` for a domain, or an id array the planner can bitmap-scan
+for a search), so the page query reads only findings and an
 index can produce its order. The page is chosen first (ids only, ``ORDER BY ... LIMIT``) and the
 row columns, the target labels, the latest retest (one LATERAL probe per page row) and the proof
 projection are computed for that page alone. Nothing per row runs over the whole match set, and
@@ -28,11 +29,11 @@ from fastapi import HTTPException
 
 try:
     from list_contract import (
-        EXACT_COUNT_CAP, ListPlan, ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time,
+        ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time,
     )
 except ModuleNotFoundError:  # package import in host-side tests
     from ..list_contract import (
-        EXACT_COUNT_CAP, ListPlan, ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time,
+        ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time,
     )
 
 from .hunt_scope import finding_hunt_predicate
@@ -223,11 +224,11 @@ class FindingFilters:
         if self.root_domain:
             domain = params.add(self.root_domain)
             where.append(f"""(
-                f.target_id = ANY(ARRAY(SELECT id FROM targets WHERE root_domain = {domain}))
-                OR f.ai_target_id = ANY(ARRAY(SELECT id FROM ai_targets
-                                             WHERE {host_in_domain_sql("endpoint_url", domain)}))
-                OR f.device_target_id = ANY(ARRAY(SELECT id FROM device_targets
-                                                 WHERE {host_in_domain_sql("primary_locator", domain)}))
+                f.target_id IN (SELECT id FROM targets WHERE root_domain = {domain})
+                OR f.ai_target_id IN (SELECT id FROM ai_targets
+                                     WHERE {host_in_domain_sql("endpoint_url", domain)})
+                OR f.device_target_id IN (SELECT id FROM device_targets
+                                         WHERE {host_in_domain_sql("primary_locator", domain)})
             )""")
         if self.verification_verdict:
             where.append(f"f.last_verification_verdict = {params.add(self.verification_verdict)}")
@@ -247,6 +248,10 @@ class FindingFilters:
                 WHERE fv2.finding_id = f.id AND fv2.verification_mode = {params.add(self.verification_mode)}
             )""")
         if self.search:
+            # Search keeps id arrays: with the trigram indexes on title/url the planner ORs them
+            # into one bitmap scan (18 ms for a selective term at 500k findings, where an
+            # IN-subquery form forces a scan: 516 ms). A domain filter uses IN (above), because
+            # a domain can hold 10k targets and a long array tested per row is linear.
             pattern = params.add(f"%{self.search}%")
             where.append(f"""(
                 f.title ILIKE {pattern}
@@ -283,12 +288,39 @@ def where_sql(clauses: Iterable[str]) -> str:
     return " AND ".join(clauses) if clauses else "TRUE"
 
 
-async def has_undetermined(conn: Any, where: list[str], values: list[Any]) -> bool:
-    """Whether any row the filters leave needs the Python proof projection (an index probe)."""
-    return bool(await conn.fetchval(
-        f"SELECT EXISTS (SELECT 1 FROM findings f WHERE {where_sql([*where, INDEXED_UNDETERMINED_SQL])})",
-        *values,
-    ))
+#: Rows whose proof only Python can decide are rare (a triage string PostgreSQL's JSON reader
+#: refuses, such as one holding NaN). More than this many under one filter is refused.
+UNDETERMINED_LIMIT = 10_000
+
+
+async def resolved_proof_filter(
+    conn: Any, where: list[str], params: SqlParams, proof_states: list[str],
+    project: Callable[[dict[str, Any]], dict[str, Any]],
+) -> str:
+    """The exact ``proof_state`` WHERE clause, whatever the rows hold.
+
+    SQL decides every row it can. The rows it cannot (undetermined triage strings) are read
+    through their partial index, projected in Python (finding_proof_fields), and the matching
+    ones enter the clause by id, so the database still pages and counts the whole filter.
+    """
+    rows = await conn.fetch(
+        f"""SELECT f.id, f.evidence, f.severity, f.last_verification_verdict,
+                   {latest_retest_mode_sql(finding_id='f.id', verdict='f.last_verification_verdict')}
+                       AS latest_retest_mode
+            FROM findings f WHERE {where_sql([*where, INDEXED_UNDETERMINED_SQL])}
+            LIMIT {UNDETERMINED_LIMIT + 1}""",
+        *params.values,
+    )
+    if len(rows) > UNDETERMINED_LIMIT:
+        raise HTTPException(status_code=503, detail=(
+            f"more than {UNDETERMINED_LIMIT} findings under this filter carry a triage block the "
+            "database cannot read; narrow the filter or drop proof_state"
+        ))
+    decided = proof_filter_sql(proof_states, params)
+    if not rows:
+        return decided
+    matching = [row["id"] for row in rows if project(dict(row))["proof_state"] in proof_states]
+    return f"(({decided} AND NOT {UNDETERMINED_SQL}) OR f.id = ANY({params.add(matching)}::uuid[]))"
 
 
 def row_select_sql(*, details: bool) -> str:
@@ -381,14 +413,6 @@ async def legacy_page(
     return [apply_proof(row, project) for row in rows], total
 
 
-def legacy_stream_sql(where: list[str], order: list[tuple[str, str]]) -> str:
-    """Every matching row with the columns the Python projection reads (the undetermined path)."""
-    return (
-        f"SELECT {row_select_sql(details=True)} FROM findings f {ROW_JOINS_SQL}"
-        f" WHERE {where_sql(where)} ORDER BY {order_sql(order)}"
-    )
-
-
 # --- list/v1 ----------------------------------------------------------------------------------
 
 LIST_V1_PARAMETERS = frozenset({"cursor", "sort", "fields", "count", "since"})
@@ -429,83 +453,42 @@ async def v1_page(
     params = SqlParams()
     where = filters.clauses(params)
     where += plan.filter_clauses(params)
-    undetermined = False
     if proof_states:
-        undetermined = await has_undetermined(conn, where, params.snapshot())
-        proof_clause = proof_filter_sql(proof_states, params)
-        # An undetermined row's proof is decided in Python below, so the SQL keeps it for that.
-        where.append(f"({proof_clause} OR {INDEXED_UNDETERMINED_SQL})" if undetermined else proof_clause)
+        where.append(await resolved_proof_filter(conn, where, params, proof_states, project))
     count_values = params.snapshot()
     # The poll watermark, taken before the page query (list_contract.snapshot_time).
     generated_at = await snapshot_time(conn)
-
-    kept: list[dict[str, Any]] = []
-    current: ListPlan = plan
-    while True:
-        page_params = SqlParams(count_values)
-        page_where = where + current.keyset_clauses(page_params)
-        rows = await conn.fetch(
-            f"""SELECT {current.select_list}, {_PROOF_INPUT_COLUMNS},
-                       f.severity AS _proof_severity, f.last_verification_verdict AS _proof_verdict,
-                       {LATEST_RETEST_MODE_SQL} AS _proof_mode
-                FROM (SELECT f.id FROM findings f WHERE {where_sql(page_where)}
-                      ORDER BY {current.order_by} LIMIT {current.fetch_limit}) page
-                JOIN findings f ON f.id = page.id
-                {ROW_JOINS_SQL}
-                ORDER BY {current.order_by}""",
-            *page_params.values,
-        )
-        for row in rows:
-            item = dict(row)
-            severity = item.pop("_proof_severity")
-            verdict = item.pop("_proof_verdict")
-            mode = item.pop("_proof_mode")
-            if item.pop("_proof_undetermined"):
-                fields = project({"evidence": item.pop("_proof_evidence"), "severity": severity,
-                                  "last_verification_verdict": verdict, "latest_retest_mode": mode})
-                if proof_states and fields["proof_state"] not in proof_states:
-                    continue
-                for name in ("proof_state", "is_verified", "is_suspected"):
-                    if name in item:
-                        item[name] = fields[name]
-            else:
-                item.pop("_proof_evidence")
-            kept.append(item)
-        # Only a dropped undetermined row can leave the page short while rows remain.
-        if len(kept) > page.limit or len(rows) < current.fetch_limit:
-            break
-        current = current.after(rows[-1])
-
-    total, kind = await _v1_total(conn, page, where=where, values=count_values,
-                                  undetermined=undetermined, proof_states=proof_states, project=project)
-    return plan.envelope(kept, total=total, total_kind=kind, generated_at=generated_at)
-
-
-async def _v1_total(
-    conn: Any, page: Page, *, where: list[str], values: list[Any], undetermined: bool,
-    proof_states: Optional[list[str]], project: Callable[[dict[str, Any]], dict[str, Any]],
-) -> tuple[Optional[int], str]:
-    if page.count != "exact" or not undetermined:
-        return await count_total(conn, page.count, from_sql="findings f", where=where,
-                                 values=values, table="findings")
-    # Exact with undetermined rows: SQL counts the decided rows, Python the undetermined ones.
-    decided, kind = await count_total(conn, "exact", from_sql="findings f",
-                                      where=[*where, f"NOT {UNDETERMINED_SQL}"], values=values)
-    if kind == "at_least":
-        return decided, kind
+    page_params = SqlParams(count_values)
+    page_where = where + plan.keyset_clauses(page_params)
     rows = await conn.fetch(
-        f"""SELECT f.evidence, f.severity, f.last_verification_verdict,
-                   {latest_retest_mode_sql(finding_id='f.id', verdict='f.last_verification_verdict')}
-                       AS latest_retest_mode
-            FROM findings f WHERE {where_sql([*where, INDEXED_UNDETERMINED_SQL])}
-            LIMIT {EXACT_COUNT_CAP + 1}""",
-        *values,
+        f"""SELECT {plan.select_list}, {_PROOF_INPUT_COLUMNS},
+                   f.severity AS _proof_severity, f.last_verification_verdict AS _proof_verdict,
+                   {LATEST_RETEST_MODE_SQL} AS _proof_mode
+            FROM (SELECT f.id FROM findings f WHERE {where_sql(page_where)}
+                  ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}) page
+            JOIN findings f ON f.id = page.id
+            {ROW_JOINS_SQL}
+            ORDER BY {plan.order_by}""",
+        *page_params.values,
     )
-    extra = sum(1 for row in rows if project(dict(row))["proof_state"] in (proof_states or ()))
-    found = decided + extra
-    if found > EXACT_COUNT_CAP:
-        return EXACT_COUNT_CAP, "at_least"
-    return found, "exact"
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        severity = item.pop("_proof_severity")
+        verdict = item.pop("_proof_verdict")
+        mode = item.pop("_proof_mode")
+        evidence = item.pop("_proof_evidence")
+        if item.pop("_proof_undetermined"):
+            # The SQL projection cannot read this row's triage; Python's does (as the detail view).
+            fields = project({"evidence": evidence, "severity": severity,
+                              "last_verification_verdict": verdict, "latest_retest_mode": mode})
+            for name in ("proof_state", "is_verified", "is_suspected"):
+                if name in item:
+                    item[name] = fields[name]
+        items.append(item)
+    total, kind = await count_total(conn, page.count, from_sql="findings f", where=where,
+                                    values=count_values, table="findings")
+    return plan.envelope(items, total=total, total_kind=kind, generated_at=generated_at)
 
 
 __all__ = [
@@ -521,10 +504,9 @@ __all__ = [
     "UNDETERMINED_SQL",
     "VERIFIED_CANDIDATE_SQL",
     "apply_proof",
-    "has_undetermined",
+    "resolved_proof_filter",
     "legacy_order",
     "legacy_page",
-    "legacy_stream_sql",
     "proof_filter_sql",
     "v1_page",
     "without_jit",

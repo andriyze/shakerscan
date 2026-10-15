@@ -350,6 +350,8 @@ class IndexConn:
             return self.lock_free
         if "SHOW statement_timeout" in query:
             return "30s"
+        if "pg_extension" in query:
+            return True
         if "to_regclass" in query:
             return args[0]
         if "indisvalid" in query:
@@ -361,7 +363,9 @@ class IndexConn:
 
 
 def test_loop_indexes_build_concurrently_and_rebuild_an_interrupted_build():
-    names = [name for name, _table, _definition in loop_scale_indexes.LOOP_SCALE_INDEXES]
+    # One builder for every bounded list's indexes: the loop indexes and the findings list's.
+    names = [name for name, _table, _definition, _extension in loop_scale_indexes.scale_indexes()]
+    assert {"idx_findings_severity_keyset", "idx_findings_title_trgm"} <= set(names)
     states = {name: True for name in names}
     states[names[0]] = False  # an interrupted CONCURRENTLY build leaves an invalid index
     states[names[1]] = None
@@ -372,6 +376,8 @@ def test_loop_indexes_build_concurrently_and_rebuild_an_interrupted_build():
     assert creates and all("CONCURRENTLY" in s for s in creates)
     assert any(s.startswith(f"DROP INDEX CONCURRENTLY IF EXISTS {names[0]}") for s in conn.statements)
     assert conn.statements[0] == "SET statement_timeout = 0"
+    # The rebuilt indexes' tables get fresh planner statistics.
+    assert "ANALYZE budget_reservations" in conn.statements and "ANALYZE scans" in conn.statements
     assert conn.statements[-2] == "SET statement_timeout = '30s'"  # the session's own limit is restored
 
 

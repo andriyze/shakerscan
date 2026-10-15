@@ -46,6 +46,35 @@ LOOP_SCALE_INDEXES: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
+def scale_indexes() -> tuple[tuple[str, str, str, str | None], ...]:
+    """Every index this builder owns: (name, table, definition, required extension or None).
+
+    The loop indexes above, and the other bounded lists' indexes (findings list and exposure):
+    one builder, so no index is ever built CONCURRENTLY under the startup lock.
+    """
+    try:
+        from finding_routes.list_schema import FINDINGS_SCALE_INDEXES
+    except ModuleNotFoundError:  # package import layout
+        from api.finding_routes.list_schema import FINDINGS_SCALE_INDEXES
+    return (*((name, table, definition, None) for name, table, definition in LOOP_SCALE_INDEXES),
+            *FINDINGS_SCALE_INDEXES)
+
+
+async def _extension_available(conn: Any, name: str, cache: dict[str, bool]) -> bool:
+    """Whether ``name`` is installed, installing it if this role may; never raises."""
+    if name not in cache:
+        try:
+            present = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1)", name)
+            if not present:
+                await conn.execute(f"CREATE EXTENSION IF NOT EXISTS {name}")
+                present = True
+        except Exception as exc:  # no privilege, or the contrib module is not installed
+            logger.warning("Extension %s is unavailable (%s); its indexes are skipped", name, type(exc).__name__)
+            present = False
+        cache[name] = bool(present)
+    return cache[name]
+
+
 _LOCK_NAMESPACE = 0x53534C50  # loop_leader.LOOP_LOCK_NAMESPACE
 _LOCK_KEY = 0x2B11_1D5  # this module's build lock within that namespace
 
@@ -74,9 +103,12 @@ async def ensure_loop_scale_indexes(pool: Any, *, progress: Any = None) -> list[
         try:
             # A build on a large table may take longer than an interactive statement may.
             await conn.execute("SET statement_timeout = 0")
-            for name, table, definition in LOOP_SCALE_INDEXES:
+            extensions: dict[str, bool] = {}
+            for name, table, definition, extension in scale_indexes():
                 try:
                     if not await conn.fetchval("SELECT to_regclass($1)", table):
+                        continue
+                    if extension and not await _extension_available(conn, extension, extensions):
                         continue
                     state = await _index_state(conn, name)
                     if state:
@@ -90,6 +122,13 @@ async def ensure_loop_scale_indexes(pool: Any, *, progress: Any = None) -> list[
                     report(f"built {name}")
                 except Exception as exc:  # never stop startup over a performance index
                     logger.warning("Could not build index %s: %s", name, type(exc).__name__)
+            # Fresh statistics for the tables that gained an index (expression and partial-index
+            # estimates the planner needs to choose them).
+            for table in dict.fromkeys(table for name, table, _d, _e in scale_indexes() if name in built):
+                try:
+                    await conn.execute(f"ANALYZE {table}")
+                except Exception as exc:
+                    logger.warning("Could not analyze %s: %s", table, type(exc).__name__)
         finally:
             try:
                 await conn.execute(f"SET statement_timeout = '{previous_timeout}'")
@@ -119,4 +158,6 @@ async def build_loop_scale_indexes_in_background(pool: Any, *, delay: float = BA
     print(f"[schema] loop index build done ({len(built)} built)", flush=True)
 
 
-__all__ = ["LOOP_SCALE_INDEXES", "build_loop_scale_indexes_in_background", "ensure_loop_scale_indexes"]
+__all__ = [
+    "LOOP_SCALE_INDEXES", "build_loop_scale_indexes_in_background", "ensure_loop_scale_indexes", "scale_indexes",
+]
