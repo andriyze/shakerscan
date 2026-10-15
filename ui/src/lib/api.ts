@@ -14,6 +14,8 @@ import type {
 } from './publicApi.generated'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import { fetchHeavyRead } from './busyRetry.mjs'
+import { getJson } from './fetchLayer.mjs'
+import { isListV1, isUnknownListParamError, listV1Params, type ListV1Page, type TotalKind } from './listPage.mjs'
 
 export { API_URL, getApiUrl } from './apiConfig'
 
@@ -2056,6 +2058,9 @@ export interface GroupedDomain {
   subdomain_count: number
   total_count: number
   asm_coverage?: AsmCoverageRollup | null
+  /** list/v1 only: more members exist than `subdomains` holds (`subdomain_count` is the true number). */
+  subdomains_truncated?: boolean
+  total_findings?: number
 }
 
 // Full per-target ASM coverage breakdown (GET /targets/{id}/asm/coverage).
@@ -3158,10 +3163,8 @@ export interface ExposureGraph {
 }
 
 // Dashboard
-export async function getDashboard(): Promise<DashboardResponse> {
-  const res = await fetchHeavyRead(`${API_URL}/dashboard`)
-  if (!res.ok) throw new Error('Failed to fetch dashboard')
-  return res.json()
+export async function getDashboard(signal?: AbortSignal): Promise<DashboardResponse> {
+  return getJson(`${API_URL}/dashboard`, { signal, heavy: true, label: 'Failed to fetch dashboard' })
 }
 
 export async function getArsenalCommands(): Promise<ArsenalCommandsResponse> {
@@ -3250,7 +3253,7 @@ export async function getMissionTimeline(params?: {
   include_evidence?: boolean
   include_refuters?: boolean
   include_exports?: boolean
-}): Promise<TimelineResponse> {
+}, signal?: AbortSignal): Promise<TimelineResponse> {
   const searchParams = new URLSearchParams()
   if (params?.limit) searchParams.set('limit', String(params.limit))
   if (params?.target_id) searchParams.set('target_id', params.target_id)
@@ -3263,9 +3266,7 @@ export async function getMissionTimeline(params?: {
     if (value !== undefined) searchParams.set(key, value ? 'true' : 'false')
   }
   const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/timeline${query ? `?${query}` : ''}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load mission timeline'))
-  return res.json()
+  return getJson(`${API_URL}/timeline${query ? `?${query}` : ''}`, { signal, label: 'Failed to load mission timeline' })
 }
 
 // Mission campaigns.
@@ -4046,7 +4047,7 @@ export async function getExposureAssets(params?: {
   cohort?: 'operational' | 'non_operational' | TargetCohort | 'all'
   limit?: number
   offset?: number
-}): Promise<ExposureAssetsResponse> {
+}, signal?: AbortSignal): Promise<ExposureAssetsResponse> {
   const searchParams = new URLSearchParams()
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
   if (params?.kind) searchParams.set('kind', params.kind)
@@ -4054,9 +4055,9 @@ export async function getExposureAssets(params?: {
   if (params?.limit) searchParams.set('limit', String(params.limit))
   if (params?.offset) searchParams.set('offset', String(params.offset))
   const query = searchParams.toString()
-  const res = await fetchHeavyRead(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`)
-  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure assets'))
-  return res.json()
+  return getJson(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`, {
+    signal, heavy: true, label: 'Failed to fetch exposure assets',
+  })
 }
 
 export interface ExposureChangeExample {
@@ -4140,6 +4141,15 @@ export async function getExposureChanges(params?: {
 }
 
 // Scans
+export interface ScansPage {
+  scans: Scan[]
+  /** Absent when the request asked for no count (`count: 'none'`) on an engine with list/v1. */
+  total?: number
+  total_kind?: TotalKind
+  limit?: number
+  offset?: number
+}
+
 export async function getScans(params?: {
   status?: string
   limit?: number
@@ -4153,7 +4163,12 @@ export async function getScans(params?: {
   include_shards?: boolean
   include_internal?: boolean
   include_model_intake?: boolean
-}): Promise<{ scans: Scan[]; total: number; limit: number; offset: number }> {
+  /**
+   * `none` for a poll that keeps the total it already has: an engine with list/v1 on /scans then
+   * skips the count query; an older one ignores the parameter.
+   */
+  count?: 'none' | 'exact'
+}, signal?: AbortSignal): Promise<ScansPage> {
   const searchParams = new URLSearchParams()
   if (params?.status) searchParams.set('status', params.status)
   if (params?.limit) searchParams.set('limit', params.limit.toString())
@@ -4165,16 +4180,23 @@ export async function getScans(params?: {
   if (params?.include_shards) searchParams.set('include_shards', 'true')
   if (params?.include_internal) searchParams.set('include_internal', 'true')
   if (params?.include_model_intake) searchParams.set('include_model_intake', 'true')
+  if (params?.count === 'none') searchParams.set('count', 'none')
 
-  const res = await fetch(`${API_URL}/scans?${searchParams}`)
-  if (!res.ok) throw new Error('Failed to fetch scans')
-  return res.json()
+  const body = await getJson(`${API_URL}/scans?${searchParams}`, { signal, label: 'Failed to fetch scans' })
+  if (isListV1<Scan>(body)) {
+    return {
+      scans: body.items,
+      total: body.total_kind === 'none' ? undefined : body.total,
+      total_kind: body.total_kind,
+      limit: params?.limit,
+      offset: params?.offset,
+    }
+  }
+  return body as ScansPage
 }
 
-export async function getScan(id: string): Promise<Scan> {
-  const res = await fetch(`${API_URL}/scans/${id}`)
-  if (!res.ok) throw new Error('Failed to fetch scan')
-  return res.json()
+export async function getScan(id: string, signal?: AbortSignal): Promise<Scan> {
+  return getJson(`${API_URL}/scans/${id}`, { signal, label: 'Failed to fetch scan' })
 }
 
 export interface TargetPostureSection {
@@ -4202,10 +4224,8 @@ export async function getTargetPosture(targetId: string, scanId?: string): Promi
   return res.json()
 }
 
-export async function getScanLogs(id: string, limit: number = 200) {
-  const res = await fetch(`${API_URL}/scans/${id}/logs?limit=${limit}`)
-  if (!res.ok) throw new Error('Failed to fetch scan logs')
-  return res.json()
+export async function getScanLogs(id: string, limit: number = 200, signal?: AbortSignal) {
+  return getJson(`${API_URL}/scans/${id}/logs?limit=${limit}`, { signal, label: 'Failed to fetch scan logs' })
 }
 
 export async function submitScan(target: string, options: Record<string, unknown> = {}) {
@@ -5543,6 +5563,51 @@ export async function getTargetsGrouped(params?: {
   return res.json()
 }
 
+export type GroupedTargetsSort =
+  | 'root_domain' | '-root_domain' | 'last_scanned_at' | '-last_scanned_at'
+  | 'active_findings_count' | '-active_findings_count' | 'last_score' | '-last_score'
+  | 'created_at' | '-created_at'
+
+/**
+ * One page of root-domain groups (list/v1 on /targets/grouped): at most `limit` groups with at most
+ * `member_limit` subdomains each; `subdomain_count` stays the true number. An engine without list/v1
+ * answers every group (legacy); that answer is returned as one complete page.
+ */
+export async function getTargetsGroupedPage(params: {
+  limit?: number
+  cursor?: string | null
+  sort?: GroupedTargetsSort
+  count?: 'none' | 'estimate' | 'exact'
+  member_limit?: number
+  search?: string
+  includeInactive?: boolean
+  has_findings?: boolean
+} = {}, signal?: AbortSignal): Promise<ListV1Page<GroupedDomain>> {
+  const searchParams = new URLSearchParams(listV1Params({
+    limit: params.limit ?? 50, cursor: params.cursor, sort: params.sort, count: params.count,
+  }))
+  if (params.member_limit) searchParams.set('member_limit', String(params.member_limit))
+  if (params.search) searchParams.set('search', params.search)
+  if (params.includeInactive) searchParams.set('include_inactive', 'true')
+  if (params.has_findings !== undefined) searchParams.set('has_findings', String(params.has_findings))
+  if (params.sort && !params.cursor) {
+    // An engine without list/v1 reads the legacy pair instead (sort is list/v1 only there).
+    searchParams.set('sort_by', params.sort.replace(/^-/, ''))
+    searchParams.set('sort_order', params.sort.startsWith('-') ? 'desc' : 'asc')
+  }
+  const body = await getJson(`${API_URL}/targets/grouped?${searchParams}`, {
+    signal, heavy: true, label: 'Failed to fetch grouped targets',
+  })
+  if (isListV1<GroupedDomain>(body)) return body
+  const legacy = body as { domains?: GroupedDomain[]; total_root_domains?: number }
+  const domains = legacy.domains || []
+  return {
+    items: domains, next_cursor: null, has_more: false,
+    total: legacy.total_root_domains ?? domains.length, total_kind: 'exact',
+    generated_at: new Date().toISOString(),
+  }
+}
+
 // Continuous ASM — persistent attack-surface inventory (docs/dast-asm-architecture.md)
 export async function getAsmCoverage(targetId: string): Promise<AsmCoverage> {
   const res = await fetchHeavyRead(`${API_URL}/targets/${targetId}/asm/coverage`)
@@ -5837,7 +5902,7 @@ export async function getFindings(params?: {
   sort_order?: 'asc' | 'desc'
   include_candidates?: boolean
   include_details?: boolean
-}): Promise<{
+}, signal?: AbortSignal): Promise<{
   findings: Finding[]
   total: number
   limit: number
@@ -5875,9 +5940,87 @@ export async function getFindings(params?: {
   if (params?.include_candidates === true) searchParams.set('include_candidates', 'true')
   if (params?.include_details === true) searchParams.set('include_details', 'true')
 
-  const res = await fetchHeavyRead(`${API_URL}/findings?${searchParams}`)
-  if (!res.ok) throw new Error('Failed to fetch findings')
-  return res.json()
+  return getJson(`${API_URL}/findings?${searchParams}`, { signal, heavy: true, label: 'Failed to fetch findings' })
+}
+
+export type FindingsSort =
+  | '-severity' | 'severity' | '-last_seen' | 'last_seen' | '-first_seen' | 'first_seen' | '-cvss' | 'cvss'
+
+export interface FindingsPage {
+  findings: Finding[]
+  next_cursor: string | null
+  has_more: boolean
+  total?: number
+  total_kind: TotalKind
+  /** Which contract answered: list/v1 pages by cursor; legacy by offset. */
+  contract: 'list/v1' | 'legacy'
+  /** Legacy only: the offset of the next page. */
+  next_offset?: number
+}
+
+type FindingFilterParams = Omit<NonNullable<Parameters<typeof getFindings>[0]>,
+  'limit' | 'offset' | 'sort_by' | 'sort_order' | 'include_candidates' | 'include_details'>
+
+// Set once an engine has refused the list/v1 parameters on /findings, so later pages go straight
+// to the legacy shape instead of paying a 400 each time.
+let findingsListV1Unsupported = false
+
+/**
+ * One page of findings over list/v1 (cursor, summary rows, `count`), falling back to the legacy
+ * limit/offset list on an engine whose /findings does not serve list/v1 yet (it rejects the
+ * parameters with a 400, or answers without `items`). Both are returned in one shape.
+ */
+export async function getFindingsPage(
+  filters: FindingFilterParams,
+  { limit = 50, cursor = null, offset = 0, sort = '-severity', count = 'none' }: {
+    limit?: number; cursor?: string | null; offset?: number; sort?: FindingsSort; count?: 'none' | 'estimate' | 'exact'
+  } = {},
+  signal?: AbortSignal,
+): Promise<FindingsPage> {
+  const filterParams = new URLSearchParams()
+  for (const [key, value] of Object.entries(filters || {})) {
+    if (value === undefined || value === null || value === '' || value === false) continue
+    filterParams.set(key, value === true ? 'true' : String(value))
+  }
+  const legacy = async (): Promise<FindingsPage> => {
+    const page = await getFindings({
+      ...filters, limit, offset,
+      sort_by: sort.replace(/^-/, '') as 'severity' | 'first_seen' | 'last_seen' | 'cvss',
+      sort_order: sort.startsWith('-') ? 'desc' : 'asc',
+    }, signal)
+    const rows = page.findings || []
+    const nextOffset = offset + rows.length
+    const total = Number(page.total || 0)
+    return {
+      findings: rows, next_cursor: null, has_more: rows.length > 0 && nextOffset < total,
+      total, total_kind: 'exact', contract: 'legacy', next_offset: nextOffset,
+    }
+  }
+  if (findingsListV1Unsupported) return legacy()
+  const params = new URLSearchParams(filterParams)
+  for (const [key, value] of Object.entries(listV1Params({ limit, cursor, sort, count }))) params.set(key, value)
+  let body: unknown
+  try {
+    body = await getJson(`${API_URL}/findings?${params}`, { signal, heavy: true, label: 'Failed to fetch findings' })
+  } catch (cause) {
+    if (!isUnknownListParamError(cause)) throw cause
+    findingsListV1Unsupported = true
+    return legacy()
+  }
+  if (!isListV1<Finding>(body)) {
+    findingsListV1Unsupported = true
+    const page = body as { findings?: Finding[]; total?: number }
+    const rows = page.findings || []
+    return {
+      findings: rows, next_cursor: null, has_more: rows.length < Number(page.total || 0),
+      total: Number(page.total || 0), total_kind: 'exact', contract: 'legacy', next_offset: rows.length,
+    }
+  }
+  return {
+    findings: body.items, next_cursor: body.next_cursor, has_more: body.has_more,
+    total: body.total_kind === 'none' ? undefined : body.total, total_kind: body.total_kind,
+    contract: 'list/v1',
+  }
 }
 
 // Domains
@@ -6570,10 +6713,8 @@ Promise<{ would_delete?: number; deleted?: number; dry_run: boolean }> {
 }
 
 // Queue
-export async function getQueueStats(): Promise<QueueStats> {
-  const res = await fetchHeavyRead(`${API_URL}/queue/stats`)
-  if (!res.ok) throw new Error('Failed to fetch queue stats')
-  return res.json()
+export async function getQueueStats(signal?: AbortSignal): Promise<QueueStats> {
+  return getJson(`${API_URL}/queue/stats`, { signal, heavy: true, label: 'Failed to fetch queue stats' })
 }
 
 // Health
@@ -7013,10 +7154,8 @@ export async function scanAITarget(
 }
 
 // Workers
-export async function getWorkers(): Promise<WorkerStats> {
-  const res = await fetch(`${API_URL}/workers`)
-  if (!res.ok) throw new Error('Failed to fetch workers')
-  return res.json()
+export async function getWorkers(signal?: AbortSignal): Promise<WorkerStats> {
+  return getJson(`${API_URL}/workers`, { signal, label: 'Failed to fetch workers' })
 }
 
 export async function scaleWorkers(count: number): Promise<{ status: string; target_count: number; message: string }> {
@@ -7118,10 +7257,8 @@ export interface GungnirStatus {
   uptime_seconds: number
 }
 
-export async function getGungnirStatus(): Promise<GungnirStatus> {
-  const res = await fetch(`${API_URL}/gungnir/status`)
-  if (!res.ok) throw new Error('Failed to fetch gungnir status')
-  return res.json()
+export async function getGungnirStatus(signal?: AbortSignal): Promise<GungnirStatus> {
+  return getJson(`${API_URL}/gungnir/status`, { signal, label: 'Failed to fetch gungnir status' })
 }
 
 export async function startGungnir(): Promise<{ status: string; message: string }> {
