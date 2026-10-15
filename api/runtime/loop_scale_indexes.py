@@ -69,6 +69,18 @@ LOOP_SCALE_INDEXES: tuple[tuple[str, str, str], ...] = (
         "asm_endpoint_attempts",
         "asm_endpoint_attempts (endpoint_id, (COALESCE(completed_at, started_at)) DESC, started_at DESC)",
     ),
+    # The cross-Hunt permission-request feed (GET /hunts/permission-requests): oldest first by
+    # (created_at, id), and its usual filter, pending requests.
+    (
+        "idx_hunt_permission_requests_feed",
+        "hunt_permission_requests",
+        "hunt_permission_requests (created_at, id)",
+    ),
+    (
+        "idx_hunt_permission_requests_pending_feed",
+        "hunt_permission_requests",
+        "hunt_permission_requests (created_at, id) WHERE status = 'pending'",
+    ),
     # Paged application-graph nodes and edges (list/v1 keyset on id within a target).
     ("idx_app_graph_nodes_target_id_walk", "application_graph_nodes", "application_graph_nodes (target_id, id)"),
     ("idx_app_graph_edges_target_id_walk", "application_graph_edges", "application_graph_edges (target_id, id)"),

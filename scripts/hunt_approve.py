@@ -58,6 +58,7 @@ import re
 import select
 import sys
 import time
+import urllib.parse
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
@@ -85,6 +86,18 @@ PREAUTHORIZATION_USES = ("agent_launch", "hunt_start")
 OPEN_HUNT_STATUSES = ("active", "awaiting_planner", "budget_exhausted")
 SESSION_SECONDS = 30 * 60
 WATCH_POLL_SECONDS = 3.0
+# --watch backs off while nothing new arrives (3, 6, 12, 15 s) and returns to WATCH_POLL_SECONDS
+# when a request is shown. A shown request is still re-read every poll interval while it waits.
+WATCH_MAX_POLL_SECONDS = 15.0
+# The engine's cross-Hunt feed (2.11): one list/v1 read, then since= deltas. An engine or gateway
+# without it answers one of FEED_ABSENT (a 2.10 engine takes the path for /hunts/{hunt_id}; a
+# gateway refuses a route it does not know with 403) and the per-Hunt reads are used instead.
+FEED_PATH = "/hunts/permission-requests"
+FEED_PAGE = 200
+FEED_ABSENT = frozenset({400, 403, 404, 405, 422})
+# Pages read per poll, at most (FEED_PAGE requests each; a Hunt holds at most 20 pending).
+MAX_PAGES = 50
+HUNT_PAGE = 200
 # --watch keys: after a request is shown, keys are discarded for this long before its prompt is
 # written (a key meant for the previous screen never decides the next one); bytes arriving within
 # KEY_BURST_SECONDS of each other are one burst (an escape sequence or a paste), never a key; and
@@ -170,6 +183,67 @@ def _detail_text(body: Any) -> str:
 
 def list_pending(send: Send, hunt_id: str | None = None) -> list[dict[str, Any]]:
     """Pending requests of one Hunt, or of every Hunt that can hold one, oldest first."""
+    return PendingFeed(send, hunt_id).poll()
+
+
+class PendingFeed:
+    """The pending requests ``--watch`` and ``--all-pending`` read.
+
+    With the engine's cross-Hunt feed: one paged read, then on each later ``poll`` only what was
+    raised or decided since the previous one (``since=``, so the caller keeps what it has seen).
+    Without it (an engine before 2.11, or a gateway that does not pass the route): the per-Hunt
+    reads, every open Hunt's pending requests on each poll. Which one is settled by the first
+    answer and kept."""
+
+    def __init__(self, send: Send, hunt_id: str | None = None) -> None:
+        self.send, self.hunt_id = send, hunt_id
+        self.supported: bool | None = None
+        self.since: str | None = None
+
+    def poll(self) -> list[dict[str, Any]]:
+        if self.supported is not False:
+            found = self._feed()
+            if found is not None:
+                return found
+        return _list_pending_per_hunt(self.send, self.hunt_id)
+
+    def _feed(self) -> list[dict[str, Any]] | None:
+        query: dict[str, Any] = {"status": "pending", "limit": FEED_PAGE}
+        if self.hunt_id:
+            query["hunt_id"] = self.hunt_id
+        if self.since:
+            query["since"] = self.since
+        pending: list[dict[str, Any]] = []
+        generated_at: str | None = None
+        cursor: str | None = None
+        for _ in range(MAX_PAGES):
+            status, body = self.send("GET", f"{FEED_PATH}?{urllib.parse.urlencode({**query, **({'cursor': cursor} if cursor else {})})}")
+            page = body if isinstance(body, Mapping) and isinstance(body.get("items"), list) else None
+            if self.supported is None and (status in FEED_ABSENT or (_ok(status) and page is None)):
+                self.supported = False
+                return None
+            if not _ok(status):
+                raise ApprovalError(f"cannot read permission requests: HTTP {status}: {_detail_text(body)}")
+            if page is None:
+                raise ApprovalError("cannot read permission requests: the answer has no items")
+            self.supported = True
+            # The first page's time: a later page's is newer, and since= is inclusive, so the
+            # next poll may repeat a request but never skips one written while these were read.
+            generated_at = generated_at or str(page.get("generated_at") or "") or None
+            pending += [{**item, "hunt_id": str(item.get("hunt_id") or self.hunt_id or "")}
+                        for item in page["items"] if isinstance(item, Mapping) and item.get("status") == "pending"]
+            cursor = str(page.get("next_cursor") or "") or None
+            if not page.get("has_more") or not cursor:
+                break
+        else:
+            raise ApprovalError(f"cannot read permission requests: more than {MAX_PAGES} pages pending")
+        if generated_at:
+            self.since = generated_at
+        return sorted(pending, key=lambda item: (str(item.get("created_at") or ""), str(item.get("id"))))
+
+
+def _list_pending_per_hunt(send: Send, hunt_id: str | None = None) -> list[dict[str, Any]]:
+    """``list_pending`` on an instance without the cross-Hunt feed: one read per open Hunt."""
     hunts = [hunt_id] if hunt_id else _open_hunts(send)
     pending: list[dict[str, Any]] = []
     for hunt in hunts:
@@ -185,13 +259,21 @@ def list_pending(send: Send, hunt_id: str | None = None) -> list[dict[str, Any]]
 
 
 def _open_hunts(send: Send) -> list[str]:
+    """Every open Hunt, page by page: a status with more than one page (200) of Hunts was cut."""
     found: list[str] = []
     for state in OPEN_HUNT_STATUSES:
-        status, body = send("GET", f"/hunts?status={state}&limit=200")
-        if not _ok(status):
-            raise ApprovalError(f"cannot list Hunts: HTTP {status}: {_detail_text(body)}")
-        found += [str(item.get("hunt_id")) for item in (body or {}).get("hunts") or ()
-                  if isinstance(item, Mapping) and item.get("hunt_id")]
+        for page in range(MAX_PAGES):
+            status, body = send("GET", f"/hunts?status={state}&limit={HUNT_PAGE}&offset={page * HUNT_PAGE}")
+            if not _ok(status):
+                raise ApprovalError(f"cannot list Hunts: HTTP {status}: {_detail_text(body)}")
+            rows = [item for item in (body or {}).get("hunts") or () if isinstance(item, Mapping)]
+            before = len(set(found))
+            found += [str(item.get("hunt_id")) for item in rows if item.get("hunt_id")]
+            total = (body or {}).get("total") if isinstance(body, Mapping) else None
+            more = (page + 1) * HUNT_PAGE < total if isinstance(total, int) else len(rows) >= HUNT_PAGE
+            # A page with nothing new (an instance that ignored offset) ends the status too.
+            if not rows or not more or len(set(found)) == before:
+                break
     return list(dict.fromkeys(found))
 
 
@@ -200,6 +282,16 @@ def find_request(send: Send, request_id: str, hunt_id: str | None = None) -> dic
     request_id = str(request_id).strip().lower()
     if not _UUID.fullmatch(request_id):
         raise ApprovalError(f"{request_id!r} is not a permission request id (a UUID from `shakerscan approve <id>`)")
+    if not hunt_id:
+        # A pending request (the usual case) names its Hunt in the feed: one read for that Hunt
+        # instead of one per open Hunt. A decided one, or no feed, is looked for Hunt by Hunt.
+        try:
+            listed = PendingFeed(send)._feed() or []
+        except ApprovalError:
+            listed = []  # the Hunt-by-Hunt search below reports what is wrong, if anything
+        named = next((item for item in listed if str(item.get("id")) == request_id), None)
+        if named and named.get("hunt_id"):
+            hunt_id = str(named["hunt_id"])
     hunts = [hunt_id] if hunt_id else _open_hunts(send)
     for hunt in hunts:
         status, body = send("GET", f"/hunts/{_quote(hunt)}/permission-requests/{_quote(request_id)}")
@@ -1086,13 +1178,17 @@ def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hun
             return False
         return check
 
+    feed = PendingFeed(send, hunt_id)
+    delay = poll_seconds
     with terminal.keypresses():
         terminal.say(f"watching {where} for permission requests... (Ctrl-C to stop)")
         while time.monotonic() < deadline:
-            for request in list_pending(send, hunt_id):
+            shown = False
+            for request in feed.poll():
                 if str(request["id"]) in seen:
                     continue
                 seen.add(str(request["id"]))
+                shown = True
                 if ended_prompt:
                     # The switch race: a key meant for the request that just ended must not
                     # decide this one. Say what changed; key() takes only a fresh key.
@@ -1114,7 +1210,12 @@ def _watch(send: Send, terminal: Terminal, *, enterprise: bool, origin: str, hun
                            account=account, method=method, session=session, confirmed=not enterprise)
                 if time.monotonic() >= deadline:
                     break
-            sleep(poll_seconds)
+            # Each read that brings nothing new doubles the wait before the next, up to
+            # WATCH_MAX_POLL_SECONDS; a request shown starts again from poll_seconds.
+            if shown:
+                delay = poll_seconds
+            sleep(min(delay, max(0.0, deadline - time.monotonic())))
+            delay = min(delay * 2, max(poll_seconds, WATCH_MAX_POLL_SECONDS))
     terminal.say(f"{ended} (time limit)")
     return 0
 

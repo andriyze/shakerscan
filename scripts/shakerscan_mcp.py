@@ -9,6 +9,8 @@ use the target-bound API, which revalidates approvals, scope, capabilities, and 
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import ipaddress
 import json
 import math
@@ -105,7 +107,6 @@ RETRY_LATER_RECOVERY = (
 SSH_ACTION_NOT_RECORDED = "SSH action not found in this Hunt"
 MAX_REQUEST_BYTES = 256_000
 MAX_RESPONSE_BYTES = 2_000_000
-DEFAULT_TARGET_PAGE_SIZE = 20
 DEFAULT_IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
 DEFAULT_CAPABILITY_PATTERN = r"^[a-z0-9][a-z0-9_.:-]{0,127}$"
 MAX_REASON_CHARS = 600
@@ -205,38 +206,6 @@ def _bounded_text(value: Any, limit: int) -> str | None:
     return text[: max(0, limit - 1)] + "…"
 
 
-def _compact_target_list(payload: dict[str, Any], *, limit: int, offset: int) -> dict[str, Any]:
-    rows = payload.get("targets") if isinstance(payload.get("targets"), list) else []
-    compact = []
-    for raw in rows[:limit]:
-        if not isinstance(raw, dict):
-            continue
-        origins = raw.get("origins") if isinstance(raw.get("origins"), list) else []
-        compact.append({
-            "id": _bounded_text(raw.get("id"), 64),
-            "url": _bounded_text(raw.get("url"), 512),
-            "name": _bounded_text(raw.get("name"), 160),
-            "root_domain": _bounded_text(raw.get("root_domain"), 255),
-            "is_active": bool(raw.get("is_active")),
-            "last_scan_id": _bounded_text(raw.get("last_scan_id"), 64),
-            "last_scanned_at": _bounded_text(raw.get("last_scanned_at"), 64),
-            "last_score": raw.get("last_score"),
-            "last_grade": _bounded_text(raw.get("last_grade"), 16),
-            "total_scans": raw.get("total_scans"),
-            "active_findings_count": raw.get("active_findings_count"),
-            "origins": [_bounded_text(value, 512) for value in origins[:8]],
-        })
-    total = payload.get("total") if isinstance(payload.get("total"), int) else len(compact)
-    return {
-        "targets": compact,
-        "total": total,
-        "returned": len(compact),
-        "limit": limit,
-        "offset": offset,
-        "has_more": offset + len(compact) < total,
-    }
-
-
 @dataclass(frozen=True)
 class MCPTool:
     name: str
@@ -303,13 +272,37 @@ class HuntMCPTool:
         }
 
 
+# Every list tool pages the same way: ``limit`` rows (default LIST_LIMIT_DEFAULT, at most
+# LIST_LIMIT_MAX) and the previous answer's ``next_cursor``, with summary rows by default. The
+# cursor is the adapter's own (it names the tool, the position and the filters), so it works the
+# same against an engine that pages a list itself and one that answers a fixed first page.
+LIST_LIMIT_DEFAULT = 20
+LIST_LIMIT_MAX = 100
+LIST_CURSOR_MAX_CHARS = 512
+LIMIT_PROPERTY = {
+    "type": "integer", "minimum": 1, "maximum": LIST_LIMIT_MAX,
+    "description": f"Rows per page (default {LIST_LIMIT_DEFAULT}).",
+}
+CURSOR_PROPERTY = {
+    "type": "string", "minLength": 1, "maxLength": LIST_CURSOR_MAX_CHARS,
+    "description": "next_cursor from the previous answer, to read the next page; keep the other "
+                   "arguments unchanged.",
+}
+ROWS_VIEW_PROPERTY = {
+    "type": "string", "enum": ["summary", "full"],
+    "description": "summary (the default): the fields that identify and triage each row. full: each "
+                   "row as the engine returns it (fewer rows fit one answer).",
+}
+
 TOOLS: tuple[MCPTool, ...] = (
     MCPTool(
         name="shakerscan_targets",
         command="target.list",
-        description="List configured ShakerScan targets using bounded pagination.",
+        description="List configured ShakerScan targets, a page at a time: follow next_cursor while "
+                    "has_more is true.",
         properties={
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "limit": LIMIT_PROPERTY,
+            "cursor": CURSOR_PROPERTY,
             "offset": {"type": "integer", "minimum": 0, "maximum": 100_000},
             "include_inactive": {"type": "boolean"},
         },
@@ -324,16 +317,22 @@ TOOLS: tuple[MCPTool, ...] = (
     MCPTool(
         name="shakerscan_findings",
         command="finding.list",
-        description="List findings using optional lifecycle and severity filters.",
+        description="List findings using optional lifecycle and severity filters, a page at a time "
+                    "(summary rows; follow next_cursor while has_more is true).",
         properties={
             "status": {"type": "string", "enum": ["active", "resolved", "false_positive", "accepted_risk"]},
             "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+            "limit": LIMIT_PROPERTY,
+            "cursor": CURSOR_PROPERTY,
+            "view": ROWS_VIEW_PROPERTY,
         },
     ),
     MCPTool(
         name="shakerscan_evidence_manifest",
         command="evidence.export_manifest",
-        description="Read a content-free evidence manifest with hashes and retention metadata.",
+        description="Read a content-free evidence manifest with hashes and retention metadata, a page "
+                    "of objects at a time (the newest 200 at most; narrow by finding, scan or "
+                    "retention class for others).",
         properties={
             "finding_id": {"type": "string", "format": "uuid"},
             "scan_id": {"type": "string", "format": "uuid"},
@@ -341,23 +340,26 @@ TOOLS: tuple[MCPTool, ...] = (
                 "type": "string",
                 "enum": ["standard", "short", "audit", "legal_hold", "sensitive"],
             },
-            "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "limit": LIMIT_PROPERTY,
+            "cursor": CURSOR_PROPERTY,
         },
     ),
     MCPTool(
         name="shakerscan_timeline",
         command="mission.timeline",
-        description="Read the cross-product mission timeline and its explicit execution states.",
+        description="Read the cross-product mission timeline and its explicit execution states, a page "
+                    "of events at a time (newest first).",
         properties={
             "target_id": {"type": "string", "format": "uuid"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            "limit": LIMIT_PROPERTY,
+            "cursor": CURSOR_PROPERTY,
         },
     ),
     MCPTool(
         name="shakerscan_plans",
         command="operation_plan.list",
-        description="Read recent validated dry-run OperationPlan records.",
-        properties={"limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+        description="Read recent validated dry-run OperationPlan records, a page at a time (summary rows).",
+        properties={"limit": LIMIT_PROPERTY, "cursor": CURSOR_PROPERTY, "view": ROWS_VIEW_PROPERTY},
     ),
     MCPTool(
         name="shakerscan_tool_status",
@@ -496,7 +498,7 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
             "hunt_id": {"type": "string", "format": "uuid"},
             "kind": {"type": "string", "enum": ["summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals", "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections", "candidates", "notes", "receipts", "interpretations", "negative_results", "changes", "continue"]},
             "filter": {"type": "object"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+            "limit": LIMIT_PROPERTY,
             "cursor": {"type": "string", "maxLength": 2048},
         },
         ("hunt_id", "kind"), read_only=True, idempotent=True,
@@ -639,7 +641,7 @@ PAGE_PROPERTY = {
     "description": "With view=full: which page of the record (default 1); mcp_view.pages says how many.",
 }
 # D11: a query page is cut to fit as well, and has a small default page size for MCP.
-DEFAULT_QUERY_LIMIT = 25
+DEFAULT_QUERY_LIMIT = LIST_LIMIT_DEFAULT
 CAPABILITY_DETAIL_PROPERTY = {
     "type": "string", "minLength": 1, "maxLength": 128, "pattern": DEFAULT_CAPABILITY_PATTERN,
     "description": "Also return this capability's full manifest entry (input schema, call, budget cost).",
@@ -651,12 +653,32 @@ COMPACT_ACTION_KEYS = ("action_id", "capability_name", "status", "receipt_id", "
 COMPACT_SKILL_KEYS = ("skill_id", "title", "support", "phase", "withheld_capabilities", "missing_capabilities")
 # A field over COMPACT_FIELD_BYTES keeps this many items of each list (outcome_summary's IDs).
 TRIMMED_LIST_ITEMS = 20
+# A capability answer is compact by default as well (one copy of the observations, long fields
+# cut, at most MCP_ANSWER_BYTES); view=full on a replay (the same idempotency_key) pages it whole.
+CAPABILITY_VIEW_PROPERTY = {
+    "type": "string", "enum": ["compact", "full"],
+    "description": "Leave it out: compact (the default) keeps one copy of the observations and fits one "
+                   "answer, and mcp_view says what was reduced. full reads back an action already "
+                   "recorded under your idempotency_key (send it, with unchanged input): what the server "
+                   "stored for it, in pages. That is the action's canonical result with every recorded "
+                   "observation and the server's stored, redacted result summary, not the raw worker "
+                   "output of the first answer; a field the server did not store is not in it.",
+}
+# The fields of a replayed action that view=full pages: the server's record, without anything
+# the adapter adds per call (mcp_*), so every page is cut from the same projection.
+RECORDED_CAPABILITY_KEYS = ("hunt_id", "capability", "action_id", "status", "receipt_id", "action_result", "result")
+CAPABILITY_PAGE_PROPERTY = {
+    "type": "integer", "minimum": 1, "maximum": 1000,
+    "description": "With view=full: which page of the answer (default 1); mcp_view.pages says how many.",
+}
 HUNT_TOOLS = tuple(
     replace(tool, properties={
         **tool.properties, "view": VIEW_PROPERTY,
         **({"capability": CAPABILITY_DETAIL_PROPERTY, "page": PAGE_PROPERTY}
            if tool.name == "shakerscan_hunt_get" else {}),
-    }) if tool.name in COMPACT_HUNT_TOOLS else tool
+    }) if tool.name in COMPACT_HUNT_TOOLS else replace(tool, properties={
+        **tool.properties, "view": CAPABILITY_VIEW_PROPERTY, "page": CAPABILITY_PAGE_PROPERTY,
+    }) if tool.name == "shakerscan_hunt_capability" else tool
     for tool in HUNT_TOOLS
 )
 HUNT_TOOL_BY_NAME = {tool.name: tool for tool in HUNT_TOOLS}
@@ -837,8 +859,10 @@ def _full_view_page(record: Any, page: int, *, tool: str) -> Any:
     pages: list[list[dict[str, Any]]] = [[]]
     used = 0
     budget = FULL_VIEW_PAGE_BYTES - 2_000  # room for hunt_id, status and mcp_view
-    for path, value in (unit for key in sorted(record) for unit in _full_view_units(record[key], (key,))):
-        part = {"path": _path_text(path), "value": value}
+    units = [unit for key in sorted(record) for unit in _full_view_units(record[key], (key,))]
+    for index, (path, value) in enumerate(units):
+        # index: the part's place among all parts, so a gap or repeat across pages shows.
+        part = {"index": index, "path": _path_text(path), "value": value}
         if _size(part) > budget:
             part["value"] = {"mcp_omitted": f"{_size(value)} bytes, larger than one page of the full view",
                              "read_with": "shakerscan_hunt_get capability=<name>, or shakerscan_hunt_query"}
@@ -851,18 +875,21 @@ def _full_view_page(record: Any, page: int, *, tool: str) -> Any:
     if page > len(pages):
         raise MCPError(-32602, f"page {page} is past the last page ({len(pages)}) of this record")
     next_page = page + 1 if page < len(pages) else None
-    return {
-        "hunt_id": record.get("hunt_id"), "status": record.get("status"), "parts": pages[page - 1],
-        "mcp_view": {
-            "view": "full", "page": page, "pages": len(pages), "next_page": next_page,
-            "note": (
-                "The full record is larger than one tool answer, so it is paged into parts, each "
+    if tool == "shakerscan_hunt_capability":
+        note = ("The full answer is larger than one tool answer, so it is paged into parts, each named by "
+                "its path in the answer. Prefer the compact view (leave view out)."
+                + (f" Read on with shakerscan_hunt_capability: the same idempotency_key, unchanged input, "
+                   f"view=full page={next_page} (a replay: nothing runs again)." if next_page else ""))
+    else:
+        note = ("The full record is larger than one tool answer, so it is paged into parts, each "
                 "named by its path in the record. Prefer the compact view (leave view out) or "
                 "capability=<name>."
                 + (f" Read on with shakerscan_hunt_get view=full page={next_page}." if next_page else "")
-                + ("" if tool == "shakerscan_hunt_get" else " Pages after the first come from shakerscan_hunt_get.")
-            ),
-        },
+                + ("" if tool == "shakerscan_hunt_get" else " Pages after the first come from shakerscan_hunt_get."))
+    return {
+        "hunt_id": record.get("hunt_id"), "status": record.get("status"), "parts": pages[page - 1],
+        "mcp_view": {"view": "full", "page": page, "pages": len(pages), "next_page": next_page,
+                     "parts": len(units), "note": note},
     }
 
 
@@ -891,6 +918,270 @@ def _fit_query_rows(result: Any) -> Any:
             ),
         },
     }
+
+
+# --- answer size and list paging --------------------------------------------------------------
+
+# One tool answer, at most. Agent hosts cut tool output far below the transport cap (OpenCode near
+# 50 KB), and a cut answer is worse than a shorter one: the agent sees a fragment and no way on. A
+# list is cut on a row boundary and its next_cursor resumes at the first row left out; any other
+# answer keeps what fits whole and says what was left out (mcp_view).
+MCP_ANSWER_BYTES = 64_000
+# A text field of a summary row is cut at this many characters ("…" marks the cut).
+SUMMARY_TEXT_CHARS = 300
+FINDING_SUMMARY_KEYS = (
+    "id", "title", "severity", "cvss_score", "status", "proof_state", "is_verified", "is_suspected",
+    "url", "cwe", "owasp", "tool", "source", "source_type", "target_id", "target_name", "target_url",
+    "root_domain", "scan_id", "hunt_run_id", "fingerprint", "first_seen_at", "last_seen_at",
+    "latest_retest_verdict", "is_candidate",
+)
+PLAN_SUMMARY_KEYS = (
+    "id", "objective", "risk_tier", "status", "valid", "created_at", "created_by", "context_hash",
+    "target_scope", "validation_errors", "validation_warnings",
+)
+
+
+def _summary_row(row: Any, keys: tuple[str, ...]) -> Any:
+    if not isinstance(row, Mapping):
+        return row
+    summary: dict[str, Any] = {}
+    for key in keys:
+        if key not in row:
+            continue
+        value = row[key]
+        summary[key] = _bounded_text(value, SUMMARY_TEXT_CHARS) if isinstance(value, str) else value
+    return summary
+
+
+def _plan_summary(row: Any) -> Any:
+    summary = _summary_row(row, PLAN_SUMMARY_KEYS)
+    if isinstance(row, Mapping) and isinstance(summary, dict) and isinstance(row.get("actions"), list):
+        summary["action_count"] = len(row["actions"])
+    return summary
+
+
+def _target_summary(raw: Any) -> Any:
+    if not isinstance(raw, dict):
+        return None
+    origins = raw.get("origins") if isinstance(raw.get("origins"), list) else []
+    return {
+        "id": _bounded_text(raw.get("id"), 64),
+        "url": _bounded_text(raw.get("url"), 512),
+        "name": _bounded_text(raw.get("name"), 160),
+        "root_domain": _bounded_text(raw.get("root_domain"), 255),
+        "is_active": bool(raw.get("is_active")),
+        "last_scan_id": _bounded_text(raw.get("last_scan_id"), 64),
+        "last_scanned_at": _bounded_text(raw.get("last_scanned_at"), 64),
+        "last_score": raw.get("last_score"),
+        "last_grade": _bounded_text(raw.get("last_grade"), 16),
+        "total_scans": raw.get("total_scans"),
+        "active_findings_count": raw.get("active_findings_count"),
+        "origins": [_bounded_text(value, 512) for value in origins[:8]],
+    }
+
+
+@dataclass(frozen=True)
+class ListPaging:
+    """How one read-only list tool pages.
+
+    ``rows_key`` holds the rows in the engine's answer. Whether the engine takes ``limit`` and
+    ``offset`` comes from the live Arsenal catalog, so an engine that pages the list is paged
+    there and one that does not (an older line) is paged here over the first rows it returns:
+    ``default_rows`` when it takes no limit, its limit maximum otherwise. ``limit_max`` is the
+    largest page this tool shows; ``summary`` projects a row unless view=full."""
+
+    rows_key: str
+    default_rows: int
+    limit_max: int = LIST_LIMIT_MAX
+    summary: Any = None
+    filters: tuple[str, ...] = ()
+
+
+LIST_PAGING: dict[str, ListPaging] = {
+    "shakerscan_targets": ListPaging("targets", 100, summary=_target_summary, filters=("include_inactive",)),
+    "shakerscan_findings": ListPaging(
+        "findings", 100, summary=lambda row: _summary_row(row, FINDING_SUMMARY_KEYS), filters=("status", "severity"),
+    ),
+    # The manifest's objects are content-free already; its pages stop at the newest 200.
+    "shakerscan_evidence_manifest": ListPaging(
+        "objects", 200, limit_max=LIST_LIMIT_MAX, filters=("finding_id", "scan_id", "retention_class"),
+    ),
+    "shakerscan_timeline": ListPaging("events", 50, filters=("target_id",)),
+    "shakerscan_plans": ListPaging("operation_plans", 20, summary=_plan_summary),
+}
+EVIDENCE_MANIFEST_MAX_OBJECTS = 200
+
+
+def _filters_fingerprint(tool: str, filters: Mapping[str, Any]) -> str:
+    canonical = json.dumps({"tool": tool, "filters": dict(filters)}, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _encode_list_cursor(tool: str, offset: int, filters: Mapping[str, Any]) -> str:
+    body = json.dumps({"v": 1, "t": tool, "o": int(offset), "q": _filters_fingerprint(tool, filters)},
+                      separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(body).decode("ascii").rstrip("=")
+
+
+def _decode_list_cursor(tool: str, cursor: str, filters: Mapping[str, Any]) -> int:
+    refused = MCPError(-32602, f"cursor is not a next_cursor of {tool}; call again without cursor to start over")
+    try:
+        body = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+    except (ValueError, TypeError, UnicodeError):
+        raise refused from None
+    if not isinstance(body, dict) or body.get("v") != 1 or body.get("t") != tool:
+        raise refused
+    offset = body.get("o")
+    if not isinstance(offset, int) or isinstance(offset, bool) or not 0 <= offset <= 100_000:
+        raise refused
+    if body.get("q") != _filters_fingerprint(tool, filters):
+        raise MCPError(-32602, "cursor belongs to other filters; keep the arguments of the call that "
+                               "returned it, or call again without cursor")
+    return offset
+
+
+def _rows_page(
+    *, tool: str, paging: ListPaging, structured: Any, rows: list[Any], offset: int, limit: int,
+    filters: Mapping[str, Any], total: int | None, more: bool, past_reach: bool, view: str,
+) -> dict[str, Any]:
+    """One page of a list tool: ``rows`` (the window offset..offset+limit), summarised, cut on a
+    row boundary to MCP_ANSWER_BYTES. ``more``: rows follow this window; ``past_reach``: rows
+    follow (or may) that the engine does not answer here, so the window cannot move on."""
+    # A row the summary cannot read stays as it is, so every row keeps its place (offsets).
+    shaped = ([summary if (summary := paging.summary(row)) is not None else row for row in rows]
+              if paging.summary and view == "summary" else list(rows))
+    base = {key: value for key, value in (structured.items() if isinstance(structured, Mapping) else ())
+            if key not in {paging.rows_key, "limit", "offset", "total", "returned", "has_more", "next_cursor"}}
+    notes: list[str] = []
+    kept: list[Any] = []
+    used = _size({**base, paging.rows_key: [], "mcp_view": {"note": "x" * 800}}) + 300
+    for row in shaped:
+        cost = _size(row) + 2
+        if used + cost > MCP_ANSWER_BYTES:
+            if not kept:
+                omitted: dict[str, Any] = {"mcp_omitted": f"{_size(row)} bytes, larger than one answer"}
+                if isinstance(row, Mapping) and row.get("id") is not None:
+                    omitted["id"] = row.get("id")
+                kept.append(omitted)
+                notes.append("A row larger than one answer is shown by id only.")
+            break
+        kept.append(row)
+        used += cost
+    if len(kept) < len(shaped):
+        more = True
+        notes.append(f"{len(shaped) - len(kept)} of the {len(shaped)} rows of this page did not fit one "
+                     "answer; next_cursor resumes at the first of them (a smaller limit fits a page whole).")
+    elif past_reach:
+        notes.append("This engine answers only the first rows of this list here and there are (or may be) "
+                     f"more: narrow the filters ({', '.join(paging.filters) or 'this tool has none'}) to "
+                     "reach the others.")
+    next_offset = offset + len(kept)
+    answer: dict[str, Any] = {
+        **base,
+        paging.rows_key: kept,
+        "returned": len(kept),
+        "limit": limit,
+        "offset": offset,
+        "has_more": more,
+        "next_cursor": _encode_list_cursor(tool, next_offset, filters) if more else None,
+    }
+    if total is not None:
+        answer["total"] = total
+    view_note: dict[str, Any] = {"rows": view if paging.summary else "full"}
+    if notes:
+        view_note["note"] = " ".join(notes)
+    answer["mcp_view"] = view_note
+    return answer
+
+
+def _bounded_answer(result: Any, *, tool: str) -> Any:
+    """``result`` if it fits one answer; otherwise the keys that fit, whole, and what was left out.
+
+    Lists and Hunt reads have their own paging; this is the floor under every other answer."""
+    if not isinstance(result, dict) or _size(result) <= MCP_ANSWER_BYTES:
+        return result
+    budget = MCP_ANSWER_BYTES - 4_000
+    kept: dict[str, Any] = {}
+    omitted: dict[str, int] = {}
+    used = 0
+    for key in sorted(result, key=lambda name: _size(result[name])):
+        cost = _size({key: result[key]})
+        if used + cost > budget:
+            omitted[str(key)] = cost
+            continue
+        kept[key] = result[key]
+        used += cost
+    kept["mcp_view"] = {
+        "truncated": True,
+        "omitted": dict(sorted(omitted.items())),
+        "note": (f"This answer was larger than one tool answer ({MCP_ANSWER_BYTES} bytes); the fields in "
+                 "omitted (with their sizes) were left out whole and nothing else was changed. Ask "
+                 f"{tool} for less (a narrower filter or a smaller limit) to read them."),
+    }
+    return kept
+
+
+# hunt_capability: the engine's answer carries the canonical action_result next to the raw
+# worker result, and the observations twice (action_result.observations is result.observations,
+# or result.typed_output.records). The compact view keeps one copy and points at it.
+CAPABILITY_FIELD_CHARS = 16_000
+
+
+def _compact_capability_answer(result: Any, *, idempotency_key: str) -> Any:
+    if not isinstance(result, dict):
+        return result
+    compact = json.loads(json.dumps(result, default=str))
+    reduced: dict[str, str] = {}
+    action = compact.get("action_result") if isinstance(compact.get("action_result"), dict) else {}
+    raw = compact.get("result") if isinstance(compact.get("result"), dict) else {}
+    observations = action.get("observations")
+    if isinstance(observations, list) and observations:
+        if raw.get("observations") == observations:
+            raw["observations"] = {"mcp_same_as": "action_result.observations"}
+            reduced["result.observations"] = "the same list as action_result.observations"
+        typed = raw.get("typed_output") if isinstance(raw.get("typed_output"), dict) else {}
+        if typed.get("records") == observations:
+            typed["records"] = {"mcp_same_as": "action_result.observations"}
+            reduced["result.typed_output.records"] = "the same list as action_result.observations"
+    if _size(compact) > MCP_ANSWER_BYTES:
+        _shorten_strings(compact, (), reduced)
+    if _size(compact) > MCP_ANSWER_BYTES and isinstance(action.get("observations"), list):
+        listed = action["observations"]
+        action["observations"] = []
+        used = _size(compact) + 2_000  # room for mcp_view
+        kept: list[Any] = []
+        for item in listed:
+            cost = _size(item) + 2
+            if used + cost > MCP_ANSWER_BYTES:
+                break
+            kept.append(item)
+            used += cost
+        action["observations"] = kept
+        reduced["action_result.observations"] = f"the first {len(kept)} of {len(listed)}"
+    if not reduced:
+        return result
+    compact["mcp_view"] = {
+        "view": "compact",
+        "reduced": dict(sorted(reduced.items())),
+        "full_view": ("For what the server recorded for this action, call again with the same "
+                      f"idempotency_key ({idempotency_key}), unchanged input and view=full: nothing runs "
+                      "again. It holds every recorded observation and the stored, redacted result "
+                      "summary, in pages (page=2, ...); raw output the server did not store (a cut "
+                      "string above) cannot be read back."),
+    }
+    return _bounded_answer(compact, tool="shakerscan_hunt_capability")
+
+
+def _shorten_strings(value: Any, path: tuple[Any, ...], reduced: dict[str, str]) -> None:
+    """Cut every string longer than CAPABILITY_FIELD_CHARS in place, and say where."""
+    items = value.items() if isinstance(value, dict) else enumerate(value) if isinstance(value, list) else ()
+    for key, item in list(items):
+        if isinstance(item, str) and len(item) > CAPABILITY_FIELD_CHARS:
+            value[key] = item[:CAPABILITY_FIELD_CHARS] + "…"
+            reduced[_path_text((*path, key)) or str(key)] = (
+                f"cut to its first {CAPABILITY_FIELD_CHARS} of {len(item)} characters")
+        elif isinstance(item, (dict, list)):
+            _shorten_strings(item, (*path, key), reduced)
 
 
 def _launch_preauthorization(environ: Mapping[str, str] | None = None) -> tuple[list[str], str | None]:
@@ -1899,6 +2190,16 @@ class ArsenalClient:
             page = payload.pop("page", 1) if name == "shakerscan_hunt_get" else 1
             if page != 1 and view != "full":
                 raise MCPError(-32602, "page applies to view=full only")
+            capability_view, capability_page = "compact", 1
+            if name == "shakerscan_hunt_capability" and not streaming_ssh:
+                capability_view = payload.pop("view", "compact")
+                capability_page = payload.pop("page", 1)
+                if capability_page != 1 and capability_view != "full":
+                    raise MCPError(-32602, "page applies to view=full only")
+                if capability_view == "full" and not str(payload.get("idempotency_key") or "").strip():
+                    raise MCPError(-32602, (
+                        "view=full reads back a recorded action: send the idempotency_key of the call whose "
+                        "answer you are reading (its mcp_idempotency_key), with unchanged input"))
             start_headers: dict[str, str] = {}
             if name == "shakerscan_hunt_query":
                 payload.setdefault("limit", DEFAULT_QUERY_LIMIT)
@@ -2040,11 +2341,33 @@ class ArsenalClient:
                     raise self._ssh_failure(exc, identity) from exc
                 raise _capability_failure(exc, identity) from exc
             if name == "shakerscan_hunt_capability":
-                result = {
-                    **result,
+                identity_keys = {
                     "mcp_idempotency_key": payload["idempotency_key"],
                     "mcp_generated_idempotency_key": generated_idempotency_key is not None,
                 }
+                result = {**result, **identity_keys}
+                if not streaming_ssh:
+                    if capability_view == "full" and result.get("idempotent_replay") is True and not _in_flight(result):
+                        # Every page comes from the same source, the server's record of the action,
+                        # in a projection that does not change between calls.
+                        recorded = {key: result[key] for key in RECORDED_CAPABILITY_KEYS if key in result}
+                        result = {**_full_view_page(recorded, capability_page, tool=name), **identity_keys}
+                    elif capability_view == "full":
+                        # The key was new (the action ran now) or the action is still running: the
+                        # first answer is not the record, so no page of it is served.
+                        result = _compact_capability_answer(result, idempotency_key=payload["idempotency_key"])
+                        result = {**result, "mcp_view": {
+                            **(result.get("mcp_view") if isinstance(result.get("mcp_view"), dict) else {}),
+                            "full_view_unavailable": (
+                                "The action is still running; call again with the same idempotency_key to "
+                                "collect it, then view=full to read its record."
+                                if _in_flight(result) else
+                                "This call ran the action (no action was recorded under this "
+                                "idempotency_key yet), so this is its compact answer. Call again with the "
+                                "same idempotency_key, unchanged input and view=full to read its record."),
+                        }}
+                    else:
+                        result = _compact_capability_answer(result, idempotency_key=payload["idempotency_key"])
             if detail_capability is not None:
                 entry = next((
                     item for item in result.get("capabilities") or ()
@@ -2068,6 +2391,7 @@ class ArsenalClient:
                 }
             if detail_capability is not None:
                 result = {**result, "capability": entry}
+            result = _bounded_answer(result, tool=name)
             return {
                 "content": [{"type": "text", "text": json.dumps(result, sort_keys=True, default=str)}],
                 "structuredContent": result,
@@ -2077,13 +2401,23 @@ class ArsenalClient:
         if not tool:
             raise MCPError(-32602, f"Unknown read-only ShakerScan tool: {name}")
         arguments = dict(arguments)
-        if name == "shakerscan_targets":
-            arguments.setdefault("limit", DEFAULT_TARGET_PAGE_SIZE)
-            arguments.setdefault("offset", 0)
-        self.validate_tool(tool, arguments)
+        paging = LIST_PAGING.get(name)
+        if paging is None:
+            self.validate_tool(tool, arguments)
+            structured = self._execute_read_only(tool, arguments)
+        else:
+            structured = self._list_page(tool, paging, arguments)
+        structured = _bounded_answer(structured, tool=name)
+        return {
+            "content": [{"type": "text", "text": json.dumps(structured, sort_keys=True, default=str)}],
+            "structuredContent": structured,
+            "isError": False,
+        }
+
+    def _execute_read_only(self, tool: MCPTool, parameters: dict[str, Any]) -> Any:
         result = self.request_json("POST", "/arsenal/execute", {
             "command": tool.command,
-            "parameters": arguments,
+            "parameters": parameters,
             "execute": False,
             "confirmations": [],
             "created_by": "mcp:read_only",
@@ -2093,18 +2427,79 @@ class ArsenalClient:
         action_state = result.get("action_state") if isinstance(result.get("action_state"), dict) else {}
         if action_state.get("catalog_status") != "read_only" or action_state.get("risk_tier") != "read_only":
             raise MCPError(-32007, "Arsenal response did not preserve the read-only contract")
-        structured = result.get("result")
-        if name == "shakerscan_targets" and isinstance(structured, dict):
-            structured = _compact_target_list(
-                structured,
-                limit=int(arguments["limit"]),
-                offset=int(arguments["offset"]),
-            )
-        return {
-            "content": [{"type": "text", "text": json.dumps(structured, sort_keys=True, default=str)}],
-            "structuredContent": structured,
-            "isError": False,
-        }
+        return result.get("result")
+
+    def _list_page(self, tool: MCPTool, paging: ListPaging, arguments: dict[str, Any]) -> dict[str, Any]:
+        """One page of a read-only list tool, whatever paging the engine's command offers.
+
+        The engine's catalog says whether the command takes ``limit`` and ``offset``. With both
+        (finding.list from 2.11, target.list) the engine pages; otherwise (finding.list before
+        2.11, the manifest, the timeline, the plans) the engine answers the first rows and this
+        adapter pages over them, saying when the rest is out of its reach."""
+        unknown = sorted(set(arguments) - set(tool.properties))
+        if unknown:
+            raise MCPError(-32602, f"Unknown tool arguments: {', '.join(unknown)}")
+        for key, value in arguments.items():
+            self._validate_argument(key, value, tool.properties[key])
+        cursor = arguments.pop("cursor", None)
+        view = arguments.pop("view", "summary")
+        limit = min(int(arguments.pop("limit", LIST_LIMIT_DEFAULT)), paging.limit_max)
+        explicit_offset = arguments.pop("offset", None)
+        if cursor is not None and explicit_offset is not None:
+            raise MCPError(-32602, "Send cursor or offset, not both")
+        filters = dict(arguments)
+        offset = _decode_list_cursor(tool.name, cursor, filters) if cursor is not None else int(explicit_offset or 0)
+        command = self._read_only_command(tool)
+        schema = command.get("parameters_schema") if isinstance(command.get("parameters_schema"), dict) else {}
+        limit_schema = schema.get("limit") if isinstance(schema.get("limit"), dict) else None
+        engine_max = limit_schema.get("maximum") if limit_schema and isinstance(limit_schema.get("maximum"), int) else None
+        parameters = dict(filters)
+        if limit_schema is not None and "offset" in schema:
+            parameters.update(limit=min(limit, engine_max or limit), offset=offset)
+            windowed, reach = False, None
+        else:
+            # How far into the list the engine answers: its limit maximum when it takes a limit
+            # (the manifest's newest 200 at most), else the rows it answers by default.
+            reach = (engine_max or paging.default_rows) if limit_schema is not None else paging.default_rows
+            if tool.name == "shakerscan_evidence_manifest":
+                reach = min(reach, EVIDENCE_MANIFEST_MAX_OBJECTS)
+            if limit_schema is not None:
+                parameters["limit"] = min(offset + limit + 1, reach)
+            windowed = True
+        uncatalogued = sorted(set(parameters) - set(schema))
+        if uncatalogued:
+            raise MCPError(-32006, f"Arguments are not present in the live Arsenal contract: {', '.join(uncatalogued)}")
+        structured = self._execute_read_only(tool, parameters)
+        if not isinstance(structured, dict):
+            return structured
+        listed = structured.get(paging.rows_key)
+        listed = list(listed) if isinstance(listed, list) else []
+        stated = structured.get("total")
+        stated = stated if isinstance(stated, int) and not isinstance(stated, bool) else None
+        if not windowed:
+            rows = listed[:limit]
+            more = offset + len(rows) < stated if stated is not None else len(rows) >= limit
+            past_reach, total = False, stated
+        else:
+            asked = int(parameters.get("limit") or paging.default_rows)
+            ended = len(listed) < asked and not structured.get("truncated")
+            rows = listed[offset:offset + limit]
+            more = len(listed) > offset + len(rows)
+            total = stated if stated is not None else (len(listed) if ended else None)
+            past_reach = (not more and not ended and offset + len(rows) >= len(listed)
+                          and (stated is None or stated > len(listed)))
+        return _rows_page(
+            tool=tool.name, paging=paging, structured=structured, rows=rows, offset=offset, limit=limit,
+            filters=filters, total=total, more=more, past_reach=past_reach, view=view,
+        )
+
+    def _read_only_command(self, tool: MCPTool) -> dict[str, Any]:
+        command = self.catalog().get(tool.command)
+        if not command:
+            raise MCPError(-32005, f"Arsenal command {tool.command} is unavailable")
+        if command.get("status") != "read_only" or command.get("risk_tier") != "read_only" or command.get("method") != "GET":
+            raise MCPError(-32006, f"Arsenal command {tool.command} is no longer read-only")
+        return command
 
 
 def _posture_check_descriptor(*, connected: bool) -> dict[str, Any]:

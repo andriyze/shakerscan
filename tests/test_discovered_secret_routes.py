@@ -44,6 +44,7 @@ class Conn:
 
     async def fetch(self, query, *args):
         self.calls.append(query)
+        self.fetch_args = args
         return [{
             "id": uuid.UUID(SECRET), "target_id": uuid.UUID(TARGET), "granted_to": [], "kind": "password", "label": "DB_PASSWORD", "length": 22,
             "source": {"kind": "hunt_action", "id": "a", "hunt_id": "h"}, "first_seen_at": NOW,
@@ -86,6 +87,17 @@ def test_a_listing_carries_metadata_and_never_a_value(client):
     assert "enc:fernet" not in str(listed)
     assert http.get(f"/targets/{uuid.uuid4()}/discovered-secrets").status_code == 404
     assert http.get("/targets/not-a-uuid/discovered-secrets").status_code == 404
+
+
+def test_a_listing_takes_a_bounded_limit(client, monkeypatch):
+    http, _ = client
+    conn = routes.pool().conn
+    assert http.get(f"/targets/{TARGET}/discovered-secrets").status_code == 200
+    assert conn.fetch_args[-1] == 200, "without limit= the store's own cap"
+    assert http.get(f"/targets/{TARGET}/discovered-secrets?limit=6").status_code == 200
+    assert conn.fetch_args[-1] == 6
+    for bad in ("0", "201"):
+        assert http.get(f"/targets/{TARGET}/discovered-secrets?limit={bad}").status_code == 422
 
 
 def test_state_and_expiry_changes_answer_404_for_another_targets_secret(client):

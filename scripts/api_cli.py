@@ -24,6 +24,8 @@ import urllib.request
 DEFAULT_API_URL = "http://127.0.0.1:8080"
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+# An error body is only shown as the instance's message, so a short read of it is enough.
+MAX_ERROR_BYTES = 64 * 1024
 
 
 class ApiCliError(RuntimeError):
@@ -110,7 +112,16 @@ def call(request: urllib.request.Request, *, opener=None, timeout: float = 60.0)
     opener = opener or _opener()
     try:
         with opener.open(request, timeout=timeout) as response:
-            return response.status, response.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                # A JSON answer cut at the cap is not JSON, and printing its first part as the
+                # answer read as "this is all there is". Refuse it and say how to ask for less.
+                raise ApiCliError(
+                    f"the answer is larger than {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB and was not printed; "
+                    "ask for less: a list takes limit= and the next_cursor of the previous page "
+                    "(cursor=), and fields= or a narrower filter where the endpoint has one"
+                )
+            return response.status, raw.decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             # D17: name where the instance is and the client option that points there (the
@@ -121,7 +132,7 @@ def call(request: urllib.request.Request, *, opener=None, timeout: float = 60.0)
                 from scripts.redirect_hint import redirect_explanation
             location = exc.headers.get("Location") if exc.headers is not None else None
             raise ApiCliError(redirect_explanation(exc.code, location, request.full_url)) from exc
-        return exc.code, exc.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+        return exc.code, exc.read(MAX_ERROR_BYTES).decode("utf-8", "replace")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ApiCliError(f"cannot reach {request.full_url}: {getattr(exc, 'reason', exc)}") from exc
 
@@ -172,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 return stream_response(request, opener=_opener(), timeout=args.timeout)
             except urllib.error.HTTPError as exc:
-                output, code = render(exc.code, exc.read(MAX_RESPONSE_BYTES).decode('utf-8', 'replace'))
+                output, code = render(exc.code, exc.read(MAX_ERROR_BYTES).decode('utf-8', 'replace'))
                 print(output, file=sys.stderr)
                 return code
             except (ValueError, OSError, urllib.error.URLError) as exc:
