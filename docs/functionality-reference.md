@@ -1898,8 +1898,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 500 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 417 | `api/**/*.py` |
+| Public REST operations | 501 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 418 | `api/**/*.py` |
 | Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2138,6 +2138,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts` | `start_hunt` |
 | `GET` | `/hunts/contract` | `get_hunt_contract` |
 | `GET` | `/hunts/lifecycle-metrics` | `get_hunt_lifecycle_metrics` |
+| `GET` | `/hunts/permission-requests` | `list_permission_requests` |
 | `GET` | `/hunts/{hunt_id}` | `get_hunt` |
 | `POST` | `/hunts/{hunt_id}/authorization-investigations` | `investigate_authorization` |
 | `GET` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}` | `read_authorization_investigation` |

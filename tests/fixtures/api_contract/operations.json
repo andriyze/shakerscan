@@ -1060,6 +1060,11 @@
     "operation_id": "get_hunt_lifecycle_metrics_hunts_lifecycle_metrics_get"
   },
   {
+    "path": "/hunts/permission-requests",
+    "method": "get",
+    "operation_id": "list_permission_requests_hunts_permission_requests_get"
+  },
+  {
     "path": "/hunts/{hunt_id}",
     "method": "get",
     "operation_id": "get_hunt_hunts__hunt_id__get"
