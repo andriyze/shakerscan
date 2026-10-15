@@ -58,6 +58,8 @@ export function useTargetSearch({
   const [loading, setLoading] = useState(false)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // The query whose search failed: answered (with an error), so not "due", but any other text is.
+  const [failedQuery, setFailedQuery] = useState<string | null>(null)
   const [known, setKnown] = useState<Map<string, TargetAsset>>(() => new Map())
   const knownRef = useRef(known)
   knownRef.current = known
@@ -99,6 +101,7 @@ export function useTargetSearch({
         setHasMore(result.hasMore)
         setScanned(result.scanned)
         setAnsweredQuery(debounced)
+        setFailedQuery(null)
         setError(null)
         setReady(true)
         setKnown((current) => {
@@ -110,6 +113,10 @@ export function useTargetSearch({
       .catch((cause) => {
         if (isAbortError(cause) || controller.signal.aborted) return
         setError(cause instanceof Error ? cause.message : 'Target search failed')
+        // The previous matches answer an older query: offer none rather than let Enter pick one.
+        setMatches([])
+        setHasMore(false)
+        setFailedQuery(debounced)
         setReady(true)
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false) })
@@ -160,8 +167,10 @@ export function useTargetSearch({
 
   const byId = useCallback((id: string) => known.get(id), [known])
   // Typed but not yet answered (debounce pending or the request in flight) counts as loading, so
-  // a picker never acts on results that belong to an older query.
-  const due = enabled && query.trim() !== (answeredQuery ?? '') && !error
+  // a picker never acts on results that belong to an older query -- also after a failed search:
+  // only the exact text that failed counts as answered (with its error).
+  const typed = query.trim()
+  const due = enabled && typed !== (answeredQuery ?? '') && typed !== failedQuery
   return {
     assets, byId, query, setQuery, answeredQuery, loading: enabled && (loading || due), error, hasMore,
     scanned, filtered: Boolean(accept), ready, remember,

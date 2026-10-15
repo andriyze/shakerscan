@@ -86,3 +86,12 @@ test('no picker claims "no targets" from a partial or filtered answer', () => {
   assert.match(pickers.collections, /targetSearchProvesEmpty\(/)
   assert.doesNotMatch(pickers.share, /targetSearch\.ready && !targetSearch\.loading && !choices\.length/)
 })
+
+test('after a failed search, newly typed text is loading until answered and old matches are dropped', () => {
+  const hook = read('src/lib/useTargetSearch.ts')
+  // The error no longer suppresses "due": only the exact failed text counts as answered.
+  assert.doesNotMatch(hook, /&& !error\b/)
+  assert.match(hook, /const due = enabled && typed !== \(answeredQuery \?\? ''\) && typed !== failedQuery/)
+  assert.match(hook, /setFailedQuery\(debounced\)/)
+  assert.match(hook, /setError\([^)]*\)[\s\S]{0,200}setMatches\(\[\]\)/, 'a failure offers no older matches to Enter')
+})
