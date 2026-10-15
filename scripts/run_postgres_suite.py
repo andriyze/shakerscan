@@ -53,6 +53,7 @@ ENV_SKIP = re.compile(
 # Each variable gets its own database. Modules that read the same variable share that database,
 # as they do in their dedicated workflows, and run one after another.
 POSTGRES_DATABASES = {
+    "ASM_DISPATCH_TEST_DATABASE_URL": "shakerscan_asm_dispatch_test",
     "ASSURANCE_TEST_DATABASE_URL": "shakerscan_assurance_test",
     "COLLECTION_TEST_DATABASE_URL": "shakerscan_collection_retry_test",
     "CREDENTIAL_GRANTS_TEST_DATABASE_URL": "shakerscan_credential_grants_test",

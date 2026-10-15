@@ -3615,6 +3615,39 @@ def _asm_dispatch_backoff_until(metadata_json) -> datetime | None:
     return parsed
 
 
+#: The targets columns a dispatch stamps; each is also the target's dispatch claim.
+_ASM_CLAIM_COLUMNS = frozenset({"asm_last_recon_at", "asm_last_test_at"})
+
+
+async def _claim_asm_dispatch(conn, target_id, column: str, seen) -> datetime | None:
+    """Claim one target's dispatch by moving ``column`` from the value this tick read.
+
+    Leadership keeps one dispatcher running, but a leader whose tick hung past its timeout can
+    still be finishing that tick when the next leader starts: both read the same target as due.
+    The stamp is a compare-and-set on what the tick read, so exactly one of them moves it and
+    dispatches; the other finds it moved and leaves the target alone. Returns the stamp written,
+    or None when another dispatch moved it first.
+    """
+    if column not in _ASM_CLAIM_COLUMNS:
+        raise ValueError(f"not an ASM dispatch column: {column}")
+    claimed_at = datetime.now(timezone.utc)
+    tag = await conn.execute(
+        f"UPDATE targets SET {column} = $3 WHERE id = $1 AND {column} IS NOT DISTINCT FROM $2",
+        target_id, seen, claimed_at,
+    )
+    return claimed_at if str(tag or "").strip().endswith(" 1") else None
+
+
+async def _release_asm_dispatch(conn, target_id, column: str, seen, claimed_at: datetime) -> None:
+    """Undo a claim whose dispatch did not happen (only if nothing moved the stamp since)."""
+    if column not in _ASM_CLAIM_COLUMNS:
+        raise ValueError(f"not an ASM dispatch column: {column}")
+    await conn.execute(
+        f"UPDATE targets SET {column} = $2 WHERE id = $1 AND {column} = $3",
+        target_id, seen, claimed_at,
+    )
+
+
 async def run_asm_dispatch(pool: asyncpg.Pool):
     """One tick of the Continuous ASM dispatcher (docs §16 Phase 3/4): for each
     ASM-enabled target, pick at most ONE action (recon or exploit batch) within
@@ -3646,6 +3679,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
         raw_config = _decode_asm_config(t['asm_config'])
         cfg = configs[target_id]
         recorded = None
+        claimed = None  # (column, value read, stamp written) while a claimed dispatch is unfinished
         try:
             async with pool.acquire() as conn:
                 active = counts["active"].get(target_id, 0)
@@ -3688,8 +3722,13 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     decoded_opts if isinstance(decoded_opts, dict) else {}
                 )
                 if action == 'recon':
+                    claim = await _claim_asm_dispatch(conn, t['id'], "asm_last_recon_at", t['asm_last_recon_at'])
+                    if claim is None:
+                        print(f"[asm] recon of {target_url} already dispatched by another tick", flush=True)
+                        continue
+                    claimed = ("asm_last_recon_at", t['asm_last_recon_at'], claim)
                     enq = await _enqueue_asm_recon(conn, r, target_id, target_url, base_opts)
-                    await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", t['id'])
+                    claimed = None
                     recorded = await _persist_asm_decision(
                         conn,
                         target_id,
@@ -3731,12 +3770,19 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     daily_cap = cfg['daily_endpoint_cap']
                     if daily_cap > 0:
                         dispatch_batch_size = min(dispatch_batch_size, max(0, daily_cap - tested_today))
+                    claim = await _claim_asm_dispatch(conn, t['id'], "asm_last_test_at", t['asm_last_test_at'])
+                    if claim is None:
+                        print(f"[asm] test batch of {target_url} already dispatched by another tick", flush=True)
+                        continue
+                    claimed = ("asm_last_test_at", t['asm_last_test_at'], claim)
                     hold_id = str(uuid.uuid4())
                     if cap > 0 and root_domain:
                         dispatch_batch_size = _reserve_asm_domain_rate(
                             r, root_domain, max(0, cap - used), dispatch_batch_size, hold_id=hold_id,
                         )
                     if dispatch_batch_size <= 0:
+                        await _release_asm_dispatch(conn, t['id'], *claimed)
+                        claimed = None
                         recorded = await _persist_asm_decision(
                             conn,
                             target_id,
@@ -3754,7 +3800,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     except Exception:
                         domain_rate.settle(r, root_domain, entry_id=hold_id, consumed=0, finalized=False)
                         raise
-                    await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", t['id'])
+                    claimed = None
                     recorded = await _persist_asm_decision(
                         conn,
                         target_id,
@@ -3766,6 +3812,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                           f"({dispatch_batch_size} eps, {claimable} claimable) -> scan {enq['scan_id'][:8]}", flush=True)
         except Exception as e:
             print(f"[asm] dispatch error for {target_url}: {e}", flush=True)
+
             # A failed dispatch is still an attempt. Record it where every other
             # dispatcher decision is recorded, with a next_eligible_at backoff (the
             # target's own min test interval), so an unreachable host is parked for a
@@ -3773,6 +3820,14 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
             try:
                 eligible_at = _asm_dispatch_as_utc(now) + timedelta(minutes=cfg['min_interval_minutes'])
                 async with pool.acquire() as conn:
+                    if claimed is not None:
+                        # The dispatch did not happen: give the stamp back so the target is not
+                        # reported as tested or reconned now (the backoff still parks it).
+                        try:
+                            await _release_asm_dispatch(conn, t['id'], *claimed)
+                        except Exception as release_exc:
+                            print(f"[asm] could not release dispatch claim for {target_url}: "
+                                  f"{type(release_exc).__name__}", flush=True)
                     recorded = await _persist_asm_decision(
                         conn,
                         target_id,
