@@ -292,13 +292,24 @@ class RunningScanAuthority:
         if self.guard is None:
             return False
         self._stopped.set()
-        await stop_task(self._monitor)
+        cancelled: asyncio.CancelledError | None = None
         try:
-            await self._timeout.__aexit__(exc_type, exc, tb)
+            await stop_task(self._monitor)
+        except asyncio.CancelledError as error:
+            # The caller was cancelled while the monitor unwound: still leave the timeout and
+            # the interruption scope, then propagate the cancellation.
+            cancelled = error
+        try:
+            if cancelled is not None:
+                await self._timeout.__aexit__(type(cancelled), cancelled, cancelled.__traceback__)
+            else:
+                await self._timeout.__aexit__(exc_type, exc, tb)
         except TimeoutError:
             raise await self._stopped_error(self.reason or UNVERIFIED, before_start=False) from None
         finally:
             self._scope.__exit__(None, None, None)
+        if cancelled is not None:
+            raise cancelled
         if self.reason is not None and exc is not None and isinstance(exc, Exception):
             # A scanner that ends its stop with an error (the device scanners raise "cancelled
             # before <stage>") was stopped by its authorization, not by a user cancel.

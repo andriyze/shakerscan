@@ -24,6 +24,7 @@ from .authority_deadline import (  # noqa: F401  (the tolerance constants are re
     HARD_STOP_GRACE_SECONDS,
     check_before_start,
     stop_task,
+    stop_tasks,
     watch_authorization,
 )
 
@@ -288,9 +289,10 @@ class ReceiptScanActionExecutor:
                         await check_authority()
         finally:
             stop_heartbeats.set()
-            for task in (monitor, authority_monitor, deadline_monitor):
-                await stop_task(task)
-            await heartbeat_task
+            try:
+                await stop_tasks(monitor, authority_monitor, deadline_monitor)
+            finally:
+                await heartbeat_task
         if isinstance(result, CapabilityReceipt):
             receipt = result
         elif isinstance(result, Mapping):

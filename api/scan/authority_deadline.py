@@ -180,10 +180,33 @@ async def watch_authorization(
 
 
 async def stop_task(task: "asyncio.Task[Any] | None") -> None:
-    if task is None:
-        return
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    """Cancel a helper task and wait until it has ended.
+
+    The helper's own ``CancelledError`` is expected and swallowed; an error it raised is
+    re-raised, as before. A cancellation of the *caller* while it waits is not swallowed: the
+    helper is still waited for (it is already unwinding), and the caller's cancellation is then
+    re-raised. ``await task`` cannot tell the two apart, so a user cancel or a worker shutdown
+    that arrived while a monitor unwound used to be lost and the caller ran on.
+    """
+    await stop_tasks(task)
+
+
+async def stop_tasks(*tasks: "asyncio.Task[Any] | None") -> None:
+    """``stop_task`` for several helpers: every one is cancelled and waited for before a caller
+    cancellation, or the first helper error, is raised."""
+    pending = [task for task in tasks if task is not None]
+    for task in pending:
+        task.cancel()
+    caller_cancelled: asyncio.CancelledError | None = None
+    while not all(task.done() for task in pending):
+        try:
+            await asyncio.wait(pending)
+        except asyncio.CancelledError as error:
+            caller_cancelled = caller_cancelled or error
+            for task in pending:
+                task.cancel()
+    if caller_cancelled is not None:
+        raise caller_cancelled
+    for task in pending:
+        if not task.cancelled():
+            task.result()
