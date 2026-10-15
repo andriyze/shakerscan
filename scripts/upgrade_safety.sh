@@ -17,8 +17,11 @@
 #     gets room from old images. Only a damaged Redis whose data was copied may start empty: it
 #     holds queues and job state, never scans, findings or evidence. A Redis that is loading,
 #     cannot be inspected, or fails for an unknown reason is never reset.
-# After a successful start, record_started_release remembers this release and the previous one;
-# in prebuilt mode older ShakerScan images are then removed.
+# After a successful start, record_started_release remembers this release and the ones before it
+# (SHAKERSCAN_KEEP_RELEASES releases in all, default 2: this one and one to roll back to); in
+# prebuilt mode older ShakerScan images are then removed. Every install on this host that recorded
+# releases is registered, so one install's cleanup never removes another (stopped) install's
+# release or rollback images.
 #
 # Docker is always called through the launcher's docker_cli (sudo when the launcher needs it).
 # Nothing here suggests `docker system prune --volumes`, which deletes the PostgreSQL data.
@@ -29,6 +32,14 @@ REDIS_LOADING_SECONDS="${SHAKERSCAN_REDIS_LOADING_SECONDS:-900}"
 REDIS_STATE_RESET=0
 RELEASE_STATE_CURRENT="${SCRIPT_DIR}/.release-images.current"
 RELEASE_STATE_PREVIOUS="${SCRIPT_DIR}/.release-images.previous"
+# Older kept releases (SHAKERSCAN_KEEP_RELEASES above 2): .release-images.previous.2, .3, ...
+# Releases kept for rollback, this one included: at least 1 (no rollback images), default 2.
+RELEASE_KEEP="${SHAKERSCAN_KEEP_RELEASES:-2}"
+case "$RELEASE_KEEP" in ''|*[!0-9]*) RELEASE_KEEP=2 ;; esac
+RELEASE_KEEP=$((10#$RELEASE_KEEP))
+[ "$RELEASE_KEEP" -ge 1 ] || RELEASE_KEEP=1
+# The installs on this host whose recorded releases every cleanup protects (one directory per line).
+INSTALL_REGISTRY="${SHAKERSCAN_INSTALL_REGISTRY:-${XDG_STATE_HOME:-${HOME:-/root}/.local/state}/shakerscan/installs}"
 # Images this install recorded and has since superseded (older than the previous release): the
 # only images the routine cleanup after a start removes.
 RELEASE_STATE_SUPERSEDED="${SCRIPT_DIR}/.release-images.superseded"
@@ -120,12 +131,20 @@ running_api_version() {
 
 # The version the API reported before this start stopped anything; empty when nothing ran or it did
 # not say. Noted once per launcher run, before the first stop (restart, clean-slate start).
+# With it, the ShakerScan images its containers use: the release a start replaces is kept for
+# rollback by what actually ran, even when the release record says otherwise (a rollback by an
+# older launcher, which keeps no record).
 RELEASE_RUNNING_BEFORE_START=""
+RELEASE_RUNNING_IMAGES=""
 RELEASE_RUNNING_NOTED=0
 note_running_release() {
     [ "$RELEASE_RUNNING_NOTED" = 1 ] && return 0
     RELEASE_RUNNING_BEFORE_START="$(running_api_version)"
     case "$RELEASE_RUNNING_BEFORE_START" in latest|dev|unknown) RELEASE_RUNNING_BEFORE_START="" ;; esac
+    if [ -n "$RELEASE_RUNNING_BEFORE_START" ]; then
+        RELEASE_RUNNING_IMAGES="$(project_container_image_ids | sed '/^$/d' | sort -u | while read -r id; do
+            image_is_shakerscan "$id" && echo "$id"; done)"
+    fi
     RELEASE_RUNNING_NOTED=1
 }
 
@@ -138,12 +157,51 @@ release_record_is_stale() {
     [ -f "$marker" ] && [ -f "$RELEASE_STATE_CURRENT" ] && [ "$marker" -nt "$RELEASE_STATE_CURRENT" ]
 }
 
-# Image ids that must stay: this release's, the recorded current and previous releases', and every
-# image any container (running or stopped) uses.
+# The kept-release records of an install directory (current, previous, previous.2, ...).
+release_kept_files() {
+    local dir="${1:-$SCRIPT_DIR}" file
+    for file in "$dir/.release-images.current" "$dir/.release-images.previous" "$dir"/.release-images.previous.[0-9]*; do
+        [ -f "$file" ] && printf '%s\n' "$file"
+    done
+    return 0
+}
+
+# Remember this install host-wide (best effort: an unwritable registry only loses the protection
+# of this install's images from another install's cleanup).
+register_install() {
+    local dir
+    dir="$(cd "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || return 0
+    grep -qxF "$dir" "$INSTALL_REGISTRY" 2>/dev/null && return 0
+    mkdir -p "$(dirname "$INSTALL_REGISTRY")" 2>/dev/null && printf '%s\n' "$dir" >> "$INSTALL_REGISTRY" 2>/dev/null || true
+}
+
+# Every install whose records protect images: this one, the registered ones and the default curl
+# install, whether running or stopped. A directory that no longer exists is skipped.
+registered_install_dirs() {
+    local dir
+    {
+        printf '%s\n' "$SCRIPT_DIR" "${SHAKERSCAN_HOME:-${HOME:-/root}/.shakerscan}"
+        grep -v '^#' "$INSTALL_REGISTRY" 2>/dev/null || true
+    } | sed '/^$/d' | while IFS= read -r dir; do
+        [ -d "$dir" ] && (cd "$dir" 2>/dev/null && pwd -P)
+    done | sort -u
+}
+
+# Image refs every install on this host keeps (its current release and its kept rollback releases).
+host_kept_release_refs() {
+    local dir
+    registered_install_dirs | while IFS= read -r dir; do
+        # shellcheck disable=SC2046
+        release_state_refs $(release_kept_files "$dir")
+    done
+}
+
+# Image ids that must stay: this release's, every install's recorded current and kept releases',
+# and every image any container (running or stopped) uses.
 protected_image_ids() {
     local ref container
     {
-        for ref in $(release_image_refs_all) $(release_state_refs "$RELEASE_STATE_CURRENT" "$RELEASE_STATE_PREVIOUS"); do
+        for ref in $(release_image_refs_all) $(host_kept_release_refs | sort -u); do
             docker_cli image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true
         done
         docker_cli ps -aq 2>/dev/null | while read -r container; do
@@ -155,8 +213,9 @@ protected_image_ids() {
 # Routine cleanup after a start: remove the images this install recorded and has since superseded
 # (.release-images.superseded), unless protected; only ShakerScan images, never a third-party one;
 # never a volume; never forced. An image still in use stays listed and is retried next time.
-# Limit: a second install on the same host that runs the same old release and has no containers
-# (stopped with `shakerscan stop`) is not visible here; it pulls those images again when started.
+# Another install on this host is protected through the install registry (register_install),
+# running or stopped. Limit: an install that has not started with a 2.11 or later launcher since
+# (and is not the default ~/.shakerscan) is not registered yet.
 # Prints how many were removed.
 prune_superseded_release_images() {
     local protected ref id removed=0 keep=""
@@ -193,7 +252,7 @@ prune_superseded_release_images() {
 # rollback). Prints how many were removed.
 prune_unused_release_images() {
     local protected repo id
-    if [ ! -f "$RELEASE_STATE_PREVIOUS" ] && [ ! -f "$RELEASE_STATE_CURRENT" ]; then
+    if [ -z "$(release_kept_files)" ]; then
         echo 0
         return 0
     fi
@@ -254,37 +313,120 @@ started_release_version() {
     sed -n 's/^# release //p' "$RELEASE_STATE_CURRENT" 2>/dev/null | head -1
 }
 
-# After a successful start: this release becomes current, the one before it previous (kept for
-# rollback). In prebuilt mode ("prune") older ShakerScan images are then removed.
+# Append a release record's refs to the superseded list (removed by the routine cleanup unless
+# something still protects them), then drop the record.
+supersede_release_record() {
+    [ -f "$1" ] || return 0
+    release_state_refs "$1" >> "$RELEASE_STATE_SUPERSEDED"
+    rm -f "$1"
+}
+
+release_record_version() {
+    sed -n 's/^# release //p' "$1" 2>/dev/null | head -1
+}
+
+# This install's kept rollback records in order: previous, previous.2, previous.3, ...
+kept_rollback_files() {
+    local n
+    [ ! -f "$RELEASE_STATE_PREVIOUS" ] || printf '%s\n' "$RELEASE_STATE_PREVIOUS"
+    for n in $(ls -1A "$SCRIPT_DIR" 2>/dev/null | sed -n 's/^\.release-images\.previous\.\([0-9][0-9]*\)$/\1/p' | sort -n); do
+        printf '%s\n' "$RELEASE_STATE_PREVIOUS.$n"
+    done
+}
+
+# Push a release record to the front of the kept chain (previous, previous.2, ...): each kept
+# record moves one place down; what falls beyond SHAKERSCAN_KEEP_RELEASES is superseded. A kept
+# record of the same version as the new one is superseded (its images, when the same, stay
+# protected by the new record).
+push_kept_release() {
+    local record="$1" version slots index file kept=() tmp
+    version="$(release_record_version "$record")"
+    slots=$((RELEASE_KEEP - 1))
+    for file in $(kept_rollback_files); do
+        if [ -n "$version" ] && [ "$(release_record_version "$file")" = "$version" ]; then
+            supersede_release_record "$file"
+        else
+            kept+=("$file")
+        fi
+    done
+    # Move into place from the end, through temporary names (a slot may be the next one's source).
+    index=0
+    for file in "$record" ${kept[@]+"${kept[@]}"}; do
+        index=$((index + 1))
+        tmp="$SCRIPT_DIR/.release-images.keep.$index.$$"
+        if [ "$index" -le "$slots" ]; then
+            cp "$file" "$tmp"
+        else
+            release_state_refs "$file" >> "$RELEASE_STATE_SUPERSEDED"
+        fi
+    done
+    for file in ${kept[@]+"${kept[@]}"}; do rm -f "$file"; done
+    index=0
+    while [ "$index" -lt "$slots" ]; do
+        index=$((index + 1))
+        tmp="$SCRIPT_DIR/.release-images.keep.$index.$$"
+        [ -f "$tmp" ] || break
+        if [ "$index" -eq 1 ]; then
+            mv "$tmp" "$RELEASE_STATE_PREVIOUS"
+        else
+            mv "$tmp" "$RELEASE_STATE_PREVIOUS.$index"
+        fi
+    done
+}
+
+# After a successful start: this release becomes current and the one it replaced is kept for
+# rollback (SHAKERSCAN_KEEP_RELEASES in all). In prebuilt mode ("prune") older ShakerScan images
+# are then removed.
 record_started_release() {
-    local current tmp removed prune="${1:-prune}"
+    local current tmp removed prune="${1:-prune}" running_record
     # This release started: its pre-upgrade dump no longer needs protecting from rotation.
     rm -f "$RELEASE_BACKUP_PENDING"
+    register_install
     current="$(release_image_refs_all | sort)"
-    # A new version moves the current release to previous (kept for rollback) and the one before
-    # it to superseded. The same version with other image names (an optional module recorded, the
-    # lock on or off) only rewrites current: the previous release stays.
+    # A new version moves the current release down the kept chain. The same version with other
+    # image names (an optional module recorded, the lock on or off) only rewrites current: the
+    # kept releases stay.
     if [ -f "$RELEASE_STATE_CURRENT" ] && [ "$(started_release_version)" != "${SCANNER_VERSION:-unknown}" ]; then
-        [ ! -f "$RELEASE_STATE_PREVIOUS" ] || release_state_refs "$RELEASE_STATE_PREVIOUS" >> "$RELEASE_STATE_SUPERSEDED"
-        cp "$RELEASE_STATE_CURRENT" "$RELEASE_STATE_PREVIOUS"
+        tmp="$RELEASE_STATE_CURRENT.old.$$"
+        cp "$RELEASE_STATE_CURRENT" "$tmp"
+        push_kept_release "$tmp"
+        rm -f "$tmp"
     fi
+    # The release that ran before this start is the one to roll back to, whatever the record says:
+    # after a rollback by a launcher that keeps no record, the record still names the newer
+    # release while the older one's images were running.
+    if [ -n "$RELEASE_RUNNING_BEFORE_START" ] && [ -n "$RELEASE_RUNNING_IMAGES" ] \
+        && [ "$RELEASE_RUNNING_BEFORE_START" != "${SCANNER_VERSION:-unknown}" ] \
+        && [ "$(release_record_version "$RELEASE_STATE_PREVIOUS")" != "$RELEASE_RUNNING_BEFORE_START" ]; then
+        running_record="$SCRIPT_DIR/.release-images.running.$$"
+        { printf '# release %s\n' "$RELEASE_RUNNING_BEFORE_START"; printf '%s\n' "$RELEASE_RUNNING_IMAGES"; } > "$running_record"
+        push_kept_release "$running_record"
+        rm -f "$running_record"
+    fi
+    # A lowered SHAKERSCAN_KEEP_RELEASES releases the records beyond it.
+    for tmp in $(kept_rollback_files); do
+        case "$tmp" in
+            "$RELEASE_STATE_PREVIOUS") [ "$RELEASE_KEEP" -ge 2 ] || supersede_release_record "$tmp" ;;
+            *) [ "${tmp##*.}" -lt "$RELEASE_KEEP" ] || supersede_release_record "$tmp" ;;
+        esac
+    done
     tmp="$RELEASE_STATE_CURRENT.tmp.$$"
     { printf '# release %s\n' "${SCANNER_VERSION:-unknown}"; printf '%s\n' "$current"; } > "$tmp"
     mv "$tmp" "$RELEASE_STATE_CURRENT"
     if [ "$prune" = prune ] && is_truthy "${SHAKERSCAN_PRUNE_OLD_IMAGES:-1}"; then
         removed="$(prune_superseded_release_images)"
         if [ "${removed:-0}" -gt 0 ]; then
-            echo "Removed ${removed} image(s) of older ShakerScan releases (the previous release is kept for rollback)."
+            echo "Removed ${removed} image(s) of older ShakerScan releases (kept for rollback: $((RELEASE_KEEP - 1)) earlier release(s); SHAKERSCAN_KEEP_RELEASES=${RELEASE_KEEP})."
         fi
     fi
 }
 
 # Before a version-changing start against an existing database: dump PostgreSQL to
 # backups/pre-upgrade-<time>-<from>-to-<to>/ (the newest two are kept). Needs PostgreSQL up.
-ensure_pre_upgrade_backup() {
-    local from to has_data size_kb free_kb dir stamp old pending
-    is_truthy "${SHAKERSCAN_PRE_UPGRADE_BACKUP:-1}" || return 0
-    to="${SCANNER_VERSION:-}"
+# The version this start upgrades from, or nothing when it is no upgrade (a restart of the same
+# release, or a first start).
+pending_upgrade_from() {
+    local from
     note_running_release
     if [ -f "$RELEASE_STATE_CURRENT" ]; then
         # The running API is the truth; the record only when nothing ran to ask. A record that may
@@ -307,7 +449,17 @@ ensure_pre_upgrade_backup() {
     else
         return 0        # no release ever recorded and none running: a first start, not an upgrade
     fi
-    [ -n "$from" ] && [ -n "$to" ] && [ "$from" != "$to" ] || return 0
+    [ -n "$from" ] && [ -n "${SCANNER_VERSION:-}" ] && [ "$from" != "${SCANNER_VERSION:-}" ] || return 0
+    printf '%s\n' "$from"
+}
+
+ensure_pre_upgrade_backup() {
+    local from to has_data size_kb free_kb dir stamp old pending
+    is_truthy "${SHAKERSCAN_PRE_UPGRADE_BACKUP:-1}" || return 0
+    to="${SCANNER_VERSION:-}"
+    note_running_release    # here, not in the subshell below, so it is noted once for the run
+    from="$(pending_upgrade_from)"
+    [ -n "$from" ] || return 0
     if ! has_data="$(compose exec -T postgres psql -U scanner -d scanner -At -v ON_ERROR_STOP=1 \
         -c "SELECT to_regclass('public.targets') IS NOT NULL" 2>&1 | tr -d '\r'; exit "${PIPESTATUS[0]}")"; then
         echo -e "${RED}Cannot check the database before upgrading (${has_data}); nothing was changed.${NC}" >&2
@@ -474,6 +626,21 @@ redis_give_up() {
     return 1
 }
 
+# Recreate Redis's volume and start it empty (its data was copied, or is gone). Running services
+# keep their old queue state: REDIS_STATE_RESET tells the caller to restart them.
+start_redis_empty() {
+    compose rm -sf redis >/dev/null 2>&1 || true
+    docker_cli volume rm "$(redis_volume)" >/dev/null 2>&1 || true
+    REDIS_STATE_RESET=1
+    compose up --no-build -d redis >/dev/null 2>&1 || true
+    if wait_for_redis_healthy; then
+        echo -e "${GREEN}Redis started with empty state. Scans that were waiting to start are queued again automatically within about 10 minutes; a scan that was already running is marked with an unknown outcome and can be started again from the Scans page.${NC}"
+        return 0
+    fi
+    redis_give_up "Redis does not start even with empty state."
+    return 1
+}
+
 # Redis healthy before anything depends on it, repairing it when its own data is the problem.
 ensure_redis_ready() {
     local kind
@@ -514,17 +681,7 @@ ensure_redis_ready() {
             # Damaged beyond repair, and a copy is kept: Redis starts empty. It holds queues and
             # job state only; scans, findings and evidence are in PostgreSQL.
             echo -e "${YELLOW}Redis could not be repaired; starting it with empty state (it holds only queues and job status; your scans, findings and evidence are in PostgreSQL and untouched).${NC}"
-            compose rm -sf redis >/dev/null 2>&1 || true
-            docker_cli volume rm "$(redis_volume)" >/dev/null 2>&1 || true
-            # Running services keep their old queue state; the launcher restarts them after start.
-            REDIS_STATE_RESET=1
-            compose up --no-build -d redis >/dev/null 2>&1 || true
-            if wait_for_redis_healthy; then
-                echo -e "${GREEN}Redis started with empty state. Scans that were waiting to start are queued again automatically within about 10 minutes; a scan that was already running is marked with an unknown outcome and can be started again from the Scans page.${NC}"
-                return 0
-            fi
-            redis_give_up "Redis does not start even with empty state."
-            return 1
+            start_redis_empty
             ;;
         *)
             # An unknown cause is never treated as damaged data: one restart, then a clear stop.
@@ -552,4 +709,279 @@ upgrade_safety_warnings() {
         && ! docker_cli volume inspect "${project}_postgres-data" >/dev/null 2>&1; then
         echo "ShakerScan's database volume is missing although this install has started before; restore it from a backup in $SCRIPT_DIR/backups before using it."
     fi
+    if [ -f "$RELEASE_STATE_CURRENT" ] && docker_cli volume ls -q >/dev/null 2>&1 \
+        && ! docker_cli volume inspect "$(redis_volume)" >/dev/null 2>&1; then
+        echo "Redis's volume is missing (it holds queues and job state only); the next start creates it empty and waiting scans are queued again automatically."
+    fi
+    if free="$(install_dir_free_gb)" && [ "$free" -lt "$INSTALL_DIR_MIN_FREE_GB" ]; then
+        echo "The install directory $SCRIPT_DIR has ${free} GB free; backups and scan results are written there (keep at least ${INSTALL_DIR_MIN_FREE_GB} GB free)."
+    fi
+}
+
+# --- install directory space -------------------------------------------------------------------
+
+INSTALL_DIR_MIN_FREE_GB="${SHAKERSCAN_INSTALL_DIR_MIN_FREE_GB:-2}"
+case "$INSTALL_DIR_MIN_FREE_GB" in ''|*[!0-9]*) INSTALL_DIR_MIN_FREE_GB=2 ;; esac
+
+install_dir_free_gb() {
+    local free_kb
+    free_kb="$(df -Pk "$SCRIPT_DIR" 2>/dev/null | awk 'END {print $4}')"
+    case "$free_kb" in ''|*[!0-9]*) return 1 ;; esac
+    echo $((free_kb / 1024 / 1024))
+}
+
+# The install directory holds backups, scan results and the release records. An upgrade with too
+# little room there stops before anything changes; any other start only warns.
+ensure_install_dir_space() {
+    local free
+    free="$(install_dir_free_gb)" || return 0
+    [ "$free" -lt "$INSTALL_DIR_MIN_FREE_GB" ] || return 0
+    note_running_release
+    if [ -n "$(pending_upgrade_from)" ]; then
+        echo -e "${RED}Not enough disk space in the install directory $SCRIPT_DIR: ${free} GB free, at least ${INSTALL_DIR_MIN_FREE_GB} GB needed before an upgrade (the database is saved there first).${NC}" >&2
+        if stack_is_running; then
+            echo "Nothing was changed: the running release keeps running." >&2
+        else
+            echo "Nothing was changed." >&2
+        fi
+        echo "Free disk space there (old files in $SCRIPT_DIR/backups: '$(cli_hint) backup list'), then run '$(cli_hint) start' again." >&2
+        return 1
+    fi
+    echo -e "${YELLOW}The install directory $SCRIPT_DIR has ${free} GB free; backups and scan results are written there. Free disk space soon.${NC}"
+}
+
+# --- datastores persisting before the switch -----------------------------------------------------
+
+# The project's service container (never a one-off `compose run` one).
+service_container() {
+    docker_cli ps -aq --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-shakerscan}" \
+        --filter "label=com.docker.compose.service=$1" --filter "label=com.docker.compose.oneoff=False" \
+        2>/dev/null | head -1
+}
+
+# Whether a service's data directory is a Docker volume (not the container's own writable layer,
+# which is lost when the container is recreated).
+service_data_on_volume() {
+    local container
+    container="$(service_container "$1")"
+    [ -n "$container" ] || return 1
+    docker_cli inspect --format '{{range .Mounts}}{{.Type}} {{.Destination}}{{println}}{{end}}' "$container" 2>/dev/null \
+        | grep -qxF "volume $2"
+}
+
+# Problems that would lose data when the running release is replaced, one per line; nothing when
+# none. Only for a running stack: a stopped one has nothing in memory to lose.
+datastore_persistence_problems() {
+    local info
+    if [ -n "$(service_container postgres)" ]; then
+        service_data_on_volume postgres /var/lib/postgresql \
+            || echo "PostgreSQL's data is not on its Docker volume (${COMPOSE_PROJECT_NAME:-shakerscan}_postgres-cluster)."
+    fi
+    if [ "$(redis_container_state)" = running ]; then
+        service_data_on_volume redis /data \
+            || echo "Redis's data is not on its Docker volume ($(redis_volume))."
+        if ! info="$(compose exec -T redis sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli INFO persistence' 2>/dev/null | tr -d '\r')"; then
+            echo "Redis cannot be asked whether it saves its data."
+        else
+            printf '%s\n' "$info" | grep -q '^loading:1' && echo "Redis is still loading its data."
+            printf '%s\n' "$info" | grep -q '^rdb_last_bgsave_status:err' \
+                && echo "Redis's last snapshot failed (often a full disk)."
+            printf '%s\n' "$info" | grep -q '^aof_last_write_status:err' \
+                && echo "Redis cannot write its append-only file (often a full disk)."
+        fi
+    fi
+    return 0
+}
+
+# Before an upgrade replaces a running release: PostgreSQL and Redis must be persisting, or
+# queued work and job state would be lost with the old containers. Nothing changed on refusal.
+ensure_datastores_persisting() {
+    local problems
+    stack_is_running || return 0
+    note_running_release
+    [ -n "$(pending_upgrade_from)" ] || return 0
+    problems="$(datastore_persistence_problems)"
+    [ -n "$problems" ] || return 0
+    echo -e "${RED}The running release cannot be replaced safely:${NC}" >&2
+    printf '%s\n' "$problems" | sed 's/^/  /' >&2
+    echo "Nothing was changed: the running release keeps running. Run '$(cli_hint) doctor' and fix this first" >&2
+    echo "(free disk space for a failed save). Do not remove Docker volumes: they hold ShakerScan's database." >&2
+    return 1
+}
+
+# A start must never create an empty database over a lost one: with a release recorded and no
+# database volume, it stops (a `reset` empties the database on purpose and says so).
+ensure_database_volume_present() {
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    is_truthy "${SHAKERSCAN_ALLOW_NEW_DATABASE:-0}" && return 0
+    [ -f "$RELEASE_STATE_CURRENT" ] || return 0
+    docker_cli volume ls -q >/dev/null 2>&1 || return 0   # Docker cannot say: never guess "missing"
+    docker_cli volume inspect "${project}_postgres-cluster" >/dev/null 2>&1 && return 0
+    docker_cli volume inspect "${project}_postgres-data" >/dev/null 2>&1 && return 0
+    echo -e "${RED}ShakerScan's database volume (${project}_postgres-cluster) is missing although this install has started before.${NC}" >&2
+    echo "Starting now would create an empty database. Nothing was changed." >&2
+    echo "Restore the database from a backup in $SCRIPT_DIR/backups ('$(cli_hint) backup list'), or, to start with" >&2
+    echo "an empty database on purpose, run 'SHAKERSCAN_ALLOW_NEW_DATABASE=1 $(cli_hint) start'." >&2
+    return 1
+}
+
+# --- a full backup offered before an upgrade ----------------------------------------------------
+
+# Before a version-changing start against an existing database: offer a complete `backup` (the
+# database, scan results and configuration, in $SCRIPT_DIR/backups, outside Docker). In a terminal
+# the operator is asked (default yes); otherwise SHAKERSCAN_UPGRADE_BACKUP decides: "full", or
+# "database" (default: the automatic pre-upgrade database dump only). Returns 0 with
+# UPGRADE_FULL_BACKUP_TAKEN=1 when one was taken. Needs PostgreSQL up.
+UPGRADE_FULL_BACKUP_TAKEN=0
+offer_upgrade_backup() {
+    local from choice="${SHAKERSCAN_UPGRADE_BACKUP:-}" answer
+    is_truthy "${SHAKERSCAN_PRE_UPGRADE_BACKUP:-1}" || return 0
+    note_running_release
+    from="$(pending_upgrade_from)"
+    [ -n "$from" ] || return 0
+    declare -F create_backup >/dev/null 2>&1 || return 0
+    if [ -z "$choice" ]; then
+        if [ -t 0 ] && [ -t 1 ] && [ "${ASSUME_YES:-0}" != 1 ]; then
+            echo "Upgrading ${from} to ${SCANNER_VERSION:-}."
+            if read -r -p "Take a full backup first (database, scan results, configuration; kept in $SCRIPT_DIR/backups)? [Y/n] " answer; then
+                case "$answer" in [nN]*) choice=database ;; *) choice=full ;; esac
+            else
+                choice=database
+            fi
+        else
+            choice=database
+        fi
+    fi
+    [ "$choice" = full ] || return 0
+    echo "Taking a full backup before upgrading ${from} to ${SCANNER_VERSION:-}..."
+    if ! create_backup; then
+        echo -e "${RED}The backup before the upgrade failed; nothing was upgraded.${NC}" >&2
+        return 1
+    fi
+    UPGRADE_FULL_BACKUP_TAKEN=1
+}
+
+# --- images ------------------------------------------------------------------------------------
+
+# `images`: every ShakerScan image on this host and why it stays; `images prune`: remove the ones
+# nothing keeps (never this release's, any install's current or kept rollback release, an image a
+# container uses, a third-party image or a volume).
+images_cmd() {
+    case "${1:-list}" in
+        list|"") list_shakerscan_images ;;
+        prune) prune_shakerscan_images ;;
+        *) echo "Usage: $(cli_hint) images [prune]" >&2; return 1 ;;
+    esac
+}
+
+# "<id> <reason>" for every protected image id, first reason wins.
+image_keep_reasons() {
+    local ref dir file version container id
+    for ref in $(release_image_refs_all); do
+        id="$(docker_cli image inspect --format '{{.Id}}' "$ref" 2>/dev/null)" && echo "$id this-release"
+    done
+    while IFS= read -r dir; do
+        for file in $(release_kept_files "$dir"); do
+            version="$(release_record_version "$file")"
+            case "$file" in
+                */.release-images.current) version="release ${version:-?} (current)" ;;
+                *) version="release ${version:-?} (kept for rollback)" ;;
+            esac
+            [ "$dir" = "$(cd "$SCRIPT_DIR" && pwd -P)" ] || version="$version of $dir"
+            for ref in $(release_state_refs "$file"); do
+                id="$(docker_cli image inspect --format '{{.Id}}' "$ref" 2>/dev/null)" && echo "$id ${version// /_}"
+            done
+        done
+    done < <(registered_install_dirs)
+    docker_cli ps -aq 2>/dev/null | while read -r container; do
+        [ -n "$container" ] || continue
+        id="$(docker_cli inspect --format '{{.Image}}' "$container" 2>/dev/null)" && echo "$id used-by-a-container"
+    done
+}
+
+list_shakerscan_images() {
+    local reasons repo id ref size reason
+    reasons="$(image_keep_reasons)"
+    printf '%-40s %-14s %-9s %s\n' "IMAGE" "ID" "SIZE" "STATUS"
+    for repo in $(shakerscan_image_repositories); do
+        docker_cli images --no-trunc --format '{{.ID}} {{.Repository}}:{{.Tag}} {{.Size}}' "$repo" 2>/dev/null \
+            | sort -u -k1,1 | while read -r id ref size; do
+                [ -n "$id" ] || continue
+                reason="$(printf '%s\n' "$reasons" | awk -v id="$id" '$1 == id {print $2; exit}')"
+                printf '%-40s %-14s %-9s %s\n' "${ref:0:40}" "$(echo "${id#sha256:}" | cut -c1-12)" "$size" \
+                    "$( [ -n "$reason" ] && echo "kept: ${reason//_/ }" || echo "removable ('$(cli_hint) images prune')")"
+            done
+    done
+    echo ""
+    echo "Kept for rollback: $((RELEASE_KEEP - 1)) earlier release(s) (SHAKERSCAN_KEEP_RELEASES=${RELEASE_KEEP})."
+    echo "Volumes (the database, Redis) are never removed by '$(cli_hint) images prune'."
+}
+
+prune_shakerscan_images() {
+    local before after removed
+    if [ -z "$(release_kept_files)" ]; then
+        echo "This install has no release record yet, so nothing marks the images to keep for rollback; nothing was removed."
+        echo "Start ShakerScan once with this launcher ('$(cli_hint) start'), then run '$(cli_hint) images prune' again."
+        return 0
+    fi
+    before="$(docker_storage_free_gb 2>/dev/null || echo '?')"
+    removed="$(prune_unused_release_images)"
+    # What the routine cleanup still had listed is gone (or protected) now.
+    [ ! -f "$RELEASE_STATE_SUPERSEDED" ] || prune_superseded_release_images >/dev/null
+    after="$(docker_storage_free_gb 2>/dev/null || echo '?')"
+    echo "Removed ${removed} ShakerScan image(s) that nothing keeps; Docker has ${after} GB free (was ${before} GB)."
+    echo "Kept: this release, every install's current release and $((RELEASE_KEEP - 1)) earlier release(s) for rollback, and images containers use."
+}
+
+# --- Redis lost ------------------------------------------------------------------------------
+
+# `redis status`: health, persistence and volume. `redis reset`: when Redis's data is lost or
+# Redis cannot start: keep a copy of what is there (when it can be read), recreate the volume,
+# start it empty and reconnect the services; waiting scans are queued again automatically.
+redis_cmd() {
+    case "${1:-status}" in
+        status|"") redis_status ;;
+        reset) redis_reset "${2:-}" ;;
+        *) echo "Usage: $(cli_hint) redis [status|reset [--yes]]" >&2; return 1 ;;
+    esac
+}
+
+redis_status() {
+    local problems
+    echo "Redis: $(redis_health) (container $(redis_container_state))"
+    if docker_cli volume inspect "$(redis_volume)" >/dev/null 2>&1; then
+        echo "Volume: $(redis_volume) present"
+    else
+        echo "Volume: $(redis_volume) MISSING (the next start creates it empty)"
+    fi
+    problems="$(datastore_persistence_problems | grep -i redis || true)"
+    if [ -n "$problems" ]; then
+        printf 'Problem: %s\n' "$problems"
+    elif [ "$(redis_container_state)" = running ]; then
+        echo "Persistence: saving normally"
+    fi
+    echo "Redis holds queues and job state only; scans, findings and evidence are in PostgreSQL."
+}
+
+redis_reset() {
+    local confirm="$1" answer
+    echo "This recreates Redis empty: queued work and job state are cleared (a copy is kept when it can be read)."
+    echo "Scans, findings and evidence are in PostgreSQL and are not touched. Scans that were waiting are"
+    echo "queued again automatically; a scan that was running is marked with an unknown outcome."
+    if [ "$confirm" != "--yes" ] && [ "${ASSUME_YES:-0}" != 1 ]; then
+        if ! read -r -p "Reset Redis now? (yes/no): " answer || [ "$answer" != yes ]; then
+            echo "Cancelled"
+            return 1
+        fi
+    fi
+    if docker_cli volume inspect "$(redis_volume)" >/dev/null 2>&1; then
+        archive_redis_data || echo -e "${YELLOW}Redis's data could not be copied (unreadable or no room); resetting without a copy.${NC}"
+    fi
+    start_redis_empty || return 1
+    if [ -n "$(service_container api)" ]; then
+        echo "Reconnecting the API and workers to Redis..."
+        compose restart api worker agent-tool-worker >/dev/null 2>&1 || true
+    fi
+    REDIS_STATE_RESET=0
+    echo -e "${GREEN}Redis was reset.${NC} Check with '$(cli_hint) status'."
 }

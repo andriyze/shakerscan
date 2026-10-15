@@ -243,6 +243,10 @@ remember_running_release() { :; }
 note_running_release() { printf 'note-running\n'; }
 ensure_upgrade_space() { printf 'space-check\n'; }
 ensure_pre_upgrade_backup() { printf 'pre-upgrade-backup\n'; }
+ensure_install_dir_space() { printf 'install-dir-space\n'; }
+ensure_datastores_persisting() { printf 'datastores-persisting\n'; }
+ensure_database_volume_present() { printf 'database-volume\n'; }
+offer_upgrade_backup() { printf 'offer-backup\n'; }
 ensure_redis_ready() { printf 'redis-ready\n'; }
 record_started_release() { printf 'record-release:%s\n' "$1"; }
 resolve_docker_socket_gid() { printf '0\n'; }
@@ -382,6 +386,9 @@ running_compose_service_count() {
 note_running_release() { if [ -e "$STOPPED" ]; then printf 'note:stopped\n'; else printf 'note:running\n'; fi; }
 stop_services() { printf 'stop\n'; : > "$STOPPED"; }
 start_services() { printf 'start:%s\n' "$*"; }
+set_build_env() { :; }
+# Checked while the stack still runs (a stopped stack has nothing to check).
+ensure_datastores_persisting() { if [ -e "$STOPPED" ]; then printf 'persist:stopped\n'; else printf 'persist:running\n'; fi; }
 restart_services() {
 __RESTART_SERVICES__
 }
@@ -405,7 +412,7 @@ def test_restart_counts_the_opt_in_lanes_before_stop_removes_them(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     # workers, device-worker lane, Gungnir lane: all taken while the lanes were still running.
-    assert result.stdout.splitlines() == ["note:running", "stop", "start:3 1 1"]
+    assert result.stdout.splitlines() == ["note:running", "persist:running", "stop", "start:3 1 1"]
 
 
 def test_running_service_count_ignores_one_off_runs(tmp_path):
@@ -495,7 +502,9 @@ def _real_start_harness(failing: str, tail: str) -> str:
 
 
 FAIL_CLOSED_STEPS = ["pull_prebuilt_images", "wait_for_url", "verify_running_build_identity",
-                     "verify_specialized_worker_identity", "set_build_env", "record_started_release"]
+                     "verify_specialized_worker_identity", "set_build_env", "record_started_release",
+                     "ensure_install_dir_space", "ensure_datastores_persisting",
+                     "ensure_database_volume_present", "offer_upgrade_backup"]
 
 
 @pytest.mark.parametrize("failing", FAIL_CLOSED_STEPS)

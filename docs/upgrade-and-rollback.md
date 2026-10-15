@@ -73,6 +73,63 @@ To write outside the runtime directory:
 shakerscan backup /secure/path/shakerscan-backups
 ```
 
+Before a start that changes the release, the launcher offers a complete `shakerscan backup` (the
+database, scan results and configuration, written to `backups/` on the host, outside Docker). In a
+terminal it asks, defaulting to yes; without a terminal it takes only the automatic database dump
+above. `SHAKERSCAN_UPGRADE_BACKUP=full` takes the complete backup without asking,
+`SHAKERSCAN_UPGRADE_BACKUP=database` never asks. When the complete backup is taken, it holds the
+database and no separate pre-upgrade dump is made. A failed backup stops the upgrade with nothing
+changed.
+
+## Disk space, images and Redis
+
+The launcher manages its own Docker images and Redis; you never need to remove Docker volumes, and
+nothing here suggests `docker system prune --volumes` (it deletes the database).
+
+Checks before an upgrade changes anything:
+
+- Docker's storage must hold the images still to download plus room for the databases; older
+  ShakerScan images nothing keeps are removed first.
+- The install directory (`backups/`, `results/`) needs at least 2 GB free
+  (`SHAKERSCAN_INSTALL_DIR_MIN_FREE_GB`); with less, an upgrade stops and any other start warns.
+- The running release's PostgreSQL and Redis must be saving their data to their Docker volumes: a
+  Redis whose last save failed (often a full disk), or data outside its volume, stops the upgrade
+  while the running release keeps running. `shakerscan doctor` names the problem.
+- A start never creates an empty database over a lost one: when this install has run before and its
+  database volume is missing, `start` stops and points to `backups/`. To start empty on purpose:
+  `SHAKERSCAN_ALLOW_NEW_DATABASE=1 shakerscan start` (`shakerscan reset` does this itself).
+
+Images:
+
+```bash
+shakerscan images          # every ShakerScan image on this host, and why it is kept
+shakerscan images prune    # remove the ones nothing keeps
+```
+
+An image is kept when it belongs to the release this install runs, to a release kept for rollback,
+to the current or kept release of another install on this host, or when any container (running or
+stopped) uses it. Third-party images (PostgreSQL, Redis) and volumes are never removed.
+`SHAKERSCAN_KEEP_RELEASES` sets how many releases are kept, this one included (default 2: this
+release and one to roll back to; 1 keeps no rollback images). After a successful start, older
+ShakerScan images of this install are removed automatically (`SHAKERSCAN_PRUNE_OLD_IMAGES=0` keeps
+them). The release that was actually running before an upgrade is the one kept for rollback, even
+after a rollback by an older launcher. Every install that starts with a 2.11 or later launcher is
+registered in `~/.local/state/shakerscan/installs`, so one install's cleanup never removes another,
+stopped install's images; an install under another user account is not visible there.
+
+Redis holds queues and job state only; scans, findings and evidence are in PostgreSQL. A damaged
+Redis is repaired during `start`. If Redis's data is lost or it cannot start at all:
+
+```bash
+shakerscan redis           # health, persistence and volume
+shakerscan redis reset     # keep a copy in backups/redis-<time>/, recreate Redis empty, reconnect services
+```
+
+After a reset, Scans that were waiting to start are queued again automatically within about ten
+minutes; a Scan that was running is marked with an unknown outcome and can be started again.
+`shakerscan status` and `doctor` warn when Docker or the install directory is short of space, or
+when the database or Redis volume of an install that has run before is missing.
+
 ## Upgrade
 
 The oldest directly supported upgrade base is **0.8.18**. Installations older than that must first
