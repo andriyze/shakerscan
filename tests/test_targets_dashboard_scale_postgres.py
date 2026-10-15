@@ -1022,3 +1022,35 @@ def test_read_path_indexes_are_built_by_the_background_builder():
         definition = await conn.fetchval("SELECT pg_get_indexdef('idx_scans_status_created'::regclass)")
         assert "UNIQUE" not in definition and "created_at DESC" in definition
     _run(check)
+
+
+def test_concurrent_builds_never_wait_under_the_startup_lock_with_a_waiter_present():
+    """CREATE/DROP INDEX CONCURRENTLY under the startup lock (8675309) deadlocks with a process
+    waiting for that lock (its waiting statement holds a snapshot the build waits for). The
+    builder runs after serving and never takes it: with a waiter queued behind another holder,
+    the build finishes once that holder lets go, and it never held the lock itself."""
+    from runtime.loop_scale_indexes import ensure_loop_scale_indexes
+    from targets.asset_migration import BoundConnectionPool
+
+    async def check(conn):
+        holder, waiter, builder = await _connect(), await _connect(), await _connect()
+        try:
+            await conn.execute("DROP INDEX IF EXISTS idx_scans_target_created")
+            await holder.execute("SELECT pg_advisory_lock(8675309)")
+            waiting = asyncio.ensure_future(waiter.execute("SELECT pg_advisory_lock(8675309)"))
+            await asyncio.sleep(0.3)
+            assert not waiting.done()
+            build = asyncio.ensure_future(ensure_loop_scale_indexes(BoundConnectionPool(builder)))
+            await asyncio.sleep(1.0)
+            held_by_builder = await conn.fetchval(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 8675309 AND granted "
+                "AND pid = $1", builder.get_server_pid())
+            assert held_by_builder == 0
+            await holder.execute("SELECT pg_advisory_unlock(8675309)")
+            await asyncio.wait_for(waiting, 30)
+            assert await asyncio.wait_for(build, 60) == ["idx_scans_target_created"]
+            await waiter.execute("SELECT pg_advisory_unlock(8675309)")
+        finally:
+            for other in (holder, waiter, builder):
+                await other.close()
+    _run(check)
