@@ -208,6 +208,9 @@ ROUTE_CLASSES: tuple[RouteRule, ...] = (
     _rule(r"^/targets/[^/]+/graph$", HEAVY, "target_graph", _legacy_list_shape),
     # /asm/coverage is counted in SQL (one row); the other ASM reads are not reworked yet.
     _rule(r"^/targets/[^/]+/asm/(?!coverage$).+$", HEAVY, "asm"),
+    # Bounded to the window, but with few active critical/high findings the weak-claim read is
+    # one pass over the active findings (no findings index for it yet).
+    _rule(r"^/arsenal/refuter-reviews/summary$", HEAVY, "arsenal"),
     # Exports with no admission of their own share one slot pool.
     _rule(r"^/evidence/export-(?:bundle|manifest)$", EXPORT, "exports"),
     _rule(r"^/model-intake/scans/[^/]+/evidence-export$", EXPORT, "exports"),
@@ -299,7 +302,10 @@ def statement_timeout_pool_options(default_timeout_ms: int) -> dict[str, Any]:
         if wanted is not None and wanted != default:
             await connection.execute(f"SET statement_timeout = {int(wanted)}")
 
-    return {"server_settings": {"statement_timeout": str(default)}, "setup": setup}
+    # JIT off: the planner prices correlated per-row subqueries high enough to cross the JIT
+    # thresholds, and on the 2.11 scale seed compiling took 0.94 s of a 1.17 s inventory facet
+    # read (0.18 s without it). The API's reads are short; JIT only adds latency.
+    return {"server_settings": {"statement_timeout": str(default), "jit": "off"}, "setup": setup}
 
 
 # --- Admission ---------------------------------------------------------------------------------

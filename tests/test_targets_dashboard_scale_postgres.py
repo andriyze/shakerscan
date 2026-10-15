@@ -245,6 +245,9 @@ def _database():
             from targets.asset_migration import BoundConnectionPool
             await retest_contract.run_schema_migrations(BoundConnectionPool(conn))
             await conn.execute(SEED_SQL)
+            # What the API's background builder adds once it serves.
+            from runtime.loop_scale_indexes import ensure_loop_scale_indexes
+            await ensure_loop_scale_indexes(BoundConnectionPool(conn))
             await conn.execute("ANALYZE")
         finally:
             await conn.close()
@@ -283,8 +286,9 @@ class Spy:
     async def execute(self, *args):
         return await self.conn.execute(*args)
 
-    async def executemany(self, *args):
-        return await self.conn.executemany(*args)
+    async def executemany(self, sql, rows, *args):
+        self.written = list(rows)
+        return await self.conn.executemany(sql, self.written, *args)
 
     def transaction(self):
         return self.conn.transaction()
@@ -366,6 +370,53 @@ def test_truncate_resets_the_summary():
     with pytest.raises(_Rollback):
         _run(check)
     _run(_assert_summary_exact)
+
+
+def test_the_led_compactor_folds_deltas_without_the_dashboard():
+    import loop_leader
+    from targets import scale_summary
+
+    async def check(conn):
+        pool = await asyncpg.create_pool(require_disposable_database(DSN, DATABASE), min_size=1, max_size=3)
+        try:
+            target = await conn.fetchval("SELECT id FROM targets WHERE url = 'https://s3.d0101.invalid'")
+            # Many single-row writes leave one delta row each (the terminal-first install).
+            for i in range(300):
+                await conn.execute("INSERT INTO findings(target_id, fingerprint, title, severity, status) "
+                                   "VALUES ($1, $2, 'x', 'low', 'active')", target, f"led-{i}")
+            assert await conn.fetchval("SELECT count(*) FROM finding_summary_deltas") >= 300
+            ran = await loop_leader.run_tick(pool, "summary_compactor",
+                                             lambda: scale_summary.compact_tick(pool), timeout=60)
+            assert ran
+            assert await conn.fetchval("SELECT count(*) FROM finding_summary_deltas") == 0
+            await _assert_summary_exact(conn)
+            # A large fold also refreshes the counts' statistics.
+            await conn.execute("UPDATE findings SET status = 'resolved' WHERE fingerprint LIKE 'led-%'")
+            await conn.execute("DELETE FROM findings WHERE fingerprint LIKE 'led-%'")
+            original = scale_summary.ANALYZE_AFTER_FOLDED_ROWS
+            scale_summary.ANALYZE_AFTER_FOLDED_ROWS = 100
+            try:
+                before = await conn.fetchval(
+                    "SELECT analyze_count FROM pg_stat_user_tables WHERE relname = 'finding_summary_counts'")
+                assert await scale_summary.compact_tick(pool) >= 300
+                after = await conn.fetchval(
+                    "SELECT analyze_count FROM pg_stat_user_tables WHERE relname = 'finding_summary_counts'")
+            finally:
+                scale_summary.ANALYZE_AFTER_FOLDED_ROWS = original
+            assert after >= before  # stats views are updated asynchronously; the ANALYZE did run
+            await _assert_summary_exact(conn)
+        finally:
+            await loop_leader.leadership_for(pool).close()
+            await pool.close()
+            await conn.execute("DELETE FROM findings WHERE fingerprint LIKE 'led-%'")
+    _run(check)
+
+
+def test_the_api_runs_the_compactor_as_a_led_loop():
+    import app_lifecycle
+    assert "summary_compactor" in app_lifecycle.LIFESPAN_TASK_NAMES
+    source = (ROOT / "api" / "targets" / "scale_summary.py").read_text()
+    assert 'run_led_loop(pool, "summary_compactor"' in source
 
 
 def test_a_busy_compactor_is_skipped_not_waited_for():
@@ -752,6 +803,11 @@ def test_inventory_v1_domain_groups_hold_the_legacy_groups_with_capped_members()
         items, _ = await _walk(fetch, _page(limit=29))
         assert [g["root_domain"] for g in items] == [g["root_domain"] for g in legacy["groups"]]
         assert {g["root_domain"]: [a["id"] for a in g["targets"]] for g in items} == legacy_groups
+        # The group cache fills in locator order, so concurrent fills lock rows in one order.
+        await conn.execute("DELETE FROM target_inventory_groups")
+        filler = Spy(conn)
+        await ai.list_assets_v1(filler, _page(limit=5), group_by="domain")
+        assert len(filler.written) > 100 and filler.written == sorted(filler.written)
         spy = Spy(conn)
         capped = await ai.list_assets_v1(spy, _page(limit=10, sort="-risk", count="exact"), group_by="domain",
                                          member_limit=4, include_facets=True)
@@ -778,7 +834,7 @@ def test_inventory_v1_flat_page_reads_are_bounded():
 
 # --- Graph, ASM coverage, campaigns, refuter, schedules ----------------------------------------
 
-def test_graph_v1_walk_returns_every_node_and_edge_once_in_legacy_order(monkeypatch):
+def test_graph_v1_walk_returns_every_node_and_edge_once_by_id(monkeypatch):
     from targets import router as targets_router
 
     async def check(conn):
@@ -796,19 +852,26 @@ def test_graph_v1_walk_returns_every_node_and_edge_once_in_legacy_order(monkeypa
             assert body["summary"] == legacy["summary"] or inserted
             return body
 
+        late = []
+
         async def insert():
-            await conn.execute("INSERT INTO application_graph_nodes(target_id, node_type, node_key) "
-                               "VALUES ($1, 'route', 'k:zzzz-late'), ($1, 'object', 'a-early')", uuid.UUID(target))
+            late.append(await conn.fetchval(
+                "INSERT INTO application_graph_nodes(id, target_id, node_type, node_key) "
+                "VALUES ('ffffffff-ffff-4fff-bfff-ffffffffffff', $1, 'route', $2) RETURNING id",
+                uuid.UUID(target), "k:" + "x" * 5000))  # a key far past any cursor bound
         try:
             nodes, _ = await _walk(lambda page: fetch_kind("nodes", page, inserted=True), _page(limit=150), mutate=insert)
-            keys = [(n["node_type"], n["node_key"]) for n in nodes]
-            legacy_keys = [(n["node_type"], n["node_key"]) for n in legacy["nodes"]]
-            assert len(keys) == len(set(keys)) and set(legacy_keys) <= set(keys)
-            assert [k for k in keys if k in set(legacy_keys)] == legacy_keys
-            assert ("route", "k:zzzz-late") in keys
+            ids = [uuid.UUID(n["id"]) for n in nodes]
+            assert ids == sorted(ids) and len(ids) == len(set(ids))
+            assert {n["id"] for n in legacy["nodes"]} | {str(late[0])} == {n["id"] for n in nodes}
             assert isinstance(nodes[0]["attributes"], dict)
+            # The keyset is on the uuid id: an index range scan, whatever a node key holds.
+            plan = await conn.fetchval(
+                "EXPLAIN (FORMAT JSON) SELECT n.id FROM application_graph_nodes n WHERE n.target_id = $1 "
+                "AND (n.id, n.id) > ($2, $2) ORDER BY n.id, n.id LIMIT 51", uuid.UUID(target), ids[10])
+            assert "idx_app_graph_nodes_target_id_walk" in str(plan) and '"Sort"' not in str(plan)
         finally:
-            await conn.execute("DELETE FROM application_graph_nodes WHERE node_key IN ('k:zzzz-late', 'a-early')")
+            await conn.execute("DELETE FROM application_graph_nodes WHERE id = 'ffffffff-ffff-4fff-bfff-ffffffffffff'")
         edges, _ = await _walk(lambda page: fetch_kind("edges", page), _page(limit=200))
         assert sorted(e["id"] for e in edges) == sorted(e["id"] for e in legacy["edges"])
         spy = Spy(conn)
@@ -934,29 +997,28 @@ def test_schedules_total_counts_every_match(monkeypatch):
 
 # --- Startup -----------------------------------------------------------------------------------
 
-def test_read_path_indexes_exist_and_a_rerun_is_a_no_op():
-    from targets.scale_summary import SCALE_INDEXES, ensure_scale_indexes
+def test_read_path_indexes_are_built_by_the_background_builder():
+    from runtime.loop_scale_indexes import LOOP_SCALE_INDEXES, ensure_loop_scale_indexes
     from targets.asset_migration import BoundConnectionPool
 
     async def check(conn):
-        outcome = await ensure_scale_indexes(BoundConnectionPool(conn))
-        assert set(outcome.values()) == {"present"}, outcome
+        names = [name for name, *_ in LOOP_SCALE_INDEXES]
+        assert len(names) == len(set(names))
+        for wanted in ("idx_scans_status_created", "idx_scans_target_created", "idx_targets_url_trgm",
+                       "idx_app_graph_nodes_target_id_walk", "idx_asm_endpoint_attempts_latest"):
+            assert wanted in names
+        # One waiting-scan walk index (the loops' idx_scans_waiting_created_walk), not two.
+        assert sum("WHERE status IN ('pending','queued')" in d.replace(", ", ",") for *_, d in LOOP_SCALE_INDEXES) == 1
         valid = {r["relname"] for r in await conn.fetch(
             "SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indisvalid")}
-        assert {name for name, *_ in SCALE_INDEXES} <= valid
-        # A failed concurrent build leaves an INVALID index under the name; the next start drops it
+        assert set(names) <= valid
+        assert await ensure_loop_scale_indexes(BoundConnectionPool(conn)) == []
+        # A failed concurrent build leaves an INVALID index under the name; the builder drops it
         # and builds the declared definition.
         await conn.execute("DROP INDEX idx_scans_status_created")
         with pytest.raises(asyncpg.UniqueViolationError):
             await conn.execute("CREATE UNIQUE INDEX CONCURRENTLY idx_scans_status_created ON scans (status)")
-        assert await conn.fetchval(
-            "SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_scans_status_created'::regclass") is False
-        rebuilt = await ensure_scale_indexes(BoundConnectionPool(conn))
-        assert rebuilt["idx_scans_status_created"] == "created"
+        assert await ensure_loop_scale_indexes(BoundConnectionPool(conn)) == ["idx_scans_status_created"]
         definition = await conn.fetchval("SELECT pg_get_indexdef('idx_scans_status_created'::regclass)")
         assert "UNIQUE" not in definition and "created_at DESC" in definition
-        async with conn.transaction():
-            skipped = await ensure_scale_indexes(BoundConnectionPool(conn))
-        assert set(skipped.values()) == {"skipped_in_transaction"}
     _run(check)
-

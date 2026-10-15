@@ -150,17 +150,7 @@ def test_schema_migration_retries_a_transient_postgres_deadlock(monkeypatch):
             assert "to_regclass('public.scans')" in query
             return "scans"
 
-    async def no_indexes(_pool):
-        return {}
-
     monkeypatch.setattr(retest_contract, "_run_unified_schema_migrations_once", migrate_once)
-    # The concurrent read-path index builder runs after the migrations (its own Postgres test).
-    import importlib
-    for name in ("targets.scale_summary", "api.targets.scale_summary"):
-        try:
-            monkeypatch.setattr(importlib.import_module(name), "ensure_scale_indexes", no_indexes)
-        except ModuleNotFoundError:
-            pass
     asyncio.run(retest_contract.run_schema_migrations(_FakePool(BaseSchemaConn())))
 
     assert calls == 2

@@ -21,9 +21,9 @@ import time
 from typing import Any, Awaitable, Callable
 
 try:
-    from targets.scale_summary import FINDING_TOTALS_SQL, SCAN_TOTALS_SQL, compact, without_jit
+    from targets.scale_summary import FINDING_TOTALS_SQL, SCAN_TOTALS_SQL, compact
 except ModuleNotFoundError:  # package import layout
-    from ..targets.scale_summary import FINDING_TOTALS_SQL, SCAN_TOTALS_SQL, compact, without_jit
+    from ..targets.scale_summary import FINDING_TOTALS_SQL, SCAN_TOTALS_SQL, compact
 
 DEVICE_RUN_KINDS = frozenset({"device_posture", "device_probe", "device_web_dast"})
 AI_RUN_KINDS = frozenset({"ai_api", "ai_widget", "ai_rag", "ai_trace", "ai_mcp", "model_intake"})
@@ -262,5 +262,4 @@ __all__ = [
     "load_dashboard_counts",
     "recent_blocker_findings",
     "recent_latest_scans",
-    "without_jit",
 ]

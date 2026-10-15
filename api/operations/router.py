@@ -1326,7 +1326,7 @@ async def dashboard():
 
 
 async def _compute_dashboard() -> dict[str, Any]:
-    async with _pool().acquire() as conn, dashboard_data.without_jit(conn):
+    async with _pool().acquire() as conn:
         # Fold pending summary deltas first (non-blocking; another compactor may hold it).
         await dashboard_data.compact(conn)
         counts = await dashboard_data.load_dashboard_counts(conn)

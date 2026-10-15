@@ -3083,14 +3083,12 @@ async def _append_hypothesis_signal(conn, hypothesis_id: str, req: HypothesisSig
     }
 
 
-# Severity buckets in the refuter window's order (critical first, then high, medium, low, other).
-_REFUTER_SEVERITY_BUCKETS = (
-    ("severity = 'critical'", True),
-    ("severity = 'high'", True),
-    ("severity = 'medium'", False),
-    ("severity = 'low'", False),
-    ("(severity IS NULL OR severity NOT IN ('critical', 'high', 'medium', 'low'))", False),
-)
+# The refuter window's order: critical, then high, then everything else (medium, low, other)
+# that is a weak claim by source or tool; newest seen first within each.
+_REFUTER_WEAK_CLAIM = ("(source IN ('ai_gate', 'model_intake') OR ai_target_id IS NOT NULL "
+                       "OR tool = 'model_intake')")
+
+
 # Targets whose recent scans feed the finding-delta signal: those in the newest completed
 # web-DAST scans, newest first.
 REFUTER_FINDING_DELTA_SCAN_WINDOW = 2000
@@ -3100,23 +3098,36 @@ REFUTER_FINDING_DELTA_TARGET_WINDOW = 200
 async def _refuter_window_findings(conn, finding_window: int) -> list[Any]:
     """Active findings worth a refuter review, in severity order then newest seen.
 
-    The same rows as one query ordered by a severity CASE, read one severity at a time so each
-    read stops at the window instead of sorting every active critical/high finding.
+    The same rows as one query ordered by a severity CASE. Critical and high are read one
+    severity at a time and stop at the window; the remaining weak claims (medium, low, other) are
+    one read, so at most one pass over the findings that are neither.
     """
     findings: list[Any] = []
-    for predicate, always in _REFUTER_SEVERITY_BUCKETS:
+    for severity in ("critical", "high"):
         remaining = finding_window - len(findings)
         if remaining <= 0:
-            break
-        weak_claim = "" if always else (
-            " AND (source IN ('ai_gate', 'model_intake') OR ai_target_id IS NOT NULL OR tool = 'model_intake')"
-        )
+            return findings
+        findings.extend(await conn.fetch(
+            """
+            SELECT *
+            FROM findings
+            WHERE status = 'active' AND severity = $2
+            ORDER BY last_seen_at DESC NULLS LAST, first_seen_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            remaining, severity,
+        ))
+    remaining = finding_window - len(findings)
+    if remaining > 0:
         findings.extend(await conn.fetch(
             f"""
             SELECT *
             FROM findings
-            WHERE status = 'active' AND {predicate}{weak_claim}
-            ORDER BY last_seen_at DESC NULLS LAST, first_seen_at DESC NULLS LAST
+            WHERE status = 'active'
+              AND (severity IS NULL OR severity NOT IN ('critical', 'high'))
+              AND {_REFUTER_WEAK_CLAIM}
+            ORDER BY CASE severity WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END,
+                     last_seen_at DESC NULLS LAST, first_seen_at DESC NULLS LAST
             LIMIT $1
             """,
             remaining,

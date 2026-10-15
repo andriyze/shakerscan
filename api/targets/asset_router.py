@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .asset_migration import host_url
 from .asset_inventory import DEFAULT_MEMBER_LIMIT, MAX_MEMBER_LIMIT, list_assets_v1
-from .scale_summary import without_jit
 from .asset_store import asset_detail, asset_history, list_assets, resolve_asset_id
 
 try:
@@ -93,7 +92,7 @@ async def target_inventory(response: Response = None,
         limit, cursor, fields, count, since, member_limit))
     if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
         page = v1_page(limit=limit, cursor=cursor, sort=sort, fields=fields, count=count, since=since)
-        async with pool().acquire() as conn, without_jit(conn):
+        async with pool().acquire() as conn:
             return await list_assets_v1(
                 conn, page, search=search, connected_only=connected_only,
                 include_inactive=include_inactive, include_services=include_services, group_by=group_by,
@@ -105,7 +104,7 @@ async def target_inventory(response: Response = None,
         raise HTTPException(400, 'A "-" sort is list/v1 only; add count=none (or a cursor) to use it')
     limit = 100 if limit is None else limit
     mark_deprecated(response)
-    async with pool().acquire() as conn, without_jit(conn):
+    async with pool().acquire() as conn:
         return await list_assets(conn, search=search, connected_only=connected_only,
                                  include_inactive=include_inactive, include_services=include_services,
                                  limit=limit, offset=offset, group_by=group_by, asset_type=asset_type,

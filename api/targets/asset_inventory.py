@@ -473,7 +473,8 @@ async def fill_group_cache(conn: Any, from_sql: str, query: _Query) -> int:
                                *query.parameters, psl_version())
     if not missing:
         return 0
-    rows = [(row['locator'], group_domain(row['locator']), psl_version()) for row in missing]
+    # In locator order, so two concurrent fills take the row locks in the same order (no deadlock).
+    rows = sorted((row['locator'], group_domain(row['locator']), psl_version()) for row in missing)
     await conn.executemany("""INSERT INTO target_inventory_groups(locator, group_domain, psl_version)
         VALUES ($1, $2, $3)
         ON CONFLICT (locator) DO UPDATE SET group_domain=EXCLUDED.group_domain, psl_version=EXCLUDED.psl_version""",

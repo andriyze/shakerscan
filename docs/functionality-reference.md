@@ -1909,7 +1909,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 424 | Python sources + Compose manifests |
+| Runtime environment keys | 425 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 132 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |

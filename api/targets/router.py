@@ -476,14 +476,14 @@ async def list_targets_grouped(
             "include_inactive": include_inactive, "search": search, "discovery_source": discovery_source,
             "grade": grade, "has_findings": has_findings, "member_limit": member_limit,
         }
-        async with _pool().acquire() as conn, grouped_list.without_jit(conn):
+        async with _pool().acquire() as conn:
             return await grouped_list.grouped_page(
                 conn, page, filters=filters, member_limit=member_limit,
                 member_columns=target_columns, public_row=_public_target_row,
             )
 
     mark_deprecated(response)
-    async with _pool().acquire() as conn, grouped_list.without_jit(conn):
+    async with _pool().acquire() as conn:
         query = f"""
             SELECT
                 {target_columns}
@@ -2046,24 +2046,25 @@ async def scan_target(
     return await _submit_scan(scan_request, stored_scheme_inferred=stored_scheme_inferred)
 
 
+# list/v1 pages of a target's graph walk (target_id, id): a uuid key, so the keyset is an index
+# range scan (idx_app_graph_*_target_id_walk) and a cursor has a fixed size whatever a node key
+# holds. The legacy response keeps its (type, key) order.
 GRAPH_NODES_LIST = ListSpec(
     scope="targets.graph.nodes",
-    sorts={"node_type": SortKey("n.node_type", "text")},
-    default_sort="node_type",
+    sorts={"id": SortKey("n.id", "uuid")},
+    default_sort="id",
     fields={
         "id": "n.id", "node_type": "n.node_type", "node_key": "n.node_key", "label": "n.label",
         "attributes": "n.attributes", "scan_id": "n.scan_id",
         "first_seen_at": "n.first_seen_at", "last_seen_at": "n.last_seen_at",
     },
-    # (node_type, node_key) is unique per target: the legacy order, and an index range scan.
-    id_expr="n.node_key",
-    id_kind="text",
+    id_expr="n.id",
     since_expr="n.last_seen_at",
 )
 GRAPH_EDGES_LIST = ListSpec(
     scope="targets.graph.edges",
-    sorts={"edge_type": SortKey("e.edge_type", "text")},
-    default_sort="edge_type",
+    sorts={"id": SortKey("e.id", "uuid")},
+    default_sort="id",
     fields={
         "id": "e.id", "edge_type": "e.edge_type", "src_key": "e.src_key", "dst_key": "e.dst_key",
         "attributes": "e.attributes", "scan_id": "e.scan_id",

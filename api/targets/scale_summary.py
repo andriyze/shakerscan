@@ -21,16 +21,14 @@ restore loads the summary rows with the data and creates the triggers afterwards
 restored database is consistent too. NULL status/source are stored as '' (every reader predicate
 treats NULL and '' alike) and findings without a target as the nil UUID.
 
-``ensure_scale_indexes`` builds the read-path indexes with CREATE INDEX CONCURRENTLY after the
-startup lock is released, so writes are never blocked while they build. One process builds (a
-session advisory lock that others skip); an index left INVALID by an interrupted build is dropped
-and rebuilt on the next start.
+The read-path indexes these readers use are built by the one background index builder
+(``runtime/loop_scale_indexes.py``), concurrently, once the API serves.
 """
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import logging
-from typing import Any, AsyncIterator, Sequence
+import os
+from typing import Any
 
 logger = logging.getLogger("shakerscan.api.targets.scale_summary")
 
@@ -39,8 +37,6 @@ NIL_UUID = "00000000-0000-0000-0000-000000000000"
 # (int, int) advisory keys do not collide with the single-bigint startup lock (8675309).
 _LOCK_CLASS = 2110
 _COMPACT_LOCK = 1
-_INDEX_LOCK = 2
-INDEX_LOCK_TIMEOUT = "10s"
 
 FINDING_KEY = ("target_id", "status", "severity", "source", "model_intake_tool", "ai_target")
 SCAN_KEY = ("status", "run_kind", "shard")
@@ -147,33 +143,38 @@ END $$;
 
 CREATE OR REPLACE FUNCTION summary_compact() RETURNS bigint
 LANGUAGE plpgsql AS $$
-DECLARE moved bigint := 0; scan_moved bigint := 0;
+DECLARE folded bigint := 0; scan_folded bigint := 0;
 BEGIN
     IF NOT pg_try_advisory_xact_lock({_LOCK_CLASS}, {_COMPACT_LOCK}) THEN
         RETURN -1;
     END IF;
+    -- Returns the number of delta rows folded (both tables).
     WITH gone AS (DELETE FROM finding_summary_deltas RETURNING *),
          summed AS (
              SELECT target_id, status, severity, source, model_intake_tool, ai_target, sum(n)::bigint AS n
-             FROM gone GROUP BY 1, 2, 3, 4, 5, 6)
-    INSERT INTO finding_summary_counts AS c
-    SELECT * FROM summed WHERE n <> 0
-    ON CONFLICT (target_id, status, severity, source, model_intake_tool, ai_target)
-    DO UPDATE SET n = c.n + EXCLUDED.n;
-    GET DIAGNOSTICS moved = ROW_COUNT;
-    IF moved > 0 THEN
+             FROM gone GROUP BY 1, 2, 3, 4, 5, 6),
+         merged AS (
+             INSERT INTO finding_summary_counts AS c
+             SELECT * FROM summed WHERE n <> 0
+             ON CONFLICT (target_id, status, severity, source, model_intake_tool, ai_target)
+             DO UPDATE SET n = c.n + EXCLUDED.n
+             RETURNING 1)
+    SELECT count(*) INTO folded FROM gone;
+    IF folded > 0 THEN
         DELETE FROM finding_summary_counts WHERE n = 0;
     END IF;
     WITH gone AS (DELETE FROM scan_summary_deltas RETURNING *),
-         summed AS (SELECT status, run_kind, shard, sum(n)::bigint AS n FROM gone GROUP BY 1, 2, 3)
-    INSERT INTO scan_summary_counts AS c
-    SELECT * FROM summed WHERE n <> 0
-    ON CONFLICT (status, run_kind, shard) DO UPDATE SET n = c.n + EXCLUDED.n;
-    GET DIAGNOSTICS scan_moved = ROW_COUNT;
-    IF scan_moved > 0 THEN
+         summed AS (SELECT status, run_kind, shard, sum(n)::bigint AS n FROM gone GROUP BY 1, 2, 3),
+         merged AS (
+             INSERT INTO scan_summary_counts AS c
+             SELECT * FROM summed WHERE n <> 0
+             ON CONFLICT (status, run_kind, shard) DO UPDATE SET n = c.n + EXCLUDED.n
+             RETURNING 1)
+    SELECT count(*) INTO scan_folded FROM gone;
+    IF scan_folded > 0 THEN
         DELETE FROM scan_summary_counts WHERE n = 0;
     END IF;
-    RETURN moved + scan_moved;
+    RETURN folded + scan_folded;
 END $$;
 """
 
@@ -263,23 +264,40 @@ async def compact_pool(pool: Any) -> int:
         return await compact(conn)
 
 
-@asynccontextmanager
-async def without_jit(conn: Any) -> AsyncIterator[Any]:
-    """Run the enclosed reads with JIT compilation off.
-
-    The planner prices correlated per-row subqueries high, which crosses the JIT thresholds: on
-    the reference seed the inventory facet query spent 0.94 s of 1.17 s compiling and 0.18 s
-    without JIT. A session setting rather than a transaction, so a failing optional read cannot
-    abort the others; it is reset on exit (and the pool's RESET ALL on release resets it too).
-    """
-    await conn.execute("SET jit = off")
+def _env_seconds(name: str, default: float) -> float:
     try:
-        yield conn
-    finally:
-        try:
-            await conn.execute("RESET jit")
-        except Exception:  # an aborted transaction: the pool resets the session on release
-            pass
+        return max(0.0, float(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+SUMMARY_COMPACT_INTERVAL_SECONDS = _env_seconds("SUMMARY_COMPACT_INTERVAL_SECONDS", 60.0)
+SUMMARY_COMPACT_TICK_TIMEOUT = 600.0
+# Statistics stay current after a large fold (cheap: the counts tables are small).
+ANALYZE_AFTER_FOLDED_ROWS = 50_000
+
+
+async def compact_tick(pool: Any) -> int:
+    """One compaction: fold every pending delta; ANALYZE the counts after a large fold."""
+    async with pool.acquire() as conn:
+        folded = await compact(conn)
+        if folded >= ANALYZE_AFTER_FOLDED_ROWS:
+            await conn.execute("ANALYZE finding_summary_counts, scan_summary_counts, "
+                               "finding_summary_deltas, scan_summary_deltas")
+    return folded
+
+
+async def summary_compactor(pool: Any) -> None:
+    """The API's led loop: one process folds the summary deltas every interval, so they stay few
+    whether or not anyone opens the dashboard (whose computation also folds them)."""
+    try:
+        from loop_leader import run_led_loop
+    except ModuleNotFoundError:
+        from ..loop_leader import run_led_loop
+    if SUMMARY_COMPACT_INTERVAL_SECONDS <= 0:
+        return
+    await run_led_loop(pool, "summary_compactor", lambda: compact_tick(pool),
+                       interval=SUMMARY_COMPACT_INTERVAL_SECONDS, timeout=SUMMARY_COMPACT_TICK_TIMEOUT)
 
 
 # Exact current counts per bucket: compacted counts plus pending deltas.
@@ -318,132 +336,16 @@ SCAN_TOTALS_SQL = """(
     GROUP BY 1, 2, 3 HAVING sum(n) <> 0)"""
 
 
-# --- Read-path indexes -------------------------------------------------------------------------
-
-# (name, table, definition after "ON table"). Each is created CONCURRENTLY; a definition change
-# needs a new name. ``trgm`` indexes need the pg_trgm extension and are skipped without it.
-SCALE_INDEXES: tuple[tuple[str, str, str, bool], ...] = (
-    # Keyset lists of targets and Hunts, newest first (list/v1 orders both columns one way).
-    ("idx_targets_updated_id", "targets", "(updated_at DESC, id DESC)", False),
-    ("idx_hunt_runs_updated_id", "hunt_runs", "(updated_at DESC, id DESC)", False),
-    # The grouped Targets order (root domain, root first, then URL).
-    ("idx_targets_root_domain_root_url", "targets", "(root_domain, is_root DESC, url)", False),
-    # Scans of one target newest first; scans in a status newest first (dashboard, queue views).
-    ("idx_scans_target_created", "scans", "(target_id, created_at DESC)", False),
-    ("idx_scans_status_created", "scans", "(status, created_at DESC)", False),
-    # Queued work and "is anything running on this asset" probes.
-    ("idx_scans_pending_queued_created", "scans", "(created_at) WHERE status IN ('pending', 'queued')", False),
-    ("idx_scans_active_target", "scans", "(target_id) WHERE status IN ('pending', 'queued', 'running')", False),
-    # The dashboard's latest completed scan per URL (``latest_scans`` view) as an index-only scan.
-    ("idx_scans_latest_completed_url", "scans",
-     "(target_url, completed_at DESC) INCLUDE (score) WHERE status = 'completed' "
-     "AND (scan_role IS NULL OR scan_role <> 'shard') "
-     "AND COALESCE(run_kind, 'web_dast') NOT IN ('device_posture', 'device_probe', 'device_web_dast')", False),
-    # The latest ASM attempt per endpoint (coverage) without sorting every attempt.
-    ("idx_asm_endpoint_attempts_latest", "asm_endpoint_attempts",
-     "(endpoint_id, (COALESCE(completed_at, started_at)) DESC, started_at DESC)", False),
-    # Paged application-graph edges.
-    ("idx_app_graph_edges_target_type_id", "application_graph_edges", "(target_id, edge_type, id)", False),
-    # Substring search (ILIKE '%term%').
-    ("idx_targets_url_trgm", "targets", "USING gin (url gin_trgm_ops)", True),
-    ("idx_targets_name_trgm", "targets", "USING gin (name gin_trgm_ops)", True),
-    ("idx_targets_root_domain_trgm", "targets", "USING gin (root_domain gin_trgm_ops)", True),
-    ("idx_scans_target_url_trgm", "scans", "USING gin (target_url gin_trgm_ops)", True),
-    ("idx_hunt_runs_objective_trgm", "hunt_runs", "USING gin (objective gin_trgm_ops)", True),
-)
-
-
-async def ensure_scale_indexes(pool: Any, indexes: Sequence[tuple[str, str, str, bool]] = SCALE_INDEXES) -> dict[str, str]:
-    """Create missing read-path indexes concurrently; returns ``{name: outcome}``.
-
-    Runs outside any transaction (CONCURRENTLY requires it) and after the startup lock is
-    released. One process builds; another that finds the build lock taken returns at once.
-    """
-    outcome: dict[str, str] = {}
-    async with pool.acquire() as conn:
-        in_transaction = getattr(conn, "is_in_transaction", None)
-        if callable(in_transaction) and in_transaction():
-            return {name: "skipped_in_transaction" for name, *_ in indexes}
-        if not await conn.fetchval("SELECT pg_try_advisory_lock($1, $2)", _LOCK_CLASS, _INDEX_LOCK):
-            return {name: "skipped_locked" for name, *_ in indexes}
-        previous = await conn.fetchrow(
-            "SELECT current_setting('statement_timeout') AS statement, current_setting('lock_timeout') AS lock"
-        )
-        deferred = False
-        try:
-            # The build itself may take long on a big table; waiting for another session's open
-            # transaction may not: a concurrent build waits for every older snapshot, and an
-            # idle-in-transaction session elsewhere must not hold a start for long. The first
-            # such wait defers the remaining builds to the next start.
-            await conn.execute(f"SET statement_timeout = 0; SET lock_timeout = '{INDEX_LOCK_TIMEOUT}'")
-            trgm = await _ensure_trgm(conn)
-            for name, table, definition, needs_trgm in indexes:
-                if deferred:
-                    outcome[name] = "deferred"
-                    continue
-                if needs_trgm and not trgm:
-                    outcome[name] = "skipped_no_pg_trgm"
-                    continue
-                if not await conn.fetchval("SELECT to_regclass($1)", table):
-                    outcome[name] = "skipped_no_table"
-                    continue
-                valid = await conn.fetchval(
-                    """SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
-                       JOIN pg_namespace n ON n.oid = c.relnamespace
-                       WHERE c.relname = $1 AND n.nspname = current_schema()""",
-                    name,
-                )
-                if valid:
-                    outcome[name] = "present"
-                    continue
-                if valid is False:  # an interrupted concurrent build left it unusable
-                    await conn.execute(f'DROP INDEX CONCURRENTLY IF EXISTS "{name}"')
-                try:
-                    await conn.execute(f'CREATE INDEX CONCURRENTLY IF NOT EXISTS "{name}" ON {table} {definition}')
-                    outcome[name] = "created"
-                except Exception as exc:
-                    outcome[name] = f"failed: {type(exc).__name__}"
-                    deferred = exc.__class__.__name__ == "LockNotAvailableError"
-                    logger.warning("index %s was not built: %s: %s", name, type(exc).__name__, exc)
-        finally:
-            try:
-                await conn.execute(
-                    f"SET statement_timeout = '{_quote_setting(previous['statement'])}'; "
-                    f"SET lock_timeout = '{_quote_setting(previous['lock'])}'"
-                )
-            finally:
-                await conn.fetchval("SELECT pg_advisory_unlock($1, $2)", _LOCK_CLASS, _INDEX_LOCK)
-    if any(value.startswith(("failed", "deferred")) for value in outcome.values()):
-        logger.warning("read-path indexes incomplete, retried on the next start: %s", outcome)
-    return outcome
-
-
-def _quote_setting(value: Any) -> str:
-    return str(value or "0").replace("'", "''")
-
-
-async def _ensure_trgm(conn: Any) -> bool:
-    if await conn.fetchval("SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"):
-        return True
-    try:
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-        return True
-    except Exception as exc:  # no privilege or no contrib package: search stays a sequential scan
-        logger.warning("pg_trgm unavailable; substring-search indexes skipped: %s", exc)
-        return False
-
-
 __all__ = [
     "ACTIVE_FINDINGS_BY_TARGET_SQL",
     "FINDING_COUNTS_SQL",
     "FINDING_TOTALS_SQL",
     "NIL_UUID",
-    "SCALE_INDEXES",
     "SCAN_TOTALS_SQL",
     "SUMMARY_MIGRATION",
     "compact",
     "compact_pool",
-    "ensure_scale_indexes",
+    "compact_tick",
+    "summary_compactor",
     "install_summary_counts",
-    "without_jit",
 ]

@@ -20,7 +20,6 @@ try:
     from list_contract import ListPlan, ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
 except ModuleNotFoundError:  # package import layout
     from ..list_contract import ListPlan, ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
-from .scale_summary import without_jit  # noqa: F401  (the route reads through it)
 
 DEFAULT_MEMBER_LIMIT = 20
 MAX_MEMBER_LIMIT = 200

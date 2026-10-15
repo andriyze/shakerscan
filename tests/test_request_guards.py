@@ -66,13 +66,12 @@ SETTINGS = rg.GuardSettings(
     ("GET", "/targets/abc/graph", "", "heavy", "target_graph"),
     ("GET", "/targets/abc/asm/gaps", "", "heavy", "asm"),
     ("GET", "/targets/abc/asm/endpoints", "limit=1000", "heavy", "asm"),
-    # Bounded since 2.11: list/v1 graph pages, SQL-counted ASM coverage, campaign impact and
-    # the refuter window.
+    # Bounded since 2.11: list/v1 graph pages, SQL-counted ASM coverage and campaign impact.
     ("GET", "/targets/abc/graph", "count=none&limit=200", "interactive", None),
     ("GET", "/targets/abc/graph", "cursor=x", "interactive", None),
     ("GET", "/targets/abc/asm/coverage", "", "interactive", None),
     ("GET", "/arsenal/campaigns", "", "interactive", None),
-    ("GET", "/arsenal/refuter-reviews/summary", "", "interactive", None),
+    ("GET", "/arsenal/refuter-reviews/summary", "", "heavy", "arsenal"),
     # Bounded in 2.11 (bounded reads; ~0.5 s at 100k job hashes / 0.3 s at 10k result files).
     ("GET", "/queue/stats", "", "interactive", None),
     ("GET", "/results", "", "interactive", None),
@@ -265,7 +264,7 @@ def test_each_request_class_acquires_with_its_statement_timeout(method, path, ex
 
 def test_pool_setup_sets_only_a_timeout_that_differs_from_the_session_default():
     options = rg.statement_timeout_pool_options(30_000)
-    assert options["server_settings"] == {"statement_timeout": "30000"}
+    assert options["server_settings"] == {"statement_timeout": "30000", "jit": "off"}
     executed: list[str] = []
 
     class Conn:

@@ -8509,7 +8509,9 @@ def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
                         "evidence": json.dumps({}),
                     },
                 ]
-                return [row for row in rows if f"severity = '{row['severity']}'" in query]
+                if "severity = $2" in query:
+                    return [row for row in rows if row["severity"] == args[1]]
+                return [row for row in rows if row["severity"] not in ("critical", "high")]
             if "FROM refuter_reviews" in query:
                 return [{"subject_type": "finding", "subject_id": str(weak_id), "finding_id": weak_id}]
             return []
