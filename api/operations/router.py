@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import timezone
 import json
 import os
 import re
 import shutil
+import threading
 from typing import Any, Callable, Literal, Mapping, Optional
 import urllib.parse
 import uuid
@@ -43,7 +44,8 @@ try:
     from finding_routes import router as _finding_routes
     from fleet_routes.router import BROKER_INGEST_QUEUE_NAME
     from artifact_storage import storage_health as artifact_storage_health
-    from job_queue import clear_unleased, pending_depth, queue_payloads
+    from job_queue import clear_unleased, pending_depth, scan_queue_job_ids
+    from operations import queue_health
     from schedules.router import SCHEDULE_HEALTH_LOOKBACK_DAYS, _schedule_health_map_for_schedules
     from scan.compatibility import record_compatibility_call
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
@@ -62,7 +64,8 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..finding_routes import router as _finding_routes
     from ..fleet_routes.router import BROKER_INGEST_QUEUE_NAME
     from ..artifact_storage import storage_health as artifact_storage_health
-    from ..job_queue import clear_unleased, pending_depth, queue_payloads
+    from ..job_queue import clear_unleased, pending_depth, scan_queue_job_ids
+    from . import queue_health
     from ..schedules.router import SCHEDULE_HEALTH_LOOKBACK_DAYS, _schedule_health_map_for_schedules
     from ..scan.compatibility import record_compatibility_call
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
@@ -711,9 +714,15 @@ async def gungnir_stop():
         raise HTTPException(status_code=500, detail=f"Failed to stop Gungnir: {str(e)}")
 
 
+_QUEUE_STATS_LOCK = asyncio.Lock()
+
+
 @router.get("/queue/stats")
 async def queue_stats():
-    """Get queue statistics."""
+    """Get queue statistics (bounded reads; read-only apart from a five-second cache).
+
+    The job-hash repairs this route used to make are made by the stale-check loop's leader
+    (``queue_health.reconcile_job_hashes``)."""
     r = get_redis()
     cached = r.get("queue:stats_cache")
     if cached:
@@ -721,186 +730,26 @@ async def queue_stats():
             return json.loads(cached)
         except Exception:
             pass
-    now = utc_now()
-
-    completed = 0
-    running = 0
-    queued = 0
-    failed = 0
-    retest_completed = 0
-    retest_running = 0
-    retest_queued = 0
-    retest_failed = 0
-
-    queue_entries = queue_payloads(r, QUEUE_NAME, include_leased=False)
-    # Consistency must include work already leased by a worker.  Excluding
-    # leased Stream messages is correct for the waiting-work headline, but it
-    # made the short pending/queued -> running handoff look orphaned and wrote a
-    # false error into an otherwise healthy job hash.
-    queue_handoffs = queue_payloads(r, QUEUE_NAME, include_leased=True)
-
-    def queue_job_ids(payloads):
-        job_ids: set[str] = set()
-        malformed = 0
-        for raw in payloads:
+    async with _QUEUE_STATS_LOCK:
+        # Concurrent pollers wait for one computation instead of repeating it.
+        cached = r.get("queue:stats_cache")
+        if cached:
             try:
-                job_id = str((json.loads(raw) if isinstance(raw, str) else {}).get("job_id") or "").strip()
-            except (TypeError, ValueError, json.JSONDecodeError):
-                job_id = ""
-            if job_id:
-                job_ids.add(job_id)
-            else:
-                malformed += 1
-        return job_ids, malformed
-
-    queued_job_ids, malformed_queue_entries = queue_job_ids(queue_entries)
-    handoff_job_ids, malformed_handoffs = queue_job_ids(queue_handoffs)
-    malformed_queue_entries += malformed_handoffs
-    async with _pool().acquire() as conn:
-        active_rows = await conn.fetch(
-            """
-            SELECT job_id, status, scan_role FROM scans
-            WHERE status IN ('pending','queued','running') AND job_id IS NOT NULL
-            """
+                return json.loads(cached)
+            except Exception:
+                pass
+        result = await queue_health.compute_queue_stats(
+            _pool(), r, now=utc_now(), hidden_roles=set(_hidden_scan_roles_for_list()),
+            queue_name=QUEUE_NAME, scan_queue_job_ids=scan_queue_job_ids, pending_depth=pending_depth,
+            retest_queue_name=RETEST_QUEUE_NAME, broker_queue_name=BROKER_INGEST_QUEUE_NAME,
+            heartbeat_timeout_minutes=HEARTBEAT_TIMEOUT_MINUTES,
+            retest_timeout_minutes=RETEST_RUNNING_TIMEOUT_MINUTES,
         )
-    active_scan_job_ids = {
-        str(row["job_id"])
-        for row in active_rows
-        if row["status"] in {"pending", "queued"}
-    }
-    active_running_job_ids = {
-        str(row["job_id"])
-        for row in active_rows
-        if row["status"] == "running"
-    }
-    # A worker may claim the Redis handoff before the planner moves the durable
-    # scan row from pending/queued to running.  That is a valid in-flight
-    # transition, not an orphan.  Reconcile running hashes against every active
-    # durable handoff; the logical headline still comes from the DB status.
-    active_job_ids = active_scan_job_ids | active_running_job_ids
-    hidden_roles = set(_hidden_scan_roles_for_list())
-    logical_pending = sum(
-        1 for row in active_rows
-        if row["status"] in {"pending", "queued"} and str(row.get("scan_role") or "") not in hidden_roles
-    )
-    logical_running = sum(
-        1 for row in active_rows
-        if row["status"] == "running" and str(row.get("scan_role") or "") not in hidden_roles
-    )
-    reconciled_queued_job_ids = queued_job_ids & active_scan_job_ids
-    valid_handoff_job_ids = handoff_job_ids & active_scan_job_ids
-    stale_queued_job_hashes = 0
-    stale_running_job_hashes = 0
-
-    for key in r.scan_iter("job:*"):
-        job_data = r.hgetall(key)
-        if not job_data:
-            continue
-
-        # Redis client uses decode_responses=True, so values are already strings
-        status_str = job_data.get('status', '')
-
-        if status_str == 'running':
-            job_id = str(key).split("job:", 1)[-1]
-            if job_id not in active_job_ids:
-                stale_running_job_hashes += 1
-                r.hset(key, mapping={
-                    "status": "orphaned",
-                    "error": "Running job hash has no matching running scan",
-                })
-                r.expire(key, 86400)
-                continue
-            heartbeat = job_data.get('heartbeat', '')
-            if heartbeat:
-                try:
-                    last_beat = datetime.fromisoformat(heartbeat)
-                    if now - last_beat > timedelta(minutes=HEARTBEAT_TIMEOUT_MINUTES):
-                        r.hset(key, 'status', 'failed')
-                        r.hset(key, 'error', 'Worker stopped responding')
-                        failed += 1
-                        continue
-                except ValueError:
-                    pass
-            running += 1
-        elif status_str == 'completed':
-            completed += 1
-        elif status_str == 'queued':
-            job_id = str(key).split("job:", 1)[-1]
-            if job_id in valid_handoff_job_ids:
-                # A leased message is valid work but no longer waiting. Keep
-                # the queued headline limited to unleased handoffs.
-                if job_id in reconciled_queued_job_ids:
-                    queued += 1
-            else:
-                stale_queued_job_hashes += 1
-                r.hset(key, mapping={
-                    "status": "orphaned",
-                    "error": "Queued job hash has no matching queued scan",
-                })
-                r.expire(key, 86400)
-        elif status_str == 'failed':
-            failed += 1
-
-    for key in r.scan_iter("retest_job:*"):
-        job_data = r.hgetall(key)
-        if not job_data:
-            continue
-
-        status_str = job_data.get('status', '')
-
-        if status_str == 'running':
-            started_at = job_data.get('started_at', '')
-            if started_at:
-                try:
-                    started = datetime.fromisoformat(started_at)
-                    if now - started > timedelta(minutes=RETEST_RUNNING_TIMEOUT_MINUTES):
-                        r.hset(key, mapping={
-                            'status': 'failed',
-                            'error': 'Retest worker did not complete in time',
-                        })
-                        retest_failed += 1
-                        continue
-                except ValueError:
-                    pass
-            retest_running += 1
-        elif status_str == 'completed':
-            retest_completed += 1
-        elif status_str == 'queued':
-            retest_queued += 1
-        elif status_str == 'failed':
-            retest_failed += 1
-
-    result = {
-        # Dashboard/CLI headline counts are logical user-visible scans. Parallel
-        # discovery, shards, and ASM implementation rows are work units, not
-        # extra scans. Keep both views explicit for operations and diagnostics.
-        'pending': logical_pending,
-        'queued': queued,
-        'running': logical_running,
-        'work_pending': pending_depth(r, QUEUE_NAME),
-        'work_running': running,
-        'completed': completed,
-        'failed': failed,
-        'retest_pending': pending_depth(r, RETEST_QUEUE_NAME),
-        'broker_ingest_pending': pending_depth(r, BROKER_INGEST_QUEUE_NAME),
-        'retest_queued': retest_queued,
-        'retest_running': retest_running,
-        'retest_completed': retest_completed,
-        'retest_failed': retest_failed,
-        'queue_consistency': {
-            'reconciled': not malformed_queue_entries and not (handoff_job_ids - active_scan_job_ids) and not (active_scan_job_ids - handoff_job_ids) and not stale_queued_job_hashes and not stale_running_job_hashes,
-            'malformed_entries': malformed_queue_entries,
-            'queue_without_active_scan': len(handoff_job_ids - active_scan_job_ids),
-            'active_scan_without_queue_entry': len(active_scan_job_ids - handoff_job_ids),
-            'stale_queued_job_hashes': stale_queued_job_hashes,
-            'stale_running_job_hashes': stale_running_job_hashes,
-        },
-    }
-    try:
-        r.set("queue:stats_cache", json.dumps(result), ex=5)
-    except Exception:
-        pass
-    return result
+        try:
+            r.set("queue:stats_cache", json.dumps(result), ex=5)
+        except Exception:
+            pass
+        return result
 
 
 @router.delete("/queue/clear")
@@ -947,35 +796,84 @@ async def clear_queue(include_retests: bool = False):
     }
 
 
-@router.get("/results")
-async def list_results(limit: int = Query(50, ge=1, le=500)):
-    """List recent scan results from files."""
-    if not _results_dir().exists():
+# Summaries of parsed ``latest.json`` files, keyed by path and invalidated by (mtime, size): a
+# listing parses only new or changed files, newest first, at most RESULTS_PARSE_BUDGET per call.
+RESULTS_PARSE_BUDGET = 1000
+_RESULT_SUMMARIES: dict[str, tuple[tuple[int, int], dict[str, Any] | None]] = {}
+_RESULTS_LOCK = asyncio.Lock()
+# The listing runs in a thread that outlives a cancelled request (and its asyncio lock), so the
+# cache itself is guarded by a thread lock.
+_RESULT_SUMMARIES_LOCK = threading.Lock()
+
+
+def _latest_result_files(results_dir: Any) -> list[tuple[tuple[int, int], str, str]]:
+    """((mtime_ns, size), folder, path) of every ``<folder>/latest.json``, from stats only."""
+    found: list[tuple[tuple[int, int], str, str]] = []
+    with os.scandir(results_dir) as entries:
+        for entry in entries:
+            try:
+                if not entry.is_dir():
+                    continue
+                latest = os.path.join(entry.path, "latest.json")
+                stat = os.stat(latest)
+                found.append(((stat.st_mtime_ns, stat.st_size), entry.name, latest))
+            except OSError:
+                continue
+    return found
+
+
+def _result_summary(folder: str, path: str) -> dict[str, Any] | None:
+    try:
+        with open(path) as fp:
+            data = json.load(fp)
+        return {
+            'folder': folder,
+            'target': data.get('input', {}).get('target'),
+            'score': data.get('result', {}).get('score'),
+            'grade': data.get('result', {}).get('grade'),
+            'timestamp': data.get('timestamp_utc'),
+        }
+    except Exception:
+        return None
+
+
+def _list_results_sync(results_dir: Any, limit: int) -> dict[str, Any]:
+    with _RESULT_SUMMARIES_LOCK:
+        return _list_results_locked(results_dir, limit)
+
+
+def _list_results_locked(results_dir: Any, limit: int) -> dict[str, Any]:
+    if not results_dir.exists():
         return {'results': [], 'count': 0}
-
+    files = _latest_result_files(results_dir)
+    files.sort(key=lambda item: item[0][0], reverse=True)
+    live = {path for _version, _folder, path in files}
+    for stale in [path for path in _RESULT_SUMMARIES if path not in live]:
+        _RESULT_SUMMARIES.pop(stale, None)
+    budget = RESULTS_PARSE_BUDGET
     results = []
-    for target_dir in _results_dir().iterdir():
-        if target_dir.is_dir():
-            latest = target_dir / "latest.json"
-            if latest.exists():
-                try:
-                    with open(latest) as fp:
-                        data = json.load(fp)
-                        results.append({
-                            'folder': target_dir.name,
-                            'target': data.get('input', {}).get('target'),
-                            'score': data.get('result', {}).get('score'),
-                            'grade': data.get('result', {}).get('grade'),
-                            'timestamp': data.get('timestamp_utc'),
-                        })
-                except Exception:
-                    pass
-
+    for version, folder, path in files:
+        cached = _RESULT_SUMMARIES.get(path)
+        if cached is None or cached[0] != version:
+            if budget <= 0:
+                continue  # parsed by a later listing; newest files are parsed first
+            budget -= 1
+            cached = (version, _result_summary(folder, path))
+            _RESULT_SUMMARIES[path] = cached
+        if cached[1] is not None:
+            results.append(cached[1])
     # Historical and partially written result files may have a null or
     # non-string timestamp. Normalize the key so one malformed legacy record
     # cannot take down the complete compatibility listing.
     results.sort(key=lambda item: str(item.get('timestamp') or ''), reverse=True)
     return {'results': results[:limit], 'count': len(results)}
+
+
+@router.get("/results")
+async def list_results(limit: int = Query(50, ge=1, le=500)):
+    """List recent scan results from files, off the event loop, parsing only new or changed files."""
+    async with _RESULTS_LOCK:
+        return await asyncio.to_thread(_list_results_sync, _results_dir(), int(limit))
 
 
 @router.get("/results/{target_folder}/latest")

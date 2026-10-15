@@ -208,8 +208,6 @@ ROUTE_CLASSES: tuple[RouteRule, ...] = (
     _rule(r"^/targets/[^/]+/graph$", HEAVY, "target_graph", _legacy_list_shape),
     # /asm/coverage is counted in SQL (one row); the other ASM reads are not reworked yet.
     _rule(r"^/targets/[^/]+/asm/(?!coverage$).+$", HEAVY, "asm"),
-    _rule(r"^/queue/stats$", HEAVY, "queue"),
-    _rule(r"^/results$", HEAVY, "results"),
     # Exports with no admission of their own share one slot pool.
     _rule(r"^/evidence/export-(?:bundle|manifest)$", EXPORT, "exports"),
     _rule(r"^/model-intake/scans/[^/]+/evidence-export$", EXPORT, "exports"),

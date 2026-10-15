@@ -9,6 +9,9 @@
 #     previous release); otherwise it refuses, naming the numbers, with nothing changed. A start
 #     with nothing to download never needs this room.
 #   - ensure_pre_upgrade_backup: a version-changing start dumps PostgreSQL first (outside Docker).
+#     The version it upgrades from is the one the running API reports; the release record only
+#     when nothing runs, and a record that an older launcher's start (or a reinstall) may have left
+#     out of date means a backup.
 #   - ensure_redis_ready: Redis must be healthy before anything that depends on it. A damaged
 #     append-only file is repaired (a copy of its data is kept first); a Redis that cannot write
 #     gets room from old images. Only a damaged Redis whose data was copied may start empty: it
@@ -29,6 +32,8 @@ RELEASE_STATE_PREVIOUS="${SCRIPT_DIR}/.release-images.previous"
 # Images this install recorded and has since superseded (older than the previous release): the
 # only images the routine cleanup after a start removes.
 RELEASE_STATE_SUPERSEDED="${SCRIPT_DIR}/.release-images.superseded"
+# The first pre-upgrade dump of an upgrade that has not started successfully yet (kept from rotation).
+RELEASE_BACKUP_PENDING="${SCRIPT_DIR}/backups/.pre-upgrade-pending"
 
 # The launcher defines docker_cli (sudo when needed) later in scanner.sh, which replaces this.
 if ! declare -F docker_cli >/dev/null 2>&1; then
@@ -111,6 +116,26 @@ running_api_version() {
     [ -n "$container" ] || return 0
     docker_cli inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null \
         | sed -n 's/^SCANNER_VERSION=//p' | head -1 | tr -cd 'A-Za-z0-9._-'
+}
+
+# The version the API reported before this start stopped anything; empty when nothing ran or it did
+# not say. Noted once per launcher run, before the first stop (restart, clean-slate start).
+RELEASE_RUNNING_BEFORE_START=""
+RELEASE_RUNNING_NOTED=0
+note_running_release() {
+    [ "$RELEASE_RUNNING_NOTED" = 1 ] && return 0
+    RELEASE_RUNNING_BEFORE_START="$(running_api_version)"
+    case "$RELEASE_RUNNING_BEFORE_START" in latest|dev|unknown) RELEASE_RUNNING_BEFORE_START="" ;; esac
+    RELEASE_RUNNING_NOTED=1
+}
+
+# The release record may not describe the database: since it was written, this install was started
+# by a launcher that keeps no record (one older than 2.10, e.g. after a rollback) or reinstalled.
+# Every launcher writes its runtime marker on a successful start (this one before the record), and
+# the installer writes it too. With nothing running to ask, the two cannot be told apart.
+release_record_is_stale() {
+    local marker="${LOCAL_BUILD_MARKER:-$SCRIPT_DIR/.shakerscan-local-build}"
+    [ -f "$marker" ] && [ -f "$RELEASE_STATE_CURRENT" ] && [ "$marker" -nt "$RELEASE_STATE_CURRENT" ]
 }
 
 # Image ids that must stay: this release's, the recorded current and previous releases', and every
@@ -233,6 +258,8 @@ started_release_version() {
 # rollback). In prebuilt mode ("prune") older ShakerScan images are then removed.
 record_started_release() {
     local current tmp removed prune="${1:-prune}"
+    # This release started: its pre-upgrade dump no longer needs protecting from rotation.
+    rm -f "$RELEASE_BACKUP_PENDING"
     current="$(release_image_refs_all | sort)"
     # A new version moves the current release to previous (kept for rollback) and the one before
     # it to superseded. The same version with other image names (an optional module recorded, the
@@ -255,15 +282,28 @@ record_started_release() {
 # Before a version-changing start against an existing database: dump PostgreSQL to
 # backups/pre-upgrade-<time>-<from>-to-<to>/ (the newest two are kept). Needs PostgreSQL up.
 ensure_pre_upgrade_backup() {
-    local from to has_data size_kb free_kb dir stamp old
+    local from to has_data size_kb free_kb dir stamp old pending
     is_truthy "${SHAKERSCAN_PRE_UPGRADE_BACKUP:-1}" || return 0
     to="${SCANNER_VERSION:-}"
+    note_running_release
     if [ -f "$RELEASE_STATE_CURRENT" ]; then
-        from="$(started_release_version)"
+        # The running API is the truth; the record only when nothing ran to ask. A record that may
+        # be out of date is not trusted: the database is saved, named for the recorded version.
+        if [ -n "$RELEASE_RUNNING_BEFORE_START" ]; then
+            from="$RELEASE_RUNNING_BEFORE_START"
+        elif release_record_is_stale; then
+            from="unverified-$(started_release_version | tr -cd 'A-Za-z0-9._-')"
+        else
+            from="$(started_release_version)"
+        fi
     elif [ -f "$RELEASE_STATE_PREVIOUS" ]; then
         # the first upgrade with this launcher: the running release was recorded from its containers
         from="$(sed -n 's/^# release //p' "$RELEASE_STATE_PREVIOUS" 2>/dev/null | head -1 | tr -cd 'A-Za-z0-9._-')"
         case "$from" in ''|running-before-upgrade|latest|dev|"${SCANNER_VERSION:-}") from="earlier" ;; esac
+    elif [ -n "$RELEASE_RUNNING_BEFORE_START" ]; then
+        # No record, but a release runs (a local build, or a release whose images were not
+        # recognised): it is what this start upgrades from.
+        from="$RELEASE_RUNNING_BEFORE_START"
     else
         return 0        # no release ever recorded and none running: a first start, not an upgrade
     fi
@@ -286,7 +326,10 @@ ensure_pre_upgrade_backup() {
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     dir="$SCRIPT_DIR/backups/pre-upgrade-${stamp}-${from}-to-${to}"
     ( umask 077; mkdir -p "$dir" )
-    echo "Saving the database before upgrading ${from} to ${to}..."
+    case "$from" in
+        unverified-*) echo "Saving the database before starting ${to}: the release it last ran is not known for certain (recorded: ${from#unverified-})..." ;;
+        *) echo "Saving the database before upgrading ${from} to ${to}..." ;;
+    esac
     if ! compose exec -T postgres pg_dump -U scanner -d scanner -Fc > "$dir/postgres.dump"; then
         echo -e "${RED}The pre-upgrade database backup failed; nothing was changed.${NC}" >&2
         rm -rf -- "$dir"
@@ -296,9 +339,17 @@ ensure_pre_upgrade_backup() {
         "$SCRIPT_DIR/.env" > "$dir/runtime.env" || true
     printf 'created_at=%s\nfrom_release=%s\nto_release=%s\nkind=pre-upgrade\n' "$stamp" "$from" "$to" > "$dir/manifest.txt"
     echo "Database saved: $dir"
-    # Names start with the time: the newest two are kept, and never the one just made.
+    # Until a start succeeds, the first dump of this upgrade is the only one taken before any
+    # migration ran: later attempts (after one that failed mid-migration) must not rotate it out.
+    pending="$(cat "$RELEASE_BACKUP_PENDING" 2>/dev/null || true)"
+    if [ -z "$pending" ] || [ ! -d "$SCRIPT_DIR/backups/$pending" ]; then
+        pending="$(basename "$dir")"
+        printf '%s\n' "$pending" > "$RELEASE_BACKUP_PENDING"
+    fi
+    # Names start with the time: the newest two are kept, never the one just made, and never the
+    # pending upgrade's first one.
     for old in $(ls -1d "$SCRIPT_DIR"/backups/pre-upgrade-* 2>/dev/null | sort -r | tail -n +3); do
-        [ "$old" = "$dir" ] || rm -rf -- "$old"
+        [ "$old" = "$dir" ] || [ "$(basename "$old")" = "$pending" ] || rm -rf -- "$old"
     done
 }
 

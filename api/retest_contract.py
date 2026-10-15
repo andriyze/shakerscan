@@ -1080,12 +1080,8 @@ async def run_schema_migrations(pool, redis_provider=None) -> None:
             if exc.__class__.__name__ != "DeadlockDetectedError" or attempt >= 2:
                 raise
             await asyncio.sleep(0.2 * (attempt + 1))
-    # Read-path indexes, built CONCURRENTLY after the startup lock is released (2.11).
-    try:
-        from targets.scale_summary import ensure_scale_indexes
-    except ModuleNotFoundError:
-        from api.targets.scale_summary import ensure_scale_indexes
-    await ensure_scale_indexes(pool)
+    # The loop indexes are built later, in the background, once the API serves
+    # (runtime/loop_scale_indexes.py, started by the API lifespan).
 
 
 class MissingBaseSchemaError(RuntimeError):

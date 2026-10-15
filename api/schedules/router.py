@@ -540,15 +540,21 @@ async def retry_schedule_at(
     )
 
 
-async def fetch_due_schedules(pool: Any, *, now: datetime) -> list[Any]:
+# Due schedules one scheduler tick dispatches, most overdue first; the rest stay due for the next.
+DUE_SCHEDULES_PER_TICK = 200
+
+
+async def fetch_due_schedules(pool: Any, *, now: datetime, limit: int = DUE_SCHEDULES_PER_TICK) -> list[Any]:
     """Read the due occurrences without pinning a connection across dispatch."""
     async with pool.acquire() as conn:
         return list(await conn.fetch(
             """SELECT s.*, t.url as target_url
                FROM schedules s
                JOIN targets t ON s.target_id = t.id
-               WHERE s.is_active = true AND t.is_active = true AND s.next_run_at <= $1""",
-            now,
+               WHERE s.is_active = true AND t.is_active = true AND s.next_run_at <= $1
+               ORDER BY s.next_run_at, s.id
+               LIMIT $2""",
+            now, max(1, int(limit)),
         ))
 
 

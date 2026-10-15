@@ -3119,6 +3119,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS` | `api/fleet_routes/router.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_PROBE_INTERVAL_MS` | `api/job_queue.py` |
 | `SHAKERSCAN_QUEUE_ROUTE_MAX` | `api/job_queue.py` |
+| `SHAKERSCAN_QUEUE_SCAN_MAX_ENTRIES` | `api/job_queue.py` |
 | `SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_RELEASE_MANIFEST` | `scanner/release_identity.py` |
 | `SHAKERSCAN_REQUEST_BUDGET_DOMAIN` | `scanner/scanner.py` |
