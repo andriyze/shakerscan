@@ -5,6 +5,7 @@ import { ArrowUpDown, ChevronDown, ChevronRight, Search, X } from 'lucide-react'
 import { API_URL } from '@/lib/api'
 import { bodyWithheldLabel } from '@/lib/archiveBodies.mjs'
 import { busyNotice, fetchRetryingBusy } from '@/lib/busyRetry.mjs'
+import { planPageMerge, resyncWindows } from '@/lib/huntArchiveSync.mjs'
 import { Button, Card, ErrorState } from '@/components/ui'
 import { MethodBadge } from '@/components/collections/CollectionViewer'
 
@@ -158,36 +159,65 @@ export function useHuntTransactions(huntId: string, version: number): HuntArchiv
     return () => { for (const controller of live) controller.abort(); live.clear() }
   }, [apply, huntId, loadFirst, track])
 
+  // Re-read the window the operator holds from the start and replace it (server order). Rows
+  // archived out of order (an overlapping action's requests land mid-list) make an offset read
+  // at the tail unreliable; see lib/huntArchiveSync.mjs.
+  const resync = useCallback(async (signal: AbortSignal) => {
+    const collected: HuntTransaction[] = []
+    let archive: Archive | null = null
+    for (const span of resyncWindows(rowsRef.current.length, { page: PAGE })) {
+      archive = await fetchPage(span.offset, span.limit, signal)
+      if (signal.aborted) return
+      const batch = archive.transactions || []
+      collected.push(...batch)
+      if (batch.length < span.limit) break
+    }
+    if (!archive) return
+    const seen = new Set<string>()
+    setFidelity({ value: archive.fidelity, detail: archive.fidelity_detail })
+    apply(collected.filter(row => (seen.has(row.id) ? false : (seen.add(row.id), true))), archive.total || 0)
+    setError(null)
+  }, [apply, fetchPage])
+
+  // A read at the tail (offset = rows held): append only when the plan says the rows add up.
+  const readTail = useCallback(async (signal: AbortSignal) => {
+    const held = rowsRef.current
+    const archive = await fetchPage(held.length, PAGE, signal)
+    if (signal.aborted) return
+    const nextTotal = archive.total || 0
+    setFidelity({ value: archive.fidelity, detail: archive.fidelity_detail })
+    const plan = planPageMerge({ held: rowsRef.current, page: archive.transactions || [], limit: PAGE, total: nextTotal })
+    if (plan.action === 'reload') { await loadFirst(signal); return }
+    if (plan.action === 'resync') { await resync(signal); return }
+    apply(plan.rows.length ? [...rowsRef.current, ...plan.rows] : rowsRef.current, nextTotal)
+    setError(null)
+  }, [apply, fetchPage, loadFirst, resync])
+
   const refresh = useCallback(async () => {
     if (!loadedOnce.current) return
     lastRefreshAt.current = Date.now()
     const { signal, done } = track()
     try {
-      const held = rowsRef.current
-      const atTail = held.length >= totalRef.current
-      // At the tail: the new requests themselves. Elsewhere: one row, for the new total.
-      const archive = await fetchPage(atTail ? held.length : 0, atTail ? PAGE : 1, signal)
+      if (rowsRef.current.length >= totalRef.current) {
+        // At the tail: the new requests themselves.
+        await readTail(signal)
+        return
+      }
+      // Not at the tail: one row, for the new total. Rows that arrived mid-list are caught by the
+      // next tail read (Load more), which resyncs when the counts no longer add up.
+      const archive = await fetchPage(0, 1, signal)
       if (signal.aborted) return
       const nextTotal = archive.total || 0
       setFidelity({ value: archive.fidelity, detail: archive.fidelity_detail })
-      if (nextTotal < rowsRef.current.length) {
-        await loadFirst(signal)
-        return
-      }
-      if (atTail) {
-        const seen = new Set(rowsRef.current.map(row => row.id))
-        const added = (archive.transactions || []).filter(row => !seen.has(row.id))
-        apply(added.length ? [...rowsRef.current, ...added] : rowsRef.current, nextTotal)
-      } else {
-        apply(rowsRef.current, nextTotal)
-      }
+      if (nextTotal < rowsRef.current.length) { await loadFirst(signal); return }
+      apply(rowsRef.current, nextTotal)
       setError(null)
     } catch {
       // A background refresh keeps the rows being read; the next version change tries again.
     } finally {
       done()
     }
-  }, [apply, fetchPage, loadFirst, track])
+  }, [apply, fetchPage, loadFirst, readTail, track])
 
   // The run recorded more work: refresh, at most once per ARCHIVE_REFRESH_MIN_MS and only while visible.
   const firstVersion = useRef(true)
@@ -195,7 +225,9 @@ export function useHuntTransactions(huntId: string, version: number): HuntArchiv
     if (firstVersion.current) { firstVersion.current = false; return }
     let timer: ReturnType<typeof setTimeout> | null = null
     const run = () => {
-      if (document.visibilityState === 'hidden') return
+      // Hidden when due (also when the throttle timer fires in a hidden tab): wait for the tab to
+      // show again, then refresh, so the final requests and total are never left unread.
+      if (document.visibilityState === 'hidden') { document.addEventListener('visibilitychange', run); return }
       document.removeEventListener('visibilitychange', run)
       const wait = lastRefreshAt.current + ARCHIVE_REFRESH_MIN_MS - Date.now()
       if (wait > 0) { timer = setTimeout(run, wait); return }
@@ -206,17 +238,16 @@ export function useHuntTransactions(huntId: string, version: number): HuntArchiv
     return () => { if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', run) }
   }, [refresh, version])
 
+  // Load more reads at the tail with the same plan, so it always makes progress: rows it already
+  // holds coming back (an insert before the offset) resync the window instead of appending nothing.
   const loadMore = useCallback(async () => {
     setLoading(true)
     const { signal, done } = track()
     try {
-      const archive = await fetchPage(rowsRef.current.length, PAGE, signal)
-      if (signal.aborted) return
-      const seen = new Set(rowsRef.current.map(row => row.id))
-      apply([...rowsRef.current, ...(archive.transactions || []).filter(row => !seen.has(row.id))], archive.total || 0)
+      await readTail(signal)
     } catch (cause) { if (!signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load more requests') }
     finally { done(); if (!signal.aborted) setLoading(false) }
-  }, [apply, fetchPage, track])
+  }, [readTail, track])
 
   return { rows, total, fidelity, loading, error, busy, loadMore }
 }

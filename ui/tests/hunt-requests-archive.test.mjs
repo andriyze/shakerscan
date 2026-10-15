@@ -17,11 +17,23 @@ test('the archive loads one page, never an automatic 1000-row loop', () => {
 })
 
 test('a version change reads only the new tail, or one row for the total', () => {
-  assert.match(panel, /const atTail = held\.length >= totalRef\.current/)
-  assert.match(panel, /fetchPage\(atTail \? held\.length : 0, atTail \? PAGE : 1, signal\)/)
-  // New rows are appended without duplicates; a purge (total below the rows held) reloads.
-  assert.match(panel, /filter\(row => !seen\.has\(row\.id\)\)/)
-  assert.match(panel, /if \(nextTotal < rowsRef\.current\.length\) \{\s*await loadFirst\(signal\)/)
+  assert.match(panel, /if \(rowsRef\.current\.length >= totalRef\.current\) \{\s*\/\/ At the tail[^\n]*\n\s*await readTail\(signal\)/)
+  assert.match(panel, /fetchPage\(held\.length, PAGE, signal\)/)
+  assert.match(panel, /fetchPage\(0, 1, signal\)/)
+  // A purge (total below the rows held) reloads.
+  assert.match(panel, /if \(nextTotal < rowsRef\.current\.length\) \{ await loadFirst\(signal\); return \}/)
+})
+
+// Review: rows archived out of order land mid-list, so an offset read at the tail could miss them
+// and Load more could re-fetch only rows it already held. Both now go through planPageMerge
+// (lib/huntArchiveSync.mjs, unit-tested there) and resync the held window when counts disagree.
+test('tail reads and Load more follow the merge plan and resync instead of appending blindly', () => {
+  assert.match(panel, /planPageMerge\(\{ held: rowsRef\.current, page: archive\.transactions \|\| \[\], limit: PAGE, total: nextTotal \}\)/)
+  assert.match(panel, /if \(plan\.action === 'resync'\) \{ await resync\(signal\); return \}/)
+  assert.match(panel, /if \(plan\.action === 'reload'\) \{ await loadFirst\(signal\); return \}/)
+  assert.match(panel, /for \(const span of resyncWindows\(rowsRef\.current\.length, \{ page: PAGE \}\)\)/)
+  const loadMore = panel.slice(panel.indexOf('const loadMore = useCallback'))
+  assert.match(loadMore.slice(0, 400), /await readTail\(signal\)/)
 })
 
 test('version-driven reads are throttled, skipped while hidden and aborted on unmount', () => {
@@ -29,6 +41,10 @@ test('version-driven reads are throttled, skipped while hidden and aborted on un
   assert.match(panel, /lastRefreshAt\.current \+ ARCHIVE_REFRESH_MIN_MS - Date\.now\(\)/)
   assert.match(panel, /document\.visibilityState === 'hidden'/)
   assert.match(panel, /addEventListener\('visibilitychange', run\)/)
+  // Review: a throttle timer that fires while the tab is hidden re-arms on visibilitychange instead
+  // of dropping the refresh (the final requests and total used to stay unread).
+  assert.match(panel, /if \(document\.visibilityState === 'hidden'\) \{ document\.addEventListener\('visibilitychange', run\); return \}/)
+  assert.doesNotMatch(panel, /if \(document\.visibilityState === 'hidden'\) return\n/)
   assert.match(panel, /for \(const controller of live\) controller\.abort\(\)/)
   assert.match(panel, /\{ cache: 'no-store', signal \}/)
 })
