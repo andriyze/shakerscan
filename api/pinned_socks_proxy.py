@@ -16,7 +16,7 @@ _REQUEST_LINE = re.compile(rb"^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|C
 _MAX_HEADER_BYTES = 64 * 1024
 # What one tunnel keeps of the cleartext request lines it relays, for the Scan's request archive.
 # Past it the lines are counted, not kept, and the archive says how many it lacks.
-MAX_TUNNEL_REQUEST_LINES = 2_000
+MAX_TUNNEL_REQUEST_LINES = 5_000
 _MAX_REQUEST_TARGET_CHARS = 2_048
 _MAX_HOST_CHARS = 255
 # Distinct destinations the tunnel refused, kept by name; any further ones are only counted.

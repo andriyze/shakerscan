@@ -1365,7 +1365,7 @@ target through a pinned tunnel that admits one host and port. Each tunnel a Scan
 as one `CONNECT` row (`capture.fidelity: pinned_tunnel`) under the Scan action's capability, with
 its destination, the frozen addresses it connected to, byte counts and any destination it refused;
 a cleartext tunnel also archives each request line it relayed (method, URL, `Host` header; no other
-headers, no bodies, fidelity `tunnel_request_line`, at most 2,000 per tunnel, the rest counted as
+headers, no bodies, fidelity `tunnel_request_line`, at most 5,000 per tunnel, the rest counted as
 dropped). An encrypted tunnel's requests are not readable, so its row proves only where the
 traffic went and keeps the archive `partial`. The stats name every `destinations` origin with its
 call count and the `refused_destinations`, so a Scan's scope can be checked from one read. Runs
