@@ -23293,3 +23293,32 @@ def test_submitted_routing_and_requeue_count_never_change_the_shard_options_dige
     base = {"scan_policy": {"x": 1}}
     marked = {**base, "queue_routing": {"placement": None, "parallel_worker_count": 3}, "queue_loss_requeues": 2}
     assert scan_job_options_digest(base) == scan_job_options_digest(marked)
+
+
+def test_results_listing_serialises_cache_access_across_threads(tmp_path):
+    # A cancelled /results request releases its asyncio lock while its listing thread still runs;
+    # the cache is guarded by a thread lock so two listings never mutate it at once.
+    import threading as _threading
+
+    operations_router = ops_router_module
+
+    for index in range(30):
+        folder = tmp_path / f"r{index}"
+        folder.mkdir()
+        (folder / "latest.json").write_text(json.dumps({"timestamp_utc": f"2026-10-14T00:00:{index:02d}Z"}))
+    errors: list[BaseException] = []
+
+    def listing():
+        try:
+            for _ in range(20):
+                operations_router._list_results_sync(tmp_path, 10)
+        except BaseException as exc:  # pragma: no cover - the failure being guarded against
+            errors.append(exc)
+
+    threads = [_threading.Thread(target=listing) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors
+    assert isinstance(operations_router._RESULT_SUMMARIES_LOCK, type(_threading.Lock()))
