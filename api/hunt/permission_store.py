@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS hunt_permission_requests (
     decision_choice_json JSONB,
     decision_key_sha256 TEXT,
     grant_id UUID,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (expires_at > created_at),
     CHECK ((status = 'pending') = (decided_at IS NULL))
 );
@@ -103,6 +104,35 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_hunt_permission_requests_pending_subject
     ON hunt_permission_requests(hunt_run_id, subject_digest) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_hunt_permission_requests_run
     ON hunt_permission_requests(hunt_run_id, created_at, id);
+DO $permission_updated_at$
+BEGIN
+    -- 2.11: requests written before updated_at existed take their last known change.
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'hunt_permission_requests'
+          AND column_name = 'updated_at'
+    ) THEN
+        ALTER TABLE hunt_permission_requests ADD COLUMN updated_at TIMESTAMPTZ;
+        UPDATE hunt_permission_requests SET updated_at = COALESCE(decided_at, created_at);
+        ALTER TABLE hunt_permission_requests
+            ALTER COLUMN updated_at SET DEFAULT NOW(), ALTER COLUMN updated_at SET NOT NULL;
+    END IF;
+END
+$permission_updated_at$;
+CREATE OR REPLACE FUNCTION hunt_permission_requests_touch() RETURNS trigger AS $touch$
+BEGIN
+    -- Every change to a request moves updated_at (what the cross-Hunt feed's since= reads),
+    -- including display-only changes, unless the statement set updated_at itself.
+    IF NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at THEN
+        NEW.updated_at := NOW();
+    END IF;
+    RETURN NEW;
+END
+$touch$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS hunt_permission_requests_touch ON hunt_permission_requests;
+CREATE TRIGGER hunt_permission_requests_touch
+    BEFORE UPDATE ON hunt_permission_requests
+    FOR EACH ROW EXECUTE FUNCTION hunt_permission_requests_touch();
 CREATE TABLE IF NOT EXISTS hunt_permission_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
@@ -740,23 +770,63 @@ async def expire_due_everywhere(conn: Any, *, hunt_id: Any = None, limit: int = 
     return len(rows)
 
 
+def proposal_needs_superseding(subject: Mapping[str, Any]) -> bool:
+    """Whether ``supersede_legacy_proposals`` would replace this pending proposal: one recorded
+    under IDNA 2003 whose hosts IDNA 2008 spells differently, or that names an invalid host.
+    The same tests, so a reader can tell without taking the Hunt lock."""
+    if subject.get("reapproval_of") or subject.get("supersedes"):
+        return False
+    allow = [str(item) for item in subject.get("allow") or ()]
+    try:
+        bounds: Bounds | None = parse_bounds(allow)
+    except ValueError:
+        bounds = None
+    if bounds is not None and subject.get("bounds_digest") == bounds.digest():
+        return False
+    return bounds is None or bool(legacy_host_changes(allow))
+
+
 async def hunts_to_reconcile(conn: Any, *, hunt_id: Any = None, limit: int = FEED_RECONCILE_HUNTS) -> list[uuid.UUID]:
-    """Open Hunts for which ``reconcile_host_encoding_if_needed`` has work: a pending proposal, or
-    a legacy pre-authorization row (both rare). The cross-Hunt read reconciles them first, as the
-    per-Hunt read does, so a legacy proposal is replaced before a person can approve it."""
-    rows = await conn.fetch(
-        """SELECT DISTINCT r.hunt_run_id AS hunt_id FROM hunt_permission_requests r
-           WHERE r.status='pending' AND r.kind=$1 AND ($2::uuid IS NULL OR r.hunt_run_id=$2)
-           UNION
-           SELECT DISTINCT p.hunt_run_id FROM hunt_preauthorizations p
-           JOIN hunt_runs h ON h.id = p.hunt_run_id
-           WHERE NOT (p.bounds_json ? 'host_canonicalization') AND h.status = ANY($3::text[])
-             AND ($2::uuid IS NULL OR p.hunt_run_id=$2)
-           LIMIT $4""",
-        KIND_PREAUTHORIZATION, uuid.UUID(str(hunt_id)) if hunt_id else None,
-        list(OPEN_HUNT_STATUSES), int(limit),
+    """Open Hunts the cross-Hunt read must reconcile first, as the per-Hunt read does, so a
+    legacy proposal is replaced before a person can approve it. Narrower than
+    ``reconcile_host_encoding_if_needed``, which locks a Hunt for any pending proposal: this
+    names only a Hunt with a proposal ``supersede_legacy_proposals`` would replace (checked here,
+    without a lock), or with a legacy pre-authorization row that has not been offered again yet.
+    A legacy row whose bounds all encode alike is never offered and keeps being named (rare:
+    an open Hunt pre-authorized before IDNA 2008 host handling)."""
+    hunt = uuid.UUID(str(hunt_id)) if hunt_id else None
+    found: list[uuid.UUID] = []
+    proposals = await conn.fetch(
+        """SELECT hunt_run_id, subject_json FROM hunt_permission_requests
+           WHERE status='pending' AND kind=$1 AND ($2::uuid IS NULL OR hunt_run_id=$2)
+             AND NOT (subject_json ? 'reapproval_of') AND NOT (subject_json ? 'supersedes')
+           ORDER BY created_at, id LIMIT $3""",
+        KIND_PREAUTHORIZATION, hunt, FEED_HOUSEKEEPING_BATCH,
     )
-    return [row["hunt_id"] for row in rows]
+    for row in proposals:
+        if row["hunt_run_id"] not in found and proposal_needs_superseding(_json(row["subject_json"], {})):
+            found.append(row["hunt_run_id"])
+    legacy = await conn.fetch(
+        """SELECT DISTINCT p.hunt_run_id FROM hunt_preauthorizations p
+           JOIN hunt_runs h ON h.id = p.hunt_run_id
+           WHERE NOT (p.bounds_json ? 'host_canonicalization') AND h.status = ANY($2::text[])
+             AND ($1::uuid IS NULL OR p.hunt_run_id=$1)
+             AND NOT EXISTS (SELECT 1 FROM hunt_permission_requests r
+                             WHERE r.hunt_run_id = p.hunt_run_id
+                               AND r.subject_json->>'reapproval_of' = p.id::text)
+           LIMIT $3""",
+        hunt, list(OPEN_HUNT_STATUSES), int(limit),
+    )
+    found += [row["hunt_run_id"] for row in legacy if row["hunt_run_id"] not in found]
+    return found[:limit]
+
+
+async def reconcile_hunt_host_encoding(conn: Any, hunt_id: Any) -> None:
+    """``reconcile_host_encoding`` under the Hunt row lock, in its own transaction."""
+    async with conn.transaction():
+        run = await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", uuid.UUID(str(hunt_id)))
+        if run is not None:
+            await reconcile_host_encoding(conn, dict(run))
 
 
 async def load_request(conn: Any, hunt_id: Any, request_id: Any, *, for_update: bool = False) -> dict[str, Any] | None:
@@ -948,18 +1018,15 @@ async def supersede_legacy_proposals(conn: Any, run: Mapping[str, Any]) -> list[
     )
     for row in rows:
         subject = _json(row["subject_json"], {})
-        if subject.get("reapproval_of") or subject.get("supersedes"):
+        # Recorded under IDNA 2003 but every host encodes alike is the same scope: kept.
+        if not proposal_needs_superseding(subject):
             continue
         allow = [str(item) for item in subject.get("allow") or ()]
         try:
             bounds: Bounds | None = parse_bounds(allow)
         except ValueError:
             bounds = None
-        if bounds is not None and subject.get("bounds_digest") == bounds.digest():
-            continue
         changed = legacy_host_changes(allow)
-        if bounds is not None and not changed:
-            continue  # recorded under IDNA 2003, but every host encodes alike: the same scope
         fresh = None
         if bounds is not None:
             fresh, _created = await raise_request(
@@ -1028,7 +1095,8 @@ def covering_preauthorization(rows: list[dict[str, Any]], predicate: Any) -> dic
 __all__ = [
     "DECISION_VIA", "DENIAL_COOLDOWN", "EVENTS", "HUNT_ACTION_STATUSES", "HUNT_PERMISSION_SCHEMA_SQL",
     "MAX_PENDING_PER_HUNT", "OPEN_HUNT_STATUSES", "PREAUTHORIZATION_PROOFS", "REQUEST_STATUSES", "canonical_digest", "cooldown_identity",
-    "covering_preauthorization", "expire_due", "expire_due_everywhere", "hunt_bounds", "hunts_to_reconcile", "hunt_deadline", "list_events",
+    "covering_preauthorization", "expire_due", "expire_due_everywhere", "hunt_bounds", "hunts_to_reconcile",
+    "proposal_needs_superseding", "reconcile_hunt_host_encoding", "hunt_deadline", "list_events",
     "list_grants", "list_requests", "live_credential_grants", "load_preauthorizations", "load_request",
     "offer_reapproval", "pending_summary", "reconcile_host_encoding", "reconcile_host_encoding_if_needed",
     "supersede_legacy_proposals",

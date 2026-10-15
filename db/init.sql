@@ -1117,6 +1117,7 @@ CREATE TABLE IF NOT EXISTS hunt_permission_requests (
     decision_choice_json JSONB,
     decision_key_sha256 TEXT,
     grant_id UUID,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (expires_at > created_at),
     CHECK ((status = 'pending') = (decided_at IS NULL))
 );
@@ -1124,6 +1125,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_hunt_permission_requests_pending_subject
     ON hunt_permission_requests(hunt_run_id, subject_digest) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_hunt_permission_requests_run
     ON hunt_permission_requests(hunt_run_id, created_at, id);
+CREATE OR REPLACE FUNCTION hunt_permission_requests_touch() RETURNS trigger AS $touch$
+BEGIN
+    -- Every change to a request moves updated_at (what the cross-Hunt feed's since= reads),
+    -- including display-only changes, unless the statement set updated_at itself.
+    IF NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at THEN
+        NEW.updated_at := NOW();
+    END IF;
+    RETURN NEW;
+END
+$touch$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS hunt_permission_requests_touch ON hunt_permission_requests;
+CREATE TRIGGER hunt_permission_requests_touch
+    BEFORE UPDATE ON hunt_permission_requests
+    FOR EACH ROW EXECUTE FUNCTION hunt_permission_requests_touch();
 CREATE TABLE IF NOT EXISTS hunt_permission_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,

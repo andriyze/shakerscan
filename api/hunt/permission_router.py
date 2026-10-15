@@ -27,6 +27,7 @@ from .permission_store import (
     expire_due,
     expire_due_everywhere,
     hunts_to_reconcile,
+    reconcile_hunt_host_encoding,
     list_events,
     list_grants,
     list_requests,
@@ -183,8 +184,9 @@ PERMISSION_REQUEST_FEED = ListSpec(
     default_sort="created_at",
     fields={name: f"r.{name}" for name in _FEED_COLUMNS},
     id_expr="r.id",
-    # A request changes when it is raised and when it is decided, expired or withdrawn.
-    since_expr="COALESCE(r.decided_at, r.created_at)",
+    # Moved by a trigger on every change: raised, decided, expired, withdrawn, and display-only
+    # changes (merged counters, a withheld auto-grant note).
+    since_expr="r.updated_at",
     table="hunt_permission_requests",
 )
 
@@ -220,7 +222,7 @@ async def list_permission_request_feed(page: Page, *, status: str | None, hunt_i
         async with conn.transaction():
             await expire_due_everywhere(conn, hunt_id=hunt_uuid)
         for hunt in await hunts_to_reconcile(conn, hunt_id=hunt_uuid):
-            await reconcile_host_encoding_if_needed(conn, hunt)
+            await reconcile_hunt_host_encoding(conn, hunt)
         generated_at = await snapshot_time(conn)  # before the page query (list_contract)
         rows = await conn.fetch(
             f"SELECT {plan.select_list} FROM hunt_permission_requests r"
