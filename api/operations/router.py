@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import threading
 from typing import Any, Callable, Literal, Mapping, Optional
 import urllib.parse
 import uuid
@@ -798,6 +799,9 @@ async def clear_queue(include_retests: bool = False):
 RESULTS_PARSE_BUDGET = 1000
 _RESULT_SUMMARIES: dict[str, tuple[tuple[int, int], dict[str, Any] | None]] = {}
 _RESULTS_LOCK = asyncio.Lock()
+# The listing runs in a thread that outlives a cancelled request (and its asyncio lock), so the
+# cache itself is guarded by a thread lock.
+_RESULT_SUMMARIES_LOCK = threading.Lock()
 
 
 def _latest_result_files(results_dir: Any) -> list[tuple[tuple[int, int], str, str]]:
@@ -832,6 +836,11 @@ def _result_summary(folder: str, path: str) -> dict[str, Any] | None:
 
 
 def _list_results_sync(results_dir: Any, limit: int) -> dict[str, Any]:
+    with _RESULT_SUMMARIES_LOCK:
+        return _list_results_locked(results_dir, limit)
+
+
+def _list_results_locked(results_dir: Any, limit: int) -> dict[str, Any]:
     if not results_dir.exists():
         return {'results': [], 'count': 0}
     files = _latest_result_files(results_dir)
