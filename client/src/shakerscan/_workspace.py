@@ -70,6 +70,22 @@ def _parts(relative: str) -> list[str]:
     return list(parts)
 
 
+def _private_directory(fd: int) -> None:
+    """D4: the workspace holds Hunt notes and records; every directory in it is the owner's
+    alone (0700), as the workspace itself is. A directory an older client made 0755 is tightened
+    when it is next written through; one owned by someone else is left as it is."""
+    with contextlib.suppress(OSError):
+        status = os.fstat(fd)
+        if status.st_uid == os.geteuid() and status.st_mode & 0o077:
+            os.fchmod(fd, status.st_mode & 0o700)
+
+
+def _private_path(path: Path) -> None:
+    status = path.lstat()
+    if stat.S_ISDIR(status.st_mode) and status.st_uid == os.geteuid() and status.st_mode & 0o077:
+        os.chmod(path, status.st_mode & 0o700)
+
+
 class Root:
     """A workspace directory. Every file is written as a new file (a fresh inode, its mode set
     before it is renamed into place), so a hard link at the destination is replaced, never
@@ -85,7 +101,7 @@ class Root:
             for index, part in enumerate(parts):
                 if create:
                     with contextlib.suppress(FileExistsError):
-                        os.mkdir(part, 0o755, dir_fd=fd)
+                        os.mkdir(part, 0o700, dir_fd=fd)
                 try:
                     child = os.open(part, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
                 except FileNotFoundError:
@@ -95,6 +111,8 @@ class Root:
                     raise WorkspaceError(
                         f"{self.path / where} is not a plain directory (a symbolic link?); nothing more "
                         "was written there") from exc
+                if create:
+                    _private_directory(child)
                 os.close(fd)
                 fd = child
         except BaseException:
@@ -106,7 +124,10 @@ class Root:
         parts = _parts(relative)
         if not SAFE_CALLS:
             target = self.path.joinpath(*parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            for index in range(1, len(parts)):
+                with contextlib.suppress(OSError):
+                    _private_path(self.path.joinpath(*parts[:index]))
             fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
             try:
                 with os.fdopen(fd, "wb") as handle:

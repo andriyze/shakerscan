@@ -983,3 +983,22 @@ def test_the_real_home_guard_notices_a_write(tmp_path):
     before = client_home_snapshot(home)
     (home / ".local" / "state" / "shakerscan" / "leak.json").write_text("{}", encoding="utf-8")
     assert client_home_snapshot(home) != before
+
+
+@pytest.mark.parametrize("safe_calls", [True, False])
+def test_d4_every_workspace_subdirectory_is_the_owners_alone(tmp_path, monkeypatch, safe_calls):
+    monkeypatch.setattr(_workspace, "SAFE_CALLS", safe_calls and _workspace.SAFE_CALLS)
+    workspace = tmp_path / "ws"
+    workspace.mkdir(mode=0o700)
+    root = _workspace.Root(workspace.resolve())
+    root.write("notes/hunts/a/record.md", b"x\n")
+    for part in ("notes", "notes/hunts", "notes/hunts/a"):
+        assert ((workspace / part).stat().st_mode & 0o777) == 0o700, part
+    # A directory an older client made 0755 is tightened when it is next written through.
+    (workspace / "notes" / "hunts").chmod(0o755)
+    (workspace / "older").mkdir(mode=0o755)
+    (workspace / "older").chmod(0o755)
+    root.write("notes/hunts/b.md", b"y\n")
+    root.write("older/c.md", b"z\n")
+    assert ((workspace / "notes" / "hunts").stat().st_mode & 0o777) == 0o700
+    assert ((workspace / "older").stat().st_mode & 0o777) == 0o700
