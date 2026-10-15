@@ -37,8 +37,9 @@ const QUEUE_REFRESH_MS = 15000
 const WORKERS_REFRESH_MS = 30000
 const GUNGNIR_REFRESH_MS = 60000
 const OVERVIEW_REFRESH_MS = 60000
-// Exposure metrics and cohort counts come from the server over the full asset set; the assets
-// themselves are only read to scope recent rows to a cohort, so one bounded page is enough.
+// Exposure metrics and cohort counts come from the server over the full asset set (the list/v1
+// page's summary); the assets themselves are only read to scope recent rows to a cohort, so one
+// bounded page (the list/v1 maximum) is enough.
 const EXPOSURE_PAGE = 200
 // Coverage card: the domains with the most findings, a few members each (list/v1 pages).
 const COVERAGE_GROUPS = 50
