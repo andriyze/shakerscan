@@ -3998,6 +3998,7 @@ except ModuleNotFoundError:
 try:
     from gateway_identity import GatewayIdentityMiddleware, capture_key as _capture_gateway_identity_key
     from host_guard import configure_host_guard
+    from list_etag import ListETagMiddleware
     from request_guards import configure_request_guards
     from public_api_contract import (
         PublicV2BodyLimitMiddleware,
@@ -4011,6 +4012,7 @@ try:
 except ModuleNotFoundError:
     from api.gateway_identity import GatewayIdentityMiddleware, capture_key as _capture_gateway_identity_key
     from api.host_guard import configure_host_guard
+    from api.list_etag import ListETagMiddleware
     from api.request_guards import configure_request_guards
     from api.public_api_contract import (
         PublicV2BodyLimitMiddleware,
@@ -7256,7 +7258,8 @@ _cors_kwargs: dict[str, Any] = {
     # canonical V2 endpoint admitted the request. CORS hides non-safelisted
     # response headers unless they are explicitly exposed. Retry-After tells the
     # archive views how long to wait when every export slot is busy (a 503).
-    "expose_headers": ["x-shakerscan-hunt-contract", "retry-after"],
+    # ETag lets the UI's read layer revalidate polled lists with If-None-Match (list_etag.py).
+    "expose_headers": ["x-shakerscan-hunt-contract", "retry-after", "etag", "deprecation"],
 }
 # Optional regex for dynamic remote origins (e.g. a Tailscale MagicDNS name) without listing each.
 _cors_regex = os.environ.get("SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX", "").strip()
@@ -7268,6 +7271,9 @@ if _cors_regex:
 # and let the origin guard sit inside the replay so a disallowed browser origin could still replay.
 
 
+# Innermost: weak ETags and 304s on the polled list reads (list_etag.py); route functions still
+# return plain data to their in-process callers.
+app.add_middleware(ListETagMiddleware)
 app.add_middleware(LegacyHuntIsolationMiddleware)
 app.add_middleware(PublicV2IdempotencyMiddleware)
 app.add_middleware(PublicV2BodyLimitMiddleware)
