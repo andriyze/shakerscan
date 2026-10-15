@@ -364,7 +364,7 @@ class IndexConn:
 
 def test_loop_indexes_build_concurrently_and_rebuild_an_interrupted_build():
     # One builder for every bounded list's indexes: the loop indexes and the findings list's.
-    names = [name for name, _table, _definition, _extension in loop_scale_indexes.scale_indexes()]
+    names = [name for name, _table, _definition in loop_scale_indexes.LOOP_SCALE_INDEXES]
     assert {"idx_findings_severity_keyset", "idx_findings_title_trgm"} <= set(names)
     states = {name: True for name in names}
     states[names[0]] = False  # an interrupted CONCURRENTLY build leaves an invalid index

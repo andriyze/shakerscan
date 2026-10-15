@@ -150,10 +150,10 @@ FINDINGS_TRGM_INDEXES: tuple[tuple[str, str], ...] = (
 )
 
 
-#: What the background builder builds: (name, table, definition, required extension or None).
-FINDINGS_SCALE_INDEXES: tuple[tuple[str, str, str, str | None], ...] = (
-    *((name, "findings", definition, None) for name, definition in FINDINGS_LIST_INDEXES),
-    *((name, "findings", definition, "pg_trgm") for name, definition in FINDINGS_TRGM_INDEXES),
+#: What the background builder (runtime/loop_scale_indexes.py) builds: (name, table, definition);
+#: the trigram ones only when pg_trgm is available.
+FINDINGS_SCALE_INDEXES: tuple[tuple[str, str, str], ...] = tuple(
+    (name, "findings", definition) for name, definition in (*FINDINGS_LIST_INDEXES, *FINDINGS_TRGM_INDEXES)
 )
 
 

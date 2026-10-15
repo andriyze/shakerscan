@@ -72,6 +72,7 @@ except ModuleNotFoundError:
     from api import loop_leader
 from runtime.loop_scale_indexes import build_loop_scale_indexes_in_background
 from finding_routes.list_schema import repair_severity_rank_in_background
+from targets.scale_summary import summary_compactor as _summary_compactor
 from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
 from scan.finding_reconciliation import reconcile_legacy_finding_row
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
@@ -3971,6 +3972,7 @@ lifespan = create_api_lifespan(ApiLifecycleDependencies(
             "model_intake_automatic_review_runner",
             lambda pool: model_intake_automatic_review_runner(pool),
         ),
+        ("summary_compactor", lambda pool: _summary_compactor(pool)),
     ),
     background_maintenance=(
         ("loop_scale_indexes", lambda pool: build_loop_scale_indexes_in_background(pool)),

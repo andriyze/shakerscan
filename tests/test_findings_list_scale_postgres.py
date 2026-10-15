@@ -665,7 +665,7 @@ def test_a_page_reads_a_page_of_rows_from_an_index(monkeypatch):
 
 # --- the upgrade migration -------------------------------------------------------------------------
 
-LIST_INDEX_NAMES = [name for name, _table, _definition, _extension in list_schema.FINDINGS_SCALE_INDEXES]
+LIST_INDEX_NAMES = [name for name, _table, _definition in list_schema.FINDINGS_SCALE_INDEXES]
 
 
 async def _definitions(conn) -> dict[str, str]:

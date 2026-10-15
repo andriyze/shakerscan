@@ -1,15 +1,25 @@
 """Canonical target inventory routes. Connected Devices is a projection of these IDs."""
 from __future__ import annotations
 
+from datetime import datetime
 import json
 from typing import Any, Literal
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .asset_migration import host_url
+from .asset_inventory import DEFAULT_MEMBER_LIMIT, MAX_MEMBER_LIMIT, list_assets_v1
 from .asset_store import asset_detail, asset_history, list_assets, resolve_asset_id
+
+try:
+    from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from list_contract import CURSOR_MAX_LENGTH
+except ModuleNotFoundError:
+    from ..list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from ..list_contract import CURSOR_MAX_LENGTH
 
 router = APIRouter(tags=['targets'])
 _pool_provider: Any = None
@@ -53,7 +63,8 @@ class DeviceProfileCreate(BaseModel):
 
 
 @router.get('/targets/inventory')
-async def target_inventory(search: str = Query('', max_length=500), connected_only: bool = False,
+async def target_inventory(response: Response = None,
+                           search: str = Query('', max_length=500), connected_only: bool = False,
                            include_inactive: bool = False, include_services: bool = False,
                            group_by: Literal['domain'] | None = None,
                            asset_type: Literal['web','network'] | None = None,
@@ -61,10 +72,38 @@ async def target_inventory(search: str = Query('', max_length=500), connected_on
                            authorization: Literal['authorized','unauthorized'] | None = None,
                            findings: Literal['any','critical_high','none'] | None = None,
                            activity: Literal['never','scanned','scanning'] | None = None,
-                           sort: Literal['name','risk','recent','created'] = 'name',
+                           sort: Literal['name','risk','recent','created',
+                                         '-name','-risk','-recent','-created'] = 'name',
                            include_facets: bool = False,
-                           limit: int = Query(100, ge=1, le=500),
-                           offset: int = Query(0, ge=0)):
+                           limit: int | None = Query(None, ge=1, le=500),
+                           offset: int = Query(0, ge=0),
+                           cursor: str | None = Query(None, max_length=CURSOR_MAX_LENGTH),
+                           fields: str | None = Query(None, max_length=2048),
+                           count: Literal['none', 'estimate', 'exact'] | None = None,
+                           since: datetime | None = None,
+                           member_limit: int = Query(DEFAULT_MEMBER_LIMIT, ge=1, le=MAX_MEMBER_LIMIT)):
+    """The target inventory.
+
+    list/v1 (any of ``cursor``/``count``/``fields``/``since``): keyset pages of assets, or with
+    ``group_by=domain`` of domain groups with at most ``member_limit`` assets each; ``sort`` takes
+    ``-`` to descend. Otherwise the deprecated limit/offset response (``sort`` names its own
+    direction: name ascending, the others descending)."""
+    limit, cursor, fields, count, since, member_limit = (direct(value) for value in (
+        limit, cursor, fields, count, since, member_limit))
+    if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
+        page = v1_page(limit=limit, cursor=cursor, sort=sort, fields=fields, count=count, since=since)
+        async with pool().acquire() as conn:
+            return await list_assets_v1(
+                conn, page, search=search, connected_only=connected_only,
+                include_inactive=include_inactive, include_services=include_services, group_by=group_by,
+                asset_type=asset_type, environment=environment, authorization=authorization,
+                findings=findings, activity=activity, member_limit=member_limit,
+                include_facets=include_facets,
+            )
+    if sort.startswith('-'):
+        raise HTTPException(400, 'A "-" sort is list/v1 only; add count=none (or a cursor) to use it')
+    limit = 100 if limit is None else limit
+    mark_deprecated(response)
     async with pool().acquire() as conn:
         return await list_assets(conn, search=search, connected_only=connected_only,
                                  include_inactive=include_inactive, include_services=include_services,
