@@ -96,13 +96,17 @@ def _client_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path:
     """The client's ``state`` or ``data`` directory, first match wins:
 
     1. ``$SHAKERSCAN_STATE_DIR`` / ``$SHAKERSCAN_DATA_DIR`` (must be absolute, and not ``/``);
-    2. ``$XDG_STATE_HOME/shakerscan`` / ``$XDG_DATA_HOME/shakerscan`` (ignored unless absolute,
-       as the XDG specification says);
-    3. with ``$SHAKERSCAN_CONFIG_DIR`` set (an isolated profile), beside it:
+    2. with ``$SHAKERSCAN_CONFIG_DIR`` set (an isolated profile), beside it:
        ``<config dir>.state`` / ``<config dir>.data``, so the profile stays isolated and the agent
        workspace stays outside the directory that holds the token;
+    3. ``$XDG_STATE_HOME/shakerscan`` / ``$XDG_DATA_HOME/shakerscan`` (ignored unless absolute,
+       as the XDG specification says);
     4. ``~/.local/state/shakerscan`` / ``~/.local/share/shakerscan`` (macOS too, as for
        ``config_dir``).
+    The profile comes before XDG: ``XDG_STATE_HOME``/``XDG_DATA_HOME`` are set once for the whole
+    user session, so with them first every profile shared one default agent workspace (whose
+    MCP configuration names the instance of whichever profile launched last) and one set of
+    workspace records.
     A value that cannot be used is a ClientError naming the variable to set."""
     environ = os.environ if environ is None else environ
     explicit, xdg, fallback = {
@@ -117,9 +121,6 @@ def _client_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path:
             raise ClientError(f"{explicit}={value} cannot hold the client's {kind}; set {explicit} to an absolute "
                               "directory other than /")
         return Path(value)
-    value = environ.get(xdg) or ""
-    if value and Path(value).is_absolute():
-        return Path(value) / "shakerscan"
     if environ.get(ENV_CONFIG_DIR):
         isolated = config_dir(environ)
         if not isolated.is_absolute() or not isolated.name or isolated.name in {".", ".."}:
@@ -128,6 +129,9 @@ def _client_dir(kind: str, environ: Mapping[str, str] | None = None) -> Path:
                 f"directory; set {explicit} to an absolute directory"
             )
         return isolated.with_name(f"{isolated.name}.{kind}")
+    value = environ.get(xdg) or ""
+    if value and Path(value).is_absolute():
+        return Path(value) / "shakerscan"
     return Path.home().joinpath(*fallback) / "shakerscan"
 
 

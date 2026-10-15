@@ -179,7 +179,7 @@ def _json(path):
 
 
 def _record(tmp_path, workspace):
-    return _workspace.state_path(tmp_path / "state" / "shakerscan" / "workspaces", workspace)
+    return _workspace.state_path(tmp_path / "cfg.state" / "workspaces", workspace)
 
 
 # --- L3: merged, not rewritten -----------------------------------------------------------------
@@ -521,14 +521,15 @@ def test_the_record_lives_in_the_state_directory_and_the_default_workspace_in_th
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
     assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
     out = capsys.readouterr().out
-    workspace = tmp_path / "data" / "shakerscan" / "agent"  # $XDG_DATA_HOME/shakerscan/agent
+    workspace = tmp_path / "cfg.data" / "agent"  # beside the profile, not $XDG_DATA_HOME
     assert f"workspace: {workspace} (" in out
-    assert _record(tmp_path, workspace).is_file()  # $XDG_STATE_HOME/shakerscan/workspaces
+    assert _record(tmp_path, workspace).is_file()  # <profile>.state/workspaces
+    assert not (tmp_path / "state").exists() and not (tmp_path / "data").exists()
     assert not (tmp_path / "cfg" / "agent").exists() and not (tmp_path / "cfg" / "workspaces").exists()
 
 
 def test_the_directory_precedence(tmp_path, monkeypatch):
-    """Explicit SHAKERSCAN_STATE_DIR/DATA_DIR, then XDG, then beside SHAKERSCAN_CONFIG_DIR, then
+    """Explicit SHAKERSCAN_STATE_DIR/DATA_DIR, then beside SHAKERSCAN_CONFIG_DIR, then XDG, then
     the defaults; each must be absolute."""
     monkeypatch.setenv("SHAKERSCAN_STATE_DIR", str(tmp_path / "explicit-state"))
     monkeypatch.setenv("SHAKERSCAN_DATA_DIR", str(tmp_path / "explicit-data"))
@@ -538,22 +539,42 @@ def test_the_directory_precedence(tmp_path, monkeypatch):
         cli.state_dir()
     monkeypatch.delenv("SHAKERSCAN_STATE_DIR")
     monkeypatch.delenv("SHAKERSCAN_DATA_DIR")
+    # An isolated profile wins over XDG, which is set for the whole session.
+    assert cli.state_dir() == tmp_path / "cfg.state" and cli.data_dir() == tmp_path / "cfg.data"
+    assert cli.default_workspace() == tmp_path / "cfg.data" / "agent"
+    monkeypatch.delenv(cli.ENV_CONFIG_DIR)
     assert cli.state_dir() == tmp_path / "state" / "shakerscan"  # XDG
     assert cli.default_workspace() == tmp_path / "data" / "shakerscan" / "agent"
     monkeypatch.setenv("XDG_STATE_HOME", "relative/path")  # not absolute: ignored, as XDG says
     monkeypatch.delenv("XDG_DATA_HOME")
-    assert cli.state_dir() == tmp_path / "cfg.state" and cli.data_dir() == tmp_path / "cfg.data"  # beside the profile
-    monkeypatch.delenv(cli.ENV_CONFIG_DIR)
-    monkeypatch.delenv("XDG_STATE_HOME")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert cli.state_dir() == tmp_path / "home" / ".local" / "state" / "shakerscan"
     assert cli.default_workspace() == tmp_path / "home" / ".local" / "share" / "shakerscan" / "agent"
 
 
+def test_two_profiles_under_one_xdg_session_share_no_state_or_workspace(tmp_path, monkeypatch, capsys):
+    """Entry point: ``shakerscan agent`` for two isolated profiles (two instances) in one login
+    session with XDG_STATE_HOME/XDG_DATA_HOME set. Both used to resolve to the same
+    $XDG_DATA_HOME/shakerscan/agent, so the second launch rewrote the first profile's workspace to
+    point at its own instance, and both kept their records in one directory."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    seen = {}
+    for name, url in (("alpha", URL), ("beta", "http://192.168.1.60:8080")):
+        monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / name))
+        assert cli.main(["agent", "--url", url, "--no-launch"]) == 0
+        out = capsys.readouterr().out
+        workspace = tmp_path / f"{name}.data" / "agent"
+        assert f"workspace: {workspace} (" in out
+        assert _workspace.state_path(tmp_path / f"{name}.state" / "workspaces", workspace).is_file()
+        seen[name] = (workspace / "opencode.json").read_text(encoding="utf-8")
+    assert URL in seen["alpha"] and "192.168.1.60" not in seen["alpha"]
+    assert "192.168.1.60" in seen["beta"]
+    assert not (tmp_path / "state" / "shakerscan").exists() and not (tmp_path / "data" / "shakerscan").exists()
+
+
 @pytest.mark.parametrize("value", ["/", "relative/cfg"])
 def test_a_config_dir_without_a_usable_sibling_names_the_variable_to_set(monkeypatch, value):
-    monkeypatch.delenv("XDG_STATE_HOME")
-    monkeypatch.setenv(cli.ENV_CONFIG_DIR, value)
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, value)  # refused even with XDG_STATE_HOME set
     with pytest.raises(cli.ClientError, match="set SHAKERSCAN_STATE_DIR to an absolute directory"):
         cli.state_dir()
 
@@ -571,7 +592,7 @@ def test_an_existing_state_directory_left_open_is_tightened_to_owner_only(tmp_pa
     """0.8.1 and earlier could leave ~/.local/state/shakerscan at 0755 (a umask, or created before
     the client set modes); starting the agent tightens the state directory it owns to 0700."""
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
-    state = tmp_path / "state" / "shakerscan"
+    state = tmp_path / "cfg.state"
     (state / "workspaces").mkdir(parents=True)
     state.chmod(0o755)
     (state / "workspaces").chmod(0o755)
@@ -597,14 +618,13 @@ def test_an_explicit_state_directory_and_a_linked_one_keep_their_mode(tmp_path, 
     target = tmp_path / "elsewhere"
     target.mkdir()
     target.chmod(0o755)
-    (tmp_path / "state").mkdir()
-    (tmp_path / "state" / "shakerscan").symlink_to(target, target_is_directory=True)
+    (tmp_path / "cfg.state").symlink_to(target, target_is_directory=True)
     cli.ensure_client_dir("state")
     assert (target.stat().st_mode & 0o777) == 0o755
 
 
 def test_a_state_directory_another_user_owns_is_not_changed(tmp_path, monkeypatch):
-    state = tmp_path / "state" / "shakerscan"
+    state = tmp_path / "cfg.state"
     state.mkdir(parents=True)
     state.chmod(0o755)
     owner = os.getuid() if hasattr(os, "getuid") else 0
@@ -643,7 +663,7 @@ def test_an_existing_default_workspace_and_its_record_move_once(tmp_path, monkey
 
     assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
     out = capsys.readouterr().out
-    new = tmp_path / "data" / "shakerscan" / "agent"
+    new = tmp_path / "cfg.data" / "agent"
     assert f"moved:     the default agent workspace from {old} to {new} (and its record)" in out, out
     assert "moved:     2 workspace record(s) from" in out
     assert not old.exists() and _json(new / "opencode.json")["permission"] == {"bash": {"env": "deny"}}
@@ -671,7 +691,7 @@ def test_an_old_default_workspace_that_is_a_link_is_not_moved(tmp_path, monkeypa
 def test_an_old_default_workspace_is_not_moved_over_a_new_one(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
     (tmp_path / "cfg" / "agent").mkdir(parents=True)
-    (tmp_path / "data" / "shakerscan" / "agent").mkdir(parents=True)
+    (tmp_path / "cfg.data" / "agent").mkdir(parents=True)
     assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
     assert "an old default workspace remains at" in capsys.readouterr().out
     assert (tmp_path / "cfg" / "agent").is_dir()
