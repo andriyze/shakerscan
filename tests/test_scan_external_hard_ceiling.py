@@ -263,3 +263,34 @@ def test_crawl_spends_its_reserved_request_budget():
     )
     for name, amount in small_plan.hard_budget_dict.items():
         assert amount <= small[name], (name, amount, small[name])
+
+
+def test_release_wire_gate_runs_an_active_nuclei_attempt_with_both_ceilings(monkeypatch):
+    """The active template batch had no wire case. The gate now resolves the reviewed active
+    allowlist from the image's pinned bundle (here: the fixture templates) with state-changing
+    HTTP authorized, and the launch plan bounds HTTP and state-changing requests by the
+    per-endpoint reservation a Scan uses."""
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "nuclei_templates"
+    monkeypatch.setattr(external_wire_acceptance, "nuclei_templates_directory", lambda: str(fixtures))
+    case = external_wire_acceptance.active_nuclei_case()
+    assert case["case"] == "nuclei_active"
+    assert case["options"]["template_profile"] == "active"
+    assert case["budget"] == {
+        "http_requests": 120, "state_changing_requests": 120, "tool_wall_seconds": 45,
+    }
+    plan = agent_tools.build_enforced_scanner_plan(
+        "nuclei", "http://app.example.test:8080/", dict(case["options"]),
+        reserved_budget=dict(case["budget"]), pinned_address="192.0.2.10",
+        pinned_proxy_url="socks5://127.0.0.1:41000", runtime_paths={},
+    )
+    hard = plan.hard_budget_dict
+    assert 0 < hard["http_requests"] <= 120
+    if case["options"]["nuclei_active_state_changing"]:
+        assert 0 < hard["state_changing_requests"] <= hard["http_requests"]
+    assert "-id" in plan.argv
+
+
+def test_the_active_wire_case_fails_closed_without_a_template_index(monkeypatch, tmp_path):
+    monkeypatch.setattr(external_wire_acceptance, "nuclei_templates_directory", lambda: str(tmp_path))
+    with pytest.raises(RuntimeError, match="did not resolve"):
+        external_wire_acceptance.active_nuclei_case()
