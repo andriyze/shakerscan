@@ -4163,11 +4163,6 @@ export async function getScans(params?: {
   include_shards?: boolean
   include_internal?: boolean
   include_model_intake?: boolean
-  /**
-   * `none` for a poll that keeps the total it already has: an engine with list/v1 on /scans then
-   * skips the count query; an older one ignores the parameter.
-   */
-  count?: 'none' | 'exact'
 }, signal?: AbortSignal): Promise<ScansPage> {
   const searchParams = new URLSearchParams()
   if (params?.status) searchParams.set('status', params.status)
@@ -4180,7 +4175,8 @@ export async function getScans(params?: {
   if (params?.include_shards) searchParams.set('include_shards', 'true')
   if (params?.include_internal) searchParams.set('include_internal', 'true')
   if (params?.include_model_intake) searchParams.set('include_model_intake', 'true')
-  if (params?.count === 'none') searchParams.set('count', 'none')
+  // No list/v1 opt-in (count/cursor) here: /scans serves only limit/offset pages today, and the
+  // opt-in would change the response to cursor pages under offset-based pagination.
 
   const body = await getJson(`${API_URL}/scans?${searchParams}`, { signal, label: 'Failed to fetch scans' })
   if (isListV1<Scan>(body)) {

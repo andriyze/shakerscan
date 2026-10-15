@@ -8,7 +8,8 @@
  *   from the cached body. Endpoints without ETags behave exactly as before.
  * - Stale-while-revalidate: `peek(url)` returns the last body (and its age) so a page can paint
  *   it at once while `getJson` revalidates; `maxAgeMs` answers from the cache without a request
- *   while the entry is younger than that.
+ *   while the entry is younger than that. Bodies are retained only where they are reused (an
+ *   ETag was sent, or the read asked for `maxAgeMs`), so plain reads hold no memory.
  * - Busy: heavy reads wait out 429/503 + Retry-After (busyRetry.mjs); a refusal that survives
  *   the retries is an `ApiError` carrying `retryAfter`, which the poller turns into backoff.
  */
@@ -72,6 +73,8 @@ export function createFetchLayer({
   /** url -> { promise, controller, waiters } */
   const inflight = new Map()
   const stats = { network: 0, deduped: 0, notModified: 0, cached: 0 }
+  // Bumped by invalidate(): a read that started before it never writes its answer to the cache.
+  let epoch = 0
 
   function remember(url, entry) {
     cache.delete(url)
@@ -85,7 +88,8 @@ export function createFetchLayer({
     return { body: entry.body, ageMs: Math.max(0, now() - entry.at), etag: entry.etag || null }
   }
 
-  async function request(url, { heavy, init, label, controller, onBusy }) {
+  async function request(url, { heavy, init, label, controller, onBusy, retain }) {
+    const started = epoch
     const entry = cache.get(url)
     const headers = new Headers(init?.headers || undefined)
     if (entry?.etag) headers.set('If-None-Match', entry.etag)
@@ -96,13 +100,16 @@ export function createFetchLayer({
       : await fetchImpl(url, requestInit)
     if (response.status === 304 && entry) {
       stats.notModified += 1
-      remember(url, { ...entry, at: now() })
+      // An entry invalidated while this read was out stays gone (the 304 answered the old ETag).
+      if (started === epoch && cache.get(url) === entry) remember(url, { ...entry, at: now() })
       return entry.body
     }
     if (!response.ok) throw await failure(response, label)
     const body = await response.json()
     const etag = response.headers?.get?.('etag') || null
-    remember(url, { body, etag, at: now() })
+    // Bodies are kept only where they are reused: for If-None-Match, or a caller's maxAgeMs.
+    if (started === epoch && (etag || retain)) remember(url, { body, etag, at: now() })
+    else if (started === epoch) cache.delete(url)
     return body
   }
 
@@ -134,7 +141,7 @@ export function createFetchLayer({
       const controller = new AbortController()
       shared = { controller, waiters: 0, promise: null }
       const current = shared
-      current.promise = request(url, { heavy, init, label, controller, onBusy }).finally(() => {
+      current.promise = request(url, { heavy, init, label, controller, onBusy, retain: maxAgeMs > 0 }).finally(() => {
         if (inflight.get(url) === current) inflight.delete(url)
       })
       // A shared read nobody waits for any more must not surface as an unhandled rejection.
@@ -165,7 +172,10 @@ export function createFetchLayer({
 
   /** Forget cached bodies whose URL starts with `prefix` (all when omitted), e.g. after a write. */
   function invalidate(prefix = '') {
+    epoch += 1
     for (const url of [...cache.keys()]) if (url.startsWith(prefix)) cache.delete(url)
+    // A read already in flight answers its own callers but is not joined by later ones.
+    for (const url of [...inflight.keys()]) if (url.startsWith(prefix)) inflight.delete(url)
   }
 
   return { getJson, peek, invalidate, stats }

@@ -94,7 +94,7 @@ test('stale-while-revalidate: peek shows the last body and its age; maxAgeMs ski
   let calls = 0
   const layer = createFetchLayer({ now: () => clock, fetchImpl: async () => { calls += 1; return reply(200, { calls }) } })
   assert.equal(layer.peek('/workers'), null)
-  await layer.getJson('/workers')
+  await layer.getJson('/workers', { maxAgeMs: 5_000 })
   clock += 4_000
   assert.deepEqual(layer.peek('/workers'), { body: { calls: 1 }, ageMs: 4_000, etag: null })
   assert.deepEqual(await layer.getJson('/workers', { maxAgeMs: 5_000 }), { calls: 1 })
@@ -124,8 +124,42 @@ test('a heavy read waits out busy answers before failing', async () => {
   assert.deepEqual(waits, [1000])
 })
 
+test('a plain read (no ETag, no maxAgeMs) keeps no body', async () => {
+  const layer = createFetchLayer({ fetchImpl: async () => reply(200, { big: true }) })
+  await layer.getJson('/scans')
+  assert.equal(layer.peek('/scans'), null)
+})
+
+test('invalidate: an in-flight read neither repopulates the cache nor is joined afterwards', async () => {
+  const { calls, fetchImpl } = controlledFetch()
+  const layer = createFetchLayer({ fetchImpl })
+  const before = layer.getJson('/targets/inventory?q', { maxAgeMs: 60_000 })
+  layer.invalidate('/targets')
+  const after = layer.getJson('/targets/inventory?q', { maxAgeMs: 60_000 })
+  assert.equal(calls.length, 2, 'the read after invalidate is a new request')
+  calls[0].resolve(reply(200, { old: true }))
+  assert.deepEqual(await before, { old: true })
+  assert.equal(layer.peek('/targets/inventory?q'), null, 'the stale answer is not cached')
+  calls[1].resolve(reply(200, { fresh: true }))
+  assert.deepEqual(await after, { fresh: true })
+  assert.deepEqual(layer.peek('/targets/inventory?q').body, { fresh: true })
+})
+
+test('a 304 does not resurrect an entry invalidated while it was out', async () => {
+  const { calls, fetchImpl } = controlledFetch()
+  const layer = createFetchLayer({ fetchImpl })
+  const first = layer.getJson('/g')
+  calls[0].resolve(reply(200, { v: 1 }, { ETag: '"1"' }))
+  await first
+  const second = layer.getJson('/g')
+  layer.invalidate()
+  calls[1].resolve(reply(304, null))
+  assert.deepEqual(await second, { v: 1 })
+  assert.equal(layer.peek('/g'), null)
+})
+
 test('the body cache is bounded', async () => {
-  const layer = createFetchLayer({ maxEntries: 2, fetchImpl: async (url) => reply(200, { url }) })
+  const layer = createFetchLayer({ maxEntries: 2, fetchImpl: async (url) => reply(200, { url }, { ETag: '"x"' }) })
   await layer.getJson('/a')
   await layer.getJson('/b')
   await layer.getJson('/c')

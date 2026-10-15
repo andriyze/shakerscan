@@ -10,7 +10,11 @@ const detail = readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf
 test('scan result fetches durable finding history for its exact target: one bounded page, once', () => {
   assert.match(detail, /getFindingsPage\(\s*\{ target_id: historyTargetId, status: 'active' \}/)
   // One page, newest observation first (this run's re-observed rows are on it), with an exact count.
-  assert.match(detail, /limit: HISTORY_PAGE_SIZE, sort: '-last_seen', count: 'exact'/)
+  // Most severe first: the fallback carried-over summary's highest severity holds on a partial page.
+  assert.match(detail, /limit: HISTORY_PAGE_SIZE, sort: '-severity', count: 'exact'/)
+  // The card is told the history is partial and shows its count as a lower bound.
+  assert.equal((detail.match(/partial=\{targetFindingsPartial\}/g) || []).length, 3)
+  assert.match(detail, /existingLowerBound \? 'at least ' : ''/)
   assert.match(detail, /const HISTORY_PAGE_SIZE = 200/)
   // No loop over every active row any more.
   assert.doesNotMatch(detail, /HISTORY_ROW_CAP/)
@@ -34,10 +38,14 @@ test('scan detail polls through usePoll: 5 s while live, stopped when terminal, 
   assert.match(detail, /\[content-visibility:auto\]/)
 })
 
-test('scans list polls only while work is live and keeps its total on count=none polls', () => {
+test('scans list polls only while work is live and never opts /scans into cursor pages', () => {
   const list = readFileSync(path.join(root, 'src/app/scans/page.tsx'), 'utf8')
+  const api = readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
   assert.doesNotMatch(list, /setInterval\(\(\) => \{\s*fetchScans/)
-  assert.match(list, /count: isPolling \? 'none' : 'exact'/)
+  // /scans pages by offset; a count=/cursor= opt-in would switch it to list/v1 cursor pages.
+  assert.doesNotMatch(list, /count: isPolling/)
+  const getScans = api.slice(api.indexOf('export async function getScans('), api.indexOf('export async function getScan('))
+  assert.doesNotMatch(getScans, /searchParams\.set\('(count|cursor)'/)
   assert.match(list, /if \(typeof data\.total === 'number'\)/)
   assert.match(list, /!isPolling && rawPage > maxPage/)
   assert.match(list, /intervalMs: SCANS_LIVE_REFRESH_MS,\s*idleIntervalMs: SCANS_IDLE_REFRESH_MS,\s*live,/)

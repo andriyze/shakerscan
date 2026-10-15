@@ -11,6 +11,9 @@ test('scan details load log history after a scan reaches a terminal state', () =
   assert.match(detail, /const logData = await getScanLogs\(scanId, 500, signal\)/)
   // A terminal scan (opened fresh or just finished) still gets its log read.
   assert.match(detail, /logForceRef\.current = true\s*\n\s*logsPoll\.refresh\(\)/)
+  // A new scan or retry resets the log loop during render, before usePoll's first tick reads it.
+  const reset = detail.indexOf('if (logLoopKeyRef.current !== logLoopKey)')
+  assert.ok(reset > 0 && reset < detail.indexOf('const logsPoll = usePoll('))
   assert.doesNotMatch(detail, /data\?\.status === 'running' \|\| data\?\.status === 'pending' \|\| isModelIntake/)
 })
 

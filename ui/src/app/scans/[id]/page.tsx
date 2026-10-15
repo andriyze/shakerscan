@@ -782,21 +782,27 @@ function ScanFindingContextCard({
   loading,
   error,
   carriedCount,
+  partial = false,
 }: {
   scan: any
   targetFindings: Finding[]
   targetFindingsTotal: number
   loading: boolean
   error: string | null
+  /** Only the first page of the target's active findings was read: counts are lower bounds. */
+  partial?: boolean
   /** The release gate's carried-over count, when known, so the page shows one number. */
   carriedCount?: number | null
 }) {
   const { current, persistedCurrentCount } = reconciledScanFindings(scan, targetFindings)
   if (!scan?.target_id && current.length === 0) return null
   const groups = groupScanFindings(current)
-  const existingTotal = typeof carriedCount === 'number'
+  const serverCount = typeof carriedCount === 'number'
+  const existingTotal = serverCount
     ? carriedCount
     : Math.max(0, targetFindingsTotal - persistedCurrentCount)
+  // Without the release gate's count, a partial history makes this number a lower bound.
+  const existingLowerBound = !serverCount && partial
   const provenCount = current.filter(isProvenFinding).length
   const targetFindingsHref = `/findings?target_id=${scan.target_id}&status=active&freshness=all`
 
@@ -809,7 +815,7 @@ function ScanFindingContextCard({
           {scan?.target_id && (
             <Link href={targetFindingsHref} className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300 hover:text-white"
               title="Open findings on this target that earlier scans found and this run did not observe; they count toward the release decision">
-              {existingTotal} not observed in this scan
+              {existingLowerBound ? 'at least ' : ''}{existingTotal} not observed in this scan
             </Link>
           )}
           {current.length > 0 && (
@@ -828,7 +834,7 @@ function ScanFindingContextCard({
         <p role="alert" className="px-4 py-3 text-sm text-amber-300">{error}</p>
       ) : current.length === 0 ? (
         <p className="px-4 py-3 text-sm text-gray-500">
-          No findings were reported by this scan.{existingTotal > 0 ? ` The target has ${existingTotal} earlier saved findings; use the link above to review them.` : ''}
+          No findings were reported by this scan.{existingTotal > 0 ? ` The target has ${existingLowerBound ? 'at least ' : ''}${existingTotal} earlier saved findings; use the link above to review them.` : ''}
         </p>
       ) : (
         // Only this run's observations are listed; earlier findings on the target stay a count and
@@ -2049,6 +2055,17 @@ function ScanDetailContent() {
     setLogsUpdatedAt(new Date())
     setLogsError(null)
   }
+  // A new scan or a retry starts the log loop fresh. Reset here, during render and before the
+  // poll effect starts its first tick: an effect declared after usePoll would run after that
+  // tick had already read the previous scan's backoff state.
+  const logLoopKey = `${scanId}:${retryNonce}`
+  const logLoopKeyRef = useRef<string | null>(null)
+  if (logLoopKeyRef.current !== logLoopKey) {
+    logLoopKeyRef.current = logLoopKey
+    logTailRef.current = ''
+    logSkipRef.current = { every: 1, since: 0 }
+    logForceRef.current = true
+  }
   const logsPoll = usePoll(async (signal) => {
     const skip = logSkipRef.current
     if (!logForceRef.current) {
@@ -2065,11 +2082,6 @@ function ScanDetailContent() {
       throw err
     }
   }, { intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: scanLive, enabled: scan !== null, deps: [scanId, retryNonce] })
-  useEffect(() => {
-    logTailRef.current = ''
-    logSkipRef.current = { every: 1, since: 0 }
-    logForceRef.current = true
-  }, [scanId, retryNonce])
   // Live -> terminal: one final read of the tail, whatever the backoff said.
   const previousStatus = useRef<string | null>(null)
   useEffect(() => {
@@ -2082,7 +2094,8 @@ function ScanDetailContent() {
   }, [scanStatus, scanTerminal, logsPoll.refresh])
 
   // Earlier findings on the target, read once per terminal scan (not per tick): ONE bounded page,
-  // newest observation first so the rows this scan re-observed are on it for linkage. The total
+  // most severe first, so the fallback summary's highest severity is right even on a partial
+  // history (rows linked by scan_id come with the scan itself). The total
   // comes from the page; more rows than the page holds make it a partial history, whose
   // carried-over count is a lower bound and never an all-clear. The release gate's server-side
   // carried-over summary (deployment decision) stays the authoritative number.
@@ -2095,7 +2108,7 @@ function ScanDetailContent() {
     setTargetFindingsLoading(true)
     getFindingsPage(
       { target_id: historyTargetId, status: 'active' },
-      { limit: HISTORY_PAGE_SIZE, sort: '-last_seen', count: 'exact' },
+      { limit: HISTORY_PAGE_SIZE, sort: '-severity', count: 'exact' },
       controller.signal,
     )
       .then((page) => {
@@ -2415,7 +2428,7 @@ function ScanDetailContent() {
           <ParentCoverageRollup scan={scan} />
           <ExecutionPlanCard scan={scan} />
           {renderStoredScanLogs(true)}
-          <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} />
+          <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} partial={targetFindingsPartial} />
           <AiGateCampaignReviewCard scan={scan} />
           <DeploymentDecisionCard
             decision={deploymentDecision}
@@ -2442,7 +2455,7 @@ function ScanDetailContent() {
         <ParentCoverageRollup scan={scan} />
         <ExecutionPlanCard scan={scan} />
         {renderStoredScanLogs(true)}
-        <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} />
+        <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} partial={targetFindingsPartial} />
       </div>
     )
   }
@@ -2539,7 +2552,7 @@ function ScanDetailContent() {
       </div>
 
       <SectionTabPanel id="scan-report" tab="findings" active={reportTab}>
-        <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} carriedCount={carriedOverFromDecision(deploymentDecision)?.count ?? null} />
+        <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} partial={targetFindingsPartial} carriedCount={carriedOverFromDecision(deploymentDecision)?.count ?? null} />
         <AiGateCampaignReviewCard scan={scan} />
         <ReportView scan={scan} isAuthenticated={true} section="findings" />
       </SectionTabPanel>

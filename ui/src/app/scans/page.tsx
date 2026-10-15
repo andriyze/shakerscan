@@ -221,9 +221,9 @@ function ScansContent() {
     }
   }, [searchInput, searchQuery, setFilter])
 
-  // A first load (or a filter/page change) asks for the exact total that pagination needs; a
-  // background poll asks for no count and keeps the total it has. An engine without list/v1 on
-  // /scans ignores `count` and still answers the total, which is used when present.
+  // /scans has no list/v1 yet, so every read is the legacy limit/offset page with its total; no
+  // `count=` is sent (opting in later would switch the response to cursor pages and break offset
+  // paging). Only exact (non-poll) loads may redirect an out-of-range page.
   const fetchScans = useCallback(async (isPolling = false, signal?: AbortSignal): Promise<boolean> => {
     // Only show loading skeleton on initial load, not polling refreshes
     if (!isPolling) {
@@ -239,7 +239,6 @@ function ScansContent() {
         include_internal: includeInternal || undefined,
         limit: PAGE_SIZE,
         offset: (rawPage - 1) * PAGE_SIZE,
-        count: isPolling ? 'none' : 'exact',
       }, signal)
       if (signal?.aborted) return true
       if (typeof data.total === 'number') {
