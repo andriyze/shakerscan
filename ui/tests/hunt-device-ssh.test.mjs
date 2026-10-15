@@ -38,5 +38,10 @@ test('unified Hunt renders and explicitly confirms immutable SSH command plans',
 
 test('active unified Hunts refresh so external planner proposals appear', () => {
   assert.match(runView, /getHuntV2\(hunt\.hunt_id\)/)
-  assert.match(runView, /window\.setInterval\(refresh, 5000\)/)
+  // usePoll: every 5 s while active/awaiting_planner, paused in a hidden tab, backing off on errors.
+  assert.match(runView, /usePoll\(async \(signal\) => \{/)
+  assert.match(runView, /intervalMs: 5000, idleIntervalMs: null, live: pollLive, enabled: pollLive/)
+  assert.match(runView, /const pollLive = \['active', 'awaiting_planner'\]\.includes\(hunt\.status\)/)
+  assert.match(runView, /if \(!signal\.aborted\) onChange\(current\)/)
+  assert.doesNotMatch(runView, /setInterval\(refresh/)
 })
