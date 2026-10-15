@@ -278,6 +278,35 @@ async def values_used_by_hunt(conn: Any, hunt_run_id: Any, *, limit: int = 64) -
     return values
 
 
+HUNT_USE_SCHEMA = "hunt-discovered-secret-use/v1"
+
+
+async def read_hunt_uses(conn: Any, hunt_run_id: Any, *, limit: int = 2000) -> list[dict[str, Any]]:
+    """Every ``secret://`` resolution of a Hunt, oldest first, for its record: the reference,
+    kind, label, action and destination host. Metadata only, never a value; operator reveals
+    (no Hunt) are not Hunt uses."""
+    rows = await conn.fetch(
+        """SELECT u.id, u.secret_id, u.action_id, u.destination_host, u.used_at,
+            s.kind, s.label, s.target_id
+        FROM discovered_secret_uses u JOIN discovered_secrets s ON s.id=u.secret_id
+        WHERE u.hunt_run_id=$1 AND u.revealed_by IS NULL
+        ORDER BY u.used_at ASC, u.id ASC LIMIT $2""",
+        uuid.UUID(str(hunt_run_id)), max(1, int(limit)),
+    )
+    return [{
+        "schema_version": HUNT_USE_SCHEMA,
+        "id": str(row["id"]),
+        "ref": f"secret://{row['secret_id']}",
+        "kind": row["kind"],
+        "label": row["label"],
+        "action_id": str(row["action_id"]) if row["action_id"] else None,
+        "destination_host": row["destination_host"] or None,
+        "found_on": str(row["target_id"]),
+        "used_at": row["used_at"].isoformat() if hasattr(row["used_at"], "isoformat") else row["used_at"],
+        "secret_values_visible": False,
+    } for row in rows]
+
+
 async def reference_for(conn: Any, *, target_id: Any, value: str) -> str | None:
     """The ``secret://`` reference of a value kept for a target, or None."""
     target = _target_uuid(target_id)

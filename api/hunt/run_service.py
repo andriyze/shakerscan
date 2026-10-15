@@ -22,6 +22,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - package import layout
     from ..targets.skill_trust import action_trust
 from .credential_uses import read_credential_uses
+from .discovered_secrets import read_hunt_uses
 from .permission_grants import settle_for_ended_hunt
 from .permission_store import pending_summary
 from .finding_verifications import HUNT_FINDINGS_QUERY
@@ -888,6 +889,7 @@ class HuntRunService:
             # action ledger never named them. The immutable observation ledger does.
             live_candidates = await connection.fetch(HUNT_CANDIDATES_QUERY, hunt_uuid)
             credential_uses = await read_credential_uses(connection, hunt_uuid)
+            secret_uses = await read_hunt_uses(connection, hunt_uuid)
             pending_permissions = await pending_summary(connection, hunt_uuid)
             result = await with_live_briefing(connection, public_hunt_run(row), row)
         result["actions"] = [public_hunt_action(action) for action in actions]
@@ -910,6 +912,8 @@ class HuntRunService:
         ]
         # Read-only: which attached credential each action used, by id and version only.
         result["credential_uses"] = credential_uses
+        # Discovered secrets the Hunt sent by ``secret://`` reference: which, where, when.
+        result["discovered_secret_uses"] = secret_uses
         # Requests waiting for a person; the Hunt's own status never changes because of them.
         result["pending_permission_requests"] = pending_permissions
         result["permission_requests_url"] = f"/hunts/{hunt_id}/permission-requests"
@@ -1367,6 +1371,7 @@ class HuntRunService:
             credential_uses = await read_credential_uses(
                 connection, hunt_uuid, limit=MAX_EXPORT_ROWS,
             )
+            secret_uses = await read_hunt_uses(connection, hunt_uuid, limit=MAX_EXPORT_ROWS)
         run = redact_sensitive(
             public_hunt_run(row, include_context=False),
             redact_strings=True,
@@ -1394,6 +1399,7 @@ class HuntRunService:
                     "planner_capability_inputs", "action_outcomes", "receipt_references",
                     "coverage_events", "persisted_notes", "final_debrief",
                     "http_transactions", "budget_amendments", "credential_uses",
+                    "discovered_secret_uses",
                 ],
                 "excludes": ["hidden_model_chain_of_thought", "context_pack"],
                 "detail": (
@@ -1407,6 +1413,7 @@ class HuntRunService:
             "hunt": run,
             "budget_amendments": budget_history,
             "credential_uses": credential_uses,
+            "discovered_secret_uses": secret_uses,
             "decision_trace": [public_hunt_action_trace(action) for action in actions],
             "methodology_trace": [
                 public_hunt_skill_event(event) for event in skill_events

@@ -640,14 +640,48 @@ def _is_credential_shaped(token: str) -> bool:
     return entropy >= 3.5
 
 
-def mask_credential_shaped(text: str) -> str:
-    """Withhold every credential-shaped token in ``text`` (one linear scan)."""
+def _mask_shaped_tokens(text: str) -> str:
     return _CREDENTIAL_TOKEN_RE.sub(
         lambda match: (
             _withhold(match.group(0)) if _is_credential_shaped(match.group(0)) else match.group(0)
         ),
         text,
     )
+
+
+# ``NAME=value``: a dotenv line, a shell assignment, a query parameter. The name is kept and only
+# the value is judged; the token pattern alone read ``SECRET_KEY=django-insecure-`` as one token,
+# hid the name and left the value's tail (after its first ``%`` or ``)``) in clear.
+_ASSIGNMENT_NAME_RE = re.compile(r"(?<![A-Za-z0-9_.\-])([A-Za-z_][A-Za-z0-9_.\-]{0,127})=(?=[^\s=])")
+_QUERY_VALUE_END_RE = re.compile(r"[&#\s]")
+_VALUE_END_RE = re.compile(r"[\s\"'<>]")
+
+
+def mask_credential_shaped(text: str) -> str:
+    """Withhold every credential-shaped token in ``text`` (one linear scan). In a ``NAME=value``
+    assignment the name stays readable and a credential-shaped value is withheld whole, up to the
+    end of the value (the next whitespace, or ``&`` in a query string), not only its first run of
+    token characters."""
+    pieces: list[str] = []
+    position = 0
+    for match in _ASSIGNMENT_NAME_RE.finditer(text):
+        start = match.start()
+        if start < position:
+            continue
+        value_start = match.end()
+        query = start > 0 and text[start - 1] in "?&"
+        end_match = (_QUERY_VALUE_END_RE if query else _VALUE_END_RE).search(text, value_start)
+        value_end = end_match.start() if end_match else len(text)
+        value = text[value_start:value_end]
+        pieces.append(_mask_shaped_tokens(text[position:start]))
+        pieces.append(match.group(1) + "=")
+        # A value that is one credential as a whole is withheld whole; otherwise (a URL, a list)
+        # each credential-shaped run in it is, as anywhere else.
+        whole = "://" not in value and _is_credential_shaped(value)
+        pieces.append(_withhold(value) if whole else _mask_shaped_tokens(value))
+        position = value_end
+    pieces.append(_mask_shaped_tokens(text[position:]))
+    return "".join(pieces)
 
 
 _BARE_JWT_RE = re.compile(

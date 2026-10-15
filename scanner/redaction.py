@@ -442,14 +442,32 @@ def _redact_parsed_url_credentials(value: str) -> str:
     )
 
 
+# A discovered-secret reference names a stored secret, never its value: ``secret:`` is not a
+# ``key: value`` pair, so the reference stays readable in findings and records.
+_SECRET_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"(?![0-9A-Za-z_-])")
+_REFERENCE_SLOT = "\x00shakerscan-secret-reference-{}\x00"
+_REFERENCE_SLOT_RE = re.compile("\x00shakerscan-secret-reference-([0-9]+)\x00")
+
+
 def redact_text(text: Any, *, known_values=()) -> Any:
     """Scrub bearer/api-key/token/secret patterns out of free text."""
     if not isinstance(text, str):
         return text
     for value in sorted({value for value in known_values if isinstance(value, str) and value}, key=len, reverse=True):
         text = text.replace(value, MASK)
+    references: list[str] = []
+    if "secret://" in text and "\x00" not in text:
+        def hold(match: re.Match[str]) -> str:
+            references.append(match.group(0))
+            return _REFERENCE_SLOT.format(len(references) - 1)
+
+        text = _SECRET_REFERENCE_RE.sub(hold, text)
     for rule in _TEXT_RULES:
         text = rule(text)
+    if references:
+        text = _REFERENCE_SLOT_RE.sub(lambda match: references[int(match.group(1))], text)
     return text
 
 

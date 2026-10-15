@@ -533,3 +533,19 @@ def test_first_slice_reserves_the_seed_sweep_beyond_its_endpoint_share():
     assert GRAPHQL_SEED_PROBE_COUNT == 8
     assert hold["http_requests"] == seeds + 2 + 3 + 10
     assert hold["tool_wall_seconds"] >= seeds
+
+
+def test_the_finding_links_each_kept_secret_by_reference_and_drops_a_forged_one():
+    body = (f"DB_PASSWORD={PASSWORD}\nSTRIPE_SECRET_KEY={STRIPE}\nAPP_ENV=prod\n").encode()
+    observation = _observation("/.env", body, "text/plain")
+    reference = "secret://0b6c4d55-7d0e-4a8e-9a43-1f0e5b7a9c21"
+    entries = [dict(item) for item in observation["exposure_fingerprints"]]
+    entries[0]["stored_as"] = reference
+    entries[1]["stored_as"] = PASSWORD  # not a reference: never carried
+    observation["exposure_fingerprints"] = entries
+    evidence = _finalized(observation)["findings"][0]["evidence"]
+    assert evidence["discovered_refs"] == [reference]
+    by_field = {item["field"]: item for item in evidence["exposure_fingerprints"]}
+    assert by_field[entries[0]["field"]]["stored_as"] == reference
+    assert "stored_as" not in by_field[entries[1]["field"]]
+    assert PASSWORD not in json.dumps(evidence)
