@@ -75,6 +75,7 @@ POSTGRES_DATABASES = {
     "SUBDOMAIN_TARGETS_TEST_DATABASE_URL": "shakerscan_subdomain_test",
     "TARGET_ASSET_TEST_DATABASE_URL": "target_assets_test",
     "TARGETS_SCALE_TEST_DATABASE_URL": "shakerscan_targets_scale_test",
+    "UI_ENDPOINTS_TEST_DATABASE_URL": "shakerscan_ui_endpoints_test",
 }
 REDIS_DATABASES = {
     "LOOPS_TEST_REDIS_URL": 13,
