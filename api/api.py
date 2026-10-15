@@ -70,7 +70,7 @@ try:
 except ModuleNotFoundError:
     from api import asm_dispatch_selection as asm_selection
     from api import loop_leader
-from runtime.loop_scale_indexes import build_loop_scale_indexes_in_background
+from runtime.loop_scale_indexes import build_loop_scale_indexes_in_background, index_health as loop_index_health
 from finding_routes.list_schema import repair_severity_rank_in_background
 from targets.scale_summary import summary_compactor as _summary_compactor
 from targets.insert_race import fetch_target_upsert
@@ -8727,9 +8727,15 @@ async def health():
         "inconsistent_count": 0,
     }
     legacy_compatibility = compatibility_snapshot(None)
+    # The background index builder's outcome: an index it gave up on reads "failed" here.
+    loop_indexes: dict[str, Any] = {"status": "unavailable"}
     try:
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
+            try:
+                loop_indexes = await loop_index_health(conn)
+            except Exception:
+                loop_indexes = {"status": "unavailable"}
             try:
                 action_budget_reconciliation = (
                     await scan_action_budget_reconciliation(conn)
@@ -8809,6 +8815,7 @@ async def health():
         "build_fingerprint": expected_fingerprint,
         "worker_build": worker_build,
         "scan_action_budget_reconciliation": action_budget_reconciliation,
+        "loop_indexes": loop_indexes,
         "legacy_compatibility": legacy_compatibility,
         "device_worker": _device_worker_readiness(),
         "agent_tool_worker": _agent_tool_worker_readiness(),
