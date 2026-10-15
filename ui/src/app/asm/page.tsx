@@ -1,6 +1,6 @@
 'use client'
 
-import { Suspense, useCallback, useEffect, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { useRouter } from 'next/navigation'
 import {
@@ -29,7 +29,8 @@ import {
   getAsmPolicy,
   getDomains,
   getTarget,
-  getTargetsGrouped,
+  getTargetsGroupedPage,
+  type GroupedDomain,
   getWorkers,
   improveAsmTarget,
   pruneAsmInventory,
@@ -54,6 +55,8 @@ import {
 } from '@/lib/api'
 import { boundedTargetDisplay } from '@/lib/targetChoices'
 import { useUrlFilters } from '@/lib/useUrlFilters'
+import { isAbortError } from '@/lib/fetchLayer.mjs'
+import { totalLabel } from '@/lib/listPage.mjs'
 import { normalizeFamilyCoverage, safeRemediationHref } from '@/lib/deferredWorkContracts'
 import {
   asmCoverageDenominator,
@@ -172,6 +175,9 @@ function CoverageStat({ label, value, accent = '' }: { label: string; value: num
 
 // ---- Rollup view (no target selected) -------------------------------------
 
+const ROLLUP_GROUPS = 50
+const ROLLUP_MEMBERS = 200
+
 interface RollupRow {
   target: Target
   root_domain: string
@@ -185,34 +191,78 @@ function RollupView({
   onSelect: (targetId: string) => void
 }) {
   const { filters, setFilter } = useUrlFilters<AsmFilters>()
-  const [rows, setRows] = useState<RollupRow[]>([])
+  // Domain groups arrive a page at a time (list/v1 on /targets/grouped); the browser never asks
+  // for every target. Rows are the loaded groups' members that have a persistent inventory.
+  const [groups, setGroups] = useState<GroupedDomain[]>([])
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [hasMore, setHasMore] = useState(false)
+  const [totalDomains, setTotalDomains] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
+  const controllerRef = useRef<AbortController | null>(null)
+  const domainFilter = filters.domain ?? ''
 
-  const load = useCallback(() => {
-    setLoading(true)
-    setError(false)
-    getTargetsGrouped({ sort_by: 'active_findings_count', sort_order: 'desc' })
-      .then((data) => {
-        const flat: RollupRow[] = []
-        for (const d of data.domains) {
-          if (d.root_target?.asm_coverage) flat.push({ target: d.root_target, root_domain: d.root_domain })
-          for (const s of d.subdomains) {
-            if (s.asm_coverage) flat.push({ target: s, root_domain: d.root_domain })
-          }
-        }
-        flat.sort((a, b) => resolvedCoverage(a.target.asm_coverage) - resolvedCoverage(b.target.asm_coverage))
-        setRows(flat)
-      })
-      .catch(() => setError(true))
-      .finally(() => setLoading(false))
-  }, [])
+  const fetchPage = useCallback((cursor: string | null, signal: AbortSignal) => getTargetsGroupedPage({
+    limit: ROLLUP_GROUPS,
+    member_limit: ROLLUP_MEMBERS,
+    sort: '-active_findings_count',
+    count: 'exact',
+    cursor,
+    // The server narrows by text; the exact root-domain match is applied below.
+    search: domainFilter || undefined,
+  }, signal), [domainFilter])
 
   useEffect(() => {
-    load()
-  }, [load])
+    const controller = new AbortController()
+    controllerRef.current?.abort()
+    controllerRef.current = controller
+    setLoading(true)
+    setError(false)
+    setGroups([])
+    fetchPage(null, controller.signal)
+      .then((page) => {
+        setGroups(page.items)
+        setNextCursor(page.next_cursor)
+        setHasMore(page.has_more)
+        setTotalDomains(totalLabel(page))
+      })
+      .catch((cause) => { if (!isAbortError(cause)) setError(true) })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    return () => controller.abort()
+  }, [fetchPage, reloadKey])
 
-  const visible = filters.domain ? rows.filter((r) => r.root_domain === filters.domain) : rows
+  const load = useCallback(() => setReloadKey((key) => key + 1), [])
+
+  const loadMore = useCallback(() => {
+    const controller = controllerRef.current
+    if (!nextCursor || !controller || controller.signal.aborted) return
+    setLoadingMore(true)
+    fetchPage(nextCursor, controller.signal)
+      .then((page) => {
+        setGroups((current) => [...current, ...page.items])
+        setNextCursor(page.next_cursor)
+        setHasMore(page.has_more)
+      })
+      .catch((cause) => { if (!isAbortError(cause)) setError(true) })
+      .finally(() => { if (!controller.signal.aborted) setLoadingMore(false) })
+  }, [fetchPage, nextCursor])
+
+  const rows = useMemo(() => {
+    const flat: RollupRow[] = []
+    for (const d of groups) {
+      if (d.root_target?.asm_coverage) flat.push({ target: d.root_target, root_domain: d.root_domain })
+      for (const s of d.subdomains) {
+        if (s.asm_coverage) flat.push({ target: s, root_domain: d.root_domain })
+      }
+    }
+    // Least covered first, within what is loaded.
+    return flat.sort((a, b) => resolvedCoverage(a.target.asm_coverage) - resolvedCoverage(b.target.asm_coverage))
+  }, [groups])
+  const truncatedGroups = groups.filter((group) => group.subdomains_truncated).length
+
+  const visible = domainFilter ? rows.filter((r) => r.root_domain === domainFilter) : rows
 
   if (loading) return <TableSkeleton />
   if (error) return <ErrorState message="Failed to load attack-surface inventory." onRetry={load} />
@@ -234,16 +284,28 @@ function RollupView({
         <span className="text-xs text-gray-500">
           {visible.length} target{visible.length === 1 ? '' : 's'} with a persistent inventory
         </span>
+        <span className="text-xs text-gray-600" data-testid="asm-rollup-scope">
+          {groups.length.toLocaleString()} of {totalDomains ?? groups.length.toLocaleString()} domain{groups.length === 1 ? '' : 's'} loaded
+          {hasMore ? ' (most findings first)' : ''}
+          {truncatedGroups ? ` · ${truncatedGroups} with more than ${ROLLUP_MEMBERS} targets shown in part; open the target for all` : ''}
+        </span>
         <Button variant="ghost" size="sm" className="ml-auto" onClick={load}>
           <RefreshCw className="h-4 w-4" /> Refresh
         </Button>
       </div>
 
       {visible.length === 0 ? (
-        <EmptyState
-          message="No attack-surface inventory yet"
-          hint="Run a coverage scan on a target to populate its persistent endpoint inventory, then come back to track and close coverage over time."
-        />
+        hasMore ? (
+          <EmptyState
+            message="No persistent inventory among the loaded domains"
+            hint="Load more domains below, or filter by a domain."
+          />
+        ) : (
+          <EmptyState
+            message="No attack-surface inventory yet"
+            hint="Run a coverage scan on a target to populate its persistent endpoint inventory, then come back to track and close coverage over time."
+          />
+        )
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -295,6 +357,13 @@ function RollupView({
               })}
             </tbody>
           </table>
+        </div>
+      )}
+      {hasMore && (
+        <div className="flex justify-center">
+          <Button variant="secondary" size="sm" onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? 'Loading…' : `Load ${ROLLUP_GROUPS} more domains`}
+          </Button>
         </div>
       )}
     </Card>
