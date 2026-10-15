@@ -54,7 +54,7 @@
     "BrokerLeaseHeartbeatRequest": "b1119c5a24bc5462d9591fbd0ff49cff766fad55228a1b7c83939366fefe9760",
     "BrokerLeaseRequest": "2bf0aed171fe04301d025156c7bbcc41317f0d36628bc96336ac8e358aa32a4e",
     "BrokerResultRequest": "9f81d20b1194d303a8ed345be9b4de116b7b9194f99c51af013a250e5d2cad3a",
-    "BrokerScanContinuationRequest": "aeebd7cc3e0ab43e171d2925d5529d30de88ebd9d2bed2c60bdf14334ba6ef9d",
+    "BrokerScanContinuationRequest": "d9081079a2fe3f56050105738703f74e8ed677c5317b9ef7200fe2b7eaf70001",
     "BulkFindingUpdateRequest": "ab9b1e432ad383a93762b41a99a3c797962628406130be954a356b0b95edfa1d",
     "CampaignActionLinkRequest": "38c2784e4d2458c9257889d4316b5bab7dec9dbdabf05bd1e22bf85cee2304ed",
     "CampaignRequest": "d93684ab216e4304f708123ee41f543627384361a55b28a9b5e3c5f33a876591",
@@ -221,7 +221,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "5c36f783ad339eda5e3c461ceb0b08ef2066286d467e9411a89410dd17d86ad4",
+  "contract_sha256": "925ceb71c3bc206cbd6ffe99268c64cc722f35ae1921eb8a8e0f6bd6a8f92c49",
   "openapi": "3.1.0",
   "operation_count": 491,
   "operations": {
