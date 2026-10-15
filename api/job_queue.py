@@ -696,3 +696,143 @@ def _clear_unleased_one(redis_client: Any, queue_name: str) -> list[str]:
         redis_client.delete(queue_name)
         deleted.extend(legacy_payloads)
     return deleted
+
+
+# Bounded reads of the waiting work. ``queue_payloads`` returns every payload at once (one XRANGE
+# over the whole stream); background sweeps and status reads use these instead, so a large backlog
+# costs bounded pages and memory, and an incomplete read is reported rather than mistaken for
+# absence.
+QUEUE_SCAN_PAGE_SIZE = 500
+QUEUE_SCAN_MAX_ENTRIES = max(1, int(os.environ.get("SHAKERSCAN_QUEUE_SCAN_MAX_ENTRIES", "20000") or 20000))
+
+
+@dataclass
+class QueueJobIds:
+    """Job ids seen in a queue, and whether every entry was read."""
+
+    job_ids: set[str]
+    unleased_job_ids: set[str]
+    malformed: int = 0
+    entries: int = 0
+    complete: bool = True
+    leased_complete: bool = True
+    error: bool = False  # Redis failed during the read
+
+    def presence(self, job_id: str) -> bool | None:
+        """True when seen, False when the whole queue was read without it, None when unknown."""
+        if job_id in self.job_ids:
+            return True
+        return False if self.complete else None
+
+
+def _payload_job_id(payload: Any) -> str:
+    try:
+        decoded = json.loads(payload) if isinstance(payload, (str, bytes)) else None
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(decoded, dict):
+        return ""
+    return str(decoded.get("job_id") or "").strip()
+
+
+def _leased_message_ids(redis_client: Any, key: str, *, limit: int, page_size: int) -> tuple[set[str], bool]:
+    leased: set[str] = set()
+    start = "-"
+    while len(leased) < limit:
+        rows = redis_client.xpending_range(key, CONSUMER_GROUP, min=start, max="+", count=page_size) or []
+        for row in rows:
+            leased.add(_text(row.get("message_id") or row.get(b"message_id")))
+        if len(rows) < page_size:
+            return leased, True
+        start = "(" + _text(rows[-1].get("message_id") or rows[-1].get(b"message_id"))
+    return leased, False
+
+
+def scan_queue_job_ids(
+    redis_client: Any,
+    queue_name: str,
+    *,
+    wanted: Iterable[str] | None = None,
+    track_unleased: bool = False,
+    max_entries: int | None = None,
+    page_size: int = QUEUE_SCAN_PAGE_SIZE,
+) -> QueueJobIds:
+    """Read the job ids of a queue (its routes and legacy list included) in bounded pages.
+
+    ``wanted`` stops the read once every named job id was seen. ``max_entries`` (default
+    ``SHAKERSCAN_QUEUE_SCAN_MAX_ENTRIES``, 20,000) caps the entries read; past it, and on any Redis
+    error, the result is incomplete, never a proof of absence (``presence`` answers None). Callers
+    deciding that work was lost (the lost-handoff sweep, the stale-parent and device reapers, the
+    research reconciler) therefore leave such a job alone: while a backlog exceeds the bound, a
+    lost handoff is neither resent nor flagged until the backlog drains below it.
+    """
+    limit = max(1, int(max_entries if max_entries is not None else QUEUE_SCAN_MAX_ENTRIES))
+    page = max(1, int(page_size))
+    remaining = {str(item) for item in wanted if item} if wanted is not None else None
+    result = QueueJobIds(job_ids=set(), unleased_job_ids=set())
+    if remaining is not None and not remaining:
+        result.complete = False  # nothing asked for: nothing read
+        return result
+
+    def record(job_id: str, leased: bool) -> bool:
+        """Record one entry; return False when the read should stop."""
+        result.entries += 1
+        if job_id:
+            result.job_ids.add(job_id)
+            if not leased:
+                result.unleased_job_ids.add(job_id)
+            if remaining is not None:
+                remaining.discard(job_id)
+        else:
+            result.malformed += 1
+        if remaining is not None and not remaining:
+            result.complete = False
+            return False
+        if result.entries >= limit:
+            result.complete = False
+            return False
+        return True
+
+    try:
+        variants = [queue_name, *_known_routes(redis_client, queue_name)]
+    except Exception:
+        result.complete = False
+        result.error = True
+        return result
+    for variant in variants:
+        try:
+            if _has_streams(redis_client):
+                key = stream_key(variant)
+                leased: set[str] = set()
+                if track_unleased:
+                    try:
+                        leased, leased_complete = _leased_message_ids(
+                            redis_client, key, limit=limit, page_size=page)
+                    except Exception as exc:
+                        if not _is_nogroup_error(exc):
+                            raise
+                        leased_complete = True  # no group yet: nothing is leased
+                    result.leased_complete = result.leased_complete and leased_complete
+                start = "-"
+                while True:
+                    rows = redis_client.xrange(key, min=start, max="+", count=page) or []
+                    for message_id, payload in [(mid, payload) for _s, mid, payload in _decode_messages([(key, rows)])]:
+                        if not record(_payload_job_id(payload), message_id in leased):
+                            return result
+                    if len(rows) < page:
+                        break
+                    start = "(" + _text(rows[-1][0])
+            offset = 0
+            while True:
+                values = redis_client.lrange(variant, offset, offset + page - 1) or []
+                for value in values:
+                    if not record(_payload_job_id(_text(value)), False):
+                        return result
+                if len(values) < page:
+                    break
+                offset += page
+        except Exception:
+            result.complete = False
+            result.error = True
+            return result
+    return result

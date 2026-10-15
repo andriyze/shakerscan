@@ -153,6 +153,10 @@ def test_reset_also_removes_the_data_kept_for_rollback(tmp_path):
         'compose() { echo "compose $*" >> "$LOG"; }',
         'compose_up() { echo "compose_up $*" >> "$LOG"; }',
         'docker_cli() { echo "docker $*" >> "$LOG"; }',
+        "note_running_release() { :; }",
+        "remove_containers_outside_compose_down() { :; }",
+        "remove_scan_worker_containers() { :; }",
+        'start_services() { echo "start_services $*" >> "$LOG"; }',
         _extract("reset_database"),
         "reset_database",
     ])
@@ -160,9 +164,9 @@ def test_reset_also_removes_the_data_kept_for_rollback(tmp_path):
     assert result.returncode == 0, result.stderr
     lines = log.read_text().splitlines()
     assert lines == [
-        "compose down -v",
+        "compose down -v --remove-orphans",
         "docker volume rm -f demo_postgres-data",
-        "compose_up -d --scale worker=1",
+        "start_services 1",
     ]
 
 

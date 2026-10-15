@@ -219,7 +219,7 @@ def test_a_redis_that_cannot_write_gets_room_from_old_images_never_a_reset(tmp_p
 
 
 def _backup(tmp_path: Path, state: str | None, has_data: str, previous: bool | str = False,
-            **env: str) -> subprocess.CompletedProcess[str]:
+            before: str = "", **env: str) -> subprocess.CompletedProcess[str]:
     if state is not None:
         (tmp_path / ".release-images.current").write_text(f"# release {state}\nref\n")
     if previous:
@@ -234,6 +234,7 @@ def _backup(tmp_path: Path, state: str | None, has_data: str, previous: bool | s
         *pg_dump*) echo DUMP ;;
       esac
     }
+    """ + textwrap.dedent(before) + """
     ensure_pre_upgrade_backup; echo rc=$?
     ls "$WORK/backups" 2>/dev/null
     """
@@ -279,7 +280,7 @@ def test_cleanup_keeps_the_backup_just_made_whatever_the_version_names(tmp_path)
     for name in ("pre-upgrade-20261001T000000Z-earlier-to-2.9.0", "pre-upgrade-20261005T000000Z-2.9.0-to-2.10.0"):
         (backups / name).mkdir(parents=True)
     result = _backup(tmp_path, "2.10.0", "t", SCANNER_VERSION="2.11.0")
-    kept = sorted(path.name for path in backups.iterdir())
+    kept = sorted(path.name for path in backups.glob("pre-upgrade-*"))
     assert len(kept) == 2 and kept[-1].endswith("-2.10.0-to-2.11.0"), (kept, result.stdout)
     assert "pre-upgrade-20261005T000000Z-2.9.0-to-2.10.0" in kept
 
@@ -535,3 +536,81 @@ def test_the_backup_of_an_unversioned_running_release_says_earlier(tmp_path):
     """Review F8: the release compose defaults SCANNER_VERSION to "latest"."""
     assert "-earlier-to-2.10.0" in _backup(tmp_path, None, "t", previous="latest").stdout
     assert "-earlier-to-2.10.0" in _backup(tmp_path, None, "t", previous="2.10.0").stdout
+
+
+def test_a_rollback_by_an_older_launcher_is_seen_from_the_running_api(tmp_path):
+    """2.10 soak: after a rollback with an older launcher (which keeps no release record) the record
+    still named 2.10.0, so upgrading the running 2.9.0 to 2.10.0 again skipped the backup."""
+    result = _backup(tmp_path, "2.10.0", "t", before="running_api_version() { echo 2.9.0; }")
+    assert "rc=0" in result.stdout and "-2.9.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_the_running_version_is_noted_before_the_stack_is_stopped(tmp_path):
+    """A start that stops the running stack first (clean slate, restart) must still compare with the
+    version that was running."""
+    before = """
+    running_api_version() { echo 2.9.0; }
+    note_running_release
+    running_api_version() { :; }   # the stack was stopped
+    """
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "-2.9.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_start_by_a_launcher_that_keeps_no_record_means_a_backup_when_nothing_runs(tmp_path):
+    """Nothing runs to ask, and a launcher that keeps no release record (or the installer) wrote the
+    runtime marker after the record: the record cannot be trusted."""
+    before = """
+    touch -t 202610010000 "$WORK/.release-images.current"
+    echo prebuilt > "$WORK/.shakerscan-local-build"
+    """
+    result = _backup(tmp_path, "2.10.0", "t", before=before)
+    assert "rc=0" in result.stdout and "-unverified-2.10.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+
+
+def test_a_restart_of_the_recorded_release_is_still_not_an_upgrade(tmp_path):
+    before = """
+    echo prebuilt > "$WORK/.shakerscan-local-build"
+    touch -t 202610010000 "$WORK/.shakerscan-local-build"
+    """
+    assert "pre-upgrade" not in _backup(tmp_path, "2.10.0", "t", before=before).stdout
+    running = tmp_path / "running"
+    running.mkdir()
+    same = _backup(running, "2.9.0", "t", before="running_api_version() { echo 2.10.0; }")
+    assert "pre-upgrade" not in same.stdout, same.stdout
+    unversioned = tmp_path / "unversioned"
+    unversioned.mkdir()
+    latest = _backup(unversioned, "2.10.0", "t", before="running_api_version() { echo latest; }")
+    assert "pre-upgrade" not in latest.stdout, latest.stdout
+
+
+def test_without_any_record_a_running_release_of_another_version_is_backed_up(tmp_path):
+    """A local build, or a release whose images were not recognised, leaves no record; the version
+    its API reports still makes the start an upgrade."""
+    result = _backup(tmp_path, None, "t", before="running_api_version() { echo 2.9.0; }")
+    assert "rc=0" in result.stdout and "-2.9.0-to-2.10.0" in result.stdout, result.stdout + result.stderr
+    same = tmp_path / "same"
+    same.mkdir()
+    assert "pre-upgrade" not in _backup(same, None, "t", before="running_api_version() { echo 2.10.0; }").stdout
+
+
+def test_failed_attempts_never_rotate_out_the_first_dump_of_an_upgrade(tmp_path):
+    """An API that exits mid-migration fails the start; each retry dumps the partly migrated
+    database. The dump taken before any migration ran stays until a start succeeds."""
+    # One distinct, ordered timestamp per attempt.
+    clock = 'date() { n=$(cat "$WORK/n" 2>/dev/null || echo 0); echo $((n + 1)) > "$WORK/n"; echo "2026101${n}T000000Z"; }'
+    for _ in range(4):
+        result = _backup(tmp_path, "2.9.0", "t", before=clock)
+        assert "rc=0" in result.stdout, result.stdout + result.stderr
+    kept = sorted(path.name for path in (tmp_path / "backups").glob("pre-upgrade-*"))
+    assert kept == ["pre-upgrade-20261010T000000Z-2.9.0-to-2.10.0",   # before any migration ran
+                    "pre-upgrade-20261012T000000Z-2.9.0-to-2.10.0",
+                    "pre-upgrade-20261013T000000Z-2.9.0-to-2.10.0"], kept
+
+
+def test_a_successful_start_releases_the_first_dump_for_rotation(tmp_path):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    (backups / ".pre-upgrade-pending").write_text("pre-upgrade-20261010T000000Z-2.9.0-to-2.10.0\n")
+    result = run(tmp_path, "record_started_release keep; echo rc=$?")
+    assert "rc=0" in result.stdout and not (backups / ".pre-upgrade-pending").exists()

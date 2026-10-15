@@ -14,9 +14,10 @@ from typing import Any, Awaitable, Callable
 
 try:
     import deployment_policy
+    import loop_leader
     import request_guards
 except ModuleNotFoundError:  # package import (api.app_lifecycle)
-    from . import deployment_policy, request_guards
+    from . import deployment_policy, loop_leader, request_guards
 
 
 AsyncPoolFactory = Callable[..., Awaitable[Any]]
@@ -47,6 +48,8 @@ class ApiLifecycleDependencies:
     publish_scanner_version: Callable[[], Any]
     fleet_edge_mode: ValueProvider
     background_controllers: tuple[tuple[str, PoolCallback], ...]
+    # One-off background maintenance started once the API serves (never fatal, never awaited).
+    background_maintenance: tuple[tuple[str, PoolCallback], ...] = ()
 
     def validate(self) -> None:
         names = tuple(name for name, _callback in self.background_controllers)
@@ -99,7 +102,8 @@ def create_api_lifespan(dependencies: ApiLifecycleDependencies):
         if not bool(dependencies.fleet_edge_mode()):
             tasks = [
                 asyncio.create_task(callback(pool), name=name)
-                for name, callback in dependencies.background_controllers
+                for name, callback in (
+                    *dependencies.background_controllers, *dependencies.background_maintenance)
             ]
 
         try:
@@ -112,6 +116,8 @@ def create_api_lifespan(dependencies: ApiLifecycleDependencies):
                     await task
                 except asyncio.CancelledError:
                     pass
+            # Loop leadership holds one pool connection; give it back before the pool closes.
+            await loop_leader.leadership_for(pool).close()
             await pool.close()
 
     return lifespan

@@ -148,6 +148,23 @@ Workers advertise a build fingerprint. Release and benchmark submissions can req
 current fleet. Scan records stamp the expected fingerprint and stale-worker count at submission so
 results cannot later be mistaken for current-build evidence.
 
+### Maintenance loops and bounded queue reads
+
+The control plane's maintenance loops (stale-scan checker, lost-handoff recovery, scheduler,
+Continuous ASM dispatcher, artifact retention, and the workers' budget-reservation sweep) each run
+in one process at a time: the process holding the loop's PostgreSQL advisory lock. A tick that
+outlives its time bound gives up that lock so another process can take over. Every tick does
+bounded work: batches read from a cursor, never a whole table or the whole Redis keyspace.
+
+The loops read the Redis queues in pages and stop after `SHAKERSCAN_QUEUE_SCAN_MAX_ENTRIES` entries
+(default 20,000). A job not seen in a read that stopped at that bound, or that failed, is treated as
+unknown, never as missing. While a backlog is larger than the bound, a pending Scan whose queue
+entry was lost is therefore not queued again or flagged "queue handoff unknown" until the backlog
+drains below it. Likewise a running Scan is never terminated for a missing heartbeat until its job
+record has been looked up directly, or a complete non-blocking walk of the job records has found
+none naming it. `GET /queue/stats` uses the same bounded reads, writes nothing (apart from a
+five-second cache), and reports `queue_consistency.complete: false` when a bound was reached.
+
 Broker fleets add authenticated leases, acknowledgement, fencing, artifact transfer, placement, and
 partition behavior around the same self-contained shard contract. Discovery follows placement;
 fan-out and merge remain local-only control-plane work. Those requirements are defined in
