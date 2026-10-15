@@ -314,3 +314,26 @@ def test_hunt_query_pages_default_to_twenty():
     assert engine.calls[-1][2]["limit"] == 20
     with pytest.raises(mcp.MCPError):
         engine.call_tool("shakerscan_hunt_query", {"hunt_id": engine.HUNT_ID, "kind": "endpoints", "limit": 500})
+
+
+def test_against_this_engines_own_catalog_findings_are_paged_by_the_engine():
+    """The real catalog (api/command_arsenal.py): every list tool's request passes the
+    uncatalogued-argument check, and finding.list takes limit and offset."""
+    sys.path.insert(0, str(ROOT / "api"))
+    import command_arsenal
+
+    real = {command.name: command.parameters_schema for command in command_arsenal.COMMANDS}
+
+    class RealCatalog(Engine):
+        def request_json(self, method, path, payload=None):
+            if path == "/arsenal/commands":
+                return {"commands": [{"name": name, "status": "read_only", "risk_tier": "read_only",
+                                      "method": "GET", "parameters_schema": real[name]}
+                                     for name in {tool.command for tool in mcp.TOOLS}]}
+            return super().request_json(method, path, payload)
+
+    engine = RealCatalog(findings=[_finding(index) for index in range(30)])
+    for tool in ("shakerscan_targets", "shakerscan_findings", "shakerscan_evidence_manifest",
+                 "shakerscan_timeline", "shakerscan_plans"):
+        _answer(engine.call_tool(tool, {"limit": 5}))
+    assert ("finding.list", {"limit": 5, "offset": 0}) in engine.executed
