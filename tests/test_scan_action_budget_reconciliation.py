@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from api.scan.action_budget_reconciliation import (
-    repair_terminal_reservation_actions,
+    repair_terminal_reservation_actions_incremental,
     scan_action_budget_reconciliation,
 )
 
@@ -59,18 +59,37 @@ def test_reconciliation_is_ok_when_all_invariants_hold():
     assert result["inconsistent_count"] == 0
 
 
+class _RepairConn:
+    def __init__(self, rows):
+        self.rows = rows
+        self.queries = []
+
+    async def fetch(self, query, *args):
+        self.queries.append((query, args))
+        if "WITH batch AS" in query:
+            return self.rows
+        if "FOR UPDATE SKIP LOCKED" in query:
+            return [{"id": action} for action in args[0]]
+        return [{"id": action} for action in args[0]]
+
+
 def test_repair_terminalizes_actions_after_terminal_reservations():
-    conn = _Conn([{"id": "a"}, {"id": "b"}])
+    rows = [{"id": f"r{i}", "updated_at": i, "passable": True, "reservation_status": "released",
+             "failure_reason": None, "execution_uncertain": False, "open_action": f"a{i}"} for i in range(2)]
+    conn = _RepairConn(rows)
 
-    repaired = asyncio.run(repair_terminal_reservation_actions(conn, limit=25))
+    repaired, _cursor, examined = asyncio.run(
+        repair_terminal_reservation_actions_incremental(conn, cursor=None, limit=25))
 
-    assert repaired == 2
-    assert conn.limit == 25
-    assert "FOR UPDATE OF a SKIP LOCKED" in conn.query
-    assert "WHEN c.reservation_status='released' THEN 'blocked'" in conn.query
-    assert "terminal_reservation_reconciled" in conn.query
+    assert (repaired, examined) == (2, 2)
+    batch_query, batch_args = conn.queries[0]
+    assert batch_args[2] == 25 and "LIMIT $3" in batch_query
+    assert "FOR UPDATE SKIP LOCKED" in conn.queries[1][0]
+    update = conn.queries[2][0]
+    assert "WHEN c.reservation_status='released' THEN 'blocked'" in update
+    assert "terminal_reservation_reconciled" in update
 
 
 def test_repair_rejects_unbounded_limits():
     with pytest.raises(ValueError, match="between 1 and 1000"):
-        asyncio.run(repair_terminal_reservation_actions(_Conn([]), limit=1001))
+        asyncio.run(repair_terminal_reservation_actions_incremental(_RepairConn([]), cursor=None, limit=1001))
