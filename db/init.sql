@@ -1117,7 +1117,7 @@ CREATE TABLE IF NOT EXISTS hunt_permission_requests (
     decision_choice_json JSONB,
     decision_key_sha256 TEXT,
     grant_id UUID,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
     CHECK (expires_at > created_at),
     CHECK ((status = 'pending') = (decided_at IS NULL))
 );

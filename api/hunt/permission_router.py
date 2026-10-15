@@ -186,7 +186,8 @@ PERMISSION_REQUEST_FEED = ListSpec(
     id_expr="r.id",
     # Moved by a trigger on every change: raised, decided, expired, withdrawn, and display-only
     # changes (merged counters, a withheld auto-grant note).
-    since_expr="r.updated_at",
+    # A request from before the column (2.10) reads as its last known change.
+    since_expr="COALESCE(r.updated_at, r.decided_at, r.created_at)",
     table="hunt_permission_requests",
 )
 

@@ -1296,14 +1296,16 @@ def test_the_feed_since_sees_display_only_changes_and_old_rows_get_updated_at(en
     assert [item["hunt_id"] for item in changed] == [str(hunt["id"])]
     assert changed[0]["needed_total"] == 9
 
-    # An installation from before the column (2.10): the migration adds it from the last change.
+    # An installation from before the column (2.10): the migration adds it without a rewrite
+    # (nullable, no backfill) and the feed reads such a row as its last known change.
     run(env, env.conn.execute(
         "DROP TRIGGER hunt_permission_requests_touch ON hunt_permission_requests;"
         "ALTER TABLE hunt_permission_requests DROP COLUMN updated_at"))
     run(env, env.conn.execute(HUNT_PERMISSION_SCHEMA_SQL))
     row = run(env, env.conn.fetchrow(
         "SELECT created_at, decided_at, updated_at FROM hunt_permission_requests WHERE hunt_run_id=$1", hunt["id"]))
-    assert row["updated_at"] == (row["decided_at"] or row["created_at"])
+    assert row["updated_at"] is None
+    assert run(env, read(since=since))["items"] == [], "an old row reads as its last known change"
     run(env, env.conn.execute("UPDATE hunt_permission_requests SET decided_by=NULL WHERE hunt_run_id=$1", hunt["id"]))
     moved = run(env, env.conn.fetchval(
         "SELECT updated_at > created_at + interval '30 minutes' FROM hunt_permission_requests WHERE hunt_run_id=$1",
@@ -1341,3 +1343,29 @@ def test_the_feed_locks_only_hunts_with_a_legacy_proposal(env):
     items = run(env, read())["items"]
     assert str(old["id"]) not in {item["id"] for item in items}, "the legacy proposal was replaced before listing"
     assert run(env, hunts_to_reconcile(env.conn)) == [], "and is not reconciled again"
+
+
+def test_the_startup_schema_takes_no_lock_on_an_up_to_date_database(env):
+    """The startup runs HUNT_PERMISSION_SCHEMA_SQL on every start, under the startup lock, while
+    the background builder may hold a concurrent build's lock on hunt_permission_requests. On an
+    up-to-date database every statement must be a catalog check: with each permission table
+    locked as a concurrent build locks it, the schema still runs at once."""
+    import asyncpg
+
+    tables = ("hunt_preauthorizations", "hunt_permission_requests", "hunt_permission_grants",
+              "hunt_permission_baselines", "hunt_permission_events")
+
+    async def check():
+        other = await asyncpg.connect(DSN, server_settings={"search_path": env.schema})
+        try:
+            async with other.transaction():
+                for table in tables:
+                    await other.execute(f"LOCK TABLE {table} IN SHARE UPDATE EXCLUSIVE MODE")
+                async with env.pool.acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute("SET LOCAL lock_timeout = '2s'")
+                        await conn.execute(HUNT_PERMISSION_SCHEMA_SQL)
+        finally:
+            await other.close()
+
+    run(env, check())

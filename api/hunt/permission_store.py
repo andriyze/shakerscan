@@ -73,8 +73,14 @@ CREATE TABLE IF NOT EXISTS hunt_preauthorizations (
     source_request_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_hunt_preauthorizations_run
-    ON hunt_preauthorizations(hunt_run_id, created_at);
+DO $i_reauthorizations_run$
+BEGIN
+    IF to_regclass('idx_hunt_preauthorizations_run') IS NULL THEN
+        CREATE INDEX idx_hunt_preauthorizations_run
+            ON hunt_preauthorizations(hunt_run_id, created_at);
+    END IF;
+END
+$i_reauthorizations_run$;
 CREATE TABLE IF NOT EXISTS hunt_permission_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
@@ -96,26 +102,38 @@ CREATE TABLE IF NOT EXISTS hunt_permission_requests (
     decision_choice_json JSONB,
     decision_key_sha256 TEXT,
     grant_id UUID,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
     CHECK (expires_at > created_at),
     CHECK ((status = 'pending') = (decided_at IS NULL))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_hunt_permission_requests_pending_subject
-    ON hunt_permission_requests(hunt_run_id, subject_digest) WHERE status = 'pending';
-CREATE INDEX IF NOT EXISTS idx_hunt_permission_requests_run
-    ON hunt_permission_requests(hunt_run_id, created_at, id);
+DO $i_ests_pending_subject$
+BEGIN
+    IF to_regclass('uq_hunt_permission_requests_pending_subject') IS NULL THEN
+        CREATE UNIQUE INDEX uq_hunt_permission_requests_pending_subject
+            ON hunt_permission_requests(hunt_run_id, subject_digest) WHERE status = 'pending';
+    END IF;
+END
+$i_ests_pending_subject$;
+DO $i_mission_requests_run$
+BEGIN
+    IF to_regclass('idx_hunt_permission_requests_run') IS NULL THEN
+        CREATE INDEX idx_hunt_permission_requests_run
+            ON hunt_permission_requests(hunt_run_id, created_at, id);
+    END IF;
+END
+$i_mission_requests_run$;
 DO $permission_updated_at$
 BEGIN
-    -- 2.11: requests written before updated_at existed take their last known change.
+    -- 2.11. Checked first: ALTER TABLE takes an exclusive lock even when the column exists.
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
         WHERE table_schema = current_schema() AND table_name = 'hunt_permission_requests'
           AND column_name = 'updated_at'
     ) THEN
+        -- Nullable, no backfill: no table rewrite under the startup lock. A row written before
+        -- reads as its last known change, COALESCE(updated_at, decided_at, created_at).
         ALTER TABLE hunt_permission_requests ADD COLUMN updated_at TIMESTAMPTZ;
-        UPDATE hunt_permission_requests SET updated_at = COALESCE(decided_at, created_at);
-        ALTER TABLE hunt_permission_requests
-            ALTER COLUMN updated_at SET DEFAULT NOW(), ALTER COLUMN updated_at SET NOT NULL;
+        ALTER TABLE hunt_permission_requests ALTER COLUMN updated_at SET DEFAULT NOW();
     END IF;
 END
 $permission_updated_at$;
@@ -129,10 +147,16 @@ BEGIN
     RETURN NEW;
 END
 $touch$ LANGUAGE plpgsql;
-DROP TRIGGER IF EXISTS hunt_permission_requests_touch ON hunt_permission_requests;
-CREATE TRIGGER hunt_permission_requests_touch
-    BEFORE UPDATE ON hunt_permission_requests
-    FOR EACH ROW EXECUTE FUNCTION hunt_permission_requests_touch();
+DO $t_ssion_requests_touch$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'hunt_permission_requests_touch'
+                   AND tgrelid = 'hunt_permission_requests'::regclass) THEN
+        CREATE TRIGGER hunt_permission_requests_touch
+            BEFORE UPDATE ON hunt_permission_requests
+            FOR EACH ROW EXECUTE FUNCTION hunt_permission_requests_touch();
+    END IF;
+END
+$t_ssion_requests_touch$;
 CREATE TABLE IF NOT EXISTS hunt_permission_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
@@ -150,8 +174,14 @@ CREATE TABLE IF NOT EXISTS hunt_permission_grants (
     revoked_by TEXT,
     CONSTRAINT hunt_permission_grants_request_unique UNIQUE (request_id)
 );
-CREATE INDEX IF NOT EXISTS idx_hunt_permission_grants_live
-    ON hunt_permission_grants(hunt_run_id, kind) WHERE revoked_at IS NULL;
+DO $i_rmission_grants_live$
+BEGIN
+    IF to_regclass('idx_hunt_permission_grants_live') IS NULL THEN
+        CREATE INDEX idx_hunt_permission_grants_live
+            ON hunt_permission_grants(hunt_run_id, kind) WHERE revoked_at IS NULL;
+    END IF;
+END
+$i_rmission_grants_live$;
 CREATE TABLE IF NOT EXISTS hunt_permission_baselines (
     -- A Hunt's authority before its first grant; effective authority is this plus live grants.
     hunt_run_id UUID PRIMARY KEY REFERENCES hunt_runs(id) ON DELETE CASCADE,
@@ -177,10 +207,16 @@ BEGIN
     RAISE EXCEPTION 'hunt_permission_baselines is immutable';
 END
 $baselines$ LANGUAGE plpgsql;
-DROP TRIGGER IF EXISTS hunt_permission_baselines_immutable ON hunt_permission_baselines;
-CREATE TRIGGER hunt_permission_baselines_immutable
-    BEFORE UPDATE OR DELETE ON hunt_permission_baselines
-    FOR EACH ROW EXECUTE FUNCTION hunt_permission_baselines_immutable();
+DO $t__baselines_immutable$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'hunt_permission_baselines_immutable'
+                   AND tgrelid = 'hunt_permission_baselines'::regclass) THEN
+        CREATE TRIGGER hunt_permission_baselines_immutable
+            BEFORE UPDATE OR DELETE ON hunt_permission_baselines
+            FOR EACH ROW EXECUTE FUNCTION hunt_permission_baselines_immutable();
+    END IF;
+END
+$t__baselines_immutable$;
 CREATE TABLE IF NOT EXISTS hunt_permission_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
@@ -194,8 +230,14 @@ CREATE TABLE IF NOT EXISTS hunt_permission_events (
     -- clock_timestamp(): several events of one transaction keep their order.
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
-CREATE INDEX IF NOT EXISTS idx_hunt_permission_events_run
-    ON hunt_permission_events(hunt_run_id, created_at, id);
+DO $i_ermission_events_run$
+BEGIN
+    IF to_regclass('idx_hunt_permission_events_run') IS NULL THEN
+        CREATE INDEX idx_hunt_permission_events_run
+            ON hunt_permission_events(hunt_run_id, created_at, id);
+    END IF;
+END
+$i_ermission_events_run$;
 CREATE OR REPLACE FUNCTION hunt_permission_events_append_only() RETURNS trigger AS $events$
 BEGIN
     -- Deleting the Hunt cascades here from a referential trigger (depth > 1); nothing else may
@@ -206,10 +248,16 @@ BEGIN
     RAISE EXCEPTION 'hunt_permission_events is append-only';
 END
 $events$ LANGUAGE plpgsql;
-DROP TRIGGER IF EXISTS hunt_permission_events_append_only ON hunt_permission_events;
-CREATE TRIGGER hunt_permission_events_append_only
-    BEFORE UPDATE OR DELETE ON hunt_permission_events
-    FOR EACH ROW EXECUTE FUNCTION hunt_permission_events_append_only();
+DO $t_n_events_append_only$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'hunt_permission_events_append_only'
+                   AND tgrelid = 'hunt_permission_events'::regclass) THEN
+        CREATE TRIGGER hunt_permission_events_append_only
+            BEFORE UPDATE OR DELETE ON hunt_permission_events
+            FOR EACH ROW EXECUTE FUNCTION hunt_permission_events_append_only();
+    END IF;
+END
+$t_n_events_append_only$;
 DO $permission_status$
 BEGIN
     -- A refused, grantable action is parked under its idempotency key.
