@@ -2210,10 +2210,14 @@ def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
         payload = ({"reason": args.reason, "note": args.note} if action == "dismiss" else {"note": args.note})
         stepup = (approval.StepUp(send, client.base_url, terminal, account=args.account, method=args.method)
                   if approval.instance_kind(send) == "enterprise" else None)
-        status, body = apply_knowledge_decision(send, stepup, approval.knowledge_entry(
-            action, args.target_id, subject_id=args.finding_id, reason=getattr(args, 'reason', None),
-            note=args.note) if stepup is not None else {}, "POST",
-            f"/targets/{_quoted(args.target_id)}/findings/{_quoted(args.finding_id)}/{action}", payload)
+        try:
+            status, body = apply_knowledge_decision(send, stepup, approval.knowledge_entry(
+                action, args.target_id, subject_id=args.finding_id, reason=getattr(args, 'reason', None),
+                note=args.note) if stepup is not None else {}, "POST",
+                f"/targets/{_quoted(args.target_id)}/findings/{_quoted(args.finding_id)}/{action}", payload)
+        except approval.OutcomeUnknown as exc:
+            terminal.say(UNKNOWN_OUTCOME.format(_shown(exc)))
+            return 1
         if not 200 <= status < 300:
             detail = body.get("detail") if isinstance(body, Mapping) else body
             terminal.say(_shown(f"  not applied: HTTP {status}: {detail}"))

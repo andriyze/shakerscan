@@ -68,6 +68,52 @@ def test_enterprise_finding_decision_uses_stepup(monkeypatch, action, key, extra
     assert begin["knowledge"]["decision"] == action
     assert begin["knowledge"]["subject_id"] == PROPOSAL
     assert begin["knowledge"]["note"] == "human decision"
+    assert begin["knowledge"]["reason"] == ("false_positive" if action == "dismiss" else None)
+    # D3: a token connection never posts the decision itself; the gateway applies it.
+    assert not any(method == "POST" and path.endswith(f"/findings/{PROPOSAL}/{action}")
+                   for method, path, _ in gateway.seen)
+
+
+@pytest.mark.parametrize("action,key,extra", [
+    ("dismiss", "d", ["--reason", "duplicate"]), ("reopen", "o", []),
+])
+def test_an_open_source_engine_takes_the_finding_decision_directly(monkeypatch, action, key, extra):
+    gateway = FakeGateway(enterprise=False)
+    original = gateway.__call__
+
+    def send(method, path, payload=None, headers=None, **kwargs):
+        if method == "GET" and path == f"/findings/{PROPOSAL}":
+            return 200, {"id": PROPOSAL, "title": "test", "status": "active"}
+        if method == "POST" and path == f"/targets/{TARGET}/findings/{PROPOSAL}/{action}":
+            gateway.seen.append((method, path, payload))
+            return 200, {"finding": {"status": "false_positive" if action == "dismiss" else "active"}}
+        return original(method, path, payload, headers, **kwargs)
+
+    monkeypatch.setattr(approval, "Terminal", lambda: Terminal(key))
+    monkeypatch.setattr(v2_cli, "_approval_send", lambda client: send)
+    assert v2_cli.main(["--api-url", ORIGIN, "knowledge", action, TARGET, PROPOSAL,
+                        "--note", "human decision", *extra]) == 0
+    assert gateway.begins() == []
+    posted = [item for item in gateway.seen if item[0] == "POST"]
+    assert posted == [("POST", f"/targets/{TARGET}/findings/{PROPOSAL}/{action}",
+                       {"reason": "duplicate", "note": "human decision"} if action == "dismiss"
+                       else {"note": "human decision"})]
+
+
+def test_a_finding_decision_without_an_answer_is_reported_as_unknown(monkeypatch, capsys):
+    def send(method, path, payload=None, headers=None, **kwargs):
+        if path == "/_enterprise/healthz":
+            return 404, {"detail": "Not Found"}
+        if method == "GET" and path == f"/findings/{PROPOSAL}":
+            return 200, {"id": PROPOSAL, "title": "test", "status": "active"}
+        raise approval.ApprovalError("the engine did not answer")
+
+    terminal = Terminal("d")
+    monkeypatch.setattr(approval, "Terminal", lambda: terminal)
+    monkeypatch.setattr(v2_cli, "_approval_send", lambda client: send)
+    assert v2_cli.main(["--api-url", ORIGIN, "knowledge", "dismiss", TARGET, PROPOSAL,
+                        "--reason", "false_positive", "--note", "x"]) == 1
+    assert "outcome unknown: the engine did not answer" in terminal.stdout.getvalue()
 AUTHORITY = {"target_id": TARGET, "revision": 3, "metadata_changes": True, "instruction_changes": False,
              "credential_profile_ids": [], "collection_ids": [],
              "ssh_host_keys": [{"port": 22, "fingerprint": "SHA256:" + "A" * 43, "source": "pinned"}],
