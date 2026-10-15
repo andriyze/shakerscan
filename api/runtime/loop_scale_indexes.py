@@ -98,7 +98,12 @@ try:
     from finding_routes.list_schema import FINDINGS_SCALE_INDEXES
 except ModuleNotFoundError:  # package import layout
     from api.finding_routes.list_schema import FINDINGS_SCALE_INDEXES
-LOOP_SCALE_INDEXES = (*LOOP_SCALE_INDEXES, *FINDINGS_SCALE_INDEXES)
+# The settled-findings count behind the Exposure asset list (exposure/scale_indexes.py).
+try:
+    from exposure.scale_indexes import EXPOSURE_SCALE_INDEXES
+except ModuleNotFoundError:  # package import layout
+    from api.exposure.scale_indexes import EXPOSURE_SCALE_INDEXES
+LOOP_SCALE_INDEXES = (*LOOP_SCALE_INDEXES, *FINDINGS_SCALE_INDEXES, *EXPOSURE_SCALE_INDEXES)
 
 #: Tables analyzed after one of their indexes is (re)built: the findings proof-gate statistics the
 #: planner needs to choose the partial proof index.

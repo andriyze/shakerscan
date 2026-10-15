@@ -221,7 +221,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "5c36f783ad339eda5e3c461ceb0b08ef2066286d467e9411a89410dd17d86ad4",
+  "contract_sha256": "bbd6b3b63f8a6d3b179192587f82583a4d7ae6f00b132a4bea5c51134bdfb9cb",
   "openapi": "3.1.0",
   "operation_count": 491,
   "operations": {
@@ -1623,7 +1623,7 @@
     "GET /exposure/assets": {
       "deprecated": false,
       "operation_id": "exposure_assets_exposure_assets_get",
-      "parameters_sha256": "3bc9d969ad5fe92ca37ba0722c4f96239f75f5a65e26a50e6c2c47de8fa54783",
+      "parameters_sha256": "b14497bcca82c429181b71eca44b0148077d94bbdf0c9ea320418a7f525e868b",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",

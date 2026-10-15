@@ -655,17 +655,20 @@ def test_a_page_reads_a_page_of_rows_from_an_index(monkeypatch):
         scans = [node for node in _nodes(plan) if node.get("Relation Name") == "findings"]
         assert any(node.get("Index Name") == "idx_findings_proof_candidates" for node in _nodes(plan)), scans
         assert max(node["Actual Rows"] for node in scans) < 1000
-        # Exposure: the proof is projected for candidate rows only, through their partial index.
+        # Exposure: the proof is projected for candidate rows only, through their partial index;
+        # severity counts come from the summary and needs-verification from the settled-rows index
+        # (tests/test_exposure_assets_rank_postgres.py covers the ranking itself).
         recording = _Recording(pool)
         monkeypatch.setattr(exposure_router, "_pool", lambda: recording)
         await exposure_router.exposure_assets(root_domain=None, kind=None, cohort=None, limit=10, offset=0)
-        targets_query, targets_args = recording.queries[0]
+        targets_query, targets_args = next((q, a) for q, a in recording.queries
+                                           if q.lstrip().startswith("WITH") and "ranked" in q)
         plan = await _explain(conn, targets_query, targets_args)
         assert any(node.get("Index Name") == "idx_findings_proof_candidates" for node in _nodes(plan))
+        assert any(node.get("Index Name") == "idx_findings_active_settled_target" for node in _nodes(plan))
         for node in _nodes(plan):
-            if node.get("Relation Name") == "findings" and node.get("Index Name") != "idx_findings_proof_candidates":
-                # Severity and needs-verification counts come from the covering index alone.
-                assert node["Node Type"] == "Index Only Scan", node["Node Type"]
+            if node.get("Relation Name") == "findings":
+                assert "Seq Scan" not in node["Node Type"], node["Node Type"]
 
     run(scenario, undetermined=0)
 

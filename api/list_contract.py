@@ -313,6 +313,14 @@ class ListPlan:
         return ", ".join(columns)
 
     @property
+    def keyset_select(self) -> str:
+        """Only the keyset columns ``envelope`` reads, for an endpoint that builds its items
+        itself (its rows still carry these values for the cursor)."""
+        columns = [f"{expr} AS {self._sort_alias(index)}" for index, (expr, _kind) in enumerate(self._sort_columns)]
+        columns.append(f"{self.spec.id_expr} AS {_ID_COLUMN}")
+        return ", ".join(columns)
+
+    @property
     def order_by(self) -> str:
         direction = "DESC" if self.descending else "ASC"
         keys = [expr for expr, _kind in self._sort_columns] + [self.spec.id_expr]

@@ -55,6 +55,8 @@ def install_fastapi_exception_stubs() -> None:
         fastapi.Depends = lambda dependency=None, **_kwargs: dependency
     if not hasattr(fastapi, "APIRouter"):
         fastapi.APIRouter = APIRouter
+    if not hasattr(fastapi, "Response"):
+        fastapi.Response = Response
     if not hasattr(fastapi, "status"):
         fastapi.status = types.SimpleNamespace(
             HTTP_201_CREATED=201,
