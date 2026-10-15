@@ -52,8 +52,15 @@ test('target groups distinguish domains from hosts and internal identities', asy
 test('finding copy failures and empty presentation have visible fallbacks', () => {
   const detail = readFindingDetail()
   const candidates = read('src/app/findings/candidates/page.tsx')
-  assert.match(detail, /Clipboard access failed/)
-  assert.match(detail, /select text/)
+  // Copy goes through the shared button: it falls back to execCommand and, when the
+  // browser refuses both, shows the text pre-selected instead of failing silently.
+  const copyButton = read('src/components/CopyButton.tsx')
+  assert.match(detail, /export \{ CopyButton \} from '@\/components\/CopyButton'/)
+  assert.match(copyButton, /copyText\(text\)/)
+  assert.match(copyButton, /data-testid="copy-fallback"/)
+  assert.match(copyButton, /The browser blocked copying/)
+  assert.match(detail, /findingLink\(finding\.id\)/)
+  assert.match(detail, /Copy link/)
   assert.match(detail, /cvss_score !== null/)
   assert.match(detail, /Canonical lifecycle/)
   assert.match(detail, /summaryDescription\.trim\(\)\.toLowerCase\(\) !== String\(finding\?\.title/)
