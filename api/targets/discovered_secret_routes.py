@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Literal
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 try:
@@ -63,13 +63,17 @@ def _uuid(value: str, name: str) -> uuid.UUID:
 
 
 @router.get('/targets/{target_id}/discovered-secrets')
-async def get_discovered_secrets(target_id: str, request: Request, usable_only: bool = False):
+async def get_discovered_secrets(
+    target_id: str, request: Request, usable_only: bool = False,
+    # The newest sightings first, at most this many (the store's own cap is 200).
+    limit: int = Query(secrets_store.MAX_LIST, ge=1, le=secrets_store.MAX_LIST),
+):
     _operator(request)
     target = _uuid(target_id, 'target')
     async with pool().acquire() as conn:
         if not await conn.fetchval('SELECT 1 FROM targets WHERE id=$1', target):
             raise HTTPException(404, 'target not found')
-        secrets = await secrets_store.list_for_target(conn, target, usable_only=usable_only)
+        secrets = await secrets_store.list_for_target(conn, target, usable_only=usable_only, limit=limit)
     return {'target_id': str(target), 'secrets': secrets, 'count': len(secrets), 'values_visible': False}
 
 

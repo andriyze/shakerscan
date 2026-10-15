@@ -174,3 +174,47 @@ def test_enterprise_decides_through_the_step_up_with_the_exact_decision(monkeypa
     assert decided == [{"decision": "secret_decision", "method": "POST",
                         "path": f"/targets/{TARGET}/discovered-secrets/{SECRET}/reveal", "payload": {}}]
     assert "value: synthetic" in terminal.stdout.getvalue()
+
+
+class ManyStub(Stub):
+    """The list route answering ``count`` rows whatever limit it is sent (an engine before 2.11
+    ignores limit=; unit fixture)."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        rows = [{"ref": f"secret://{index:08d}-0000-4000-8000-000000000000", "kind": "token", "label": None,
+                 "length": 8, "state": "active", "seen_count": 1, "last_seen_at": "2026-10-13", "uses": 0,
+                 "found_on": TARGET} for index in range(count)]
+        handler = self.server.RequestHandlerClass
+        stub = self
+
+        def do_GET(self) -> None:  # noqa: N802
+            stub.seen.append(("GET", self.path, None))
+            self._reply(200, {"secrets": rows, "count": len(rows), "values_visible": False})
+
+        handler.do_GET = do_GET
+
+
+def test_list_sends_a_limit_and_says_when_there_are_more(monkeypatch, capsys):
+    """the list had no limit; it asks for one more than it shows, and an engine that
+    ignores limit= (before 2.11) is cut to --limit by the client."""
+    with ManyStub(30) as stub:
+        assert _run(stub, None, "list", TARGET, "--limit", "5", monkeypatch=monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert any(path.endswith("/discovered-secrets?limit=6") for _m, path, _b in stub.seen), stub.seen
+    assert out.count("secret://") == 5 and "there are more" in out and "--limit" in out
+
+    with ManyStub(3) as stub:
+        assert _run(stub, None, "list", TARGET, "--usable", monkeypatch=monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert any("usable_only=true&limit=51" in path for _m, path, _b in stub.seen), stub.seen
+    assert out.count("secret://") == 3 and "more" not in out
+
+    with ManyStub(200) as stub:
+        assert _run(stub, None, "list", TARGET, "--limit", "200", monkeypatch=monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert out.count("secret://") == 200 and "there may be more" in out
+
+    for bad in ("0", "201", "x"):
+        with pytest.raises(SystemExit):
+            v2_cli.main(["--api-url", "http://127.0.0.1:9", "secrets", "list", TARGET, "--limit", bad])
