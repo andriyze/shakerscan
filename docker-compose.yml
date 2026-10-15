@@ -53,7 +53,9 @@ services:
   # unless the operator already configured an external S3-compatible store.
   minio:
     profiles: ["artifacts"]
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    # Upstream quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z, no longer publicly pullable from
+    # Quay or Docker Hub (#218). Same index digest, so the same bytes, from a public mirror.
+    image: ghcr.io/teableio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-shakerscan}
@@ -71,7 +73,8 @@ services:
 
   minio-init:
     profiles: ["artifacts"]
-    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+    # Upstream quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z; same digest from a public mirror (#218).
+    image: ghcr.io/teableio/minio-mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
