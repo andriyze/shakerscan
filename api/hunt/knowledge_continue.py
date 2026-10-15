@@ -321,17 +321,22 @@ async def _freshness(conn: Any, target: uuid.UUID, observer: Observer, anchor: d
 
 async def continue_report(conn: Any, target_id: Any, *, device: bool, audience: str = "operator",
                           since: str = "release", run: Mapping[str, Any] | None = None,
-                          limit: int = MAX_ITEMS, after: str | None = None) -> dict[str, Any]:
+                          limit: int = MAX_ITEMS, after: str | None = None,
+                          reader: str | None = None) -> dict[str, Any]:
     """The milestone report for one target. ``run`` is the calling Hunt (its authority is evaluated).
-    ``after`` is the cursor a previous page returned (``next_experiments.next_after``)."""
+    ``after`` is the cursor a previous page returned (``next_experiments.next_after``). ``reader``
+    (``operator:<id>`` or ``hunt:<id>``) records the read for the continuation measures; the
+    briefing's short form records nothing."""
     # The records part is cached briefly; the authority part is evaluated on every call from the
     # policy as it is now (a grant, a revoke, a spent budget or the Hunt ending changes it at once).
     key = json.dumps([str(target_id), device, audience, since, str((run or {}).get("id"))])
     cached = _cache.get(key)
-    if cached is not None and time.monotonic() - cached[0] < REPORT_CACHE_SECONDS:
-        base = cached[1]
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < REPORT_CACHE_SECONDS:
+        base, age = cached[1], now - cached[0]
     else:
-        base = await _continue_report(conn, target_id, device=device, audience=audience, since=since, run=run)
+        base, age = await _continue_report(conn, target_id, device=device, audience=audience, since=since,
+                                           run=run), None
         if len(_cache) > 2_000:
             _cache.clear()
         _cache[key] = (time.monotonic(), base)
@@ -340,7 +345,39 @@ async def continue_report(conn: Any, target_id: Any, *, device: bool, audience: 
         url = await conn.fetchval("SELECT url FROM targets WHERE id=$1",
                                   uuid.UUID(str(run.get("target_id") or run.get("device_target_id") or target_id)))
         scoped = {**run, "_target_url": url}
-    return _with_authority(copy.deepcopy(base), scoped, max(1, min(int(limit), MAX_ITEMS)), after=after)
+    report = _with_authority(copy.deepcopy(base), scoped, max(1, min(int(limit), MAX_ITEMS)), after=after)
+    # Whether the records part was served from this process's short cache, and how old it is: a
+    # caller that just changed something (re-tested, declared a release) knows to ask again.
+    report["cache"] = cache_view(age)
+    if reader:
+        await _record_read(conn, base, report, reader=reader, run=run)
+    return report
+
+
+async def _record_read(conn: Any, base: Mapping[str, Any], report: Mapping[str, Any], *, reader: str,
+                       run: Mapping[str, Any] | None) -> None:
+    """Keep the read for the continuation measures; a failure to record never fails the report."""
+    from .knowledge_measures import record_report_read
+    since = base.get("since") or {}
+    try:
+        # Its own transaction (a savepoint inside a caller's): a failed write never aborts the caller's.
+        async with conn.transaction():
+            await record_report_read(conn, base["target_id"], reader=reader, hunt_run_id=(run or {}).get("id"),
+                                     since_at=_time(since.get("at")) if since.get("resolved") else None,
+                                     set_digest=report["next_experiments"].get("set_digest"),
+                                     ranked=base["next_experiments"]["ranked"])
+    except Exception as exc:  # noqa: BLE001 - measurement only
+        import logging
+        logging.getLogger(__name__).warning("continue report read not recorded: %s", type(exc).__name__)
+
+
+def cache_view(age: float | None) -> dict[str, Any]:
+    """``cached`` and ``age_seconds`` of a report kept for ``REPORT_CACHE_SECONDS`` per process."""
+    return {"cached": age is not None, "age_seconds": round(age, 1) if age is not None else 0.0,
+            "max_age_seconds": REPORT_CACHE_SECONDS,
+            "note": ("The records part was built at built_at and served from this process's cache; authority is "
+                     "evaluated on every call." if age is not None else
+                     "Built for this call; the records part is kept for up to max_age_seconds.")}
 
 
 class CursorError(ValueError):

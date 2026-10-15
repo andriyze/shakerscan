@@ -76,9 +76,12 @@ def test_p1_2_a_negative_on_another_origin_never_skips_the_default_origin(monkey
                 # The default origin is another experiment (a different key): nothing to reuse.
                 default = await _check(hunt, _negative(evidence)['conditions'])
                 assert default['skip'] is False and default['identical'] == []
-                # Naming the default origin for a request sent to :8443 never binds.
-                wrong = (await hunt.ok('knowledge.record', _negative(evidence)))['result']['interpretation']
-                assert wrong['dependencies']['binding']['bound'] is False
+                # Naming the default origin for a request sent to :8443 is another experiment than the
+                # cited action ran: the entry is refused (conditions are checked against the action).
+                wrong = await hunt.call('knowledge.record', _negative(evidence))
+                assert wrong.status_code == 422, wrong.text
+                assert wrong.json()['detail']['error'] == 'conditions_contradict_cited_action'
+                assert wrong.json()['detail']['contradictions'][0]['fields'] == ['origin']
                 assert (await _check(hunt, _negative(evidence)['conditions']))['skip'] is False
     asyncio.run(run())
 

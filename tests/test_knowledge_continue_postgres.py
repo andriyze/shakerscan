@@ -440,19 +440,21 @@ def test_review_regressions_stale_state_window_burying_and_claims_that_are_not_r
                 assert all(item['required_retest'] for item in result['next_experiments']['items'][2:])
 
                 # Claims that are not re-tests never supersede another writer's entry.
-                async def refused(entry_id, path, **values):
+                async def refused(entry_id, path, status=403, **values):
                     action = await _request(conn, hunt.id, path=path, **values.pop('request', {}))
                     body = {**_negative(action, '/api/orders/{id}', 'order:5', principal=False), **values,
                             'supersedes': entry_id}
                     body = {key: value for key, value in body.items() if value is not None}
                     answer = await hunt.call('knowledge.record', body)
-                    assert answer.status_code == 403, answer.text
+                    assert answer.status_code == status, answer.text
+                    if status == 422:  # the conditions are not what the cited request was
+                        assert answer.json()['detail']['error'] == 'conditions_contradict_cited_action'
                 await refused(json.loads(own.text)['id'], '/api/orders/5')  # an operator's entry
-                await refused(day1['orders'], '/')  # identical conditions, a different request
+                await refused(day1['orders'], '/', status=422)  # identical conditions, a different request
                 await refused(day1['orders'], '/api/orders/5', negative_state='experiment_inconclusive')
                 await refused(day1['orders'], '/api/orders/5', kind='observation', negative_state=None)
                 # Another origin, or a request that is not plain (a body), is not the same request.
-                await refused(day1['orders'], '/api/orders/5', request={'origin': ORIGIN + ':8443'})
+                await refused(day1['orders'], '/api/orders/5', status=422, request={'origin': ORIGIN + ':8443'})
                 await refused(day1['orders'], '/api/orders/5', request={'body': 'x=1'})
                 # After a newer release the day-1 entry is due; re-tested with its own request, it is replaced.
                 action = await _request(conn, hunt.id, path='/api/orders/5')
