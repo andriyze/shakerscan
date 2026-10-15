@@ -4,12 +4,16 @@ import { useEffect, useState, useCallback, Suspense } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import {
   getSchedules, createSchedule, updateSchedule, deleteSchedule,
-  getTargets,
-  type Schedule, type Target
+  type Schedule
 } from '@/lib/api'
 import { Plus } from 'lucide-react'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Modal, PageHeader, Select, useToast } from '@/components/ui'
-import { boundedTargetDisplay, usableWebTargets } from '@/lib/targetChoices'
+import { usableWebTargets } from '@/lib/targetChoices'
+import { TargetSearchCombobox } from '@/components/targets/TargetSearchCombobox'
+import type { TargetAsset } from '@/lib/targetAssetApi'
+
+/** Schedules run web scans: active targets with a usable web URL are the choices. */
+const scheduleTargetChoice = (asset: TargetAsset) => usableWebTargets([asset]).length === 1
 import { utcTimeToLocalLabel } from '@/lib/format'
 import {
   buildAsmScheduleOptions,
@@ -109,7 +113,6 @@ function SchedulesContent() {
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [healthFilter, setHealthFilter] = useState(false)
   const [showCreateModal, setShowCreateModal] = useState(false)
-  const [targets, setTargets] = useState<Target[]>([])
   const [deleting, setDeleting] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<Schedule | null>(null)
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null)
@@ -169,19 +172,10 @@ function SchedulesContent() {
     }
   }, [searchParams, router])
 
-  // Load targets when modal opens
-  useEffect(() => {
-    if (showCreateModal) {
-      getTargets().then(data => {
-        setTargets(usableWebTargets(data.targets || []))
-      }).catch(err => console.error('Failed to fetch targets:', err))
-    }
-  }, [showCreateModal, formTargetId])
-
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()
-    if (!formTargetId && !editingSchedule) return
+    if (!formTargetId && !editingSchedule) { setError('Choose a target.'); return }
     if (formKind === 'evidence_retention_sweep') {
       setError('Choose a scan or ASM schedule to migrate this retired retention schedule.')
       return
@@ -562,20 +556,14 @@ function SchedulesContent() {
                     {editingSchedule.target_url?.replace(/^https?:\/\//, '')}
                   </div>
                 ) : (
-                  <select
+                  // Searched on the server: the modal used to offer only the first 100 targets.
+                  <TargetSearchCombobox
                     id="schedule-target"
                     value={formTargetId}
-                    onChange={(e) => setFormTargetId(e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-hidden focus:border-blue-500"
-                    required
-                  >
-                    <option value="">Select target...</option>
-                    {targets.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {boundedTargetDisplay(t, { stripScheme: true })}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setFormTargetId}
+                    accept={scheduleTargetChoice}
+                    placeholder="Select target..."
+                  />
                 )}
               </div>
 

@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useState, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
-import { getMissionTimeline, getTargets, formatDate, type Target, type TimelineEvent } from '@/lib/api'
+import { getMissionTimeline, formatDate, type TimelineEvent } from '@/lib/api'
+import { TargetSearchCombobox } from '@/components/targets/TargetSearchCombobox'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
+import { boundedDisplayText } from '@/lib/targetChoices'
 import {
   Card,
   EmptyState,
@@ -164,18 +165,8 @@ function TimelineContent() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
-  const [targets, setTargets] = useState<Target[]>([])
 
   const targetFilter = (filters.target || '').trim()
-
-  useEffect(() => {
-    getTargets()
-      .then((result) => {
-        const rows = Array.isArray(result) ? result : result.targets || []
-        setTargets(rows)
-      })
-      .catch(() => setTargets([]))
-  }, [])
 
   const load = useCallback(async () => {
     try {
@@ -224,18 +215,14 @@ function TimelineContent() {
             </label>
             <div className="flex gap-2">
               <div className="flex-1">
-                <Select
+                {/* A server-searched picker: the first 100 targets used to be the only choices. */}
+                <TargetSearchCombobox
                   id="timeline-target"
                   value={targetFilter}
-                  onChange={(e) => setFilter('target', e.target.value || undefined)}
-                >
-                  <option value="">All targets</option>
-                  {targets.map((target) => (
-                    <option key={target.id} value={target.id}>
-                      {boundedTargetDisplay(target)}
-                    </option>
-                  ))}
-                </Select>
+                  onChange={(value) => setFilter('target', value || undefined)}
+                  noneLabel="All targets"
+                  placeholder="All targets"
+                />
               </div>
               {targetFilter && (
                 <button

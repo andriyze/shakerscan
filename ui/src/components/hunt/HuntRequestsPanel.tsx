@@ -1,10 +1,11 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowUpDown, ChevronDown, ChevronRight, Search, X } from 'lucide-react'
 import { API_URL } from '@/lib/api'
 import { bodyWithheldLabel } from '@/lib/archiveBodies.mjs'
 import { busyNotice, fetchRetryingBusy } from '@/lib/busyRetry.mjs'
+import { planPageMerge, resyncWindows } from '@/lib/huntArchiveSync.mjs'
 import { Button, Card, ErrorState } from '@/components/ui'
 import { MethodBadge } from '@/components/collections/CollectionViewer'
 
@@ -31,7 +32,8 @@ export interface HuntTransaction {
 interface Archive { fidelity: string; fidelity_detail: string; total: number; transactions: HuntTransaction[] }
 
 const PAGE = 250
-const AUTO_LOAD = 1000
+/** A live Hunt's archive is re-read at most this often, however fast its version moves. */
+export const ARCHIVE_REFRESH_MIN_MS = 5000
 const STATUS_CLASSES = ['2xx', '3xx', '4xx', '5xx', 'error'] as const
 
 function statusClass(transaction: HuntTransaction): (typeof STATUS_CLASSES)[number] {
@@ -87,8 +89,12 @@ export interface HuntArchive {
 }
 
 /**
- * The Hunt's redacted request archive, auto-loading up to AUTO_LOAD rows. `version` changes when the
- * run records more work, so a live Hunt refreshes without clearing the rows being read.
+ * The Hunt's redacted request archive, one page (PAGE rows) at a time; `loadMore` reads the next.
+ * `version` changes when the run records more work. The archive is ordered oldest first, so new
+ * requests append: an operator who has read to the end gets only the new tail (offset = rows read);
+ * one who has not gets a one-row read that refreshes the total. Version-driven reads are throttled
+ * (ARCHIVE_REFRESH_MIN_MS), skipped while the tab is hidden (caught up when it shows) and aborted on
+ * unmount or a different Hunt. A total below the rows held (a purge) reloads the first page.
  */
 export function useHuntTransactions(huntId: string, version: number): HuntArchive {
   const [rows, setRows] = useState<HuntTransaction[]>([])
@@ -97,13 +103,25 @@ export function useHuntTransactions(huntId: string, version: number): HuntArchiv
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  const rowsRef = useRef<HuntTransaction[]>([])
+  const totalRef = useRef(0)
+  const loadedOnce = useRef(false)
+  const lastRefreshAt = useRef(0)
+  const controllers = useRef(new Set<AbortController>())
+
+  const apply = useCallback((nextRows: HuntTransaction[], nextTotal: number) => {
+    rowsRef.current = nextRows
+    totalRef.current = nextTotal
+    setRows(nextRows)
+    setTotal(nextTotal)
+  }, [])
 
   // Filters run in the browser over redacted rows: a server-side URL search would match the raw stored
   // URL and could confirm a value the redacted view masks.
-  const fetchPage = useCallback(async (offset: number) => {
-    const params = new URLSearchParams({ format: 'transactions', redaction: 'redacted', limit: String(PAGE), offset: String(offset) })
-    const response = await fetchRetryingBusy(`${API_URL}/hunts/${encodeURIComponent(huntId)}/http-transactions?${params}`, { cache: 'no-store' },
-      { onBusy: seconds => setBusy(busyNotice(seconds)) })
+  const fetchPage = useCallback(async (offset: number, limit: number, signal: AbortSignal) => {
+    const params = new URLSearchParams({ format: 'transactions', redaction: 'redacted', limit: String(limit), offset: String(offset) })
+    const response = await fetchRetryingBusy(`${API_URL}/hunts/${encodeURIComponent(huntId)}/http-transactions?${params}`, { cache: 'no-store', signal },
+      { onBusy: seconds => { if (!signal.aborted) setBusy(busyNotice(seconds)) } })
     if (!response.ok) {
       const detail = await response.json().catch(() => null)
       throw new Error(typeof detail?.detail === 'string' ? detail.detail : `Request archive unavailable (${response.status})`)
@@ -111,41 +129,125 @@ export function useHuntTransactions(huntId: string, version: number): HuntArchiv
     return response.json() as Promise<Archive>
   }, [huntId])
 
-  useEffect(() => {
-    let cancelled = false
-    async function loadInitial() {
-      setLoading(true)
-      try {
-        let archive = await fetchPage(0)
-        let loaded = archive.transactions || []
-        if (cancelled) return
-        setTotal(archive.total || 0)
-        setFidelity({ value: archive.fidelity, detail: archive.fidelity_detail })
-        setRows(loaded); setError(null)
-        while (!cancelled && loaded.length < (archive.total || 0) && loaded.length < AUTO_LOAD) {
-          archive = await fetchPage(loaded.length)
-          if (!archive.transactions?.length) break
-          loaded = [...loaded, ...archive.transactions]
-          if (!cancelled) setRows(loaded)
-        }
-      } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load requests')
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-    void loadInitial()
-    return () => { cancelled = true }
-  }, [fetchPage, version])
+  const track = useCallback(() => {
+    const controller = new AbortController()
+    controllers.current.add(controller)
+    return { signal: controller.signal, done: () => controllers.current.delete(controller) }
+  }, [])
 
+  const loadFirst = useCallback(async (signal: AbortSignal) => {
+    const archive = await fetchPage(0, PAGE, signal)
+    if (signal.aborted) return
+    setFidelity({ value: archive.fidelity, detail: archive.fidelity_detail })
+    apply(archive.transactions || [], archive.total || 0)
+    setError(null)
+    loadedOnce.current = true
+  }, [apply, fetchPage])
+
+  // A different Hunt: forget the rows and read its first page.
+  useEffect(() => {
+    const live = controllers.current
+    const { signal, done } = track()
+    loadedOnce.current = false
+    lastRefreshAt.current = Date.now()
+    apply([], 0)
+    setLoading(true)
+    setError(null)
+    loadFirst(signal)
+      .catch((cause) => { if (!signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load requests') })
+      .finally(() => { done(); if (!signal.aborted) setLoading(false) })
+    return () => { for (const controller of live) controller.abort(); live.clear() }
+  }, [apply, huntId, loadFirst, track])
+
+  // Re-read the window the operator holds from the start and replace it (server order). Rows
+  // archived out of order (an overlapping action's requests land mid-list) make an offset read
+  // at the tail unreliable; see lib/huntArchiveSync.mjs.
+  const resync = useCallback(async (signal: AbortSignal) => {
+    const collected: HuntTransaction[] = []
+    let archive: Archive | null = null
+    for (const span of resyncWindows(rowsRef.current.length, { page: PAGE })) {
+      archive = await fetchPage(span.offset, span.limit, signal)
+      if (signal.aborted) return
+      const batch = archive.transactions || []
+      collected.push(...batch)
+      if (batch.length < span.limit) break
+    }
+    if (!archive) return
+    const seen = new Set<string>()
+    setFidelity({ value: archive.fidelity, detail: archive.fidelity_detail })
+    apply(collected.filter(row => (seen.has(row.id) ? false : (seen.add(row.id), true))), archive.total || 0)
+    setError(null)
+  }, [apply, fetchPage])
+
+  // A read at the tail (offset = rows held): append only when the plan says the rows add up.
+  const readTail = useCallback(async (signal: AbortSignal) => {
+    const held = rowsRef.current
+    const archive = await fetchPage(held.length, PAGE, signal)
+    if (signal.aborted) return
+    const nextTotal = archive.total || 0
+    setFidelity({ value: archive.fidelity, detail: archive.fidelity_detail })
+    const plan = planPageMerge({ held: rowsRef.current, page: archive.transactions || [], limit: PAGE, total: nextTotal })
+    if (plan.action === 'reload') { await loadFirst(signal); return }
+    if (plan.action === 'resync') { await resync(signal); return }
+    apply(plan.rows.length ? [...rowsRef.current, ...plan.rows] : rowsRef.current, nextTotal)
+    setError(null)
+  }, [apply, fetchPage, loadFirst, resync])
+
+  const refresh = useCallback(async () => {
+    if (!loadedOnce.current) return
+    lastRefreshAt.current = Date.now()
+    const { signal, done } = track()
+    try {
+      if (rowsRef.current.length >= totalRef.current) {
+        // At the tail: the new requests themselves.
+        await readTail(signal)
+        return
+      }
+      // Not at the tail: one row, for the new total. Rows that arrived mid-list are caught by the
+      // next tail read (Load more), which resyncs when the counts no longer add up.
+      const archive = await fetchPage(0, 1, signal)
+      if (signal.aborted) return
+      const nextTotal = archive.total || 0
+      setFidelity({ value: archive.fidelity, detail: archive.fidelity_detail })
+      if (nextTotal < rowsRef.current.length) { await loadFirst(signal); return }
+      apply(rowsRef.current, nextTotal)
+      setError(null)
+    } catch {
+      // A background refresh keeps the rows being read; the next version change tries again.
+    } finally {
+      done()
+    }
+  }, [apply, fetchPage, loadFirst, readTail, track])
+
+  // The run recorded more work: refresh, at most once per ARCHIVE_REFRESH_MIN_MS and only while visible.
+  const firstVersion = useRef(true)
+  useEffect(() => {
+    if (firstVersion.current) { firstVersion.current = false; return }
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const run = () => {
+      // Hidden when due (also when the throttle timer fires in a hidden tab): wait for the tab to
+      // show again, then refresh, so the final requests and total are never left unread.
+      if (document.visibilityState === 'hidden') { document.addEventListener('visibilitychange', run); return }
+      document.removeEventListener('visibilitychange', run)
+      const wait = lastRefreshAt.current + ARCHIVE_REFRESH_MIN_MS - Date.now()
+      if (wait > 0) { timer = setTimeout(run, wait); return }
+      void refresh()
+    }
+    if (document.visibilityState === 'hidden') document.addEventListener('visibilitychange', run)
+    else run()
+    return () => { if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', run) }
+  }, [refresh, version])
+
+  // Load more reads at the tail with the same plan, so it always makes progress: rows it already
+  // holds coming back (an insert before the offset) resync the window instead of appending nothing.
   const loadMore = useCallback(async () => {
     setLoading(true)
+    const { signal, done } = track()
     try {
-      const archive = await fetchPage(rows.length)
-      setRows(current => [...current, ...(archive.transactions || [])])
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not load more requests') }
-    finally { setLoading(false) }
-  }, [fetchPage, rows.length])
+      await readTail(signal)
+    } catch (cause) { if (!signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load more requests') }
+    finally { done(); if (!signal.aborted) setLoading(false) }
+  }, [readTail, track])
 
   return { rows, total, fidelity, loading, error, busy, loadMore }
 }
@@ -155,7 +257,9 @@ export function RequestRow({ row, index, expanded, onToggle, showCapability = tr
   row: HuntTransaction; index: number; expanded: boolean; onToggle: () => void; showCapability?: boolean
 }) {
   const { host, path } = splitUrl(row.url)
-  return <li>
+  // Rendering cost scales with what is on screen, not with the rows loaded: the browser skips
+  // layout and paint for rows outside the viewport (dependency-free virtualization).
+  return <li className="[content-visibility:auto] [contain-intrinsic-size:auto_44px]">
     <button type="button" onClick={onToggle} aria-expanded={expanded}
       className={`grid w-full grid-cols-[1rem_4rem_3rem_minmax(0,1fr)] items-center gap-3 px-4 py-2 text-left hover:bg-gray-800/30 ${showCapability ? 'lg:grid-cols-[1rem_4rem_3rem_minmax(0,1fr)_12rem_5rem]' : 'lg:grid-cols-[1rem_4rem_3rem_minmax(0,1fr)_5rem]'}`}>
       {expanded ? <ChevronDown className="h-4 w-4 text-gray-500" aria-hidden="true" /> : <ChevronRight className="h-4 w-4 text-gray-500" aria-hidden="true" />}

@@ -55,3 +55,32 @@ export function groupOptions(options) {
   }
   return groups
 }
+
+/**
+ * The highlighted index for a freshly shown list: the selected value when it is there and enabled,
+ * otherwise the first enabled option, otherwise -1. Recomputed whenever the visible options
+ * change, so an index from an earlier result list can never point at a different (or no) option.
+ */
+export function initialActive(options, value) {
+  const list = options || []
+  const selected = list.findIndex(option => option.value === value && !option.disabled)
+  return selected >= 0 ? selected : moveActive(list, -1, 1)
+}
+
+/** An index that is valid for `options` (enabled and in range), or -1. */
+export function clampActive(options, active) {
+  const list = options || []
+  return Number.isInteger(active) && active >= 0 && active < list.length && !list[active]?.disabled ? active : -1
+}
+
+/**
+ * Whether Enter may choose the highlighted option. In server-search mode the options must answer
+ * the text in the box: not while a search is due or running, and not while they belong to an
+ * older query. A local list always answers its own filter.
+ */
+export function canChooseActive({ remote, loading, query, optionsQuery }) {
+  if (!remote) return true
+  if (loading) return false
+  if (optionsQuery === undefined) return true
+  return optionsQuery !== null && String(optionsQuery).trim() === String(query ?? '').trim()
+}

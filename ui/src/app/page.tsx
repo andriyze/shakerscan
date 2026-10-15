@@ -2,17 +2,21 @@
 import { featureEnabled, navigationAllowed } from '@/lib/workspaceCapabilities'
 import { WorkspaceFeature } from '@/components/WorkspaceBoundary'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { workerCapacityLabel, workerCountLabel } from '@/lib/labels'
 import Link from '@/components/WorkspaceLink'
 import { AlertTriangle, ArrowRight, CheckCircle2, CircleHelp, ListTodo, Minus, Plus, RadioTower, ScanLine, Server, ShieldAlert, Target, Trash2, Workflow } from 'lucide-react'
 import {
   clearQueue, formatDate, getDashboard, getExposureAssets, getGradeColor, getGungnirStatus,
-  getMissionTimeline, getQueueStats, getTargetsGrouped, getWorkers, scaleWorkers, startGungnir,
+  getMissionTimeline, getQueueStats, getTargetsGroupedPage, getWorkers, scaleWorkers, startGungnir,
   stopGungnir, type DashboardActionItem, type DashboardResponse, type ExposureAssetsResponse,
   type GroupedDomain, type GungnirStatus, type QueueStats, type Scan, type TimelineEvent,
-  type WorkerStats, type ExposureAsset, type ExposureAssetMetrics, type TargetCohort,
+  type WorkerStats, type TargetCohort,
 } from '@/lib/api'
+import { isAbortError } from '@/lib/fetchLayer.mjs'
+import { totalLabel, type ListV1Page } from '@/lib/listPage.mjs'
+import { usePoll } from '@/lib/usePoll'
+import { cohortScopingNote, coverageScope as describeCoverageScope, postureState, type CoverageScope, type PostureState } from '@/lib/dashboardScope.mjs'
 import {
   Badge,
   Card,
@@ -27,11 +31,18 @@ import { ChangesStrip } from '@/app/exposure/ChangesStrip'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 
-const DASHBOARD_REFRESH_MS = 10000
+// The server caches /dashboard for 15 s: polling it faster only re-reads the same answer.
+const DASHBOARD_REFRESH_MS = 15000
 const QUEUE_REFRESH_MS = 15000
 const WORKERS_REFRESH_MS = 30000
-const GUNGNIR_REFRESH_MS = 30000
+const GUNGNIR_REFRESH_MS = 60000
 const OVERVIEW_REFRESH_MS = 60000
+// Exposure metrics and cohort counts come from the server over the full asset set; the assets
+// themselves are only read to scope recent rows to a cohort, so one bounded page is enough.
+const EXPOSURE_PAGE = 200
+// Coverage card: the domains with the most findings, a few members each (list/v1 pages).
+const COVERAGE_GROUPS = 50
+const COVERAGE_MEMBERS = 20
 
 const FOCUS_RING = 'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
 type CohortView = 'operational' | 'production' | 'staging' | 'non_operational' | 'all'
@@ -42,8 +53,13 @@ export default function Dashboard() {
   const [queue, setQueue] = useState<QueueStats | null>(null)
   const [workers, setWorkers] = useState<WorkerStats | null>(null)
   const [gungnir, setGungnir] = useState<GungnirStatus | null>(null)
-  const [exposure, setExposure] = useState<ExposureAssetsResponse | null>(null)
-  const [groupedTargets, setGroupedTargets] = useState<GroupedDomain[]>([])
+  // The exposure answer remembers the cohort it was asked for: a cohort switch in flight shows
+  // the loading state, never the previous cohort's numbers (or numbers recomputed in the browser).
+  const [exposure, setExposure] = useState<{ view: CohortView; body: ExposureAssetsResponse } | null>(null)
+  // The cohort whose exposure read failed: a failure belongs to that cohort only, so switching
+  // cohorts never carries it over (and never leaves zeros standing in for unavailable data).
+  const [exposureFailedView, setExposureFailedView] = useState<CohortView | null>(null)
+  const [groupsPage, setGroupsPage] = useState<ListV1Page<GroupedDomain> | null>(null)
   const [timeline, setTimeline] = useState<TimelineEvent[]>([])
   const [overviewLoading, setOverviewLoading] = useState(true)
   const [dashboardLoading, setDashboardLoading] = useState(true)
@@ -59,58 +75,121 @@ export default function Dashboard() {
   const [gungnirActionLoading, setGungnirActionLoading] = useState(false)
   const [cohortView, setCohortView] = useState<CohortView>('operational')
 
-  const dashboardInFlight = useRef(false)
   const dashboardLoadedOnce = useRef(false)
-  const queueInFlight = useRef(false)
-  const workersInFlight = useRef(false)
-  const gungnirInFlight = useRef(false)
-  const overviewInFlight = useRef(false)
-  const overviewRefreshPending = useRef(false)
-  const cohortViewRef = useRef<CohortView>('operational')
+  const workersVisible = featureEnabled('worker_status') || featureEnabled('worker_admin')
+  const gungnirVisible = featureEnabled('ct_monitor')
 
-  const fetchDashboard = async (showLoading = false): Promise<boolean | undefined> => {
-    if (dashboardInFlight.current) return undefined
-    dashboardInFlight.current = true
-    if (showLoading) setDashboardLoading(true)
+  // Each loader throws on failure (after recording it) so the poll loop backs off; an abort is
+  // the page moving on and records nothing.
+  const fetchDashboard = useCallback(async (signal?: AbortSignal) => {
     try {
-      const dashboardData = await getDashboard()
+      const dashboardData = await getDashboard(signal)
+      if (signal?.aborted) return
       setData(dashboardData)
       setDashboardError(null)
       setLastUpdated(new Date())
       dashboardLoadedOnce.current = true
-      return true
     } catch (err) {
+      if (isAbortError(err)) return
       console.error('Failed to load dashboard:', err)
       if (!dashboardLoadedOnce.current) {
         setDashboardError('Failed to load dashboard. Is the API running?')
       }
-      return false
+      throw err
     } finally {
-      dashboardInFlight.current = false
-      setDashboardLoading(false)
+      if (!signal?.aborted) setDashboardLoading(false)
     }
-  }
+  }, [])
 
-  const fetchQueueStats = async () => {
-    if (queueInFlight.current) return
-    queueInFlight.current = true
+  const fetchQueueStats = useCallback(async (signal?: AbortSignal) => {
     try {
-      const queueData = await getQueueStats()
+      const queueData = await getQueueStats(signal)
+      if (signal?.aborted) return
       setQueue(queueData)
       setQueueError(null)
     } catch (err) {
+      if (isAbortError(err)) return
       setQueueError('Queue status unavailable')
-    } finally {
-      queueInFlight.current = false
+      throw err
     }
-  }
+  }, [])
+
+  const fetchWorkers = useCallback(async (signal?: AbortSignal) => {
+    if (!featureEnabled('worker_status') && !featureEnabled('worker_admin')) return
+    try {
+      const workerData = await getWorkers(signal)
+      if (signal?.aborted) return
+      setWorkers(workerData)
+      setWorkersError(workerData?.error || null)
+    } catch (err) {
+      if (isAbortError(err)) return
+      setWorkers(null)
+      setWorkersError('Workers unavailable')
+      throw err
+    }
+  }, [])
+
+  const fetchGungnirStatus = useCallback(async (signal?: AbortSignal) => {
+    if (!featureEnabled('ct_monitor')) return
+    try {
+      const gungnirData = await getGungnirStatus(signal)
+      if (!signal?.aborted) setGungnir(gungnirData)
+    } catch (err) {
+      if (isAbortError(err)) return
+      console.error('Failed to fetch gungnir status:', err)
+      throw err
+    }
+  }, [])
+
+  // Exposure is per cohort: switching cohorts restarts this loop (aborting the old read).
+  const fetchExposure = useCallback(async (signal?: AbortSignal) => {
+    if (!featureEnabled('exposure')) return
+    const view = cohortView
+    try {
+      const body = await getExposureAssets({ limit: EXPOSURE_PAGE, cohort: view }, signal)
+      if (signal?.aborted) return
+      setExposure({ view, body })
+      setExposureFailedView((current) => current === view ? null : current)
+    } catch (err) {
+      if (isAbortError(err)) return
+      setExposureFailedView(view)
+      throw err
+    }
+  }, [cohortView])
+
+  // Coverage groups and recent activity do not depend on the cohort (it is applied in the browser).
+  const fetchOverview = useCallback(async (signal?: AbortSignal) => {
+    const [groupsResult, timelineResult] = await Promise.allSettled([
+      featureEnabled('asm')
+        ? getTargetsGroupedPage({
+          limit: COVERAGE_GROUPS, member_limit: COVERAGE_MEMBERS, sort: '-active_findings_count', count: 'exact',
+        }, signal)
+        : Promise.resolve(null),
+      featureEnabled('timeline') ? getMissionTimeline({ limit: 12 }, signal) : Promise.resolve({ events: [] }),
+    ])
+    if (signal?.aborted) return
+    if (groupsResult.status === 'fulfilled') setGroupsPage(groupsResult.value)
+    if (timelineResult.status === 'fulfilled') setTimeline(timelineResult.value.events || [])
+    setOverviewLoading(false)
+    const failed = [groupsResult, timelineResult].find((result) => result.status === 'rejected')
+    if (failed && failed.status === 'rejected' && !isAbortError(failed.reason)) throw failed.reason
+  }, [])
+
+  usePoll(fetchDashboard, { intervalMs: DASHBOARD_REFRESH_MS })
+  usePoll(fetchQueueStats, { intervalMs: QUEUE_REFRESH_MS })
+  usePoll(fetchWorkers, { intervalMs: WORKERS_REFRESH_MS, enabled: workersVisible })
+  usePoll(fetchGungnirStatus, { intervalMs: GUNGNIR_REFRESH_MS, enabled: gungnirVisible })
+  const exposurePoll = usePoll(fetchExposure, { intervalMs: OVERVIEW_REFRESH_MS, deps: [cohortView] })
+  usePoll(fetchOverview, { intervalMs: OVERVIEW_REFRESH_MS })
+
+  const settle = (work: Promise<unknown>) => work.then(() => true, () => false)
 
   const handleClearQueue = async () => {
     setClearingQueue(true)
     try {
       const res = await clearQueue(clearRetests)
       toast.success(`Cleared ${res.cleared} pending job(s)${clearRetests ? ` + ${res.retest_cleared} retest job(s)` : ''}`)
-      await fetchQueueStats()
+      await settle(fetchQueueStats())
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to clear queue')
     } finally {
@@ -119,104 +198,15 @@ export default function Dashboard() {
     }
   }
 
-  const fetchWorkers = async (force = false) => {
-    if (!featureEnabled('worker_status') && !featureEnabled('worker_admin')) return
-    if (workersInFlight.current && !force) return
-    workersInFlight.current = true
-    try {
-      const workerData = await getWorkers()
-      setWorkers(workerData)
-      setWorkersError(workerData?.error || null)
-    } catch (err) {
-      setWorkers(null)
-      setWorkersError('Workers unavailable')
-    } finally {
-      workersInFlight.current = false
-    }
-  }
-
-  const fetchGungnirStatus = async (force = false) => {
-    if (!featureEnabled('ct_monitor')) return
-    if (gungnirInFlight.current && !force) return
-    gungnirInFlight.current = true
-    try {
-      const gungnirData = await getGungnirStatus()
-      setGungnir(gungnirData)
-    } catch (err) {
-      console.error('Failed to fetch gungnir status:', err)
-    } finally {
-      gungnirInFlight.current = false
-    }
-  }
-
-  const fetchOverview = async (force = false) => {
-    if (overviewInFlight.current) {
-      if (force) overviewRefreshPending.current = true
-      return
-    }
-    overviewInFlight.current = true
-    try {
-      const [exposureResult, targetsResult, timelineResult] = await Promise.allSettled([
-        featureEnabled('exposure') ? getExposureAssets({ limit: 1000, cohort: cohortViewRef.current }) : Promise.resolve(null),
-        getTargetsGrouped({ sort_by: 'active_findings_count', sort_order: 'desc' }),
-        featureEnabled('timeline') ? getMissionTimeline({ limit: 12 }) : Promise.resolve({ events: [] }),
-      ])
-      if (exposureResult.status === 'fulfilled') setExposure(exposureResult.value)
-      if (targetsResult.status === 'fulfilled') setGroupedTargets(targetsResult.value.domains || [])
-      if (timelineResult.status === 'fulfilled') setTimeline(timelineResult.value.events || [])
-    } finally {
-      overviewInFlight.current = false
-      setOverviewLoading(false)
-      if (overviewRefreshPending.current) {
-        overviewRefreshPending.current = false
-        void fetchOverview(true)
-      }
-    }
-  }
-
-  useEffect(() => {
-    fetchDashboard(true)
-    const interval = setInterval(() => fetchDashboard(false), DASHBOARD_REFRESH_MS)
-    return () => clearInterval(interval)
-  }, [])
-
-  useEffect(() => {
-    fetchQueueStats()
-    const interval = setInterval(fetchQueueStats, QUEUE_REFRESH_MS)
-    return () => clearInterval(interval)
-  }, [])
-
-  useEffect(() => {
-    fetchWorkers()
-    const interval = setInterval(fetchWorkers, WORKERS_REFRESH_MS)
-    return () => clearInterval(interval)
-  }, [])
-
-  useEffect(() => {
-    fetchGungnirStatus()
-    const interval = setInterval(fetchGungnirStatus, GUNGNIR_REFRESH_MS)
-    return () => clearInterval(interval)
-  }, [])
-
-  useEffect(() => {
-    fetchOverview(true)
-    const interval = setInterval(fetchOverview, OVERVIEW_REFRESH_MS)
-    return () => clearInterval(interval)
-  }, [])
-
-  useEffect(() => {
-    cohortViewRef.current = cohortView
-    fetchOverview()
-  }, [cohortView])
-
   const handleManualRefresh = async () => {
     if (refreshing) return
     setRefreshing(true)
     const [ok] = await Promise.all([
-      fetchDashboard(false), fetchOverview(), fetchWorkers(true), fetchQueueStats(),
+      settle(fetchDashboard()), settle(fetchOverview()), settle(fetchExposure()),
+      settle(fetchWorkers()), settle(fetchQueueStats()),
     ])
     setRefreshing(false)
-    if (ok === false) {
+    if (!ok) {
       toast.error('Failed to refresh dashboard')
     }
   }
@@ -226,7 +216,7 @@ export default function Dashboard() {
     setScaling(true)
     try {
       await scaleWorkers(count)
-      await fetchWorkers(true)
+      await settle(fetchWorkers())
       toast.success(`Scaled workers to ${count}`)
     } catch (err) {
       console.error('Failed to scale workers:', err)
@@ -246,7 +236,7 @@ export default function Dashboard() {
       } else {
         await startGungnir()
       }
-      await fetchGungnirStatus(true)
+      await settle(fetchGungnirStatus())
       toast.success(wasRunning ? 'Gungnir CT monitor stopped' : 'Gungnir CT monitor started')
     } catch (err) {
       console.error('Failed to toggle gungnir:', err)
@@ -272,15 +262,31 @@ export default function Dashboard() {
   const pendingWorkerCount = workers?.pending_count
     ?? Math.max(0, (workerCount ?? 0) - (workers?.current_count ?? 0) - staleCount)
   const unavailableWorkerCount = (workers?.workers || []).filter((worker) => worker.status !== 'running').length
-  const cohortCounts = useMemo(
-    () => exposure?.cohort_counts || countCohorts(exposure?.assets || []),
-    [exposure],
-  )
-  const scopedExposure = useMemo(() => scopeExposure(exposure, cohortView), [exposure, cohortView])
+  // Server counts over every asset; never recomputed from the bounded page in the browser.
+  const cohortCounts = useMemo(() => exposure?.body.cohort_counts || {}, [exposure])
+  const scopedExposure = exposure && exposure.view === cohortView ? exposure.body : null
+  const posture: PostureState = postureState({
+    enabled: featureEnabled('exposure'), exposure: scopedExposure, failed: exposureFailedView === cohortView,
+  })
+  const exposureLoading = posture === 'loading'
+  const cohortNote = cohortScopingNote({ view: cohortView, exposure: scopedExposure })
+  const groupedTargets = useMemo(() => groupsPage?.items || [], [groupsPage])
   const scopedTargets = useMemo(() => scopeTargetGroups(groupedTargets, cohortView), [groupedTargets, cohortView])
-  const scopedTargetIds = useMemo(() => new Set(scopedTargets.flatMap((domain) => [domain.root_target, ...domain.subdomains].filter(Boolean).map((target) => target!.id))), [scopedTargets])
+  // Cohort membership for recent scans and activity comes from the exposure page for this cohort
+  // (its asset ids are target ids). That page is bounded (EXPOSURE_PAGE, risk-ranked), so above
+  // that many assets in one cohort a recent row can be left out of a scoped view. The server
+  // should label /dashboard recent_scans and /timeline events with the target's cohort; until it
+  // does, this is the bounded approximation (the "All cohorts" view is always complete).
+  const scopedTargetIds = useMemo(() => new Set([
+    ...(scopedExposure?.assets || []).map((asset) => asset.id),
+    ...scopedTargets.flatMap((domain) => [domain.root_target, ...domain.subdomains].filter(Boolean).map((target) => target!.id)),
+  ]), [scopedExposure, scopedTargets])
   const scopedUrls = useMemo(() => new Set((scopedExposure?.assets || []).flatMap((asset) => [asset.url, asset.root_domain].filter((value): value is string => Boolean(value)).map(normalizeScopeLocator))), [scopedExposure])
   const coverage = useMemo(() => buildCoverageRollup(scopedTargets), [scopedTargets])
+  // Members are bounded per group as well as groups per page: either cut is said on the card.
+  const coverageScope = useMemo<CoverageScope>(() => describeCoverageScope({
+    groups: groupedTargets, hasMore: Boolean(groupsPage?.has_more), total: totalLabel(groupsPage),
+  }), [groupedTargets, groupsPage])
   const meaningfulActivity = useMemo(
     () => timeline.filter((event) => isMeaningfulActivity(event) && (
       rowMatchesCohort(event.target_id, event.target_url, cohortView, scopedTargetIds, scopedUrls)
@@ -472,12 +478,12 @@ export default function Dashboard() {
       />
 
       {dashboardError && (
-        <ErrorState message={dashboardError} onRetry={() => fetchDashboard(true)} />
+        <ErrorState message={dashboardError} onRetry={() => { setDashboardLoading(true); void settle(fetchDashboard()) }} />
       )}
 
       <CohortScopeBar value={cohortView} onChange={setCohortView} counts={cohortCounts} />
 
-      <WorkspaceFeature name="exposure"><SecurityPosture exposure={scopedExposure} loading={overviewLoading} /></WorkspaceFeature>
+      <WorkspaceFeature name="exposure"><SecurityPosture exposure={scopedExposure} state={posture} onRetry={exposurePoll.refresh} /></WorkspaceFeature>
 
       <WorkspaceFeature name="timeline">{cohortView === 'all' ? (
         <ChangesStrip storageKey="dashboard" />
@@ -489,14 +495,17 @@ export default function Dashboard() {
       )}
 
       </WorkspaceFeature>
-      <WorkspaceFeature name="asm"><CoverageOverview exposure={scopedExposure} coverage={coverage} loading={overviewLoading} /></WorkspaceFeature>
+      <WorkspaceFeature name="asm"><CoverageOverview exposure={scopedExposure} exposureState={posture} onRetry={exposurePoll.refresh} coverage={coverage} scope={coverageScope} loading={exposureLoading || overviewLoading} /></WorkspaceFeature>
 
-      <ActionCenter items={scopedActions.filter(item => item.href && navigationAllowed(item.href))} loading={dashboardLoading && !data} />
+      <ActionCenter items={scopedActions.filter(item => item.href && navigationAllowed(item.href))}
+        loading={(dashboardLoading && !data) || (cohortView !== 'all' && posture === 'loading')}
+        unavailable={cohortView !== 'all' && posture === 'unavailable' ? exposurePoll.refresh : null} />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <LatestResults scans={recentScans} loading={dashboardLoading && !data} />
         <WorkspaceFeature name="timeline"><RecentActivity events={meaningfulActivity} loading={overviewLoading} /></WorkspaceFeature>
       </div>
+      {cohortNote ? <p className="text-xs text-gray-500" data-testid="cohort-scoping-note">{cohortNote}</p> : null}
     </div>
   )
 }
@@ -534,56 +543,6 @@ function isGlobalActivity(
   targetUrl: string | null | undefined,
 ): boolean {
   return !targetId && !targetUrl
-}
-
-function countCohorts(assets: ExposureAsset[]): Record<string, number> {
-  return assets.reduce<Record<string, number>>((counts, asset) => {
-    const cohort = asset.cohort || 'unclassified'
-    counts[cohort] = (counts[cohort] || 0) + 1
-    return counts
-  }, {})
-}
-
-function metricsFromAssets(assets: ExposureAsset[]): ExposureAssetMetrics {
-  const count = (predicate: (asset: ExposureAsset) => boolean) => assets.filter(predicate).length
-  return {
-    asset_count: assets.length,
-    active_critical: assets.reduce((sum, asset) => sum + asset.active_critical, 0),
-    active_high: assets.reduce((sum, asset) => sum + asset.active_high, 0),
-    active_verified: assets.reduce((sum, asset) => sum + (asset.active_verified || 0), 0),
-    active_needs_verification: assets.reduce((sum, asset) => sum + (asset.active_needs_verification || 0), 0),
-    ai_surfaces: count((asset) => asset.kind === 'ai'),
-    web_targets: count((asset) => asset.kind === 'web'),
-    model_artifacts: count((asset) => asset.kind === 'model'),
-    public_assets: count((asset) => asset.exposure_class === 'public'),
-    internal_assets: count((asset) => asset.exposure_class === 'internal'),
-    unscanned_assets: count((asset) => asset.coverage_posture === 'unscanned'),
-    stale_assets: count((asset) => asset.coverage_posture === 'stale'),
-    incomplete_scans: count((asset) => asset.coverage_posture === 'limited'),
-    failed_scans: count((asset) => asset.coverage_posture === 'failed'),
-    fresh_scans: count((asset) => asset.coverage_posture === 'fresh'),
-    verified_assets: count((asset) => (asset.active_verified || 0) > 0),
-    unverified_high_assets: count((asset) => (asset.active_needs_verification || 0) > 0 && asset.active_critical + asset.active_high > 0),
-    unowned_assets: count((asset) => !asset.owner),
-    needs_action: count((asset) => Boolean(asset.needs_action)),
-    p1_count: count((asset) => asset.action_priority === 'P1'),
-    p2_count: count((asset) => asset.action_priority === 'P2'),
-    p3_count: count((asset) => asset.action_priority === 'P3'),
-    prod_ai_surfaces: count((asset) => asset.kind === 'ai' && (asset.production_mode || asset.environment === 'production')),
-  }
-}
-
-function scopeExposure(exposure: ExposureAssetsResponse | null, view: CohortView): ExposureAssetsResponse | null {
-  if (!exposure || exposure.cohort === view || (view === 'all' && exposure.cohort === 'all')) return exposure
-  const assets = exposure.assets.filter((asset) => cohortMatches(asset.cohort, view))
-  return {
-    ...exposure,
-    assets,
-    count: assets.length,
-    total: assets.length,
-    new_count: assets.filter((asset) => asset.is_new).length,
-    metrics: metricsFromAssets(assets),
-  }
 }
 
 function scopeTargetGroups(groups: GroupedDomain[], view: CohortView): GroupedDomain[] {
@@ -630,9 +589,12 @@ function CohortScopeBar({ value, onChange, counts }: { value: CohortView; onChan
 function ActionCenter({
   items,
   loading,
+  unavailable = null,
 }: {
   items: DashboardActionItem[]
   loading: boolean
+  /** The cohort's actions come from its exposure; when that read failed, say so (with retry). */
+  unavailable?: (() => void) | null
 }) {
   const actionableItems = items.filter((item) => item.id !== 'worker-build-freshness' && item.priority !== 'info')
   const visibleItems = actionableItems.slice(0, 3)
@@ -649,7 +611,7 @@ function ActionCenter({
         </Link>
       </div>
 
-      {loading ? (
+      {unavailable ? <ExposureUnavailable onRetry={unavailable} compact /> : loading ? (
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
           <Skeleton className="h-20" />
           <Skeleton className="h-20" />
@@ -732,8 +694,19 @@ function actionPriorityTone(priority: DashboardActionItem['priority']) {
   }
 }
 
-function SecurityPosture({ exposure, loading }: { exposure: ExposureAssetsResponse | null; loading: boolean }) {
-  const metrics = exposure?.metrics
+function ExposureUnavailable({ onRetry, compact = false }: { onRetry: () => void; compact?: boolean }) {
+  return (
+    <div role="alert" data-testid="exposure-unavailable" className={`flex flex-wrap items-center gap-3 ${compact ? '' : 'p-4'} text-sm text-amber-200`}>
+      <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+      <span>Exposure unavailable for this cohort: the posture could not be read, so no numbers are shown.</span>
+      <button type="button" onClick={onRetry} className={`rounded-md border border-amber-500/40 px-2.5 py-1 text-xs hover:bg-amber-500/10 ${FOCUS_RING}`}>Retry</button>
+    </div>
+  )
+}
+
+function SecurityPosture({ exposure, state, onRetry }: { exposure: ExposureAssetsResponse | null; state: PostureState; onRetry: () => void }) {
+  const loading = state === 'loading'
+  const metrics = state === 'ready' ? exposure?.metrics : undefined
   const verified = metrics?.active_verified || 0
   const needsVerification = metrics?.active_needs_verification || 0
   const p1 = metrics?.p1_count || 0
@@ -756,11 +729,13 @@ function SecurityPosture({ exposure, loading }: { exposure: ExposureAssetsRespon
           <h2 className="font-medium text-white">Security posture</h2>
           <p className="mt-1 text-sm text-gray-400">Verified risk, uncertain signals, and assets that need attention</p>
         </div>
-        <Link href={primary.href} className={`inline-flex items-center gap-1 self-start rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-blue-500/20 ${FOCUS_RING}`}>
-          {primary.label} <ArrowRight className="h-4 w-4" />
-        </Link>
+        {state === 'ready' ? (
+          <Link href={primary.href} className={`inline-flex items-center gap-1 self-start rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-blue-500/20 ${FOCUS_RING}`}>
+            {primary.label} <ArrowRight className="h-4 w-4" />
+          </Link>
+        ) : null}
       </div>
-      {loading && !metrics ? (
+      {state === 'unavailable' ? <ExposureUnavailable onRetry={onRetry} /> : loading || !metrics ? (
         <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
           {Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-24" />)}
         </div>
@@ -823,6 +798,7 @@ interface CoverageTarget {
   coverage: number
 }
 
+
 interface CoverageRollup {
   targets: CoverageTarget[]
   tested: number
@@ -862,12 +838,15 @@ function buildCoverageRollup(domains: GroupedDomain[]): CoverageRollup {
   }
 }
 
-function CoverageOverview({ exposure, coverage, loading }: {
+function CoverageOverview({ exposure, exposureState, onRetry, coverage, scope, loading }: {
   exposure: ExposureAssetsResponse | null
+  exposureState: PostureState
+  onRetry: () => void
   coverage: CoverageRollup
+  scope: CoverageScope
   loading: boolean
 }) {
-  const metrics = exposure?.metrics
+  const metrics = exposureState === 'ready' ? exposure?.metrics : undefined
   const totalAssets = metrics?.asset_count || 0
   const freshness = [
     { label: 'Fresh', value: metrics?.fresh_scans || 0, color: 'bg-emerald-500' },
@@ -886,19 +865,21 @@ function CoverageOverview({ exposure, coverage, loading }: {
           Open Coverage <ArrowRight className="h-3.5 w-3.5" />
         </Link>
       </div>
-      {loading && !metrics ? <Skeleton className="h-40" /> : (
+      {loading && !metrics && exposureState !== 'unavailable' ? <Skeleton className="h-40" /> : (
         <div className="grid gap-6 lg:grid-cols-2">
           <section>
             <div className="mb-3 flex items-center gap-2">
               <Target className="h-4 w-4 text-gray-500" />
               <h3 className="text-sm font-medium text-gray-200">Asset freshness</h3>
-              <span className="ml-auto text-xs text-gray-600">{totalAssets} assets</span>
+              {metrics ? <span className="ml-auto text-xs text-gray-600">{totalAssets} assets</span> : null}
             </div>
-            <div className="grid gap-2.5">
-              {freshness.map((item) => (
-                <ProgressRow key={item.label} label={item.label} value={item.value} total={totalAssets} color={item.color} />
-              ))}
-            </div>
+            {exposureState === 'unavailable' ? <ExposureUnavailable onRetry={onRetry} compact /> : (
+              <div className="grid gap-2.5">
+                {freshness.map((item) => (
+                  <ProgressRow key={item.label} label={item.label} value={item.value} total={totalAssets} color={item.color} />
+                ))}
+              </div>
+            )}
           </section>
           <section className="border-t border-gray-800 pt-5 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
             <div className="mb-3 flex items-center gap-2">
@@ -908,6 +889,12 @@ function CoverageOverview({ exposure, coverage, loading }: {
             </div>
             <ProgressRow label="Tested endpoints" value={coverage.tested} total={coverage.denominator} color="bg-blue-500" />
             <p className="mt-2 text-xs text-gray-600">{coverage.tested.toLocaleString()} tested · {coverage.remaining.toLocaleString()} remaining across {coverage.targets.length} inventoried targets</p>
+            {scope.show ? (
+              <p className="mt-1 text-xs text-gray-600" data-testid="coverage-scope">
+                {scope.text}{' '}
+                <Link href="/asm" className={`text-blue-300 hover:text-blue-200 ${FOCUS_RING}`}>See every domain</Link>
+              </p>
+            ) : null}
             <div className="mt-3 grid gap-1.5">
               {coverage.targets.slice(0, 3).map((target) => (
                 <Link key={target.id} href={`/asm?target_id=${target.id}`} className={`flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-gray-800/50 ${FOCUS_RING}`}>

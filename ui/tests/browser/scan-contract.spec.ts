@@ -44,11 +44,22 @@ test.beforeEach(async ({ page }) => {
     contentType: 'application/json',
     body: JSON.stringify(SCAN_PUBLIC_CONTRACT_SNAPSHOT),
   }))
-  await page.route('**/targets?*', (route) => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ targets: [target], total: 1 }),
-  }))
+  // New Scan recognises a registered target with a bounded server search for the typed URL
+  // (list/v1, no count), not a capped list of every target.
+  await page.route('**/targets/inventory?*', (route) => {
+    const query = new URL(route.request().url()).searchParams
+    const search = query.get('search') || ''
+    expect(query.get('count')).toBe('none')
+    expect(Number(query.get('limit'))).toBeLessThanOrEqual(50)
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        items: target.url.includes(search) ? [target] : [], next_cursor: null, has_more: false,
+        total_kind: 'none', generated_at: '2026-10-15T00:00:00Z',
+      }),
+    })
+  })
   await page.route('**/workers', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',

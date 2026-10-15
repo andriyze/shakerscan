@@ -33,8 +33,9 @@ test('a slow answer for a target no longer selected never fills the list', () =>
 test('a linked credential target outside the loaded list is fetched, or reported', () => {
   assert.match(credentials, /getTargetAsset\(targetId\)/)
   assert.match(credentials, /was not found among active targets that can hold credentials/)
-  // An unknown ID is never sent to the profiles API.
-  assert.match(credentials, /if \(targetId && !choices\.some\(\(item\) => item\.id === targetId\)\) \{\n      setProfiles\(\[\]\)/)
+  // An unknown ID is never sent to the profiles API; one still being read shows as loading, not empty.
+  assert.match(credentials, /if \(targetId && !selectedChoice\) \{\n      \/\/ Still being read: keep the loading state instead of an empty list\.\n      if \(resolvingTarget\) setProfilesLoading\(true\)\n      else \{ setProfiles\(\[\]\); setProfilesLoading\(false\) \}\n      return/)
+  assert.match(credentials, /const resolvingTarget = Boolean\(targetId\) && !selectedAsset && missingTarget !== targetId/)
 })
 
 test('Hunts and Scans filter by an exact target', () => {

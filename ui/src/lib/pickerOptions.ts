@@ -2,6 +2,7 @@
 import type { ComboboxOption } from '@/components/ui'
 import type { CredentialProfile } from './credentialApi'
 import type { TargetAsset } from './targetAssetApi'
+import { targetSearchNoteText } from './targetSearchModel.mjs'
 
 function locatorOf(url: string): string {
   return String(url || '').replace(/^host:\/\//, '')
@@ -41,4 +42,11 @@ export function credentialOptions(profiles: CredentialProfile[]): ComboboxOption
     group: profile.shared ? 'Shared with this target' : 'This target',
     disabled: profile.status === 'expired' || !profile.is_active,
   }))
+}
+
+/** The line under a server-searched target picker: honest about a bounded, possibly filtered page. */
+export function targetSearchNote(search: {
+  assets: unknown[]; hasMore: boolean; error: string | null; query: string; scanned?: number; filtered?: boolean
+}): string {
+  return targetSearchNoteText(search)
 }

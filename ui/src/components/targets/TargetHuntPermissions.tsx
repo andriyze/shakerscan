@@ -1,10 +1,11 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { KeyRound, Settings2, ShieldCheck, Plus, X } from 'lucide-react'
-import { Button, Card, Field, Input, Modal, Select } from '@/components/ui'
+import { Button, Card, Combobox, Field, Input, Modal } from '@/components/ui'
 import { getTargetHuntAuthority, saveTargetHuntAuthority, type TargetHuntAuthority } from '@/lib/targetHuntAuthorityApi'
-import { getAllTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
+import { targetOptions, targetSearchNote } from '@/lib/pickerOptions'
+import { useTargetSearch } from '@/lib/useTargetSearch'
 import { listCredentialProfiles } from '@/lib/credentialApi'
 import { listRequestCollections } from '@/lib/requestCollectionApi'
 
@@ -15,10 +16,12 @@ export function TargetHuntPermissions({targetId}: {targetId: string}) {
   const [busy,setBusy] = useState(false)
   const [error,setError] = useState('')
   const [notice,setNotice] = useState('')
-  const [targets,setTargets] = useState<TargetAsset[]>([])
   const [source,setSource] = useState(targetId)
   const [inputs,setInputs] = useState<{profiles:Array<{id:string;name:string}>;collections:Array<{id:string;name:string}>}>({profiles:[],collections:[]})
   const [inputError,setInputError] = useState('')
+  // The source picker searches the inventory on the server while the dialog is open.
+  const targetSearch = useTargetSearch({enabled:open,selectedIds:[source]})
+  const sourceOptions = useMemo(() => targetOptions(targetSearch.assets),[targetSearch.assets])
   useEffect(() => {
     let current = true
     getTargetHuntAuthority(targetId).then(value => {if(current) {setSaved(value);setError('')}})
@@ -37,8 +40,8 @@ export function TargetHuntPermissions({targetId}: {targetId: string}) {
   async function edit() {
     setOpen(true);setBusy(true);setError('');setNotice('');setDraft(null)
     try {
-      const [permissions,assets] = await Promise.all([getTargetHuntAuthority(targetId),getAllTargetAssets()])
-      setSaved(permissions);setDraft(permissions);setTargets(assets)
+      const permissions = await getTargetHuntAuthority(targetId)
+      setSaved(permissions);setDraft(permissions)
     } catch(cause) {setError(cause instanceof Error ? cause.message : 'Could not load permissions')}
     finally {setBusy(false)}
   }
@@ -69,7 +72,7 @@ export function TargetHuntPermissions({targetId}: {targetId: string}) {
       {draft && <div className="space-y-6">
         <label className="flex items-start gap-3 rounded-xl border border-gray-700 bg-gray-800/30 p-4"><input className="mt-1 accent-blue-500" type="checkbox" checked={draft.metadata_changes} onChange={event => setDraft({...draft,metadata_changes:event.target.checked})} /><span><strong className="text-sm font-medium text-gray-100">Let Hunt manage targets and knowledge</strong><span className="mt-1 block text-xs leading-5 text-gray-400">Enabled by default. Create targets, rename this asset, and record advisory knowledge for it. Turn off to prevent these edits; instructions, saved actions, network testing and input sharing have separate permissions.</span></span></label>
         <label className="flex items-start gap-3 rounded-xl border border-gray-700 bg-gray-800/30 p-4"><input className="mt-1 accent-blue-500" type="checkbox" checked={draft.instruction_changes === true} onChange={event => setDraft({...draft,instruction_changes:event.target.checked})} /><span><strong className="text-sm font-medium text-gray-100">Let Hunt edit these instructions</strong><span className="mt-1 block text-xs leading-5 text-gray-400">Off by default. When on, a Hunt can create, change, or delete this target’s instructions and saved actions directly, and future Hunts follow them. When off, a Hunt can only propose a change, which you review with <code>shakerscan knowledge review</code>.</span></span></label>
-        <section><h3 className="mb-2 flex items-center gap-2 text-sm font-medium text-gray-100"><KeyRound className="h-4 w-4 text-blue-300" />Reuse selected inputs</h3><p className="mb-3 text-xs leading-5 text-gray-400">Choose a source target, then approve specific inputs for this asset. Credential sharing is consumed once; revoke the resulting grant in Credentials. Removing a collection here stops future replay, including queued work.</p><Field label="Source target"><Select value={source} onChange={event => setSource(event.target.value)}>{targets.map(target => <option key={target.id} value={target.id}>{target.name || target.locator}</option>)}</Select></Field>
+        <section><h3 className="mb-2 flex items-center gap-2 text-sm font-medium text-gray-100"><KeyRound className="h-4 w-4 text-blue-300" />Reuse selected inputs</h3><p className="mb-3 text-xs leading-5 text-gray-400">Choose a source target, then approve specific inputs for this asset. Credential sharing is consumed once; revoke the resulting grant in Credentials. Removing a collection here stops future replay, including queued work.</p><Field label="Source target"><Combobox value={source} onChange={value => {if(value) setSource(value)}} options={sourceOptions} onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} optionsQuery={targetSearch.answeredQuery} footerNote={targetSearchNote(targetSearch)} placeholder="Choose a source target" searchPlaceholder="Search targets by name or host…" /></Field>
           {inputError && <p role="alert" className="mt-2 text-xs text-amber-300">{inputError}</p>}
           <div className="mt-3 grid gap-3 sm:grid-cols-2">{([{field:'credential_profile_ids',label:'Credential profiles',items:inputs.profiles},{field:'collection_ids',label:'Request collections',items:inputs.collections}] as const).map(section => <div key={section.field} className="rounded-xl border border-gray-800 p-3"><h4 className="mb-2 text-xs font-medium text-gray-400">{section.label}</h4>{section.items.length ? section.items.map(item => <label key={item.id} className="mb-2 flex items-center gap-2 text-sm text-gray-200"><input type="checkbox" className="accent-blue-500" checked={draft[section.field].includes(item.id)} onChange={() => toggle(section.field,item.id)} />{item.name}</label>) : <p className="text-xs text-gray-500">No available inputs on this target.</p>}{draft[section.field].filter(id => !section.items.some(item => item.id === id)).map(id => <button key={id} onClick={() => toggle(section.field,id)} className="mt-2 flex items-center gap-2 rounded-md bg-blue-500/10 px-2 py-1 text-xs text-blue-200" aria-label={`Remove approval for ${id}`}>{id.slice(0,8)}…<X className="h-3 w-3" /></button>)}</div>)}</div>
         </section>

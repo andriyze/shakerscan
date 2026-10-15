@@ -7,14 +7,49 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const detail = readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf8')
 
-test('scan result fetches durable finding history for its exact target', () => {
-  assert.match(detail, /getFindings\(\{/)
-  assert.match(detail, /target_id: data\.target_id/)
-  // Every active row is paged in; a cap that cannot be reached is a partial history, not an all-clear.
-  assert.match(detail, /limit: pageSize/)
-  assert.match(detail, /offset < HISTORY_ROW_CAP/)
-  assert.match(detail, /setTargetFindingsPartial\(rows\.length < total\)/)
+test('scan result fetches durable finding history for its exact target: one bounded page, once', () => {
+  assert.match(detail, /getFindingsPage\(\s*\{ target_id: historyTargetId, status: 'active' \}/)
+  // One page, newest observation first (this run's re-observed rows are on it), with an exact count.
+  // Most severe first: the fallback carried-over summary's highest severity holds on a partial page.
+  assert.match(detail, /limit: HISTORY_PAGE_SIZE, sort: '-severity', count: 'exact'/)
+  // The card is told the history is partial and shows its count as a lower bound.
+  assert.equal((detail.match(/partial=\{targetFindingsPartial\}/g) || []).length, 3)
+  assert.match(detail, /existingLowerBound \? 'at least ' : ''/)
+  assert.match(detail, /const HISTORY_PAGE_SIZE = 200/)
+  // No loop over every active row any more.
+  assert.doesNotMatch(detail, /HISTORY_ROW_CAP/)
+  assert.doesNotMatch(detail, /for \(let offset = 0; offset </)
+  // More rows than the page (or a capped count) is a partial history, not an all-clear.
+  assert.match(detail, /setTargetFindingsPartial\(page\.has_more \|\| page\.total_kind === 'at_least' \|\| rows\.length < total\)/)
   assert.match(detail, /not an all-clear/)
+  // Read once per terminal scan, not on every poll tick.
+  assert.match(detail, /\}, \[scanTerminal, historyTargetId, scanId, retryNonce\]\)/)
+})
+
+test('scan detail polls through usePoll: 5 s while live, stopped when terminal, logs backing off', () => {
+  assert.doesNotMatch(detail, /setInterval\(/)
+  assert.match(detail, /intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: scan === null \|\| scanLive/)
+  assert.match(detail, /const SCAN_REFRESH_MS = 5000/)
+  assert.match(detail, /const LOG_MAX_SKIP = 6/)
+  assert.match(detail, /logSkipRef\.current\.every = Math\.min\(LOG_MAX_SKIP, logSkipRef\.current\.every \* 2\)/)
+  assert.match(detail, /live: scanLive, enabled: scan !== null/)
+  // One final tail read on the live -> terminal transition.
+  assert.match(detail, /scanTerminal && \(before === 'running' \|\| before === 'pending'\)/)
+  assert.match(detail, /\[content-visibility:auto\]/)
+})
+
+test('scans list polls only while work is live and never opts /scans into cursor pages', () => {
+  const list = readFileSync(path.join(root, 'src/app/scans/page.tsx'), 'utf8')
+  const api = readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
+  assert.doesNotMatch(list, /setInterval\(\(\) => \{\s*fetchScans/)
+  // /scans pages by offset; a count=/cursor= opt-in would switch it to list/v1 cursor pages.
+  assert.doesNotMatch(list, /count: isPolling/)
+  const getScans = api.slice(api.indexOf('export async function getScans('), api.indexOf('export async function getScan('))
+  assert.doesNotMatch(getScans, /searchParams\.set\('(count|cursor)'/)
+  assert.match(list, /if \(typeof data\.total === 'number'\)/)
+  assert.match(list, /!isPolling && rawPage > maxPage/)
+  assert.match(list, /intervalMs: SCANS_LIVE_REFRESH_MS,\s*idleIntervalMs: SCANS_IDLE_REFRESH_MS,\s*live,/)
+  assert.match(list, /scan\.status === 'pending' \|\| scan\.status === 'running'\) \|\| activeHunts\.length > 0/)
 })
 
 test('scan result reconciles report evidence with durable IDs from the scan payload', () => {

@@ -1,5 +1,7 @@
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import { fetchHeavyRead } from './busyRetry.mjs'
+import { getJson } from './fetchLayer.mjs'
+import { isListV1, listV1Params } from './listPage.mjs'
 import type { CredentialProfile } from './credentialApi'
 import type { SharedServiceKnowledge } from '@/components/targets/SharedServicePorts'
 
@@ -178,15 +180,39 @@ export async function registerTargetAsset(input: {locator: string; name?: string
   return detail.target.id
 }
 
-/** Fetch every metadata page; selectors must not silently lose assets after the first page. */
-export async function getAllTargetAssets(signal?: AbortSignal, includeServices = false): Promise<TargetAsset[]> {
-  const assets = new Map<string, TargetAsset>()
-  let offset = 0
-  for (;;) {
-    const page = await getTargetAssets({limit:500,offset,include_services:includeServices},signal)
-    for (const asset of page.targets) assets.set(asset.id,asset)
-    offset += page.targets.length
-    if (offset >= page.total) return [...assets.values()]
-    if (!page.targets.length) throw new Error('Target inventory changed while paging; refresh the selector')
+/** One bounded page of a target search, for typeahead pickers (never the whole inventory). */
+export interface TargetSearchPage {
+  targets: TargetAsset[]
+  /** More assets match than this page holds: the operator should type more. */
+  hasMore: boolean
+  /** Where the next page starts: a list/v1 cursor, or a legacy offset; null at the end. */
+  next: string | number | null
+}
+
+/**
+ * A typeahead page from the inventory: list/v1 (`count=none`, no total computed) on an engine that
+ * serves it; an older engine ignores the opt-in and answers its legacy shape, read the same way.
+ * `position` is the previous page's `next` (a cursor on list/v1, an offset on the legacy shape).
+ */
+export async function searchTargetAssets(
+  { search = '', limit = 25, includeServices = false, includeInactive = false, position = null }:
+  { search?: string; limit?: number; includeServices?: boolean; includeInactive?: boolean; position?: string | number | null } = {},
+  signal?: AbortSignal,
+): Promise<TargetSearchPage> {
+  const cursor = typeof position === 'string' ? position : null
+  const params = new URLSearchParams(listV1Params({ limit, cursor }))
+  if (typeof position === 'number' && position > 0) params.set('offset', String(position))
+  const term = search.trim()
+  if (term) params.set('search', term.slice(0, 500))
+  if (includeServices) params.set('include_services', 'true')
+  if (includeInactive) params.set('include_inactive', 'true')
+  const body = await getJson(`${API_URL}/targets/inventory?${params}`, { signal, heavy: true, maxAgeMs: 15_000, label: 'Target search failed' })
+  if (isListV1<TargetAsset>(body)) {
+    return { targets: body.items, hasMore: Boolean(body.has_more), next: body.has_more ? body.next_cursor : null }
   }
+  const legacy = body as InventoryPage
+  const targets = legacy.targets || []
+  const offset = (typeof position === 'number' ? position : 0) + targets.length
+  const hasMore = targets.length > 0 && Number(legacy.total || 0) > offset
+  return { targets, hasMore, next: hasMore ? offset : null }
 }

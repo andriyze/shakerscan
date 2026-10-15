@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { usePoll } from '@/lib/usePoll'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import { AlertTriangle, ArrowLeft, Square, Terminal } from 'lucide-react'
@@ -67,15 +68,16 @@ export function HuntRunView({ hunt, onChange, target }: {
   const actions = hunt.actions || []
   const archive = useHuntTransactions(hunt.hunt_id, actions.length + (hunt.budget_used.http_requests || 0))
 
-  useEffect(() => {
-    if (!['active', 'awaiting_planner'].includes(hunt.status)) return
-    let cancelled = false
-    const refresh = () => getHuntV2(hunt.hunt_id)
-      .then((current) => { if (!cancelled) onChange(current) })
-      .catch(() => undefined)
-    const timer = window.setInterval(refresh, 5000)
-    return () => { cancelled = true; window.clearInterval(timer) }
-  }, [hunt.hunt_id, hunt.status, onChange])
+  // A live run is re-read every 5 s (external planner proposals, new actions); the loop pauses in a
+  // hidden tab, backs off on errors and stops once the run is no longer live.
+  const pollLive = ['active', 'awaiting_planner'].includes(hunt.status)
+  // The page has just read the run, so the loop's immediate first tick is skipped.
+  const pollStarted = useRef<string | null>(null)
+  usePoll(async (signal) => {
+    if (pollStarted.current !== hunt.hunt_id) { pollStarted.current = hunt.hunt_id; return }
+    const current = await getHuntV2(hunt.hunt_id)
+    if (!signal.aborted) onChange(current)
+  }, { intervalMs: 5000, idleIntervalMs: null, live: pollLive, enabled: pollLive, deps: [hunt.hunt_id] })
 
   const shellPlans = useMemo<DeviceAgentShellPlan[]>(() => {
     const deviceState = hunt.context_pack?.device_state

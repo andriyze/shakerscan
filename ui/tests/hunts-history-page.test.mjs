@@ -43,6 +43,15 @@ test('sorting and filtering cover target, status and kind', () => {
 
 test('a background refresh failure does not blank the rows being read', () => {
   assert.match(page, /if \(!isPolling\) setLoadError/)
+  // ...and it backs the poll loop off instead of retrying at full pace.
+  assert.match(page, /else throw error/)
+})
+
+test('the history refreshes through usePoll: fast while a Hunt is live, slow otherwise, never in a hidden tab', () => {
+  assert.match(page, /usePoll\(async \(\) => \{/)
+  assert.match(page, /intervalMs: REFRESH_MS, idleIntervalMs: IDLE_REFRESH_MS, live: anyLive/)
+  assert.match(page, /const anyLive = hunts\.some\(\(hunt\) => huntIsLive\(hunt\)\)/)
+  assert.doesNotMatch(page, /setInterval\(/)
 })
 
 test('the page distinguishes loading, empty and error', () => {
