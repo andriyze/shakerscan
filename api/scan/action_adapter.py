@@ -3638,6 +3638,7 @@ class DatabaseNeutralScanActionDispatcher:
             process_runner=self.process_runner,
             requested_budget=requested_budget,
             redacted_execution=prepared.redacted_execution,
+            archive_capability_name=action.capability_name,
         )
         return await self._execute_adapter(
             action, adapter, heartbeat, managed_cancellation=True,
@@ -4498,6 +4499,7 @@ class DatabaseNeutralScanActionDispatcher:
                             process_runner=self.process_runner,
                             requested_budget=dict(budget),
                             redacted_execution=prepared.redacted_execution,
+                            archive_capability_name=action.capability_name,
                         )
                         return await CapabilityExecutor().execute(
                             CapabilityExecutionContext(

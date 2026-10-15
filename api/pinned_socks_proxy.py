@@ -14,6 +14,13 @@ from runtime.target_bound_socket import FrozenTargetSocketFactory
 
 _REQUEST_LINE = re.compile(rb"^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT) \S+ HTTP/1\.[01]$")
 _MAX_HEADER_BYTES = 64 * 1024
+# What one tunnel keeps of the cleartext request lines it relays, for the Scan's request archive.
+# Past it the lines are counted, not kept, and the archive says how many it lacks.
+MAX_TUNNEL_REQUEST_LINES = 2_000
+_MAX_REQUEST_TARGET_CHARS = 2_048
+_MAX_HOST_CHARS = 255
+# Distinct destinations the tunnel refused, kept by name; any further ones are only counted.
+MAX_REFUSED_DESTINATIONS = 16
 
 
 class RequestCounter:
@@ -32,12 +39,16 @@ class RequestCounter:
     true lower bound, sets ``measurable`` to False and never adds to the count again.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_request: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.count = 0
         self.measurable = True
         self._buffer = b""
         self._state = "request_line"
         self._body_remaining = 0
+        # Called once per counted request with its method and request target; the Host header
+        # is added to the same mapping once the header block has been read.
+        self._on_request = on_request
+        self._current: dict[str, Any] | None = None
 
     def _fail(self) -> int:
         self.measurable = False
@@ -67,6 +78,13 @@ class RequestCounter:
                 counted += 1
                 self._buffer = rest
                 self._state = "headers"
+                if self._on_request is not None:
+                    method, target, _version = line.split(b" ", 2)
+                    self._current = {
+                        "method": method.decode("ascii"),
+                        "target": target[:_MAX_REQUEST_TARGET_CHARS].decode("latin-1"),
+                    }
+                    self._on_request(self._current)
             if self._state == "headers":
                 idx = self._buffer.find(b"\r\n\r\n")
                 if idx < 0:
@@ -88,6 +106,9 @@ class RequestCounter:
                             return counted
                     elif key == b"transfer-encoding" and b"chunked" in value.lower():
                         chunked = True
+                    elif key == b"host" and self._current is not None and "host" not in self._current:
+                        self._current["host"] = value.strip()[:_MAX_HOST_CHARS].decode("latin-1")
+                self._current = None
                 if chunked:
                     self._state = "chunk_size"
                 elif length > 0:
@@ -184,6 +205,13 @@ class PinnedSocksProxy:
         }
         self.bytes_to_target = 0
         self.bytes_from_target = 0
+        # The archive's account of the tunnel: the cleartext request lines it relayed (an
+        # encrypted connection has none to read), their methods, and the destinations it refused.
+        self.request_lines: list[dict[str, Any]] = []
+        self.request_lines_dropped = 0
+        self.methods_observed: dict[str, int] = {}
+        self.refused_destinations: dict[str, int] = {}
+        self.refused_destinations_other = 0
         self.limit_exceeded = asyncio.Event()
         # A shared request gate (scan.sqli_concurrency.RequestRateGate): every connection to the
         # target waits for its start time, so the processes sharing one gate stay within its
@@ -219,6 +247,55 @@ class PinnedSocksProxy:
 
     async def __aexit__(self, *_args: Any) -> None:
         await self.close()
+
+    def _note_request(self, request: dict[str, Any]) -> None:
+        method = str(request.get("method") or "")
+        self.methods_observed[method] = self.methods_observed.get(method, 0) + 1
+        if len(self.request_lines) < MAX_TUNNEL_REQUEST_LINES:
+            self.request_lines.append(request)
+        else:
+            self.request_lines_dropped += 1
+
+    def _note_refused(self, destination: str, port: int) -> None:
+        key = f"{str(destination)[:_MAX_HOST_CHARS]}:{int(port)}"
+        if key in self.refused_destinations or len(self.refused_destinations) < MAX_REFUSED_DESTINATIONS:
+            self.refused_destinations[key] = self.refused_destinations.get(key, 0) + 1
+        else:
+            self.refused_destinations_other += 1
+
+    def tunnel_record(self, *, scheme: str) -> dict[str, Any]:
+        """What crossed this tunnel, for the Scan's request archive.
+
+        The tunnel admits one destination, so its host, port and the frozen addresses it
+        connected to are the whole of where the tool's traffic went. Cleartext request lines
+        are kept (bounded); an encrypted tunnel is ciphertext to the engine, so for it the
+        record proves the destination and counts the bytes, but holds no request content.
+        """
+        return {
+            "scheme": str(scheme or "").lower() or ("https" if self.port == 443 else "http"),
+            "host": self.hostname,
+            "port": self.port,
+            "address_connections": {
+                address: count for address, count in self.address_connections.items() if count
+            },
+            "connections_attempted": int(self.connection_attempts),
+            "connections_opened": int(self.connections_opened),
+            "connections_rejected": int(self.connections_rejected),
+            "bytes_to_target": int(self.bytes_to_target),
+            "bytes_from_target": int(self.bytes_from_target),
+            "http_requests_observed": int(self.http_requests_observed),
+            # False once any connection carried something other than cleartext HTTP/1 (TLS):
+            # its requests are neither counted nor listed.
+            "content_readable": bool(self.wire_requests_measurable),
+            "methods_observed": dict(sorted(self.methods_observed.items())),
+            "request_lines": [dict(item) for item in self.request_lines],
+            "request_lines_dropped": int(self.request_lines_dropped),
+            "refused_destinations": [
+                {"destination": key, "attempts": count}
+                for key, count in sorted(self.refused_destinations.items())
+            ],
+            "refused_destinations_other": int(self.refused_destinations_other),
+        }
 
     def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.connection_attempts += 1
@@ -266,6 +343,7 @@ class PinnedSocksProxy:
             requested_port = struct.unpack("!H", await reader.readexactly(2))[0]
             allowed_hosts = {self.hostname, *self.pinned_addresses}
             if destination not in allowed_hosts or requested_port != self.port:
+                self._note_refused(destination, requested_port)
                 await self._reply(writer, 2)
                 return
             if self._admit is not None:
@@ -316,7 +394,9 @@ class PinnedSocksProxy:
                 *,
                 toward_target: bool,
             ) -> None:
-                counter = RequestCounter()
+                counter = RequestCounter(
+                    on_request=self._note_request if toward_target else None,
+                )
                 try:
                     while chunk := await source.read(65536):
                         if toward_target:

@@ -491,30 +491,12 @@ async def read_archive_stats(
         for key in ("attempted", "stored", "failed", "dropped")
     }
     if len(owners) > 1:
-        capture_limited = await conn.fetchval(
-            """SELECT COUNT(*) FROM http_transactions
-               WHERE scan_id=ANY($1::uuid[])
-                 AND COALESCE(metadata_json->>'fidelity','')
-                     NOT IN ('wire_request','attempted_no_response')""",
-            list(owners),
-        )
+        owner_clause, owner_param = "scan_id=ANY($1::uuid[])", list(owners)
     elif scan_id:
-        capture_limited = await conn.fetchval(
-            """SELECT COUNT(*) FROM http_transactions
-               WHERE scan_id=$1
-                 AND COALESCE(metadata_json->>'fidelity','')
-                     NOT IN ('wire_request','attempted_no_response')""",
-            scan_id,
-        )
+        owner_clause, owner_param = "scan_id=$1", scan_id
     else:
-        capture_limited = await conn.fetchval(
-            """SELECT COUNT(*) FROM http_transactions
-               WHERE hunt_run_id=$1
-                 AND COALESCE(metadata_json->>'fidelity','')
-                     NOT IN ('wire_request','attempted_no_response')""",
-            hunt_run_id,
-        )
-    stats["capture_limited"] = int(capture_limited or 0)
+        owner_clause, owner_param = "hunt_run_id=$1", hunt_run_id
+    stats.update(await _capture_detail(conn, owner_clause, owner_param))
     if scan_id:
         scan_filter = (
             "action.scan_id=ANY($1::uuid[])" if len(owners) > 1
@@ -525,7 +507,9 @@ async def read_archive_stats(
             f"""SELECT action.capability_name, action.status,
                       COALESCE(NULLIF(
                           action.result_json->'budget_consumed'->>'http_requests',''
-                      )::int,0) AS http_consumed
+                      )::int,0) AS http_consumed,
+                      COALESCE(action.result_json->'budget_consumed' ? 'http_requests', FALSE)
+                          AS http_measured
                FROM scan_capability_actions action
                WHERE {scan_filter}
                  AND COALESCE(NULLIF(action.requested_budget->>'http_requests','')::int,0) > 0
@@ -573,6 +557,84 @@ async def read_archive_stats(
     return stats
 
 
+# Rows a pinned tunnel wrote (http_archive_capture.record_tunnel): one per tunnel, naming its
+# destination; the cleartext request lines it relayed are ordinary capture-limited rows.
+TUNNEL_FIDELITY = "pinned_tunnel"
+# Distinct destinations an archive read names; past it the list says it is truncated.
+MAX_STATED_DESTINATIONS = 50
+
+
+def _authority(url: str) -> str:
+    """``scheme://host[:port]`` of an archived URL, without any userinfo."""
+    scheme, _sep, rest = str(url or "").partition("://")
+    host = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0].rsplit("@", 1)[-1]
+    return f"{scheme.lower()}://{host.lower()}" if scheme and host else ""
+
+
+async def _capture_detail(conn, owner_clause: str, owner_param: Any) -> dict[str, Any]:
+    """Fidelity counters plus where the run's archived traffic went.
+
+    ``destinations`` names every origin the archive holds a call or a pinned tunnel to, so a
+    Scan's scope can be checked from one read instead of every page. ``refused_destinations``
+    are the ones a pinned tunnel refused: nothing was sent to them.
+    """
+    row = await conn.fetchrow(
+        f"""SELECT
+               COUNT(*) FILTER (WHERE COALESCE(metadata_json->>'fidelity','')
+                   NOT IN ('wire_request','attempted_no_response','{TUNNEL_FIDELITY}'))
+                   AS capture_limited,
+               COUNT(*) FILTER (WHERE metadata_json->>'fidelity'='{TUNNEL_FIDELITY}')
+                   AS tunnel_records,
+               COUNT(*) FILTER (WHERE metadata_json->>'fidelity'='{TUNNEL_FIDELITY}'
+                   AND metadata_json->'tunnel'->>'content_readable'='false')
+                   AS opaque_tunnels
+           FROM http_transactions WHERE {owner_clause}""",
+        owner_param,
+    )
+    origins = await conn.fetch(
+        f"""SELECT split_part(url,'/',1) AS scheme, split_part(url,'/',3) AS authority,
+                  COUNT(*) AS calls
+           FROM http_transactions WHERE {owner_clause}
+           GROUP BY 1, 2 ORDER BY 3 DESC, 1, 2 LIMIT {MAX_STATED_DESTINATIONS * 2 + 1}""",
+        owner_param,
+    )
+    merged: dict[str, int] = {}
+    for item in origins:
+        origin = _authority(f"{str(item['scheme']).rstrip(':')}://{item['authority']}")
+        if origin:
+            merged[origin] = merged.get(origin, 0) + int(item["calls"] or 0)
+    refused = await conn.fetch(
+        f"""SELECT refused->>'destination' AS destination,
+                  SUM(COALESCE(NULLIF(refused->>'attempts','')::int,0)) AS attempts
+           FROM http_transactions,
+                jsonb_array_elements(CASE
+                    WHEN jsonb_typeof(metadata_json->'tunnel'->'refused_destinations')='array'
+                    THEN metadata_json->'tunnel'->'refused_destinations' ELSE '[]'::jsonb END)
+                    AS refused
+           WHERE {owner_clause} AND metadata_json->>'fidelity'='{TUNNEL_FIDELITY}'
+           GROUP BY 1 ORDER BY 1 LIMIT {MAX_STATED_DESTINATIONS + 1}""",
+        owner_param,
+    )
+    ordered = sorted(merged.items(), key=lambda pair: (-pair[1], pair[0]))
+    return {
+        "capture_limited": int(row["capture_limited"] or 0) if row else 0,
+        "tunnel_records": int(row["tunnel_records"] or 0) if row else 0,
+        "opaque_tunnels": int(row["opaque_tunnels"] or 0) if row else 0,
+        "destinations": [
+            {"origin": origin, "calls": calls}
+            for origin, calls in ordered[:MAX_STATED_DESTINATIONS]
+        ],
+        "destinations_truncated": (
+            len(ordered) > MAX_STATED_DESTINATIONS or len(origins) > MAX_STATED_DESTINATIONS * 2
+        ),
+        "refused_destinations": [
+            {"destination": str(item["destination"]), "attempts": int(item["attempts"] or 0)}
+            for item in refused[:MAX_STATED_DESTINATIONS]
+        ],
+        "refused_destinations_truncated": len(refused) > MAX_STATED_DESTINATIONS,
+    }
+
+
 def _runs_external_scanner(name: str) -> bool:
     try:
         spec = CAPABILITY_REGISTRY.require(name)
@@ -591,13 +653,22 @@ def scan_action_sent_traffic(row: Mapping[str, Any]) -> bool:
     sent 340 and 905 SQLi verification requests under ``sqli.verify_batch`` actions that ended
     ``timed_out``, and the capture note, which read only success and partial actions, neither
     archived nor named them. Any action that consumed requests sent traffic, whatever it ended.
+
+    An action that ended without succeeding and whose settled consumption says it sent no
+    request did not: the Scan's time limit settles every verifier it stopped before it started
+    ``timed_out`` with zero consumed, and the archive named five such verifiers of one lab Scan
+    as engine capabilities whose calls went unrecorded.
     """
     status = str(row.get("status") or "")
     try:
         consumed = int(row.get("http_consumed") or 0)
     except (TypeError, ValueError):
         consumed = 0
-    return status in {"success", "partial", "timed_out"} or consumed > 0
+    if consumed > 0:
+        return True
+    if row.get("http_measured") is True and status not in {"success", "partial"}:
+        return False
+    return status in {"success", "partial", "timed_out"}
 
 
 def split_unarchived_capabilities(names: Sequence[str]) -> tuple[list[str], list[str]]:
@@ -632,19 +703,25 @@ def archive_fidelity(stats: Mapping[str, int], *, total: int) -> tuple[str, str]
     failed = int(stats.get("failed") or 0)
     dropped = int(stats.get("dropped") or 0)
     capture_limited = int(stats.get("capture_limited") or 0)
+    opaque_tunnels = int(stats.get("opaque_tunnels") or 0)
     unarchived = [
         str(item) for item in stats.get("unarchived_http_capabilities") or []
         if str(item)
     ]
     if attempted == 0 and total == 0:
         return "unavailable", "no calls were recorded for this run"
-    if failed or dropped or stored < attempted or capture_limited or unarchived:
+    if failed or dropped or stored < attempted or capture_limited or opaque_tunnels or unarchived:
         return "partial", (
             f"{stored} of {attempted} recorded calls were stored"
             + (f"; {dropped} were dropped at the capture ceiling" if dropped else "")
             + (
                 f"; {capture_limited} calls have adapter-limited wire detail"
                 if capture_limited else ""
+            )
+            + (
+                f"; {opaque_tunnels} pinned tunnels carried encrypted traffic: their destination "
+                "is archived, their requests are not"
+                if opaque_tunnels else ""
             )
             + _unarchived_clauses(stats, unarchived)
         )

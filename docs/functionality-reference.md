@@ -1360,9 +1360,19 @@ other body a masked view (the JSON and the masked HAR alike) withholds what expo
 withholds: each value under or beside a secret-named key in JSON (whole or truncated), YAML, HTML
 form fields and `key = value` text, and every provider-format secret
 (`api/runtime/archive_body_masking.py`). External
-scanner processes (httpx, katana, ffuf, nuclei, dalfox, sqlmap) reach the target through an opaque
-pinned tunnel and are not archived; the stats list them apart from engine gaps
-(`unarchived_external_tool_capabilities` vs `unarchived_engine_capabilities`).
+scanner processes (httpx, katana, ffuf, nuclei, dalfox, sqlmap) and the engine's browser reach the
+target through a pinned tunnel that admits one host and port. Each tunnel a Scan opens is archived
+as one `CONNECT` row (`capture.fidelity: pinned_tunnel`) under the Scan action's capability, with
+its destination, the frozen addresses it connected to, byte counts and any destination it refused;
+a cleartext tunnel also archives each request line it relayed (method, URL, `Host` header; no other
+headers, no bodies, fidelity `tunnel_request_line`, at most 2,000 per tunnel, the rest counted as
+dropped). An encrypted tunnel's requests are not readable, so its row proves only where the
+traffic went and keeps the archive `partial`. The stats name every `destinations` origin with its
+call count and the `refused_destinations`, so a Scan's scope can be checked from one read. Runs
+archived before this list tunnelled capabilities apart from engine gaps
+(`unarchived_external_tool_capabilities` vs `unarchived_engine_capabilities`); an action that
+ended without succeeding and consumed no request (a verifier the Scan's time limit stopped before
+it started) is not named as a gap.
 Operator-authenticated `DELETE` routes purge the archive and unreferenced blobs without requiring
 raw export to be enabled.
 

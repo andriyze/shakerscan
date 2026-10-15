@@ -18962,6 +18962,9 @@ async def _execute_agent_scanner_process(
         "browser_profile": browser_profile_receipt,
         "execution_uncertain": execution_uncertain,
         "network_binding": _agent_scanner_network_binding(name),
+        # The tunnel's account for the Scan request archive (recorded by capabilities/scanner.py).
+        "tunnel": pinned_proxy.tunnel_record(scheme=urllib.parse.urlsplit(execution_target).scheme)
+        if process_started and hasattr(pinned_proxy, "tunnel_record") else None,
     }
 
 
@@ -18977,6 +18980,7 @@ async def process_agent_scanner_tool_job(job_data: dict[str, Any]) -> None:
     cancel_key = f"agent_tool_cancel:{job_id}"
     redis_client = get_redis()
     result = await _execute_agent_scanner_process(job_data)
+    result.pop("tunnel", None)  # archive-only; not part of the queued job result
     if job_id:
         redis_client.set(
             result_key,
