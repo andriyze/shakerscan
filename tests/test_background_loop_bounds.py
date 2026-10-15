@@ -369,15 +369,16 @@ def test_loop_indexes_build_concurrently_and_rebuild_an_interrupted_build():
     states = {name: True for name in names}
     states[names[0]] = False  # an interrupted CONCURRENTLY build leaves an invalid index
     states[names[1]] = None
+    states["idx_findings_severity_keyset"] = None
     conn = IndexConn(states)
     built = asyncio.run(loop_scale_indexes.ensure_loop_scale_indexes(SimplePool(conn)))
-    assert built == names[:2]
+    assert built == [*names[:2], "idx_findings_severity_keyset"]
     creates = [s for s in conn.statements if s.startswith("CREATE INDEX")]
     assert creates and all("CONCURRENTLY" in s for s in creates)
     assert any(s.startswith(f"DROP INDEX CONCURRENTLY IF EXISTS {names[0]}") for s in conn.statements)
     assert conn.statements[0] == "SET statement_timeout = 0"
-    # The rebuilt indexes' tables get fresh planner statistics.
-    assert "ANALYZE budget_reservations" in conn.statements and "ANALYZE scans" in conn.statements
+    # Only findings is re-analyzed after a build (its proof-gate statistics); loop tables are not.
+    assert "ANALYZE findings" in conn.statements and "ANALYZE scans" not in conn.statements
     assert conn.statements[-2] == "SET statement_timeout = '30s'"  # the session's own limit is restored
 
 

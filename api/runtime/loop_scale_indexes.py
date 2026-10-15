@@ -75,6 +75,9 @@ async def _extension_available(conn: Any, name: str, cache: dict[str, bool]) -> 
     return cache[name]
 
 
+#: Tables analyzed after one of their indexes is (re)built.
+ANALYZE_AFTER_BUILD = frozenset({"findings"})
+
 _LOCK_NAMESPACE = 0x53534C50  # loop_leader.LOOP_LOCK_NAMESPACE
 _LOCK_KEY = 0x2B11_1D5  # this module's build lock within that namespace
 
@@ -122,9 +125,10 @@ async def ensure_loop_scale_indexes(pool: Any, *, progress: Any = None) -> list[
                     report(f"built {name}")
                 except Exception as exc:  # never stop startup over a performance index
                     logger.warning("Could not build index %s: %s", name, type(exc).__name__)
-            # Fresh statistics for the tables that gained an index (expression and partial-index
-            # estimates the planner needs to choose them).
-            for table in dict.fromkeys(table for name, table, _d, _e in scale_indexes() if name in built):
+            # Fresh findings statistics once its list indexes exist: the planner needs the
+            # proof-gate expression statistics to choose the partial proof index.
+            for table in dict.fromkeys(table for name, table, _d, _e in scale_indexes()
+                                       if name in built and table in ANALYZE_AFTER_BUILD):
                 try:
                     await conn.execute(f"ANALYZE {table}")
                 except Exception as exc:
