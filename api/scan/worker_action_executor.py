@@ -17,6 +17,7 @@ from .capability_result import CapabilityResultReference, CapabilityResultReason
 from .execution_backend import ActionAuthorityWithdrawn, ActionHeartbeat, ActionLease
 from .action_interruption import ActionInterruption, interruption_scope
 from .scan_deadline import SCAN_TIME_LIMIT, ScanDeadline
+from .action_authority_guard import authority_exempt
 from .authority_deadline import (  # noqa: F401  (the tolerance constants are re-exported)
     AUTHORITY_CHECK_RETRY_DELAYS,
     AUTHORITY_UNVERIFIED_AFTER_SECONDS,
@@ -208,7 +209,7 @@ class ReceiptScanActionExecutor:
         authority_monitor = None
         deadline_monitor = None
         check = self._credential_check if action.action_id != "finalize.report" else None
-        authority = self._authority if action.action_id != "finalize.report" else None
+        authority = self._authority if not authority_exempt(action) else None
 
         async def check_authority():
             assert check is not None

@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Any
 
-from .action_authority_guard import ScanAuthorityGuard
+from .action_authority_guard import ScanAuthorityGuard, authority_exempt
 from .capability_result import CapabilityResultReason
 
 
@@ -27,7 +27,14 @@ class RunningBrokerAuthority:
         self._max_entries = max_entries
 
     async def reason(self, pool: Any, *, scan_id: str, plan_digest: str, job: Any, action: Any) -> str | None:
-        """``None`` while the action is still authorized, else a ``CapabilityResultReason`` value."""
+        """``None`` while the action is still authorized, else a ``CapabilityResultReason`` value.
+
+        An exempt action (the report finalizer) is always ``None``, as the local executor never
+        checks it: its heartbeat keeps its lease and its result is settled as reported, so a
+        withdrawal on a fleet Scan still ends with the report of what was confirmed before it.
+        """
+        if authority_exempt(action):
+            return None
         key = (str(scan_id), str(plan_digest), str(action.action_id))
         guard = self._guards.get(key)
         if guard is None:
