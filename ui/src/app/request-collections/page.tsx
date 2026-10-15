@@ -8,6 +8,7 @@ import { UploadAttempt } from '@/lib/uploadAttempt'
 import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { getTargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'
 import { targetOptions, targetSearchNote } from '@/lib/pickerOptions'
+import { targetSearchProvesEmpty } from '@/lib/targetSearchModel.mjs'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { CollectionLibrary } from '@/components/collections/CollectionLibrary'
 import {
@@ -465,8 +466,8 @@ function RequestCollectionsContent() {
         </Field>
         <Field label="Collection owner">
           <Combobox value={targetId} onChange={setTargetId} options={ownerOptions} noneLabel="All collections"
-            onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} footerNote={targetSearchNote(targetSearch)}
-            placeholder={choices.length || targetSearch.query.trim() ? 'All collections' : 'No active targets'} searchPlaceholder="Search targets by name, host or environment…" />
+            onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} optionsQuery={targetSearch.answeredQuery} footerNote={targetSearchNote(targetSearch)}
+            placeholder={targetSearchProvesEmpty({ ...targetSearch, assets: choices }) ? 'No active targets' : 'All collections'} searchPlaceholder="Search targets by name, host or environment…" />
         </Field>
       </Card>
 

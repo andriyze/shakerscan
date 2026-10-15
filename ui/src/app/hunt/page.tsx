@@ -31,6 +31,7 @@ import {
 } from '@/lib/huntContract.generated'
 import { Button, Card, Combobox, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
 import { credentialOptions, targetOptions, targetSearchNote } from '@/lib/pickerOptions'
+import { targetSearchProvesEmpty } from '@/lib/targetSearchModel.mjs'
 import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
@@ -408,13 +409,13 @@ function HuntContent() {
             <h2 className="font-medium text-white">New Hunt</h2>
             <Button size="sm" variant="ghost" onClick={() => setLauncherOpen(false)}>Close</Button>
           </div>
-          {loading ? <p className="text-sm text-gray-400">Loading targets…</p> : choices.length === 0 && !targetSearch.query.trim() && !targetSearch.error ? (
+          {loading ? <p className="text-sm text-gray-400">Loading targets…</p> : targetSearchProvesEmpty({ ...targetSearch, assets: choices }) ? (
             <EmptyState message="No targets available" hint="Add a hostname, IP address, or application target first." />
           ) : (
             <>
               <Field label="Target">
                 <Combobox value={targetId} onChange={setTargetId} options={targetOptionList}
-                  onQueryChange={targetSearch.setQuery} loading={targetSearch.loading}
+                  onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} optionsQuery={targetSearch.answeredQuery}
                   footerNote={targetSearchNote(targetSearch)}
                   placeholder="Choose a target" searchPlaceholder="Search targets by name, host or environment…" />
               </Field>

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Share2, X } from 'lucide-react'
 import { Button, Combobox, Field, Modal, type ComboboxOption } from '@/components/ui'
 import { useToast } from '@/components/ui'
@@ -15,6 +15,7 @@ import {
   type CredentialTargetKind,
 } from '@/lib/credentialApi'
 import { targetSearchNote } from '@/lib/pickerOptions'
+import { targetSearchProvesEmpty } from '@/lib/targetSearchModel.mjs'
 import type { TargetAsset } from '@/lib/targetAssetApi'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 
@@ -106,13 +107,17 @@ export function ShareCredentialDialog({
 
   // Targets come from a server search inside the dialog (one bounded page per query), not from
   // the whole inventory loaded up front.
-  const targetSearch = useTargetSearch({ includeServices: true, enabled: Boolean(profile), selectedIds: [targetId] })
-  const targets = useMemo(() => targetSearch.assets.map(shareTargetChoice), [targetSearch.assets])
   const used = useMemo(() => new Set(grants.filter((grant) => grant.active).map((grant) => grant.target_id)), [grants])
-  const choices = useMemo(() => (profile ? targets.filter((target) =>
-    sharesAsset(profile.target_kind, target.kind) && protocolFits(profile.auth_kind, target)
-    && target.id !== profile.target_id && !used.has(target.id)) : []),
-  [profile, targets, used])
+  const fits = useCallback((target: ShareTargetChoice) => Boolean(profile
+    && sharesAsset(profile.target_kind, target.kind) && protocolFits(profile.auth_kind, target)
+    && target.id !== profile.target_id && !used.has(target.id)), [profile, used])
+  // The inventory has no parameter for "shares this credential's kind and protocol", so the search
+  // applies it while reading (and reads on, bounded, while it rejects rows): a page of other kinds
+  // never reads as "no target of this kind".
+  const accept = useCallback((asset: TargetAsset) => fits(shareTargetChoice(asset)), [fits])
+  const targetSearch = useTargetSearch({ includeServices: true, enabled: Boolean(profile), selectedIds: [targetId], accept })
+  const targets = useMemo(() => targetSearch.assets.map(shareTargetChoice), [targetSearch.assets])
+  const choices = useMemo(() => targets.filter(fits), [targets, fits])
   const chosen = choices.find((target) => target.id === targetId)
   const options = useMemo<ComboboxOption[]>(() => choices.map((target) => ({
     value: target.id, label: target.label, meta: target.detail, description: target.kind,
@@ -219,10 +224,10 @@ export function ShareCredentialDialog({
         <Field label="Share with target">
           <Combobox value={targetId} options={options} disabled={busy || loading}
             onChange={(value) => { setTargetId(value); setApproveActive(false) }}
-            onQueryChange={targetSearch.setQuery} loading={targetSearch.loading}
-            footerNote={targetSearch.ready && !targetSearch.loading && !choices.length
-              ? (targetSearch.query.trim() ? 'No matching target of this kind' : 'No other target of this kind')
-              : targetSearchNote(targetSearch)}
+            onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} optionsQuery={targetSearch.answeredQuery}
+            footerNote={targetSearchProvesEmpty({ ...targetSearch, assets: choices })
+              ? 'No other target of this kind'
+              : targetSearchNote({ ...targetSearch, assets: choices })}
             placeholder="Choose a target…" searchPlaceholder="Search targets by name or host…"
             aria-label="Share with target" />
         </Field>

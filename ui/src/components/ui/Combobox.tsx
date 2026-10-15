@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown, Search, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { filterOptions, groupOptions, moveActive } from '@/lib/comboboxModel.mjs'
+import { canChooseActive, clampActive, filterOptions, groupOptions, initialActive, moveActive } from '@/lib/comboboxModel.mjs'
 import { fieldClasses } from './Input'
 
 export interface ComboboxOption {
@@ -28,7 +28,7 @@ export interface ComboboxOption {
 export function Combobox({
   id, value, onChange, options, placeholder = 'Choose…', searchPlaceholder = 'Search…',
   noneLabel, emptyMessage = 'No matches', disabled, className, 'aria-describedby': describedBy,
-  'aria-invalid': invalid, 'aria-label': ariaLabel, onQueryChange, loading = false, footerNote,
+  'aria-invalid': invalid, 'aria-label': ariaLabel, onQueryChange, loading = false, footerNote, optionsQuery,
 }: {
   id?: string
   value: string
@@ -53,6 +53,11 @@ export function Combobox({
   loading?: boolean
   /** Shown under the list, e.g. "Showing the first 25 matches; type to narrow". */
   footerNote?: string | null
+  /**
+   * Server search: the query the current `options` answer (useTargetSearch's answeredQuery).
+   * Enter chooses only when it equals the text in the box, so a stale result is never picked.
+   */
+  optionsQuery?: string | null
 }) {
   const generated = useId()
   const listId = `${id || generated}-list`
@@ -100,14 +105,20 @@ export function Combobox({
   }
 
   useLayoutEffect(() => { if (open) place() }, [open, place, visible.length])
+  // The list's identity: a new result list (another query's answer, a page that arrived) resets
+  // the highlight, so it never points at a different option or past the end.
+  const visibleKey = visible.map(option => `${option.value}\u0000${option.disabled ? 1 : 0}`).join('\u0001')
   useEffect(() => {
     if (!open) return
-    const index = visible.findIndex(option => option.value === value && !option.disabled)
-    setActive(index >= 0 ? index : moveActive(visible, -1, 1))
-    requestAnimationFrame(() => search.current?.focus())
-    // Recompute only when the list opens or the query changes.
+    setActive(initialActive(visible, value))
+    // Recompute only when the list opens or what it shows changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, query])
+  }, [open, visibleKey])
+  useEffect(() => {
+    if (open) requestAnimationFrame(() => search.current?.focus())
+  }, [open])
+  const activeIndex = clampActive(visible, active)
+  const chooseReady = canChooseActive({ remote, loading, query, optionsQuery })
   useEffect(() => {
     if (!open) return
     const onPointer = (event: PointerEvent) => {
@@ -128,9 +139,9 @@ export function Combobox({
     }
   }, [open, close, place])
   useEffect(() => {
-    if (!open || active < 0) return
-    panel.current?.querySelector(`[data-index="${active}"]`)?.scrollIntoView({ block: 'nearest' })
-  }, [open, active])
+    if (!open || activeIndex < 0) return
+    panel.current?.querySelector(`[data-index="${activeIndex}"]`)?.scrollIntoView({ block: 'nearest' })
+  }, [open, activeIndex])
 
   function choose(option: ComboboxOption | undefined) {
     if (!option || option.disabled) return
@@ -141,10 +152,11 @@ export function Combobox({
   function onKeyDown(event: React.KeyboardEvent) {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
-      setActive(current => moveActive(visible, current, event.key === 'ArrowDown' ? 1 : -1))
+      setActive(current => moveActive(visible, clampActive(visible, current), event.key === 'ArrowDown' ? 1 : -1))
     } else if (event.key === 'Enter') {
       event.preventDefault()
-      choose(visible[active])
+      // Server search: only a list that answers the text in the box, and only a valid index.
+      if (chooseReady && activeIndex >= 0) choose(visible[activeIndex])
     } else if (event.key === 'Escape') {
       event.preventDefault()
       close(true)
@@ -176,7 +188,7 @@ export function Combobox({
       <div className="relative border-b border-gray-800 p-2">
         <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" aria-hidden="true" />
         <input ref={search} role="combobox" aria-expanded="true" aria-controls={listId} aria-autocomplete="list"
-          aria-label={`${searchPlaceholder.replace(/…$/, '')}`} aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
+          aria-label={`${searchPlaceholder.replace(/…$/, '')}`} aria-activedescendant={activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
           value={query} onChange={event => setQuery(event.target.value)} onKeyDown={onKeyDown} placeholder={searchPlaceholder}
           className="w-full rounded-lg border border-gray-700 bg-gray-800 py-1.5 pl-8 pr-8 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden" />
         {query && <button type="button" aria-label="Clear search" onClick={() => { setQuery(''); search.current?.focus() }}
@@ -195,7 +207,7 @@ export function Combobox({
               onPointerMove={() => { if (!option.disabled && active !== at) setActive(at) }}
               onClick={() => choose(option)}
               className={cn('flex cursor-pointer items-start gap-2 rounded-lg px-2.5 py-2 text-sm',
-                option.disabled ? 'cursor-not-allowed opacity-40' : at === active ? 'bg-blue-500/15' : 'hover:bg-gray-800')}>
+                option.disabled ? 'cursor-not-allowed opacity-40' : at === activeIndex ? 'bg-blue-500/15' : 'hover:bg-gray-800')}>
               <Check className={cn('mt-0.5 h-4 w-4 shrink-0', isSelected ? 'text-blue-300' : 'invisible')} aria-hidden="true" />
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2">

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isAbortError } from './fetchLayer.mjs'
 import { getTargetAsset, searchTargetAssets, type TargetAsset } from './targetAssetApi'
+import { collectAcceptedTargets } from './targetSearchModel.mjs'
 
 export const TARGET_SEARCH_DEBOUNCE_MS = 250
 export const TARGET_SEARCH_LIMIT = 25
@@ -14,10 +15,17 @@ export interface TargetSearch {
   byId: (id: string) => TargetAsset | undefined
   query: string
   setQuery: (query: string) => void
+  /** The (trimmed) query the current matches answer; differs from `query` while a search is due. */
+  answeredQuery: string | null
+  /** A search is due or in flight: the matches may belong to an older query. */
   loading: boolean
   error: string | null
   /** More assets match than were returned: say so and ask for a narrower search. */
   hasMore: boolean
+  /** Inventory rows read for the current answer (more than `assets` when `accept` filtered). */
+  scanned: number
+  /** Whether an `accept` filter narrowed the rows read. */
+  filtered: boolean
   /** True once the first page answered (an empty inventory is then really empty). */
   ready: boolean
   /** Add an asset the page already holds (just created, read from a link) to the known set. */
@@ -45,6 +53,8 @@ export function useTargetSearch({
   const [debounced, setDebounced] = useState('')
   const [matches, setMatches] = useState<TargetAsset[]>([])
   const [hasMore, setHasMore] = useState(false)
+  const [scanned, setScanned] = useState(0)
+  const [answeredQuery, setAnsweredQuery] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -69,29 +79,46 @@ export function useTargetSearch({
   }, [query])
 
   useEffect(() => {
-    if (!enabled) return
+    if (!enabled) {
+      setLoading(false)
+      return
+    }
     const controller = new AbortController()
     setLoading(true)
-    searchTargetAssets({ search: debounced, limit, includeServices, includeInactive }, controller.signal)
-      .then((page) => {
-        const accepted = acceptRef.current ? page.targets.filter(acceptRef.current) : page.targets
-        setMatches(accepted)
-        setHasMore(page.hasMore)
+    // A filter the inventory cannot express runs here, reading on (bounded) while it rejects
+    // rows, so a page of rejected rows never reads as "no targets".
+    collectAcceptedTargets({
+      fetchPage: (position: string | number | null) => searchTargetAssets(
+        { search: debounced, limit, includeServices, includeInactive, position }, controller.signal),
+      accept: acceptRef.current,
+      limit,
+    })
+      .then((result) => {
+        if (controller.signal.aborted) return
+        setMatches(result.matches)
+        setHasMore(result.hasMore)
+        setScanned(result.scanned)
+        setAnsweredQuery(debounced)
         setError(null)
         setReady(true)
         setKnown((current) => {
           const next = new Map(current)
-          for (const asset of accepted) next.set(asset.id, asset)
+          for (const asset of result.matches) next.set(asset.id, asset)
           return next
         })
       })
       .catch((cause) => {
-        if (isAbortError(cause)) return
+        if (isAbortError(cause) || controller.signal.aborted) return
         setError(cause instanceof Error ? cause.message : 'Target search failed')
         setReady(true)
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      // Disabled (or superseded) mid-request: nothing is in flight for this hook any more; the
+      // next run, if any, sets it again.
+      setLoading(false)
+    }
   }, [debounced, enabled, includeInactive, includeServices, limit])
 
   // A selection the current matches do not hold (a link, a saved choice): read just that asset.
@@ -132,5 +159,11 @@ export function useTargetSearch({
   }, [known, matches, selectedIds])
 
   const byId = useCallback((id: string) => known.get(id), [known])
-  return { assets, byId, query, setQuery, loading, error, hasMore, ready, remember }
+  // Typed but not yet answered (debounce pending or the request in flight) counts as loading, so
+  // a picker never acts on results that belong to an older query.
+  const due = enabled && query.trim() !== (answeredQuery ?? '') && !error
+  return {
+    assets, byId, query, setQuery, answeredQuery, loading: enabled && (loading || due), error, hasMore,
+    scanned, filtered: Boolean(accept), ready, remember,
+  }
 }

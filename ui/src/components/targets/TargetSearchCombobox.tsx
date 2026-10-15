@@ -42,5 +42,5 @@ export function TargetSearchCombobox({
   useEffect(() => { onSelectedAsset?.(selected) }, [onSelectedAsset, selected])
   return <Combobox id={id} value={value} onChange={onChange} options={options} noneLabel={noneLabel}
     placeholder={placeholder} searchPlaceholder="Search targets by name or host…" aria-label={ariaLabel}
-    onQueryChange={search.setQuery} loading={search.loading} footerNote={targetSearchNote(search)} disabled={disabled} />
+    onQueryChange={search.setQuery} loading={search.loading} optionsQuery={search.answeredQuery} footerNote={targetSearchNote(search)} disabled={disabled} />
 }

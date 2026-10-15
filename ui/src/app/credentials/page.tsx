@@ -553,7 +553,7 @@ function CredentialsContent() {
           <Field label="Target">
             <Combobox value={selectedChoice ? targetId : ''} options={targetOptionList} noneLabel="All targets"
               searchPlaceholder="Search targets by name, host or environment…"
-              onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} footerNote={targetSearchNote(targetSearch)}
+              onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} optionsQuery={targetSearch.answeredQuery} footerNote={targetSearchNote(targetSearch)}
               onChange={(value) => { setMissingTarget(null); setTargetId(value) }} />
           </Field>
           <label className="flex h-10 items-center gap-2 text-sm text-gray-400">

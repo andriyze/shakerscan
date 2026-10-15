@@ -55,5 +55,34 @@ test('the Hunt launcher keeps offering only active web origins and hosts, and se
   assert.match(pickers.hunt, /enabled: launcherSearchOpen/)
   assert.match(pickers.hunt, /includeServices: true/)
   // "No targets" is only claimed when nothing was typed and the search answered.
-  assert.match(pickers.hunt, /choices\.length === 0 && !targetSearch\.query\.trim\(\) && !targetSearch\.error/)
+  assert.match(pickers.hunt, /targetSearchProvesEmpty\(\{ \.\.\.targetSearch, assets: choices \}\) \? \(\s*<EmptyState/)
+})
+
+// Review fixes: Enter only for results that answer the box's text, and searches that stop
+// cleanly. These check the wiring; the decisions themselves are tested in comboboxModel and
+// targetSearchModel.
+test('every server-searched picker tells the Combobox which query its options answer', () => {
+  for (const [name, source] of Object.entries(pickers)) {
+    assert.match(source, /optionsQuery=\{(targetSearch|search)\.answeredQuery\}/, name)
+  }
+  const combobox = read('src/components/ui/Combobox.tsx')
+  assert.match(combobox, /canChooseActive\(\{ remote, loading, query, optionsQuery \}\)/)
+  assert.match(combobox, /if \(chooseReady && activeIndex >= 0\) choose\(visible\[activeIndex\]\)/)
+  assert.match(combobox, /setActive\(initialActive\(visible, value\)\)[\s\S]*\[open, visibleKey\]/, 'the highlight follows the visible list')
+  assert.match(combobox, /aria-activedescendant=\{activeIndex >= 0 \?/)
+})
+
+test('the search hook pages through a filter, and never stays loading once disabled or aborted', () => {
+  const hook = read('src/lib/useTargetSearch.ts')
+  assert.match(hook, /collectAcceptedTargets\(/)
+  assert.match(hook, /if \(!enabled\) \{\s*setLoading\(false\)/)
+  assert.match(hook, /controller\.abort\(\)[\s\S]{0,200}setLoading\(false\)/)
+})
+
+test('no picker claims "no targets" from a partial or filtered answer', () => {
+  assert.match(pickers.hunt, /targetSearchProvesEmpty\(\{ \.\.\.targetSearch, assets: choices \}\)/)
+  assert.match(pickers.share, /targetSearchProvesEmpty\(\{ \.\.\.targetSearch, assets: choices \}\)/)
+  assert.match(pickers.share, /useTargetSearch\(\{[^}]*accept \}\)/, 'the share filter pages on the server search')
+  assert.match(pickers.collections, /targetSearchProvesEmpty\(/)
+  assert.doesNotMatch(pickers.share, /targetSearch\.ready && !targetSearch\.loading && !choices\.length/)
 })
