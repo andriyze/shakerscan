@@ -42,3 +42,11 @@ export function credentialOptions(profiles: CredentialProfile[]): ComboboxOption
     disabled: profile.status === 'expired' || !profile.is_active,
   }))
 }
+
+/** The line under a server-searched target picker: honest about a bounded page of matches. */
+export function targetSearchNote(search: { assets: unknown[]; hasMore: boolean; error: string | null; query: string }): string {
+  if (search.error) return `Search failed: ${search.error}`
+  if (search.hasMore) return `Showing the first ${search.assets.length} matches; type to narrow`
+  if (!search.assets.length) return search.query.trim() ? 'No matching targets' : 'No targets yet'
+  return `${search.assets.length} match${search.assets.length === 1 ? '' : 'es'}`
+}

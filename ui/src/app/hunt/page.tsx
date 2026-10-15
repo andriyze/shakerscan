@@ -30,14 +30,15 @@ import {
   type HuntZeroableBudgetDimension,
 } from '@/lib/huntContract.generated'
 import { Button, Card, Combobox, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
-import { credentialOptions, targetOptions } from '@/lib/pickerOptions'
+import { credentialOptions, targetOptions, targetSearchNote } from '@/lib/pickerOptions'
 import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
 import { HuntHistoryList } from '@/components/hunt/HuntHistoryList'
 import { HuntRunView } from '@/components/hunt/HuntRunView'
 import { cleanTargetLocator, huntTargetTitle } from '@/lib/huntListModel.mjs'
-import { getAllTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
+import type { TargetAsset } from '@/lib/targetAssetApi'
+import { useTargetSearch } from '@/lib/useTargetSearch'
 import { TargetSkillEditor } from '@/components/targets/TargetSkillEditor'
 
 type TargetChoice = {
@@ -66,12 +67,16 @@ function positiveInteger(value: string): number | undefined {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
+/** A Hunt launches against an active web origin or host; other inventory rows are not choices. */
+function isHuntLaunchTarget(target: TargetAsset): boolean {
+  return target.is_active && /^(https?|host):\/\//i.test(target.url)
+}
+
 const ZEROABLE_BUDGETS = HUNT_BUDGET_DIMENSIONS.filter((item) => item.zeroable)
 
 function HuntContent() {
   const searchParams = useSearchParams()
   const toast = useToast()
-  const [assets, setAssets] = useState<TargetAsset[]>([])
   const [authorizedTargetId, setAuthorizedTargetId] = useState<string | null>(null)
   const [authorizationLoading, setAuthorizationLoading] = useState(false)
   const [authorizationError, setAuthorizationError] = useState<string | null>(null)
@@ -110,24 +115,15 @@ function HuntContent() {
   const [launcherOpen, setLauncherOpen] = useState(() => Boolean(searchParams.get('target') && !searchParams.get('run')))
   const [legacyDeviceRun, setLegacyDeviceRun] = useState<DeviceAgentSession | null>(null)
   const [legacyRunLoading, setLegacyRunLoading] = useState(false)
-  const [loading, setLoading] = useState(true)
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Link parameters preselect the launcher's target and objective.
   useEffect(() => {
-    let cancelled = false
-    getAllTargetAssets(undefined, true)
-      .then((targets) => {
-        if (cancelled) return
-        setAssets(targets.filter(target => target.is_active && /^(https?|host):\/\//i.test(target.url)))
-        const requested = searchParams.get('target') || searchParams.get('target_id')
-        if (requested) setTargetId(requested)
-        const requestedObjective = searchParams.get('objective')
-        if (requestedObjective) setObjective(requestedObjective)
-      })
-      .catch((cause) => setError(cause instanceof Error ? cause.message : 'Failed to load targets'))
-      .finally(() => setLoading(false))
-    return () => { cancelled = true }
+    const requested = searchParams.get('target') || searchParams.get('target_id')
+    if (requested) setTargetId(requested)
+    const requestedObjective = searchParams.get('objective')
+    if (requestedObjective) setObjective(requestedObjective)
   }, [searchParams])
 
   useEffect(() => {
@@ -171,6 +167,20 @@ function HuntContent() {
     return () => { cancelled = true }
   }, [searchParams])
 
+  // The launcher searches the inventory on the server (one bounded page per query) instead of
+  // loading every target; a preselected target is read on its own.
+  const launcherSearchOpen = launcherOpen && !searchParams.get('run') && !searchParams.get('legacy_run')
+  const targetSearch = useTargetSearch({
+    selectedIds: [targetId],
+    includeServices: true,
+    enabled: launcherSearchOpen,
+    accept: isHuntLaunchTarget,
+  })
+  const assets = useMemo(
+    () => targetSearch.assets.filter(isHuntLaunchTarget),
+    [targetSearch.assets],
+  )
+  const loading = launcherSearchOpen && !targetSearch.ready
   const choices = useMemo<TargetChoice[]>(() => assets.map((target) => ({
       id: target.id,
       sourceKind: target.connected_device ? 'device' : target.url.startsWith('host://') ? 'network' : 'web',
@@ -186,7 +196,7 @@ function HuntContent() {
   // The run detail carries no target name. Inactive targets are not launch choices, so read those directly.
   const [runTargetRecord, setRunTargetRecord] = useState<{ id: string; name?: string; url?: string } | null>(null)
   const runTargetId = hunt?.target_id
-  const runTargetKnown = Boolean(runTargetId && assets.some((target) => target.id === runTargetId))
+  const runTargetKnown = Boolean(runTargetId && targetSearch.byId(runTargetId))
   useEffect(() => {
     if (!runTargetId || runTargetKnown) return
     let cancelled = false
@@ -194,7 +204,7 @@ function HuntContent() {
     return () => { cancelled = true }
   }, [runTargetId, runTargetKnown])
   const runTarget = hunt ? (() => {
-    const known = assets.find((target) => target.id === hunt.target_id) || (runTargetRecord?.id === hunt.target_id ? runTargetRecord : undefined)
+    const known = targetSearch.byId(hunt.target_id) || (runTargetRecord?.id === hunt.target_id ? runTargetRecord : undefined)
     const named = { target_name: hunt.target_name || known?.name, target_url: hunt.target_url || known?.url, target_id: hunt.target_id }
     return { title: huntTargetTitle(named), locator: cleanTargetLocator(named.target_url) }
   })() : null
@@ -398,12 +408,14 @@ function HuntContent() {
             <h2 className="font-medium text-white">New Hunt</h2>
             <Button size="sm" variant="ghost" onClick={() => setLauncherOpen(false)}>Close</Button>
           </div>
-          {loading ? <p className="text-sm text-gray-400">Loading targets…</p> : choices.length === 0 ? (
+          {loading ? <p className="text-sm text-gray-400">Loading targets…</p> : choices.length === 0 && !targetSearch.query.trim() && !targetSearch.error ? (
             <EmptyState message="No targets available" hint="Add a hostname, IP address, or application target first." />
           ) : (
             <>
               <Field label="Target">
                 <Combobox value={targetId} onChange={setTargetId} options={targetOptionList}
+                  onQueryChange={targetSearch.setQuery} loading={targetSearch.loading}
+                  footerNote={targetSearchNote(targetSearch)}
                   placeholder="Choose a target" searchPlaceholder="Search targets by name, host or environment…" />
               </Field>
 

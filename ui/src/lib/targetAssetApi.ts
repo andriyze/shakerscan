@@ -1,5 +1,7 @@
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import { fetchHeavyRead } from './busyRetry.mjs'
+import { getJson } from './fetchLayer.mjs'
+import { isListV1, listV1Params } from './listPage.mjs'
 import type { CredentialProfile } from './credentialApi'
 import type { SharedServiceKnowledge } from '@/components/targets/SharedServicePorts'
 
@@ -178,15 +180,30 @@ export async function registerTargetAsset(input: {locator: string; name?: string
   return detail.target.id
 }
 
-/** Fetch every metadata page; selectors must not silently lose assets after the first page. */
-export async function getAllTargetAssets(signal?: AbortSignal, includeServices = false): Promise<TargetAsset[]> {
-  const assets = new Map<string, TargetAsset>()
-  let offset = 0
-  for (;;) {
-    const page = await getTargetAssets({limit:500,offset,include_services:includeServices},signal)
-    for (const asset of page.targets) assets.set(asset.id,asset)
-    offset += page.targets.length
-    if (offset >= page.total) return [...assets.values()]
-    if (!page.targets.length) throw new Error('Target inventory changed while paging; refresh the selector')
-  }
+/** One bounded page of a target search, for typeahead pickers (never the whole inventory). */
+export interface TargetSearchPage {
+  targets: TargetAsset[]
+  /** More assets match than this page holds: the operator should type more. */
+  hasMore: boolean
+}
+
+/**
+ * A typeahead page from the inventory: list/v1 (`count=none`, no total computed) on an engine that
+ * serves it; an older engine ignores the opt-in and answers its legacy shape, read the same way.
+ */
+export async function searchTargetAssets(
+  { search = '', limit = 25, includeServices = false, includeInactive = false }:
+  { search?: string; limit?: number; includeServices?: boolean; includeInactive?: boolean } = {},
+  signal?: AbortSignal,
+): Promise<TargetSearchPage> {
+  const params = new URLSearchParams(listV1Params({ limit }))
+  const term = search.trim()
+  if (term) params.set('search', term.slice(0, 500))
+  if (includeServices) params.set('include_services', 'true')
+  if (includeInactive) params.set('include_inactive', 'true')
+  const body = await getJson(`${API_URL}/targets/inventory?${params}`, { signal, heavy: true, maxAgeMs: 15_000, label: 'Target search failed' })
+  if (isListV1<TargetAsset>(body)) return { targets: body.items, hasMore: Boolean(body.has_more) }
+  const legacy = body as InventoryPage
+  const targets = legacy.targets || []
+  return { targets, hasMore: Number(legacy.total || 0) > targets.length }
 }

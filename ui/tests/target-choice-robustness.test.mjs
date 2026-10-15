@@ -10,6 +10,7 @@ const evidencePanel = fs.readFileSync(new URL('../src/components/EvidenceRetenti
 const timelinePage = fs.readFileSync(new URL('../src/app/timeline/page.tsx', import.meta.url), 'utf8')
 const schedulesPage = fs.readFileSync(new URL('../src/app/schedules/page.tsx', import.meta.url), 'utf8')
 const targetsPage = fs.readFileSync(new URL('../src/components/targets/inventory/TargetRow.tsx', import.meta.url), 'utf8')
+const targetSearchPicker = fs.readFileSync(new URL('../src/components/targets/TargetSearchCombobox.tsx', import.meta.url), 'utf8')
 const targetGroups = fs.readFileSync(new URL('../src/components/targets/inventory/TargetGroups.tsx', import.meta.url), 'utf8')
 
 test('target-bound forms hide inactive and unnamed web targets', () => {
@@ -29,9 +30,10 @@ test('secret-bearing forms require an explicit target choice', () => {
   // Credentials without a target is the library; creating one still needs an explicit target.
   assert.match(credentialsPage, /noneLabel="All targets"/)
   assert.match(credentialsPage, /onClick=\{openCreate\} disabled=\{!targetId\}/)
-  // A target ID from the URL is used only once it is one of the choices.
-  assert.match(credentialsPage, /choices\.some\(\(item\) => item\.id === targetId\) \? targetId : ''/)
-  assert.match(collectionsPage, /if \(loading \|\| !targetId \|\| assets\.some\(\(asset\) => asset\.id === targetId\)\) return/)
+  // A target ID from the URL is used only once it has been read and accepted as a choice.
+  assert.match(credentialsPage, /<Combobox value=\{selectedChoice \? targetId : ''\}/)
+  assert.match(collectionsPage, /if \(loading \|\| !targetId \|\| selectedAsset\) return/)
+  assert.match(collectionsPage, /if \(!result\.target\.is_active\) \{setError\('The linked target is retired'\);return\}/)
   // With no target chosen the credentials page is the library, and says how to create one.
   assert.match(credentialsPage, /Choose a target to create a credential/)
   assert.match(collectionsPage, /Choose a collection owner/)
@@ -47,8 +49,14 @@ test('historical malformed target labels stay bounded in read-only selectors', (
   assert.equal(boundedDisplayText(`target-${'x'.repeat(500)}`, 40).length, 40)
   assert.equal(boundedDisplayText('  normal target  '), 'normal target')
   assert.equal(boundedTargetDisplay({ url: 'https://example.test' }, { stripScheme: true }), 'example.test')
-  for (const surface of [evidencePanel, timelinePage, schedulesPage, targetsPage]) {
+  for (const surface of [evidencePanel, targetsPage, targetSearchPicker]) {
     assert.match(surface, /boundedTargetDisplay/)
   }
+  // Timeline and Schedules pick targets through the server-searched picker, which bounds labels.
+  for (const surface of [timelinePage, schedulesPage]) {
+    assert.match(surface, /<TargetSearchCombobox/)
+    assert.doesNotMatch(surface, /getTargets\(/)
+  }
+  assert.match(targetSearchPicker, /label: boundedTargetDisplay\(asset\)/)
   assert.match(targetGroups, /boundedDisplayText\(group\.root_domain/)
 })

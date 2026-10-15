@@ -5,8 +5,8 @@ import AuthenticationProfiles from '@/components/AuthenticationProfiles'
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyRound, Plus, RefreshCw, RotateCw, Search, Share2, ShieldCheck, Trash2, X } from 'lucide-react'
-import { targetOptions } from '@/lib/pickerOptions'
-import { ShareCredentialDialog, type ShareTargetChoice } from '@/components/credentials/ShareCredentialDialog'
+import { targetOptions, targetSearchNote } from '@/lib/pickerOptions'
+import { ShareCredentialDialog } from '@/components/credentials/ShareCredentialDialog'
 import {
   createTargetPolicyApprovalReceipt,
 } from '@/lib/api'
@@ -30,7 +30,6 @@ import {
   Card,
   ConfirmDialog,
   EmptyState,
-  ErrorState,
   Field,
   Input,
   Modal,
@@ -40,7 +39,8 @@ import {
   Textarea,
   useToast,
 } from '@/components/ui'
-import { getAllTargetAssets, getTargetAsset, type TargetAsset } from '@/lib/targetAssetApi'
+import { getTargetAsset, searchTargetAssets } from '@/lib/targetAssetApi'
+import { useTargetSearch } from '@/lib/useTargetSearch'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 
 const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
@@ -247,10 +247,8 @@ function CredentialsContent() {
   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, target: undefined }), [setFilters])
   const [missingTarget, setMissingTarget] = useState<string | null>(null)
   const latestProfileRequest = useRef(0)
-  const [assets, setAssets] = useState<TargetAsset[]>([])
   const [profiles, setProfiles] = useState<CredentialProfile[]>([])
   const [includeInactive, setIncludeInactive] = useState(false)
-  const [loading, setLoading] = useState(true)
   const [profilesLoading, setProfilesLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
@@ -264,22 +262,23 @@ function CredentialsContent() {
   const [capabilityOptions, setCapabilityOptions] = useState<CredentialCapabilityOption[]>([])
   const [capabilitiesLoading, setCapabilitiesLoading] = useState(false)
 
-  useEffect(() => {
-    let cancelled = false
-    getAllTargetAssets(undefined, true)
-      .then((items) => {
-        if (!cancelled) setAssets(items)
-      })
-      .catch((cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')
-      })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
-  }, [])
+  // The target picker searches the inventory on the server, one bounded page per query; the
+  // selected target (from a link or a choice) is read on its own below.
+  const targetSearch = useTargetSearch({ includeServices: true })
+  const { remember } = targetSearch
+  const selectedAsset = targetId ? targetSearch.byId(targetId) : undefined
+  // The matches, plus the selection (read on its own below) so it stays a choice while the
+  // operator searches for something else.
+  const assets = useMemo(() => selectedAsset && !targetSearch.assets.some((asset) => asset.id === selectedAsset.id)
+    ? [...targetSearch.assets, selectedAsset] : targetSearch.assets, [selectedAsset, targetSearch.assets])
+  // A selected id that is neither known nor reported missing is still being read.
+  const resolvingTarget = Boolean(targetId) && !selectedAsset && missingTarget !== targetId
+  const searchReady = targetSearch.ready
 
-  const choices = useMemo(() => assets.map((asset) => ({
-    id: asset.id, label: asset.name || asset.locator, detail: /^https?:\/\//i.test(asset.url) ? asset.url : asset.locator,
-  })), [assets])
+  const selectedChoice = useMemo(() => selectedAsset ? {
+    id: selectedAsset.id, label: selectedAsset.name || selectedAsset.locator,
+    detail: /^https?:\/\//i.test(selectedAsset.url) ? selectedAsset.url : selectedAsset.locator,
+  } : undefined, [selectedAsset])
   const targetOptionList = useMemo(() => targetOptions(assets), [assets])
   // Narrow the loaded list without another request: text, principal slot and status.
   const [search, setSearch] = useState('')
@@ -301,36 +300,31 @@ function CredentialsContent() {
     counts[profile.principal_slot] = (counts[profile.principal_slot] || 0) + 1
     return counts
   }, {}), [profiles])
-  // The grant names the target as it is; the server refuses a label that does not match.
-  const shareTargets = useMemo<ShareTargetChoice[]>(() => assets.map((asset) => {
-    const httpOrigin = /^https?:\/\//i.test(asset.url)
-    return {
-      id: asset.id,
-      kind: httpOrigin ? 'web' : asset.connected_device ? 'device' : 'network',
-      label: asset.name || asset.locator,
-      detail: httpOrigin ? asset.url : asset.locator,
-      // As the server decides: no HTTP only on evidence (services observed, no web app linked).
-      servesHttp: httpOrigin || (asset.origin_count ?? 0) > 0
-        || ((asset.service_count ?? 0) > 0 ? false : undefined),
-    }
-  }), [assets])
 
+  // A link may name a target by URL (?target=) or id (?target_id=). The URL is resolved with one
+  // bounded server search for its origin; the id is read directly.
   useEffect(() => {
-    if (loading) return
     const requestedUrl = typeof filters.target === 'string' ? filters.target : ''
-    if (!targetId && requestedUrl) {
-      try {
-        const requested = new URL(requestedUrl)
-        const asset = assets.find((item) => {
-          if (/^https?:\/\//i.test(item.url)) return new URL(item.url).origin === requested.origin
-          return false
+    if (targetId || !requestedUrl) return
+    let requested: URL
+    try { requested = new URL(requestedUrl) } catch { setMissingTarget(requestedUrl); return }
+    const controller = new AbortController()
+    searchTargetAssets({ search: requested.host, limit: 50, includeServices: true }, controller.signal)
+      .then((page) => {
+        const asset = page.targets.find((item) => {
+          if (!/^https?:\/\//i.test(item.url)) return false
+          try { return new URL(item.url).origin === requested.origin } catch { return false }
         })
-        if (asset) setFilters({target_id:asset.id,target:undefined})
+        if (asset) { remember(asset); setFilters({target_id:asset.id,target:undefined}) }
         else setMissingTarget(requestedUrl)
-      } catch { setMissingTarget(requestedUrl) }
-      return
-    }
-    if (!targetId || assets.some((asset) => asset.id === targetId)) return
+      })
+      .catch(() => { if (!controller.signal.aborted) setMissingTarget(requestedUrl) })
+    return () => controller.abort()
+  },[filters.target,remember,setFilters,targetId])
+
+  // Read the selected id on its own only once the first search page answered without it.
+  useEffect(() => {
+    if (!targetId || selectedAsset || !searchReady) return
     let cancelled = false
     getTargetAsset(targetId).then((result) => {
       if (cancelled) return
@@ -338,10 +332,10 @@ function CredentialsContent() {
       const origin = result.origins.find((item) => item.id === targetId)
       const exact = origin ? {...result.target,...origin,asset_id:result.target.id,locator:origin.url} : result.target
       if (exact.id !== targetId || !exact.is_active) {setMissingTarget(targetId);return}
-      setAssets((current) => current.some((asset) => asset.id === exact.id) ? current : [...current,exact])
+      remember(exact)
     }).catch(() => {if (!cancelled) setMissingTarget(targetId)})
     return () => {cancelled = true}
-  },[assets,filters.target,loading,setFilters,targetId])
+  },[remember,searchReady,selectedAsset,targetId])
 
   const loadProfiles = useCallback(async () => {
     // Only the latest request may fill the list: a slower answer for a target that is no longer
@@ -349,8 +343,10 @@ function CredentialsContent() {
     const request = ++latestProfileRequest.current
     // A linked ID is queried only once it is a known target: an unknown one gets the notice above
     // rather than an API error.
-    if (targetId && !choices.some((item) => item.id === targetId)) {
-      setProfiles([])
+    if (targetId && !selectedChoice) {
+      // Still being read: keep the loading state instead of an empty list.
+      if (resolvingTarget) setProfilesLoading(true)
+      else { setProfiles([]); setProfilesLoading(false) }
       return
     }
     setProfilesLoading(true)
@@ -373,7 +369,7 @@ function CredentialsContent() {
     } finally {
       if (request === latestProfileRequest.current) setProfilesLoading(false)
     }
-  }, [choices, includeInactive, targetId, targetKind])
+  }, [includeInactive, resolvingTarget, selectedChoice, targetId, targetKind])
 
   useEffect(() => { void loadProfiles() }, [loadProfiles])
 
@@ -469,7 +465,7 @@ function CredentialsContent() {
         })
         toast.success('Credential rotated. Existing jobs remain bound to their admitted version.')
       } else {
-        const selectedTarget = choices.find((item) => item.id === targetId)
+        const selectedTarget = selectedChoice
         const activeApproval = draft.allowActiveCapabilities && selectedTarget
           ? await createTargetPolicyApprovalReceipt({
               targetId,
@@ -534,8 +530,6 @@ function CredentialsContent() {
     }
   }
 
-  if (loading) return <div className="p-6 text-sm text-gray-400">Loading credential targets…</div>
-  if (error && !assets.length) return <ErrorState message={error} />
 
   return (
     <div className="mx-auto max-w-6xl p-6">
@@ -557,8 +551,9 @@ function CredentialsContent() {
             </Select>
           </Field>
           <Field label="Target">
-            <Combobox value={choices.some((item) => item.id === targetId) ? targetId : ''} options={targetOptionList} noneLabel="All targets"
+            <Combobox value={selectedChoice ? targetId : ''} options={targetOptionList} noneLabel="All targets"
               searchPlaceholder="Search targets by name, host or environment…"
+              onQueryChange={targetSearch.setQuery} loading={targetSearch.loading} footerNote={targetSearchNote(targetSearch)}
               onChange={(value) => { setMissingTarget(null); setTargetId(value) }} />
           </Field>
           <label className="flex h-10 items-center gap-2 text-sm text-gray-400">
@@ -795,7 +790,6 @@ function CredentialsContent() {
 
       <ShareCredentialDialog
         profile={sharing}
-        targets={shareTargets}
         onClose={() => setSharing(null)}
         onChanged={() => void loadProfiles()}
       />

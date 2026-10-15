@@ -28,7 +28,7 @@ export interface ComboboxOption {
 export function Combobox({
   id, value, onChange, options, placeholder = 'Choose…', searchPlaceholder = 'Search…',
   noneLabel, emptyMessage = 'No matches', disabled, className, 'aria-describedby': describedBy,
-  'aria-invalid': invalid, 'aria-label': ariaLabel,
+  'aria-invalid': invalid, 'aria-label': ariaLabel, onQueryChange, loading = false, footerNote,
 }: {
   id?: string
   value: string
@@ -44,6 +44,15 @@ export function Combobox({
   'aria-describedby'?: string
   'aria-invalid'?: boolean
   'aria-label'?: string
+  /**
+   * Server-side search: the typed text goes to the caller, which supplies the matching `options`
+   * (bounded) instead of the list being filtered in the browser.
+   */
+  onQueryChange?: (query: string) => void
+  /** A server search is in flight. */
+  loading?: boolean
+  /** Shown under the list, e.g. "Showing the first 25 matches; type to narrow". */
+  footerNote?: string | null
 }) {
   const generated = useId()
   const listId = `${id || generated}-list`
@@ -56,7 +65,11 @@ export function Combobox({
   const [position, setPosition] = useState<{ top: number; left: number; width: number; maxHeight: number }>({ top: 0, left: 0, width: 320, maxHeight: 320 })
 
   const all = useMemo<ComboboxOption[]>(() => noneLabel !== undefined ? [{ value: '', label: noneLabel }, ...options] : options, [noneLabel, options])
-  const visible = useMemo(() => filterOptions(all, query), [all, query])
+  const remote = Boolean(onQueryChange)
+  const visible = useMemo(() => remote ? all : filterOptions(all, query), [all, query, remote])
+  const onQueryChangeRef = useRef(onQueryChange)
+  onQueryChangeRef.current = onQueryChange
+  useEffect(() => { onQueryChangeRef.current?.(query) }, [query])
   const selected = all.find(option => option.value === value)
 
   const close = useCallback((focusTrigger = false) => {
@@ -170,7 +183,7 @@ export function Combobox({
           className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-200"><X className="h-3.5 w-3.5" /></button>}
       </div>
       <div id={listId} role="listbox" aria-label={ariaLabel || placeholder} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5">
-        {!visible.length && <p className="px-3 py-6 text-center text-sm text-gray-500">{emptyMessage}</p>}
+        {!visible.length && <p className="px-3 py-6 text-center text-sm text-gray-500">{loading ? 'Searching…' : emptyMessage}</p>}
         {groupOptions(visible).map(group => <div key={group.name || 'all'} role="group" aria-label={group.name || undefined}>
           {group.name && <p className="px-2.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500">{group.name}</p>}
           {group.options.map(option => {
@@ -196,7 +209,11 @@ export function Combobox({
           })}
         </div>)}
       </div>
-      {all.length > 8 && <p className="border-t border-gray-800 px-3 py-1.5 text-[11px] text-gray-500">{visible.length} of {all.length} · ↑↓ to move, Enter to choose</p>}
+      {remote
+        ? <p className="border-t border-gray-800 px-3 py-1.5 text-[11px] text-gray-500" aria-live="polite">
+            {loading ? 'Searching…' : footerNote || `${visible.length} match${visible.length === 1 ? '' : 'es'}`} · ↑↓ to move, Enter to choose
+          </p>
+        : all.length > 8 && <p className="border-t border-gray-800 px-3 py-1.5 text-[11px] text-gray-500">{visible.length} of {all.length} · ↑↓ to move, Enter to choose</p>}
     </div>}
   </div>
 }
