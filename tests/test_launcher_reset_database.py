@@ -29,7 +29,6 @@ log() { printf '%s\n' "$*" >> "$CALLS"; }
 compose() { log "compose $*"; }
 compose_up() { log "compose_up $*"; }
 docker_cli() { log "docker $*"; }
-postgres_legacy_volume() { echo shakerscan_postgres-data; }
 resolve_start_workers() { echo 3; }
 remove_containers_outside_compose_down() { log remove-outside-compose; }
 remove_scan_worker_containers() { log remove-scan-workers; }

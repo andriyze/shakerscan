@@ -10,8 +10,7 @@
 #   3. The pinned installer rolls back to the previous release, which must start on its own data.
 #
 # The previous release and the candidate must run the same PostgreSQL major: the steps must
-# preserve the data with no migration at all. The PostgreSQL 16 -> 18 migration is not exercised
-# here (few installs still hold 16 data); scripts/postgres_upgrade.sh keeps its fast unit tests.
+# preserve the data with no migration at all. Every supported install runs PostgreSQL 18.
 #
 # Inputs: CANDIDATE_IMAGE_LOCK (a release-image-lock.env with the candidate's five digests),
 # BASELINE_VERSION (default install/STABLE_VERSION), INSTALLED_UPGRADE_HOME, INSTALLED_UPGRADE_BULK_MB
@@ -72,7 +71,7 @@ cleanup() {
             (cd "$INSTALL_DIR" && ./scanner.sh stop > /dev/null 2>&1) || true
         fi
         docker volume ls -q --filter label=com.docker.compose.project=shakerscan | xargs -r docker volume rm -f > /dev/null 2>&1 || true
-        docker volume rm -f shakerscan_postgres-data shakerscan_postgres-cluster > /dev/null 2>&1 || true
+        docker volume rm -f shakerscan_postgres-cluster > /dev/null 2>&1 || true
         rm -rf -- "$INSTALL_DIR"
     fi
 }
