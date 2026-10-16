@@ -667,6 +667,8 @@ download "$REPO_RAW_BASE/api/scan/continuation.py" "$INSTALL_DIR/api/scan/contin
 download "$REPO_RAW_BASE/api/scan/execution.py" "$INSTALL_DIR/api/scan/execution.py"
 download "$REPO_RAW_BASE/api/scan/external_process.py" "$INSTALL_DIR/api/scan/external_process.py"
 download "$REPO_RAW_BASE/api/scan/finalizer.py" "$INSTALL_DIR/api/scan/finalizer.py"
+download "$REPO_RAW_BASE/api/scan/finding_evidence.py" "$INSTALL_DIR/api/scan/finding_evidence.py"
+download "$REPO_RAW_BASE/api/scan/severity_calibration.py" "$INSTALL_DIR/api/scan/severity_calibration.py"
 download "$REPO_RAW_BASE/api/scan/verification_extension.py" "$INSTALL_DIR/api/scan/verification_extension.py"
 download "$REPO_RAW_BASE/api/scan/sqli_concurrency.py" "$INSTALL_DIR/api/scan/sqli_concurrency.py"
 download "$REPO_RAW_BASE/api/scan/sqli_stages.py" "$INSTALL_DIR/api/scan/sqli_stages.py"
