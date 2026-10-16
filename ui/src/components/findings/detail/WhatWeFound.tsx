@@ -30,6 +30,7 @@ export function WhatWeFound({
   aiProbe,
   detailEvidence,
   hideSeverityReason = false,
+  hideExcerpt = false,
 }: {
   observation: FindingObservation
   description: string | null
@@ -40,6 +41,8 @@ export function WhatWeFound({
   detailEvidence?: unknown
   /** The brief above already states why this severity (and stands in for an empty section). */
   hideSeverityReason?: boolean
+  /** The brief above already shows this excerpt. */
+  hideExcerpt?: boolean
 }) {
   const allSignals = Array.from(new Set([...observation.signals, ...signals]))
   const parsed = findingDetailEvidence(detailEvidence)
@@ -99,7 +102,7 @@ export function WhatWeFound({
           </dl>
         )}
 
-        {observation.excerpt && (
+        {observation.excerpt && !hideExcerpt && (
           <div>
             <Label>Response excerpt <span className="font-normal text-gray-600">· redacted by the server</span></Label>
             <pre className="max-h-64 overflow-auto rounded-md border border-gray-800 bg-gray-950 p-3 font-mono text-xs leading-5 text-gray-200 whitespace-pre-wrap break-all">{observation.excerpt}</pre>

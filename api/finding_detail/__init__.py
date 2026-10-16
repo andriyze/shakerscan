@@ -118,10 +118,10 @@ def related_findings(finding: Mapping[str, Any], rows: list[Mapping[str, Any]], 
         priority = 9
         if cert and row.get("certificate_sha256") == cert:
             reason, priority = "Same certificate", 0
-        elif tool and row.get("tool") == tool and origin and origin_of(row.get("url")) == origin:
-            reason, priority = "Same check on this origin", 1
         elif exposure_class and row.get("exposure_class") and origin_of(row.get("url")) == origin:
-            reason, priority = "Other exposed content on this origin", 2
+            reason, priority = "Other exposed content on this origin", 1
+        elif tool and row.get("tool") == tool and origin and origin_of(row.get("url")) == origin:
+            reason, priority = "Same check on this origin", 2
         elif origin and origin_of(row.get("url")) == origin and _SEVERITY_RANK.get(str(row.get("severity")), 5) <= 2:
             reason, priority = "Other significant finding on this origin", 3
         if not reason:

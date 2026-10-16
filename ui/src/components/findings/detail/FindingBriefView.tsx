@@ -6,6 +6,10 @@ import { secretLink } from '@/lib/findingBrief'
 import { CopyButton } from './CopyButton'
 import { Section } from './Section'
 
+function pathOfUrl(url: string): string {
+  try { const parsed = new URL(url); return parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : '' } catch { return '' }
+}
+
 const CONFIDENCE: Record<string, { label: string; tone: string }> = {
   confirmed: { label: 'Confirmed', tone: 'bg-emerald-500/15 text-emerald-300' },
   likely: { label: 'Likely', tone: 'bg-amber-500/15 text-amber-300' },
@@ -164,6 +168,7 @@ export function FindingBriefView({ brief, targetId, related }: { brief: FindingB
                 <li key={item.id} className="flex min-w-0 flex-wrap items-baseline gap-x-2">
                   <span className="text-xs text-gray-500">{item.relation} ·</span>
                   <Link href={`/findings/${item.id}`} className="min-w-0 text-blue-300 hover:text-blue-200 wrap-break-word">{item.title}</Link>
+                  {pathOfUrl(item.url) && <code className="font-mono text-xs text-gray-400 break-all">{pathOfUrl(item.url)}</code>}
                   <span className="text-xs uppercase text-gray-500">{item.severity}</span>
                 </li>
               ))}

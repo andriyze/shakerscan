@@ -616,7 +616,7 @@ function FindingDetailContent() {
     finding?.retest_unsupported_reason === 'model_intake'
       ? 'Model Intake findings are re-checked by re-running the Model Intake scan for the artifact.'
       : canonicalProofVerified
-        ? 'Automated retest is not available for this finding type; the scan-time proof above still stands. Run a new Scan to observe it again.'
+        ? 'this finding type has no replay; the scan-time proof above still stands. Run a new Scan to observe it again.'
         : featureEnabled('engine_admin')
           ? 'No deterministic prover covers this finding type. Enable AI verification in AI settings to retest it.'
           : 'No automated retest is available for this finding type in this workspace.'
@@ -856,6 +856,7 @@ function FindingDetailContent() {
 
           <WhatWeFound
             hideSeverityReason={Boolean(brief?.severity?.reason)}
+            hideExcerpt={Boolean(brief?.excerpt)}
             detailEvidence={rawEvidenceObject}
             observation={observation}
             description={showSummaryDescription ? summaryDescription : null}
