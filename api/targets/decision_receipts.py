@@ -301,9 +301,9 @@ async def _restore(conn: Any, target: UUID, item: DecisionInput, before: dict, a
             finding['analyst_verdict_notes'], finding['notes'],
             datetime.fromisoformat(finding['resolved_at']) if finding['resolved_at'] else None)
         try:
-            from finding_routes.router import _refresh_finding_owner_counts
+            from finding_routes.owner_counts import _refresh_finding_owner_counts
         except ModuleNotFoundError:
-            from ..finding_routes.router import _refresh_finding_owner_counts
+            from ..finding_routes.owner_counts import _refresh_finding_owner_counts
         owners = await conn.fetch('SELECT target_id,device_target_id FROM findings WHERE id=$1', UUID(finding['id']))
         await _refresh_finding_owner_counts(conn, owners)
     previous = {entry['id']: entry for entry in before.get('entries', [])}

@@ -110,9 +110,11 @@ async def _reopen_dismissal(conn: Any, row: Mapping[str, Any], reason: Mapping[s
     if reopened is None:
         return False
     try:
-        from finding_routes.router import FINDING_UPDATE_SQL, _refresh_finding_owner_counts
+        from finding_routes.triage_sql import FINDING_UPDATE_SQL
+        from finding_routes.owner_counts import _refresh_finding_owner_counts
     except ModuleNotFoundError:  # package import
-        from ..finding_routes.router import FINDING_UPDATE_SQL, _refresh_finding_owner_counts
+        from ..finding_routes.triage_sql import FINDING_UPDATE_SQL
+        from ..finding_routes.owner_counts import _refresh_finding_owner_counts
     updated = await conn.fetchrow(FINDING_UPDATE_SQL, "active", None, "needs_review", reopened["finding_id"], "set")
     if updated is not None:
         await _refresh_finding_owner_counts(conn, [updated])

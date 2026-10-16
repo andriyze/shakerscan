@@ -806,6 +806,10 @@ note_running_release() { :; }
 ensure_upgrade_space() { printf 'space-check\n'; }
 ensure_pre_upgrade_backup() { printf 'pre-upgrade-backup\n'; }
 ensure_redis_ready() { printf 'redis-ready\n'; }
+ensure_install_dir_space() { :; }
+ensure_datastores_persisting() { :; }
+ensure_database_volume_present() { :; }
+offer_upgrade_backup() { :; }
 record_started_release() { printf 'record-release:%s\n' "$1"; }
 build_local_images() { printf 'build-local\n'; }
 local_application_images_ready() { return __READY_RC__; }
@@ -1180,6 +1184,10 @@ note_running_release() { :; }
 ensure_upgrade_space() { printf 'space-check\n'; }
 ensure_pre_upgrade_backup() { printf 'pre-upgrade-backup\n'; }
 ensure_redis_ready() { printf 'redis-ready\n'; }
+ensure_install_dir_space() { :; }
+ensure_datastores_persisting() { :; }
+ensure_database_volume_present() { :; }
+offer_upgrade_backup() { :; }
 record_started_release() { printf 'record-release:%s\n' "$1"; }
 build_local_images() { printf 'build-local\n'; }
 local_application_images_ready() { return 0; }

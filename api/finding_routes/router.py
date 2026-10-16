@@ -76,6 +76,11 @@ from .list_query import (
 )
 from .list_schema import severity_rank_ready
 from .remediation import finding_remediation
+from .triage_sql import FINDING_UPDATE_SQL
+from .owner_counts import (
+    _refresh_web_active_finding_counts, _refresh_finding_owner_counts,
+    _refresh_device_active_finding_counts,
+)
 
 
 router = APIRouter()
@@ -1262,30 +1267,6 @@ async def bulk_retest_findings(request: FindingsBulkRetestRequest):
     return response
 
 
-async def _refresh_web_active_finding_counts(conn: Any, target_ids: Sequence[Any]) -> None:
-    normalized = sorted({item for item in target_ids if item is not None}, key=str)
-    if not normalized:
-        return
-    await conn.execute(
-        """UPDATE targets t
-           SET active_findings_count=(
-               SELECT COUNT(*) FROM findings f
-               WHERE f.target_id=t.id AND f.status='active'
-           ), updated_at=NOW()
-           WHERE t.id=ANY($1::uuid[])""",
-        normalized,
-    )
-
-
-async def _refresh_finding_owner_counts(conn: Any, rows: Sequence[Any]) -> None:
-    await _refresh_web_active_finding_counts(
-        conn, [row["target_id"] for row in rows]
-    )
-    await _refresh_device_active_finding_counts(
-        conn, [row["device_target_id"] for row in rows]
-    )
-
-
 async def _resolve_finding_mutation_id(
     conn: Any,
     identifier: str,
@@ -1409,29 +1390,6 @@ async def _triage_receipt(conn: Any, http_request: Request, route: str, finding_
 
 # The prior status is read in the same statement so the response can say what changed: a client
 # that sets a verdict and a status together must be able to show the status change it caused.
-FINDING_UPDATE_SQL = """
-    UPDATE findings
-    SET status = COALESCE($1::text, findings.status),
-        resolved_at = CASE WHEN $1::text = 'resolved' THEN COALESCE(findings.resolved_at, NOW())
-                           WHEN $1::text = 'active' THEN NULL
-                           ELSE findings.resolved_at END,
-        notes = COALESCE($2, findings.notes),
-        analyst_verdict = CASE $5::text WHEN 'set' THEN $3::text WHEN 'clear' THEN NULL
-                                        ELSE findings.analyst_verdict END,
-        analyst_verdict_at = CASE $5::text WHEN 'set' THEN NOW() WHEN 'clear' THEN NULL
-                                           ELSE findings.analyst_verdict_at END,
-        -- Clearing a verdict keeps its notes unless the request sends new ones: the notes are
-        -- the record of why a verdict was set, an automated retest's included, and survive it.
-        analyst_verdict_notes = CASE WHEN $5::text IN ('set', 'clear')
-                                     THEN COALESCE($2, findings.analyst_verdict_notes)
-                                     ELSE findings.analyst_verdict_notes END,
-        updated_at = NOW()
-    FROM (SELECT id, status FROM findings WHERE id = $4 FOR UPDATE) AS prior
-    WHERE findings.id = prior.id
-    RETURNING findings.id, findings.target_id, findings.device_target_id, findings.status,
-              prior.status AS previous_status, findings.analyst_verdict,
-              findings.analyst_verdict_at
-"""
 
 
 def finding_update_response(row: Any) -> dict[str, Any]:
@@ -1714,19 +1672,6 @@ async def create_manual_finding(request: ManualFindingCreate):
 _FINDING_SEVERITY_ORDER = {"critical": 1, "high": 2, "medium": 3, "low": 4, "info": 5}
 
 
-async def _refresh_device_active_finding_counts(conn: Any, device_ids: Sequence[Any]) -> None:
-    normalized = sorted({item for item in device_ids if item is not None}, key=str)
-    if not normalized:
-        return
-    await conn.execute(
-        """UPDATE device_targets d
-           SET active_findings_count=(
-               SELECT COUNT(*) FROM findings f
-               WHERE f.device_target_id=d.id AND f.status='active'
-           ), updated_at=NOW()
-           WHERE d.id=ANY($1::uuid[])""",
-        normalized,
-    )
 async def enqueue_finding_retest(
     conn,
     finding: dict[str, Any],
