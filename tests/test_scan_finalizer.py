@@ -1447,3 +1447,87 @@ def test_session_cookies_set_without_httponly_or_secure_are_verified_by_the_base
         "https://app.example.test",
         [{"secure": False, "httponly": False, "samesite": None}],
     ) == []
+
+
+def test_a_stored_baseline_observation_still_proves_a_session_cookie_flag():
+    # Observations are persisted through receipt redaction; the cookie metadata must reach the
+    # finalizer intact (it read "***" before, so no Scan ever reported the flag).
+    from api.runtime.receipts import redact_receipt_value
+    origin = "http://dvwa.example.test"
+    stored = redact_receipt_value({
+        "kind": "http_observation",
+        "request": {"method": "GET", "origin": origin, "path": "/"},
+        "response": {"status": 302, "security_headers": {}, "set_cookie_metadata": [
+            {"name": "PHPSESSID", "secure": False, "httponly": False, "samesite": None},
+        ]},
+    })
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url=origin,
+        action_results={baseline.action_id: _result_with_observation_count(baseline, 1)},
+        observations={baseline.action_id: (stored,)},
+    )
+    found = [item for item in report["findings"] if item["evidence"].get("cookie_name")]
+    assert [(f["evidence"]["cookie_name"], f["title"]) for f in found] == [
+        ("PHPSESSID", "Session cookie without HttpOnly flag"),
+    ]
+
+
+def _redirecting_origin_header_matches(landing_url: str):
+    origin = "http://dvwa.example.test"
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    landing = _action("baseline.http_redirect", 1, dependencies=(baseline.action_id,),
+                      capability_name="http.request")
+    templates = _action("passive.templates", 2, dependencies=(baseline.action_id,),
+                        capability_name="templates.passive_batch")
+    final = _action("finalize.report", 3, dependencies=(templates.action_id, landing.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(baseline, landing, templates, final),
+    )
+    results = {
+        baseline.action_id: _result_with_observation_count(baseline, 1),
+        landing.action_id: _result_with_observation_count(landing, 1),
+        templates.action_id: _result_with_observation_count(templates, 1),
+    }
+    observations = {
+        baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"method": "GET", "origin": origin, "path": "/"},
+            "response": {"status": 302, "security_headers": {}, "selected_headers": {}},
+        },),
+        landing.action_id: ({
+            "kind": "http_observation",
+            "request": {"method": "GET", "origin": origin, "path": "/"},
+            "response": {"status": 200, "final_url": landing_url, "security_headers": {},
+                         "selected_headers": {"server": "Apache"}},
+        },),
+        templates.action_id: ({
+            "kind": "template_match", "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers", "severity": "info",
+            "matched_at": f"{origin}/", "matcher_name": "x-frame-options",
+        },),
+    }
+    report = finalize_scan_report(plan=plan, target_url=origin, action_results=results,
+                                  observations=observations)
+    return [item for item in report["findings"]
+            if item["evidence"].get("template_id") == "http-missing-security-headers"]
+
+
+def test_a_root_redirect_is_proven_from_the_same_origin_landing_page():
+    # DVWA answers / with 302 -> login.php; its headers are proven on the page it lands on.
+    [finding] = _redirecting_origin_header_matches("http://dvwa.example.test/login.php")
+    assert finding["proof_state"] == "verified"
+    observed = finding["evidence"]["observed_response"]
+    assert observed["source_action_id"] == "baseline.http_redirect"
+    assert observed["request_line"] == "GET http://dvwa.example.test/login.php"
+
+
+def test_a_redirect_landing_on_another_origin_proves_nothing():
+    [finding] = _redirecting_origin_header_matches("https://sso.example.test/login")
+    assert finding["proof_state"] == "candidate"

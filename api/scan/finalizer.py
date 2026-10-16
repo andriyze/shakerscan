@@ -422,6 +422,38 @@ def _baseline_header_responses(
             "observed_headers": dict(sorted(headers.items())),
             "source_action_id": "baseline.http",
         }
+    # An origin whose root answers with a redirect (a login page behind ``/``) shows its
+    # application headers on the page it redirects to. ``baseline.http_redirect`` follows one
+    # redirect; when that lands on a 2xx of the SAME origin, the landing response is the origin's
+    # recorded application response. A landing on another origin proves nothing about this one.
+    for row in observations.get("baseline.http_redirect", ()) or ():
+        if not isinstance(row, Mapping) or row.get("kind") != "http_observation":
+            continue
+        response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+        status = response.get("status")
+        final_url = str(response.get("final_url") or "")
+        origin = _http_origin(final_url)
+        current = responses.get(origin) if origin else None
+        if (
+            current is None or not 300 <= int(current["response_status"]) < 400
+            or type(status) is not int or not 200 <= status < 300
+            or not isinstance(response.get("security_headers"), Mapping)
+        ):
+            continue
+        headers = {}
+        for source in (response.get("selected_headers"), response.get("security_headers")):
+            if isinstance(source, Mapping):
+                headers.update({
+                    str(name).lower()[:120]: str(value)[:2_000] for name, value in source.items()
+                })
+        method = str((row.get("request") or {}).get("method") or "GET").upper()[:16]
+        parsed = urllib.parse.urlsplit(final_url)
+        responses[origin] = {
+            "request_line": f"{method} {origin}{(parsed.path or '/')[:2_000]}",
+            "response_status": status,
+            "observed_headers": dict(sorted(headers.items())),
+            "source_action_id": "baseline.http_redirect",
+        }
     return responses
 
 
@@ -503,7 +535,7 @@ def _baseline_cookie_findings(
 def _attach_observed_header_responses(
     findings: Sequence[dict[str, Any]],
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
-    baseline_receipt: Mapping[str, Any] | None = None,
+    baseline_receipts: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     """Give each missing-header finding the recorded response that lacks the header.
 
@@ -533,6 +565,7 @@ def _attach_observed_header_responses(
         # The pinned baseline response of this origin is an application response (2xx) that
         # lacks a header the capability always records: that response is the deterministic
         # proof. A redirect or an error page lacking it proves nothing about the application.
+        baseline_receipt = dict(baseline_receipts or {}).get(observed["source_action_id"])
         if baseline_receipt is None or not 200 <= int(observed["response_status"]) < 300:
             continue
         finding.update({
@@ -2120,10 +2153,13 @@ def finalize_scan_report(
             "budget_consumed": dict(result.budget_consumed),
         })
     findings = list(findings_by_id.values())
-    baseline_result = action_results.get("baseline.http")
     _attach_observed_header_responses(
         findings, observations,
-        _receipt(baseline_result) if baseline_result is not None else None,
+        {
+            action_id: _receipt(action_results[action_id])
+            for action_id in ("baseline.http", "baseline.http_redirect")
+            if action_results.get(action_id) is not None
+        },
     )
 
     # Family-aware coverage: every selected family (one that produced a batch or
