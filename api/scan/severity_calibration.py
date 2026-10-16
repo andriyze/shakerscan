@@ -24,7 +24,7 @@ SEVERITY_ORDER = ("info", "low", "medium", "high", "critical")
 # keeps the placeholder consistent with its new severity.
 _PLACEHOLDER_CVSS = {"critical": 9.5, "high": 8.0, "medium": 5.5, "low": 3.0, "info": 0.0}
 
-_WEAK_CIPHER_BROKEN_MARKERS = ("NULL", "EXPORT", "ANON", "ADH", "AECDH")
+_WEAK_CIPHER_BROKEN_MARKERS = ("NULL", "EXPORT", "EXP-", "ANON", "ADH", "AECDH")
 
 # Rule id -> (calibrated default, reason), independent of target labels and network placement.
 CLASS_RULES: Mapping[str, tuple[str, str]] = {
@@ -57,19 +57,25 @@ CLASS_RULES: Mapping[str, tuple[str, str]] = {
     ),
     "tls_legacy_protocol": (
         "medium",
-        "The server's best protocol is TLS 1.0/1.1, deprecated by RFC 8996 and refused by "
-        "current browsers; attacks on these versions need a network position and specific "
-        "conditions.",
+        "The server accepts TLS 1.0/1.1, deprecated by RFC 8996 and refused by current "
+        "browsers; attacks on these versions need a network position and specific conditions, "
+        "and a client that still offers them can be held to them.",
+    ),
+    "tls_legacy_protocol_sslv3": (
+        "high",
+        "The server accepts SSL 3.0, whose CBC padding is practically decryptable (POODLE) by an "
+        "attacker in the network path.",
     ),
     "tls_weak_cipher": (
         "medium",
-        "The negotiated cipher is weak (3DES/RC4 or under 128 bits): practical attacks need a "
-        "network position and large amounts of captured traffic.",
+        "The server accepts a weak cipher suite (3DES/RC4/DES or under 128 bits): practical "
+        "attacks need a network position and large amounts of captured traffic.",
     ),
     "tls_weak_cipher_broken": (
         "high",
-        "The negotiated cipher provides no encryption or no server authentication (NULL, "
-        "EXPORT or anonymous suites): traffic can be read or intercepted directly.",
+        "The server accepts a suite that provides no encryption, export-grade keys or no server "
+        "authentication (NULL, EXPORT or anonymous suites): traffic can be read or intercepted "
+        "directly.",
     ),
     "tls_certificate_weak_signature": (
         "medium",
@@ -209,6 +215,11 @@ def rule_for(finding: Mapping[str, Any]) -> str | None:
             cipher = str(evidence.get("cipher") or "").upper()
             if any(marker in cipher for marker in _WEAK_CIPHER_BROKEN_MARKERS):
                 return "tls_weak_cipher_broken"
+        if check == "tls_legacy_protocol" and (
+            "SSLv3" in (evidence.get("legacy_protocols_supported") or ())
+            or str(evidence.get("protocol") or "") == "SSLv3"
+        ):
+            return "tls_legacy_protocol_sslv3"
         if check == "tls_certificate_weak_signature":
             certificate = evidence.get("certificate") if isinstance(evidence.get("certificate"), Mapping) else {}
             if str(certificate.get("signature_hash") or "").lower() == "md5":

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from . import exposure, http, injection, other, tls
+from . import exposure, http, injection, other, posture, tls
 from .common import DETAIL_SCHEMA, record, text
 from .severity import severity_section
 
@@ -19,6 +19,9 @@ _CONFIRMED_NOTES = {
     "header": "Read from the scan's recorded response of this origin.",
     "cookie": "Read from the Set-Cookie header of the scan's recorded response.",
     "exposure": "The response matched a content signature for this class; the scanner did not rely on the status code alone.",
+    "cors": "Read from the CORS headers of the scan's recorded response to the probe Origin.",
+    "redirect": "Read from the Location header of the scan's recorded response; the redirect was not followed.",
+    "dns": "Read from the DNS answers the scan recorded.",
 }
 
 
@@ -33,6 +36,14 @@ def _builder(finding: Mapping[str, Any], evidence: Mapping[str, Any]):
         return http.build_missing_header
     if check.startswith("session_cookie_missing_"):
         return http.build_cookie
+    if check.startswith("weak_header_"):
+        return http.build_weak_header
+    if check.startswith("cors_"):
+        return posture.build_cors
+    if check == "open_redirect":
+        return posture.build_open_redirect
+    if tool == "dns.inspect" and check:
+        return posture.build_dns
     if tool == "shakerscan_exposure_probe" and evidence.get("exposure_class"):
         return exposure.build
     if tool in {"shakerscan_sqli_proof", "sqlmap", "request_sqli_differential"}:

@@ -131,6 +131,25 @@ export function FindingBriefView({ brief, targetId, related }: { brief: FindingB
           </div>
         ))}
 
+        {brief.relatedExposures.length > 0 && (
+          <div data-testid="finding-brief-exposures">
+            <Heading>Exposure candidates <span className="font-normal normal-case text-gray-500">· advisories listed for the software observed on this origin; candidates, not proof</span></Heading>
+            <ul className="space-y-1 text-sm">
+              {brief.relatedExposures.map(item => (
+                <li key={item.cve} className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+                  <span className="text-xs text-gray-500">{item.relation} ·</span>
+                  {item.href ? <Link href={item.href} className="font-mono text-blue-300 hover:text-blue-200">{item.cve}</Link> : <span className="font-mono">{item.cve}</span>}
+                  {item.title && <span className="min-w-0 text-gray-300 wrap-break-word">{item.title}</span>}
+                  {(item.product || item.source) && (
+                    <span className="text-xs text-gray-500">{[item.product && `${item.product}${item.version ? ` ${item.version}` : ''}`, item.source && `from ${item.source}`].filter(Boolean).join(' ')}</span>
+                  )}
+                  {item.severity && <span className="text-xs uppercase text-gray-500">{item.severity}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {brief.context.length > 0 && (
           <div>
             <Heading>Why it matters here</Heading>

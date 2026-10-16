@@ -25,6 +25,11 @@ except ModuleNotFoundError:  # package imports in host-side tests
     from ..runtime.models import TargetBinding
     from ..runtime.target_bound_socket import FrozenTargetSocketFactory
 
+try:
+    from capabilities.tls_legacy_probe import PROBE_COUNT as LEGACY_PROBE_COUNT, probe_legacy_tls
+except ModuleNotFoundError:  # package imports in host-side tests
+    from .tls_legacy_probe import PROBE_COUNT as LEGACY_PROBE_COUNT, probe_legacy_tls
+
 
 def _origin(value: str) -> str | None:
     try:
@@ -301,10 +306,36 @@ async def inspect_tls_origin(
             })
             successful.append((snapshot, certificate))
 
+    # Legacy protocols and weak suites the worker's own TLS library cannot offer, probed with raw
+    # ClientHello messages (capabilities/tls_legacy_probe.py). A server that accepts only such
+    # suites is still examined from the certificate its first flight carries.
+    legacy: dict[str, Any] = {}
+    legacy_only = False
+    if route_gap is None:
+        attempts += LEGACY_PROBE_COUNT
+        async def plain_connection(address: str, probe_port: int) -> tuple[Any, Any]:
+            # Plain TCP to the same frozen address the handshakes use; no TLS library.
+            return await asyncio.open_connection(host=address, port=probe_port)
+
+        legacy = await probe_legacy_tls(
+            selected_address, port, parsed.hostname, timeout=float(attempt_timeout),
+            connect=plain_connection,
+        )
+        best = legacy.get("best")
+        if not successful and isinstance(best, Mapping) and legacy.get("certificates"):
+            chain = tuple(legacy["certificates"])
+            successful.append(({
+                "protocol": best.get("protocol"),
+                "cipher": (best.get("cipher"), best.get("protocol"), best.get("cipher_bits")),
+                "alpn_protocol": None,
+                "certificate_chain": chain,
+            }, chain[0]))
+            legacy_only = True
+
     trust = "not_evaluated"
     trust_error_type: str | None = None
     trust_error: dict[str, Any] = {}
-    if successful:
+    if successful and not legacy_only:
         # Chain trust only. The name check is the separate hostname-match evidence: with it on,
         # a publicly trusted certificate issued for another name was also reported as an
         # untrusted chain, one defect counted twice under two titles.
@@ -409,21 +440,28 @@ async def inspect_tls_origin(
             cipher and (
                 int(cipher[2] or 0) < 128
                 or any(marker in str(cipher[0]).upper() for marker in (
-                    "NULL", "RC4", "3DES", "DES-CBC", "EXPORT",
+                    "NULL", "RC4", "3DES", "DES-CBC", "EXPORT", "EXP-", "ADH-", "AECDH-",
                 ))
             )
-        ),
+        ) or bool(legacy.get("weak_ciphers_supported")),
         "legacy_protocol_negotiated": (
             str(snapshot.get("protocol") or "")
             not in {"TLSv1.2", "TLSv1.3"}
-        ),
+        ) or bool(legacy.get("legacy_protocols_supported")),
+        "legacy_protocol_probes": list(legacy.get("legacy_protocol_probes") or ()),
+        "weak_cipher_probes": list(legacy.get("weak_cipher_probes") or ()),
+        "legacy_protocols_supported": list(legacy.get("legacy_protocols_supported") or ()),
+        "weak_ciphers_supported": list(legacy.get("weak_ciphers_supported") or ()),
+        **({"examined_by": "raw_client_hello"} if legacy_only else {}),
         "alpn_protocol": snapshot.get("alpn_protocol"),
         "certificate_sha256": (
             hashlib.sha256(certificate).hexdigest() if certificate else None
         ),
         "certificate_bytes": len(certificate),
         "certificate_trust": trust,
-        "certificate_trust_error_type": trust_error_type,
+        "certificate_trust_error_type": (
+            "legacy_handshake_only" if legacy_only else trust_error_type
+        ),
         **trust_error,
         **certificate_details,
     }

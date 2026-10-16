@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseFindingBrief, parseRelatedFindings, secretLink, severityLine } from './findingBrief.ts'
+import { parseFindingBrief, parseRelatedExposures, parseRelatedFindings, secretLink, severityLine } from './findingBrief.ts'
 
 const REF = 'secret://12345678-1234-1234-1234-123456789abc'
 
@@ -57,4 +57,26 @@ test('redacted query values are masked for display and emptied for copy, other v
   assert.equal(displayTitle('Potential SQL injection', true), 'SQL injection')
   assert.equal(displayTitle('Potential SQL injection', false), 'Potential SQL injection')
   assert.equal(displayTitle('Verified SQL injection', true), 'Verified SQL injection')
+})
+
+test('related exposures keep CVE candidates with only the Exposure view link', () => {
+  const sid = '0f1e2d3c-4b5a-4987-8a6b-5c4d3e2f1a0b'
+  const brief = parseFindingBrief({
+    schema: 'finding-detail/v1', class: 'vuln.cve',
+    related_exposures: [
+      { cve: 'CVE-2021-41773', title: 'Apache HTTP Server path traversal', severity: 'high', product: 'Apache', version: '2.4.49',
+        source: 'Server header', relation: 'Same CVE', exposure_href: `/exposure?service_query=app.example.test&service_id=${sid}` },
+      { cve: 'CVE-2021-42013', exposure_href: 'javascript:alert(1)' },
+      { cve: 'CVE-2021-1', exposure_href: `/exposure?service_query=x&service_id=${sid}` },
+      { cve: 'CVE-2021-44790', exposure_href: `https://evil.invalid/exposure?service_query=x&service_id=${sid}` },
+    ],
+  })
+  assert.ok(brief)
+  assert.deepEqual(brief.relatedExposures.map(item => item.cve), ['CVE-2021-41773', 'CVE-2021-42013', 'CVE-2021-44790'])
+  assert.equal(brief.relatedExposures[0].href, `/exposure?service_query=app.example.test&service_id=${sid}`)
+  assert.equal(brief.relatedExposures[0].source, 'Server header')
+  assert.equal(brief.relatedExposures[1].href, '')
+  assert.equal(brief.relatedExposures[2].href, '')
+  assert.equal(parseRelatedExposures(Array.from({ length: 20 }, (_, i) => ({ cve: `CVE-2021-${4000 + i}` }))).length, 8)
+  assert.deepEqual(parseFindingBrief({ schema: 'finding-detail/v1' })?.relatedExposures, [])
 })

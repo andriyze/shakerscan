@@ -131,6 +131,31 @@ _CLASSES: Mapping[str, tuple[str, str, str, list[str]]] = {
 }
 
 
+# A class can be proven by several file types; these read better named by what was matched.
+_PASSWORD_HASH_FILE = (
+    "Password hashes exposed", "a password file (htpasswd-style user:hash lines)",
+    "Anyone can download the hashes and crack them offline at their own pace; weak or reused passwords fall quickly.",
+    ["Move the password file outside the web root (AuthUserFile can point anywhere the server can read).",
+     "Deny it at the server: nginx location ~ /\\.ht { deny all; } · Apache <Files \".ht*\"> Require all denied </Files>",
+     "Change the password of every account named below, and anywhere else those passwords were reused."],
+)
+_SERVER_STATUS_PAGE = (
+    "Server status page public", "the web server's live status page (Apache mod_status or nginx stub_status)",
+    "It shows the server version and, for Apache, the clients, virtual hosts and full request lines (query strings included) being served right now.",
+    ["Restrict the status page to local or internal addresses: Apache <Location \"/server-status\"> Require local </Location> · nginx location = /nginx_status { stub_status; allow 127.0.0.1; deny all; }",
+     "Turn ExtendedStatus off if request lines are not needed, or remove mod_status from the public virtual host."],
+)
+_SERVER_STATUS_MARKERS = ("Apache Server Status", "Scoreboard:", "Active connections:")
+
+
+def _signature_entry(signature: str) -> tuple[str, str, str, list[str]] | None:
+    if signature == "htpasswd_hash_lines":
+        return _PASSWORD_HASH_FILE
+    if any(marker in signature for marker in _SERVER_STATUS_MARKERS):
+        return _SERVER_STATUS_PAGE
+    return None
+
+
 def secret_refs(evidence: Mapping[str, Any]) -> list[str]:
     refs = [ref for ref in strings(evidence.get("discovered_refs"), 20, 60) if _SECRET_REF.match(ref)]
     for entry in evidence.get("exposure_fingerprints") or ():
@@ -165,9 +190,9 @@ def _block_examples(exposure_class: str, path: str) -> list[dict[str, str]]:
 
 def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     exposure_class = text(evidence.get("exposure_class"), 80)
-    label, what, why, fix = _CLASSES.get(exposure_class, (
-        exposure_class.replace("_", " ").capitalize() or "Sensitive exposure", "sensitive content", "", [],
-    ))
+    label, what, why, fix = _signature_entry(text(evidence.get("matched_signature"), 200)) or _CLASSES.get(
+        exposure_class, (exposure_class.replace("_", " ").capitalize() or "Sensitive exposure", "sensitive content", "", []),
+    )
     url = text(evidence.get("request_url") or finding.get("url"), 600)
     _scheme, _host, _port, path = url_parts(url)
     status = evidence.get("response_status")

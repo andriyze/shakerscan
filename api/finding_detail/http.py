@@ -111,6 +111,42 @@ def build_missing_header(finding: Mapping[str, Any], evidence: Mapping[str, Any]
     }
 
 
+def build_weak_header(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """A security header that is present but whose value leaves its protection open."""
+    header = text(evidence.get("header"), 80).lower() or text(evidence.get("check"), 120).removeprefix("weak_header_")
+    display, value, purpose = HEADERS.get(header, (header.title(), "", "A browser security header."))
+    observed = record(evidence.get("observed_response"))
+    headers = {str(k).lower(): v for k, v in record(observed.get("observed_headers")).items()}
+    url = text(evidence.get("url") or finding.get("url"), 400)
+    origin = origin_of(url) or url
+    current = text(evidence.get("observed_value"), 2000) or text(headers.get(header), 2000)
+    issues = [record(item) for item in evidence.get("issues") or () if isinstance(item, Mapping)]
+    expected = text(evidence.get("expected_value"), 600) or value
+    stack = detected_stack(headers)
+    curl = f"curl -sS -o /dev/null -D - {q(url or origin)} | grep -i {q('^' + header + ':')}"
+    return {
+        "class": "header.weak_value",
+        "class_label": f"Weak {display} value",
+        "summary": f"{origin} sends {display}, but its value is weak: " + " ".join(text(item.get("text"), 300) for item in issues[:3]),
+        "where": facts(fact("Origin", origin, mono=True), fact("Header", display, mono=True)),
+        "observed": facts(
+            fact(f"{display} (as sent)", current, mono=True, limit=2000),
+            fact("Request", observed.get("request_line"), mono=True),
+            fact("Response status", observed.get("response_status") or evidence.get("status"), mono=True),
+            fact("Server", headers.get("server"), mono=True),
+        ),
+        "expected": [f"{display}: {expected}"] if expected else [],
+        "context": [text(item.get("text"), 400) for item in issues] + [purpose],
+        "reproduce": command(curl, expect=f"{display}: {current[:120]}"),
+        "verify": command(curl, expect=f"{display}: {expected[:160]}" if expected else f"a {display} line without the weaknesses listed"),
+        "fix": [f"Change the {display} value sent by {origin}{' (detected server: ' + stack + ')' if stack else ''}: {expected}."]
+               + (["Replace inline scripts with external files or add a per-response nonce, then drop 'unsafe-inline'; test with Content-Security-Policy-Report-Only first."] if header == "content-security-policy" else [])
+               + (["Raise max-age to at least 15552000 (180 days), ideally 31536000; add includeSubDomains once every subdomain serves HTTPS."] if header == "strict-transport-security" else []),
+        "examples": _stack_example(stack, display, value) if value else [],
+        "stack": stack,
+    }
+
+
 _COOKIE_EXAMPLES = (
     ("Express (express-session)", "session({ cookie: { secure: true, httpOnly: true, sameSite: 'lax' } })"),
     ("PHP (php.ini)", "session.cookie_secure = 1\nsession.cookie_httponly = 1\nsession.cookie_samesite = Lax"),
@@ -160,4 +196,4 @@ def build_cookie(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dic
     }
 
 
-__all__ = ["HEADERS", "build_cookie", "build_missing_header"]
+__all__ = ["HEADERS", "build_cookie", "build_missing_header", "build_weak_header"]

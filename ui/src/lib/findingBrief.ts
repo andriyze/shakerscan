@@ -8,6 +8,8 @@ export type BriefSecret = { field: string; category: string; length: number | nu
 export type BriefCve = { id: string; nvd: string; title: string; affected: string[]; fixedIn: string[]; kev: { dateAdded: string; ransomware: boolean } | null; epss: number | null }
 export type BriefSeverity = { severity: string; reason: string; source: string; policy: string; producerSeverity: string; currentRule: { severity: string; reason: string } | null; proofNote: string }
 export type RelatedFinding = { id: string; title: string; severity: string; url: string; relation: string }
+// An Exposure (Service Intelligence) candidate for the same CVE or product on this origin.
+export type RelatedExposure = { cve: string; title: string; severity: string; product: string; version: string; source: string; relation: string; href: string }
 export type FindingBrief = {
   cls: string
   label: string
@@ -28,6 +30,7 @@ export type FindingBrief = {
   examples: Array<{ label: string; code: string }>
   references: string[]
   severity: BriefSeverity | null
+  relatedExposures: RelatedExposure[]
 }
 
 function rec(value: unknown): Rec {
@@ -59,6 +62,17 @@ function cmd(value: unknown): BriefCommand | null {
 }
 
 const SECRET_REF = /^secret:\/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const CVE_ID = /^CVE-\d{4}-\d{4,19}$/
+// Only the Exposure view's own service link: a host search and a service id, nothing else.
+const EXPOSURE_HREF = /^\/exposure\?service_query=[A-Za-z0-9.%\-]{1,300}&service_id=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+export function parseRelatedExposures(value: unknown): RelatedExposure[] {
+  return arr(value, 8).map(rec).map(item => ({
+    cve: str(item.cve, 30), title: str(item.title, 200), severity: str(item.severity, 20), product: str(item.product, 80),
+    version: str(item.version, 60), source: str(item.source, 40), relation: str(item.relation, 60),
+    href: EXPOSURE_HREF.test(str(item.exposure_href, 400)) ? str(item.exposure_href, 400) : '',
+  })).filter(item => CVE_ID.test(item.cve))
+}
 
 export function parseFindingBrief(value: unknown): FindingBrief | null {
   const raw = rec(value)
@@ -105,6 +119,7 @@ export function parseFindingBrief(value: unknown): FindingBrief | null {
       currentRule: str(current.severity, 20) ? { severity: str(current.severity, 20), reason: str(current.reason, 1200) } : null,
       proofNote: str(severity.proof_note, 300),
     } : null,
+    relatedExposures: parseRelatedExposures(raw.related_exposures),
   }
 }
 

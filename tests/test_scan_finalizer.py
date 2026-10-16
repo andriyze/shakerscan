@@ -455,7 +455,7 @@ def test_finalizer_names_the_specific_header_reported_by_nuclei():
         "name": "HTTP Missing Security Headers",
         "severity": "info",
         "matched_at": "https://app.example.test/",
-        "matcher_name": "x-permitted-cross-domain-policies",
+        "matcher_name": "x-content-type-options",
     },)}
 
     report = finalize_scan_report(
@@ -468,10 +468,10 @@ def test_finalizer_names_the_specific_header_reported_by_nuclei():
     assert len(report["findings"]) == 1
     finding = report["findings"][0]
     assert finding["title"] == (
-        "Missing HTTP response header: X-Permitted-Cross-Domain-Policies"
+        "Missing HTTP response header: X-Content-Type-Options"
     )
     assert finding["evidence"]["header_name"] == (
-        "x-permitted-cross-domain-policies"
+        "x-content-type-options"
     )
 
 
@@ -596,7 +596,7 @@ def test_a_missing_header_finding_carries_the_recorded_response_that_lacks_it():
     response headers, so the finding carries that request line, status and header set."""
     by_header = _baseline_and_header_matches(
         {"x-frame-options": "DENY", "server": "nginx"},
-        ["permissions-policy", "x-frame-options", "x-permitted-cross-domain-policies"],
+        ["permissions-policy", "x-frame-options", "x-xss-protection"],
     )
     observed = by_header["permissions-policy"]["evidence"]["observed_response"]
     assert observed == {
@@ -609,7 +609,7 @@ def test_a_missing_header_finding_carries_the_recorded_response_that_lacks_it():
     # A header the baseline saw contradicts the match there: no contradicting response is attached.
     assert "observed_response" not in by_header["x-frame-options"]["evidence"]
     # A header the baseline never records cannot be claimed absent from it.
-    assert "observed_response" not in by_header["x-permitted-cross-domain-policies"]["evidence"]
+    assert "observed_response" not in by_header["x-xss-protection"]["evidence"]
 
 
 def test_the_recorded_header_set_matches_what_the_http_capability_records():
@@ -1385,13 +1385,13 @@ def test_a_missing_header_the_baseline_application_response_lacks_is_verified():
     baseline saw, or one it never records, stays a candidate."""
     by_header = _baseline_and_header_matches(
         {"x-frame-options": "DENY", "server": "nginx"},
-        ["permissions-policy", "x-frame-options", "x-permitted-cross-domain-policies"],
+        ["permissions-policy", "x-frame-options", "x-xss-protection"],
     )
     proven = by_header["permissions-policy"]
     assert proven["proof_state"] == "verified" and proven["verified"] is True
     assert proven["proof_contract_v2"]["predicate"]["satisfied"] is True
     assert proven["proof_contract_v2"]["contract_id"] == "scan.http.request.http_observation"
-    for header in ("x-frame-options", "x-permitted-cross-domain-policies"):
+    for header in ("x-frame-options", "x-xss-protection"):
         assert by_header[header]["proof_state"] == "candidate", header
         assert by_header[header]["verified"] is False
 

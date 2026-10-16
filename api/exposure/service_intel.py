@@ -34,6 +34,11 @@ def reference_url(value: Any) -> str | None:
     return value
 
 
+# The index built for the snapshot object last loaded. The loader returns the same verified object
+# until the file changes, so an unchanged snapshot is indexed once per process, not per request.
+_INDEXED: dict[str, tuple[dict[str, Any], Callable[..., Any]]] = {}
+
+
 def load_service_intelligence() -> tuple[dict[str, Any], Callable[..., Any]]:
     """Reuse the device intelligence trust boundary; never fetch a live feed."""
     try:
@@ -43,6 +48,9 @@ def load_service_intelligence() -> tuple[dict[str, Any], Callable[..., Any]]:
     snapshot = device_advisories.load_verified_snapshot(
         os.environ.get("DEVICE_INTEL_DB_PATH"), os.environ.get("DEVICE_INTEL_DB_SHA256"),
     )
+    cached = _INDEXED.get("current")
+    if cached is not None and cached[0] is snapshot:
+        return cached
     # Build a request-local candidate index once. Matching the entire custom
     # snapshot for every visible listener would turn one page into O(S * CVEs).
     records = [row for row in snapshot.get("advisories", []) if isinstance(row, Mapping)]
@@ -73,6 +81,8 @@ def load_service_intelligence() -> tuple[dict[str, Any], Callable[..., Any]]:
     def indexed_matcher(_records, *, cpe, product, version, identity_evidence_tier=None, limit=50):
         return lookup(cpe, product, version, limit)
 
+    if snapshot.get("status") == "available":
+        _INDEXED["current"] = (snapshot, indexed_matcher)
     return snapshot, indexed_matcher
 
 

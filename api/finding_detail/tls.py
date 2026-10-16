@@ -188,32 +188,56 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         out["reproduce"] = command(_s_client(address, host, port) + " 2>/dev/null | openssl x509 -noout -subject -serial -dates")
     elif check == "tls_legacy_protocol":
         attempts = [record(row) for row in evidence.get("protocol_attempts") or () if isinstance(row, Mapping)]
-        accepted = [text(row.get("protocol")) for row in attempts if row.get("supported") is True]
+        probes = [record(row) for row in evidence.get("legacy_protocol_probes") or () if isinstance(row, Mapping)]
+        legacy = strings(evidence.get("legacy_protocols_supported"), 4, 20) or [
+            text(row.get("protocol")) for row in probes if row.get("supported") is True
+        ]
+        modern = [text(row.get("protocol")) for row in attempts if row.get("supported") is True and text(row.get("protocol")).startswith("TLSv1.")]
+        refused = [text(row.get("protocol")) for row in [*probes, *attempts] if row.get("supported") is False and text(row.get("protocol"))]
         best = text(evidence.get("protocol"))
-        out["summary"] = f"{origin or host} negotiated {best or 'a legacy protocol'} as its best protocol" + (f"; versions accepted: {join_limited(accepted, 6)}." if accepted else ".")
+        accepted = [*legacy, *[name for name in modern if name not in legacy]]
+        out["summary"] = (
+            f"{origin or host} accepts {join_limited(legacy, 4) or best or 'a legacy protocol'}"
+            + (f" alongside {join_limited(modern, 3)}" if modern else (f"; its best protocol is {best}" if best else ""))
+            + ". Clients that still offer the old versions can be held to them."
+        )
         out["observed"] = facts(
-            fact("Negotiated protocol", best, mono=True),
+            fact("Legacy versions accepted", join_limited(legacy, 4), mono=True),
             fact("Protocol versions accepted", join_limited(accepted, 6), mono=True),
-            fact("Protocol versions refused", join_limited([text(row.get("protocol")) for row in attempts if row.get("supported") is False], 6), mono=True),
-            fact("Negotiated cipher", evidence.get("cipher"), mono=True),
+            fact("Protocol versions refused", join_limited(refused, 6), mono=True),
+            fact("Best protocol negotiated", best, mono=True),
+            fact("How it was tested", "One ClientHello offering only that version; the server's ServerHello selected it." if probes else ""),
         )
-        out["expected"] = ["TLS 1.2 and TLS 1.3 only (RFC 8996 deprecates TLS 1.0 and 1.1)."]
-        out["fix"] = ["Enable TLS 1.2 and 1.3 and disable TLS 1.0/1.1 on the terminator for this port:"] + _SERVER_FIXES["protocol"]
-        out["reproduce"] = command(_s_client(address, host, port, " -tls1") + " 2>/dev/null | grep -E '^ *(Protocol|Cipher) *:'",
-                                   note="Older OpenSSL builds refuse TLS 1.0 locally; nmap --script ssl-enum-ciphers -p PORT HOST lists versions too.")
-        out["verify"] = command(_s_client(host or address, host, port, " -tls1_1") + " 2>&1 | grep -E 'Protocol|alert|error'", expect="a handshake failure for TLS 1.1 and TLS 1.0")
+        if "SSLv3" in legacy:
+            context.append("SSL 3.0 is accepted: its CBC padding can be decrypted by an attacker in the network path (POODLE).")
+        out["expected"] = ["TLS 1.2 and TLS 1.3 only (RFC 8996 deprecates TLS 1.0 and 1.1; SSL 3.0 is prohibited by RFC 7568)."]
+        out["fix"] = ["Enable TLS 1.2 and 1.3 and disable SSL 3.0, TLS 1.0 and TLS 1.1 on the terminator for this port:"] + _SERVER_FIXES["protocol"]
+        flag = {"TLSv1": " -tls1", "TLSv1.1": " -tls1_1", "SSLv3": " -ssl3"}.get(legacy[0] if legacy else "", " -tls1")
+        out["reproduce"] = command(f"nmap --script ssl-enum-ciphers -p {port} {q(host or address)}",
+                                   note="Lists every protocol version and suite the server accepts. A current OpenSSL client cannot offer TLS 1.0/1.1 at its default security level, so `openssl s_client` can fail locally even though the server accepts them.")
+        out["verify"] = command(_s_client(host or address, host, port, flag + " -cipher 'DEFAULT:@SECLEVEL=0'") + " 2>&1 | grep -E 'Protocol|alert|error'",
+                                expect="a handshake failure (alert) for every legacy version")
     elif check == "tls_weak_cipher":
-        cipher = text(evidence.get("cipher"), 120)
-        bits = integer(evidence.get("cipher_bits"))
-        out["summary"] = f"{origin or host} negotiated the weak cipher {cipher}" + (f" ({bits}-bit)" if bits else "") + f" over {text(evidence.get('protocol')) or 'TLS'}."
-        out["observed"] = facts(
-            fact("Negotiated cipher", cipher, mono=True), fact("Cipher bits", bits),
-            fact("Protocol", evidence.get("protocol"), mono=True),
+        weak = strings(evidence.get("weak_ciphers_supported"), 12, 80)
+        cipher = text(evidence.get("cipher"), 120) or (weak[0] if weak else "")
+        bits = integer(evidence.get("cipher_bits")) if not weak else None
+        negotiated = text(evidence.get("negotiated_cipher"), 120)
+        out["summary"] = (
+            f"{origin or host} accepts the weak cipher suite{'s' if len(weak) > 1 else ''} {join_limited(weak, 4) or cipher}"
+            + (f" (a normal handshake negotiates {negotiated})" if negotiated and negotiated not in weak else "")
+            + "."
         )
-        out["expected"] = ["An AEAD suite (AES-GCM or ChaCha20-Poly1305) with forward secrecy (ECDHE)."]
-        out["fix"] = [f"Remove {cipher} (and every RC4, 3DES, NULL, EXPORT and anonymous suite) from the server's cipher list:"] + _SERVER_FIXES["cipher"]
-        out["reproduce"] = command(f"nmap --script ssl-enum-ciphers -p {port} {q(host or address)}", note="Lists every suite the server accepts, graded.")
-        out["verify"] = command(_s_client(host or address, host, port, f" -cipher {q(cipher + '@SECLEVEL=0')}") + " 2>&1 | grep -E 'Cipher is|alert|error'", expect="a handshake failure for the weak suite")
+        out["observed"] = facts(
+            fact("Weak suites accepted", join_limited(weak, 8) or cipher, mono=True),
+            fact("Cipher bits", bits),
+            fact("Suite a normal handshake negotiates", negotiated, mono=True),
+            fact("Protocol", evidence.get("protocol"), mono=True),
+            fact("How it was tested", "One ClientHello offering only the weak suite group; the server's ServerHello selected one of them." if weak else ""),
+        )
+        out["expected"] = ["Only AEAD suites (AES-GCM or ChaCha20-Poly1305) with forward secrecy (ECDHE); no RC4, DES/3DES, NULL, EXPORT or anonymous suites."]
+        out["fix"] = [f"Remove {join_limited(weak, 4) or cipher} (and every RC4, DES/3DES, NULL, EXPORT and anonymous suite) from the server's cipher list:"] + _SERVER_FIXES["cipher"]
+        out["reproduce"] = command(f"nmap --script ssl-enum-ciphers -p {port} {q(host or address)}", note="Lists every suite the server accepts, graded. A current OpenSSL client may lack RC4/DES entirely, so `openssl s_client -cipher` can fail locally.")
+        out["verify"] = command(_s_client(host or address, host, port, f" -cipher {q((weak[0] if weak else cipher) + ':@SECLEVEL=0')}") + " 2>&1 | grep -E 'Cipher is|alert|error'", expect="a handshake failure for every weak suite")
     elif check == "tls_certificate_weak_signature":
         out["summary"] = f"The certificate served at {origin or host} is signed with {text(cert.get('signature_hash')).upper() or 'a weak hash'}."
         out["expected"] = ["A SHA-256 (or stronger) signature, which every public CA issues today."]

@@ -15,6 +15,10 @@ from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
 from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
 from .finding_evidence import template_classification, tls_finding_evidence
+from .posture_findings import (
+    CORS_PROBE_ACTIONS, OPT_IN_HEADERS, cors_findings, dns_posture_findings, open_redirect_finding,
+    weak_header_findings,
+)
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 from .severity_calibration import calibrate_findings
 from .sqli_stages import INCONCLUSIVE_RECORD_KIND, sqli_budget_outcomes
@@ -710,6 +714,36 @@ def _takeover_finding(
     return finding
 
 
+def _verified_posture_factory(result: CapabilityResultReference, receipt: Any, kind: str):
+    """A finding builder for the posture rules: verified by this capability's own receipt."""
+
+    def make(
+        *, tool: str, title: str, severity: str, cwe: str, url: Any,
+        evidence: Mapping[str, Any], verification_reason: str,
+    ) -> dict[str, Any]:
+        finding = _base_finding(
+            tool=tool, title=title, severity=severity, cwe=cwe, url=url,
+            evidence={
+                **evidence,
+                "canonical_capability": result.capability_name,
+                "capability_receipt": receipt,
+            },
+        )
+        finding.update({
+            "verified": True,
+            "suspected": False,
+            "needs_verification": False,
+            "proof_state": "verified",
+            "proof_contract_v2": _canonical_proof_contract_v2(
+                capability_name=result.capability_name, kind=kind, receipt=receipt,
+            ),
+            "verification_reason": verification_reason,
+        })
+        return finding
+
+    return make
+
+
 def _findings_for_action(
     result: CapabilityResultReference,
     observations: Sequence[Mapping[str, Any]],
@@ -743,7 +777,9 @@ def _findings_for_action(
         "templates.active_batch": {"candidate_attempt", "template_match"},
         "templates.passive_batch": {"candidate_attempt", "template_match"},
         "tls.inspect": {"tls_protocol"},
+        "dns.inspect": {"dns_posture"},
         "subdomains.takeover_check": {"takeover_check"},
+        "redirect.verify_batch": {"candidate_attempt", "open_redirect_proof"},
     }.get(result.capability_name, set())
     for raw in observations:
         item = dict(raw)
@@ -831,6 +867,30 @@ def _findings_for_action(
             ):
                 cookie_finding["evidence"]["observed_response"] = observed_response
                 findings.append(cookie_finding)
+            if posture_recorded and isinstance(status, int) and 200 <= status < 400:
+                # Present headers whose VALUE leaves the protection open (CSP *, short HSTS...).
+                findings.extend(weak_header_findings(
+                    headers, origin=str(request.get("origin") or response.get("final_url") or ""),
+                    status=status, observed_response=observed_response,
+                    make=_verified_posture_factory(result, receipt, str(kind)),
+                ))
+        elif kind == "http_observation" and result.action_id in CORS_PROBE_ACTIONS:
+            request = item.get("request") if isinstance(item.get("request"), Mapping) else {}
+            response = item.get("response") if isinstance(item.get("response"), Mapping) else {}
+            findings.extend(cors_findings(
+                result.action_id, request, response,
+                make=_verified_posture_factory(result, receipt, str(kind)),
+            ))
+        elif kind == "dns_posture":
+            findings.extend(dns_posture_findings(
+                item, make=_verified_posture_factory(result, receipt, str(kind)),
+            ))
+        elif kind == "open_redirect_proof":
+            redirect = open_redirect_finding(
+                item, make=_verified_posture_factory(result, receipt, str(kind)),
+            )
+            if redirect is not None:
+                findings.append(redirect)
         elif kind == "xss_alert" and item.get("proof_state") == "verified":
             proof_contract = {
                 "schema_version": "proof-contract/v2",
@@ -1491,6 +1551,13 @@ def _fold_duplicate_header_findings(findings: list[dict[str, Any]]) -> list[dict
     for finding in findings:
         evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
         header = str(evidence.get("header_name") or "").lower()
+        # Opt-in headers whose absence is the browser default (posture_findings.OPT_IN_HEADERS):
+        # kept in the report's posture section, not reported as findings.
+        if (
+            finding.get("tool") == "nuclei" and header in OPT_IN_HEADERS
+            and evidence.get("template_id") == "http-missing-security-headers"
+        ):
+            continue
         # Browsers ignore HSTS received over plain HTTP: its absence there is not a finding.
         if (
             finding.get("tool") == "nuclei" and header == "strict-transport-security"

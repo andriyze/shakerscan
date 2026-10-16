@@ -72,6 +72,28 @@ def _cookie_name(set_cookie: str) -> str | None:
     return name if _COOKIE_NAME_RE.fullmatch(name) else None
 
 
+def cookie_metadata(set_cookie: str) -> dict[str, Any] | None:
+    """Name and security attributes of one ``Set-Cookie`` value; the value never leaves.
+
+    Attributes are read from the attribute list only (after the first ``;``): a cookie whose
+    value happens to contain ``secure`` or ``httponly`` is not mistaken for one that sets them.
+    """
+    name = _cookie_name(set_cookie)
+    if name is None:
+        return None
+    attributes: dict[str, str] = {}
+    for part in str(set_cookie or "").split(";")[1:20]:
+        key, _sep, value = part.partition("=")
+        attributes.setdefault(key.strip().lower(), value.strip().lower())
+    samesite = attributes.get("samesite")
+    return {
+        "name": name,
+        "secure": "secure" in attributes,
+        "httponly": "httponly" in attributes,
+        "samesite": samesite if samesite in {"strict", "lax", "none"} else None,
+    }
+
+
 # The response headers that describe a target's security posture. Fixed and public: naming them
 # here rather than accepting a caller-supplied list keeps the capability's declared input contract
 # unchanged while making the posture observable.
@@ -843,19 +865,9 @@ async def execute_bound_http_request(
         if name in response.headers
     }
     summary["set_cookie_metadata"] = [
-        {
-            # The cookie's name only (a token, bounded); its value never leaves the response.
-            "name": _cookie_name(value),
-            "secure": "secure" in value.lower(),
-            "httponly": "httponly" in value.lower(),
-            "samesite": (
-                "strict" if "samesite=strict" in value.lower()
-                else "lax" if "samesite=lax" in value.lower()
-                else "none" if "samesite=none" in value.lower()
-                else None
-            ),
-        }
-        for value in response.headers.get_list("set-cookie")[:50]
+        cookie for cookie in (
+            cookie_metadata(value) for value in response.headers.get_list("set-cookie")[:50]
+        ) if cookie is not None
     ]
     summary["final_url"] = final_url
     summary["http_version"] = str(response.http_version or "")[:20]

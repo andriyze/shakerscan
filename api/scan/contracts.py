@@ -95,7 +95,8 @@ _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
 # batch action produces a candidate. They are part of the family's authority even
 # though the family is complete without them.
 _SCAN_V2_FAMILY_PROOF_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
-    "xss": ("xss.browser_prove_batch",),
+    # The open-redirect probe reads the same discovered query parameters (see action_plan).
+    "xss": ("xss.browser_prove_batch", "redirect.verify_batch"),
     "sqli": ("sqli.prove_batch",),
 }
 
