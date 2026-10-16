@@ -1919,7 +1919,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 425 | Python sources + Compose manifests |
+| Runtime environment keys | 426 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 136 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2903,6 +2903,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `HTTP_ARCHIVE_MAX_CAPTURED_CALLS` | `scanner/scanner_tools/http_archive_capture.py` |
 | `HTTP_ARCHIVE_MAX_CAPTURE_BYTES` | `scanner/scanner_tools/http_archive_capture.py` |
 | `LOCAL_ENV_FILE` | `api/settings_routes/router.py` |
+| `METRICS_CACHE_SECONDS` | `api/api.py` |
 | `MINIO_BUCKET` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_ROOT_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |

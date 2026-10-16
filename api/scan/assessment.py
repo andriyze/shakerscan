@@ -10,11 +10,6 @@ from typing import Any, Mapping, Sequence
 from .reachability import fail_unreachable_parallel_report
 from .redirect_evidence import http_origin
 
-
-SCAN_LIST_ASSESSMENT_COLUMNS = """
-    s.result->'result'->>'risk_assessment_state' AS risk_assessment_state,
-    s.result->'result'->'application_observed' AS application_observed
-"""
 _SCORE_FIELDS = ("score", "grade", "risk_score", "risk_grade")
 
 

@@ -294,6 +294,11 @@ def test_unified_startup_installs_the_candidate_schema_on_converted_instances(mo
         # Scan change stamps have dedicated real PostgreSQL migration coverage.
         ("scan.list_v1", "install_scan_updated_at"),
         ("api.scan.list_v1", "install_scan_updated_at"),
+        # Scan assessment columns (tests/test_scan_assessment_columns_postgres.py).
+        ("scan.assessment_columns", "install_scan_assessment_columns"),
+        ("api.scan.assessment_columns", "install_scan_assessment_columns"),
+        ("scan.assessment_columns", "finish_scan_assessment_columns"),
+        ("api.scan.assessment_columns", "finish_scan_assessment_columns"),
     ):
         monkeypatch.setattr(importlib.import_module(module), name, noop)
 

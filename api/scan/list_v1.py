@@ -20,14 +20,12 @@ try:
 except ModuleNotFoundError:  # package import layout
     from ..list_contract import ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
 
+from .assessment_columns import TOUCH_FUNCTION_SQL
+
 UPDATED_AT_MIGRATION_SQL = (
     "ALTER TABLE scans ADD COLUMN updated_at TIMESTAMPTZ",
-    """CREATE OR REPLACE FUNCTION scans_touch_updated_at() RETURNS trigger
-    LANGUAGE plpgsql AS $$
-    BEGIN
-        NEW.updated_at := now();
-        RETURN NEW;
-    END $$""",
+    # Leaves updated_at alone in a backfill transaction (scan/assessment_columns.py).
+    TOUCH_FUNCTION_SQL,
     """CREATE TRIGGER scans_touch_updated_at BEFORE INSERT OR UPDATE ON scans
         FOR EACH ROW EXECUTE FUNCTION scans_touch_updated_at()""",
 )
@@ -90,7 +88,7 @@ def summary_options_sql(column: str, keys: Sequence[str]) -> str:
 
 def scan_list_columns(include_details: bool, option_keys: Sequence[str]) -> str:
     """Canonical Scan summary projection, shared by legacy and keyset list queries."""
-    from .assessment import SCAN_LIST_ASSESSMENT_COLUMNS
+    from .assessment_columns import SCAN_LIST_ASSESSMENT_COLUMNS
 
     scan_columns = "s.*" if include_details else f"""
                s.id, s.target_id, s.target_url, s.status, s.progress,

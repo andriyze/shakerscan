@@ -55,7 +55,9 @@ except ModuleNotFoundError:
 from scan.assessment import project_scan_assessment_row
 from scan.list_v1 import scans_page, scan_list_columns
 from scan.live_log import read_scan_log
+from scan.detail_bounds import MAX_DETAIL_FINDINGS, PARALLEL_CHILDREN_SQL, scan_detail_findings
 from research_routes.autopilot_loop import run_research_autopilot
+from operations.dashboard_data import SingleFlightCache
 from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
 from list_contract import CURSOR_MAX_LENGTH
 from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
@@ -78,6 +80,7 @@ except ModuleNotFoundError:
     from api import loop_leader
 from runtime.loop_scale_indexes import build_loop_scale_indexes_in_background, index_health as loop_index_health
 from finding_routes.list_schema import repair_severity_rank_in_background
+from scan.assessment_columns import project_scan_assessment_in_background
 from targets.scale_summary import summary_compactor as _summary_compactor
 from targets.insert_race import fetch_target_upsert
 from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
@@ -3978,6 +3981,7 @@ lifespan = create_api_lifespan(ApiLifecycleDependencies(
     background_maintenance=(
         ("loop_scale_indexes", lambda pool: build_loop_scale_indexes_in_background(pool)),
         ("findings_severity_rank_repair", lambda pool: repair_severity_rank_in_background(pool)),
+        ("scans_assessment_projection", lambda pool: project_scan_assessment_in_background(pool)),
     ),
 ))
 
@@ -8844,9 +8848,27 @@ async def health():
     }
 
 
+def _metrics_cache_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("METRICS_CACHE_SECONDS", "15")))
+    except ValueError:
+        return 15.0
+
+
+_METRICS_CACHE = SingleFlightCache(ttl=_metrics_cache_seconds)
+
+
 @app.get("/metrics/v2")
 async def get_v2_operational_metrics():
-    """Expose content-free canonical runtime counters and actionable alerts."""
+    """Expose content-free canonical runtime counters and actionable alerts.
+
+    Counting every Scan and action is a pass over the largest tables, so the answer is served from
+    a single-flight cache (``METRICS_CACHE_SECONDS``, default 15 s, 0 disables it): any number of
+    pollers cost one computation per interval. ``generated_at`` says when it was computed."""
+    return await _METRICS_CACHE.get(_compute_v2_operational_metrics)
+
+
+async def _compute_v2_operational_metrics() -> dict[str, Any]:
     running_worker_ids = await asyncio.to_thread(
         _running_scan_worker_container_ids_best_effort
     )
@@ -8888,6 +8910,7 @@ async def get_v2_operational_metrics():
         )
     metrics["worker_build"] = worker_build
     metrics["legacy_compatibility"] = legacy
+    metrics["generated_at"] = datetime.now(timezone.utc).isoformat()
     return metrics
 
 
@@ -11812,8 +11835,16 @@ async def list_scans(
 
 
 @app.get("/scans/{scan_id}")
-async def get_scan(scan_id: str, verified_only: bool = False):
-    """Get scan details."""
+async def get_scan(
+    scan_id: str,
+    verified_only: bool = False,
+    findings_limit: int = Query(MAX_DETAIL_FINDINGS, ge=0, le=MAX_DETAIL_FINDINGS),
+    include_result: bool = True,
+):
+    """Get scan details: at most ``findings_limit`` persisted findings (``findings_total`` and
+    ``findings_truncated`` say how many there are; scan/detail_bounds.py), and the report body
+    unless ``include_result=false``."""
+    findings_limit, include_result = direct(findings_limit), direct(include_result)
     async with db_pool.acquire() as conn:
         scan = await conn.fetchrow("""
             SELECT s.*,
@@ -11831,7 +11862,8 @@ async def get_scan(scan_id: str, verified_only: bool = False):
         # Get findings for this scan. Verified-only filtering is applied after
         # merging raw scan-time proof below, so stale persisted retest verdicts
         # cannot hide findings that this scan just proved.
-        findings = await conn.fetch(SCAN_DETAIL_FINDINGS_SQL, uuid.UUID(scan_id))
+        findings, findings_total = await scan_detail_findings(
+            conn, SCAN_DETAIL_FINDINGS_SQL, uuid.UUID(scan_id), findings_limit)
 
         action_rows = await conn.fetch(
             _PUBLIC_SCAN_ACTIONS_SQL, uuid.UUID(scan_id),
@@ -11873,6 +11905,9 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     result['findings'] = project_scan_finding_proof(
         result.get('result'), merged_findings, project=finding_proof_fields, identities=finding_identity_keys,
     )
+    result['findings_total'], result['findings_truncated'] = findings_total, len(findings) < findings_total
+    if not include_result:
+        result['result'] = None
     if canonical_stage_checkpoint:
         result["canonical_stage_checkpoint"] = dict(
             canonical_stage_checkpoint
@@ -11897,15 +11932,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     # can show per-shard progress under the single parent row.
     if result.get('scan_role') == 'parent':
         async with db_pool.acquire() as conn:
-            shard_rows = await conn.fetch("""
-                SELECT id, scan_role, shard_index, status, score, grade,
-                       findings_count, current_phase, progress, duration_seconds,
-                       executing_node_id, worker_id, execution_context,
-                       result, options
-                FROM scans
-                WHERE parent_scan_id = $1
-                ORDER BY shard_index
-        """, uuid.UUID(scan_id))
+            shard_rows = await conn.fetch(PARALLEL_CHILDREN_SQL, uuid.UUID(scan_id))
         child_rows = [row_to_dict(row) for row in shard_rows]
         discovery_rows = [
             row for row in child_rows

@@ -96,6 +96,47 @@ LOOP_SCALE_INDEXES: tuple[tuple[str, str, str], ...] = (
     # Paged application-graph nodes and edges (list/v1 keyset on id within a target).
     ("idx_app_graph_nodes_target_id_walk", "application_graph_nodes", "application_graph_nodes (target_id, id)"),
     ("idx_app_graph_edges_target_id_walk", "application_graph_edges", "application_graph_edges (target_id, id)"),
+    # /metrics/v2 grade-reliability reasons: projected rows that have any, and rows the background
+    # projection has not reached yet (scan/assessment_columns.py).
+    (
+        "idx_scans_grade_reliability_reasons",
+        "scans",
+        "scans (id) WHERE assessment_projected AND cardinality(grade_reliability_reasons) > 0",
+    ),
+    ("idx_scans_assessment_unprojected", "scans", "scans (id) WHERE assessment_projected IS NOT TRUE"),
+    # /metrics/v2 reconciliation: actions whose receipt names a reservation they are not linked
+    # to (normally none), and the open actions it joins to settled reservations.
+    (
+        "idx_scan_actions_unlinked_receipt",
+        "scan_capability_actions",
+        "scan_capability_actions (updated_at) "
+        "WHERE reservation_id IS NULL AND (receipt_json->>'budget_reservation_id') IS NOT NULL",
+    ),
+    (
+        "idx_scan_actions_open",
+        "scan_capability_actions",
+        "scan_capability_actions (scan_id, action_id) WHERE status IN ('planned','leased','running')",
+    ),
+    # /investigation/candidates list/v1: newest first by (last_seen_at, id), overall and per status.
+    (
+        "idx_investigation_candidates_seen_id",
+        "investigation_candidates",
+        "investigation_candidates (last_seen_at DESC, id DESC)",
+    ),
+    (
+        "idx_investigation_candidates_status_seen_id",
+        "investigation_candidates",
+        "investigation_candidates (status, last_seen_at DESC, id DESC)",
+    ),
+    # /evidence/instances newest first by (created_at, id): the legacy list and list/v1 keyset.
+    ("idx_evidence_instances_created_id", "evidence_instances", "evidence_instances (created_at DESC, id DESC)"),
+    # Research autopilot: the stale-dispatch recovery finds a dispatched Scan by its correlation.
+    (
+        "idx_scans_research_dispatch_correlation",
+        "scans",
+        "scans ((options->>'research_dispatch_correlation')) "
+        "WHERE (options->>'research_dispatch_correlation') IS NOT NULL",
+    ),
     # Substring search (ILIKE '%term%'); built only when pg_trgm is available.
     ("idx_targets_url_trgm", "targets", "targets USING gin (url gin_trgm_ops)"),
     ("idx_targets_name_trgm", "targets", "targets USING gin (name gin_trgm_ops)"),
