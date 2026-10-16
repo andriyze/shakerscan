@@ -268,6 +268,25 @@ def first(data: Any, *paths: str) -> Any:
     return None
 
 
+def authorization_state(api: "Api", target: str) -> tuple[bool | None, str]:
+    """``(standing, detail)`` from ``GET /targets/{id}/authorization``: True for a standing
+    authorization, False when the target answers with none (or a bounded one), None when the
+    read failed or its shape is not the documented one (never read as "revoked")."""
+    response = api.call("GET", f"/targets/{target}/authorization")
+    if response.status != 200:
+        return None, f"GET /targets/{{id}}/authorization -> {response.status or response.error} {excerpt(response.body)}"
+    data = response.json()
+    if not isinstance(data, dict) or "authorization" not in data:
+        return None, f"no authorization field: {excerpt(response.body)}"
+    authorization = data["authorization"]
+    if authorization is None:
+        return False, "authorization is null"
+    standing = authorization.get("standing") if isinstance(authorization, dict) else None
+    if not isinstance(standing, bool):
+        return None, f"authorization.standing is {standing!r}"
+    return standing, f"authorization.standing is {standing!r}"
+
+
 # ---------------------------------------------------------------------------------------------
 # HTTP
 
@@ -520,12 +539,23 @@ def targeted_writes(api: Api, state: dict[str, Any], report: Report, scan_deadli
     write("PATCH /targets/{id}", "PATCH", f"/targets/{target}", {"name": "upgrade-path apex (upgraded)"})
     renamed = first(api.call("GET", f"/targets/{target}").json(), "name", "target.name")
     report.check("target update visible", renamed == "upgrade-path apex (upgraded)", f"name is {renamed!r}")
-    write("DELETE /targets/{id}/authorization", "DELETE", f"/targets/{target}/authorization",
-          {"revoked_by": "upgrade-path-smoke", "reason": "upgrade-path revoke check"})
-    revoked = first(api.call("GET", f"/targets/{target}/authorization").json(), "authorization.standing")
-    report.check("authorization revoke visible", revoked is not True, f"standing is {revoked!r}")
+    # The revoke is proven, not inferred: the seeded standing authorization must be readable
+    # first, the revoke must count a receipt, and the read afterwards must answer with no
+    # authorization. A failed read, a renamed field or a revoke of nothing used to pass, because
+    # each of them also reads as "not standing".
+    before, detail = authorization_state(api, target)
+    report.check("authorization standing before the revoke", before is True, detail)
+    revocation = write("DELETE /targets/{id}/authorization", "DELETE", f"/targets/{target}/authorization",
+                       {"revoked_by": "upgrade-path-smoke", "reason": "upgrade-path revoke check"})
+    count = revocation.get("revoked") if isinstance(revocation, dict) else None
+    report.check("authorization revoke counted", isinstance(count, int) and not isinstance(count, bool)
+                 and count >= 1, f"revoked is {count!r}")
+    after, detail = authorization_state(api, target)
+    report.check("authorization revoke visible", after is False, detail)
     write("POST /targets/{id}/authorization", "POST", f"/targets/{target}/authorization",
           {"approved_by": "upgrade-path-smoke", "environment": "lab"})
+    again, detail = authorization_state(api, target)
+    report.check("authorization re-create visible", again is True, detail)
     write("POST /findings/manual", "POST", "/findings/manual", {
         "target": state["apex_url"], "title": "upgrade-path post-upgrade finding", "severity": "info",
         "url": state["apex_url"] + "/upgraded"})

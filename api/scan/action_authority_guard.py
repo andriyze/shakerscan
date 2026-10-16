@@ -35,7 +35,15 @@ from .capability_result import CapabilityResultReason
 
 
 AUTHORIZATION_WITHDRAWN = "authorization_withdrawn"
+# Actions that send no target traffic and are never re-checked: the report finalizer assembles
+# what earlier actions confirmed, so a withdrawal still ends with a report. Local and fleet
+# execution (executor, lease, heartbeat, authority route, settlement) all ask ``authority_exempt``.
 EXEMPT_ACTIONS = frozenset({"finalize.report"})
+
+
+def authority_exempt(action: Any) -> bool:
+    """True for an action that target-authorization checks never stop (``EXEMPT_ACTIONS``)."""
+    return getattr(action, "action_id", None) in EXEMPT_ACTIONS
 
 _REASONS: Mapping[ActionAuthorityDecision, CapabilityResultReason] = {
     ActionAuthorityDecision.REJECTED_EXPIRED: CapabilityResultReason.AUTHORIZATION_EXPIRED,
@@ -175,7 +183,7 @@ class ScanAuthorityGuard:
 
     async def check(self, action: Any) -> str | None:
         """Full fail-closed check immediately before dispatch; raises on a database error."""
-        if action.action_id in EXEMPT_ACTIONS:
+        if authority_exempt(action):
             return None
         if self.reason is None:
             async with self.pool.acquire() as conn:
@@ -186,6 +194,8 @@ class ScanAuthorityGuard:
 
     async def poll(self, action: Any) -> str | None:
         """Cheap in-flight check; raises on a database error so the caller can count failures."""
+        if authority_exempt(action):
+            return None
         if self.reason is not None:
             return self.reason
         self.polls += 1

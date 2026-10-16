@@ -936,6 +936,9 @@ class _FleetNode:
         from scan.broker_backend import BrokerActionHTTPError
         fleet = self.fleet
         parts = path.split("/")
+        if parts[-1] == "cancel-status":  # a whole-Scan run asks whether the user cancelled
+            self.calls.append("cancel-status")
+            return {"cancel_requested": False}
         node_id, lease_id, action_id, operation = parts[4], parts[6], parts[8], parts[9]
         self.calls.append(operation)
         routes = {
@@ -943,6 +946,7 @@ class _FleetNode:
             "heartbeat": (fleet.heartbeat_broker_scan_action, fleet.BrokerActionLeaseRequest),
             "result": (fleet.settle_broker_scan_action, fleet.BrokerActionResultRequest),
             "authority": (fleet.broker_scan_action_authority, fleet.BrokerActionAuthorityRequest),
+            "status": (fleet.get_broker_scan_action_status, fleet.BrokerActionAuthorityRequest),
         }
         route, model = routes[operation]
         try:
@@ -1240,4 +1244,74 @@ def test_a_device_service_probe_binds_the_standing_authorization_when_there_is_o
             authority = await running_scan_authority(pool, options=options, device_target_id=str(device_id))
             # Watched (a revoke stops it) exactly when there is a standing authorization to revoke.
             assert (authority.guard is not None) is has_standing
+    asyncio.run(run())
+
+
+# --- The report finalizer is exempt on a fleet node exactly as it is locally ---
+
+def test_a_withdrawn_fleet_scan_still_leases_heartbeats_and_settles_its_report_finalizer(
+        template_database, monkeypatch):
+    """Entry point: the control-plane lease, heartbeat, authority and result routes.
+
+    Locally ``finalize.report`` is never re-checked, so a revoked Scan still ends with the report
+    of what was confirmed before the stop. On a fleet node every one of these routes refused it
+    (lease 409, heartbeat ``authority_withdrawn``, settlement rewritten as an authorization stop),
+    so the report and its findings were lost.
+    """
+    import fleet_routes.router as fleet
+    from tests.test_scan_local_revocation_postgres import _scan
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool)
+            request = _broker_control_plane(monkeypatch, pool, scan)
+            active = scan.plan.actions[1]
+            final = next(item for item in scan.plan.actions if item.action_id == "finalize.report")
+            await scan.revoke()
+            # The traffic-sending action is still refused...
+            path = "/fleet/broker/nodes/node-1/leases/lease-1/actions/{}/authority"
+            assert await request("POST", path.format(active.action_id), _broker_body(scan, active)) == {
+                "reason": "authorization_revoked"}
+            # ...and the finalizer is not, on every route.
+            assert await request("POST", path.format(final.action_id), _broker_body(scan, final)) == {"reason": None}
+            body = fleet.BrokerActionLeaseRequest(**_broker_body(scan, final, action_lease={}))
+            assert await fleet.heartbeat_broker_scan_action(
+                "node-1", "lease-1", final.action_id, body, None) == {"status": "running"}
+            assert request.backend.heartbeats == 1
+            async with pool.acquire() as conn:
+                job = type("Job", (), {"target": scan.binding,
+                                       "execution_plan": type("P", (), {"policy": scan.policy})()})()
+                await fleet._revalidate_broker_action_authority(conn, action=final, canonical_job=job)
+            receipt = _broker_receipt(scan, final, observations=())
+            body = fleet.BrokerActionResultRequest(**_broker_body(
+                scan, final, action_lease={}, receipt=receipt.public_dict()))
+            await fleet.settle_broker_scan_action("node-1", "lease-1", final.action_id, body, None)
+            settled = request.backend.settled[-1]
+            assert settled.status == "success" and "target_authority_interruption" not in settled.redacted_execution
+    asyncio.run(run())
+
+
+def test_a_fleet_node_runs_the_report_finalizer_after_a_revoke(template_database, monkeypatch):
+    """End to end: the node's orchestrator over the real routes, as the local revoke test runs."""
+    from tests.test_scan_local_revocation_postgres import FixtureToolDispatcher, _scan
+
+    async def run():
+        async with scan_database(template_database) as pool:
+            scan = await _scan(pool, plan=_broker_plan)
+            node = _FleetNode(monkeypatch, pool, scan)
+
+            async def revoke_soon():
+                await asyncio.sleep(0.3)
+                assert await scan.revoke() == 1
+
+            dispatcher = FixtureToolDispatcher(str(scan.target_id), str(scan.scan_id),
+                                               long_actions=frozenset({"templates.active"}),
+                                               during={"templates.active": revoke_soon})
+            await node.orchestrator(_as_node(dispatcher, scan)).run(scan.plan)
+            actions = await scan.actions()
+            assert actions["templates.active"] == ("partial", "authorization_revoked")
+            assert actions["templates.followup"] == ("blocked", "authorization_revoked")
+            assert dispatcher.dispatched == ["baseline.http", "templates.active", "finalize.report"]
+            assert actions["finalize.report"][0] == "success"
+            assert await scan.held_reservations() == 0
     asyncio.run(run())

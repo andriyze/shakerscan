@@ -197,3 +197,86 @@ def test_sandbox_client_fails_fast_when_service_is_absent(tmp_path):
 
     assert result["status"] == "UNSUPPORTED"
     assert time.monotonic() - started < 1
+
+
+class _StopServing(Exception):
+    pass
+
+
+def _serve_rounds(monkeypatch, queue_root, rounds):
+    """Run the real serve loop for ``rounds`` rounds (the queue work itself is stubbed)."""
+    processed = []
+    monkeypatch.setattr(sandbox, "process_pending_once", lambda q, _r: processed.append(q))
+    real_sleep = time.sleep
+
+    def sleep(seconds):
+        if seconds == 0.25 and len(processed) >= rounds:
+            raise _StopServing
+        real_sleep(0 if seconds == 0.25 else seconds)
+
+    monkeypatch.setattr(sandbox.time, "sleep", sleep)
+    try:
+        sandbox.serve(queue_root, queue_root.parent / "quarantine")
+    except _StopServing:
+        pass
+    return processed
+
+
+def test_heartbeat_ignores_another_process_temporary_file(tmp_path, monkeypatch):
+    """The old fixed ``heartbeat.tmp`` collided with a second serving process (here its leftover
+    temporary is a directory, which made ``write_text`` raise and the sandbox restart)."""
+    queue_root = tmp_path / "queue"
+    (queue_root / "heartbeat.tmp").mkdir(parents=True)
+    assert len(_serve_rounds(monkeypatch, queue_root, 2)) == 2
+    beat = json.loads((queue_root / "heartbeat.json").read_text())
+    assert beat["pid"] == os.getpid()
+    assert sorted(p.name for p in queue_root.iterdir()) == ["heartbeat.json", "heartbeat.tmp"]
+
+
+def test_heartbeat_replace_is_retried_and_never_stops_the_serve_loop(tmp_path, monkeypatch):
+    queue_root = tmp_path / "queue"
+    real_replace = os.replace
+    failures = {"left": 1}
+
+    def flaky_replace(src, dst):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise FileNotFoundError(src)  # another process removed or renamed it
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(sandbox.os, "replace", flaky_replace)
+    assert len(_serve_rounds(monkeypatch, queue_root, 1)) == 1
+    assert json.loads((queue_root / "heartbeat.json").read_text())["pid"] == os.getpid()
+
+    def broken_replace(src, dst):
+        raise PermissionError(src)
+
+    monkeypatch.setattr(sandbox.os, "replace", broken_replace)
+    # Persistent failure: requests keep being processed and no temporary file is left behind.
+    assert len(_serve_rounds(monkeypatch, queue_root, 3)) == 3
+    assert [p.name for p in queue_root.iterdir()] == ["heartbeat.json"]
+
+
+def test_concurrent_heartbeat_writers_use_distinct_temporary_files(tmp_path):
+    import threading
+
+    queue_root = tmp_path / "queue"
+    queue_root.mkdir()
+    results = []
+    errors = []
+
+    def writer():
+        try:
+            for _ in range(50):
+                results.append(sandbox.write_heartbeat(queue_root))
+        except Exception as exc:  # pragma: no cover - the failure being tested for
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors and all(results) and len(results) == 200
+    assert [p.name for p in queue_root.iterdir()] == ["heartbeat.json"]
+    json.loads((queue_root / "heartbeat.json").read_text())

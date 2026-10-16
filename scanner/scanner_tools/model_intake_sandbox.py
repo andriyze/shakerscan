@@ -11,6 +11,7 @@ import resource
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -708,13 +709,45 @@ def request_sandbox_analysis(
     return {"schema_version": SCHEMA_VERSION, "provenance_class": "shakerscan_generated", "status": "TIMEOUT", "error": "sandbox_response_timeout"}
 
 
+HEARTBEAT_REPLACE_ATTEMPTS = 3
+
+
+def write_heartbeat(queue_root: Path) -> bool:
+    """Publish ``heartbeat.json`` atomically; True when it was replaced.
+
+    Each write uses its own ``mkstemp`` file (named with the pid) in the queue directory, so two
+    serving processes (an overlapping restart, a second worker on a shared volume) never write or
+    rename each other's temporary file. A failed replace is retried briefly and then given up for
+    this round: a stale heartbeat makes requests fail closed as ``UNSUPPORTED`` until the next
+    round, whereas raising here used to kill the serve loop and restart the sandbox.
+    """
+    payload = json.dumps({"at": _utc_iso(), "pid": os.getpid()}).encode("utf-8")
+    for attempt in range(HEARTBEAT_REPLACE_ATTEMPTS):
+        temporary: str | None = None
+        try:
+            fd, temporary = tempfile.mkstemp(
+                prefix=f".heartbeat.{os.getpid()}.", suffix=".tmp", dir=queue_root,
+            )
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+            os.replace(temporary, queue_root / "heartbeat.json")
+            return True
+        except OSError:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+            if attempt + 1 < HEARTBEAT_REPLACE_ATTEMPTS:
+                time.sleep(0.05 * (attempt + 1))
+    return False
+
+
 def serve(queue_root: Path, quarantine_root: Path) -> None:
     queue_root.mkdir(parents=True, exist_ok=True)
     while True:
-        heartbeat = queue_root / "heartbeat.json"
-        temporary = heartbeat.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"at": _utc_iso(), "pid": os.getpid()}), encoding="utf-8")
-        os.replace(temporary, heartbeat)
+        if not write_heartbeat(queue_root):
+            print("model intake sandbox: heartbeat not written this round", file=sys.stderr, flush=True)
         process_pending_once(queue_root, quarantine_root)
         time.sleep(0.25)
 

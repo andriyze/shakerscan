@@ -421,18 +421,43 @@ async def live_credential_grants(conn: Any, hunt_id: Any) -> dict[str, dict[str,
     )
     result: dict[str, dict[str, Any]] = {}
     for row in rows:
-        subject = row["subject_json"]
-        if isinstance(subject, str):
-            subject = json.loads(subject)
+        stored = _stored_credential_grant(row["subject_json"])
+        if stored is None:
+            continue  # fail closed: a grant whose stored subject is malformed covers nothing
+        profile_id, version, slot = stored
         source = (
             f"preauthorized:{row['preauthorization_id']}" if row["preauthorization_id"]
             else f"live_grant:{row['id']}"
         )
-        result[str(subject.get("profile_id"))] = {
-            "version": int(subject.get("profile_version") or 0), "grant_id": str(row["id"]),
-            "source": source, "slot": subject.get("slot"),
+        result[profile_id] = {
+            "version": version, "grant_id": str(row["id"]), "source": source, "slot": slot,
         }
     return result
+
+
+def _stored_credential_grant(subject: Any) -> tuple[str, int, Any] | None:
+    """``(profile id, version, slot)`` of a stored ``credential.use`` grant, or None.
+
+    A grant is written with a profile UUID and a positive version. A stored subject without them
+    (unreadable JSON, a missing or non-UUID profile id, a missing, zero or non-integer version)
+    grants nothing: it used to be read as profile ``"None"`` or version 0, so a reference that
+    also lacked a version matched it, and a non-numeric version raised out of admission.
+    """
+    if isinstance(subject, str):
+        try:
+            subject = json.loads(subject)
+        except ValueError:
+            return None
+    if not isinstance(subject, Mapping):
+        return None
+    try:
+        profile_id = str(uuid.UUID(str(subject.get("profile_id"))))
+    except ValueError:
+        return None
+    version = subject.get("profile_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version <= 0:
+        return None
+    return profile_id, version, subject.get("slot")
 
 
 def unattached_reference_refusal(

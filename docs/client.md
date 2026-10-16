@@ -272,10 +272,10 @@ would sit inside the workspace (`--here` from your home directory) is not used, 
 that contains the client's configuration directory (it holds the token) is warned about.
 
 Where the client keeps its state (workspace records) and data (the default agent workspace),
-first match wins: `SHAKERSCAN_STATE_DIR` / `SHAKERSCAN_DATA_DIR`; `$XDG_STATE_HOME/shakerscan`
-/ `$XDG_DATA_HOME/shakerscan`; beside `SHAKERSCAN_CONFIG_DIR` when it is set (`<dir>.state`,
-`<dir>.data`, so an isolated profile stays isolated); `~/.local/state/shakerscan` /
-`~/.local/share/shakerscan` (macOS too). Every path must be absolute (a relative XDG value is
+first match wins: `SHAKERSCAN_STATE_DIR` / `SHAKERSCAN_DATA_DIR`; beside `SHAKERSCAN_CONFIG_DIR`
+when it is set (`<dir>.state`, `<dir>.data`, so an isolated profile stays isolated even when the
+session sets XDG variables); `$XDG_STATE_HOME/shakerscan` / `$XDG_DATA_HOME/shakerscan`;
+`~/.local/state/shakerscan` / `~/.local/share/shakerscan` (macOS too). Every path must be absolute (a relative XDG value is
 ignored, as the XDG specification says). A directory that cannot be created or written, or a
 `SHAKERSCAN_CONFIG_DIR` without a usable sibling (such as `/`), or `/` as
 `SHAKERSCAN_STATE_DIR` or `SHAKERSCAN_DATA_DIR`, stops `shakerscan agent` with an

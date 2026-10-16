@@ -1369,3 +1369,80 @@ def test_the_startup_schema_takes_no_lock_on_an_up_to_date_database(env):
             await other.close()
 
     run(env, check())
+
+
+def _foreign_credential_hunt(env):
+    """A Hunt and a credential whose home is another target (https://other.example.test)."""
+    run(env, PostgresCredentialProfileStore().ensure_schema(env.conn))
+    hunt = run(env, env.hunt())
+    other = uuid.uuid4()
+    run(env, env.conn.execute(
+        "INSERT INTO targets(id,url,name) VALUES($1,'https://other.example.test','o')", other))
+    return hunt, run(env, _credential_profile(env.conn, home=other))
+
+
+async def _raise_credential_request(env, hunt, profile_id):
+    from hunt.permission_reasons import HuntRefusal
+    from hunt.permission_admission import settle_refusal
+    return await settle_refusal(env.pool, hunt_id=hunt["id"], action_id=uuid.uuid4(),
+                                name="http.request", input_summary={}, input_digest="d" * 64,
+                                refusal=HuntRefusal("credential_not_attached", "x", subject={
+                                    "slot": "primary", "profile_id": str(profile_id)}))
+
+
+def test_stored_credential_bounds_outside_the_grammar_are_reported_and_grant_nothing(env, monkeypatch):
+    """Entry point: the pre-authorization route and the pre-authorized grant of a credential.use
+    request. A stored wildcard, port or unparseable credential entry was carried as a live bound
+    and never listed under refused_bounds."""
+    from hunt import permission_router
+    from scanner_tools.host_names import HOST_CANONICALIZATION
+
+    monkeypatch.setattr(permission_router, "_pool_provider", lambda: env.pool)
+    hunt, profile_id = _foreign_credential_hunt(env)
+    entries = ["*.other.example.test", "other.example.test:443", "other_example!.test"]
+    row = {"budget_multiplier": None, "budget_totals": {}, "credential_targets": entries,
+           "target_patterns": [], "capability_flags": [], "ssh_host_trust_first_contact": False,
+           "host_canonicalization": HOST_CANONICALIZATION}
+    run(env, env.conn.execute(
+        """INSERT INTO hunt_preauthorizations(hunt_run_id, bounds_json, bounds_digest, created_by, proof)
+           VALUES ($1,$2::jsonb,$3,'alice@example.test','stepup')""",
+        hunt["id"], json.dumps(row), canonical_digest(row)))
+    (preauth,) = run(env, permission_router.get_hunt_preauthorization(str(hunt["id"])))["preauthorizations"]
+    assert [item["bound"] for item in preauth["refused_bounds"]] == [f"credential.use:{item}" for item in entries]
+    with pytest.raises(HTTPException) as parked:
+        run(env, _raise_credential_request(env, hunt, profile_id))
+    assert _detail(parked)["permission_request"]["kind"] == "credential.use"
+    (request,) = run(env, env.requests(hunt))
+    assert request["status"] == "pending"  # not granted by the stored bounds
+
+
+@pytest.mark.parametrize("damage", ["jsonb_set(subject_json, '{profile_version}', '\"1\"')",
+                                    "jsonb_set(subject_json, '{profile_version}', '1.5')",
+                                    "jsonb_set(subject_json, '{profile_version}', '\"abc\"')",
+                                    "subject_json - 'profile_version'"])
+def test_a_stored_credential_grant_without_a_valid_version_admits_nothing(env, damage):
+    """Entry point: action admission (``admit_action_credentials``). A grant is written with an
+    integer version; a stored subject whose version is text or fractional was coerced with
+    ``int()`` and matched version 1, and a non-numeric one raised out of admission."""
+    hunt, profile_id = _foreign_credential_hunt(env)
+    with pytest.raises(HTTPException):
+        run(env, _raise_credential_request(env, hunt, profile_id))
+    (request,) = run(env, env.requests(hunt))
+    run(env, env.decide(hunt, request))
+    run(env, env.conn.execute(f"UPDATE hunt_permission_grants SET subject_json = {damage} "
+                              "WHERE hunt_run_id=$1 AND kind='credential.use'", hunt["id"]))
+    stored = run(env, env.run(hunt))
+    context = {"credential_refs": [{
+        "source": "credential_profiles", "principal_slot": "primary", "profile_id": str(profile_id),
+        "profile_version": 1, "allowed_capabilities": ["http.request"],
+    }]}
+
+    async def admit():
+        async with env.pool.acquire() as conn:
+            return await admit_action_credentials(
+                conn, run=stored, capability="http.request",
+                capability_input={"method": "GET", "path": "/", "as_principal": "primary"}, context=context)
+
+    with pytest.raises(Exception) as refused:
+        run(env, admit())
+    assert getattr(refused.value, "code", None) == "credential_not_attached"

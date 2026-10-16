@@ -110,9 +110,9 @@ safe_dir() {
 }
 
 # The client's state (workspace records) and data (default agent workspace) directories, resolved
-# as the client resolves them: SHAKERSCAN_STATE_DIR/SHAKERSCAN_DATA_DIR, then XDG_STATE_HOME/
-# XDG_DATA_HOME (absolute only), then beside SHAKERSCAN_CONFIG_DIR (<dir>.state, <dir>.data),
-# then ~/.local/state/shakerscan and ~/.local/share/shakerscan.
+# as the client resolves them: SHAKERSCAN_STATE_DIR/SHAKERSCAN_DATA_DIR, then beside
+# SHAKERSCAN_CONFIG_DIR (<dir>.state, <dir>.data: an isolated profile), then XDG_STATE_HOME/
+# XDG_DATA_HOME (absolute only), then ~/.local/state/shakerscan and ~/.local/share/shakerscan.
 client_dir() {
   local explicit=$1 xdg=$2 suffix=$3 fallback=$4 value config
   value=${!explicit-}
@@ -120,14 +120,14 @@ client_dir() {
     case "$value" in /*) printf '%s\n' "$value"; return 0 ;; esac
     die "$explicit must be an absolute path"
   fi
-  value=${!xdg-}
-  case "$value" in /*) printf '%s/shakerscan\n' "${value%/}"; return 0 ;; esac
   if [ -n "${SHAKERSCAN_CONFIG_DIR-}" ]; then
     config=$SHAKERSCAN_CONFIG_DIR
     while [ "${config%/}" != "$config" ]; do config=${config%/}; done
     case "$config" in /?*) ;; *) die "SHAKERSCAN_CONFIG_DIR has no usable sibling; set $explicit" ;; esac
     printf '%s.%s\n' "$config" "$suffix"; return 0
   fi
+  value=${!xdg-}
+  case "$value" in /*) printf '%s/shakerscan\n' "${value%/}"; return 0 ;; esac
   printf '%s/%s\n' "$HOME" "$fallback"
 }
 STATE_DIR=$(client_dir SHAKERSCAN_STATE_DIR XDG_STATE_HOME state .local/state/shakerscan)

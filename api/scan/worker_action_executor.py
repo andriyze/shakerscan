@@ -17,12 +17,14 @@ from .capability_result import CapabilityResultReference, CapabilityResultReason
 from .execution_backend import ActionAuthorityWithdrawn, ActionHeartbeat, ActionLease
 from .action_interruption import ActionInterruption, interruption_scope
 from .scan_deadline import SCAN_TIME_LIMIT, ScanDeadline
+from .action_authority_guard import authority_exempt
 from .authority_deadline import (  # noqa: F401  (the tolerance constants are re-exported)
     AUTHORITY_CHECK_RETRY_DELAYS,
     AUTHORITY_UNVERIFIED_AFTER_SECONDS,
     HARD_STOP_GRACE_SECONDS,
     check_before_start,
     stop_task,
+    stop_tasks,
     watch_authorization,
 )
 
@@ -208,7 +210,7 @@ class ReceiptScanActionExecutor:
         authority_monitor = None
         deadline_monitor = None
         check = self._credential_check if action.action_id != "finalize.report" else None
-        authority = self._authority if action.action_id != "finalize.report" else None
+        authority = self._authority if not authority_exempt(action) else None
 
         async def check_authority():
             assert check is not None
@@ -287,9 +289,10 @@ class ReceiptScanActionExecutor:
                         await check_authority()
         finally:
             stop_heartbeats.set()
-            for task in (monitor, authority_monitor, deadline_monitor):
-                await stop_task(task)
-            await heartbeat_task
+            try:
+                await stop_tasks(monitor, authority_monitor, deadline_monitor)
+            finally:
+                await heartbeat_task
         if isinstance(result, CapabilityReceipt):
             receipt = result
         elif isinstance(result, Mapping):
