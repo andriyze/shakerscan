@@ -107,6 +107,8 @@ function RequestCollectionsContent() {
   }), [setFilters])
   const latestCollectionsRequest = useRef(0)
   const [collections, setCollections] = useState<SharedRequestCollection[]>([])
+  // A failed read is not an empty target: the empty state (and its upload prompt) stays hidden.
+  const [collectionsFailed, setCollectionsFailed] = useState(false)
   const [selectedId, setSelectedId] = useState('')
   const [detail, setDetail] = useState<RequestCollectionDetail | null>(null)
   const [inventory, setInventory] = useState<RequestCollectionInventoryItem[]>([])
@@ -189,6 +191,7 @@ function RequestCollectionsContent() {
     const request = ++latestCollectionsRequest.current
     if (!targetId) {
       setCollections([])
+      setCollectionsFailed(false)
       setSelectedId('')
       return
     }
@@ -196,6 +199,7 @@ function RequestCollectionsContent() {
       const result = await listRequestCollections(targetId)
       if (request !== latestCollectionsRequest.current) return
       setCollections(result.collections || [])
+      setCollectionsFailed(false)
       setSelectedId((current) => {
         const requested = typeof filters.collection === 'string' ? filters.collection : ''
         if (requested && result.collections.some((item) => item.id === requested)) return requested
@@ -208,6 +212,7 @@ function RequestCollectionsContent() {
       setCollections([])
       setSelectedId('')
       setError(cause instanceof Error ? cause.message : 'Failed to load request collections')
+      setCollectionsFailed(true)
     }
   }, [targetId, filters.collection])
 
@@ -475,7 +480,7 @@ function RequestCollectionsContent() {
 
       {!targetId ? (
         <CollectionLibrary onManage={(collection) => setFilters({ target_id: collection.target_id || undefined, collection: collection.id })} />
-      ) : !collections.length ? (
+      ) : !collections.length ? (collectionsFailed ? null :
         <EmptyState
           message={targetId ? 'No shared request collections for this target' : 'Choose a collection owner'}
           hint={targetId
