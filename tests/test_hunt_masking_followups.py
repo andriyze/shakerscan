@@ -223,7 +223,12 @@ ALLOWED_PLAIN_DIGESTS = {
     ("scanner/scanner_tools/critical_checks.py", "test_default_credentials"): "finding",
     ("scanner/scanner_tools/deduplication_engine.py", "consolidate_graphql_findings"): "finding",
     ("scanner/scanner_tools/deduplication_engine.py", "generate_grouping_key"): "finding",
-    ("scanner/scanner_tools/device_advisories.py", "load_verified_snapshot"): "integrity",
+    ("scanner/scanner_tools/device_advisories.py", "_load_pinned_snapshot"): "integrity",
+    # Signed intelligence bundles: the manifest names the snapshot's digest; a key id is the
+    # fingerprint of a public key; a verify manifest entry binds a template id to the pinned bundle.
+    ("scanner/scanner_tools/intel_bundle.py", "build_manifest"): "integrity",
+    ("scanner/scanner_tools/intel_bundle.py", "key_id_for"): "public",
+    ("api/scan/verify_templates.py", "_digest"): "canonical",
     ("scanner/scanner_tools/device_application.py", "_application_finding"): "finding",
     ("scanner/scanner_tools/device_control_plane.py", "_control_plane_finding"): "finding",
     ("scanner/scanner_tools/device_evidence.py", "_stable_id"): "finding",
