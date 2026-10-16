@@ -13,10 +13,16 @@ Three places install it:
 * ``FINDINGS_LIST_SCHEMA_STATEMENTS`` run inside the startup schema transaction. They are cheap and
   idempotent: the rank function, the column (a constant default is metadata only, no rewrite), the
   trigger, the planner statistics and the timestamp trigger's backfill switch.
-* ``finish_findings_list_schema`` runs after that transaction, under the startup lock, once
-  (marker-gated): it ranks the existing rows in short id-keyset batches, each its own
-  transaction, never moving ``updated_at``. It builds no index: CREATE INDEX CONCURRENTLY waits for
-  every open snapshot, and a process waiting for the startup lock holds one (a deadlock).
+* ``finish_findings_list_schema`` runs after that transaction, under the startup lock. It only
+  records the rank as complete when there is nothing to rank (a new or emptied database): ranking
+  existing rows kept the API from serving for about a minute at 500k findings, so it is done after
+  serving starts, by ``rank_findings_in_background`` (try-locked, short id-keyset batches, each its
+  own transaction, resumable, never moving ``updated_at``), which records the marker at the end.
+  Until the marker exists the list orders by ``finding_severity_rank(severity)``, the very value
+  the column holds once ranked (``severity_rank_ready``): the same rows in the same order, and a
+  cursor taken before the marker continues after it. Nothing here builds an index: CREATE INDEX
+  CONCURRENTLY waits for every open snapshot, and a process waiting for the startup lock holds one
+  (a deadlock).
 * ``FINDINGS_SCALE_INDEXES`` are built by the one background builder
   (``runtime/loop_scale_indexes.py``) after the API serves, CONCURRENTLY and try-locked; an
   interrupted build is dropped and rebuilt. db/init.sql carries the same column, function, trigger
@@ -38,6 +44,10 @@ BACKFILL_BATCH = 5000
 EPOCH = "'1970-01-01 00:00:00+00'::timestamptz"
 LAST_SEEN_SORT_SQL = f"COALESCE(f.last_seen_at, {EPOCH})"
 FIRST_SEEN_SORT_SQL = f"COALESCE(f.first_seen_at, {EPOCH})"
+#: Severity order: the stored, indexed rank once every row is ranked; until then the function the
+#: column is computed from (``severity_rank_ready``), which orders the same rows identically.
+SEVERITY_RANK_SORT_SQL = "f.severity_rank"
+SEVERITY_RANK_UNRANKED_SORT_SQL = "finding_severity_rank(f.severity)"
 
 SEVERITY_RANK_FUNCTION_SQL = """
 CREATE OR REPLACE FUNCTION finding_severity_rank(severity TEXT) RETURNS SMALLINT
@@ -204,12 +214,16 @@ async def backfill_severity_rank(conn: Any, *, batch: int = BACKFILL_BATCH) -> i
 
 
 async def finish_findings_list_schema(conn: Any) -> None:
-    """The one-time rank of existing rows, under the startup lock. No index work here."""
+    """Under the startup lock, cheap on every start: with no findings to rank (a new or emptied
+    database) the rank is complete at once. Existing rows are ranked after serving starts
+    (``rank_findings_in_background``), never here."""
     if await _migration_applied(conn, SEVERITY_RANK_MIGRATION):
         return
-    filled = await backfill_severity_rank(conn)
-    if filled:
-        logger.info("findings.severity_rank backfilled for %d findings", filled)
+    if await conn.fetchval("SELECT NOT EXISTS (SELECT 1 FROM findings)"):
+        await _record_ranked(conn)
+
+
+async def _record_ranked(conn: Any) -> None:
     await conn.execute(
         "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
         SEVERITY_RANK_MIGRATION,
@@ -220,30 +234,79 @@ _REPAIR_LOCK = (0x53534C50, 0x2B11_F1D)  # loop_leader's namespace, this repair'
 
 
 async def repair_severity_rank(pool: Any) -> int:
-    """Rank rows a trigger-less load left at the default; try-locked, one pass, never fatal."""
+    """Rank every row whose rank is not its severity's, then record the rank as complete.
+
+    Try-locked (one process at a time; a busy lock is skipped, the holder finishes), one pass,
+    resumable: an interrupted pass leaves ranked rows ranked and the marker unwritten, and the next
+    start continues. Also corrects rows a trigger-less load left at the default.
+    """
     async with pool.acquire() as conn:
         if not await conn.fetchval("SELECT pg_try_advisory_lock($1::int, $2::int)", *_REPAIR_LOCK):
             return 0
         try:
+            first = not await _migration_applied(conn, SEVERITY_RANK_MIGRATION)
             repaired = await backfill_severity_rank(conn)
+            if first:
+                # Rows written since the pass began were ranked by the trigger: every row is ranked.
+                await _record_ranked(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock($1::int, $2::int)", *_REPAIR_LOCK)
-    if repaired:
+    if first:
+        logger.info("findings.severity_rank ranked for %d findings; the findings list uses the stored rank", repaired)
+    elif repaired:
         logger.warning("findings.severity_rank repaired for %d findings", repaired)
     return repaired
 
 
 async def repair_severity_rank_in_background(pool: Any, *, delay: float = 15.0) -> None:
-    """The API lifespan's maintenance task: after serving starts; a failure is logged only."""
+    """The API lifespan's maintenance task, after serving starts; a failure is logged only (the
+    next start continues). A first rank (an upgraded database) starts at once; the routine repair
+    pass waits ``delay`` seconds."""
     import asyncio
 
-    await asyncio.sleep(delay)
     try:
+        async with pool.acquire() as conn:
+            ranked = await _migration_applied(conn, SEVERITY_RANK_MIGRATION)
+        await asyncio.sleep(delay if ranked else 0)
         await repair_severity_rank(pool)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # a rank repair never stops the API
-        logger.warning("findings.severity_rank repair skipped: %s", type(exc).__name__)
+        logger.warning("findings.severity_rank ranking skipped: %s", type(exc).__name__)
+
+
+#: Once a process has seen the rank complete it stays complete (the marker is never removed).
+_RANK_READY = False
+_RANK_CHECKED_AT = 0.0
+_RANK_RECHECK_SECONDS = 5.0
+
+
+async def severity_rank_ready(conn: Any) -> bool:
+    """Whether every finding carries its stored rank, so the list may order by the column (and its
+    index). Cached per process: true for good once seen; while false, re-read at most every few
+    seconds. An unreadable marker reads as not ready (the expression orders identically)."""
+    global _RANK_READY, _RANK_CHECKED_AT
+    if _RANK_READY:
+        return True
+    import time
+
+    now = time.monotonic()
+    if _RANK_CHECKED_AT and now - _RANK_CHECKED_AT < _RANK_RECHECK_SECONDS:
+        return False
+    _RANK_CHECKED_AT = now
+    try:
+        _RANK_READY = await _migration_applied(conn, SEVERITY_RANK_MIGRATION)
+    except Exception as exc:  # never fails a read: the unranked order is the same order
+        logger.debug("severity rank marker unreadable: %s", type(exc).__name__)
+        return False
+    return _RANK_READY
+
+
+def reset_severity_rank_ready() -> None:
+    """Forget the cached readiness (tests)."""
+    global _RANK_READY, _RANK_CHECKED_AT
+    _RANK_READY = False
+    _RANK_CHECKED_AT = 0.0
 
 
 __all__ = [
@@ -255,8 +318,12 @@ __all__ = [
     "FIRST_SEEN_SORT_SQL",
     "LAST_SEEN_SORT_SQL",
     "SEVERITY_RANK_MIGRATION",
+    "SEVERITY_RANK_SORT_SQL",
+    "SEVERITY_RANK_UNRANKED_SORT_SQL",
     "backfill_severity_rank",
     "finish_findings_list_schema",
     "repair_severity_rank",
     "repair_severity_rank_in_background",
+    "reset_severity_rank_ready",
+    "severity_rank_ready",
 ]

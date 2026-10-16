@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from fleet import (  # noqa: E402
     FleetBootstrapConfig,
+    FleetConfigurationError,
     FleetConflictError,
     FleetEnrollmentError,
     consume_connection_bundle,
@@ -514,3 +515,13 @@ def test_heartbeat_query_explicitly_types_nullable_status_parameters():
         assert conn.args[7] is None
 
     asyncio.run(run())
+
+
+def test_a_fleet_initialized_with_zero_workers_per_node_is_valid():
+    """2.11 C8: `fleet init --workers 0` writes FLEET_DESIRED_WORKER_COUNT=0; nodes join idle and
+    are scaled later. 129 is still refused."""
+    import dataclasses
+
+    assert dataclasses.replace(bootstrap_config(), desired_worker_count=0).validated().desired_worker_count == 0
+    with pytest.raises(FleetConfigurationError, match="between 0 and 128"):
+        dataclasses.replace(bootstrap_config(), desired_worker_count=129).validated()

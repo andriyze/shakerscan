@@ -66,8 +66,8 @@ class FleetBootstrapConfig:
         image_name, separator, digest = self.worker_image_digest.rpartition("@sha256:")
         if not separator or not image_name or len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest.lower()):
             raise FleetConfigurationError("FLEET_WORKER_IMAGE_DIGEST must be digest-pinned")
-        if not 1 <= int(self.desired_worker_count) <= 128:
-            raise FleetConfigurationError("FLEET_DESIRED_WORKER_COUNT must be between 1 and 128")
+        if not 0 <= int(self.desired_worker_count) <= 128:
+            raise FleetConfigurationError("FLEET_DESIRED_WORKER_COUNT must be between 0 and 128")
         return self
 
 
@@ -333,8 +333,8 @@ async def enroll_node(
         image_name, separator, digest = str(config.worker_image_digest or "").rpartition("@sha256:")
         if not separator or not image_name or len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest.lower()):
             raise FleetConfigurationError("FLEET_WORKER_IMAGE_DIGEST must be digest-pinned")
-        if not 1 <= int(config.desired_worker_count) <= 128:
-            raise FleetConfigurationError("FLEET_DESIRED_WORKER_COUNT must be between 1 and 128")
+        if not 0 <= int(config.desired_worker_count) <= 128:
+            raise FleetConfigurationError("FLEET_DESIRED_WORKER_COUNT must be between 0 and 128")
     public_key = (
         validate_wireguard_public_key(str(wireguard_public_key or ""))
         if normalized_transport == "overlay"
