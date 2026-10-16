@@ -288,6 +288,9 @@ def test_unified_startup_installs_the_candidate_schema_on_converted_instances(mo
         ("finding_routes.list_schema", "finish_findings_list_schema"),
         # Summary counts (tests/test_targets_dashboard_scale_postgres.py).
         ("api.targets.scale_summary", "install_summary_counts"),
+        # Exposure facts have dedicated real PostgreSQL migration tests.
+        ("api.exposure.asset_rank", "install_exposure_facts"),
+        ("exposure.asset_rank", "install_exposure_facts"),
     ):
         monkeypatch.setattr(importlib.import_module(module), name, noop)
 

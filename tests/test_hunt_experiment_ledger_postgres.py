@@ -32,6 +32,10 @@ def test_concurrent_actions_survive_fresh_service_and_connections():
                 statement = re.search(rf"CREATE TABLE {name} \(.*?\n\);", ddl, re.DOTALL)
                 assert statement is not None
                 await control.execute(statement[0])
+            # Hunt reads include discovered-secret use metadata. Install its canonical schema
+            # too, so this isolated ledger fixture exercises the current read contract.
+            from api.hunt.discovered_secrets import DISCOVERED_SECRETS_SCHEMA_SQL
+            await control.execute(DISCOVERED_SECRETS_SCHEMA_SQL)
             await control.execute("""CREATE TABLE findings (
                 id UUID PRIMARY KEY,
                 hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL
