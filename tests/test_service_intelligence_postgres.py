@@ -73,7 +73,8 @@ async def test_verify_scan_outcomes_read_from_real_scan_action_and_finding_rows(
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         await conn.execute("""
-          CREATE TEMP TABLE scans (id uuid,target_id uuid,status text,created_at timestamptz,completed_at timestamptz,options jsonb);
+          CREATE TEMP TABLE scans (id uuid,target_id uuid,status text,created_at timestamptz,completed_at timestamptz,options jsonb,
+            target_url text DEFAULT 'https://app.example.test/');
           CREATE TEMP TABLE scan_capability_actions (scan_id uuid,action_id text,status text,reason_code text,receipt_json jsonb);
           CREATE TEMP TABLE findings (id uuid,target_id uuid,scan_id uuid,first_seen_scan_id uuid,last_seen_scan_id uuid,
             status text,severity text,last_seen_at timestamptz,evidence jsonb,proof_state text);

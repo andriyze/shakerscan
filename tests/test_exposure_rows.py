@@ -81,7 +81,8 @@ def test_verify_is_offered_only_on_the_target_origin_with_a_named_check():
 def test_a_running_verify_scan_is_pending_and_never_reads_as_clean():
     scan = uuid.uuid4()
     records = {"scans": [{"id": scan, "status": "running", "created_at": datetime.now(timezone.utc),
-                          "completed_at": None, "verify_templates": ["cve-2021-41773"]}],
+                          "completed_at": None, "target_url": TARGET["locator"],
+                          "verify_templates": ["cve-2021-41773"]}],
                "actions": {}, "findings": []}
     state = candidate_verification(TARGET, _service("a"), _candidate("C", check="CVE-2021-41773"), records)
     assert state["status"] == "pending" and state["scan_id"] == str(scan)
@@ -106,10 +107,11 @@ def test_hunt_rows_put_known_exploited_and_likely_first_with_the_check_state():
     assert rows[2]["verification"] == "no_check"
 
 
-def _scan_records(requested, steps, status="completed"):
+def _scan_records(requested, steps, status="completed", target_url=TARGET["locator"]):
     scan = uuid.uuid4()
     return scan, {"scans": [{"id": scan, "status": status, "created_at": datetime.now(timezone.utc),
-                             "completed_at": datetime.now(timezone.utc), "verify_templates": requested}],
+                             "completed_at": datetime.now(timezone.utc), "target_url": target_url,
+                             "verify_templates": requested}],
                   "actions": {str(scan): steps}, "findings": []}
 
 
@@ -144,3 +146,26 @@ def test_an_exploit_class_check_is_not_offered_as_a_one_click_verify():
     state = candidate_verification(TARGET, _service("s"), candidate, {})
     assert (state["status"], state["request"]) == ("unavailable", None)
     assert state["unavailable_reason"] == "exploit_class_needs_exploit_tier"
+
+
+def test_a_verify_scan_is_credited_only_to_the_listener_on_its_own_origin():
+    candidate = _candidate("CVE-X", check="cve-x")
+    scan, records = _scan_records(["cve-x"], [_step(["cve-x"])])
+    on_origin = _service("a", origin="https://app.example.test", candidates=[_candidate("CVE-X", check="cve-x")])
+    other_port = _service("b", port=8443, origin="https://app.example.test:8443",
+                          candidates=[_candidate("CVE-X", check="cve-x")])
+    attach_verification(TARGET, [on_origin, other_port], records)
+    assert on_origin["cve_candidates"][0]["verification"]["status"] == "check_not_matched"
+    off = other_port["cve_candidates"][0]
+    assert (off["verification"]["status"], off["verification"]["unavailable_reason"]) == (
+        "unavailable", "listener_is_not_the_target_origin")
+    assert "scan_id" not in off["verification"] and "local_validation" not in off
+
+    # A match at :443 is never credited to :8443 either.
+    records["findings"] = [{"id": uuid.uuid4(), "template_id": "cve-x", "scan_id": scan, "status": "open"}]
+    assert candidate_verification(TARGET, other_port, candidate, records)["status"] == "unavailable"
+    assert candidate_verification(TARGET, _service("c"), candidate, records)["status"] == "check_matched"
+
+    # A Scan of another origin of the same target says nothing about this listener.
+    _scan, elsewhere = _scan_records(["cve-x"], [_step(["cve-x"])], target_url="https://app.example.test:8443/")
+    assert candidate_verification(TARGET, _service("d"), candidate, elsewhere)["status"] == "available"

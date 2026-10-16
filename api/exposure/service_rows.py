@@ -19,7 +19,8 @@ MAX_VERIFY_FINDINGS = 200
 VERIFY_POLICY = {"active_testing": True, "preset": "custom", "include_families": ["nuclei_active"]}
 
 VERIFY_SCANS_SQL = """
-SELECT s.id, s.status, s.created_at, s.completed_at, s.options->'verify_templates' AS verify_templates
+SELECT s.id, s.status, s.created_at, s.completed_at, s.target_url,
+       s.options->'verify_templates' AS verify_templates
 FROM scans s
 WHERE s.target_id=$1 AND jsonb_typeof(s.options->'verify_templates')='array'
 ORDER BY s.created_at DESC, s.id
@@ -99,18 +100,26 @@ def candidate_verification(target: Mapping[str, Any], service: Mapping[str, Any]
     checks = candidate_check_ids(candidate)
     if not checks:
         return {"status": "no_check", "template_ids": [], "reason": "No check in this release names this CVE."}
-    blocked = verify_bound(target, service) or (
-        "exploit_class_needs_exploit_tier" if any(
-            isinstance(check, Mapping) and check.get("safety") == "exploit"
-            for check in candidate.get("checks") or ()) else None)
+    unreachable = verify_bound(target, service)
+    if unreachable:
+        # A verify Scan runs against the target's origin only: its outcome says nothing about a
+        # listener elsewhere, so neither a match nor a silence is credited to this one.
+        return {"status": "unavailable", "template_ids": checks, "request": None,
+                "unavailable_reason": unreachable}
+    blocked = "exploit_class_needs_exploit_tier" if any(
+        isinstance(check, Mapping) and check.get("safety") == "exploit"
+        for check in candidate.get("checks") or ()) else None
     request = None if blocked else {
         "target": target.get("locator"), "budget_profile": "fast",
         "policy": dict(VERIFY_POLICY), "verify_templates": checks,
     }
     base = {"template_ids": checks, "request": request, "unavailable_reason": blocked}
     wanted = set(checks)
+    listener_origin = service.get("application_origin")
     for scan in records.get("scans") or ():
         if not wanted & set(_verify_list(scan.get("verify_templates"))):
+            continue
+        if origin(scan.get("target_url")) != listener_origin:
             continue
         scan_id = str(scan["id"])
         status = str(scan.get("status") or "").lower()
