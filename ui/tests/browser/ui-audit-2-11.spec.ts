@@ -149,3 +149,37 @@ test('the Targets count applies the filters, not the facets\' search-scope total
   await expect(page.getByText('3 targets in 3 groups', { exact: true })).toBeVisible()
   await expect(page.getByText(/1,200 targets/)).toHaveCount(0)
 })
+
+// Review of the audit fixes: Next clicked while a typed search was settling sent the old query's
+// cursor with the new search, and the server refused it (cursor_mismatch).
+test('Next while a search is settling never pairs the old cursor with the new search', async ({ page }) => {
+  // A cursor names the search it was issued for; like the server, the fixture refuses a mismatch.
+  const refused: string[] = []
+  const api = await mockPageApi(page, {
+    '/health': () => ({ status: 'healthy' }),
+    '/targets/inventory': (url) => {
+      const search = url.searchParams.get('search') || ''
+      const cursor = url.searchParams.get('cursor')
+      if (cursor && cursor !== `page-2:${search}`) {
+        refused.push(url.search)
+        return { status: 400, json: { detail: { error: 'cursor_mismatch' } } }
+      }
+      return {
+        items: [{ root_domain: 'scale-seed.invalid', discoverable: false, targets: [asset(1)], member_count: 1, members_truncated: false }],
+        has_more: !cursor, next_cursor: cursor ? null : `page-2:${search}`,
+        total: 2, total_kind: 'exact', generated_at: now, facets: facets(2),
+      }
+    },
+  })
+  await page.goto('/targets')
+  const next = page.getByRole('button', { name: 'Next', exact: true })
+  await expect(next).toBeEnabled()
+  await page.getByRole('textbox', { name: 'Search targets by URL or domain' }).fill('app')
+  await expect(next).toBeDisabled()
+  await next.click({ force: true, timeout: 1000 }).catch(() => undefined)
+  await expect.poll(() => api.requests.some(entry => entry.includes('search=app'))).toBe(true)
+  await expect(next).toBeEnabled()
+  await next.click()
+  await expect.poll(() => api.requests.some(entry => entry.includes('cursor=page-2%3Aapp'))).toBe(true)
+  expect(refused).toEqual([])
+})

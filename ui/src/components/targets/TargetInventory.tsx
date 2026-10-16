@@ -32,12 +32,19 @@ export function TargetInventory() {
   const parameters = useSearchParams()
   const [filters, setFilters] = useState<InventoryFilters>(() => filtersFromQuery(parameters))
   const [query, setQuery] = useState(filters)
-  // list/v1 keyset paging: the cursor of every page visited, so Previous can go back.
-  const [cursors, setCursors] = useState<Array<string | null>>([null])
+  // list/v1 keyset paging: the cursor of every page visited, so Previous can go back. Cursors
+  // belong to the query they were issued for (the server refuses one under other filters), so a
+  // new query starts at the first page even when Next was clicked while the search was settling.
+  const [paging, setPaging] = useState<{ query: InventoryFilters; cursors: Array<string | null> }>({ query, cursors: [null] })
+  const cursors = paging.query === query ? paging.cursors : [null]
   const pageIndex = cursors.length - 1
   const cursor = cursors[pageIndex]
   const [nextCursor, setNextCursor] = useState<string | null>(null)
-  const firstPage = useCallback(() => setCursors([null]), [])
+  const moveTo = useCallback((next: (current: Array<string | null>) => Array<string | null>) =>
+    setPaging(current => ({ query, cursors: next(current.query === query ? current.cursors : [null]) })), [query])
+  const firstPage = useCallback(() => moveTo(() => [null]), [moveTo])
+  // Typed search not yet applied: paging waits for it.
+  const settling = filters !== query
   const [groups, setGroups] = useState<TargetAssetGroup[]>([])
   const [facets, setFacets] = useState<InventoryFacets | null>(null)
   const [totals, setTotals] = useState<{ targets: InventoryTargetTotal; groups: number | null }>({ targets: { count: 0, kind: 'exact' }, groups: 0 })
@@ -257,9 +264,9 @@ export function TargetInventory() {
               </div>}
       </div>
       {(pageIndex > 0 || nextCursor) && <div className="mt-4 flex items-center justify-between gap-3">
-        <Button variant="secondary" size="sm" disabled={pageIndex === 0 || loading} onClick={() => setCursors(current => current.slice(0, -1))}>Previous</Button>
+        <Button variant="secondary" size="sm" disabled={pageIndex === 0 || loading || settling} onClick={() => moveTo(current => current.slice(0, -1))}>Previous</Button>
         <span className="text-xs text-gray-500">Groups {(pageIndex * PAGE_GROUPS + 1).toLocaleString()}–{(pageIndex * PAGE_GROUPS + groups.length).toLocaleString()}{totals.groups != null ? ` of ${totals.groups.toLocaleString()}` : ''} · {targetTotalLabel(totals.targets)}</span>
-        <Button variant="secondary" size="sm" disabled={!nextCursor || loading} onClick={() => { if (nextCursor) setCursors(current => [...current, nextCursor]) }}>Next</Button>
+        <Button variant="secondary" size="sm" disabled={!nextCursor || loading || settling} onClick={() => { if (nextCursor) moveTo(current => [...current, nextCursor]) }}>Next</Button>
       </div>}
       {!loading && groups.length > 0 && pageIndex === 0 && !nextCursor && <p className="mt-3 text-center text-xs text-gray-600" aria-live="polite">{targetTotalLabel(totals.targets)} in {plural(totals.groups ?? groups.length, 'group')}</p>}
     </>}
