@@ -124,6 +124,32 @@ test('a heavy read waits out busy answers before failing', async () => {
   assert.deepEqual(waits, [1000])
 })
 
+test('a heavy read answered 503 without Retry-After fails at once with the server message', async () => {
+  let calls = 0
+  const layer = createFetchLayer({
+    fetchImpl: async () => { calls += 1; return reply(503, { detail: 'Database is not ready' }) },
+    sleep: async () => { throw new Error('a bare 503 must not be waited out') },
+  })
+  await assert.rejects(layer.getJson('/exposure/assets', { heavy: true }), (error) => {
+    assert.ok(error instanceof ApiError)
+    assert.equal(error.status, 503)
+    assert.equal(error.message, 'Database is not ready')
+    assert.equal(error.retryAfter, null, 'not busy: the poller does not treat it as Retry-After')
+    return true
+  })
+  assert.equal(calls, 1)
+})
+
+test('a heavy read gives up within its wait budget and keeps the Retry-After for backoff', async () => {
+  const waits = []
+  const layer = createFetchLayer({
+    fetchImpl: async () => reply(429, { detail: 'busy' }, { 'Retry-After': '5' }),
+    sleep: async (ms) => { waits.push(ms) },
+  })
+  await assert.rejects(layer.getJson('/dashboard', { heavy: true }), (error) => error.status === 429 && error.retryAfter === 5)
+  assert.deepEqual(waits, [5000])
+})
+
 test('a plain read (no ETag, no maxAgeMs) keeps no body', async () => {
   const layer = createFetchLayer({ fetchImpl: async () => reply(200, { big: true }) })
   await layer.getJson('/scans')
