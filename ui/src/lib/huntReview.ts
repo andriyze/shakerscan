@@ -1,3 +1,4 @@
+import { pathSegment } from './apiPath.mjs'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import { isReviewId } from './huntReviewModel'
 
@@ -44,7 +45,7 @@ export interface ProposalPage {
 
 function runPath(huntId: string): string {
   if (!isReviewId(huntId)) throw new Error('Invalid Hunt reference')
-  return `${API_URL}/hunts/${encodeURIComponent(huntId)}`
+  return `${API_URL}/hunts/${pathSegment(huntId)}`
 }
 
 export async function listReviewProposals(huntId: string, cursor: string | null, signal?: AbortSignal): Promise<ProposalPage> {
@@ -72,7 +73,7 @@ export async function listReviewProposals(huntId: string, cursor: string | null,
 
 export async function readInvestigation(huntId: string, proposalId: string, signal?: AbortSignal): Promise<InvestigationReview> {
   if (!isReviewId(proposalId)) throw new Error('Invalid investigation reference')
-  const response = await fetch(`${runPath(huntId)}/authorization-investigations/${encodeURIComponent(proposalId)}`, { signal })
+  const response = await fetch(`${runPath(huntId)}/authorization-investigations/${pathSegment(proposalId)}`, { signal })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Could not read the saved investigation'))
   const result = await response.json()
   if (result.hunt_id !== huntId || result.proposal_id !== proposalId || !Array.isArray(result.attempts)) {

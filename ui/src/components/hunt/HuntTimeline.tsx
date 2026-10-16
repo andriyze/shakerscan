@@ -1,5 +1,6 @@
 'use client'
 
+import { pathSegment } from '@/lib/apiPath.mjs'
 import { useEffect, useMemo, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { ChevronDown, ChevronRight } from 'lucide-react'
@@ -132,7 +133,7 @@ export function HuntTimeline({ hunt, archive }: { hunt: HuntV2; archive: HuntArc
   // and the reason it failed. It is the same document the Export menu downloads.
   useEffect(() => {
     let cancelled = false
-    fetchRetryingBusy(`${API_URL}/hunts/${encodeURIComponent(hunt.hunt_id)}/record`, { cache: 'no-store' })
+    fetchRetryingBusy(`${API_URL}/hunts/${pathSegment(hunt.hunt_id)}/record`, { cache: 'no-store' })
       .then(async response => {
         if (!response.ok) throw new Error(`Call details unavailable (${response.status})`)
         return response.json()

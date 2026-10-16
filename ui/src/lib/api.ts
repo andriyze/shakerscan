@@ -6668,7 +6668,7 @@ export async function updateFinding(
   analyst_verdict_at?: string | null
 }> {
   const url = scanId
-    ? `${API_URL}/findings/${pathSegment(id)}?scan_id=${scanId}`
+    ? `${API_URL}/findings/${pathSegment(id)}?${new URLSearchParams({ scan_id: scanId })}`
     : `${API_URL}/findings/${pathSegment(id)}`
   const res = await fetch(url, {
     method: 'PATCH',

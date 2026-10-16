@@ -1,3 +1,4 @@
+import { pathSegment } from './apiPath.mjs'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 
 /** A target's attributed interpretations (read-only here; Hunts record them, operators review them). */
@@ -32,14 +33,14 @@ async function read<T>(path: string, signal?: AbortSignal): Promise<T> {
 
 export async function getTargetInterpretations(id: string, signal?: AbortSignal) {
   const value = await read<{ interpretations?: unknown; has_more?: boolean }>(
-    `/targets/${encodeURIComponent(id)}/interpretations?limit=100`, signal)
+    `/targets/${pathSegment(id)}/interpretations?limit=100`, signal)
   if (!Array.isArray(value.interpretations)) throw new Error('The server returned an invalid interpretation list.')
   return { entries: value.interpretations as TargetInterpretation[], hasMore: Boolean(value.has_more) }
 }
 
 export async function getTargetNegativeResults(id: string, signal?: AbortSignal) {
   const value = await read<{ rows?: unknown; has_more?: boolean }>(
-    `/targets/${encodeURIComponent(id)}/negative-results`, signal)
+    `/targets/${pathSegment(id)}/negative-results`, signal)
   if (!Array.isArray(value.rows)) throw new Error('The server returned an invalid negative-result list.')
   return { rows: value.rows as TargetNegativeResult[], hasMore: Boolean(value.has_more) }
 }
