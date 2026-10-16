@@ -2051,6 +2051,7 @@ def run_dast() -> H.Scorecard:
         _, resp = H.post("/scans", {
             "target": JUICE_SHOP,
             "budget_profile": "fast",
+            "options": {"require_current_workers": True},
             "policy": {"active_testing": False},
             "advanced": {"max_endpoints": 40, "force_single_worker": True},
         })
@@ -2061,6 +2062,14 @@ def run_dast() -> H.Scorecard:
             status = str(scan.get("status"))
             sc.check("D-1 scan completes (no hang/crash/reap)", status == "completed", f"status={status}")
             res = H.scan_result(scan_id)
+            assessment = res.get("result") or res
+            sc.check(
+                "D-1 application examination established",
+                assessment.get("application_observed") is True
+                and assessment.get("risk_assessment_state") != "not_examined",
+                f"observed={assessment.get('application_observed')} "
+                f"state={assessment.get('risk_assessment_state')}",
+            )
             log_lines = (H.get(f"/scans/{scan_id}/logs?limit=1000").get("lines") or [])
             connectivity_failures = [
                 str(line) for line in log_lines
