@@ -530,6 +530,14 @@ def _start_preauthorization(
                 "not offer yet. No Hunt was started.", error_type="preauthorization_required",
             )
         payload["secret_visibility"] = "agent_may_see"
+        # The engine accepts it only with the person who chose it; on a local install that is you,
+        # at this host (anyone with local API access can say the same: the host is the boundary).
+        import getpass
+        try:
+            person = getpass.getuser() or "local-operator"
+        except Exception:  # noqa: BLE001 - no login name in this environment
+            person = "local-operator"
+        payload.setdefault("allow_asserted_by", {"person": person[:200], "proof": "local"})
     if not payload.get("allow") or not client.api_token:
         return {}
     approval = _approval()

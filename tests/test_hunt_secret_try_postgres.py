@@ -49,9 +49,15 @@ def env(monkeypatch):
         return {"tool_receipt": {"id": str(uuid.uuid4())}}
 
     monkeypatch.setitem(arsenal._deps, "_record_tool_receipt", lambda: record_tool_receipt)
+    # Labelled double: the denied hosts resolve to nothing unless a test says otherwise (no DNS).
+    monkeypatch.setattr(secret_try, "_RESOLVED", {})
+    monkeypatch.setattr(secret_try, "resolve_denied_host", lambda _host: frozenset())
     monkeypatch.setitem(arsenal._deps, "_redact_agent_payload", lambda: (lambda value: value))
     for environment in permission_environment(monkeypatch):
         environment.loop.run_until_complete(environment.conn.execute(store.DISCOVERED_SECRETS_SCHEMA_SQL))
+        # Every fixture target shares a root domain (related) unless a test says otherwise.
+        environment.loop.run_until_complete(environment.conn.execute(
+            "ALTER TABLE targets ALTER COLUMN root_domain SET DEFAULT 'example.test'"))
         environment.receipts = receipts
         yield environment
 
@@ -409,4 +415,95 @@ def test_inspect_lists_related_targets_secrets_as_metadata_a_try_can_name(env):
         # Even with values visible, another target's value is never in the answer.
         text = json.dumps(answer, default=str)
         assert "synthetic-related-value-0a7b" not in text and "synthetic-unrelated-value-31f0" not in text
+    run(env, scenario())
+
+
+def test_an_unrelated_targets_secret_is_never_asked_about(env):
+    async def scenario():
+        other, ref = await _found_on_other_target(env)
+        await env.conn.execute("UPDATE targets SET root_domain='elsewhere.test' WHERE id=$1", other)
+        hunt = await env.hunt(policy=ACTIVE, budget={"max_state_changing_requests": 10, "max_active_actions": 10})
+        with pytest.raises(HTTPException) as refused:
+            await env.call(hunt, "unrelated-0001", values=_login(ref))
+        assert refused.value.status_code == 403
+        assert refused.value.detail["reason_code"] == "secret_try_unrelated_target"
+        assert await env.requests(hunt) == []
+    run(env, scenario())
+
+
+def test_requests_that_cannot_name_their_login_or_reach_a_denied_address_carry_no_secret(env, monkeypatch):
+    async def scenario():
+        _other, ref = await _found_on_other_target(env)
+        hunt = await env.hunt(policy=ACTIVE, budget={"max_state_changing_requests": 10, "max_active_actions": 10})
+        with pytest.raises(HTTPException) as long_path:
+            await env.call(hunt, "long-0001", values=_login(ref, path="/" + "a" * secret_try.MAX_PATH_CHARS))
+        assert long_path.value.detail["reason_code"] == "scope_origin_invalid"
+        # The Hunt's target is pinned to 203.0.113.10; say the shared hub host resolves there too.
+        monkeypatch.setattr(secret_try, "_RESOLVED", {})
+        monkeypatch.setattr(secret_try, "resolve_denied_host",  # labelled double: no DNS
+                            lambda host: frozenset({"203.0.113.10"}))
+        with pytest.raises(HTTPException) as aliased:
+            await env.call(hunt, "alias-0001", values=_login(ref, path="/hub;x=1/login"))
+        assert aliased.value.detail["reason_code"] == "secret_try_destination_denied"
+        assert await env.requests(hunt) == []
+    run(env, scenario())
+
+
+def test_the_per_host_limit_holds_across_hunts_and_grants_claimed_at_once(env):
+    async def scenario():
+        _other, ref = await _found_on_other_target(env)
+        hunts, actions = [], []
+        for index in range(2):
+            hunt = await env.hunt(policy=ACTIVE, budget={"max_state_changing_requests": 10, "max_active_actions": 10})
+            await env.conn.execute("UPDATE targets SET url=$2 WHERE id=$1", hunt["target_id"], "https://app.example.test")
+            with pytest.raises(HTTPException):
+                await env.call(hunt, f"race-000{index}", values=_login(ref))
+            [request] = await env.requests(hunt)
+            await env.decide(hunt, request, choice={"attempts": 10}, key=f"decision-race-{index}")
+            hunts.append(hunt)
+            actions.append((await _action_row(env, hunt, f"race-000{index}"))[0])
+        # One try is left on this host in the window; two Hunts claim it at the same moment.
+        await env.conn.execute(
+            """INSERT INTO discovered_secret_uses(secret_id, destination_host, permission_grant_id)
+               SELECT $1::uuid, 'app.example.test', gen_random_uuid() FROM generate_series(1, $2)""",
+            ref.removeprefix("secret://"), secret_try.WINDOW_MAX - 1)
+
+        async def claim(hunt, action_id):
+            async with env.pool.acquire() as conn:
+                return await store.resolve_for_hunt(
+                    conn, reference=ref, target_id=hunt["target_id"], hunt_run_id=hunt["id"],
+                    action_id=action_id, destination_host="app.example.test", destination=_destination())
+
+        # A claim of this secret on this host waits while another claim's transaction holds it.
+        secret_id = ref.removeprefix("secret://")
+        async with env.pool.acquire() as holder:
+            async with holder.transaction():
+                await secret_try.lock_window(holder, secret_id, "app.example.test")
+                waiting = asyncio.ensure_future(claim(hunts[0], actions[0]))
+                await asyncio.sleep(0.5)
+                assert not waiting.done(), "a claim did not wait for the per-host lock"
+        assert await waiting == VALUE
+        # Undo that one use so the window holds one free try again.
+        await env.conn.execute("DELETE FROM discovered_secret_uses WHERE action_id=$1", actions[0])
+        outcomes = await asyncio.gather(*(claim(h, a) for h, a in zip(hunts, actions)), return_exceptions=True)
+        assert sum(1 for item in outcomes if item == VALUE) == 1
+        assert [item.reason for item in outcomes if isinstance(item, store.DiscoveredSecretError)] == [
+            secret_try.SECRET_TRY_RATE_LIMITED]
+        assert await secret_try.window_attempts(env.conn, ref.removeprefix("secret://"), "app.example.test") == (
+            secret_try.WINDOW_MAX)
+    run(env, scenario())
+
+
+def test_a_granted_secret_is_usable_but_never_shown_to_the_agent(env):
+    async def scenario():
+        hunt = await _hunt_with_secret(env, visible=True)
+        other, ref = await _found_on_other_target(env, value="synthetic-granted-value-77e1")
+        assert await store.grant(env.conn, target_id=other, secret_id=ref.removeprefix("secret://"),
+                                 to_target_id=hunt["target_id"], actor="operator:test")
+        answer = await _inspect(env, hunt, "inspect-0004")
+        granted = next(item for item in answer["result"]["secrets"] if item["ref"] == ref)
+        assert "value" not in granted
+        assert "synthetic-granted-value-77e1" not in json.dumps(answer, default=str)
+        own = next(item for item in answer["result"]["secrets"] if item["ref"] != ref)
+        assert own["value"] == VALUE
     run(env, scenario())

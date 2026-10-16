@@ -676,8 +676,9 @@ async def values_for_agent(
     conn: Any, *, hunt_run_id: Any, target_id: Any, action_id: Any, refs: Iterable[str],
 ) -> dict[str, str]:
     """The values behind ``refs`` for a Hunt whose starting person let the agent see them
-    (``policy.secret_values_visible``; the caller checks it). Only usable secrets of this Hunt's
-    target (its own, or granted to it) are returned, and each disclosure is recorded in the use
+    (``policy.secret_values_visible``; the caller checks it). Only usable secrets found on this
+    Hunt's own target are returned: a secret another target's operator granted to it is usable by
+    reference but never shown (a grant is no consent to disclosure), and each disclosure is recorded in the use
     ledger as a reveal to that Hunt's agent (``revealed_by='agent:hunt:<id>'``). The values go into
     the live answer only: never into the stored action, receipt, record or a log."""
     target = _target_uuid(target_id)
@@ -692,8 +693,7 @@ async def values_for_agent(
     rows = await conn.fetch(
         """SELECT s.id, s.value_ciphertext FROM discovered_secrets s
         WHERE s.id = ANY($1::uuid[]) AND s.state='active' AND s.expires_at > NOW()
-          AND (s.target_id=$2 OR EXISTS (SELECT 1 FROM discovered_secret_grants g
-                                         WHERE g.secret_id=s.id AND g.target_id=$2))""",
+          AND s.target_id=$2""",
         wanted[:MAX_LIST], target,
     )
     values: dict[str, str] = {}

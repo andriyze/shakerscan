@@ -122,6 +122,7 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     "secret_try_attempts_exhausted": ReasonSpec(403, KIND_SECRET_TRY),
     "secret_try_rate_limited": ReasonSpec(429),
     "secret_try_destination_denied": ReasonSpec(403),
+    "secret_try_unrelated_target": ReasonSpec(403),
     # Same key, other action.
     "idempotency_key_reused": ReasonSpec(409, recorded=False),
     # A parked action whose request was not granted.

@@ -73,6 +73,9 @@ async def prepare_http_operation(
     injects_headers = bool(trusted_headers) or any('header' in item for item in inputs.get('request_bindings') or ())
     bindings = tuple(inputs.get('request_bindings') or ())
     withheld_only = bool(bindings) and not inputs.get('capture') and all('withheld_ref' in item or 'secret_ref' in item for item in bindings)
+    # A discovered secret goes to exactly one login: no redirect is followed with it, even on the
+    # same origin, where it would reach another path (a denied login among them) unchecked.
+    carries_secret = any('secret_ref' in item for item in bindings)
 
     def record(captured: Mapping[str, Any]) -> None:
         recorder({**captured, "workflow_values_private": True} if workflow else captured)
@@ -98,6 +101,8 @@ async def prepare_http_operation(
             if collector is not None and withheld_only:
                 # Every echo of a value sent by reference is withheld before any sample is cut.
                 collector.bind_known(exchange.bound_values)
+            if carries_secret:
+                wire_input['follow_redirects'] = False
             response = await execute_bound_http_request(
                 target_url, wire_input, target=target,
                 allow_write=inputs['method'] in {'POST', 'PUT', 'PATCH', 'DELETE'},
@@ -106,7 +111,7 @@ async def prepare_http_operation(
                 direct_origin_addresses=tuple(policy.get('direct_origin_addresses') or ()),
                 principal_slot="workflow_binding" if inputs.get("request_bindings") else principal_slot,
                 timeout_seconds=timeout_seconds,
-                allow_bound_origin_redirects=True, private_response_sink=exchange.capture_response,
+                allow_bound_origin_redirects=not carries_secret, private_response_sink=exchange.capture_response,
                 private_response_headers=exchange.response_headers,
             )
             if workflow and withheld_only:

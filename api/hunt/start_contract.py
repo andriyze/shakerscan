@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 import ipaddress
+import os
 import re
 from typing import Any, Mapping, Sequence
 
@@ -39,8 +40,10 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "direct_origin_addresses", "allow", "proposed_allow", "allow_asserted_by", "secret_visibility",
 })
 # Whether the planner may read the values of the target's discovered secrets (``secrets.inspect``).
-# A person's choice at start, recorded as theirs, off by default; the MCP start tool never sends it
-# and nothing after start can change it (hunt/discovered_secrets.py, values_for_agent).
+# A person's choice at start, off by default, accepted only with ``allow_asserted_by`` and recorded
+# as theirs; the MCP start tool drops it, the Enterprise gateway strips it, and nothing after start
+# changes it (hunt/discovered_secrets.py, values_for_agent). On a loopback-only local install the
+# local operator is the boundary: a local agent with API access can assert it too.
 SECRET_VISIBILITIES = ("withheld", "agent_may_see")
 # Who set ``allow`` bounds. The Enterprise gateway sets this after the person's step-up (PR G1)
 # and must strip any value a client sent; on local OSS the bounds are the operator's own.
@@ -220,7 +223,9 @@ def hunt_start_public_contract() -> dict[str, Any]:
         },
         "secret_visibility": {
             "field": "secret_visibility", "values": list(SECRET_VISIBILITIES), "default": "withheld",
-            "set_by": "the person starting the Hunt; never the agent, never changed after start",
+            "set_by": ("the person starting the Hunt, named in allow_asserted_by (step-up, or local "
+                       "on a loopback-only install, where anyone with API access can assert it); "
+                       "never changed after start"),
         },
         "permission_reason_codes": sorted(REASON_CODES),
         "permission_kinds": list(PERMISSION_KINDS),
@@ -628,12 +633,9 @@ class HuntStartContract:
         assertion = self.allow_asserted_by or {}
         return {
             "secret_values_visible": self.secret_values_visible,
-            "secret_visibility_set_by": (
-                str(assertion.get("person") or "local-operator") if self.secret_values_visible else None
-            ),
-            "secret_visibility_proof": (
-                str(assertion.get("proof") or "local") if self.secret_values_visible else None
-            ),
+            # The asserted person and proof exactly (``_secret_visibility`` requires them).
+            "secret_visibility_set_by": str(assertion["person"]) if self.secret_values_visible else None,
+            "secret_visibility_proof": str(assertion["proof"]) if self.secret_values_visible else None,
         }
 
     @property
@@ -932,12 +934,43 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
     )
 
 
+def _local_operator_deployment() -> bool:
+    """Whether the API is published only on loopback (the open-source local install), where the
+    operator at the host is the trust boundary and ``proof: local`` names them."""
+    bind = os.environ.get("SHAKERSCAN_BIND_HOST", "127.0.0.1").strip()
+    public = os.environ.get("SHAKERSCAN_PUBLIC_HOST", "").strip()
+    try:
+        if not ipaddress.ip_address(bind).is_loopback:
+            return False
+        return not public or ipaddress.ip_address("127.0.0.1" if public == "localhost" else public).is_loopback
+    except ValueError:
+        return False
+
+
 def _secret_visibility(payload: Mapping[str, Any]) -> str:
+    """``agent_may_see`` only with the person who chose it (``allow_asserted_by``): a step-up
+    proof the Enterprise gateway sets after the person's step-up, or ``local`` on an install
+    published only on loopback. On such a local install anyone with API access, a local agent
+    included, can send that assertion: the operator's host is the boundary there."""
     value = payload.get("secret_visibility")
     if value is None:
         return "withheld"
     if value not in SECRET_VISIBILITIES:
         raise HuntStartContractError("secret_visibility must be withheld or agent_may_see")
+    if value == "agent_may_see":
+        assertion = payload.get("allow_asserted_by")
+        proof = str(assertion.get("proof") or "") if isinstance(assertion, Mapping) else ""
+        person = str(assertion.get("person") or "").strip() if isinstance(assertion, Mapping) else ""
+        if not person or proof not in ALLOW_ASSERTION_PROOFS:
+            raise HuntStartContractError(
+                "secret_visibility agent_may_see needs the person who chose it (allow_asserted_by)",
+                code="secret_visibility_unasserted",
+            )
+        if proof == "local" and not _local_operator_deployment():
+            raise HuntStartContractError(
+                "secret_visibility agent_may_see needs the person's step-up on an instance that is "
+                "not published only on loopback", code="secret_visibility_unasserted",
+            )
     return str(value)
 
 

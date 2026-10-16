@@ -3056,7 +3056,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
 | `SHAKERSCAN_AUTHENTICATED_ASSURANCE` | `api/authenticated_assurance/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_BIND_HOST` | `api/authenticated_assurance/router.py`, `api/fleet_routes/router.py`, `api/operator_auth.py`, `api/runtime/http_archive_router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_BIND_HOST` | `api/authenticated_assurance/router.py`, `api/fleet_routes/router.py`, `api/hunt/start_contract.py`, `api/operator_auth.py`, `api/runtime/http_archive_router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_BROKER_LEASE` | `api/broker_worker.py`, `api/worker.py` |
 | `SHAKERSCAN_BROKER_LEASE_SECONDS` | `api/fleet_routes/router.py` |
 | `SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS` | `api/fleet_routes/router.py` |
@@ -3125,7 +3125,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_PREAUTHORIZATION_ID` | `scripts/v2_cli.py` |
 | `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml`, `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/host_guard.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/host_guard.py`, `api/hunt/start_contract.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_CONSUMER_GROUP` | `api/job_queue.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |

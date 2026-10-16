@@ -28,8 +28,12 @@ from collections.abc import Callable, Mapping
 from datetime import timedelta
 import json
 import os
+import asyncio
+import ipaddress
 import posixpath
 import re
+import socket
+import time
 from typing import Any
 import urllib.parse
 import uuid
@@ -43,10 +47,12 @@ DEFAULT_ATTEMPTS = 3
 MAX_ATTEMPTS = 10
 WINDOW = timedelta(minutes=15)
 WINDOW_MAX = 3
-MAX_PATH_CHARS = 2048
+# The http.request path limit: a longer path cannot carry a discovered secret (never truncated).
+MAX_PATH_CHARS = 4000
 SECRET_TRY_DESTINATION_DENIED = "secret_try_destination_denied"
 SECRET_TRY_RATE_LIMITED = "secret_try_rate_limited"
 SECRET_TRY_EXHAUSTED = "secret_try_attempts_exhausted"
+SECRET_TRY_UNRELATED = "secret_try_unrelated_target"
 # Shipped logins that never receive a discovered secret (host/path prefix per line); the shared
 # demonstration hub login of the project's public test site is one.
 DENIED_LOGINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "secret_try_denied_logins.txt")
@@ -94,29 +100,95 @@ def _denied_rules() -> tuple[tuple[str, str], ...]:
 
 def _normal_path(path: Any) -> str:
     """A path as a server would route it, for the deny rules only: percent-decoded (twice, for a
-    double-encoded spelling), dot segments and repeated slashes resolved, lowercase."""
+    double-encoded spelling), ``;params`` dropped from every segment, dot segments and repeated
+    slashes resolved, lowercase."""
     text = str(path or "/")
     for _ in range(2):
         text = urllib.parse.unquote(text)
     text = text.split("?", 1)[0].split("#", 1)[0].replace("\\", "/")
+    text = "/".join(segment.split(";", 1)[0] for segment in text.split("/"))
     normal = posixpath.normpath("/" + text.lstrip("/"))
     return ("/" if normal in {"", "."} else normal.replace("//", "/")).lower()
 
 
-def denied_destination(host: Any, path: Any) -> bool:
-    """Whether a login never receives a discovered secret (a hard limit, never a request)."""
+def _rule_matches(prefix: str, normal: str) -> bool:
+    return prefix in {"", "/"} or normal == prefix or normal.startswith(prefix.rstrip("/") + "/")
+
+
+def denied_destination(host: Any, path: Any, addresses: Any = ()) -> bool:
+    """Whether a login never receives a discovered secret (a hard limit, never a request): its
+    host is a denied one, or (``addresses``: where the request is pinned) it reaches an address a
+    denied host resolves to, under the denied path. Synchronous checks use only resolved
+    addresses already known (``denied_addresses``); the worker resolves them before sending."""
     canonical = _canonical_host(host)
     normal = _normal_path(path)
+    pinned = {_address(item) for item in addresses or ()} - {""}
     for denied_host, prefix in _denied_rules():
-        if canonical == denied_host and (
-            prefix in {"", "/"} or normal == prefix or normal.startswith(prefix.rstrip("/") + "/")
-        ):
+        if not _rule_matches(prefix, normal):
+            continue
+        if canonical == denied_host or (pinned and pinned & _RESOLVED.get(denied_host, (0.0, frozenset()))[1]):
             return True
     return False
 
 
+def _address(value: Any) -> str:
+    try:
+        return str(ipaddress.ip_address(str(value).strip().strip("[]")))
+    except ValueError:
+        return ""
+
+
+# Denied host -> (resolved at, its addresses). Resolved off the event loop, bounded in time, and
+# reused for RESOLVE_TTL; an unresolvable host keeps only the name rule.
+_RESOLVED: dict[str, tuple[float, frozenset[str]]] = {}
+RESOLVE_TTL = 600.0
+RESOLVE_TIMEOUT = 2.0
+
+
+def _resolve_host(host: str) -> frozenset[str]:
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return frozenset()
+    return frozenset(_address(info[4][0]) for info in infos) - {""}
+
+
+# Replaceable in tests (a labelled double): no DNS leaves a test.
+resolve_denied_host: Callable[[str], frozenset[str]] = _resolve_host
+
+
+async def denied_addresses() -> None:
+    """Refresh the addresses of the denied hosts (cached; failures leave the name rule)."""
+    now = time.monotonic()
+    for denied_host, _prefix in _denied_rules():
+        cached = _RESOLVED.get(denied_host)
+        if cached is not None and now - cached[0] < RESOLVE_TTL:
+            continue
+        try:
+            found = await asyncio.wait_for(asyncio.to_thread(resolve_denied_host, denied_host), RESOLVE_TIMEOUT)
+        except (asyncio.TimeoutError, OSError):
+            found = frozenset()
+        _RESOLVED[denied_host] = (now, frozenset(found))
+
+
+async def denied_destination_resolved(host: Any, path: Any, addresses: Any = ()) -> bool:
+    """``denied_destination`` after the denied hosts' addresses were refreshed."""
+    if addresses:
+        await denied_addresses()
+    return denied_destination(host, path, addresses)
+
+
+def binding_origin(binding: Any) -> str | None:
+    """The origin a request without its own ``origin`` goes to: the target binding's first
+    origin. Admission and the worker key a try on this one value."""
+    origins = tuple(getattr(binding, "allowed_origins", ()) or ())
+    return str(origins[0]) if origins else None
+
+
 def destination_of(values: Mapping[str, Any], fallback_origin: Any) -> dict[str, Any] | None:
-    """Where an ``http.request`` sends its bindings: canonical origin, host, path and method."""
+    """Where an ``http.request`` sends its bindings: canonical origin, host, path and method.
+    None when it cannot be named exactly (no origin, or a path over ``MAX_PATH_CHARS``): such a
+    request never carries a discovered secret."""
     text = str(values.get("origin") or fallback_origin or "").strip()
     try:
         parsed = urllib.parse.urlsplit(text)
@@ -128,7 +200,9 @@ def destination_of(values: Mapping[str, Any], fallback_origin: Any) -> dict[str,
         return None
     port = port or (443 if parsed.scheme == "https" else 80)
     netloc = f"[{host}]" if ":" in host else host
-    path = str(values.get("path") or "/")[:MAX_PATH_CHARS]
+    path = str(values.get("path") or "/")
+    if len(path) > MAX_PATH_CHARS:
+        return None
     return {
         "origin": f"{parsed.scheme}://{netloc}:{port}", "host": host,
         "path": path if path.startswith("/") else "/" + path,
@@ -172,6 +246,12 @@ async def window_attempts(conn: Any, secret_id: Any, host: str) -> int:
         uuid.UUID(str(secret_id)), str(host)[:255], WINDOW) or 0)
 
 
+async def lock_window(conn: Any, secret_id: Any, host: str) -> None:
+    """Until the caller's transaction ends: one secret on one host is counted and claimed one
+    claim at a time, whichever Hunt or grant claims it."""
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"secret-try:{secret_id}:{host}")
+
+
 async def remaining_grant(conn: Any, grants: list[dict[str, Any]]) -> Any:
     for grant in grants:
         if await _used(conn, grant["id"]) < _allowed(grant):
@@ -206,6 +286,7 @@ async def claim_attempt(
     refuse past the rate limit or the allowed attempts, and record the attempt (``record(grant)``)
     before the lock is released. Returns what ``record`` returned."""
     async with conn.transaction():
+        await lock_window(conn, secret_id, destination["host"])
         grants = await _live_grants(conn, hunt_run_id, secret_id, destination, lock=True)
         if not grants:
             raise _error("secret_target_mismatch", (
@@ -221,38 +302,62 @@ async def claim_attempt(
         return await record(grant_id)
 
 
+def _pinned_addresses(run: Mapping[str, Any], destination: Mapping[str, Any]) -> list[str]:
+    """The addresses an admitted request to ``destination`` is pinned to: the Hunt's authorized
+    target addresses, and a destination a person authorized for this Hunt."""
+    context, policy = _json(run.get("context_pack"), {}), _json(run.get("policy_json"), {})
+    found = [str(item) for item in (context or {}).get("authorized_target_addresses") or ()]
+    for granted in (policy or {}).get("granted_destinations") or ():
+        if isinstance(granted, Mapping) and _canonical_host(granted.get("host")) == destination["host"]:
+            found += [str(item) for item in granted.get("addresses") or ()]
+    return found
+
+
 async def admit_secret_references(
     conn: Any, *, run: Mapping[str, Any], values: Mapping[str, Any], fallback_origin: Any,
 ) -> None:
     """At admission: refuse (and so ask a person about) every ``secret_ref`` binding the worker
-    would refuse for want of a ``secret.try`` grant, before anything is reserved."""
+    would refuse for want of a ``secret.try`` grant, before anything is reserved. A request that
+    cannot name its destination exactly, or goes to a denied login, never carries a secret."""
     bindings = [item for item in values.get("request_bindings") or () if isinstance(item, Mapping)
                 and item.get("secret_ref")]
     if not bindings:
         return
     destination = destination_of(values, fallback_origin)
+    if destination is None:
+        raise HuntRefusal("scope_origin_invalid", (
+            "A request carrying a discovered secret must name one HTTP(S) origin and a path of at "
+            f"most {MAX_PATH_CHARS} characters; nothing was sent."))
+    # The denied hosts' addresses are cached (RESOLVE_TTL); a refresh is bounded by RESOLVE_TIMEOUT.
+    if await denied_destination_resolved(destination["host"], destination["path"], _pinned_addresses(run, destination)):
+        raise HuntRefusal(SECRET_TRY_DESTINATION_DENIED, (
+            f"{destination['origin']}{destination['path']} never receives a discovered secret: "
+            "it is a shared login other people rely on. No permission can allow it."))
     consuming = run.get("target_id")
     for binding in bindings:
         text = str(binding["secret_ref"])
         if not _SECRET_REF_RE.fullmatch(text):
             continue  # the input schema and the worker refuse it with its code
         secret_id = uuid.UUID(text.removeprefix("secret://"))
-        if destination is not None and denied_destination(destination["host"], destination["path"]):
-            raise HuntRefusal(SECRET_TRY_DESTINATION_DENIED, (
-                f"{destination['origin']}{destination['path']} never receives a discovered secret: "
-                "it is a shared login other people rely on. No permission can allow it."))
         row = await conn.fetchrow(
             """SELECT s.target_id, s.kind, s.label, s.length, t.name AS found_on_name, t.url AS found_on_url
                FROM discovered_secrets s LEFT JOIN targets t ON t.id=s.target_id WHERE s.id=$1""",
             secret_id,
         )
-        if row is None or destination is None or consuming is None:
+        if row is None or consuming is None:
             continue  # the worker refuses it with its code
         if str(row["target_id"]) == str(consuming) or await conn.fetchval(
             "SELECT 1 FROM discovered_secret_grants WHERE secret_id=$1 AND target_id=$2",
             secret_id, uuid.UUID(str(consuming)),
         ):
             continue
+        if not await is_related(conn, consuming, row["target_id"]):
+            # Only a related target's secret (the ones secrets.inspect lists) is worth asking a
+            # person about; any other stays refused without a request.
+            raise HuntRefusal(SECRET_TRY_UNRELATED, (
+                f"secret://{secret_id} was found on a target unrelated to this Hunt's (another root "
+                "domain and host asset). An operator can grant it to this target "
+                "(shakerscan secrets grant); a Hunt cannot ask for it."))
         subject = {
             "secret_id": str(secret_id), "found_on_target_id": str(row["target_id"]),
             "consuming_target_id": str(consuming), "origin": destination["origin"],
@@ -286,6 +391,23 @@ async def admit_secret_references(
             raise refusal
 
 
+# Targets related to one another: the same root domain, or the same host asset. One predicate for
+# the planner's listing and for whether a try may be asked for at all.
+_RELATED_SQL = """
+    (me.root IS NOT NULL AND lower(t.root_domain) = me.root)
+    OR COALESCE(to_jsonb(t)->>'asset_owner_id', t.id::text) = me.asset"""
+_ME_SQL = """SELECT id, lower(root_domain) AS root,
+                    COALESCE(to_jsonb(t)->>'asset_owner_id', id::text) AS asset
+             FROM targets t WHERE id=$1"""
+
+
+async def is_related(conn: Any, target_id: Any, other_id: Any) -> bool:
+    return bool(await conn.fetchval(
+        f"""WITH me AS ({_ME_SQL})
+            SELECT 1 FROM targets t, me WHERE t.id=$2 AND t.id <> me.id AND ({_RELATED_SQL})""",
+        uuid.UUID(str(target_id)), uuid.UUID(str(other_id))))
+
+
 MAX_RELATED = 50
 
 
@@ -294,14 +416,10 @@ async def related_secrets(conn: Any, target_id: Any, *, limit: int = MAX_RELATED
     the same host asset) and not granted to it: what a Hunt here may ask to try on its own login.
     Reference, kind, field name, length, where and when found; never a value."""
     rows = await conn.fetch(
-        """WITH me AS (SELECT id, lower(root_domain) AS root,
-                              COALESCE(to_jsonb(t)->>'asset_owner_id', id::text) AS asset
-                       FROM targets t WHERE id=$1),
+        f"""WITH me AS ({_ME_SQL}),
            related AS (
                SELECT t.id, t.name, t.url FROM targets t, me
-               WHERE t.id <> me.id AND t.is_active IS NOT FALSE
-                 AND ((me.root IS NOT NULL AND lower(t.root_domain) = me.root)
-                      OR COALESCE(to_jsonb(t)->>'asset_owner_id', t.id::text) = me.asset)
+               WHERE t.id <> me.id AND t.is_active IS NOT FALSE AND ({_RELATED_SQL})
                LIMIT 200)
            SELECT s.id, s.target_id, s.kind, s.label, s.length, s.last_seen_at, r.name, r.url
            FROM related r JOIN discovered_secrets s ON s.target_id = r.id
@@ -358,6 +476,8 @@ async def apply_secret_try(conn: Any, run: Mapping[str, Any], request: Mapping[s
     if state != "active":
         raise refused(409, "secret_not_active",
                       "The secret is no longer active (revoked, expired, promoted or purged); nothing was granted.")
+    if not await is_related(conn, run.get("target_id"), subject.get("found_on_target_id")):
+        raise refused(409, SECRET_TRY_UNRELATED, "The secret's target is not related to this Hunt's target.")
     if str(subject.get("consuming_target_id")) != str(run.get("target_id")):
         raise refused(409, "permission_subject_changed", "The request names another target than this Hunt's.")
     return {key: subject[key] for key in ("secret_id", "origin", "path", "method")} | {"max_attempts": attempts}
@@ -366,6 +486,7 @@ async def apply_secret_try(conn: Any, run: Mapping[str, Any], request: Mapping[s
 __all__ = [
     "DEFAULT_ATTEMPTS", "DENIED_LOGINS_FILE", "MAX_ATTEMPTS", "SECRET_TRY_DESTINATION_DENIED",
     "SECRET_TRY_EXHAUSTED", "SECRET_TRY_RATE_LIMITED", "SecretTryError", "WINDOW", "WINDOW_MAX",
-    "MAX_RELATED", "admit_secret_references", "apply_secret_try", "related_secrets", "claim_attempt", "denied_destination",
+    "MAX_RELATED", "SECRET_TRY_UNRELATED", "admit_secret_references", "binding_origin",
+    "denied_addresses", "denied_destination_resolved", "is_related", "lock_window", "apply_secret_try", "related_secrets", "claim_attempt", "denied_destination",
     "destination_of", "has_live_grant", "render_secret_try", "window_attempts",
 ]

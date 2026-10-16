@@ -598,15 +598,21 @@ async def prepare_http_exchange(
         elif "secret_ref" in binding:
             try:
                 from hunt.discovered_secrets import DiscoveredSecretError, resolve_for_hunt
-                from hunt.secret_try import destination_of
+                from hunt.secret_try import binding_origin, denied_destination_resolved, destination_of
             except ModuleNotFoundError:  # package import layout
                 from api.hunt.discovered_secrets import DiscoveredSecretError, resolve_for_hunt
-                from api.hunt.secret_try import destination_of
+                from api.hunt.secret_try import binding_origin, denied_destination_resolved, destination_of
             if not _hunt_is_live(run):
                 raise ValueError("secret reference belongs to a Hunt that is no longer live")
             # Where this request goes (the origin the action selected, else the target's own): a
-            # secret of another target is sent only to the login a person allowed.
-            destination = destination_of(values, (target.allowed_origins or (None,))[0])
+            # secret of another target is sent only to the login a person allowed, and no secret
+            # goes where the destination cannot be named exactly or to a denied login (by name or
+            # by the address the request is pinned to).
+            destination = destination_of(values, binding_origin(target))
+            if destination is None:
+                raise ValueError("secret_reference_invalid: the destination of a secret must be one exact origin and path")
+            if await denied_destination_resolved(destination["host"], destination["path"], target.allowed_addresses):
+                raise ValueError("secret_try_destination_denied: this login never receives a discovered secret")
             try:
                 value = await resolve_for_hunt(conn, reference=binding["secret_ref"],
                     target_id=target.target_id, hunt_run_id=run_id, action_id=action_id,
