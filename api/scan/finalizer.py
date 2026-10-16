@@ -570,6 +570,18 @@ def _attach_observed_header_responses(
         })
 
 
+def _authz_object_facts(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Which object the authorization proof is about: field names and id location, no values."""
+    facts: dict[str, Any] = {
+        name: str(item[key])[:120]
+        for key, name in (("object_id_key", "id_key"), ("object_id_location", "id_location"))
+        if item.get(key)
+    }
+    if isinstance(item.get("sensitive_field_names"), (list, tuple)):
+        facts["sensitive_field_names"] = [str(name)[:80] for name in item["sensitive_field_names"]][:20]
+    return facts
+
+
 def canonical_authz_findings(
     observations: Sequence[Mapping[str, Any]], *, receipt: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
@@ -607,10 +619,10 @@ def canonical_authz_findings(
                     "accepted_principal_responses": dict(
                         item.get("accepted_principal_responses") or {}
                     ),
-                    # Names and locations only: which fields made the object sensitive, where its id is.
-                    **({"sensitive_field_names": [str(name)[:80] for name in item["sensitive_field_names"]][:20]}
-                       if isinstance(item.get("sensitive_field_names"), (list, tuple)) else {}),
-                    **{key: str(item[key])[:120] for key in ("object_id_key", "object_id_location") if item.get(key)},
+                    # Names and locations only: which fields made the object sensitive, where its id
+                    # is. Nested, never top-level: a top-level ``object_id_key`` is a parameter of
+                    # the templated finding identity and would re-key every BOLA row on upgrade.
+                    **({"object": _authz_object_facts(item)} if _authz_object_facts(item) else {}),
                     "distinct_principal_control": True,
                     "object_id_absent_from_attacker_listing": True,
                     "responses_equivalent": True,
@@ -868,7 +880,10 @@ def _findings_for_action(
                     "param": item.get("param"),
                     "payload_sha256": item.get("payload_sha256"),
                     "message": item.get("message"),
-                    **{key: item[key] for key in ("alert_type", "client_route") if item.get(key)},
+                    # Nested: a top-level ``client_route`` joins a CWE-79 finding's identity and
+                    # would re-key every verified XSS row on upgrade.
+                    **({"browser_alert": {key: item[key] for key in ("alert_type", "client_route") if item.get(key)}}
+                       if item.get("alert_type") or item.get("client_route") else {}),
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                     "detail": {"verified": True, "type": "verified"},
@@ -986,7 +1001,9 @@ def _findings_for_action(
                 ),
                 severity="high",
                 cwe="CWE-79" if expected_family == "xss" else "CWE-89",
-                url=item.get("origin"),
+                # No URL: these rows have always been keyed without one (the origin is in the
+                # evidence, under a key that is not an endpoint), so upgrading keeps their identity.
+                url=None,
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "request_ref_id": item.get("request_ref_id"),
