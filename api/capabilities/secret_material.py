@@ -221,6 +221,12 @@ def is_non_secret_value_shape(text: str) -> bool:
     )
 
 
+def is_masked_or_indirect_value(text: str) -> bool:
+    """A masked (``******``) or indirect (``${DB_PASSWORD}``) value carries no secret."""
+    stripped = str(text or "").strip().strip("\"'")
+    return bool(_MASKED_VALUE_RE.match(stripped) or _INDIRECTION_RE.match(stripped))
+
+
 def is_structured_secret_value(value: object) -> bool:
     """An unmasked, non-indirect value that passes the placeholder and entropy screen and is
     not configuration by its shape (a URL, host, class name, path, boolean or number)."""

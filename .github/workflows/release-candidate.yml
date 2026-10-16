@@ -435,7 +435,7 @@ jobs:
             > artifacts/release-external-wire.json
           test "$(jq -r '.source_sha' artifacts/release-external-wire.json)" = "$CANDIDATE_SHA"
           test "$(jq -r '.status' artifacts/release-external-wire.json)" = passed
-          test "$(jq -r '.tool_count' artifacts/release-external-wire.json)" = 9
+          test "$(jq -r '.tool_count' artifacts/release-external-wire.json)" = 10
 
       - name: Upload candidate external wire receipt
         if: always()

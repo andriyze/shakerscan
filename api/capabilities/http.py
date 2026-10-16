@@ -9,6 +9,7 @@ import hashlib
 import json
 import sys
 import ssl
+import re
 import time
 from typing import Any, Callable, Mapping, Sequence
 import urllib.parse
@@ -60,6 +61,15 @@ class WorkerPrivateHTTPResponse:
 
     def cookies(self) -> dict[str, str]:
         return dict(self._cookies)
+
+
+_COOKIE_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}")
+
+
+def _cookie_name(set_cookie: str) -> str | None:
+    """The name of a ``Set-Cookie`` value (RFC 6265 token), or None when it has none."""
+    name = str(set_cookie or "").split(";", 1)[0].split("=", 1)[0].strip()
+    return name if _COOKIE_NAME_RE.fullmatch(name) else None
 
 
 # The response headers that describe a target's security posture. Fixed and public: naming them
@@ -834,6 +844,8 @@ async def execute_bound_http_request(
     }
     summary["set_cookie_metadata"] = [
         {
+            # The cookie's name only (a token, bounded); its value never leaves the response.
+            "name": _cookie_name(value),
             "secure": "secure" in value.lower(),
             "httponly": "httponly" in value.lower(),
             "samesite": (

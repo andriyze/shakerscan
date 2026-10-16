@@ -1373,3 +1373,77 @@ def test_the_report_keeps_which_tls_versions_the_server_accepts():
     assert tls["certificate"]["key_size"] == 2048
     assert tls["certificate"]["key_algo"] == "RSAPublicKey"
     assert tls["certificate"]["sig_algo"] == "sha256"
+
+
+def test_a_missing_header_the_baseline_application_response_lacks_is_verified():
+    """The matched header is one the baseline always records and the origin's pinned 2xx response
+    lacked it: that response is the proof, so the template match is promoted. A header the
+    baseline saw, or one it never records, stays a candidate."""
+    by_header = _baseline_and_header_matches(
+        {"x-frame-options": "DENY", "server": "nginx"},
+        ["permissions-policy", "x-frame-options", "x-permitted-cross-domain-policies"],
+    )
+    proven = by_header["permissions-policy"]
+    assert proven["proof_state"] == "verified" and proven["verified"] is True
+    assert proven["proof_contract_v2"]["predicate"]["satisfied"] is True
+    assert proven["proof_contract_v2"]["contract_id"] == "scan.http.request.http_observation"
+    for header in ("x-frame-options", "x-permitted-cross-domain-policies"):
+        assert by_header[header]["proof_state"] == "candidate", header
+        assert by_header[header]["verified"] is False
+
+
+def test_a_redirect_baseline_does_not_verify_a_missing_header(monkeypatch):
+    original = finalizer_module._baseline_header_responses
+
+    def as_redirect(observations):
+        return {origin: {**row, "response_status": 302}
+                for origin, row in original(observations).items()}
+
+    monkeypatch.setattr(finalizer_module, "_baseline_header_responses", as_redirect)
+    by_header = _baseline_and_header_matches({"server": "nginx"}, ["permissions-policy"])
+    finding = by_header["permissions-policy"]
+    assert finding["evidence"]["observed_response"]["response_status"] == 302
+    assert finding["proof_state"] == "candidate"
+
+
+def _baseline_cookie_report(origin: str, cookies: list[dict], status: int = 200):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url=origin,
+        action_results={baseline.action_id: _result_with_observation_count(baseline, 1)},
+        observations={baseline.action_id: ({
+            "kind": "http_observation",
+            "request": {"method": "GET", "origin": origin, "path": "/"},
+            "response": {"status": status, "security_headers": {},
+                         "set_cookie_metadata": cookies},
+        },)},
+    )
+    return [item for item in report["findings"] if item["evidence"].get("cookie_name")]
+
+
+def test_session_cookies_set_without_httponly_or_secure_are_verified_by_the_baseline():
+    cookies = [
+        {"name": "PHPSESSID", "secure": False, "httponly": False, "samesite": None},
+        {"name": "security", "secure": False, "httponly": False, "samesite": None},
+        {"name": "connect.sid", "secure": True, "httponly": True, "samesite": "lax"},
+    ]
+    https = _baseline_cookie_report("https://app.example.test", cookies)
+    assert sorted((f["evidence"]["cookie_name"], f["title"], f["cwe"]) for f in https) == [
+        ("PHPSESSID", "Session cookie without HttpOnly flag", "CWE-1004"),
+        ("PHPSESSID", "Session cookie without Secure flag", "CWE-614"),
+    ]
+    assert all(f["proof_state"] == "verified" for f in https)
+    # Over plain HTTP a Secure flag could not be honoured; only HttpOnly is reported.
+    http = _baseline_cookie_report("http://app.example.test", cookies, status=302)
+    assert [f["title"] for f in http] == ["Session cookie without HttpOnly flag"]
+    # A failed response proves nothing; a cookie with no recorded name is not classified.
+    assert _baseline_cookie_report("https://app.example.test", cookies, status=500) == []
+    assert _baseline_cookie_report(
+        "https://app.example.test",
+        [{"secure": False, "httponly": False, "samesite": None}],
+    ) == []
