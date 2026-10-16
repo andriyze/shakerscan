@@ -10,7 +10,8 @@ async function mockServices(page: Page, fail = false) {
     const url = new URL(request.url())
     if (!['GET', 'OPTIONS'].includes(request.method())) writes.push(url.pathname)
     if (url.pathname === '/exposure/services') {
-      if (fail) return route.fulfill({ status: 503, json: { detail: 'Database is not ready' } })
+      // 500, not 503: a 503/429 is a busy answer the page retries (busyRetry.mjs) before failing.
+      if (fail) return route.fulfill({ status: 500, json: { detail: 'Database is not ready' } })
       if (url.searchParams.get('search')) return route.fulfill({ json: { ...fixture, targets: [], total_targets: 0 } })
       return route.fulfill({ json: fixture })
     }
@@ -88,4 +89,33 @@ test('a candidate shows known exploitation, likelihood and the checks that exist
   await expect(details).toContainText('EPSS 94.3% (top 0.1%)')
   await expect(details).toContainText('CVSS 9.8')
   await expect(details).toContainText('they run only as part of an authorized Scan')
+})
+
+test('verify runs the named check as an ordinary Scan only after the person confirms', async ({ page }) => {
+  const writes = await mockServices(page)
+  const posted: unknown[] = []
+  await page.route(`${MOCK_API_ORIGIN}/scans`, async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posted.push(route.request().postDataJSON())
+    return route.fulfill({ json: { scan_id: '99999999-9999-4999-8999-999999999999', status: 'queued' } })
+  })
+  await page.goto('/exposure')
+  // One row per listener, with its severity and the check that exists.
+  await expect(page.getByTestId('listener-row')).toHaveCount(1)
+  await expect(page.getByText('1 with a check')).toBeVisible()
+  await page.getByRole('button', { name: 'Inspect tcp/443 on Fixture app' }).click()
+  const details = page.getByTestId('service-details')
+  await details.getByRole('tab', { name: 'Weaknesses' }).click()
+  const verification = details.getByTestId('candidate-verification')
+  await expect(verification).toContainText('Check available')
+  await verification.getByRole('button', { name: 'Verify with this check' }).click()
+  await expect(verification).toContainText('runs only cve-2017-17562 against https://app.example.test')
+  expect(posted).toEqual([])
+  await verification.getByRole('button', { name: 'Start verify Scan' }).click()
+  await expect(verification.getByRole('status')).toContainText('Verify Scan queued')
+  expect(posted).toEqual([{
+    target: 'https://app.example.test', budget_profile: 'fast', verify_templates: ['cve-2017-17562'],
+    policy: { active_testing: true, preset: 'custom', include_families: ['nuclei_active'] },
+  }])
+  expect(writes).toEqual([])
 })

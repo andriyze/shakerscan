@@ -77,11 +77,50 @@ pretend those capabilities exist.
 
 ## Accuracy and coverage limits
 
-The bundled snapshot is a small curated dataset, not complete/live NVD coverage. Zero candidates
+The bundled snapshot is an offline dataset, not complete/live NVD coverage. Zero candidates
 means **no match in that snapshot**, not “no vulnerabilities.” Configure the existing
 `DEVICE_INTEL_DB_PATH` and `DEVICE_INTEL_DB_SHA256` pair for a reviewed custom snapshot. A missing or
 incorrect digest fails closed; its trust status remains visible. This feature never performs a live
 CVE, KEV, EPSS or exploit-site query.
+
+### Signed intelligence bundles
+
+Newer data can arrive without a new image as a signed bundle installed under `results/intel`
+(`SHAKERSCAN_INTEL_BUNDLE_DIR` inside the containers): `device_advisories.json`, a `manifest.json`
+naming its SHA-256, size, `generated_at` and a monotonic `bundle_version`, and `manifest.sig`, an
+Ed25519 signature over the manifest. The loader uses the bundle only when the signature verifies
+under a key the engine trusts (the vendor keys in `scanner/scanner_tools/intel_bundle.py`, or keys an
+operator pins with `SHAKERSCAN_INTEL_TRUSTED_KEYS=<key id>=<base64 public key>`), the snapshot
+matches the signed digest, and the bundle is not older than the snapshot built into the image.
+Otherwise the built-in snapshot stays in force and the page names the reason (`untrusted_key`,
+`bad_signature`, `older_than_builtin`, ...). An operator pin (`DEVICE_INTEL_DB_*` set to anything
+but the built-in file) always wins over a bundle.
+
+`./scanner.sh intel status` shows what is in force; `./scanner.sh intel install <archive, directory
+or https URL>` verifies a bundle inside the engine and activates it, refusing a lower
+`bundle_version` than the installed one and keeping the previous bundle as `results/intel.previous`.
+Bundles are built and signed with `scripts/intel_bundle.py` (`keygen`, `build`, `verify`); the
+private key never belongs in a checkout.
+
+### Rows, verification and Hunt
+
+Each target lists one row per listener product/version (`listener_groups`), ordered by the most
+severe candidate or linked finding, then known exploitation; the same listener seen by several
+Scans, Hunts or addresses is one row whose observations stay inspectable, an identity is marked
+stale once per row, and inconclusive rows with nothing linked are folded by default.
+
+A candidate whose CVE has a check in this release carries `verification`. When the listener is the
+target's own origin, **Verify** submits an ordinary Scan with `verify_templates` (the named checks
+only, `policy.active_testing` and the `nuclei_active` family, under the target's standing
+authorization and budgets). The worker still drops intrusive templates, and non-GET templates
+unless state-changing HTTP is authorized. The outcome is read back from durable records:
+`check_matched` links the finding with its own proof state; `check_not_matched` means that check
+ran and did not match, which is evidence about that check only; a skipped or failed step is
+`inconclusive`. A version match without a run stays a candidate.
+
+Hunt reads the same rows with `query kind=service_intelligence filter={"view": "candidates"}`: one
+row per listener and CVE, known exploited and likely first, with the check that exists and its
+verification state.
 
 A version/CPE match is always a candidate in this projection—even if a matcher could promote a
 record elsewhere. Confirm product/build, affected component/configuration and distribution backports.
