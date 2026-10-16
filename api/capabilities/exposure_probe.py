@@ -1100,6 +1100,7 @@ def _credential_records(document: Any) -> list[tuple[str, object]]:
 
     def records(items: list[Any], name: str) -> list[tuple[str, object]]:
         out: list[tuple[str, object]] = []
+        identities: set[str] = set()
         for index, item in enumerate(items[:2_000]):
             if not isinstance(item, Mapping):
                 continue
@@ -1107,9 +1108,15 @@ def _credential_records(document: Any) -> list[tuple[str, object]]:
             if not any(key in _IDENTITY_KEYS and isinstance(keys[key], str) and keys[key].strip()
                        for key in keys):
                 continue
+            identity = next((keys[key].strip().casefold() for key in
+                ('email', 'email_address', 'username', 'user_name', 'login', 'user', 'account')
+                if isinstance(keys.get(key), str) and keys[key].strip()), '')
+            if identity in identities:
+                continue
             for key, value in keys.items():
                 if key in _PASSWORD_KEYS and (secret := plaintext(value)) is not None:
                     out.append((f"{name}[{index}].{key}", secret))
+                    identities.add(identity)
                     break
         return out
 
@@ -1124,7 +1131,12 @@ def _credential_records(document: Any) -> list[tuple[str, object]]:
             for index, item in enumerate(value[:50]):
                 walk(item, f"{name}[{index}]", depth + 1)
         elif isinstance(value, Mapping):
+            # OpenAPI/JSON Schema example records describe a schema, not account data.
+            if any(key in value for key in ('openapi', 'swagger', '$schema')):
+                return
             for key, item in list(value.items())[:200]:
+                if str(key).lower() in _EXAMPLE_KEYS | {'schemas', 'definitions'}:
+                    continue
                 walk(item, f"{name}.{key}" if name else str(key), depth + 1)
 
     walk(document, "", 0)
