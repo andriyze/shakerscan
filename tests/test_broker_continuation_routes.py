@@ -268,7 +268,7 @@ def test_the_scan_time_limit_is_measured_from_the_scans_start(monkeypatch):
 def test_the_finalize_only_tolerance_covers_only_the_stop_grace(monkeypatch):
     """Review sweep L6: a node's request just before the control plane's limit (the time the
     request took) is within the tolerance; one well before it is not."""
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
 
     class Connection:
         async def fetchval(self, _sql, _scan_id):
@@ -282,7 +282,7 @@ def test_the_finalize_only_tolerance_covers_only_the_stop_grace(monkeypatch):
     monkeypatch.setattr(routes, "_pool", lambda: Pool())
     job = SimpleNamespace(execution_plan=SimpleNamespace(budget=SimpleNamespace(max_duration_seconds=3600)),
                           shard=None)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     from api.scan.scan_deadline import finalization_reserve_seconds
     deadline_offset = 3600 - finalization_reserve_seconds(3600)
     state = {"started": now - timedelta(seconds=deadline_offset - 5)}

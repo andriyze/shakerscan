@@ -668,10 +668,10 @@ def adopt_shared_record(shared: Path, records: Path, workspace: Path) -> list[st
         save_state(target, workspace, {key: value for key, value in state.items()
                                        if key not in {"schema_version", "workspace"}})
     except OSError as exc:
-        return [f"note:      could not copy the record of {workspace} from {shared} to {records} "
-                f"({exc.strerror or exc}); changes since the last launch are not checked this time"]
-    return [f"copied:    the record of {workspace} from {shared} (shared by every profile in this session) "
-            f"to this profile's {records}"]
+        return [(f"note:      could not copy the record of {workspace} from {shared} to {records} "
+                 f"({exc.strerror or exc}); changes since the last launch are not checked this time")]
+    return [(f"copied:    the record of {workspace} from {shared} (shared by every profile in this session) "
+             f"to this profile's {records}")]
 
 
 def note_shared_default_workspace(shared: Path, workspace: Path) -> list[str]:
@@ -681,9 +681,9 @@ def note_shared_default_workspace(shared: Path, workspace: Path) -> list[str]:
     use it."""
     if workspace.exists() or workspace.is_symlink() or shared.is_symlink() or not shared.is_dir():
         return []
-    return [f"note:      this profile's default agent workspace is now {workspace}; the one it used before, "
-            f"shared by every profile under XDG_DATA_HOME, remains at {shared} (nothing was moved). To keep "
-            f"using it: shakerscan agent --workspace {shared}"]
+    return [(f"note:      this profile's default agent workspace is now {workspace}; the one it used before, "
+             f"shared by every profile under XDG_DATA_HOME, remains at {shared} (nothing was moved). To keep "
+             f"using it: shakerscan agent --workspace {shared}")]
 
 
 def migrate_default_workspace(old: Path, new: Path, records: Path) -> list[str]:

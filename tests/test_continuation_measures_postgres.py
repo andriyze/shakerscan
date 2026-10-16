@@ -8,7 +8,7 @@ summary; no live target runs here.
 import asyncio
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID, uuid4, uuid5
 
 import pytest
@@ -328,8 +328,8 @@ def test_legacy_triage_writes_record_a_reversible_receipt(monkeypatch):
                 misfiled = await client.post('/finding-exceptions', headers={'x-shakerscan-decision-id': str(uuid4())},
                                              json={'finding_id': str(finding), 'target_id': str(other),
                                                    'owner': 'sec', 'approver': 'lead', 'reason': 'misfiled',
-                                                   'status': 'revoked', 'expires_at': (datetime.now(timezone.utc)
-                                                                                       + timedelta(days=30)).isoformat()})
+                                                   'status': 'revoked',
+                                                   'expires_at': (datetime.now(UTC) + timedelta(days=30)).isoformat()})
                 assert misfiled.status_code == 409, misfiled.text
                 assert await conn.fetchval("SELECT count(*) FROM finding_exceptions WHERE reason='misfiled'") == 0
                 # An exception naming no target and no finding on one cannot carry a receipt.
