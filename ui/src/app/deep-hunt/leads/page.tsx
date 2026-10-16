@@ -251,11 +251,16 @@ export default function InvestigationWorkspacePage() {
   const [notice, setNotice] = useState<string | null>(null)
   const [transitionError, setTransitionError] = useState<string | null>(null)
 
-  useEffect(() => {
-    getFamilyProofContracts().then((proofData) => {
-      setContracts(proofData)
-    }).catch((e) => setError(e instanceof Error ? e.message : 'Failed to load investigation context'))
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshedAt, setRefreshedAt] = useState<Date | null>(null)
+
+  const loadContracts = useCallback(async () => {
+    try {
+      setContracts(await getFamilyProofContracts())
+    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to load investigation context') }
   }, [])
+
+  useEffect(() => { void loadContracts() }, [loadContracts])
 
   const load = useCallback(async () => {
     if (!targetId) {
@@ -274,6 +279,16 @@ export default function InvestigationWorkspacePage() {
   }, [targetId])
 
   useEffect(() => { load().catch(() => undefined) }, [load])
+
+  // Refresh re-reads the proof contracts and, once a target is chosen, its ranked leads, then
+  // says when; it used to call a loader that returns at once without a target, so it looked dead.
+  const refresh = useCallback(async () => {
+    setRefreshing(true); setNotice(null); setTransitionError(null)
+    try {
+      await Promise.all([loadContracts(), load()])
+      setRefreshedAt(new Date())
+    } finally { setRefreshing(false) }
+  }, [load, loadContracts])
 
   const selected = useMemo(() => data?.scheduled.find((x) => x.hypothesis_id === selectedId) || null, [data, selectedId])
   const visibleLeads = useMemo(() => data?.scheduled.slice(0, 5) || [], [data])
@@ -322,7 +337,13 @@ export default function InvestigationWorkspacePage() {
                 accept={webTargetChoice} webOnly placeholder="Choose a target…" onSelectedAsset={setSelectedTarget} />
             </div>
           </div>
-          <Button variant="secondary" onClick={() => load().catch(() => undefined)} disabled={loading || busy}><RefreshCw className="h-4 w-4" />Refresh</Button>
+          <div className="flex flex-col items-start gap-1 md:items-end">
+            <Button variant="secondary" onClick={() => { void refresh() }} loading={refreshing} disabled={(loading && Boolean(targetId)) || busy || refreshing}
+              title={targetId ? 'Re-rank this target’s leads' : 'Re-read the proof contracts; choose a target to rank its leads'}><RefreshCw className="h-4 w-4" />Refresh</Button>
+            {refreshedAt ? <span className="text-[11px] text-gray-500" role="status" data-testid="leads-refreshed">
+              {targetId ? 'Leads' : 'Proof contracts'} updated {refreshedAt.toLocaleTimeString()}
+            </span> : null}
+          </div>
         </div>
       </Card>
 
