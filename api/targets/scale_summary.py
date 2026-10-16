@@ -84,6 +84,13 @@ CREATE TABLE IF NOT EXISTS target_inventory_groups (
     group_domain TEXT NOT NULL,
     psl_version TEXT NOT NULL
 );
+-- Each target URL's host class (asset_cohorts.target_exposure_class, computed in Python): a pure
+-- function of the URL, filled on first read, so cohort filters run in SQL (target_cohort_sql.py).
+CREATE TABLE IF NOT EXISTS target_url_classes (
+    url_hash TEXT PRIMARY KEY,
+    exposure_class TEXT NOT NULL,
+    classifier_version TEXT NOT NULL
+);
 
 CREATE OR REPLACE FUNCTION finding_summary_insert_rows() RETURNS trigger
 LANGUAGE plpgsql AS $$

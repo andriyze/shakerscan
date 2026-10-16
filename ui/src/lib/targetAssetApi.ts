@@ -195,8 +195,14 @@ export interface TargetSearchPage {
  * `position` is the previous page's `next` (a cursor on list/v1, an offset on the legacy shape).
  */
 export async function searchTargetAssets(
-  { search = '', limit = 25, includeServices = false, includeInactive = false, position = null }:
-  { search?: string; limit?: number; includeServices?: boolean; includeInactive?: boolean; position?: string | number | null } = {},
+  { search = '', limit = 25, includeServices = false, includeInactive = false, webOnly = false, position = null }:
+  {
+    search?: string; limit?: number; includeServices?: boolean; includeInactive?: boolean
+    /** Only active http(s) web targets (the server applies the picker's web rule; a 2.10 engine
+     *  ignores it and the caller's own filter still applies). */
+    webOnly?: boolean
+    position?: string | number | null
+  } = {},
   signal?: AbortSignal,
 ): Promise<TargetSearchPage> {
   const cursor = typeof position === 'string' ? position : null
@@ -206,6 +212,7 @@ export async function searchTargetAssets(
   if (term) params.set('search', term.slice(0, 500))
   if (includeServices) params.set('include_services', 'true')
   if (includeInactive) params.set('include_inactive', 'true')
+  if (webOnly) params.set('web_only', 'true')
   const body = await getJson(`${API_URL}/targets/inventory?${params}`, { signal, heavy: true, maxAgeMs: 15_000, label: 'Target search failed' })
   if (isListV1<TargetAsset>(body)) {
     return { targets: body.items, hasMore: Boolean(body.has_more), next: body.has_more ? body.next_cursor : null }

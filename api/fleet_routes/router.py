@@ -66,6 +66,7 @@ try:
     from scan.action_store import PostgresScanActionStore
     from scan.action_authority_guard import scan_action_authority_reason
     from scan.broker_authority import RunningBrokerAuthority, authority_exempt
+    from scan.live_log import append_scan_log_lines
     from scan.broker_backend import AUTHORITY_WITHDRAWN_DETAIL
     from scan.worker_action_executor import with_authority_interruption
     from scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
@@ -121,6 +122,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.action_store import PostgresScanActionStore
     from ..scan.action_authority_guard import scan_action_authority_reason
     from ..scan.broker_authority import RunningBrokerAuthority, authority_exempt
+    from ..scan.live_log import append_scan_log_lines
     from ..scan.broker_backend import AUTHORITY_WITHDRAWN_DETAIL
     from ..scan.worker_action_executor import with_authority_interruption
     from ..scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
@@ -1825,10 +1827,7 @@ async def heartbeat_broker_job(
             mapping["progress"] = str(body.progress)
         redis_client.hset(f"job:{row['job_id']}", mapping=mapping)
         if body.log_lines:
-            key = f"scan:{row['scan_id']}:logs"
-            redis_client.rpush(key, *body.log_lines)
-            redis_client.ltrim(key, -1000, -1)
-            redis_client.expire(key, 86400)
+            append_scan_log_lines(redis_client, row["scan_id"], body.log_lines, tail=1000, ttl_seconds=86400)
     return {
         "lease_id": lease_id,
         "lease_expires_at": expires_at.isoformat(),

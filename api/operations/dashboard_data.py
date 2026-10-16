@@ -21,8 +21,12 @@ import time
 from typing import Any, Awaitable, Callable
 
 try:
+    from list_contract import SqlParams
+    from target_cohort_sql import COHORT_VIEWS, cohort_filter_sql, fill_url_classes, row_cohorts
     from targets.scale_summary import FINDING_TOTALS_SQL, SCAN_TOTALS_SQL, compact
 except ModuleNotFoundError:  # package import layout
+    from ..list_contract import SqlParams
+    from ..target_cohort_sql import COHORT_VIEWS, cohort_filter_sql, fill_url_classes, row_cohorts
     from ..targets.scale_summary import FINDING_TOTALS_SQL, SCAN_TOTALS_SQL, compact
 
 DEVICE_RUN_KINDS = frozenset({"device_posture", "device_probe", "device_web_dast"})
@@ -140,52 +144,82 @@ def _recent_scan_key(row: Any) -> str | None:
     return None if row["target_url"] is None else f"url:{row['target_url']}"
 
 
-async def recent_latest_scans(conn: Any, limit: int = 10) -> list[dict[str, Any]]:
+#: The dashboard's cohort selections other than "all" (``recent_scans`` serves "all").
+DASHBOARD_COHORT_VIEWS = ("operational", "production", "staging", "non_operational")
+
+
+async def recent_latest_scans(conn: Any, limit: int = 10, *,
+                              cohorts: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
     """The newest completed scan of each of the ``limit`` most recently scanned subjects.
 
     Equivalent to DISTINCT ON (subject) ... ORDER BY created_at DESC LIMIT n, without sorting
     every completed scan: walking completed scans newest first, the first scan seen for a
     subject is its latest, so the walk stops after ``limit`` subjects (index on status, created_at).
+
+    Every row carries ``target_cohort``, its subject's cohort (``target_cohort_sql.row_cohorts``:
+    the target's, else the AI target's, else the URL host's). ``cohorts`` keeps only subjects of
+    those cohorts: SQL narrows the walk to targets of the cohorts (and rows without a target), and
+    the Python label decides.
     """
     found: list[dict[str, Any]] = []
     seen: set[str | None] = set()
+    base = SqlParams()
+    cohort_sql = ""
+    if cohorts:
+        await fill_url_classes(conn)
+        cohort_sql = (" AND (target_id IS NULL OR target_id IN (SELECT t.id FROM targets t WHERE "
+                      f"{cohort_filter_sql('t', cohorts, base)}))")
+    where = f"{_RECENT_SCAN_FILTER}{cohort_sql}"
 
-    def take(rows: Any) -> bool:
-        for row in rows:
+    async def take(rows: Any) -> bool:
+        batch_rows = [dict(row) for row in rows]
+        labels = await row_cohorts(conn, batch_rows)
+        for row, label in zip(batch_rows, labels):
             key = _recent_scan_key(row)
             if key in seen:
                 continue
             seen.add(key)
-            found.append(dict(row))
+            if cohorts and (label or "unclassified") not in cohorts:
+                continue
+            row["target_cohort"] = label
+            found.append(row)
             if len(found) >= limit:
                 return True
         return False
 
     # PostgreSQL sorts NULL first descending; a NULL created_at (never written by the engine)
     # is still honoured before the keyset walk.
-    if take(await conn.fetch(
-        f"SELECT {_RECENT_SCAN_COLUMNS} FROM scans WHERE {_RECENT_SCAN_FILTER} AND created_at IS NULL "
-        "ORDER BY id DESC"
+    if await take(await conn.fetch(
+        f"SELECT {_RECENT_SCAN_COLUMNS} FROM scans WHERE {where} AND created_at IS NULL "
+        "ORDER BY id DESC", *base.values,
     )):
         return found
     position: tuple[Any, Any] | None = None
     batch = 100
     while True:
+        params = SqlParams(base.values)
         if position is None:
             rows = await conn.fetch(
-                f"SELECT {_RECENT_SCAN_COLUMNS} FROM scans WHERE {_RECENT_SCAN_FILTER} AND created_at IS NOT NULL "
-                "ORDER BY created_at DESC, id DESC LIMIT $1", batch,
+                f"SELECT {_RECENT_SCAN_COLUMNS} FROM scans WHERE {where} AND created_at IS NOT NULL "
+                f"ORDER BY created_at DESC, id DESC LIMIT {params.add(batch)}", *params.values,
             )
         else:
             rows = await conn.fetch(
-                f"SELECT {_RECENT_SCAN_COLUMNS} FROM scans WHERE {_RECENT_SCAN_FILTER} "
-                "AND (created_at, id) < ($2, $3) ORDER BY created_at DESC, id DESC LIMIT $1",
-                batch, position[0], position[1],
+                f"SELECT {_RECENT_SCAN_COLUMNS} FROM scans WHERE {where} "
+                f"AND (created_at, id) < ({params.add(position[0])}, {params.add(position[1])}) "
+                f"ORDER BY created_at DESC, id DESC LIMIT {params.add(batch)}", *params.values,
             )
-        if take(rows) or len(rows) < batch:
+        if await take(rows) or len(rows) < batch:
             return found
         position = (rows[-1]["created_at"], rows[-1]["id"])
         batch = min(batch * 4, 5000)
+
+
+async def recent_scans_by_cohort(conn: Any, limit: int = 10) -> dict[str, list[dict[str, Any]]]:
+    """``recent_latest_scans`` for each dashboard cohort view (the view's own walk, so a scoped
+    view lists its own latest results rather than the slice of the global list that matched)."""
+    return {view: await recent_latest_scans(conn, limit=limit, cohorts=COHORT_VIEWS[view])
+            for view in DASHBOARD_COHORT_VIEWS}
 
 
 async def recent_blocker_findings(conn: Any, limit: int = 10) -> list[dict[str, Any]]:
@@ -261,5 +295,7 @@ __all__ = [
     "generated_at",
     "load_dashboard_counts",
     "recent_blocker_findings",
+    "DASHBOARD_COHORT_VIEWS",
     "recent_latest_scans",
+    "recent_scans_by_cohort",
 ]

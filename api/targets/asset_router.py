@@ -75,6 +75,8 @@ async def target_inventory(response: Response = None,
                            sort: Literal['name','risk','recent','created',
                                          '-name','-risk','-recent','-created'] = 'name',
                            include_facets: bool = False,
+                           web_only: bool = Query(False, description="only active http(s) web targets a "
+                                                  "picker can offer (the UI's usable-web-target rule)"),
                            limit: int | None = Query(None, ge=1, le=500),
                            offset: int = Query(0, ge=0),
                            cursor: str | None = Query(None, max_length=CURSOR_MAX_LENGTH),
@@ -88,8 +90,8 @@ async def target_inventory(response: Response = None,
     ``group_by=domain`` of domain groups with at most ``member_limit`` assets each; ``sort`` takes
     ``-`` to descend. Otherwise the deprecated limit/offset response (``sort`` names its own
     direction: name ascending, the others descending)."""
-    limit, cursor, fields, count, since, member_limit = (direct(value) for value in (
-        limit, cursor, fields, count, since, member_limit))
+    limit, cursor, fields, count, since, member_limit, web_only = (direct(value) for value in (
+        limit, cursor, fields, count, since, member_limit, web_only))
     if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
         page = v1_page(limit=limit, cursor=cursor, sort=sort, fields=fields, count=count, since=since)
         async with pool().acquire() as conn:
@@ -98,7 +100,7 @@ async def target_inventory(response: Response = None,
                 include_inactive=include_inactive, include_services=include_services, group_by=group_by,
                 asset_type=asset_type, environment=environment, authorization=authorization,
                 findings=findings, activity=activity, member_limit=member_limit,
-                include_facets=include_facets,
+                include_facets=include_facets, web_only=bool(web_only),
             )
     if sort.startswith('-'):
         raise HTTPException(400, 'A "-" sort is list/v1 only; add count=none (or a cursor) to use it')
@@ -109,7 +111,8 @@ async def target_inventory(response: Response = None,
                                  include_inactive=include_inactive, include_services=include_services,
                                  limit=limit, offset=offset, group_by=group_by, asset_type=asset_type,
                                  environment=environment, authorization=authorization, findings=findings,
-                                 activity=activity, sort=sort, include_facets=include_facets)
+                                 activity=activity, sort=sort, include_facets=include_facets,
+                                 web_only=bool(web_only))
 
 
 @router.post('/targets/hosts')

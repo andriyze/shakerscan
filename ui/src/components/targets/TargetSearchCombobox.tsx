@@ -14,7 +14,7 @@ import { useTargetSearch } from '@/lib/useTargetSearch'
  */
 export function TargetSearchCombobox({
   id, value, onChange, accept, includeServices = true, noneLabel, placeholder = 'Choose a target',
-  'aria-label': ariaLabel, onSelectedAsset, disabled,
+  'aria-label': ariaLabel, onSelectedAsset, disabled, webOnly = false, includeInactive = false,
 }: {
   id?: string
   value: string
@@ -28,8 +28,12 @@ export function TargetSearchCombobox({
   'aria-label'?: string
   onSelectedAsset?: (asset: TargetAsset | undefined) => void
   disabled?: boolean
+  /** Ask the server for active http(s) web targets only (pair with a web `accept`). */
+  webOnly?: boolean
+  /** Offer inactive targets too. */
+  includeInactive?: boolean
 }) {
-  const search = useTargetSearch({ selectedIds: [value], includeServices, accept })
+  const search = useTargetSearch({ selectedIds: [value], includeServices, includeInactive, accept, webOnly })
   const options = useMemo<ComboboxOption[]>(() => search.assets
     .filter((asset) => !accept || accept(asset))
     .map((asset) => ({

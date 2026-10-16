@@ -77,6 +77,7 @@ try:
     )
     from action_scope import scope_origin_matches_target
     from asset_cohorts import target_cohort, target_exposure_class
+    from target_cohort_sql import COHORT_VIEW_PATTERN, view_cohorts
     from scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
     from scan.manifest_store import PostgresScanManifestStore
     from secret_store import decrypt_secret, encrypt_secret, encryption_enabled
@@ -111,6 +112,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         sync_legacy_web_credential_by_name,
     )
     from ..asset_cohorts import target_cohort, target_exposure_class
+    from ..target_cohort_sql import COHORT_VIEW_PATTERN, view_cohorts
     from ..runtime.credential_store import CredentialStoreError
     from ..runtime.models import TargetBinding
     from ..scan.action_plan import ScanActionPlanError
@@ -451,6 +453,16 @@ async def list_targets_grouped(
         grouped_list.DEFAULT_MEMBER_LIMIT, ge=1, le=grouped_list.MAX_MEMBER_LIMIT,
         description="list/v1 subdomains returned per group (subdomain_count is always the full number)",
     ),
+    cohort: Optional[str] = Query(
+        None, pattern=COHORT_VIEW_PATTERN,
+        description="list/v1: only targets of this cohort or cohort view (operational, non_operational, or one cohort)",
+    ),
+    has_inventory: Optional[bool] = Query(
+        None, description="list/v1: only domains with a persistent endpoint inventory (Continuous ASM)",
+    ),
+    summary: Optional[Literal["asm"]] = Query(
+        None, description="list/v1: add asm_summary, endpoint coverage over every filtered target",
+    ),
 ):
     """List all targets grouped by root domain for hierarchical display.
 
@@ -462,8 +474,9 @@ async def list_targets_grouped(
     # authorization and said so, then the row was unchanged on the next load, so an operator had
     # no way to tell it had worked.
     target_columns = f"{_GROUPED_TARGET_COLUMNS},\n                {_authorized_for_active_testing_sql()}"
-    limit, cursor, sort, fields, count, since, member_limit = (direct(value) for value in (
-        limit, cursor, sort, fields, count, since, member_limit))
+    limit, cursor, sort, fields, count, since, member_limit, cohort, has_inventory, summary = (
+        direct(value) for value in (
+            limit, cursor, sort, fields, count, since, member_limit, cohort, has_inventory, summary))
     if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
         if fields is not None:
             raise HTTPException(status_code=400, detail={
@@ -477,13 +490,19 @@ async def list_targets_grouped(
         filters = {
             "include_inactive": include_inactive, "search": search, "discovery_source": discovery_source,
             "grade": grade, "has_findings": has_findings, "member_limit": member_limit,
+            "cohort": cohort or "all", "has_inventory": bool(has_inventory),
         }
         async with _pool().acquire() as conn:
             return await grouped_list.grouped_page(
                 conn, page, filters=filters, member_limit=member_limit,
                 member_columns=target_columns, public_row=_public_target_row,
+                cohorts=view_cohorts(cohort), has_inventory=bool(has_inventory), summary=summary == "asm",
             )
 
+    if cohort is not None or has_inventory is not None or summary is not None:
+        raise HTTPException(status_code=400, detail={
+            "error": "list_v1_required",
+            "message": "cohort, has_inventory and summary need the list/v1 page (send count=none)"})
     mark_deprecated(response)
     async with _pool().acquire() as conn:
         query = f"""

@@ -146,7 +146,7 @@ export default function NewScanPage() {
   )
   // Registered targets matching what is typed come from a server search (one bounded page per
   // debounced query); the first 100 targets used to be the only ones recognised.
-  const targetSearch = useTargetSearch({ includeServices: true, accept: registeredWebTarget, enabled: !batchMode })
+  const targetSearch = useTargetSearch({ includeServices: true, accept: registeredWebTarget, webOnly: true, enabled: !batchMode })
   const { setQuery: setTargetQuery } = targetSearch
   useEffect(() => { setTargetQuery(batchMode ? '' : target) }, [batchMode, setTargetQuery, target])
   const existingTargets = targetSearch.assets
