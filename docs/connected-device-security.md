@@ -370,9 +370,9 @@ instead of degrading to unpinned data.
 
 Only advisories with explicit NVD version bounds (or an exact version) are included; unbounded
 wildcard configurations are signal-only and are never emitted into the snapshot, so any promotable
-match is provably version-bounded. The release image pins the bundled copy through
-`DEVICE_INTEL_DB_PATH` and `DEVICE_INTEL_DB_SHA256` in `scanner/Dockerfile`, and tests reject drift
-between the file, the loader constant, and the Dockerfile pin.
+match is provably version-bounded. The loader pins the bundled copy by `BUNDLED_SNAPSHOT_SHA256`;
+the release image sets no `DEVICE_INTEL_DB_*` variables (setting them is an operator pin that also
+freezes out signed bundles), and tests reject drift between the file and the loader constants.
 
 An operator can substitute a newer or site-specific snapshot without rebuilding by pointing the
 same two environment variables at a regular file and its SHA-256; `DEVICE_INTEL_DB_SHA256` is
@@ -397,9 +397,10 @@ override lines. `--self-check` validates the written file through the real scann
 confirms every record is bounded and promotable; `--verify PATH` runs the same validation against
 an existing snapshot; `--offline` emits only the generator's built-in curated seed with no network
 access; and `--from-raw DIR` rebuilds deterministically from cached NVD API responses. After a
-refresh, copy the printed SHA-256 into both `BUNDLED_SNAPSHOT_SHA256` in
-`scanner/scanner_tools/device_advisories.py` and the `ENV DEVICE_INTEL_DB_SHA256` line in
-`scanner/Dockerfile`; the drift tests fail until both match.
+refresh, copy the printed SHA-256 into `BUNDLED_SNAPSHOT_SHA256` in
+`scanner/scanner_tools/device_advisories.py` and the snapshot's `generated_at` into
+`BUNDLED_SNAPSHOT_GENERATED_AT`; the drift tests fail until they match. Between releases the same snapshot can be shipped as a signed
+bundle (see [Service intelligence](service-intelligence.md#signed-intelligence-bundles)).
 
 ## Wireless and non-IP extensions
 

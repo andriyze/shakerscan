@@ -1540,7 +1540,7 @@ install_dependencies() {
 
 command_needs_docker_runtime() {
     case "$1" in
-        start|stop|restart|status|scale|logs|gungnir|devices|build|rebuild|reset|shell|db-upgrade|images|redis)
+        start|stop|restart|status|scale|logs|gungnir|devices|build|rebuild|reset|shell|db-upgrade|images|redis|intel)
             return 0
             ;;
         *)
@@ -2474,6 +2474,7 @@ print_help() {
     echo "  deny <id>          Deny a Hunt permission request"
     echo "  knowledge review   Review proposed target-instruction changes (diff, keypress per proposal)"
     echo "  secrets <cmd>      Secrets found on a target: list, revoke, expiry, grant, promote, reveal"
+    echo "  intel <cmd>        Vulnerability intelligence: status, install <bundle path or https URL>"
     echo "  credentials <cmd>  Create, rotate, or admission-test encrypted profiles"
     echo "  collections <cmd>  Upload, bind, or select request collections"
     echo "  evidence export    Export content-free evidence manifests or bundles"
@@ -4151,6 +4152,61 @@ cli_hint() {
     fi
 }
 
+# Signed vulnerability-intelligence bundles live outside the image under results/intel. The engine
+# (inside the api container) verifies the vendor signature and the snapshot digest before a bundle is
+# put in force; a refused or missing bundle leaves the snapshot built into the image in force.
+manage_intel_bundle() {
+    local action="${1:-status}"
+    local source="${2:-}"
+    case "$action" in
+        status)
+            compose exec -T api python -m scanner_tools.intel_bundle status
+            ;;
+        install)
+            if [ -z "$source" ]; then
+                echo -e "${RED}Usage: $(cli_hint) intel install <bundle.tar.gz | bundle directory | https URL>${NC}" >&2
+                return 1
+            fi
+            local incoming="$SCRIPT_DIR/results/intel-incoming.tar.gz"
+            rm -rf "$incoming"
+            case "$source" in
+                https://*)
+                    if ! curl -fsSL --proto '=https' --max-filesize 67108864 -o "$incoming" "$source"; then
+                        echo -e "${RED}Error: could not download the intelligence bundle.${NC}" >&2
+                        return 1
+                    fi
+                    ;;
+                http://*)
+                    echo -e "${RED}Error: intelligence bundles are fetched over HTTPS only.${NC}" >&2
+                    return 1
+                    ;;
+                *)
+                    if [ -d "$source" ]; then
+                        tar -C "$source" -czf "$incoming" manifest.json manifest.sig device_advisories.json || return 1
+                    elif [ -f "$source" ]; then
+                        cp "$source" "$incoming" || return 1
+                    else
+                        echo -e "${RED}Error: $source is not a bundle file or directory.${NC}" >&2
+                        return 1
+                    fi
+                    ;;
+            esac
+            chmod 0644 "$incoming"
+            compose exec -T api python -m scanner_tools.intel_bundle install --from /results/intel-incoming.tar.gz
+            local status=$?
+            rm -f "$incoming"
+            if [ "$status" -eq 0 ]; then
+                echo "Bundle in force for new pages and scans; workers pick it up on their next read."
+            fi
+            return "$status"
+            ;;
+        *)
+            echo -e "${RED}Usage: $(cli_hint) intel status | install <bundle>${NC}" >&2
+            return 1
+            ;;
+    esac
+}
+
 show_env_help() {
     local launcher
     launcher="$(installed_launcher_path 2>/dev/null || true)"
@@ -4651,6 +4707,9 @@ case $COMMAND in
         # A target's discovered secrets: listing never shows a value; reveal, grant and promote
         # are the person's decisions at this terminal, like approve.
         run_v2_product_cli "secrets" "${ARGS[@]}"
+        ;;
+    intel)
+        manage_intel_bundle "${ARGS[@]}"
         ;;
     api)
         if [ ! -f "$SCRIPT_DIR/scripts/api_cli.py" ]; then

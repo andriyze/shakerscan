@@ -91,7 +91,28 @@
                   "kind": "nuclei_template",
                   "id": "CVE-2017-17562"
                 }
-              ]
+              ],
+              "verification": {
+                "status": "available",
+                "template_ids": [
+                  "cve-2017-17562"
+                ],
+                "unavailable_reason": null,
+                "request": {
+                  "target": "https://app.example.test",
+                  "budget_profile": "fast",
+                  "policy": {
+                    "active_testing": true,
+                    "preset": "custom",
+                    "include_families": [
+                      "nuclei_active"
+                    ]
+                  },
+                  "verify_templates": [
+                    "cve-2017-17562"
+                  ]
+                }
+              }
             }
           ],
           "activities": [
@@ -374,7 +395,59 @@
       "sources_truncated": false,
       "findings_truncated": false,
       "unlinked_findings_count": 0,
-      "warnings": []
+      "warnings": [],
+      "listener_groups": [
+        {
+          "key": "tcp/443/goahead/3.0.0",
+          "transport": "tcp",
+          "port": 443,
+          "service": "https",
+          "product": "GoAhead",
+          "version": "3.0.0",
+          "service_ids": [
+            "5e1afacf-9b9e-5214-ab73-bd2269a96b7f"
+          ],
+          "primary_service_id": "5e1afacf-9b9e-5214-ab73-bd2269a96b7f",
+          "max_severity": "high",
+          "known_exploited": 1,
+          "candidate_count": 1,
+          "finding_count": 0,
+          "checks_available": 1,
+          "check_matched": 0,
+          "identity_stale": false,
+          "last_seen_at": "2026-09-16T00:00:00+00:00",
+          "quiet": false
+        },
+        {
+          "key": "udp/161/unknown/",
+          "transport": "udp",
+          "port": 161,
+          "service": "snmp",
+          "product": null,
+          "version": null,
+          "service_ids": [
+            "5e1afacf-9b9e-5214-ab73-bd2269a96b80"
+          ],
+          "primary_service_id": "5e1afacf-9b9e-5214-ab73-bd2269a96b80",
+          "max_severity": null,
+          "known_exploited": 0,
+          "candidate_count": 0,
+          "finding_count": 0,
+          "checks_available": 0,
+          "check_matched": 0,
+          "identity_stale": false,
+          "last_seen_at": "2026-09-16T00:00:00+00:00",
+          "quiet": true
+        }
+      ],
+      "severity_counts": {
+        "critical": 1,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "none": 1,
+        "quiet": 1
+      }
     }
   ],
   "total_targets": 1,
@@ -391,7 +464,14 @@
       "This is a curated offline snapshot, not complete or live CVE coverage.",
       "Version and CPE matches do not establish configuration or distribution backport applicability.",
       "Public exploit references are unexecuted research links, not ShakerScan capabilities."
-    ]
+    ],
+    "source": "builtin",
+    "bundle": {
+      "status": "absent",
+      "bundle_version": null,
+      "generated_at": null,
+      "key_id": null
+    }
   },
   "limitations": [
     "Fixture: no network traffic is generated."

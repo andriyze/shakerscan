@@ -14892,6 +14892,7 @@ def _compile_parallel_child_work_manifests(
             scan_id=child_scan_id,
             target_binding_digest=parent_job.target.digest,
             include_active=policy.active_testing and active_selected,
+            verify_template_ids=tuple(child_options.get("verify_templates") or ()),
         )
         options["template_manifest_ref"] = (
             template_manifest.reference().canonical_dict()

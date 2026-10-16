@@ -29,16 +29,19 @@ KIND_BUDGET_RAISE = "budget.raise"
 KIND_SSH_EXEC = "ssh.exec"
 KIND_SSH_HOST_TRUST = "ssh.host_trust"
 KIND_PREAUTHORIZATION = "preauthorization"
+# 2.11: try a secret discovered on another target on this Hunt's login (hunt/secret_try.py).
+# Only a person's decision grants it; no start bound covers it.
+KIND_SECRET_TRY = "secret.try"
 PERMISSION_KINDS = (
     KIND_TARGET_AUTHORIZE, KIND_CREDENTIAL_USE, KIND_CAPABILITY_ENABLE, KIND_BUDGET_RAISE,
-    KIND_SSH_EXEC, KIND_SSH_HOST_TRUST, KIND_PREAUTHORIZATION,
+    KIND_SSH_EXEC, KIND_SSH_HOST_TRUST, KIND_PREAUTHORIZATION, KIND_SECRET_TRY,
 )
 # Kinds whose refusal creates a request in this release. ssh.exec and ssh.host_trust keep their
 # codes but stay plain refusals: the SSH worker re-reads the profile's command grant and meets
 # the host key only at connection time, so a Hunt-scoped grant could not reach it yet.
 REQUESTABLE_KINDS = frozenset({
     KIND_TARGET_AUTHORIZE, KIND_CREDENTIAL_USE, KIND_CAPABILITY_ENABLE, KIND_BUDGET_RAISE,
-    KIND_PREAUTHORIZATION,
+    KIND_PREAUTHORIZATION, KIND_SECRET_TRY,
 })
 
 
@@ -113,6 +116,13 @@ REASON_CODES: Mapping[str, ReasonSpec] = {
     # Host bounds stored under IDNA 2003 whose IDNA 2008/UTS #46 spelling differs: withheld, and
     # offered back to the person as one pending request (``shakerscan approve``) to grant again.
     "preauthorization_reapproval": ReasonSpec(409, KIND_PREAUTHORIZATION, recorded=False),
+    # Discovered secrets on another target's login (hunt/secret_try.py). The first two ask a
+    # person; the last two are hard limits no grant lifts.
+    "secret_other_target": ReasonSpec(403, KIND_SECRET_TRY),
+    "secret_try_attempts_exhausted": ReasonSpec(403, KIND_SECRET_TRY),
+    "secret_try_rate_limited": ReasonSpec(429),
+    "secret_try_destination_denied": ReasonSpec(403),
+    "secret_try_unrelated_target": ReasonSpec(403),
     # Same key, other action.
     "idempotency_key_reused": ReasonSpec(409, recorded=False),
     # A parked action whose request was not granted.
@@ -201,7 +211,7 @@ def refusal_summary(refusal: HuntRefusal) -> dict[str, Any]:
 
 __all__ = [
     "HuntRefusal", "KIND_BUDGET_RAISE", "KIND_CAPABILITY_ENABLE", "KIND_CREDENTIAL_USE",
-    "KIND_PREAUTHORIZATION", "KIND_SSH_EXEC", "KIND_SSH_HOST_TRUST", "KIND_TARGET_AUTHORIZE",
+    "KIND_PREAUTHORIZATION", "KIND_SECRET_TRY", "KIND_SSH_EXEC", "KIND_SSH_HOST_TRUST", "KIND_TARGET_AUTHORIZE",
     "PERMISSION_KINDS", "PERMISSION_REQUIRED", "REASON_CODES", "REQUESTABLE_KINDS", "ReasonSpec",
     "from_credential_refusal", "reason_kind", "refusal_summary",
 ]

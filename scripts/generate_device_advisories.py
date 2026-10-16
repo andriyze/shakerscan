@@ -604,8 +604,41 @@ def load_template_checks(directory: str | None) -> dict[str, list[str]]:
     return {cve: sorted(set(ids))[:5] for cve, ids in checks.items()}
 
 
+_TEMPLATE_TAGS = re.compile(r"^\s*tags:\s*['\"]?([A-Za-z0-9_,. -]+)", re.MULTILINE)
+_TEMPLATE_CODE_STEP = re.compile(r"^(code|javascript|flow):", re.MULTILINE)
+# Keep in step with api/scan/nuclei_template_index.py EXPLOIT_CLASS_TAGS.
+EXPLOIT_CLASS_TAGS = frozenset({
+    "rce", "lfi", "sqli", "deserialization", "ssti", "xxe", "code-injection", "cmdi", "ssrf",
+})
+
+
+def load_template_safety(directory: str | None) -> dict[str, str]:
+    """Safety class per template id: ``exploit`` (exploit-class tags or a code/javascript/flow
+    step; a verify Scan runs it only with the state-changing tier) or ``probe``."""
+    if not directory:
+        return {}
+    classes: dict[str, str] = {}
+    for root, _dirs, files in os.walk(directory):
+        for name in files:
+            if not name.endswith((".yaml", ".yml")):
+                continue
+            try:
+                with open(os.path.join(root, name), encoding="utf-8", errors="ignore") as handle:
+                    text = handle.read(65536)
+            except OSError:
+                continue
+            template = _TEMPLATE_ID.search(text)
+            if not template:
+                continue
+            tags = {tag.strip().lower() for match in _TEMPLATE_TAGS.findall(text) for tag in match.split(",")}
+            exploit = bool(tags & EXPLOIT_CLASS_TAGS) or bool(_TEMPLATE_CODE_STEP.search(text))
+            if exploit or template.group(1) not in classes:
+                classes[template.group(1)] = "exploit" if exploit else "probe"
+    return classes
+
+
 def enrich(advisories: list[dict], kev: dict[str, dict], epss: dict[str, dict],
-           checks: dict[str, list[str]]) -> None:
+           checks: dict[str, list[str]], safety: dict[str, str] | None = None) -> None:
     """Add exploitation context: known exploited (CISA KEV), likelihood (EPSS) and the checks the
     image's own templates carry for the CVE. Metadata only; nothing here is executed."""
     for item in advisories:
@@ -615,7 +648,11 @@ def enrich(advisories: list[dict], kev: dict[str, dict], epss: dict[str, dict],
         if cve in epss:
             item["epss"] = epss[cve]
         if cve in checks:
-            item["checks"] = [{"kind": "nuclei_template", "id": template} for template in checks[cve]]
+            item["checks"] = [
+                {"kind": "nuclei_template", "id": template,
+                 **({"safety": safety[template]} if safety and template in safety else {})}
+                for template in checks[cve]
+            ]
 
 
 def build_snapshot(entries: list[dict]) -> dict:
@@ -913,7 +950,8 @@ def main(argv: list[str] | None = None) -> int:
           f"skipped {skipped_unbounded} unbounded and {skipped_product} out-of-scope configuration matches",
           file=sys.stderr)
     snapshot = build_snapshot(entries)
-    enrich(snapshot["advisories"], load_kev(args.kev), load_epss(args.epss), load_template_checks(args.templates))
+    enrich(snapshot["advisories"], load_kev(args.kev), load_epss(args.epss), load_template_checks(args.templates),
+           load_template_safety(args.templates))
     snapshot = normalize_snapshot(snapshot)
     digest = write_snapshot(snapshot, args.output)
     for name, count in per_cve_counts.items():

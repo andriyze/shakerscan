@@ -493,7 +493,7 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         ("hunt_id", "skill_id", "state"), idempotent=True,
     ),
     HuntMCPTool(
-        "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query target-scoped Hunt knowledge pages. Follow next_cursor with unchanged kind/filter while has_more is true; count is this page, not a total. kind=interpretations reads attributed interpretations (filter kind, status, negative_state, provenance, hunt_id, text_contains): advisory claims, never proof; agent-written and target-quoted text arrives under untrusted_data. kind=negative_results lists narrow negative results (filter state, source), each valid only for its recorded conditions. kind=changes reports what changed since filter.since (last_hunt, release, scan:<id>, hunt:<id> or an ISO time) from existing records, with the interpretations it affects (applicability needs_revalidation, historical, reopened dismissals). kind=continue (filter.since, default release) is the continue-after-the-latest-release report: changes, what is still applicable, needs revalidation or was not re-observed since the release, unfinished work, reopened dismissals, and the next experiments ranked by fixed rules within this Hunt's authority; it sends nothing. Record your own with the knowledge.record capability.",
+        "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query target-scoped Hunt knowledge pages. Follow next_cursor with unchanged kind/filter while has_more is true; count is this page, not a total. kind=interpretations reads attributed interpretations (filter kind, status, negative_state, provenance, hunt_id, text_contains): advisory claims, never proof; agent-written and target-quoted text arrives under untrusted_data. kind=negative_results lists narrow negative results (filter state, source), each valid only for its recorded conditions. kind=changes reports what changed since filter.since (last_hunt, release, scan:<id>, hunt:<id> or an ISO time) from existing records, with the interpretations it affects (applicability needs_revalidation, historical, reopened dismissals). kind=continue (filter.since, default release) is the continue-after-the-latest-release report: changes, what is still applicable, needs revalidation or was not re-observed since the release, unfinished work, reopened dismissals, and the next experiments ranked by fixed rules within this Hunt's authority; it sends nothing. kind=service_intelligence reads retained service evidence (filter id; filter view=candidates gives one row per listener and CVE candidate, known exploited first, with the check that exists and its verify state). Record your own with the knowledge.record capability.",
         {
             "hunt_id": {"type": "string", "format": "uuid"},
             "kind": {"type": "string", "enum": ["summary", "endpoints", "endpoint_groups", "findings", "hypotheses", "principals", "graph_nodes", "graph_edges", "services", "service_intelligence", "scans", "collections", "candidates", "notes", "receipts", "interpretations", "negative_results", "changes", "continue"]},
@@ -2286,6 +2286,11 @@ class ArsenalClient:
                 payload.setdefault("capabilities", [])
                 payload.setdefault("request_collection_ids", [])
                 payload.setdefault("skill_ids", [])
+                # Whether the agent may see discovered secret values is the person's choice at
+                # start (`shakerscan hunt start --agent-may-see-secrets`); this tool never sends it,
+                # nor a person assertion.
+                payload.pop("secret_visibility", None)
+                payload.pop("allow_asserted_by", None)
                 # The agent's bounds are a proposal for the person, never the person's own.
                 if "allow" in payload:
                     payload["proposed_allow"] = payload.pop("allow")

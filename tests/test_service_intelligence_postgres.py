@@ -63,3 +63,93 @@ async def test_target_pagination_and_historical_device_locator_in_real_postgres(
             assert literal['total_targets'] == 0
     finally:
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_verify_scan_outcomes_read_from_real_scan_action_and_finding_rows():
+    import asyncpg
+    from api.exposure.service_rows import attach_verification, verification_records
+
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("""
+          CREATE TEMP TABLE scans (id uuid,target_id uuid,status text,created_at timestamptz,completed_at timestamptz,options jsonb,
+            target_url text DEFAULT 'https://app.example.test/');
+          CREATE TEMP TABLE scan_capability_actions (scan_id uuid,action_id text,status text,reason_code text,receipt_json jsonb);
+          CREATE TEMP TABLE findings (id uuid,target_id uuid,scan_id uuid,first_seen_scan_id uuid,last_seen_scan_id uuid,
+            status text,severity text,last_seen_at timestamptz,evidence jsonb,proof_state text);
+        """)
+        web, other = uuid.uuid4(), uuid.uuid4()
+        matched, clean, gap, unrelated = (uuid.uuid4() for _ in range(4))
+        stamp = datetime(2026, 10, 16, tzinfo=timezone.utc)
+        rows = [
+            (matched, web, 'completed', stamp, ['cve-2021-41773']),
+            (clean, web, 'completed', stamp.replace(day=15), ['cve-2023-0001']),
+            (gap, web, 'completed', stamp.replace(day=14), ['cve-2024-0002']),
+            (unrelated, other, 'completed', stamp, ['cve-2024-0002']),
+        ]
+        for scan_id, target, status, created, ids in rows:
+            await conn.execute("INSERT INTO scans VALUES ($1,$2,$3,$4,$4,$5::jsonb)", scan_id, target, status, created,
+                               json.dumps({"verify_templates": ids}))
+        await conn.execute("INSERT INTO scans VALUES ($1,$2,'completed',$3,$3,'{}'::jsonb)", uuid.uuid4(), web, stamp)
+        def receipt(ran, excluded=None):
+            return json.dumps({"redacted_execution": {"verify_selection": {
+                "requested": sorted(set(ran) | set(excluded or {})), "ran": ran,
+                "excluded": excluded or {}, "negative_unreliable": {}}}})
+        insert = "INSERT INTO scan_capability_actions VALUES ($1,$2,$3,$4,$5::jsonb)"
+        await conn.execute(insert, matched, 'active.templates', 'success', None, receipt(['cve-2021-41773']))
+        await conn.execute(insert, clean, 'active.templates.002', 'success', None, receipt(['cve-2023-0001']))
+        await conn.execute(insert, gap, 'active.templates', 'skipped', 'verify_checks_excluded',
+                           receipt([], {'cve-2024-0002': 'needs_oob_interaction'}))
+        await conn.execute(insert, unrelated, 'active.templates', 'success', None, receipt(['cve-2024-0002']))
+        finding = uuid.uuid4()
+        await conn.execute("""INSERT INTO findings VALUES ($1,$2,$3,$3,$3,'active','critical',$4,
+                           '{"template_id":"CVE-2021-41773"}'::jsonb,'candidate')""", finding, web, matched, stamp)
+        target = {'id': str(web), 'kind': 'web', 'locator': 'https://app.example.test'}
+        services = [{
+            'id': 'svc', 'application_origin': 'https://app.example.test', 'presence': 'observed_open',
+            'binding_status': 'observation_only',
+            'cve_candidates': [
+                {'id': cve, 'checks': [{'kind': 'nuclei_template', 'id': check}]}
+                for cve, check in (('CVE-2021-41773', 'CVE-2021-41773'), ('CVE-2023-0001', 'cve-2023-0001'),
+                                   ('CVE-2024-0002', 'cve-2024-0002'), ('CVE-2024-0003', 'cve-2024-0003'))
+            ],
+        }]
+        async with conn.transaction(isolation='repeatable_read', readonly=True):
+            records = await verification_records(conn, target, services)
+        attach_verification(target, services, records)
+        states = {item['id']: item['verification'] for item in services[0]['cve_candidates']}
+        assert states['CVE-2021-41773']['status'] == 'check_matched'
+        assert states['CVE-2021-41773']['finding_id'] == str(finding)
+        assert states['CVE-2021-41773']['proof_state'] == 'candidate'
+        assert states['CVE-2023-0001']['status'] == 'check_not_matched'
+        assert states['CVE-2024-0002']['status'] == 'inconclusive'
+        assert 'needs_oob_interaction' in states['CVE-2024-0002']['reason']
+        assert states['CVE-2024-0002']['scan_id'] == str(gap)  # never the other target's Scan
+        assert states['CVE-2024-0003']['status'] == 'available'
+        assert states['CVE-2024-0003']['request']['verify_templates'] == ['cve-2024-0003']
+    finally:
+        await conn.close()
+
+
+
+@pytest.mark.asyncio
+async def test_intel_bundle_high_water_mark_only_rises_and_repairs_the_mark_file(tmp_path):
+    import asyncpg
+    from scanner.scanner_tools import intel_bundle
+
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("DROP TABLE IF EXISTS intel_bundle_high_water")
+        await conn.execute(intel_bundle.HIGH_WATER_SCHEMA_SQL)
+        await conn.execute(intel_bundle.HIGH_WATER_SCHEMA_SQL)  # idempotent on restart
+        assert await intel_bundle.database_high_water(conn) == 0
+        assert await intel_bundle.record_database_high_water(conn, 7, "aaaaaaaaaaaaaaaa") == 7
+        assert await intel_bundle.record_database_high_water(conn, 3, "bbbbbbbbbbbbbbbb") == 7
+        directory = str(tmp_path / "intel")
+        assert intel_bundle.read_high_water(directory) == 0
+        assert await intel_bundle.sync_high_water_from_database(conn, directory) == 7
+        assert intel_bundle.read_high_water(directory) == 7
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS intel_bundle_high_water")
+        await conn.close()

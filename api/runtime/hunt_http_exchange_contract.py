@@ -39,7 +39,8 @@ HTTP_EXCHANGE_PROPERTIES: Mapping[str, Any] = {
                     "the value; it is never shown.")},
             "secret_ref": {"type": "string", "maxLength": 80, "pattern": SECRET_REF_PATTERN,
                 "description": ("A secret discovered on this target earlier (secret://<id>, from "
-                    "secrets.inspect). The worker sends the value; it is never shown.")},
+                    "secrets.inspect). The request must name its origin (scheme://host:port); the "
+                    "secret is sent only there. The worker sends the value; it is never shown.")},
             "capture_name": {"type": "string", "pattern": _NAME},
             "principal": {"type": "string", "enum": ["primary", "secondary", "service"]},
             "profile_id": {"type": "string", "maxLength": 36},
@@ -126,6 +127,9 @@ def validate_exchange_input(values: Mapping[str, Any]) -> None:
                 raise ValueError("withheld_ref must be a withheld://hunt/<action id>/<n> reference")
             if "secret_ref" in binding and not re.fullmatch(SECRET_REF_PATTERN, str(binding["secret_ref"])):
                 raise ValueError("secret_ref must be a secret://<id> reference")
+            if "secret_ref" in binding and not str(values.get("origin") or "").strip():
+                # Never a default origin: the person allows (and the worker sends to) one named login.
+                raise ValueError("a request binding a secret_ref must name its origin (scheme://host:port)")
             if any(k in binding for k in ("capture_name", "credential_field", "profile_version")):
                 raise ValueError("withheld value binding takes only its reference and a destination")
         elif "source_action_id" in binding:

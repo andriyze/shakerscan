@@ -127,8 +127,11 @@ def test_late_worker_never_restores_capture_after_terminal_hunt(status, complete
 
 
 def test_a_discovered_secret_reference_is_a_binding_source():
-    validate(request_bindings=[{'secret_ref': 'secret://11111111-2222-4333-8444-555555555555',
-                                'header': 'Authorization', 'prefix': 'Bearer '}])
+    secret = {'secret_ref': 'secret://11111111-2222-4333-8444-555555555555',
+              'header': 'Authorization', 'prefix': 'Bearer '}
+    validate(origin='https://app.example.test', request_bindings=[secret])
+    with pytest.raises(ValueError, match='must name its origin'):
+        validate(request_bindings=[secret])   # never sent to a default origin
     for bad in (
         {'secret_ref': 'secret://not-a-uuid', 'header': 'X-Key'},
         {'secret_ref': 'secret://11111111-2222-4333-8444-555555555555',
@@ -137,4 +140,4 @@ def test_a_discovered_secret_reference_is_a_binding_source():
          'header': 'X-Key'},
     ):
         with pytest.raises(ValueError):
-            validate(request_bindings=[bad])
+            validate(origin='https://app.example.test', request_bindings=[bad])

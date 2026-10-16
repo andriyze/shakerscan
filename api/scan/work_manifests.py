@@ -13,6 +13,13 @@ from typing import Any, Iterable, Mapping, Sequence
 import urllib.parse
 import uuid
 
+from .verify_templates import (
+    VerifyTemplatesError,
+    manifest_verify_template_ids,
+    verify_scan_options,
+    verify_template_rows,
+)
+
 try:
     from scanner_tools.url_redaction import redact_path
 except ModuleNotFoundError:  # package import through api.scan
@@ -1661,19 +1668,29 @@ def build_canonical_scan_nuclei_template_manifest(
     scan_id: str,
     target_binding_digest: str,
     include_active: bool,
+    verify_template_ids: Sequence[str] = (),
 ) -> ScanWorkManifest:
-    """Freeze the passive pack and, when authorized, the active pack together."""
+    """Freeze the passive pack and, when authorized, the active pack together.
+
+    A verify Scan freezes exactly its verify templates in place of the active pack, so its
+    active step runs those checks and nothing else.
+    """
     templates: list[Mapping[str, Any]] = list(
         _canonical_passive_nuclei_manifest_rows()
     )
     source_action_ids = ["passive.templates"]
     if include_active:
-        templates.append({
+        verify_rows = verify_template_rows(
+            verify_template_ids,
+            bundle_commit=CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT,
+            bundle_sha256=CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256,
+        )
+        templates.extend(verify_rows or [{
             "template_id": CANONICAL_NUCLEI_TEMPLATE_PACK_ID,
             "template_digest": canonical_nuclei_template_pack_digest(),
             "risk": "safe_active",
             "tags": list(CANONICAL_NUCLEI_TEMPLATE_TAGS),
-        })
+        }])
         source_action_ids.append("active.templates")
     return build_template_manifest(
         scan_id=scan_id,
@@ -1736,9 +1753,18 @@ def canonical_nuclei_options_for_manifest(
     expected_passive = {
         str(row["template_id"]): row for row in passive_rows
     }
+    try:
+        verify_ids = manifest_verify_template_ids(
+            manifest.entries,
+            bundle_commit=CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT,
+            bundle_sha256=CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256,
+        )
+    except VerifyTemplatesError as exc:
+        raise ScanWorkManifestError(str(exc)) from exc
     allowed_ids = {
         *expected_passive,
         CANONICAL_NUCLEI_TEMPLATE_PACK_ID,
+        *verify_ids,
     }
     if set(entries_by_id) - allowed_ids:
         raise ScanWorkManifestError(
@@ -1770,6 +1796,16 @@ def canonical_nuclei_options_for_manifest(
         }
 
     entry = entries_by_id.get(CANONICAL_NUCLEI_TEMPLATE_PACK_ID)
+    if verify_ids:
+        if entry is not None:
+            raise ScanWorkManifestError(
+                "template manifest mixes verify templates with the active pack"
+            )
+        return verify_scan_options(
+            verify_ids,
+            bundle_commit=CANONICAL_NUCLEI_TEMPLATE_BUNDLE_COMMIT,
+            bundle_sha256=CANONICAL_NUCLEI_TEMPLATE_BUNDLE_SHA256,
+        )
     if (
         entry is None
         or entry.get("template_digest") != canonical_nuclei_template_pack_digest()

@@ -29,7 +29,40 @@ export interface ServiceCandidate {
   cvss_score?: number | null
   known_exploited?: { date_added: string | null; ransomware: boolean } | null
   epss?: { score: number; percentile: number | null } | null
-  checks?: Array<{ kind: string; id: string }>
+  checks?: Array<{ kind: string; id: string; safety?: 'exploit' | 'probe' }>
+  // 2.11: whether the named check ran in a verify Scan and what it found. Absent on an older engine.
+  verification?: ServiceVerification
+}
+export interface ServiceVerification {
+  status: 'no_check' | 'available' | 'unavailable' | 'pending' | 'check_matched' | 'check_not_matched' | 'inconclusive'
+  template_ids: string[]
+  request?: Record<string, unknown> | null
+  unavailable_reason?: string | null
+  scan_id?: string
+  checked_at?: string | null
+  finding_id?: string
+  finding_status?: string | null
+  proof_state?: string | null
+  reason?: string
+}
+export interface ListenerGroup {
+  key: string
+  transport: 'tcp' | 'udp'
+  port: number
+  service: string
+  product: string | null
+  version: string | null
+  service_ids: string[]
+  primary_service_id: string
+  max_severity: 'critical' | 'high' | 'medium' | 'low' | null
+  known_exploited: number
+  candidate_count: number
+  finding_count: number
+  checks_available: number
+  check_matched: number
+  identity_stale: boolean
+  last_seen_at: string | null
+  quiet: boolean
 }
 export interface ServiceActivity {
   id: string
@@ -90,6 +123,8 @@ export interface ServiceTarget {
   findings_truncated: boolean
   unlinked_findings_count: number
   warnings: string[]
+  listener_groups?: ListenerGroup[]
+  severity_counts?: Record<'critical' | 'high' | 'medium' | 'low' | 'none' | 'quiet', number>
 }
 export interface ServicePage {
   schema_version: string
@@ -104,6 +139,8 @@ export interface ServicePage {
     snapshot_sha256: string | null
     record_count: number
     coverage: string
+    source?: 'builtin' | 'external_bundle' | 'operator_pinned'
+    bundle?: { status: string; bundle_version: number | null; generated_at: string | null; key_id: string | null }
     limitations: string[]
   }
   limitations: string[]
@@ -127,5 +164,17 @@ export async function getServiceIntelligence(options: {
   params.set('offset', String(options.offset ?? 0))
   const response = await fetchHeavyRead(`${API_URL}/exposure/services?${params}`, { signal: options.signal, cache: 'no-store' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to load service evidence'))
+  return response.json()
+}
+
+// Verify a candidate: the server supplies the exact Scan request (the target's origin, the active
+// template family and the named checks); this submits it as an ordinary Scan.
+export async function submitVerifyScan(request: Record<string, unknown>): Promise<{ scan_id?: string; id?: string }> {
+  const response = await fetch(`${API_URL}/scans`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to start the verify Scan'))
   return response.json()
 }
