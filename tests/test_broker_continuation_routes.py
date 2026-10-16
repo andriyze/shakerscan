@@ -151,7 +151,8 @@ def test_broker_retries_current_round_next_round_and_cancellation(monkeypatch):
 
 
 def test_a_node_past_its_limit_asks_for_the_finalizer_and_gets_it_stored(monkeypatch):
-    """B7: a node's ``finalize_only`` on a running Scan stores the terminal revision."""
+    """B7: a node's ``finalize_only`` on a running Scan past its limit stores the terminal
+    revision; before the control plane's limit it is refused."""
     async def scenario():
         fixture = _shared_round_fixture()
         root = fixture["parent_plan"]
@@ -200,23 +201,37 @@ def test_a_node_past_its_limit_asks_for_the_finalizer_and_gets_it_stored(monkeyp
                                                 include_finalizer=True, finalize_only=True)
             return result.plan, result.revision, result.options
 
-        async def not_reached(*_args, **_kwargs):
-            return False
+        limit = {"reached": False, "tolerances": []}
+
+        async def time_limit(*_args, tolerance_seconds=0.0, **_kwargs):
+            limit["tolerances"].append(tolerance_seconds)
+            return limit["reached"]
 
         monkeypatch.setattr(routes, "_pool", lambda: Pool())
         monkeypatch.setattr(routes, "_broker_authenticated_node", authenticated)
         monkeypatch.setattr(routes, "_broker_lease_row", lease)
         monkeypatch.setattr(routes, "PostgresScanActionStore", ActionStore)
-        monkeypatch.setattr(routes, "_broker_scan_time_limit_reached", not_reached)
+        monkeypatch.setattr(routes, "_broker_scan_time_limit_reached", time_limit)
         monkeypatch.setattr(routes, "CanonicalScanJob", SimpleNamespace(from_payload=lambda _raw: SimpleNamespace(
             scan_id=root.scan_id, execution_plan=SimpleNamespace(digest=fixture["allocation"].execution_plan_digest),
             target=SimpleNamespace(digest=fixture["target"].digest, target_id="70000000-0000-4000-8000-000000000002"),
         )))
         monkeypatch.setattr(routes, "_materialize_broker_scan_continuation", materialize)
-        response = await routes.continue_broker_scan_action_plan(
-            "node", "lease", routes.BrokerScanContinuationRequest(
-                job_lease_token="x" * 32, worker_id="broker:node:container", plan_digest=root.plan_digest,
-                allocation_digest=fixture["allocation"].allocation_digest, finalize_only=True), None)
+
+        def ask():
+            return routes.continue_broker_scan_action_plan(
+                "node", "lease", routes.BrokerScanContinuationRequest(
+                    job_lease_token="x" * 32, worker_id="broker:node:container", plan_digest=root.plan_digest,
+                    allocation_digest=fixture["allocation"].allocation_digest, finalize_only=True), None)
+
+        # Review sweep L6: on a running Scan whose limit the control plane has not reached, a
+        # node's finalize_only is refused; nothing is compiled or stored.
+        with pytest.raises(routes.HTTPException) as early:
+            await ask()
+        assert early.value.status_code == 409 and seen == []
+        assert limit["tolerances"] == [routes.TIME_LIMIT_STOP_GRACE_SECONDS]
+        limit["reached"] = True
+        response = await ask()
         assert seen == [(True, True)] and response["time_limit_reached"] is True
     asyncio.run(scenario())
 
@@ -248,3 +263,34 @@ def test_the_scan_time_limit_is_measured_from_the_scans_start(monkeypatch):
         Pool(), scan_id="70000000-0000-4000-8000-000000000001",
         options={"scan_execution_plan": {"budget": {"max_duration_seconds": 600}}}))
     assert limit["max_duration_seconds"] == 600 and 695 <= limit["elapsed_seconds"] <= 710
+
+
+def test_the_finalize_only_tolerance_covers_only_the_stop_grace(monkeypatch):
+    """Review sweep L6: a node's request just before the control plane's limit (the time the
+    request took) is within the tolerance; one well before it is not."""
+    from datetime import datetime, timezone
+
+    class Connection:
+        async def fetchval(self, _sql, _scan_id):
+            return state["started"]
+
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self):
+            yield Connection()
+
+    monkeypatch.setattr(routes, "_pool", lambda: Pool())
+    job = SimpleNamespace(execution_plan=SimpleNamespace(budget=SimpleNamespace(max_duration_seconds=3600)),
+                          shard=None)
+    now = datetime.now(timezone.utc)
+    from api.scan.scan_deadline import finalization_reserve_seconds
+    deadline_offset = 3600 - finalization_reserve_seconds(3600)
+    state = {"started": now - timedelta(seconds=deadline_offset - 5)}
+    check = routes._broker_scan_time_limit_reached
+    scan = "70000000-0000-4000-8000-000000000001"
+    assert asyncio.run(check(None, scan_id=scan, canonical_job=job)) is False
+    assert asyncio.run(check(None, scan_id=scan, canonical_job=job,
+                             tolerance_seconds=routes.TIME_LIMIT_STOP_GRACE_SECONDS)) is True
+    state["started"] = now - timedelta(seconds=deadline_offset - 300)
+    assert asyncio.run(check(None, scan_id=scan, canonical_job=job,
+                             tolerance_seconds=routes.TIME_LIMIT_STOP_GRACE_SECONDS)) is False
