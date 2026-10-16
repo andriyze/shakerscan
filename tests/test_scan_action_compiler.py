@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from api.http_experiment import MAX_REDIRECT_HOPS
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from api.scan.action_plan import (
@@ -363,7 +364,7 @@ def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families(
     assert "verify.sqli" not in by_id
     assert "active.templates" not in by_id
     assert "discover.web_content" not in by_id
-    assert by_id["baseline.http_redirect"].requested_budget["http_requests"] == 2
+    assert by_id["baseline.http_redirect"].requested_budget["http_requests"] == 1 + MAX_REDIRECT_HOPS
     assert by_id["baseline.tls"].capability_args == {
         "origins_ref": "frozen_https_origins",
         "origin_count": 1,
@@ -1279,3 +1280,70 @@ def test_a_plan_is_sized_by_the_ledger_that_will_reserve_it():
     # ledgers disagreeing is the defect, not any single oversized action.
     with pytest.raises(ScanBudgetAllocationError):
         allocate_scan_action_plan(parent_sized, _ShardLedger())
+
+
+def test_cheap_read_only_verifiers_run_before_the_long_active_batches():
+    """Exposure and GraphQL verification are ordered ahead of active templates and injection.
+
+    Lab, release/2.11.0 (juice-shop, VAmPI, thorough): the active template batch ran 25
+    minutes and SQLi verification the rest of the Scan's wall; every exposure batch was still
+    waiting at the time limit and never started, so no exposure was proven. The cheap
+    verifiers take minutes and now go first.
+    """
+    profile = "thorough"
+    budget = BUDGET_PROFILES[profile]
+    execution = ScanExecutionPlan(
+        policy=ScanPolicy(
+            active_testing=True,
+            allow_state_changing_http=True,
+            network_discovery=False,
+            subdomain_discovery=False,
+            include_families=(
+                "recon", "nuclei_passive", "nuclei_active",
+                "xss", "sqli", "sensitive_exposure", "nosqli", "graphql",
+            ),
+            exclude_families=(),
+            scope_receipt_id=_target().scope_receipt_id,
+            approval_receipt_id=str(uuid.UUID("10000000-0000-0000-0000-000000000004")),
+        ),
+        budget_profile=profile,
+        budget=budget,
+    )
+    endpoint_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000093",
+        kind="endpoint",
+        content_schema="endpoint-manifest/v2",
+        manifest_digest="e" * 64,
+        entry_count=60,
+        status="complete",
+    ).canonical_dict()
+    candidate_ref = ScanWorkManifestReference(
+        manifest_id="10000000-0000-4000-8000-000000000094",
+        kind="candidate",
+        content_schema="candidate-manifest/v1",
+        manifest_digest="f" * 64,
+        entry_count=40,
+        status="complete",
+    ).canonical_dict()
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=execution,
+        target_binding=_target(),
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=candidate_ref,
+        template_manifest_ref=build_canonical_scan_nuclei_template_manifest(
+            scan_id=SCAN_ID,
+            target_binding_digest=_target().digest,
+            include_active=True,
+        ).reference().canonical_dict(),
+    )
+    ordinals: dict[str, list[int]] = {}
+    for action in plan.actions:
+        ordinals.setdefault(action.capability_name, []).append(action.ordinal)
+    cheap = [*ordinals["exposure.verify_batch"], *ordinals.get("graphql.verify_batch", [])]
+    long_running = [
+        *ordinals["templates.active_batch"], *ordinals["xss.verify_batch"],
+        *ordinals["sqli.verify_batch"], *ordinals.get("nosqli.verify_batch", []),
+    ]
+    assert cheap and long_running
+    assert max(cheap) < min(long_running)

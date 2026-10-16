@@ -7,6 +7,7 @@ import json
 import re
 import urllib.parse
 from collections import Counter
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from . import scoring
@@ -421,8 +422,57 @@ def _baseline_header_responses(
             "response_status": status,
             "observed_headers": dict(sorted(headers.items())),
             "source_action_id": "baseline.http",
+            "principal": _observed_principal(request),
+        }
+    # An origin whose root answers with a redirect (a login page behind ``/``) shows its
+    # application headers on the page it redirects to. ``baseline.http_redirect`` starts at
+    # ``http://host/`` and follows redirects within the bound origins (MAX_REDIRECT_HOPS), so an
+    # HTTP origin lands on ``/login`` in one hop and an HTTPS one through the scheme upgrade in
+    # two. When that lands on a 2xx of the SAME origin whose root answered 3xx, the landing
+    # response is the origin's recorded application response. A landing on another origin proves
+    # nothing about this one. The landing request is anonymous, so it is credited only when the
+    # root response it stands in for was anonymous too: an authenticated root redirects to a page
+    # the anonymous login page does not describe. An HTTPS target whose plain-HTTP origin is not
+    # bound has no landing observation, and its root-redirect proof stays a candidate.
+    for row in observations.get("baseline.http_redirect", ()) or ():
+        if not isinstance(row, Mapping) or row.get("kind") != "http_observation":
+            continue
+        response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
+        status = response.get("status")
+        final_url = str(response.get("final_url") or "")
+        origin = _http_origin(final_url)
+        current = responses.get(origin) if origin else None
+        landing_principal = _observed_principal(
+            row.get("request") if isinstance(row.get("request"), Mapping) else {},
+        )
+        if (
+            current is None or not 300 <= int(current["response_status"]) < 400
+            or current.get("principal") != landing_principal
+            or type(status) is not int or not 200 <= status < 300
+            or not isinstance(response.get("security_headers"), Mapping)
+        ):
+            continue
+        headers = {}
+        for source in (response.get("selected_headers"), response.get("security_headers")):
+            if isinstance(source, Mapping):
+                headers.update({
+                    str(name).lower()[:120]: str(value)[:2_000] for name, value in source.items()
+                })
+        method = str((row.get("request") or {}).get("method") or "GET").upper()[:16]
+        parsed = urllib.parse.urlsplit(final_url)
+        responses[origin] = {
+            "request_line": f"{method} {origin}{(parsed.path or '/')[:2_000]}",
+            "response_status": status,
+            "observed_headers": dict(sorted(headers.items())),
+            "source_action_id": "baseline.http_redirect",
+            "principal": landing_principal,
         }
     return responses
+
+
+def _observed_principal(request: Mapping[str, Any]) -> str:
+    """The principal slot an HTTP observation was sent as (``anonymous`` unless recorded)."""
+    return str(request.get("as_principal") or "anonymous")[:80]
 
 
 # Cookies that carry a login session by their conventional names. A flag missing on one of these
@@ -503,7 +553,7 @@ def _baseline_cookie_findings(
 def _attach_observed_header_responses(
     findings: Sequence[dict[str, Any]],
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
-    baseline_receipt: Mapping[str, Any] | None = None,
+    baseline_receipts: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     """Give each missing-header finding the recorded response that lacks the header.
 
@@ -533,6 +583,7 @@ def _attach_observed_header_responses(
         # The pinned baseline response of this origin is an application response (2xx) that
         # lacks a header the capability always records: that response is the deterministic
         # proof. A redirect or an error page lacking it proves nothing about the application.
+        baseline_receipt = dict(baseline_receipts or {}).get(observed["source_action_id"])
         if baseline_receipt is None or not 200 <= int(observed["response_status"]) < 300:
             continue
         finding.update({
@@ -1366,6 +1417,13 @@ def _findings_for_action(
             if severity not in scoring.SEVERITY_WEIGHT:
                 severity = "info"
             title, header_name = _header_template_title(item)
+            # HSTS is honoured only over HTTPS (RFC 6797 §8.1): a browser ignores the header on a
+            # plain-HTTP response, so its absence there is not a weakness of that origin.
+            if (
+                header_name == "strict-transport-security"
+                and urllib.parse.urlsplit(str(matched_url or "")).scheme.lower() != "https"
+            ):
+                continue
             classification = template_classification(item)
             # A response header policy is a property of the origin, not of the path that
             # happened to be requested. Emitting the match per URL turned one missing header
@@ -1420,6 +1478,99 @@ def _findings_for_action(
             findings.append(finding)
     # One calibrated severity per class, with its reason kept in the evidence.
     return calibrate_findings(findings)
+
+
+def _exposure_location(url: Any) -> str | None:
+    origin = _http_origin(url)
+    if not origin:
+        return None
+    path = urllib.parse.urlsplit(str(url)).path or "/"
+    return f"{origin}{path.rstrip('/') or '/'}"
+
+
+# A passive-pack template folds into a proven exposure only when it detects the same exposure
+# class (``exposure_probe._CLASS_SEVERITY``) that the probe proved at the same URL. Any other
+# template matching that URL -- a CVE at /console, GraphQL batching at /graphql -- reports
+# something else and stays a finding of its own.
+_TEMPLATE_EXPOSURE_CLASSES: Mapping[str, frozenset[str]] = MappingProxyType({
+    "git-config": frozenset({"version_control_exposure"}),
+    "git-credentials-disclosure": frozenset({"configuration_secret_file"}),
+    "web-config": frozenset({"configuration_secret_file"}),
+    "openapi": frozenset({"api_specification_secret"}),
+})
+_CORROBORATING_TEMPLATE_SAMPLES = 10
+_SEVERITY_RANK = MappingProxyType({
+    "info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4,
+})
+
+
+def _merge_template_candidates_into_exposure_proofs(
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One finding per exposed file: a template candidate for a proven exposure joins it.
+
+    The passive pack's git-config / git-credentials templates match the same file the exposure
+    probe proves (``/.git/config``, ``/.git-credentials``), so a Scan reported the issue twice,
+    once proven and once as a candidate still to verify. A candidate template match is kept as
+    corroborating evidence on a verified exposure proof only when all of these hold: its URL
+    (origin and path) is the proof's URL, its template detects the proof's exposure class
+    (``_TEMPLATE_EXPOSURE_CLASSES``), and its severity does not exceed the proof's. Every
+    other match stays a finding of its own. The first samples are listed and every folded
+    match is counted, so nothing disappears past the sample cap.
+    """
+    proven: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        if (
+            finding.get("tool") == "shakerscan_exposure_probe"
+            and finding.get("proof_state") == "verified"
+        ):
+            location = _exposure_location(finding.get("url"))
+            if location:
+                proven.setdefault(location, []).append(finding)
+    if not proven:
+        return findings
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        target = (
+            _corroborated_exposure_proof(finding, proven)
+            if finding.get("tool") == "nuclei" and finding.get("proof_state") == "candidate"
+            else None
+        )
+        if target is None:
+            kept.append(finding)
+            continue
+        evidence = finding["evidence"]
+        target_evidence = target["evidence"]
+        target_evidence["corroborating_template_count"] = (
+            int(target_evidence.get("corroborating_template_count") or 0) + 1
+        )
+        corroborating = target_evidence.setdefault("corroborating_templates", [])
+        if len(corroborating) < _CORROBORATING_TEMPLATE_SAMPLES:
+            corroborating.append({
+                "template_id": evidence.get("template_id"),
+                "matcher_name": evidence.get("matcher_name"),
+                "title": finding.get("title"),
+                "severity": finding.get("severity"),
+            })
+    return kept
+
+
+def _corroborated_exposure_proof(
+    candidate: Mapping[str, Any], proven: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), Mapping) else {}
+    if evidence.get("header_name"):
+        return None
+    classes = _TEMPLATE_EXPOSURE_CLASSES.get(str(evidence.get("template_id") or ""))
+    candidate_rank = _SEVERITY_RANK.get(str(candidate.get("severity") or "").lower())
+    if not classes or candidate_rank is None:
+        return None
+    for proof in proven.get(_exposure_location(candidate.get("url")) or "", ()):
+        proof_evidence = proof.get("evidence") if isinstance(proof.get("evidence"), Mapping) else {}
+        proof_rank = _SEVERITY_RANK.get(str(proof.get("severity") or "").lower(), -1)
+        if str(proof_evidence.get("exposure_class") or "") in classes and candidate_rank <= proof_rank:
+            return proof
+    return None
 
 
 def _finding_identity(finding: Mapping[str, Any]) -> str:
@@ -2119,11 +2270,14 @@ def finalize_scan_report(
             "budget_reserved": dict(result.budget_reserved),
             "budget_consumed": dict(result.budget_consumed),
         })
-    findings = list(findings_by_id.values())
-    baseline_result = action_results.get("baseline.http")
+    findings = _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values()))
     _attach_observed_header_responses(
         findings, observations,
-        _receipt(baseline_result) if baseline_result is not None else None,
+        {
+            action_id: _receipt(action_results[action_id])
+            for action_id in ("baseline.http", "baseline.http_redirect")
+            if action_results.get(action_id) is not None
+        },
     )
 
     # Family-aware coverage: every selected family (one that produced a batch or

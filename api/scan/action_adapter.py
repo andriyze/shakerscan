@@ -274,7 +274,7 @@ from .capability_execution import (
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import _observed_url_key, finalize_scan_report
-from .nuclei_execution import resolve_active_scan_nuclei_options
+from .nuclei_execution import active_template_window, resolve_active_scan_nuclei_options
 from .negative_control import negative_control_entries
 from .nuclei_template_index import nuclei_templates_directory
 from .private_inputs import BrokerPrivateScanInputs
@@ -3887,6 +3887,7 @@ class DatabaseNeutralScanActionDispatcher:
         retried = 0
         attempt_log: list[tuple[str, int, bool, bool]] = []
         work = [(manifest_index, row, 0) for manifest_index, row in rows]
+        template_windows: dict[str, dict[str, int]] = {}
         first_pass = len(work)
         position = 0
         # SQLi candidates of one slice may run concurrently, inside the slice's reservation and
@@ -4027,6 +4028,8 @@ class DatabaseNeutralScanActionDispatcher:
             attempt = {
                 "attempt_id": attempt_id,
                 "candidate_id": candidate_id,
+                **({"template_window": template_windows[candidate_id]}
+                   if candidate_id in template_windows else {}),
                 "status": result.status,
                 "timed_out": bool(result.timed_out),
                 "budget_consumed": dict(result.actual_budget),
@@ -4499,6 +4502,14 @@ class DatabaseNeutralScanActionDispatcher:
                     if tool == "nuclei":
                         scanner_options.update(worker_template_options)
                         args.update(args_template_options)
+                        # A verify Scan runs exactly the checks it names, never a window of them.
+                        if (worker_template_options.get("template_profile") == "active"
+                                and verify_selection is None):
+                            window = active_template_window(
+                                str(worker_template_options.get("template_ids") or ""), manifest_index,
+                            )
+                            scanner_options["template_ids"] = window.template_ids
+                            template_windows[candidate_id] = window.record()
                     elif tool == "dalfox":
                         scanner_options["severity"] = "high"
                         args["severity"] = "high"

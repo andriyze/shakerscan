@@ -216,3 +216,28 @@ def test_credential_revision_metadata_survives_without_opening_secret_values():
         assert redact_receipt_value({key: 3}) == {key: 3}
         for value in ("seeded-secret", True, -1, 0, 2_147_483_648, 1.5):
             assert redact_receipt_value({key: value}) == {key: "***"}
+
+
+def test_value_free_set_cookie_metadata_survives_receipt_redaction():
+    # The HTTP capability records each Set-Cookie's name and flags, never its value. The word
+    # "cookie" masked the whole list in every stored observation, so the finalizer's session
+    # cookie flag proof never saw a cookie on a real Scan (lab: DVWA's PHPSESSID).
+    cookies = [
+        {"name": "PHPSESSID", "secure": False, "httponly": False, "samesite": None},
+        {"name": "security", "secure": False, "httponly": True, "samesite": "lax"},
+    ]
+    observation = {"kind": "http_observation",
+                   "response": {"status": 302, "set_cookie_metadata": cookies}}
+    assert redact_receipt_value(observation)["response"]["set_cookie_metadata"] == cookies
+
+
+@pytest.mark.parametrize("shape", [
+    [{"name": "sid", "value": "abc123"}],                      # a value field
+    [{"name": "sid=abc123; Path=/", "httponly": False}],      # a raw header as the name
+    [{"name": "sid", "secure": "yes"}],                        # a non-boolean flag
+    [{"name": "sid", "samesite": "abc123"}],                   # an unknown SameSite value
+    "PHPSESSID=abc123",                                        # not a list
+])
+def test_any_other_shape_under_set_cookie_metadata_stays_masked(shape):
+    redacted = redact_receipt_value({"response": {"set_cookie_metadata": shape}})
+    assert redacted["response"]["set_cookie_metadata"] == "***"
