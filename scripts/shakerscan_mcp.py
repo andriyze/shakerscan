@@ -2286,6 +2286,11 @@ class ArsenalClient:
                 payload.setdefault("capabilities", [])
                 payload.setdefault("request_collection_ids", [])
                 payload.setdefault("skill_ids", [])
+                # Whether the agent may see discovered secret values is the person's choice at
+                # start (`shakerscan hunt start --agent-may-see-secrets`); this tool never sends it,
+                # nor a person assertion.
+                payload.pop("secret_visibility", None)
+                payload.pop("allow_asserted_by", None)
                 # The agent's bounds are a proposal for the person, never the person's own.
                 if "allow" in payload:
                     payload["proposed_allow"] = payload.pop("allow")

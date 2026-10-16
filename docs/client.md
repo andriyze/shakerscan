@@ -401,6 +401,32 @@ on an open-source engine after a `y` keypress (a pipe or a paste never decides),
 your step-up for that one decision (the gateway applies it; a token alone never can). A revealed
 value is shown in that terminal only, with control characters escaped.
 
+**Trying a secret on another target's login.** A Hunt of target B may want to try a password found
+on target A on B's login. It never does so on its own: the attempt is refused with
+`secret_other_target` and a permission request is raised (`shakerscan approve <id>` shows the
+secret by field name, kind and length, the target it was found on and the exact login). Allowing it
+lets that Hunt try that secret on that login only, 3 times unless you choose 1-10, and never more
+than 3 times per 15 minutes on one host across Hunts; each attempt is recorded with the login's
+answer on the Hunt record. No start bound (`--allow`) covers it. Some logins never receive a
+discovered secret at all (the shared `honey.shakerscan.com/hub` demonstration login, and any
+`host/path` listed in `SHAKERSCAN_SECRET_TRY_DENY`), whether named by host or reached at one of
+their addresses; a request carrying a discovered secret follows no redirect. Only secrets of
+related targets (same root domain or host asset, the ones `secrets.inspect` lists) can be asked
+about; any other needs your `shakerscan secrets grant`.
+
+**Letting the agent see values.** By default a Hunt's agent never sees a discovered value.
+`shakerscan hunt start ... --agent-may-see-secrets` (for a local model you trust with them) lets
+that Hunt's `secrets.inspect` answer carry the values of secrets found on that target (never one
+another target granted to it). The engine accepts it only with the person who chose it
+(`allow_asserted_by`) and records that name; the agent's start tool never sends it, and nothing
+changes it after the start. Be aware that on a local open-source install published only on
+loopback, anyone with access to the local API, a local agent included, can make that same
+assertion: your host is the boundary there. On any other install it needs a step-up, which the
+Enterprise gateway does not offer for it yet (it strips the field). Each value shown is recorded as a reveal (`reveals` in `shakerscan secrets list`,
+`disclosed_to_agent` on the Hunt record); stored actions, receipts, records and logs never hold the
+value, and a retried call returns the answer without it. A connected (Enterprise) instance refuses
+the option until its gateway records your step-up for it.
+
 ## Hunt from a script
 
 ```bash

@@ -12,8 +12,10 @@ Rules:
   and never written to any other table, log, receipt or output. Without the stable installation
   key nothing is stored.
 - A reference resolves only for a live Hunt of the secret's own target, while the row is
-  ``active`` and unexpired. Using it on another target needs an operator grant (not in this
-  version: refused with ``secret_target_mismatch``).
+  ``active`` and unexpired. Another target's Hunt may use it under an operator grant to that
+  target (``discovered_secret_grants``), or on one exact login after a person allowed that try
+  (a ``secret.try`` permission request, hunt/secret_try.py: bounded attempts, rate limited,
+  audited, never automatic); otherwise it is refused with ``secret_target_mismatch``.
 - Repeated sightings refresh ``last_seen_at``, ``seen_count`` and the expiry; a revoked row stays
   revoked (an operator decision), an expired one becomes active again.
 - Every resolution is appended to ``discovered_secret_uses`` with the action and destination host.
@@ -136,6 +138,28 @@ BEGIN
     END IF;
 END
 $i_discovered_secret_uses_run$;
+DO $ds_uses_try$
+BEGIN
+    -- 2.11 (hunt/secret_try.py): the person's grant an attempt on another target's login used,
+    -- and what the login answered. Checked first: ALTER TABLE takes an exclusive lock even when
+    -- the column exists. Nullable, no default, no foreign key: no rewrite, no lock on another table.
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'discovered_secret_uses'
+          AND column_name = 'permission_grant_id'
+    ) THEN
+        ALTER TABLE discovered_secret_uses ADD COLUMN permission_grant_id UUID;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'discovered_secret_uses'
+          AND column_name = 'outcome'
+    ) THEN
+        ALTER TABLE discovered_secret_uses ADD COLUMN outcome TEXT
+            CHECK (outcome IS NULL OR length(outcome) <= 80);
+    END IF;
+END
+$ds_uses_try$;
 CREATE TABLE IF NOT EXISTS discovered_secret_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
@@ -168,6 +192,14 @@ def _secret_store() -> Any:
     except ModuleNotFoundError:  # package layout in host-side tests
         from .. import secret_store
     return secret_store
+
+
+def _secret_try() -> Any:
+    try:
+        from hunt import secret_try
+    except ModuleNotFoundError:  # package layout
+        from . import secret_try
+    return secret_try
 
 
 def _transforms() -> Any:
@@ -333,13 +365,14 @@ HUNT_USE_SCHEMA = "hunt-discovered-secret-use/v1"
 
 async def read_hunt_uses(conn: Any, hunt_run_id: Any, *, limit: int = 2000) -> list[dict[str, Any]]:
     """Every ``secret://`` resolution of a Hunt, oldest first, for its record: the reference,
-    kind, label, action and destination host. Metadata only, never a value; operator reveals
-    (no Hunt) are not Hunt uses."""
+    kind, label, action and destination host, and each value shown to the Hunt's agent when its
+    starting person allowed that. Metadata only, never a value; operator reveals (no Hunt) are not
+    Hunt uses."""
     rows = await conn.fetch(
         """SELECT u.id, u.secret_id, u.action_id, u.destination_host, u.used_at,
-            s.kind, s.label, s.target_id
+            u.permission_grant_id, u.outcome, u.revealed_by, s.kind, s.label, s.target_id
         FROM discovered_secret_uses u JOIN discovered_secrets s ON s.id=u.secret_id
-        WHERE u.hunt_run_id=$1 AND u.revealed_by IS NULL
+        WHERE u.hunt_run_id=$1 AND (u.revealed_by IS NULL OR u.revealed_by LIKE 'agent:hunt:%')
         ORDER BY u.used_at ASC, u.id ASC LIMIT $2""",
         uuid.UUID(str(hunt_run_id)), max(1, int(limit)),
     )
@@ -353,6 +386,12 @@ async def read_hunt_uses(conn: Any, hunt_run_id: Any, *, limit: int = 2000) -> l
         "destination_host": row["destination_host"] or None,
         "found_on": str(row["target_id"]),
         "used_at": row["used_at"].isoformat() if hasattr(row["used_at"], "isoformat") else row["used_at"],
+        # A try on another target's login: the person's grant that allowed it, and the answer.
+        "permission_grant_id": str(row.get("permission_grant_id")) if row.get("permission_grant_id") else None,
+        "outcome": row.get("outcome"),
+        # The starting person let this Hunt's agent see the value (secrets.inspect); the record
+        # says it was shown, never what it was.
+        "disclosed_to_agent": bool(row.get("revealed_by")),
         "secret_values_visible": False,
     } for row in rows]
 
@@ -405,26 +444,40 @@ def parse_reference(reference: Any) -> uuid.UUID:
 
 async def resolve_for_hunt(
     conn: Any, *, reference: Any, target_id: Any, hunt_run_id: Any, action_id: Any,
-    destination_host: str = "",
+    destination_host: str = "", destination: Mapping[str, Any] | None = None,
+    use_ids: list[Any] | None = None,
 ) -> str:
     """The value behind ``secret://<id>`` for a Hunt action on ``target_id``, recording the use.
 
     The caller has already checked that the Hunt is live and holds the action's reservation.
-    Every refusal names a reason code and carries no value."""
+    ``destination`` (``origin``, ``host``, ``path``) is where the action sends the value: a secret
+    of another target is sent there only under a person's ``secret.try`` grant for exactly that
+    login (hunt/secret_try.py), one attempt of it at a time, within the per-login rate limit; and
+    a denied login (``secret_try.denied_destination``) never receives any secret. ``use_ids``
+    collects the recorded use rows, so the caller can note the outcome. Every refusal names a
+    reason code and carries no value."""
     secret_id = parse_reference(reference)
+    try_rules = _secret_try()
+    if destination is not None and try_rules.denied_destination(destination.get("host"), destination.get("path")):
+        raise DiscoveredSecretError(
+            try_rules.SECRET_TRY_DESTINATION_DENIED,
+            "this login never receives a discovered secret")
     row = await conn.fetchrow(
         "SELECT target_id, value_ciphertext, state, expires_at FROM discovered_secrets WHERE id=$1",
         secret_id,
     )
     if row is None:
         raise DiscoveredSecretError(SECRET_UNAVAILABLE, "secret reference is unavailable")
-    if str(row["target_id"]) != str(_target_uuid(target_id)) and not await conn.fetchval(
+    other_target = str(row["target_id"]) != str(_target_uuid(target_id)) and not await conn.fetchval(
         "SELECT 1 FROM discovered_secret_grants WHERE secret_id=$1 AND target_id=$2",
         secret_id, _target_uuid(target_id),
-    ):
+    )
+    if other_target and not await try_rules.has_live_grant(
+            conn, hunt_run_id=hunt_run_id, secret_id=secret_id, destination=destination):
         raise DiscoveredSecretError(
             SECRET_TARGET_MISMATCH,
-            "secret reference belongs to another target; an operator grant is required")
+            "secret reference belongs to another target; a person must allow trying it on this "
+            "login (a secret.try permission request) or grant it to this target")
     if row["state"] != "active":
         raise DiscoveredSecretError(SECRET_NOT_ACTIVE, f"secret reference is {row['state']}")
     if row["expires_at"] <= datetime.now(timezone.utc):
@@ -433,13 +486,37 @@ async def resolve_for_hunt(
         value = _secret_store().decrypt_secret(str(row["value_ciphertext"]))
     except Exception:
         raise DiscoveredSecretError(SECRET_UNAVAILABLE, "secret reference is unavailable") from None
-    await conn.execute(
-        """INSERT INTO discovered_secret_uses(secret_id, hunt_run_id, action_id, destination_host)
-        VALUES($1,$2,$3,$4)""",
-        secret_id, uuid.UUID(str(hunt_run_id)), uuid.UUID(str(action_id)),
-        str(destination_host or "")[:255],
-    )
+
+    async def record(grant_id: Any) -> Any:
+        return await conn.fetchval(
+            """INSERT INTO discovered_secret_uses(secret_id, hunt_run_id, action_id, destination_host,
+                permission_grant_id)
+            VALUES($1,$2,$3,$4,$5) RETURNING id""",
+            secret_id, uuid.UUID(str(hunt_run_id)), uuid.UUID(str(action_id)),
+            str(destination_host or "")[:255], grant_id,
+        )
+
+    if other_target:
+        # Claimed and recorded under the grant's row lock, in one transaction.
+        try:
+            use_id = await try_rules.claim_attempt(
+                conn, hunt_run_id=hunt_run_id, secret_id=secret_id, destination=destination, record=record)
+        except try_rules.SecretTryError as exc:
+            raise DiscoveredSecretError(exc.reason, str(exc)) from None
+    else:
+        use_id = await record(None)
+    if use_ids is not None:
+        use_ids.append(use_id)
     return str(value)
+
+
+async def record_use_outcome(conn: Any, use_ids: Iterable[Any], outcome: str) -> None:
+    """What the destination answered to the request that carried these uses (``http_401``...)."""
+    ids = [uuid.UUID(str(item)) for item in use_ids if item]
+    if ids:
+        await conn.execute(
+            "UPDATE discovered_secret_uses SET outcome=$2 WHERE id = ANY($1::uuid[]) AND outcome IS NULL",
+            ids, str(outcome)[:80])
 
 
 def _decoded(value: Any) -> Any:
@@ -590,6 +667,47 @@ async def revoke_grant(conn: Any, *, target_id: Any, secret_id: Any, to_target_i
         uuid.UUID(str(secret_id)), _target_uuid(target_id), _target_uuid(to_target_id),
     )
     return bool(deleted)
+
+
+AGENT_VIEW = "agent_view"
+
+
+async def values_for_agent(
+    conn: Any, *, hunt_run_id: Any, target_id: Any, action_id: Any, refs: Iterable[str],
+) -> dict[str, str]:
+    """The values behind ``refs`` for a Hunt whose starting person let the agent see them
+    (``policy.secret_values_visible``; the caller checks it). Only usable secrets found on this
+    Hunt's own target are returned: a secret another target's operator granted to it is usable by
+    reference but never shown (a grant is no consent to disclosure), and each disclosure is recorded in the use
+    ledger as a reveal to that Hunt's agent (``revealed_by='agent:hunt:<id>'``). The values go into
+    the live answer only: never into the stored action, receipt, record or a log."""
+    target = _target_uuid(target_id)
+    wanted = []
+    for ref in refs:
+        try:
+            wanted.append(parse_reference(ref))
+        except DiscoveredSecretError:
+            continue
+    if target is None or not wanted:
+        return {}
+    rows = await conn.fetch(
+        """SELECT s.id, s.value_ciphertext FROM discovered_secrets s
+        WHERE s.id = ANY($1::uuid[]) AND s.state='active' AND s.expires_at > NOW()
+          AND s.target_id=$2""",
+        wanted[:MAX_LIST], target,
+    )
+    values: dict[str, str] = {}
+    for row in rows:
+        try:
+            values[f"secret://{row['id']}"] = str(_secret_store().decrypt_secret(str(row["value_ciphertext"])))
+        except Exception:
+            continue
+        await conn.execute(
+            """INSERT INTO discovered_secret_uses(secret_id, hunt_run_id, action_id, destination_host, revealed_by)
+            VALUES($1,$2,$3,$4,$5)""",
+            row["id"], uuid.UUID(str(hunt_run_id)), uuid.UUID(str(action_id)) if action_id else None,
+            AGENT_VIEW, f"agent:hunt:{hunt_run_id}"[:200])
+    return values
 
 
 async def value_for_operator(
