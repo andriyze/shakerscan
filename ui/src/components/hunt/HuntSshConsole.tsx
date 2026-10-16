@@ -1,4 +1,5 @@
 'use client'
+import { pathSegment } from '@/lib/apiPath.mjs'
 import {useEffect,useRef,useState} from 'react'
 import {Terminal, Square, Save, Unplug} from 'lucide-react'
 import {Button,Card,Field,Input,Textarea} from '@/components/ui'
@@ -28,7 +29,7 @@ export function HuntSshConsole({hunt,onChanged}:{hunt:HuntV2;onChanged:(hunt:Hun
     const abort = new AbortController();controller.current=abort
     let terminal = false
     try {
-      const response = await fetch(API_URL+'/hunts/'+hunt.hunt_id+'/ssh/exec',{method:'POST',signal:abort.signal,
+      const response = await fetch(`${API_URL}/hunts/${pathSegment(hunt.hunt_id)}/ssh/exec`,{method:'POST',signal:abort.signal,
         headers:{'Content-Type':'application/json'},body:JSON.stringify({idempotency_key:'ui-ssh-'+createRandomUUID(),
           input:{command,timeout_seconds:Number(timeout),...(session?{session_id:session}:{}),...(port?{port:Number(port)}:{})}})})
       if (!response.ok) throw new Error(await getApiErrorMessage(response,'Could not start SSH command'))
@@ -64,7 +65,7 @@ export function HuntSshConsole({hunt,onChanged}:{hunt:HuntV2;onChanged:(hunt:Hun
   async function cancel() {
     if (!actionId) return
     try {
-      const response=await fetch(API_URL+'/hunts/'+hunt.hunt_id+'/ssh/actions/'+actionId+'/cancel',{method:'POST'})
+      const response=await fetch(`${API_URL}/hunts/${pathSegment(hunt.hunt_id)}/ssh/actions/${pathSegment(actionId)}/cancel`,{method:'POST'})
       if (!response.ok) throw new Error(await getApiErrorMessage(response,'Could not cancel SSH command'))
       setNotice('Cancellation requested. Remote process termination may remain uncertain.')
     } catch(cause) {setError(cause instanceof Error?cause.message:'Could not cancel')}
@@ -73,7 +74,7 @@ export function HuntSshConsole({hunt,onChanged}:{hunt:HuntV2;onChanged:(hunt:Hun
     if (!session) return
     setBusy(true);setError('');setNotice('')
     try {
-      const response=await fetch(API_URL+'/hunts/'+hunt.hunt_id+'/capabilities/ssh.close',{
+      const response=await fetch(`${API_URL}/hunts/${pathSegment(hunt.hunt_id)}/capabilities/ssh.close`,{
         method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({idempotency_key:'ui-ssh-close-'+createRandomUUID(),input:{session_id:session}})})
       if (!response.ok) throw new Error(await getApiErrorMessage(response,'Could not disconnect SSH'))

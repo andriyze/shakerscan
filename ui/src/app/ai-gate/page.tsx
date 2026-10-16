@@ -1,5 +1,6 @@
 'use client'
 
+import { pathSegment } from '@/lib/apiPath.mjs'
 import { CopyButton } from '@/components/CopyButton'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
@@ -19,7 +20,7 @@ import {
 import {
   createAITarget,
   deleteAITarget,
-  getApiUrl,
+  API_URL,
   getAIInventory,
   getAISettings,
   getAITestScenarios,
@@ -360,7 +361,8 @@ export default function AIGateSettingsPage() {
   const router = useRouter()
   const toast = useToast()
   const initialType = TARGET_TYPES[0]
-  const [runtimeApiUrl, setRuntimeApiUrl] = useState('')
+  // API links render once the page runs in the browser, where API_URL names the API the user reaches.
+  const [apiReady, setApiReady] = useState(false)
   const [targets, setTargets] = useState<AITarget[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -464,7 +466,7 @@ export default function AIGateSettingsPage() {
   }, [])
 
   useEffect(() => {
-    setRuntimeApiUrl(getApiUrl())
+    setApiReady(true)
   }, [])
 
   useEffect(() => {
@@ -1456,8 +1458,8 @@ export default function AIGateSettingsPage() {
                       <div className="flex flex-wrap gap-2">
                         {campaignHistory && (
                           <a
-                            href={runtimeApiUrl ? `${runtimeApiUrl}/ai/targets/${target.id}/campaign-history/export?limit=12` : undefined}
-                            aria-disabled={!runtimeApiUrl}
+                            href={apiReady ? `${API_URL}/ai/targets/${pathSegment(target.id)}/campaign-history/export?limit=12` : undefined}
+                            aria-disabled={!apiReady}
                             target="_blank"
                             rel="noreferrer"
                             className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800"
@@ -1645,8 +1647,8 @@ export default function AIGateSettingsPage() {
             {REDTEAM_RESOURCE_LINKS.map((item) => (
               <a
                 key={item.label}
-                href={runtimeApiUrl ? `${runtimeApiUrl}${item.path}` : undefined}
-                aria-disabled={!runtimeApiUrl}
+                href={apiReady ? `${API_URL}${item.path}` : undefined}
+                aria-disabled={!apiReady}
                 target="_blank"
                 rel="noreferrer"
                 className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
