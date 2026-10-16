@@ -18,6 +18,7 @@ import { fetchHeavyRead } from './busyRetry.mjs'
 import { getJson } from './fetchLayer.mjs'
 import { exposureAssetsFromBody, exposureAssetsParams } from './exposureAssets.mjs'
 import { LIST_V1_MAX_LIMIT, isListV1, isUnknownListParamError, listV1Params, type ListV1Page, type TotalKind } from './listPage.mjs'
+import { isServerGroupsPage } from './findingGroups'
 
 export { API_URL, getApiUrl } from './apiConfig'
 
@@ -6036,6 +6037,85 @@ export async function getFindingsPage(
     findings: body.items, next_cursor: body.next_cursor, has_more: body.has_more,
     total: body.total_kind === 'none' ? undefined : body.total, total_kind: body.total_kind,
     contract: 'list/v1',
+  }
+}
+
+/** One member of a server-side finding group: enough to list its location and open it. */
+export interface FindingGroupMember {
+  id: string
+  url?: string | null
+  last_seen_at?: string | null
+  latest_retest_verdict?: string | null
+}
+
+/** One group of `GET /findings?group_by=issue`: the same issue on one subject, proof and status. */
+export interface FindingGroupItem {
+  title_key: string
+  severity: string
+  subject: string
+  proof_state: string
+  status: string
+  /** Every member under the filters, not only the listed ones. */
+  count: number
+  first_seen_at: string | null
+  last_seen_at: string | null
+  /** The first member in the requested sort, as a list row. */
+  lead: Finding
+  member_ids: string[]
+  member_ids_truncated: boolean
+  members: FindingGroupMember[]
+}
+
+export interface FindingGroupsPage {
+  groups: FindingGroupItem[]
+  next_cursor: string | null
+  has_more: boolean
+  /** Groups under the filters. */
+  total?: number
+  /** Findings in those groups. */
+  findings_total?: number
+}
+
+// Set once an engine has answered without server-side grouping, so the page groups in the browser
+// from then on instead of asking again.
+let findingGroupsUnsupported = false
+
+/**
+ * One page of finding groups, grouped by the engine over every match (`group_by=issue`), or null
+ * when this engine cannot: it rejects the parameter (a 400 naming it) or answers rows instead of
+ * groups. The caller then groups the loaded rows in the browser, as before.
+ */
+export async function getFindingGroupsPage(
+  filters: FindingFilterParams,
+  { limit = 50, cursor = null, sort = '-severity' }: { limit?: number; cursor?: string | null; sort?: FindingsSort } = {},
+  signal?: AbortSignal,
+): Promise<FindingGroupsPage | null> {
+  if (findingGroupsUnsupported) return null
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(filters || {})) {
+    if (value === undefined || value === null || value === '' || value === false) continue
+    params.set(key, value === true ? 'true' : String(value))
+  }
+  params.set('group_by', 'issue')
+  for (const [key, value] of Object.entries(listV1Params({ limit, cursor, sort }))) params.set(key, value)
+  // The engine counts groups in the same pass that forms them, so every page asks for the count.
+  params.set('count', 'exact')
+  let body: unknown
+  try {
+    body = await getJson(`${API_URL}/findings?${params}`, { signal, heavy: true, label: 'Failed to fetch findings' })
+  } catch (cause) {
+    if (!isUnknownListParamError(cause)) throw cause
+    findingGroupsUnsupported = true
+    return null
+  }
+  if (!isServerGroupsPage<FindingGroupItem>(body)) {
+    findingGroupsUnsupported = true
+    return null
+  }
+  return {
+    groups: body.items, next_cursor: body.next_cursor, has_more: body.has_more,
+    total: body.total_kind === 'none' ? undefined : body.total,
+    findings_total: body.total_kind === 'none' ? undefined : (body as { findings_total?: number }).findings_total,
   }
 }
 
