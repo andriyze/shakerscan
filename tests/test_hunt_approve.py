@@ -836,6 +836,7 @@ def test_sso_handoff_waits_for_exact_gateway_confirmation(state):
     assert calls[0][2]["set_digest"] == challenge["set_digest"]
     assert calls[0][2]["approval_id"] == challenge["approval_id"]
     assert "review the exact decision" in terminal.text
+    assert f"Approval digest: {challenge['set_digest']}" in terminal.text
 
 
 @pytest.mark.parametrize("url", [

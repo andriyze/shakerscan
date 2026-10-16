@@ -753,6 +753,7 @@ class StepUp:
                 raise ApprovalError("the browser approval URL is not on this gateway; nothing was approved")
             self.terminal.say("Open this link in your browser, review the exact decision, and sign in again:")
             self.terminal.say(url)
+            self.terminal.say(f"Approval digest: {challenge['set_digest']}")
             self.terminal.line("Press Enter after the browser confirms your sign-in: ")
             status = self._post("/_enterprise/approvals/sso/status", {
                 "schema_version": "shakerscan-approval-finish/v1",
