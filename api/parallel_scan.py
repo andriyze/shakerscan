@@ -1827,6 +1827,22 @@ def aggregate_shard_coverage(strategy: str | None, shard_records: list[dict[str,
     return out
 
 
+def enqueue_cancelled_parent_fold(redis_client, parent_id: str, queue_name: str) -> None:
+    """Queue the merge job of a cancelled parent, which keeps what its shards kept.
+
+    Unguarded: the merge job of a cancelled parent only rebuilds the parent's kept findings
+    from its shards (idempotent), so a later shard's settlement may run it again.
+    """
+    payload = json.dumps(merge_job(parent_id))
+    if callable(getattr(redis_client, "xadd", None)) and callable(
+        getattr(redis_client, "xreadgroup", None)
+    ):
+        ensure_consumer_group(redis_client, queue_name)
+        redis_client.xadd(stream_key(queue_name), {"payload": payload})
+    else:
+        redis_client.lpush(queue_name, payload)
+
+
 async def reconcile_parallel_parent(conn, parent_id: str, redis_client, queue_name: str) -> bool:
     """Enqueue the merge job once all of a parent's shards are terminal.
 

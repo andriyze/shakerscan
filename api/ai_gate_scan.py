@@ -6035,7 +6035,30 @@ def _agent_execution_receipt_findings(metadata_json: dict[str, Any]) -> tuple[li
     }
 
 
-async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None) -> dict[str, Any]:
+def kept_checkpoint_findings(checkpoint: Any) -> list[dict[str, Any]]:
+    """The findings a stopped AI target scan had checkpointed, as its report would carry them.
+
+    A run stopped hard (it did not return within its stop grace) has no report; the probes it
+    finished had already reported these findings through the checkpoint.
+    """
+    raw = checkpoint.get("findings") if isinstance(checkpoint, dict) else None
+    findings = [dict(item) for item in raw or () if isinstance(item, dict)]
+    if not findings:
+        return []
+    return _redact_secret_like_values(_apply_ai_gate_analysis_fields(_dedupe_findings(findings)))
+
+
+async def run_ai_target_scan(
+    target_url: str, raw_options: dict[str, Any] | None, *,
+    cancelled: Any = None, checkpoint: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run one AI target scan.
+
+    ``cancelled`` is polled between probes and turns: a stop (a cancel, or the target's
+    authorization withdrawn) ends the run without more target traffic and returns what the
+    probes that ran found, partial. ``checkpoint`` receives each probe's findings as they are
+    found, for a run that is stopped hard before it returns (``kept_checkpoint_findings``).
+    """
     options = raw_options if isinstance(raw_options, dict) else {}
     target = options.get("ai_target") if isinstance(options.get("ai_target"), dict) else {}
     if not target:
@@ -6145,16 +6168,27 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
         analyze_probe=_analyze_probe,
         classify_response=_classify_response,
         max_turns_per_conversation=max_turns_per_conversation,
+        cancelled=cancelled,
+        on_probe_findings=(
+            (lambda found: checkpoint.setdefault("findings", []).extend(found))
+            if isinstance(checkpoint, dict) else None
+        ),
     )
+    stopped_by_cancellation = False
 
     async def _run_phase(phase_probes: tuple[Probe, ...], phase_max_requests: int) -> Any:
-        if not phase_probes or phase_max_requests <= 0:
+        nonlocal stopped_by_cancellation
+        if not phase_probes or phase_max_requests <= 0 or stopped_by_cancellation:
             return None
-        return await runner.run_probe_pack(
+        run = await runner.run_probe_pack(
             phase_probes,
             max_requests=phase_max_requests,
             per_request_delay=per_request_delay,
         )
+        stopped_by_cancellation = stopped_by_cancellation or bool(
+            getattr(run, "stopped_by_cancellation", False)
+        )
+        return run
 
     adaptive_mode = is_adaptive_scan_profile(scan_profile) and max_requests > 1
     adaptive_limits = resolve_adaptive_planner_limits(metadata_json, scan_profile)
@@ -6283,6 +6317,9 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
             executed_probes = list(probes[: len(run.transcripts)])
 
     execution_plan["executed"] = [probe.id for probe in executed_probes]
+    if stopped_by_cancellation:
+        execution_plan["stopped"] = {"reason": "stopped", "planned_probes": len(probes),
+                                     "executed_probes": len(executed_probes)}
     if hasattr(target_adapter, "describe_lifecycle_summary"):
         try:
             lifecycle_summary = target_adapter.describe_lifecycle_summary()
@@ -6314,6 +6351,9 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     semantic_reviewed: list[str] = []
     semantic_judge_status: str | None = None
     semantic_judge_error: str | None = None
+    if stopped_by_cancellation:
+        # A stopped run returns promptly: no judge calls after the stop.
+        semantic_judge_config = None
     if semantic_judge_config and semantic_judge_enabled and max_semantic_judge_calls > 0:
         try:
             findings, semantic_reviewed = await _semantic_judge_probe_transcripts(
@@ -6378,7 +6418,7 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
     }
     execution_plan["agent_execution_receipts"] = receipt_summary
 
-    judge_config = _get_judge_config(options) if judge_enabled else None
+    judge_config = _get_judge_config(options) if judge_enabled and not stopped_by_cancellation else None
     if judge_config and findings:
         try:
             findings = await _rubric_judge_findings(findings, judge_config)
@@ -6470,6 +6510,7 @@ async def run_ai_target_scan(target_url: str, raw_options: dict[str, Any] | None
                 **request_budget.to_dict(),
                 "stopped_by_rate_limit": stopped_by_rate_limit,
                 "stopped_by_request_budget": stopped_by_request_budget or request_budget.exhausted,
+                "stopped_by_cancellation": stopped_by_cancellation,
             },
             "decision": {
                 "decision": decision,

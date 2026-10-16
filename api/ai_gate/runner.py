@@ -19,6 +19,9 @@ class PackRunResult:
     successful_requests: int
     stopped_by_rate_limit: bool
     stopped_by_request_budget: bool
+    # The run was stopped (a cancel or a withdrawn authorization) before every probe ran;
+    # what the probes that ran found is kept.
+    stopped_by_cancellation: bool = False
 
 
 class ConversationTarget(Protocol):
@@ -191,8 +194,12 @@ class ConversationRunner:
         classify_response: Callable[..., list[dict[str, Any]]],
         max_consecutive_429s: int = 3,
         max_turns_per_conversation: int | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        on_probe_findings: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
         self.aiohttp = aiohttp_module
+        self.cancelled = cancelled
+        self.on_probe_findings = on_probe_findings
         self.target = target
         self.token_budget = token_budget
         self.request_budget = request_budget
@@ -274,6 +281,9 @@ class ConversationRunner:
             turn_limit = max(1, min(turn_limit, self.max_turns_per_conversation))
 
         for turn_index, turn in enumerate(probe.conversation_turns[:turn_limit], start=1):
+            if turn_index > 1 and self.stop_requested():
+                stop_reason = "stopped"
+                break
             if self.token_budget.exceeded:
                 stop_reason = "budget"
                 errors.append(
@@ -470,6 +480,7 @@ class ConversationRunner:
         consecutive_429s = 0
         stopped_by_rate_limit = False
         stopped_by_request_budget = False
+        stopped_by_cancellation = False
         shared_session_id = uuid.uuid4().hex
         session_ids: set[str] = set()
 
@@ -477,6 +488,9 @@ class ConversationRunner:
         try:
             async with self.aiohttp.ClientSession(timeout=timeout) as session:
                 for probe in probes[:max_requests]:
+                    if self.stop_requested():
+                        stopped_by_cancellation = True
+                        break
                     if self.token_budget.exceeded:
                         errors.append(
                             f"{probe.id}: skipped — token budget exhausted ({self.token_budget.total}/{self.token_budget.limit})"
@@ -512,6 +526,10 @@ class ConversationRunner:
                     ) = await self._run_probe_conversation(session, probe, current_session_id)
                     transcripts.append(transcript)
                     findings.extend(probe_findings)
+                    if self.on_probe_findings is not None and probe_findings:
+                        # A checkpoint of what was found so far: a run stopped hard (it did
+                        # not return within its stop grace) still keeps these.
+                        self.on_probe_findings(list(probe_findings))
                     errors.extend(probe_errors)
                     successful_requests += probe_successes
                     stopped_by_rate_limit = stopped_by_rate_limit or probe_rate_limited
@@ -523,7 +541,8 @@ class ConversationRunner:
                         await asyncio.sleep(per_request_delay)
 
                 finalize_session = getattr(self.target, "finalize_session", None)
-                if callable(finalize_session):
+                # A stopped run sends nothing more to the target, not even session cleanup.
+                if callable(finalize_session) and not stopped_by_cancellation:
                     for session_id in session_ids:
                         maybe_coro = finalize_session(session, session_id)
                         if asyncio.iscoroutine(maybe_coro):
@@ -542,4 +561,13 @@ class ConversationRunner:
             successful_requests=successful_requests,
             stopped_by_rate_limit=stopped_by_rate_limit,
             stopped_by_request_budget=stopped_by_request_budget,
+            stopped_by_cancellation=stopped_by_cancellation,
         )
+
+    def stop_requested(self) -> bool:
+        if self.cancelled is None:
+            return False
+        try:
+            return bool(self.cancelled())
+        except Exception:
+            return False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any, Mapping
 
 try:
@@ -15,6 +16,14 @@ from .services import ProductWorkerHandler
 AI_GATE_RUN_KINDS = frozenset({
     "ai_api", "ai_rag", "ai_trace", "ai_mcp", "ai_widget",
 })
+
+
+# The findings checkpoint of the AI target scan running in this task: the worker sets it
+# before the run so a run stopped hard (authorization withdrawn and no return within the stop
+# grace) still keeps what its finished probes found.
+AI_SCAN_CHECKPOINT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "ai_scan_checkpoint", default=None,
+)
 
 
 class AIGateWorkerHandler(ProductWorkerHandler):
@@ -46,9 +55,13 @@ class AIGateWorkerHandler(ProductWorkerHandler):
                     cancelled=lambda: self.services.scan_cancel_requested(scan_id),
                 )
             else:
-                result = await run_ai_target_scan(target, hydrated_options)
+                result = await run_ai_target_scan(
+                    target, hydrated_options,
+                    cancelled=lambda: self.services.scan_cancel_requested(scan_id),
+                    checkpoint=AI_SCAN_CHECKPOINT.get(),
+                )
         await self.progress(scan_id, "ai_gate_finalize", 95, job_id=job_id)
         return result
 
 
-__all__ = ["AI_GATE_RUN_KINDS", "AIGateWorkerHandler"]
+__all__ = ["AI_GATE_RUN_KINDS", "AI_SCAN_CHECKPOINT", "AIGateWorkerHandler"]

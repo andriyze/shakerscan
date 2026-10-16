@@ -19,8 +19,15 @@ from .continuation_rounds import prepare_local_scan_continuation
 CANCELLED_REPORT_KEPT = "cancelled_report_kept"
 
 
-def mark_cancelled_scan_report(report: dict[str, Any]) -> dict[str, Any]:
-    """Mark a report built after cancellation: cancelled coverage, findings kept."""
+def mark_cancelled_scan_report(
+    report: dict[str, Any], *, finalizer_completed: bool = False,
+) -> dict[str, Any]:
+    """Mark a report built after cancellation: cancelled coverage, findings kept.
+
+    ``finalizer_completed`` marks a report whose finalizer had already run when the
+    cancellation was seen (it arrived while the report was being finalized or stored): the
+    finalization action keeps its own status, and the record says it ran before.
+    """
     coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
     reasons = [str(item) for item in coverage.get("reasons") or () if str(item).strip()]
     report["coverage"] = {
@@ -42,6 +49,9 @@ def mark_cancelled_scan_report(report: dict[str, Any]) -> dict[str, Any]:
     # The report was built without running the finalization action, which the cancellation
     # settled or never planned: the execution record says so instead of claiming success.
     execution = report.get("canonical_action_execution")
+    if isinstance(execution, dict) and finalizer_completed:
+        execution["finalized_before_cancellation"] = True
+        return report
     if isinstance(execution, dict):
         finalization = execution.get("finalization_action")
         if isinstance(finalization, dict):
@@ -54,18 +64,85 @@ def mark_cancelled_scan_report(report: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def finalized_canonical_report(result: Any) -> bool:
+    """A complete canonical Scan report (its finalizer ran), not yet marked cancelled."""
+    return (
+        isinstance(result, dict)
+        and not result.get("error")
+        and isinstance(result.get("canonical_action_execution"), dict)
+        and not is_kept_cancelled_report(result)
+    )
+
+
+def keep_report_finalized_before_cancellation(result: Any, scan_status: Any) -> Any:
+    """A report finalized before a cancellation was seen, kept for the cancelled Scan.
+
+    The finalizer had already confirmed these findings (no traffic is sent after it), so a
+    cancellation that arrives while the report is finalized or stored keeps them. Any other
+    result, or a Scan that is not cancelled, is returned unchanged.
+    """
+    if str(scan_status or "") not in {"cancelled", "cancelling"} or not finalized_canonical_report(result):
+        return result
+    return mark_cancelled_scan_report(result, finalizer_completed=True)
+
+
+def cancelled_parallel_parent_report(
+    *, target_url: Any, children: Any, merge_key: Callable[[dict[str, Any]], str],
+    extra_findings: Any = (),
+) -> dict[str, Any]:
+    """The kept report of a cancelled parallel Scan: the union of what its shards kept.
+
+    ``children`` are the shard rows (``id``, ``status``, ``shard_index``, ``result``). A
+    completed shard and a cancelled shard with a kept report contribute their findings; a
+    shard cancelled before it ran, or one that failed, contributes none. Pure: the caller
+    persists it under the parent, which stays cancelled.
+    """
+    union: dict[str, dict[str, Any]] = {}
+    shards = []
+    kept = 0
+
+    def add(finding: Any) -> None:
+        if isinstance(finding, dict):
+            union.setdefault(merge_key(finding), finding)
+
+    for child in children or ():
+        result = child.get("result")
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except ValueError:
+                result = None
+        status = str(child.get("status") or "")
+        contributes = isinstance(result, dict) and not result.get("error") and (
+            status == "completed" or (status == "cancelled" and is_kept_cancelled_report(result))
+        )
+        findings = (result.get("findings") if contributes else None) or []
+        if contributes:
+            kept += 1
+            for finding in findings:
+                add(finding)
+        shards.append({
+            "scan_id": str(child.get("id") or ""),
+            "shard_index": child.get("shard_index"),
+            "status": status,
+            "findings_kept": len(findings) if isinstance(findings, list) else 0,
+        })
+    for finding in extra_findings or ():
+        add(finding)
+    report = {
+        "target": target_url,
+        "findings": list(union.values()),
+        "result": {"score": None, "grade": None},
+        "coverage": {"status": "cancelled", "reasons": ["cancelled"]},
+        "scan_metadata": {},
+        "parallel": {"shards": shards, "shards_total": len(shards), "shards_kept": kept},
+    }
+    return mark_cancelled_scan_report(report)
+
+
 def is_kept_cancelled_report(result: Any) -> bool:
     metadata = result.get("scan_metadata") if isinstance(result, dict) else None
     return isinstance(metadata, dict) and metadata.get(CANCELLED_REPORT_KEPT) is True and not result.get("error")
-
-
-def cancellation_error_result(result: Any, target: Any) -> Any:
-    """A kept cancelled report turned back into the cancellation error, for callers that
-    record a cancelled run as an error (an ASM exploit batch); any other result unchanged."""
-    if not is_kept_cancelled_report(result):
-        return result
-    return {"target": target, "error": "Cancelled by user",
-            "result": {"score": None, "grade": None}, "findings": []}
 
 
 async def build_cancelled_scan_report(
@@ -135,9 +212,12 @@ async def cancelled_scan_report(
 
 async def persist_kept_cancelled_scan(
     pool: Any, *, scan_id: str, result: dict[str, Any], completed_at: Any, duration: int,
-    coverage: dict[str, Any], budget_used: dict[str, Any],
+    coverage: dict[str, Any], budget_used: dict[str, Any] | None,
 ) -> bool:
-    """Store a cancelled Scan's kept report; the row stays cancelled. False if it is not."""
+    """Store a cancelled Scan's kept report; the row stays cancelled. False if it is not.
+
+    ``budget_used`` None keeps the row's ledger (a shard's is reconciled by its actions).
+    """
     findings = result.get("findings") if isinstance(result.get("findings"), list) else []
     async with pool.acquire() as conn:
         kept = await conn.fetchval(
@@ -146,13 +226,14 @@ async def persist_kept_cancelled_scan(
                       progress=100, current_phase='cancelled',
                       error_message=COALESCE(error_message, 'Cancelled by user'),
                       score=NULL, grade=NULL,
-                      coverage_status=$6, coverage_json=$7, budget_used_json=$8,
+                      coverage_status=$6, coverage_json=$7,
+                      budget_used_json=COALESCE($8::jsonb, budget_used_json),
                       assurance_score=COALESCE(assurance_score, 0)
                 WHERE id=$1 AND status IN ('cancelled','cancelling')
             RETURNING id""",
             uuid.UUID(str(scan_id)), json.dumps(result), len(findings), completed_at,
             duration, str(coverage.get("status") or "cancelled"), json.dumps(coverage),
-            json.dumps(budget_used),
+            json.dumps(budget_used) if budget_used is not None else None,
         )
     return kept is not None
 
@@ -160,8 +241,10 @@ async def persist_kept_cancelled_scan(
 __all__ = [
     "CANCELLED_REPORT_KEPT",
     "build_cancelled_scan_report",
-    "cancellation_error_result",
+    "cancelled_parallel_parent_report",
     "cancelled_scan_report",
+    "finalized_canonical_report",
+    "keep_report_finalized_before_cancellation",
     "is_kept_cancelled_report",
     "mark_cancelled_scan_report",
     "persist_kept_cancelled_scan",
