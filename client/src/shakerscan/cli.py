@@ -1474,7 +1474,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     agent.add_argument("--account", help="Enterprise step-up for --allow: your sign-in name")
-    agent.add_argument("--method", choices=("totp", "security_key"), help="Enterprise step-up method for --allow")
+    agent.add_argument("--method", choices=("totp", "security_key", "sso"), help="Enterprise step-up method for --allow")
     agent.add_argument("--timeout", type=float, help="seconds per request for the --allow step-up (default 60)")
     api = commands.add_parser("api", help="call the instance's API: METHOD PATH [JSON] (the agent kit's one way in)")
     connection(api)

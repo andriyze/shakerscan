@@ -680,7 +680,7 @@ class StepUp:
         self.origin = origin.rstrip("/")
         self.terminal = terminal
         self.account = (account or "").strip() or None
-        self.method = method
+        self.method = method.replace("-", "_") if method else None
 
     def _account(self) -> str:
         if not self.account:
@@ -733,14 +733,38 @@ class StepUp:
         })
 
     def prove(self, challenge: Mapping[str, Any]) -> dict[str, Any]:
-        """The person's proof: a TOTP code typed here, or a security-key assertion."""
+        """A TOTP code, security-key assertion, or browser confirmation of this exact set."""
         methods = [str(item) for item in challenge.get("methods") or ()]
-        method = self.method or ("totp" if "totp" in methods else "security_key" if "security_key" in methods else "")
+        method = self.method or ("totp" if "totp" in methods else "security_key" if "security_key" in methods else "sso" if "sso" in methods else "")
         if method not in methods:
             raise ApprovalError(
                 f"your account offers {', '.join(methods) or 'no step-up method'} for this approval, not "
                 f"{method or 'any this client supports'}; enrol TOTP or a security key in the console"
             )
+        if method == "sso":
+            sso = challenge.get("sso")
+            url = str(sso.get("authorize_url") or "") if isinstance(sso, Mapping) else ""
+            parsed, origin = urllib.parse.urlsplit(url), urllib.parse.urlsplit(self.origin)
+            if (
+                (parsed.scheme, parsed.netloc) != (origin.scheme, origin.netloc)
+                or parsed.username or parsed.password or parsed.query or parsed.fragment
+                or not re.fullmatch(r"/_enterprise/approvals/browser/[A-Za-z0-9_-]{40,100}", parsed.path)
+            ):
+                raise ApprovalError("the browser approval URL is not on this gateway; nothing was approved")
+            self.terminal.say("Open this link in your browser, review the exact decision, and sign in again:")
+            self.terminal.say(url)
+            self.terminal.line("Press Enter after the browser confirms your sign-in: ")
+            status = self._post("/_enterprise/approvals/sso/status", {
+                "schema_version": "shakerscan-approval-finish/v1",
+                "approval_id": challenge["approval_id"], "set_digest": challenge["set_digest"],
+                "proof": {},
+            })
+            if status.get("state") != "granted":
+                raise ApprovalError(
+                    "the browser sign-in is not confirmed or has expired; nothing was approved; "
+                    "finish sign-in and retry the command"
+                )
+            return {"method": "sso"}
         if method == "totp":
             code = self.terminal.secret(f"TOTP code for {self.account} (never type it into an agent's chat): ")
             if not _TOTP.fullmatch(code):
@@ -1322,7 +1346,7 @@ def add_arguments(parser: Any, command: str) -> None:
     parser.add_argument("--all-pending", action="store_true", help="every pending request (of --hunt, else of every open Hunt)")
     parser.add_argument("--hunt", help="the Hunt the request belongs to (found automatically otherwise)")
     parser.add_argument("--account", help="Enterprise: your sign-in name (asked for otherwise)")
-    parser.add_argument("--method", choices=("totp", "security_key"),
+    parser.add_argument("--method", choices=("totp", "security_key", "sso"),
                         help="Enterprise step-up: a TOTP code, or a USB/NFC security key (needs python-fido2)")
     if command == "approve":
         parser.add_argument("--remember", action="store_true",
