@@ -1565,7 +1565,7 @@ See [`docs/mcp.md`](mcp.md).
 `GET /scans/{id}/deployment-decision` · `GET /scans/{id}/ai-redteam-report` ·
 `GET|DELETE /scans/{id}/http-transactions`
 
-**Findings**: `GET /findings` · `GET /findings/{id}` · `PATCH /findings/{id}` · `DELETE /findings/{id}` (list filters include `severity`, `status`, `source_type`, `target_id`, `scan_id`, `root_domain`, `search`, `seen_within_days`, `not_seen_within_days`, `first_seen_within_days`, `resolved_within_days`, `verification_verdict`, `verified_only`); sending any of `cursor`, `sort`, `fields`, `count` or `since` selects the bounded list contract (`limit` 1..200, opaque `next_cursor`, summary rows, `count=none|estimate|exact`), and the `limit`/`offset` response is deprecated for 2.11.x
+**Findings**: `GET /findings` · `GET /findings/{id}` · `PATCH /findings/{id}` · `DELETE /findings/{id}` (list filters include `severity`, `status`, `source_type`, `target_id`, `scan_id`, `root_domain`, `search`, `seen_within_days`, `not_seen_within_days`, `first_seen_within_days`, `resolved_within_days`, `verification_verdict`, `verified_only`); sending any of `cursor`, `sort`, `fields`, `count` or `since` selects the bounded list contract (`limit` 1..200, opaque `next_cursor`, summary rows, `count=none|estimate|exact`), `group_by=issue` answers that contract with groups of repeats (same title, severity, subject, proof state and status) formed over every match, each with its count, lead row and first 50 member ids, and the `limit`/`offset` response is deprecated for 2.11.x
 · `POST /findings/bulk` · `POST /findings/cleanup` · `POST /findings/manual` ·
 `POST /findings/{id}/retest` · `POST /findings/retest` · `GET /retests/{id}` ·
 `GET /retests/finding/{id}`

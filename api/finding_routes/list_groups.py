@@ -27,8 +27,9 @@ previous page's last lead.
 
 Cost. A group's count and lead depend on every member, so each page groups the whole match set:
 one pass over the filtered findings computing the key (the proof projection included) and one
-aggregate. That is linear in the matches (measured in the 2.11 scale notes), so the route is an
-admission-controlled heavy read (request_guards) under the heavy statement timeout. Only the page's
+aggregate. That is linear in the matches (about 1.4 s for 430k matching findings, most of it the
+key and proof expressions), so the route is an admission-controlled heavy read (request_guards)
+under the heavy statement timeout. Only the page's
 groups then read their lead rows and member locations. The group count comes from the same
 aggregate, so a requested count is always exact.
 """
