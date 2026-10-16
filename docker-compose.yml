@@ -53,7 +53,9 @@ services:
   # unless the operator already configured an external S3-compatible store.
   minio:
     profiles: ["artifacts"]
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    # Upstream quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z, no longer publicly pullable from
+    # Quay or Docker Hub (#218). Same index digest, so the same bytes, from a public mirror.
+    image: ghcr.io/teableio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-shakerscan}
@@ -71,7 +73,8 @@ services:
 
   minio-init:
     profiles: ["artifacts"]
-    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+    # Upstream quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z; same digest from a public mirror (#218).
+    image: ghcr.io/teableio/minio-mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
@@ -90,7 +93,7 @@ services:
   # Caddyfile with a strict route allowlist; the UI and operator API stay local.
   fleet-gateway:
     profiles: ["fleet-gateway"]
-    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+    image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
     ports:
       - "${FLEET_GATEWAY_BIND_HOST:-0.0.0.0}:80:80"
       - "${FLEET_GATEWAY_BIND_HOST:-0.0.0.0}:443:443"
@@ -789,7 +792,7 @@ services:
   juice-shop:
     # Multi-platform digest resolved 2026-07-21. Pinning prevents an upstream
     # latest-image change from silently changing release-gate ground truth.
-    image: bkimminich/juice-shop@sha256:e68144772ebaaca0ec117b38d44903af92416793230288ef7c5437fc4f26850a
+    image: bkimminich/juice-shop@sha256:73c53fbf442e8337b3ea3d98c7e8550308854701ebdfce4cc39768f36b75430e
     profiles:
       - e2e
     ports:
