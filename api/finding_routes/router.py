@@ -74,6 +74,7 @@ from .list_query import (
     legacy_order, legacy_page, resolved_proof_filter, row_select_sql, v1_page,
     without_jit,
 )
+from .list_groups import groups_page, parse_group_by
 from .list_schema import severity_rank_ready
 from .remediation import finding_remediation
 from .triage_sql import FINDING_UPDATE_SQL
@@ -408,6 +409,7 @@ async def list_findings(
     fields: Optional[str] = None,
     count: Optional[Literal["none", "estimate", "exact"]] = None,
     since: Optional[datetime] = None,
+    group_by: Optional[str] = None,
 ):
     """List findings with filtering and sorting.
 
@@ -419,6 +421,9 @@ async def list_findings(
 
     Either way the page is chosen over ``findings`` alone (index order, LIMIT) and only that page's
     rows read their target, latest retest and proof projection.
+
+    ``group_by=issue`` (list/v1 only) answers groups of repeats instead of rows, grouped in SQL over
+    every match (``list_groups.py``).
     """
     # Reject unknown query parameters instead of silently ignoring them. A typo'd
     # filter (e.g. ?domain= instead of ?root_domain=) would otherwise return the
@@ -429,7 +434,7 @@ async def list_findings(
         "verified_only", "proof_state", "driven_by", "research_campaign_id", "search",
         "seen_within_days", "not_seen_within_days", "first_seen_within_days",
         "resolved_within_days", "sort_by", "sort_order",
-        "include_candidates", "include_details", "limit", "offset",
+        "include_candidates", "include_details", "limit", "offset", "group_by",
         *LIST_V1_PARAMETERS,
     }
     unknown_params = sorted({k for k in request.query_params if k not in allowed_params})
@@ -462,11 +467,12 @@ async def list_findings(
         first_seen_within_days=first_seen_within_days, resolved_within_days=resolved_within_days,
     )
 
-    if LIST_V1_PARAMETERS.intersection(request.query_params):
+    grouping = parse_group_by(group_by)
+    if grouping or LIST_V1_PARAMETERS.intersection(request.query_params):
         legacy = sorted(LEGACY_ONLY_PARAMETERS.intersection(request.query_params))
         if legacy:
             raise HTTPException(status_code=400, detail=(
-                f"{', '.join(legacy)} belong to the limit/offset list; with cursor/sort/fields/count/since "
+                f"{', '.join(legacy)} belong to the limit/offset list; with cursor/sort/fields/count/since/group_by "
                 "use sort=-severity|severity|-last_seen|last_seen|-first_seen|first_seen|-cvss|cvss and "
                 "next_cursor (candidates: GET /investigation/candidates; bodies: GET /findings/{id})"
             ))
@@ -476,6 +482,10 @@ async def list_findings(
         page = page_params(limit=page_size, cursor=cursor, sort=sort, fields=fields,
                            count=count or "none", since=since)
         async with _pool().acquire() as conn, without_jit(conn):
+            if grouping:
+                return await groups_page(conn, page, filters=filters, proof_states=proof_states,
+                                         project=finding_proof_fields, group_by=grouping,
+                                         ranked=await severity_rank_ready(conn))
             return await v1_page(conn, page, filters=filters, proof_states=proof_states,
                                  project=finding_proof_fields, ranked=await severity_rank_ready(conn))
 

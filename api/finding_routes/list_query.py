@@ -308,13 +308,33 @@ async def resolved_proof_filter(
     through their partial index, projected in Python (finding_proof_fields), and the matching
     ones enter the clause by id, so the database still pages and counts the whole filter.
     """
+    states = await undetermined_proof_states(
+        conn, where, params.values, project,
+        too_broad="add a target_id, scan_id, severity or seen_within_days filter, or drop proof_state",
+    )
+    decided = proof_filter_sql(proof_states, params)
+    if not states:
+        return decided
+    matching = [finding_id for finding_id, state in states.items() if state in proof_states]
+    return f"(({decided} AND NOT {UNDETERMINED_SQL}) OR f.id = ANY({params.add(matching)}::uuid[]))"
+
+
+async def undetermined_proof_states(
+    conn: Any, where: list[str], values: list[Any],
+    project: Callable[[dict[str, Any]], dict[str, Any]], *, too_broad: str,
+) -> dict[Any, str]:
+    """``{id: proof_state}`` for the rows under ``where`` whose proof only Python can decide.
+
+    They are read through their partial index and projected by ``project`` (finding_proof_fields);
+    more than ``UNDETERMINED_LIMIT`` of them is a 422 whose message ends with ``too_broad``.
+    """
     rows = await conn.fetch(
         f"""SELECT f.id, f.evidence, f.severity, f.last_verification_verdict,
                    {latest_retest_mode_sql(finding_id='f.id', verdict='f.last_verification_verdict')}
                        AS latest_retest_mode
             FROM findings f WHERE {where_sql([*where, INDEXED_UNDETERMINED_SQL])}
             LIMIT {UNDETERMINED_LIMIT + 1}""",
-        *params.values,
+        *values,
     )
     if len(rows) > UNDETERMINED_LIMIT:
         # Not transient: a retry gets the same answer, so this is the request's to change.
@@ -322,15 +342,10 @@ async def resolved_proof_filter(
             "error": "proof_filter_too_broad",
             "message": (
                 f"more than {UNDETERMINED_LIMIT} findings under this filter carry a triage block the "
-                "database cannot read (for example one holding NaN); add a target_id, scan_id, "
-                "severity or seen_within_days filter, or drop proof_state"
+                f"database cannot read (for example one holding NaN); {too_broad}"
             ),
         })
-    decided = proof_filter_sql(proof_states, params)
-    if not rows:
-        return decided
-    matching = [row["id"] for row in rows if project(dict(row))["proof_state"] in proof_states]
-    return f"(({decided} AND NOT {UNDETERMINED_SQL}) OR f.id = ANY({params.add(matching)}::uuid[]))"
+    return {row["id"]: project(dict(row))["proof_state"] for row in rows}
 
 
 def row_select_sql(*, details: bool) -> str:
@@ -464,6 +479,32 @@ FINDINGS_LIST_UNRANKED = replace(FINDINGS_LIST, sorts={
 })
 
 
+#: What ``finish_v1_row`` reads to project a row the SQL proof projection cannot decide.
+V1_PROOF_INPUT_COLUMNS = (
+    f"{_PROOF_INPUT_COLUMNS}, f.severity AS _proof_severity, "
+    f"f.last_verification_verdict AS _proof_verdict, {LATEST_RETEST_MODE_SQL} AS _proof_mode"
+)
+#: The list/v1 default row: every summary field, as one select list over ``f`` and ROW_JOINS_SQL.
+V1_ROW_SELECT_SQL = ", ".join(f"{expr} AS {name}" for name, expr in _V1_FIELDS.items())
+
+
+def finish_v1_row(row: Mapping[str, Any], project: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
+    """A row fetched with ``V1_PROOF_INPUT_COLUMNS``, without them and with exact proof fields."""
+    item = dict(row)
+    severity = item.pop("_proof_severity")
+    verdict = item.pop("_proof_verdict")
+    mode = item.pop("_proof_mode")
+    evidence = item.pop("_proof_evidence")
+    if item.pop("_proof_undetermined"):
+        # The SQL projection cannot read this row's triage; Python's does (as the detail view).
+        fields = project({"evidence": evidence, "severity": severity,
+                          "last_verification_verdict": verdict, "latest_retest_mode": mode})
+        for name in ("proof_state", "is_verified", "is_suspected"):
+            if name in item:
+                item[name] = fields[name]
+    return item
+
+
 async def v1_page(
     conn: Any, page: Page, *, filters: FindingFilters, proof_states: Optional[list[str]],
     project: Callable[[dict[str, Any]], dict[str, Any]], ranked: bool = True,
@@ -482,9 +523,7 @@ async def v1_page(
     page_params = SqlParams(count_values)
     page_where = where + plan.keyset_clauses(page_params)
     rows = await conn.fetch(
-        f"""SELECT {plan.select_list}, {_PROOF_INPUT_COLUMNS},
-                   f.severity AS _proof_severity, f.last_verification_verdict AS _proof_verdict,
-                   {LATEST_RETEST_MODE_SQL} AS _proof_mode
+        f"""SELECT {plan.select_list}, {V1_PROOF_INPUT_COLUMNS}
             FROM (SELECT f.id FROM findings f WHERE {where_sql(page_where)}
                   ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}) page
             JOIN findings f ON f.id = page.id
@@ -492,21 +531,7 @@ async def v1_page(
             ORDER BY {plan.order_by}""",
         *page_params.values,
     )
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        item = dict(row)
-        severity = item.pop("_proof_severity")
-        verdict = item.pop("_proof_verdict")
-        mode = item.pop("_proof_mode")
-        evidence = item.pop("_proof_evidence")
-        if item.pop("_proof_undetermined"):
-            # The SQL projection cannot read this row's triage; Python's does (as the detail view).
-            fields = project({"evidence": evidence, "severity": severity,
-                              "last_verification_verdict": verdict, "latest_retest_mode": mode})
-            for name in ("proof_state", "is_verified", "is_suspected"):
-                if name in item:
-                    item[name] = fields[name]
-        items.append(item)
+    items = [finish_v1_row(row, project) for row in rows]
     total, kind = await count_total(conn, page.count, from_sql="findings f", where=where,
                                     values=count_values, table="findings")
     return plan.envelope(items, total=total, total_kind=kind, generated_at=generated_at)
@@ -524,9 +549,13 @@ __all__ = [
     "PROOF_STATE_ROW_SQL",
     "ROW_JOINS_SQL",
     "UNDETERMINED_SQL",
+    "V1_PROOF_INPUT_COLUMNS",
+    "V1_ROW_SELECT_SQL",
     "VERIFIED_CANDIDATE_SQL",
     "apply_proof",
+    "finish_v1_row",
     "resolved_proof_filter",
+    "undetermined_proof_states",
     "legacy_order",
     "legacy_page",
     "proof_filter_sql",

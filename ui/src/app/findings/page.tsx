@@ -5,7 +5,7 @@ import { previewRecordDeletion, type DeletionPreview } from '@/lib/dataLifecycle
 
 import { useEffect, useState, useRef, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
-import { getFindings, getDomains, bulkUpdateFindings, getFindingResearchProvenance, type Finding } from '@/lib/api'
+import { getFindings, getFindingGroupsPage, getDomains, bulkUpdateFindings, getFindingResearchProvenance, type Finding, type FindingsSort } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { detailUrlWithReturn } from '@/lib/detailReturnUrl'
 import { STALE_AFTER_DAYS } from '@/lib/findingFreshness'
@@ -13,7 +13,10 @@ import {
   effectiveStatusView,
   findingCountSummary,
   groupFindings,
+  groupedCountSummary,
+  groupsFromServer,
   statusViewParam,
+  type FindingGroup,
   type StatusView,
 } from '@/lib/findingGroups'
 import { FindingGroupRow } from '@/components/findings/list/FindingGroupRow'
@@ -46,9 +49,11 @@ import { TriageDock } from './TriageDock'
 import { triageOutcomeMessage } from './triage'
 
 const PAGE_SIZE = 50
-// Grouping needs the whole result set on one page, or a group would be cut between pages.
-// 500 is the API's ceiling; a larger set is paged and the count line says groups cover the
-// loaded rows only.
+// An engine that groups findings itself (GET /findings?group_by=issue) groups every match and
+// pages whole groups. On an older engine the browser groups one loaded page: it needs the whole
+// result set on that page, or a group would be cut between pages. 500 is the legacy list's
+// ceiling; a larger set is paged and the count line says groups cover the loaded rows only.
+const GROUP_PAGE_SIZE = 50
 const GROUPED_PAGE_SIZE = 500
 const SEARCH_DEBOUNCE_MS = 300
 
@@ -142,6 +147,12 @@ function FindingsContent() {
   const hasLoadedRef = useRef(false)
   const [domains, setDomains] = useState<string[]>([])
   const [total, setTotal] = useState(0)
+  // Groups the engine formed over every match (null: the browser groups the loaded rows).
+  const [serverGroups, setServerGroups] = useState<FindingGroup<Finding>[] | null>(null)
+  const [groupTotal, setGroupTotal] = useState(0)
+  // Cursors of the group pages reached so far, for the filters and sort they were issued under.
+  const groupPages = useRef<{ key: string; cursors: (string | null)[]; groups: number; findings: number }>(
+    { key: '', cursors: [null], groups: 0, findings: 0 })
   const [hiddenOlder, setHiddenOlder] = useState(0)
   const [searchInput, setSearchInput] = useState<string>(filters.search || '')
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
@@ -273,6 +284,37 @@ function FindingsContent() {
         driven_by: drivenByFilter === 'autonomous_research' ? 'autonomous_research' : undefined,
         research_campaign_id: researchCampaignFilter || undefined,
       }
+      if (grouped) {
+        const sort = `${sortOrder === 'desc' ? '-' : ''}${sortBy}` as FindingsSort
+        const pagesKey = JSON.stringify([scope, sort])
+        if (groupPages.current.key !== pagesKey) groupPages.current = { key: pagesKey, cursors: [null], groups: 0, findings: 0 }
+        const cursor = groupPages.current.cursors[rawPage - 1]
+        // Group pages are reached in order; a page number without its cursor starts again.
+        if (cursor === undefined) {
+          setFilter('page', undefined)
+          return
+        }
+        const result = await getFindingGroupsPage(scope, { limit: GROUP_PAGE_SIZE, cursor, sort })
+        if (result) {
+          const pages = groupPages.current
+          if (result.next_cursor) pages.cursors[rawPage] = result.next_cursor
+          if (result.total !== undefined) {
+            pages.groups = result.total
+            pages.findings = result.findings_total ?? 0
+          }
+          const groups = groupsFromServer(result.groups)
+          setServerGroups(groups)
+          setGroupTotal(pages.groups)
+          setFindings(groups.flatMap((group) => group.members))
+          setTotal(pages.findings)
+          await countHiddenOlder(scope)
+          setLoadError(false)
+          hasLoadedRef.current = true
+          setLoading(false)
+          return
+        }
+      }
+      setServerGroups(null)
       const data = await getFindings({
         ...scope,
         sort_by: sortBy,
@@ -292,24 +334,7 @@ function FindingsContent() {
 
       setFindings(data.findings || [])
       setTotal(fetchedTotal)
-      // Count what the Current view excludes, so the page can say so rather
-      // than quietly showing a shorter list.
-      if (freshnessFilter === 'current') {
-        try {
-          const older = await getFindings({
-            ...scope,
-            seen_within_days: undefined,
-            not_seen_within_days: STALE_AFTER_DAYS,
-            limit: 1,
-            offset: 0,
-          })
-          setHiddenOlder(Number(older?.total || 0))
-        } catch {
-          setHiddenOlder(0)
-        }
-      } else {
-        setHiddenOlder(0)
-      }
+      await countHiddenOlder(scope)
       setLoadError(false)
       hasLoadedRef.current = true
       setLoading(false)
@@ -322,6 +347,27 @@ function FindingsContent() {
         setLoadError(true)
       }
       setLoading(false)
+    }
+  }
+
+  // Count what the Current view excludes, so the page can say so rather than quietly showing a
+  // shorter list.
+  async function countHiddenOlder(scope: NonNullable<Parameters<typeof getFindings>[0]>) {
+    if (freshnessFilter !== 'current') {
+      setHiddenOlder(0)
+      return
+    }
+    try {
+      const older = await getFindings({
+        ...scope,
+        seen_within_days: undefined,
+        not_seen_within_days: STALE_AFTER_DAYS,
+        limit: 1,
+        offset: 0,
+      })
+      setHiddenOlder(Number(older?.total || 0))
+    } catch {
+      setHiddenOlder(0)
     }
   }
 
@@ -420,7 +466,11 @@ function FindingsContent() {
     }
   }
 
-  const totalPages = Math.ceil(total / pageSize)
+  // Server groups page by group; every other view pages by finding.
+  const serverGrouped = grouped && serverGroups !== null
+  const pageUnit = serverGrouped ? GROUP_PAGE_SIZE : pageSize
+  const pagedCount = serverGrouped ? groupTotal : total
+  const totalPages = Math.ceil(pagedCount / pageUnit)
 
   // Clamp page to valid range for display
   const page = Math.min(rawPage, Math.max(1, totalPages))
@@ -457,17 +507,25 @@ function FindingsContent() {
     ) : null
   )
 
-  const rangeStart = (page - 1) * pageSize + 1
-  const rangeEnd = Math.min(page * pageSize, total)
+  const rangeStart = (page - 1) * pageUnit + 1
+  const rangeEnd = Math.min(page * pageUnit, pagedCount)
   const dockVisible = selectedIds.size > 0
-  const groups = grouped ? groupFindings(findings) : []
-  const countSummary = findingCountSummary({
-    total,
-    loaded: findings.length,
-    offset: (page - 1) * pageSize,
-    groups: grouped ? groups.length : null,
-    statusLabel: STATUS_VIEW_NOUNS[statusView],
-  })
+  const groups = grouped ? (serverGroups ?? groupFindings(findings)) : []
+  const countSummary = serverGrouped
+    ? groupedCountSummary({
+      findings: total,
+      groups: groupTotal,
+      start: rangeStart,
+      shown: groups.length,
+      statusLabel: STATUS_VIEW_NOUNS[statusView],
+    })
+    : findingCountSummary({
+      total,
+      loaded: findings.length,
+      offset: (page - 1) * pageSize,
+      groups: grouped ? groups.length : null,
+      statusLabel: STATUS_VIEW_NOUNS[statusView],
+    })
   function setStatusView(view: StatusView) {
     setFilters({ status: statusViewParam(view, evidenceScoped), page: undefined })
   }
@@ -764,10 +822,10 @@ function FindingsContent() {
       )}
 
       {/* Bottom Pagination */}
-      {total > pageSize && (
+      {pagedCount > pageUnit && (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <span className="text-sm text-gray-500 tabular-nums">
-            {`Showing ${rangeStart}–${rangeEnd} of ${total.toLocaleString()}`}
+            {`Showing ${serverGrouped ? 'groups ' : ''}${rangeStart}–${rangeEnd} of ${pagedCount.toLocaleString()}`}
           </span>
           <PaginationControls />
         </div>
