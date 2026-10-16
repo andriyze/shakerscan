@@ -2157,7 +2157,18 @@ class ScanActionPlanCompiler:
                 "prove_candidates", "finalize_evidence",
             ))
         }
-        blueprints.sort(key=lambda row: stage_order[row.stage])
+        # Cheap read-only verifiers run ahead of the active batches. An exposure attempt costs
+        # about five requests and a GraphQL one a single request, while active templates and
+        # injection verification take most of a Scan's wall; ordered after them, the cheap
+        # verifiers were still waiting when a Scan reached its time limit and never started (lab,
+        # release/2.11.0: juice-shop and VAmPI lost every exposure proof). They keep their stage;
+        # only their turn moves ahead of deterministic_active.
+        cheap_first = {"exposure.verify_batch", "graphql.verify_batch"}
+        blueprints.sort(key=lambda row: (
+            stage_order["deterministic_active"] - 0.5
+            if row.stage == "verify_candidates" and row.capability_name in cheap_first
+            else stage_order[row.stage]
+        ))
         blueprints = with_authentication_health(blueprints, credentials, self._registry)
         if any("authentication_profile_ref" in ref for ref in credentials):
             if "local" not in backends:
