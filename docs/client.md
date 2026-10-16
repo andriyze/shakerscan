@@ -405,6 +405,19 @@ on an open-source engine after a `y` keypress (a pipe or a paste never decides),
 your step-up for that one decision (the gateway applies it; a token alone never can). A revealed
 value is shown in that terminal only, with control characters escaped.
 
+## Record a browser session: `shakerscan record`
+
+```bash
+pipx install --force 'shakerscan[record]' && python -m playwright install chromium
+shakerscan record https://app.example.com        # or a target id
+```
+
+Opens Chromium on the target, keeps the requests to the target's exact origin as you browse and
+sign in, and uploads them to a browser capture on the connected instance; close the browser or
+press Ctrl-C to finish. Scans and Hunts use the capture like an imported HAR, and an agent can
+follow it while it records (`shakerscan_captures`). Captured cookies and passwords are never
+promoted to credentials. See [Browser capture](browser-capture.md).
+
 ## Hunt from a script
 
 ```bash

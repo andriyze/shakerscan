@@ -1602,6 +1602,17 @@ response. This makes installed Scan, Hunt start, credential create/rotate, and c
 safe to retry after a lost response. A key reused with different input returns `409`; an in-flight
 duplicate returns a bounded `idempotency_request_in_progress` response instead of executing twice.
 
+**Browser captures** (`shakerscan record`, [browser-capture.md](browser-capture.md)):
+`POST /request-collections/captures` (`{target_id | target_url, name?}` → `{id, allowed_origins,
+limits}`) · `POST /request-collections/{id}/capture-batches` (`{seq, flows[], client_dropped?}`,
+idempotent per `seq`, at most 100 flows and 16 MiB) · `POST /request-collections/{id}/capture-close` ·
+`GET /request-collections?source_format=capture` · `GET /request-collections/{id}/requests?since_seq=`
+(list/v1: `seq`, `last_seq`, `cursor`). A capture is a request collection of format `capture` whose
+encrypted document is HAR; the server re-checks each flow's origin against the binding, caps bodies
+(request 256 KiB, response 1 MiB, scripts 256 KiB), the document (25 MiB, then metadata-only flows)
+and 20,000 requests, and closes a capture idle for 30 minutes. Views are the redacted index only;
+captured credentials are never promoted. MCP: `shakerscan_captures` (list, read with `since_seq`).
+
 Legacy device SSH, header, cookie, and form profiles are backfilled to same-ID generic profiles.
 Their older encrypted JSON envelopes are canonicalized without returning or logging plaintext;
 new and compatibility mutations remain transactional in both stores until device execution stops
