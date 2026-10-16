@@ -385,6 +385,9 @@ async def _update_exception(conn: Any, exception_uuid: uuid.UUID, req: FindingEx
     for uuid_field in ("policy_id", "target_id"):
         if merged.get(uuid_field) is not None:
             merged[uuid_field] = str(merged[uuid_field])
+    # The stored expiry is a timestamp; the request model takes it as ISO text.
+    if hasattr(merged.get("expires_at"), "isoformat"):
+        merged["expires_at"] = merged["expires_at"].isoformat()
     merged_req = FindingExceptionRequest(**merged)
     expires_at = _validate_finding_exception_accountability(merged_req)
     if merged_req.status in EFFECTIVE_EXCEPTION_STATUSES:

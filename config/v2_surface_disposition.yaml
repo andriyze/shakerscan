@@ -348,6 +348,14 @@ surfaces:
     routes: ["/knowledge/decisions"]
     files: ["api/targets/decision_receipts.py"]
 
+  - id: knowledge-continue-usage
+    owner: targets
+    disposition: KEEP_AND_SPLIT
+    canonical_replacement: null
+    new_writes_allowed: false
+    routes: ["/knowledge/continue/usage"]
+    files: ["api/targets/interpretation_routes.py"]
+
   - id: operations
     owner: operations
     disposition: KEEP_AND_SPLIT
