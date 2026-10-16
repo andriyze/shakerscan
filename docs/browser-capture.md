@@ -1,5 +1,7 @@
 # Browser capture: `shakerscan record`
 
+**Status:** shipped in 2.11.0 (client `record` command and engine capture routes).
+
 `shakerscan record` opens a browser on one of your targets and keeps what you do there. You
 browse, sign in and walk through the flows a crawler does not reach; the ShakerScan instance you
 are connected to (on the same machine or another) receives every in-scope request as you go. The
