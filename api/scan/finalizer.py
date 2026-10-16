@@ -1476,7 +1476,8 @@ def _fold_duplicate_header_findings(findings: list[dict[str, Any]]) -> list[dict
 
     The baseline request proves a missing CSP/HSTS/Referrer/Permissions header itself; the passive
     template reports the same header again ("Missing HTTP response header: Referrer-Policy").
-    The baseline finding is kept and takes the template's matched-page evidence.
+    The baseline finding is kept and takes the template's matched-page evidence. A template
+    HSTS match on a plain-HTTP origin is dropped: HSTS has no effect there.
     """
     baseline: dict[tuple[str, str], dict[str, Any]] = {}
     for finding in findings:
@@ -1486,12 +1487,16 @@ def _fold_duplicate_header_findings(findings: list[dict[str, Any]]) -> list[dict
             origin = _http_origin(finding.get("url"))
             if origin:
                 baseline[(check.removeprefix("missing_header_"), origin)] = finding
-    if not baseline:
-        return findings
     kept: list[dict[str, Any]] = []
     for finding in findings:
         evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
         header = str(evidence.get("header_name") or "").lower()
+        # Browsers ignore HSTS received over plain HTTP: its absence there is not a finding.
+        if (
+            finding.get("tool") == "nuclei" and header == "strict-transport-security"
+            and str(_http_origin(finding.get("url")) or "").startswith("http://")
+        ):
+            continue
         twin = (
             baseline.get((header, _http_origin(finding.get("url")) or ""))
             if finding.get("tool") == "nuclei" and evidence.get("template_id") == "http-missing-security-headers"

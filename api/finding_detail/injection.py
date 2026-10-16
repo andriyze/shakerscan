@@ -5,7 +5,7 @@ from __future__ import annotations
 import urllib.parse
 from typing import Any, Mapping
 
-from .common import command, fact, facts, integer, join_limited, origin_of, q, record, strings, text
+from .common import command, display_url, fact, facts, integer, join_limited, origin_of, q, record, strings, text
 
 _SQL_FIX = [
     ("Python (DB-API)", 'cursor.execute("SELECT * FROM products WHERE id = %s", (product_id,))'),
@@ -66,7 +66,8 @@ def dbms_from(signatures: list[str], excerpt: str) -> str:
 
 
 def build_sqli(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
-    url, method, parameter = _location(finding, evidence)
+    raw_url, method, parameter = _location(finding, evidence)
+    url = display_url(raw_url)
     verified = finding.get("proof_state") == "verified" or finding.get("verified") is True
     signatures = strings(evidence.get("database_error_signatures"), 6, 200)
     dbms = text(evidence.get("dbms"), 60) or dbms_from(signatures, text(evidence.get("redacted_excerpt"), 1200))
@@ -95,9 +96,9 @@ def build_sqli(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[
     )
     excerpt = text(evidence.get("redacted_excerpt"), 1200)
     reproduce = None
-    if method == "GET" and parameter and url.startswith(("http://", "https://")) and "." not in parameter:
+    if method == "GET" and parameter and raw_url.startswith(("http://", "https://")) and "." not in parameter:
         reproduce = command(
-            f"curl -sS {q(_with_value(url, parameter, chr(39)))} | grep -iE 'sql|syntax|database|ORA-|SQLITE'",
+            f"curl -sS {q(_with_value(raw_url, parameter, chr(39)))} | grep -iE 'sql|syntax|database|ORA-|SQLITE'",
             expect="a database error for the single quote, none for a normal value",
             note="One harmless quote; do not run destructive payloads against production.",
         )

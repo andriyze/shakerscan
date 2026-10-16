@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .common import command, fact, facts, integer, join_limited, q, record, strings, text, url_parts
+from .common import command, fact, facts, integer, join_limited, q, record, short_date, strings, text, url_parts
 
 _LABELS = {
     "tls_certificate_hostname_mismatch": "Certificate hostname mismatch",
@@ -86,7 +86,7 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         fact("Issuer", cert.get("issuer")),
         fact("Valid from", cert.get("not_before")),
         fact("Valid until", cert.get("not_after")),
-        fact("Key", " ".join(part for part in (text(cert.get("public_key_type")), f"{cert.get('public_key_bits')} bits" if integer(cert.get("public_key_bits")) else "") if part)),
+        fact("Key", " ".join(part for part in (text(cert.get("public_key_type")).removesuffix("PublicKey"), f"{cert.get('public_key_bits')} bits" if integer(cert.get("public_key_bits")) else "") if part)),
         fact("Signature hash", cert.get("signature_hash")),
         fact("Serial", cert.get("serial_hex"), mono=True),
     )
@@ -163,21 +163,21 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
     elif check in {"tls_certificate_expired", "tls_certificate_not_yet_valid", "tls_certificate_expiring"}:
         expired_links = [text(link.get("subject")) for index, link in enumerate(chain) if index and link.get("expired") is True]
         if check == "tls_certificate_expired":
-            out["summary"] = f"The certificate served at {origin or host} expired on {text(cert.get('not_after'))}" + (f" ({abs(days)} days ago)." if days is not None and days < 0 else ".")
+            out["summary"] = f"The certificate served at {origin or host} expired on {short_date(cert.get('not_after'))}" + (f" ({abs(days)} days ago)." if days is not None and days < 0 else ".")
             out["expected"] = ["A certificate whose validity period includes today."]
             out["fix"] = [
                 f"Renew the certificate for {covered} and install it with its intermediates.",
                 f"The server still serves serial {text(cert.get('serial_hex')) or 'recorded above'}: if renewal ran, the terminator was not reloaded (check the ACME deploy/reload hook).",
             ]
         elif check == "tls_certificate_not_yet_valid":
-            out["summary"] = f"The certificate served at {origin or host} only becomes valid on {text(cert.get('not_before'))}."
+            out["summary"] = f"The certificate served at {origin or host} only becomes valid on {short_date(cert.get('not_before'))}."
             out["expected"] = ["A certificate whose start date is in the past."]
             out["fix"] = [
                 "Check the clock of the host that issued or installed the certificate (NTP); a future start date is usually a clock error.",
                 "Install a certificate that is valid now, then reload the terminator.",
             ]
         else:
-            out["summary"] = f"The certificate served at {origin or host} expires on {text(cert.get('not_after'))}" + (f", in {days} days." if days is not None else ".")
+            out["summary"] = f"The certificate served at {origin or host} expires on {short_date(cert.get('not_after'))}" + (f", in {days} days." if days is not None else ".")
             out["expected"] = ["More than 30 days of validity left, renewed automatically."]
             out["fix"] = [
                 "Renew now and confirm automated renewal (certbot/acme.sh timer, or your CA's renewal) is enabled for this name.",
@@ -219,7 +219,7 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         out["expected"] = ["A SHA-256 (or stronger) signature, which every public CA issues today."]
         out["fix"] = [f"Reissue the certificate for {covered} with a SHA-256 signature and install it with its current intermediates."]
     elif check == "tls_certificate_weak_public_key":
-        out["summary"] = f"The certificate served at {origin or host} uses a {cert.get('public_key_bits')}-bit {text(cert.get('public_key_type'))} key."
+        out["summary"] = f"The certificate served at {origin or host} uses a {cert.get('public_key_bits')}-bit {text(cert.get('public_key_type')).removesuffix('PublicKey') or 'public'} key."
         out["expected"] = ["RSA 2048 bits or more, or an EC P-256 key."]
         out["fix"] = [
             "Generate a NEW key (renewing with the same key keeps it weak), e.g. openssl req -new -newkey rsa:3072 -nodes -keyout server.key -out server.csr, or an EC P-256 key.",

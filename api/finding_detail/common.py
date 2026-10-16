@@ -9,6 +9,7 @@ target chose.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import urllib.parse
 from typing import Any, Iterable, Mapping
@@ -94,6 +95,20 @@ def origin_of(value: Any) -> str:
     return f"{scheme}://{shown}" + ("" if port == default else f":{port}")
 
 
+_REDACTED_QUERY_VALUE = re.compile(r"=(?:%3Credacted%3E|<redacted>|\[redacted\]|%5Bredacted%5D)(?=&|$|#)", re.IGNORECASE)
+
+
+def display_url(value: Any, limit: int = 800) -> str:
+    """A stored URL for reading: a value the server redacted reads as ``•••``, not as a marker."""
+    return _REDACTED_QUERY_VALUE.sub("=•••", text(value, limit))
+
+
+def short_date(value: Any) -> str:
+    """``2025-01-01T00:00:00+00:00`` -> ``2025-01-01``; other text unchanged."""
+    shown = text(value, 40)
+    return shown[:10] if re.match(r"^\d{4}-\d{2}-\d{2}T", shown) else shown
+
+
 def q(value: Any) -> str:
     return shlex.quote(str(value))
 
@@ -170,6 +185,6 @@ def detected_stack(headers: Mapping[str, Any]) -> str | None:
 
 
 __all__ = [
-    "DETAIL_SCHEMA", "command", "detected_stack", "fact", "facts", "integer", "join_limited",
+    "DETAIL_SCHEMA", "command", "detected_stack", "display_url", "short_date", "fact", "facts", "integer", "join_limited",
     "origin_of", "q", "record", "strings", "text", "url_parts", "visible_scalar_facts",
 ]

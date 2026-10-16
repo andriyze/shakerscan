@@ -77,7 +77,7 @@ def build_missing_header(finding: Mapping[str, Any], evidence: Mapping[str, Any]
     if header == "x-frame-options" and "frame-ancestors" in csp:
         context.append("The response already sets CSP frame-ancestors, which modern browsers use instead of X-Frame-Options: the remaining risk is limited to very old browsers.")
     if header == "strict-transport-security" and url.startswith("http://"):
-        context.append("HSTS only takes effect when sent over HTTPS; set it on the HTTPS responses.")
+        context.append("This origin is plain HTTP, where browsers ignore HSTS: the issue that matters is serving the site without HTTPS. Redirect it to HTTPS and send HSTS there.")
     matched = int(evidence.get("matched_url_count") or 0)
     if matched > 1:
         context.append(f"{matched} scanned pages on this origin lacked the header; it is reported once per origin.")

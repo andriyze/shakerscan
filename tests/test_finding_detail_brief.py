@@ -291,3 +291,23 @@ def test_knowledge_base_check_commands_target_the_finding_not_example_com():
     remediation = finding_remediation(finding)
     assert "https://app.fixture.invalid/actuator/env" in remediation["verification"]
     assert "example.com" not in remediation["verification"]
+
+
+def test_hsts_absence_on_plain_http_is_not_a_finding():
+    from api.scan.finalizer import _fold_duplicate_header_findings
+    http_hsts = {"tool": "nuclei", "url": "http://app.fixture.invalid", "evidence": {
+        "template_id": "http-missing-security-headers", "header_name": "strict-transport-security"}}
+    https_hsts = {"tool": "nuclei", "url": "https://app.fixture.invalid", "evidence": {
+        "template_id": "http-missing-security-headers", "header_name": "strict-transport-security"}}
+    assert _fold_duplicate_header_findings([http_hsts, https_hsts]) == [https_hsts]
+
+
+def test_redacted_query_values_read_as_masked_in_the_brief_and_dates_are_short():
+    sqli = build_finding_detail({"tool": "sqlmap", "severity": "high", "proof_state": "candidate",
+        "url": "http://s.invalid/product?id=%3Credacted%3E", "evidence": {"url": "http://s.invalid/product?id=%3Credacted%3E", "param": "id"}})
+    assert "redacted" not in sqli["summary"] and "id=•••" in sqli["summary"]
+    assert "redacted" not in sqli["reproduce"]["command"]
+    key = build_finding_detail(_tls("tls_certificate_weak_public_key", certificate={"public_key_type": "RSAPublicKey", "public_key_bits": 1024}))
+    assert "1024-bit RSA key" in key["summary"]
+    expired = build_finding_detail(_tls("tls_certificate_expired", certificate={"not_after": "2025-01-01T00:00:00+00:00"}))
+    assert "expired on 2025-01-01" in expired["summary"] and "T00" not in expired["summary"]
