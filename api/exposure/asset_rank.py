@@ -39,6 +39,8 @@ from .scale_indexes import EXPOSURE_SCALE_INDEXES
 
 #: Bump when the Python classification changes: every stored fact is then recomputed once.
 FACTS_VERSION = "exposure-facts/1"
+# Cold or invalidated inventories are classified in small transactions, never one Python list.
+FACTS_BATCH = 100
 PRIORITY_WEIGHT = {"P1": 300, "P2": 200, "P3": 100}
 STALE_DAYS = 30
 NEW_DAYS = 7
@@ -229,9 +231,9 @@ _FACT_SOURCES = {
 
 
 async def _refresh_kind(conn: Any, kind: str) -> tuple[int, int]:
-    """Recompute one kind's changed facts; ``(written, raced)``."""
+    """Recompute one bounded batch of changed facts; ``(written, raced)``."""
     source = _FACT_SOURCES[kind]
-    rows = await conn.fetch(source["select"], FRESH_STATE)
+    rows = await conn.fetch(source["select"] + " LIMIT $2", FRESH_STATE, FACTS_BATCH)
     if not rows:
         return 0, 0
     columns = source["columns"]
@@ -269,10 +271,15 @@ async def refresh_facts(conn: Any, *, include_web: bool = True, include_ai: bool
         raced = 0
         try:
             for kind in kinds:
-                async with conn.transaction():
-                    done, lost = await _refresh_kind(conn, kind)
-                written += done
-                raced += lost
+                while True:
+                    async with conn.transaction():
+                        done, lost = await _refresh_kind(conn, kind)
+                    written += done
+                    raced += lost
+                    # A full successful batch leaves more possible work. Commit it before
+                    # loading the next batch; edits that raced this one use the outer retry.
+                    if lost or done < FACTS_BATCH:
+                        break
         except Exception as exc:
             # Two readers refreshing the same rows can deadlock; the loser retries.
             if exc.__class__.__name__ != "DeadlockDetectedError" or attempt == attempts - 1:
