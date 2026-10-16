@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import timedelta
 import json
+import logging
 import os
 import asyncio
 import ipaddress
@@ -58,12 +59,23 @@ SECRET_TRY_UNRELATED = "secret_try_unrelated_target"
 DENIED_LOGINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "secret_try_denied_logins.txt")
 
 
-def _shipped_rules() -> tuple[str, ...]:
+_log = logging.getLogger(__name__)
+_SHIPPED_UNREADABLE_LOGGED = False
+
+
+def _shipped_rules() -> tuple[str, ...] | None:
+    """The shipped deny rules, or ``None`` when the list cannot be read: every try then fails
+    closed (``denied_destination``), since a missing list would otherwise allow every login."""
+    global _SHIPPED_UNREADABLE_LOGGED
     try:
         with open(DENIED_LOGINS_FILE, encoding="utf-8") as handle:
             return tuple(line.strip() for line in handle if line.strip() and not line.lstrip().startswith("#"))
-    except OSError:
-        return ()
+    except (OSError, UnicodeDecodeError) as exc:
+        if not _SHIPPED_UNREADABLE_LOGGED:
+            _SHIPPED_UNREADABLE_LOGGED = True
+            _log.error("secret try denied-login list unreadable (%s); refusing every secret try",
+                       type(exc).__name__)
+        return None
 
 
 def _json(value: Any, default: Any) -> Any:
@@ -83,11 +95,15 @@ def _canonical_host(value: Any) -> str:
     return canonical(value)
 
 
-def _denied_rules() -> tuple[tuple[str, str], ...]:
-    """The shipped rules plus ``SHAKERSCAN_SECRET_TRY_DENY`` (``host/path,host/path``)."""
+def _denied_rules() -> tuple[tuple[str, str], ...] | None:
+    """The shipped rules plus ``SHAKERSCAN_SECRET_TRY_DENY`` (``host/path,host/path``); ``None``
+    when the shipped list cannot be read."""
     extra = []
+    shipped = _shipped_rules()
+    if shipped is None:
+        return None
     configured = str(os.environ.get("SHAKERSCAN_SECRET_TRY_DENY") or "").split(",")
-    for item in (*_shipped_rules(), *configured):
+    for item in (*shipped, *configured):
         text = item.strip()
         if not text:
             continue
@@ -120,10 +136,13 @@ def denied_destination(host: Any, path: Any, addresses: Any = ()) -> bool:
     host is a denied one, or (``addresses``: where the request is pinned) it reaches an address a
     denied host resolves to, under the denied path. Synchronous checks use only resolved
     addresses already known (``denied_addresses``); the worker resolves them before sending."""
+    rules = _denied_rules()
+    if rules is None:
+        return True  # fail closed: the shipped list could not be read
     canonical = _canonical_host(host)
     normal = _normal_path(path)
     pinned = {_address(item) for item in addresses or ()} - {""}
-    for denied_host, prefix in _denied_rules():
+    for denied_host, prefix in rules:
         if not _rule_matches(prefix, normal):
             continue
         if canonical == denied_host or (pinned and pinned & _RESOLVED.get(denied_host, (0.0, frozenset()))[1]):
@@ -160,7 +179,7 @@ resolve_denied_host: Callable[[str], frozenset[str]] = _resolve_host
 async def denied_addresses() -> None:
     """Refresh the addresses of the denied hosts (cached; failures leave the name rule)."""
     now = time.monotonic()
-    for denied_host, _prefix in _denied_rules():
+    for denied_host, _prefix in _denied_rules() or ():
         cached = _RESOLVED.get(denied_host)
         if cached is not None and now - cached[0] < RESOLVE_TTL:
             continue

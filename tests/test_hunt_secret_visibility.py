@@ -210,6 +210,20 @@ def test_a_secret_goes_only_to_the_origin_the_request_names_never_a_default():
     assert secret_try.destination_of(named)["origin"] == "http://app.example.test:8080"
 
 
+def test_an_unreadable_shipped_deny_list_refuses_every_try(monkeypatch, tmp_path, caplog):
+    monkeypatch.delenv("SHAKERSCAN_SECRET_TRY_DENY", raising=False)
+    monkeypatch.setattr(secret_try, "DENIED_LOGINS_FILE", str(tmp_path / "missing.txt"))
+    monkeypatch.setattr(secret_try, "_SHIPPED_UNREADABLE_LOGGED", False)
+    with caplog.at_level("ERROR", logger=secret_try.__name__):
+        assert secret_try.denied_destination("app.example.test", "/login")
+        assert secret_try.denied_destination("honey.shakerscan.com", "/hub/login")
+    assert sum("unreadable" in record.getMessage() for record in caplog.records) == 1   # logged once
+    import asyncio
+    assert asyncio.run(secret_try.denied_destination_resolved("app.example.test", "/login", ("203.0.113.9",)))
+    (tmp_path / "missing.txt").write_text("# none\n", encoding="utf-8")
+    assert not secret_try.denied_destination("app.example.test", "/login")
+
+
 def test_the_person_reads_names_and_ids_never_a_value():
     subject = {"secret_id": "00000000-0000-4000-8000-000000000001", "found_on_target_id": "t-s",
                "consuming_target_id": "t-t", "origin": "https://app.example.test:443",
