@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import sys
 import random
 import re
 import secrets
@@ -54,6 +55,7 @@ except ModuleNotFoundError:
 from scan.assessment import project_scan_assessment_row
 from scan.list_v1 import scans_page, scan_list_columns
 from scan.live_log import read_scan_log
+from research_routes.autopilot_loop import run_research_autopilot
 from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
 from list_contract import CURSOR_MAX_LENGTH
 from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
@@ -18697,11 +18699,14 @@ async def _reap_abandoned_research_episodes(conn) -> int:
     # stale-dispatch reconciler owns it; cancelling it would orphan a live scan) and autopilot
     # episodes (the runner advances/re-leases them). No hard delete of hunt transcripts — those are
     # run records under the evidence-retention discipline, not reaper-deletable. (External-audit P1/P2.)
+    # At most 500 per pass (oldest first); the next pass takes the rest.
     reaped = await conn.fetch(
         """UPDATE research_episodes re
            SET status='cancelled', stop_reason='abandoned_reaper_timeout',
                lease_expires_at=NULL, updated_at=NOW()
-           WHERE re.status IN ('awaiting_planner','awaiting_input')
+           WHERE re.id IN (
+             SELECT re.id FROM research_episodes re
+             WHERE re.status IN ('awaiting_planner','awaiting_input')
              AND re.autopilot_enabled=false
              AND re.cancel_requested=false
              AND re.updated_at < NOW() - make_interval(hours => $1::int)
@@ -18717,6 +18722,7 @@ async def _reap_abandoned_research_episodes(conn) -> int:
                        (SELECT max(ev2.created_at) FROM research_events ev2
                         WHERE ev2.episode_id=re.id AND ev2.event_type='autopilot_resumed'),
                        '-infinity'::timestamptz))
+             ORDER BY re.updated_at LIMIT 500 FOR UPDATE SKIP LOCKED)
            RETURNING id""",
         ttl,
     )
@@ -19170,210 +19176,8 @@ async def _reconcile_research_orphaned_queue_work(conn) -> int:
 
 
 async def research_autopilot_runner(pool) -> None:
-    """Durably advance opted-in episodes independent of any browser session.
-
-    A Postgres lease makes the controller safe across API replicas. Episodes with a linked active
-    scan or finding retest are left alone until that work settles, then receive exactly one fresh
-    result-bearing observation before planning.
-    """
-    owner = f"api-autopilot:{os.getpid()}:{uuid.uuid4()}"
-    last_queue_reconcile_monotonic = 0.0
-    last_campaign_reconcile_monotonic = 0.0
-    last_episode_reap_monotonic = 0.0
-    while True:
-        episode_id: str | None = None
-        try:
-            now_monotonic = time.monotonic()
-            if now_monotonic - last_campaign_reconcile_monotonic >= 30.0:
-                await _continue_autonomous_research_campaigns()
-                last_campaign_reconcile_monotonic = now_monotonic
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    await _reconcile_stale_research_dispatches(conn)
-                    now_monotonic = time.monotonic()
-                    if now_monotonic - last_queue_reconcile_monotonic >= 30.0:
-                        await _reconcile_unconfirmed_queue_handoffs(conn)
-                        await _reconcile_research_orphaned_queue_work(conn)
-                        last_queue_reconcile_monotonic = now_monotonic
-                    if now_monotonic - last_episode_reap_monotonic >= 300.0:
-                        await _reap_abandoned_research_episodes(conn)
-                        last_episode_reap_monotonic = now_monotonic
-                row = await conn.fetchrow(
-                    """
-                    WITH candidate AS (
-                        SELECT re.id
-                        FROM research_episodes re
-                        WHERE re.autopilot_enabled=true
-                          AND re.status IN ('awaiting_planner','awaiting_observation')
-                          AND re.cancel_requested=false
-                          AND (re.lease_expires_at IS NULL OR re.lease_expires_at < NOW())
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM research_decisions rd
-                              JOIN command_results cr ON cr.id=rd.command_result_id
-                              JOIN scans s ON s.id=cr.scan_id
-                              WHERE rd.episode_id=re.id AND s.status IN ('pending','queued','running')
-                          )
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM research_decisions rd
-                              JOIN command_results cr ON cr.id=rd.command_result_id
-                              JOIN finding_verifications fv ON fv.id=(CASE WHEN cr.result_json->>'retest_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (cr.result_json->>'retest_id')::uuid END)
-                              WHERE rd.episode_id=re.id AND fv.status IN ('queued','running')
-                          )
-                        ORDER BY re.updated_at ASC
-                        FOR UPDATE SKIP LOCKED
-                        LIMIT 1
-                    )
-                    UPDATE research_episodes re
-                    SET lease_owner=$1,
-                        lease_expires_at=NOW()+make_interval(secs => $2),
-                        updated_at=NOW()
-                    FROM candidate
-                    WHERE re.id=candidate.id
-                    RETURNING re.*
-                    """,
-                    owner,
-                    RESEARCH_AUTOPILOT_LEASE_SECONDS,
-                )
-                if row:
-                    episode_id = str(row["id"])
-                    should_plan = str(row["status"]) == "awaiting_planner"
-                    if str(row["status"]) == "awaiting_observation":
-                        async with conn.transaction():
-                            locked = await conn.fetchrow(
-                                "SELECT * FROM research_episodes WHERE id=$1 FOR UPDATE",
-                                row["id"],
-                            )
-                            if (
-                                not locked
-                                or str(locked["status"]) != "awaiting_observation"
-                                or bool(locked["cancel_requested"])
-                                or str(locked["lease_owner"] or "") != owner
-                            ):
-                                should_plan = False
-                            elif await _research_async_work(conn, row["id"], active_only=True):
-                                # Work became active after the candidate query; keep waiting.
-                                should_plan = False
-                            else:
-                                settlement = await _settle_research_awaiting_observation(conn, locked)
-                                should_plan = settlement.get("next_status") == "awaiting_planner"
-            if not episode_id:
-                await asyncio.sleep(1.0)
-                continue
-            if not should_plan:
-                await _release_research_autopilot_lease(pool, episode_id, owner)
-                continue
-            heartbeat_stop = asyncio.Event()
-            heartbeat_task = asyncio.create_task(
-                _research_lease_heartbeat(pool, episode_id, owner, heartbeat_stop)
-            )
-            try:
-                if _research_episode_uses_agent_loop(row):
-                    # Opt-in: drive this episode with the LLM ReAct hunt loop instead of the
-                    # menu planner. The existing create-MA/menu path is untouched (this branch
-                    # only fires when planner.agent_loop was set at launch).
-                    result = await _run_agent_hunt_for_episode(episode_id)
-                else:
-                    result = await _plan_research_episode_step(
-                        episode_id,
-                        ResearchPlannerStepRequest(
-                            execute=True,
-                            # 240s (of a 300s ceiling) so a large reasoning planner finishes the first big
-                            # pack with room for one retry after a transient provider connection error; the
-                            # full 8000 max_tokens so a filled mass_assignment/BOLA workflow isn't truncated
-                            # into a harness-repair/misinferred stop.
-                            timeout_seconds=240,
-                            max_tokens=8000,
-                            created_by="server_autopilot",
-                        ),
-                    )
-            except asyncio.CancelledError:
-                heartbeat_stop.set()
-                # Graceful shutdown cancels this task and awaits it BEFORE closing the pool (see
-                # lifespan), so release the lease we hold here. Otherwise a restarted controller must
-                # wait out the ~4-minute lease TTL before it can resume this episode -- the observed
-                # multi-minute dead window after an API restart. Shield so the cleanup completes
-                # despite the cancellation propagating.
-                try:
-                    await asyncio.shield(heartbeat_task)
-                except Exception:
-                    pass
-                try:
-                    await asyncio.shield(_release_research_autopilot_lease(pool, episode_id, owner))
-                except Exception:
-                    pass
-                raise
-            except Exception as exc:
-                heartbeat_stop.set()
-                await heartbeat_task
-                if _research_autopilot_expected_control_race(exc):
-                    await _release_research_autopilot_lease(pool, episode_id, owner)
-                else:
-                    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
-                    error = json.dumps(detail, default=str) if isinstance(detail, (dict, list)) else str(detail)
-                    await _release_research_autopilot_lease(pool, episode_id, owner, error=error or type(exc).__name__)
-            else:
-                heartbeat_stop.set()
-                await heartbeat_task
-                result_episode = result.get("episode") if isinstance(result, dict) else {}
-                if isinstance(result, dict) and result.get("accepted") is False and not (result_episode or {}).get("terminal"):
-                    errors = []
-                    decisions = result.get("decisions") if isinstance(result.get("decisions"), list) else []
-                    if decisions and isinstance(decisions[0], dict):
-                        errors = decisions[0].get("validation_errors") or []
-                    policy_steering = _research_rejection_is_policy_steering(errors)
-                    async with pool.acquire() as conn:
-                        episode_row = await conn.fetchrow(
-                            "SELECT * FROM research_episodes WHERE id=$1 AND lease_owner=$2",
-                            uuid.UUID(episode_id), owner,
-                        )
-                        if episode_row and str(episode_row["status"]) == "awaiting_planner":
-                            await _build_research_observation(
-                                conn,
-                                episode_row,
-                                previous_result={
-                                    "planner_rejection": {
-                                        "validation_errors": [str(item)[:300] for item in errors[:20]],
-                                        "instruction": (
-                                            "The deterministic policy excluded this exact action/hypothesis. "
-                                            "Choose a different planner-visible hypothesis or semantic dimension."
-                                            if policy_steering else
-                                            "Choose a named proposable command or provide a valid stop/input decision."
-                                        ),
-                                    }
-                                },
-                                next_status="awaiting_planner",
-                            )
-                            if policy_steering:
-                                await _record_research_event(
-                                    conn,
-                                    episode_row["id"],
-                                    event_type="planner_steered",
-                                    status="retrying",
-                                    summary="Deterministic policy steered the planner to different work",
-                                    details={"validation_errors": [str(item)[:300] for item in errors[:20]]},
-                                )
-                    if policy_steering:
-                        await _release_research_autopilot_lease(pool, episode_id, owner)
-                    else:
-                        await _release_research_autopilot_lease(
-                            pool,
-                            episode_id,
-                            owner,
-                            error=f"planner_decision_rejected:{','.join(str(item) for item in errors)[:800]}",
-                        )
-                else:
-                    await _release_research_autopilot_lease(pool, episode_id, owner)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            if episode_id:
-                try:
-                    await _release_research_autopilot_lease(pool, episode_id, owner, error="autopilot_controller_error")
-                except Exception:
-                    pass
-            await asyncio.sleep(2.0)
+    """Durably advance opted-in episodes under one leader (research_routes/autopilot_loop.py)."""
+    await run_research_autopilot(pool, sys.modules[__name__])
 
 
 
