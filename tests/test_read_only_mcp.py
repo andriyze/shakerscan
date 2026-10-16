@@ -423,7 +423,8 @@ def test_mcp_server_protocol_and_notifications():
     assert initialized["result"]["serverInfo"]["version"] == (ROOT / "VERSION").read_text().strip()
     assert notification is None
     assert cancelled is None
-    assert len(tools["result"]["tools"]) == 8 + len(mcp.HUNT_TOOLS)
+    # The Arsenal read-only tools, the Hunt tools and shakerscan_captures.
+    assert len(tools["result"]["tools"]) == 8 + len(mcp.HUNT_TOOLS) + 1
 
 
 def test_mcp_hunt_tools_wrap_canonical_api_and_validate_ids():
