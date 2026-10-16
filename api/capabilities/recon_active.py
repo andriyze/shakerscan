@@ -54,7 +54,7 @@ PARAMETER_WORDLIST = "params-corporate.txt"
 DNS_BATCH = 32
 DNS_CONCURRENCY = 16
 VHOST_CONTROLS = 2
-VHOST_CONFIRM_LIMIT = 10
+VHOST_CONFIRM_LIMIT = 25
 PARAMETER_ROUTE_LIMIT = 12
 PARAMETER_CONFIRM_PER_ROUTE = 8
 LEAD_STATUSES = frozenset({200, 204, 301, 302, 303, 307, 308, 401, 403})
@@ -403,9 +403,23 @@ def parameter_routes(
     observations: Iterable[Mapping[str, Any]], *, origin: str, limit: int = PARAMETER_ROUTE_LIMIT,
     excluded_urls: frozenset[str] = frozenset(),
 ) -> list[str]:
-    """Observed GET paths on the Scan's own origin worth asking about parameters, root first."""
+    """Observed GET paths on the Scan's own origin worth asking about parameters: the root,
+    then routes the application itself links or declares, then content-discovery hits."""
     paths: list[str] = ["/"]
-    for item in observations:
+    # A content-discovery hit answered exactly like a path that cannot exist (a soft-404 host)
+    # is not an observed route: its status and length match a negative-control answer.
+    absent_answers = {
+        (str(item.get("url") or "").split("/", 3)[2] if "//" in str(item.get("url") or "") else "",
+         item.get("status"), item.get("length"))
+        for item in observations
+        if isinstance(item, Mapping) and item.get("kind") == "content_discovery"
+        and item.get("negative_control")
+    }
+    ordered = sorted(
+        (item for item in observations if isinstance(item, Mapping)),
+        key=lambda item: 0 if str(item.get("kind") or "") == "discovered_route" else 1,
+    )
+    for item in ordered:
         kind = str(item.get("kind") or "")
         if kind == "discovered_route" and str(item.get("method") or "GET").upper() != "GET":
             continue
@@ -414,6 +428,10 @@ def parameter_routes(
             if item.get("negative_control") or type(status) is not int or not 200 <= status < 300:
                 continue
             if str(item.get("url") or "") in excluded_urls:
+                continue
+            url = str(item.get("url") or "")
+            authority = url.split("/", 3)[2] if "//" in url else ""
+            if (authority, status, item.get("length")) in absent_answers:
                 continue
         elif kind != "discovered_route":
             continue

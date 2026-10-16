@@ -1280,7 +1280,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "bundled names below the bound root, against the bound name and random-name "
             "controls. Leads only; never a route or a target.",
             "http", "active", _HTTP_TARGETS, "scanner.vhost_discovery", "1",
-            "active_testing", {"http_requests": 120, "tool_wall_seconds": 120},
+            "active_testing", {"http_requests": 140, "tool_wall_seconds": 120},
             {
                 "network_reachability": True,
                 "runtime_target_binding": True,

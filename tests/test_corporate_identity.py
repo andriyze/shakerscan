@@ -60,9 +60,9 @@ def test_path_marker_needs_a_distinguishable_negative_control():
     leads, controlled = ci.identities_from_content_discovery([*controls, _hit("/remote/login")])
     assert [lead["product"] for lead in leads] == ["Fortinet FortiGate SSL VPN"]
     assert leads[0]["basis"] == ["path_marker"] and controlled == 0
-    # Without any measured absent answer nothing is claimed.
+    # No absent path reported as a hit: the server answered them with a non-hit status.
     leads, controlled = ci.identities_from_content_discovery([_hit("/remote/login")])
-    assert leads == [] and controlled == 1
+    assert [lead["product"] for lead in leads] == ["Fortinet FortiGate SSL VPN"] and controlled == 0
 
 
 def test_soft_404_host_produces_no_path_leads():

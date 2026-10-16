@@ -222,7 +222,7 @@ class _Leads:
             if len(self._items) >= MAX_LEADS:
                 return
             lead = self._items[key] = {
-                "product": product.label, "key": product.key, "vendor": product.vendor,
+                "product": product.label, "catalogue_id": product.key, "vendor": product.vendor,
                 "category": product.category, "origin": origin, "version": None,
                 "basis": [], "evidence": [], "status": "lead",
                 "applicability": "unconfirmed",
@@ -286,9 +286,12 @@ def identities_from_content_discovery(
 ) -> tuple[list[dict[str, Any]], int]:
     """Path-marker leads from content-discovery hits, and how many hits the control removed.
 
-    A hit counts only when the run measured the host's absent-path answer (negative control) and
-    the hit's status and length differ from every absent answer on that origin: a soft-404 host
-    answers ``/remote/login`` exactly as it answers a path that cannot exist.
+    Content discovery sends a few paths that cannot exist with every calibrated run and reports
+    only answers with a hit status. A hit is distinguishable when its status and length differ
+    from every absent-path answer the run reported on that origin, or when no absent path was
+    reported there at all (the server answered them with a non-hit status such as 404). A
+    soft-404 host answers ``/remote/login`` exactly as it answers a path that cannot exist, and
+    that hit is removed.
     """
     items = [dict(row) for row in rows if isinstance(row, Mapping)
              and str(row.get("kind") or "content_discovery") == "content_discovery"]
@@ -303,10 +306,7 @@ def identities_from_content_discovery(
         if product is None or type(status) is not int or status not in _PATH_HIT_STATUSES:
             continue
         origin = _origin_of(row.get("url"))
-        measured = absent.get(origin or "")
-        if not measured:
-            controlled += 1  # no control measured for this origin: no claim
-            continue
+        measured = absent.get(origin or "") or set()
         if (status, row.get("length")) in measured:
             controlled += 1
             continue

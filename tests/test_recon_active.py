@@ -367,13 +367,27 @@ def test_parameter_routes_are_observed_same_origin_gets_only():
         {"kind": "discovered_route", "method": "GET", "url": "https://other.example.test/x"},
         {"kind": "discovered_route", "method": "GET", "url": "https://www.example.test/app.js"},
         {"kind": "discovered_route", "method": "GET", "url": "https://www.example.test/logout"},
-        {"kind": "content_discovery", "url": "https://www.example.test/report", "status": 200},
+        {"kind": "content_discovery", "url": "https://www.example.test/report", "status": 200,
+         "length": 900},
         {"kind": "content_discovery", "url": "https://www.example.test/gone", "status": 404},
         {"kind": "content_discovery", "url": "https://www.example.test/.shakerscan-absent-0",
-         "status": 200, "negative_control": True},
+         "status": 200, "length": 12, "negative_control": True},
     ]
     assert ra.parameter_routes(observations, origin="https://www.example.test") == [
         "/", "/search", "/report"]
+
+
+def test_soft_404_content_hits_are_not_parameter_routes():
+    soft = [
+        {"kind": "content_discovery", "url": f"https://www.example.test/.shakerscan-absent-{i}",
+         "status": 200, "length": 812, "negative_control": True} for i in range(3)
+    ] + [
+        {"kind": "content_discovery", "url": "https://www.example.test/admin", "status": 200,
+         "length": 812},
+        {"kind": "content_discovery", "url": "https://www.example.test/report", "status": 200,
+         "length": 4000},
+    ]
+    assert ra.parameter_routes(soft, origin="https://www.example.test") == ["/", "/report"]
 
 
 def test_discovered_parameters_reach_the_candidate_surface_as_observed_routes():
