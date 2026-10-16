@@ -21,7 +21,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, isProvenFinding, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, isProvenFinding, reconciledScanFindings, releaseLine, scanFindingCounts, scanFindingCountsText, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { emptyScanLogState, mergeScanLogReply } from '@/lib/scanLogDelta.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 import { failedScanHeadline } from '@/lib/authorizationStop'
@@ -807,7 +807,8 @@ function ScanFindingContextCard({
   // the exact total minus only the rows linked on the page read, so linked rows beyond it are
   // still counted.
   const existingUpperBound = !serverCount && partial
-  const provenCount = current.filter(isProvenFinding).length
+  // One count source for the summary line and the section headings below.
+  const counts = scanFindingCounts(current)
   const targetFindingsHref = `/findings?target_id=${scan.target_id}&status=active&freshness=all`
 
   return (
@@ -823,7 +824,7 @@ function ScanFindingContextCard({
             </Link>
           )}
           {current.length > 0 && (
-            <span className="text-gray-500">{provenCount} proven · {current.length - provenCount} {current.length - provenCount === 1 ? 'needs' : 'need'} verification</span>
+            <span className="text-gray-500" data-testid="scan-findings-counts">{scanFindingCountsText(counts)}</span>
           )}
         </div>
         {scan?.target_id && (

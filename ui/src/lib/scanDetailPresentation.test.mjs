@@ -19,6 +19,9 @@ import {
   scanLogEntry,
   scanPhasePresentation,
   scanResultPresentation,
+  blockerSeverityPhrase,
+  scanFindingCounts,
+  scanFindingCountsText,
 } from './scanDetailPresentation.mjs'
 
 test('running phases are explained in operator language', () => {
@@ -651,4 +654,43 @@ test('rows with neither a scan nor a Hunt behind them are labelled honestly', ()
   assert.equal(carriedSourceText({ fromHunts: 2, fromOther: 1 }), 'Found by earlier scans or other sources (2 by Hunts, 1 recorded outside a scan or Hunt)')
   const fallback = carriedOverSummary({ id: 's', result: { findings: [] } }, [{ id: 'm', scan_id: null, hunt_run_id: null, severity: 'high' }])
   assert.equal(fallback.fromOther, 1)
+})
+
+// UI audit 2.11 #6 (honey): the summary said "30 proven · 3 need verification" over sections of
+// 30 / 2 / 1, and the headline's "24 confirmed" sat next to "blocked by 23" with no hint why.
+test('the Findings tab summary and its sections count from one grouping', () => {
+  const finding = (severity, proven, title = `${severity} ${proven}`) => ({ severity, title, proof_state: proven ? 'verified' : 'candidate' })
+  const findings = [
+    ...Array.from({ length: 8 }, (_, i) => finding('critical', true, `c${i}`)),
+    ...Array.from({ length: 15 }, (_, i) => finding('high', true, `h${i}`)),
+    finding('medium', true, 'm-proven'),
+    ...Array.from({ length: 6 }, (_, i) => finding('info', true, `i${i}`)),
+    finding('medium', false, 'git config'), finding('medium', false, 'git creds'),
+    finding('info', false, 'note'),
+  ]
+  const counts = scanFindingCounts(findings)
+  assert.deepEqual(counts, { total: 33, proven: 30, provenMaterial: 24, verify: 2, informational: 1 })
+  const groups = groupScanFindings(findings)
+  const size = (key) => groups[key].reduce((sum, cluster) => sum + cluster.findings.length, 0)
+  assert.deepEqual([size('proven'), size('verify'), size('informational')], [counts.proven, counts.verify, counts.informational])
+  assert.equal(scanFindingCountsText(counts), '30 proven (24 medium or higher) · 2 need verification · 1 informational')
+  assert.equal(scanFindingCountsText({ total: 1, proven: 1, provenMaterial: 1, verify: 0, informational: 0 }), '1 proven')
+  // The headline's confirmed count is the same proven-material number.
+  assert.equal(scanResultPresentation({ result: { findings } }, null).confirmedCount, counts.provenMaterial)
+})
+
+test('the release line names the severity bar its count is against', () => {
+  const blockers = [
+    ...Array.from({ length: 8 }, (_, i) => ({ id: `c${i}`, severity: 'critical', origin: 'this_scan' })),
+    ...Array.from({ length: 15 }, (_, i) => ({ id: `h${i}`, severity: 'high', origin: 'this_scan' })),
+  ]
+  assert.equal(blockerSeverityPhrase(blockers), 'critical or high ')
+  assert.equal(blockerSeverityPhrase([{ severity: 'critical' }]), 'critical ')
+  assert.equal(blockerSeverityPhrase([{ severity: 'medium' }, { severity: 'critical' }]), 'critical, high or medium ')
+  assert.equal(blockerSeverityPhrase([{ id: 'x' }]), '')
+  assert.equal(releaseLine({ decision: 'block', blocking_findings: blockers }, 's', 24).text,
+    'Release is blocked by 23 unresolved critical or high findings on this target.')
+  // A truncated list still states the gate's own total.
+  assert.equal(releaseLine({ decision: 'block', blocking_count: 120, blocking_findings: blockers.slice(0, 2) }, 's', 1).text,
+    'Release is blocked by 120 unresolved critical findings on this target.')
 })
