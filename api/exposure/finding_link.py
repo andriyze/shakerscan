@@ -16,7 +16,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote, urlsplit
 import uuid
 
-from .service_intel import CVE_ID, enrich_service, load_service_intelligence
+from .service_intel import CVE_ID, PRODUCT_CPE_ALIASES, enrich_service, load_service_intelligence
 from .service_inventory import build_inventory, object_value, origin, text
 from .service_store import SCAN_SOURCES_SQL, validated_scan_source
 
@@ -50,6 +50,35 @@ def _finding_text(finding: Mapping[str, Any]) -> str:
     evidence = object_value(finding.get("evidence"))
     parts = [finding.get("title"), evidence.get("cpe"), evidence.get("template_id")]
     return " ".join(text(part, 300) for part in parts).lower()
+
+
+_TOKEN = re.compile(r"[a-z0-9]+")
+
+
+def _tokens(value: str) -> tuple[str, ...]:
+    return tuple(_TOKEN.findall(value.lower()))
+
+
+def _contains(haystack: tuple[str, ...], needle: tuple[str, ...]) -> bool:
+    size = len(needle)
+    return bool(size) and any(haystack[i:i + size] == needle for i in range(len(haystack) - size + 1))
+
+
+def names_product(named: str, product: str) -> bool:
+    """True when the finding's text names ``product`` as whole words, and not as part of a longer
+    known product name: "go" is not in "going", "php" not in "phpmyadmin", and "Apache" (the HTTP
+    server) is not "Apache Tomcat"."""
+    words = _tokens(named)
+    wanted = _tokens(product)
+    if not _contains(words, wanted):
+        return False
+    aliases = PRODUCT_CPE_ALIASES.get(" ".join(wanted))
+    for other, other_aliases in PRODUCT_CPE_ALIASES.items():
+        other_words = _tokens(other)
+        if (len(other_words) > len(wanted) and _contains(other_words, wanted)
+                and other_aliases != aliases and _contains(words, other_words)):
+            return False
+    return True
 
 
 def _finding_origin(finding: Mapping[str, Any]) -> str | None:
@@ -97,7 +126,7 @@ def exposure_links(
         enriched = dict(service)
         enrich_service(enriched, snapshot, matcher)
         product = text(enriched.get("product"), 80)
-        same_product = bool(product) and product.lower() in named
+        same_product = bool(product) and names_product(named, product)
         for order, candidate in enumerate(enriched.get("cve_candidates") or []):
             cve = text(candidate.get("id"), 30)
             if not CVE_ID.fullmatch(cve) or cve in seen or not (cve in cves or same_product):
@@ -156,4 +185,7 @@ async def related_exposures(
         return []
 
 
-__all__ = ["MAX_RELATED_EXPOSURES", "exposure_links", "finding_cves", "related_exposures", "wants_exposure_link"]
+__all__ = [
+    "MAX_RELATED_EXPOSURES", "exposure_links", "finding_cves", "names_product", "related_exposures",
+    "wants_exposure_link",
+]

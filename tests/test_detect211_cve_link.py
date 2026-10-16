@@ -161,3 +161,27 @@ def test_no_snapshot_is_loaded_when_no_service_on_the_origin_has_a_product(monke
     monkeypatch.setattr(finding_link, "validated_scan_source", validated)
     conn = _Conn([{"action_id": "baseline.http", "scan_id": "s1"}])
     assert asyncio.run(related_exposures(conn, _finding(), intelligence=intelligence)) == []
+
+
+def test_a_product_is_matched_as_whole_words_not_as_a_substring():
+    from api.exposure.finding_link import names_product
+    assert names_product("apache 2.4.49 - path traversal", "Apache")
+    assert names_product("cpe:2.3:a:apache:http_server:2.4.49 apache http server", "Apache")
+    # A short product name inside another word is not that product.
+    assert not names_product("ongoing deserialization in mongo-express", "go")
+    assert names_product("go 1.20 net/http request smuggling", "Go")
+    assert not names_product("phpmyadmin 4.8 local file inclusion", "PHP")
+    assert names_product("php 8.1 cgi argument injection", "php")
+    # Apache (the HTTP server) is not Apache Tomcat, and Tomcat stays Tomcat.
+    assert not names_product("apache tomcat 9.0.30 ajp ghostcat", "Apache")
+    assert not names_product("cpe:2.3:a:apache:tomcat:9.0.30", "Apache")
+    assert names_product("apache tomcat 9.0.30 ajp ghostcat", "Tomcat")
+    assert names_product("apache tomcat 9.0.30 ajp ghostcat", "Apache Tomcat")
+
+
+def test_a_tomcat_finding_does_not_link_the_apache_httpd_candidates():
+    links = exposure_links(
+        _finding(title="Apache Tomcat 9.0.30 - AJP Ghostcat", evidence={"template_id": "tomcat-ajp"}),
+        _services(_source()), snapshot=SNAPSHOT, matcher=_matcher,
+    )
+    assert links == []
