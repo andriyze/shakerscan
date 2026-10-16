@@ -18,11 +18,28 @@ export interface DiscoveryOutcomeLike {
 
 const DISCOVERY_SOURCE_LABELS: Record<string, string> = { crtsh: 'crt.sh', gungnir: 'Gungnir', subfinder: 'subfinder' }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// A source's reason usually repeats the source ("crt.sh HTTP 503; results are incomplete") and
+// the incompleteness the message already states; keep only what is new.
+export function sourceFailureReason(name: string, reason: string): string {
+  const label = DISCOVERY_SOURCE_LABELS[name] ?? name
+  const prefix = new RegExp(`^(?:${[label, name].map(escapeRegExp).join('|')})\\s*[:\\-–—]?\\s*`, 'i')
+  const trimmed = reason.trim()
+  const stripped = trimmed
+    .replace(prefix, '')
+    .replace(/[;,.]?\s*[^;,.]*results (?:are|may be) incomplete\.?\s*$/i, '')
+    .trim()
+  return (stripped || trimmed).slice(0, 120)
+}
+
 function failedSources(run: DiscoveryOutcomeLike): string {
   const errors = run.source_errors && typeof run.source_errors === 'object' ? run.source_errors : {}
   return Object.entries(errors)
     .filter(([, reason]) => typeof reason === 'string' && reason.trim())
-    .map(([name, reason]) => `${DISCOVERY_SOURCE_LABELS[name] ?? name} (${reason.trim().slice(0, 120)})`)
+    .map(([name, reason]) => `${DISCOVERY_SOURCE_LABELS[name] ?? name} (${sourceFailureReason(name, reason)})`)
     .join(', ')
 }
 
@@ -75,8 +92,15 @@ export function targetForRegisteredDnsFallback(
 }
 
 // One sentence for a finished discovery run, naming names skipped for having no address record.
-export function discoveryOutcomeMessage(rootDomain: string, run: DiscoveryOutcomeLike): { kind: 'success' | 'info' | 'error'; message: string } {
+// A source failure stays on screen until dismissed (`persistent`), so it is still there after a
+// long run the operator stopped watching.
+export function discoveryOutcomeMessage(rootDomain: string, run: DiscoveryOutcomeLike): { kind: 'success' | 'info' | 'warning' | 'error'; message: string; persistent?: boolean } {
   if (run.status === 'failed') {
+    const failedSourceNames = failedSources(run)
+    if (failedSourceNames) {
+      // The server's own sentence repeats each source name; say it once.
+      return { kind: 'error', persistent: true, message: `Subdomain discovery failed for ${rootDomain}: no discovery source answered (${failedSourceNames}); subdomains were not checked, try again later` }
+    }
     return { kind: 'error', message: `Subdomain discovery failed for ${rootDomain}${run.error_message ? `: ${run.error_message}` : ''}` }
   }
   const found = Number(run.subdomains_found ?? 0)
@@ -89,8 +113,9 @@ export function discoveryOutcomeMessage(rootDomain: string, run: DiscoveryOutcom
   const failed = failedSources(run)
   if (failed) {
     // A failed source is not a source that found nothing: never let "0 found" read as "none exist".
+    // A warning stays on screen until dismissed, so the operator sees it after a long run.
     message += `. Results may be incomplete: ${failed} did not answer; run discovery again later`
-    return { kind: 'info', message }
+    return { kind: 'warning', message, persistent: true }
   }
   return { kind: skipped > 0 ? 'info' : 'success', message }
 }

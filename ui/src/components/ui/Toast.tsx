@@ -2,14 +2,14 @@
 
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
-import { CheckCircle2, Info, X, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react'
 
 export interface ToastLink {
   href: string
   label: string
 }
 
-type ToastVariant = 'success' | 'error' | 'info'
+type ToastVariant = 'success' | 'error' | 'info' | 'warning'
 
 interface ToastItem {
   id: number
@@ -18,10 +18,18 @@ interface ToastItem {
   link?: ToastLink
 }
 
+export interface ToastOptions {
+  link?: ToastLink
+  /** Keep the notification until the operator dismisses it (warnings always persist). */
+  persistent?: boolean
+}
+
 export interface ToastApi {
-  success: (message: string, opts?: { link?: ToastLink }) => void
-  error: (message: string, opts?: { link?: ToastLink }) => void
-  info: (message: string, opts?: { link?: ToastLink }) => void
+  success: (message: string, opts?: ToastOptions) => void
+  error: (message: string, opts?: ToastOptions) => void
+  info: (message: string, opts?: ToastOptions) => void
+  /** Something the operator must act on or know (an incomplete result); stays until dismissed. */
+  warning: (message: string, opts?: ToastOptions) => void
 }
 
 const ToastContext = createContext<ToastApi | null>(null)
@@ -30,18 +38,21 @@ const VARIANT_BORDERS: Record<ToastVariant, string> = {
   success: 'border-green-500/30',
   error: 'border-red-500/30',
   info: 'border-blue-500/30',
+  warning: 'border-amber-500/40',
 }
 
 const VARIANT_ICON_COLORS: Record<ToastVariant, string> = {
   success: 'text-green-400',
   error: 'text-red-400',
   info: 'text-blue-400',
+  warning: 'text-amber-400',
 }
 
 const VARIANT_ICONS: Record<ToastVariant, typeof Info> = {
   success: CheckCircle2,
   error: XCircle,
   info: Info,
+  warning: AlertTriangle,
 }
 
 const MAX_VISIBLE_TOASTS = 5
@@ -55,9 +66,10 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const push = useCallback(
-    (variant: ToastVariant, message: string, opts?: { link?: ToastLink }) => {
+    (variant: ToastVariant, message: string, opts?: ToastOptions) => {
       const id = nextId.current++
       setToasts(prev => [...prev.slice(-(MAX_VISIBLE_TOASTS - 1)), { id, variant, message, link: opts?.link }])
+      if (variant === 'warning' || opts?.persistent) return
       window.setTimeout(() => dismiss(id), variant === 'error' ? 8000 : 5000)
     },
     [dismiss]
@@ -68,6 +80,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       success: (message, opts) => push('success', message, opts),
       error: (message, opts) => push('error', message, opts),
       info: (message, opts) => push('info', message, opts),
+      warning: (message, opts) => push('warning', message, opts),
     }),
     [push]
   )
@@ -85,7 +98,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           return (
             <div
               key={t.id}
-              role={t.variant === 'error' ? 'alert' : 'status'}
+              role={t.variant === 'error' || t.variant === 'warning' ? 'alert' : 'status'}
               className={`flex items-start gap-2 rounded-lg border bg-gray-900 p-3 shadow-lg ${VARIANT_BORDERS[t.variant]}`}
             >
               <Icon

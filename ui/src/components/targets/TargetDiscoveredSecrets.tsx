@@ -1,5 +1,5 @@
 'use client'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Badge, Button, Card, ErrorState, Field, Input, Modal, Select } from '@/components/ui'
 import { formatDate } from '@/lib/api'
 import {
@@ -21,9 +21,10 @@ const STATE_TONE: Record<DiscoveredSecret['state'], string> = {
  *  list never holds a value. Revealing one to a person, granting it to another target and moving it
  *  into a credential profile are explicit decisions (on Enterprise, with the person's step-up).
  *  A web Scan records its secrets on the application origin it ran on, not on the host asset: the
- *  asset page shows one card per origin (`origin`, its URL), each only when it holds any. */
-export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = false }: {
-  targetId: string; origin?: string; hideWhenEmpty?: boolean
+ *  asset page shows one card per origin (`origin`, its URL), each only when it holds any, and
+ *  hides the host's own empty card while an origin card lists some (`onLoaded` reports the count). */
+export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = false, onLoaded }: {
+  targetId: string; origin?: string; hideWhenEmpty?: boolean; onLoaded?: (count: number) => void
 }) {
   const [rows, setRows] = useState<DiscoveredSecret[] | null>(null)
   const [error, setError] = useState('')
@@ -31,6 +32,9 @@ export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = fals
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [busy, setBusy] = useState(false)
   const [refresh, setRefresh] = useState(0)
+  const onLoadedRef = useRef(onLoaded)
+  onLoadedRef.current = onLoaded
+  useEffect(() => { if (rows) onLoadedRef.current?.(rows.length) }, [rows])
 
   useEffect(() => {
     const controller = new AbortController()
