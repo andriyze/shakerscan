@@ -27,10 +27,33 @@ def test_no_filters_add_nothing_and_a_bad_target_id_is_refused():
         scan_list_filters(target_id="not-a-uuid")
 
 
-def test_list_scans_uses_the_shared_filters():
-    source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
-    assert "status=status, target_id=target_id, target=target," in source
-    assert "query += filter_sql\n        count_query += filter_sql" in source
+def test_list_scans_uses_the_same_shared_filters_for_rows_and_count(monkeypatch):
+    import asyncio
+    from contextlib import asynccontextmanager
+    from api import api as module
+    calls = []
+    class Conn:
+        async def fetch(self, query, *values):
+            calls.append((query, values))
+            return []
+        async def fetchval(self, query, *values):
+            calls.append((query, values))
+            return 7
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self):
+            yield Conn()
+    monkeypatch.setattr(module, 'db_pool', Pool())
+    target_id = str(uuid.uuid4())
+    filters = dict(status='completed', target_id=target_id, target='needle',
+                   root_domain='example.com', created_within_days=7)
+    result = asyncio.run(module.list_scans(**filters, limit=10, offset=3))
+    sql, values = scan_list_filters(**filters)
+    assert result['total'] == 7 and result['scans'] == []
+    assert len(calls) == 2
+    assert all(sql in query and list(params[:len(values)]) == values for query, params in calls)
+    assert calls[0][1][-2:] == (10, 3)
+    assert calls[1][1] == tuple(values)
 
 
 def test_exposure_links_open_the_whole_finding_history_they_count():
