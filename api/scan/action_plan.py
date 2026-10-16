@@ -40,7 +40,7 @@ except ModuleNotFoundError:
     from ..capabilities.exposure_probe import exposure_first_slice_hold
     from ..capabilities.graphql_probe import graphql_first_slice_hold
 from .capability_execution import (
-    SCAN_BASE_ORIGIN_CAPABILITIES, TLS_CONNECTIONS_PER_PAIR, scan_discovery_reservation,
+    SCAN_BASE_ORIGIN_CAPABILITIES, scan_discovery_reservation, tls_connections_per_pair,
 )
 from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .posture_findings import CORS_PROBE_ACTIONS
@@ -1586,9 +1586,11 @@ class ScanActionPlanCompiler:
                     * int(blueprint.capability_args.get("address_count") or 0)
                 )
                 # Per pair: up to four stdlib handshakes (TLS 1.2, TLS 1.3, default, trust)
-                # plus the raw legacy-protocol/weak-suite probes (tls_legacy_probe.PROBE_COUNT).
+                # plus the raw legacy-protocol/weak-suite probes (tls_legacy_probe.PROBE_COUNT)
+                # when the Scan's TCP authority pays for them on every pair.
+                tcp_granted = int(getattr(execution_plan.budget, "max_tcp_ports", 0) or 0)
                 requested = {
-                    "tcp_ports_attempted": TLS_CONNECTIONS_PER_PAIR * pair_count,
+                    "tcp_ports_attempted": tls_connections_per_pair(tcp_granted, pair_count) * pair_count,
                     "tool_wall_seconds": 15 * pair_count,
                 }
             return requested

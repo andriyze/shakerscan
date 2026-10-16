@@ -213,3 +213,12 @@ def test_sslv3_and_export_suites_rate_high():
     export = calibrate_finding({"tool": "tls.inspect", "severity": "high", "evidence": {
         "check": "tls_weak_cipher", "cipher": "EXP-RC4-MD5"}})
     assert export["severity"] == "high"
+
+
+def test_without_budget_for_the_probes_only_the_handshakes_run_and_the_skip_is_recorded(monkeypatch):
+    calls = _legacy_server(monkeypatch, versions={probe.TLS10}, suites={0x000A})
+    result = asyncio.run(inspect_tls_origin(f"https://{HOST}", target=_target(), timeout_seconds=15,
+                                            legacy_probes=False))
+    assert calls["raw"] == 0
+    assert result["observation"]["legacy_probes_skipped"] == "insufficient_tcp_budget"
+    assert result["budget_consumed"]["tcp_ports_attempted"] == calls["tls"] <= 4

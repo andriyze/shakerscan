@@ -203,6 +203,7 @@ from scan.capability_execution import (
     scan_sqli_verification_capability_allocation,
     scan_template_capability_allocation,
     scan_tls_capability_allocation,
+    TLS_CONNECTIONS_PER_PAIR,
     scan_web_crawl_capability_allocation,
     scan_web_probe_capability_allocation,
     scan_xss_verification_capability_allocation,
@@ -10137,6 +10138,11 @@ async def _execute_scan_tls_capability(
     )
     if allocation is None:
         return _skipped_scan_tls_summary("insufficient_stage_budget")
+    # A TCP budget that pays only for the handshakes still inspects every pair, without the
+    # legacy-protocol/weak-suite probes (the observation records the skip).
+    legacy_probes = allocation["tcp_ports_attempted"] >= (
+        TLS_CONNECTIONS_PER_PAIR * len(https_origins) * len(target.allowed_addresses)
+    )
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -10156,6 +10162,7 @@ async def _execute_scan_tls_capability(
         inline_operation=lambda: inspect_tls_binding(
             target=target,
             timeout_seconds_per_target=15,
+            legacy_probes=legacy_probes,
         ),
         canonical_action=canonical_action,
     )

@@ -47,3 +47,29 @@ def test_the_tls_reservation_pays_for_the_legacy_probes():
     assert CAPABILITY_REGISTRY.require("tls.inspect").budget_cost["tcp_ports_attempted"] == TLS_CONNECTIONS_PER_PAIR
     allocation = scan_tls_capability_allocation({"max_tcp_ports": 100, "max_tool_wall_seconds": 100}, origin_count=2)
     assert allocation["tcp_ports_attempted"] == 2 * TLS_CONNECTIONS_PER_PAIR
+
+
+def test_a_tcp_budget_short_of_the_legacy_probes_degrades_tls_instead_of_skipping_it():
+    from scan.capability_execution import TLS_HANDSHAKE_CONNECTIONS_PER_PAIR
+    # Two pairs at ten connections need 20; a budget of 12 still pays for the handshakes.
+    degraded = scan_tls_capability_allocation({"max_tcp_ports": 12, "max_tool_wall_seconds": 100}, origin_count=2)
+    assert degraded["tcp_ports_attempted"] == 2 * TLS_HANDSHAKE_CONNECTIONS_PER_PAIR
+    # Below the handshakes the action is skipped, and the caller reports why.
+    assert scan_tls_capability_allocation({"max_tcp_ports": 7, "max_tool_wall_seconds": 100}, origin_count=2) is None
+
+
+def test_the_planned_tls_reservation_degrades_with_a_small_tcp_grant():
+    from dataclasses import replace
+    from scan.capability_execution import TLS_HANDSHAKE_CONNECTIONS_PER_PAIR
+    full = _compile(("sensitive_exposure",), False)
+    pairs = next(a for a in full.actions if a.capability_name == "tls.inspect").capability_args
+    count = pairs["origin_count"] * pairs["address_count"]
+    assert next(a for a in full.actions if a.capability_name == "tls.inspect").requested_budget[
+        "tcp_ports_attempted"] == count * TLS_CONNECTIONS_PER_PAIR
+    plan = _execution(include=("sensitive_exposure",), active=False)
+    small = replace(plan, budget=replace(plan.budget, max_tcp_ports=count * TLS_CONNECTIONS_PER_PAIR - 1))
+    compiled = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID, execution_plan=small, target_binding=_target(), action_scope="full",
+    )
+    tls = next(a for a in compiled.actions if a.capability_name == "tls.inspect")
+    assert tls.requested_budget["tcp_ports_attempted"] == count * TLS_HANDSHAKE_CONNECTIONS_PER_PAIR
