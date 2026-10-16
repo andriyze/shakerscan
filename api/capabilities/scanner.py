@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Awaitable, Callable, Mapping
 
 from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
@@ -10,6 +11,11 @@ from scan.external_process import (
     ExternalProcessContractError,
     validate_enforcement_receipt,
 )
+
+try:
+    from scanner_tools import http_archive_capture as _scan_capture
+except (ImportError, ModuleNotFoundError):  # package import layout
+    from scanner.scanner_tools import http_archive_capture as _scan_capture
 
 
 ScannerProcessRunner = Callable[..., Awaitable[Mapping[str, Any]]]
@@ -66,8 +72,12 @@ class ScannerExecutionAdapter:
         process_runner: ScannerProcessRunner,
         requested_budget: Mapping[str, int],
         redacted_execution: Mapping[str, Any],
+        archive_capability_name: str | None = None,
     ) -> None:
         self.capability_name = specification.name
+        # The Scan action this run belongs to (a batch runs its legacy capability per
+        # candidate); the request archive judges completeness per Scan action capability.
+        self._archive_capability_name = archive_capability_name or specification.name
         self.adapter_name = specification.adapter
         self.adapter_version = specification.adapter_version
         self._specification = specification
@@ -133,6 +143,20 @@ class ScannerExecutionAdapter:
             process_payload,
             heartbeat=heartbeat,
         ))
+        tunnel = process_result.pop("tunnel", None)
+        if isinstance(tunnel, Mapping):
+            # Only a Scan worker has a capture open; elsewhere this records nothing. The
+            # archive never decides the action's outcome.
+            try:
+                _scan_capture.record_tunnel(
+                    tunnel, capability_name=self._archive_capability_name,
+                    tool=str(self._process_payload.get("tool_name") or ""),
+                    elapsed_ms=max(0, int(process_result.get("elapsed_seconds") or 0)) * 1_000,
+                    error=str(process_result.get("error") or "") or None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[http-archive] {self._archive_capability_name}: tunnel not recorded: "
+                      f"{type(exc).__name__}", file=sys.stderr, flush=True)
         self.process_result = process_result
         settlement = (
             dict(process_result.get("settlement") or {})
