@@ -273,3 +273,27 @@ def test_due_schedule_bounds_a_tick_and_prefers_the_most_overdue():
     schedule.schedule("t8", "f", {"blocked_by": "daily_endpoint_cap",
                                   "next_eligible_at": (now + timedelta(hours=24)).isoformat()}, now=now)
     assert "t8" in schedule.select(rows, now=now + timedelta(hours=1), limit=10)
+
+
+def test_a_target_another_tick_already_claimed_is_left_alone(monkeypatch, quiet_redis, capsys):
+    """The dispatch stamp is a compare-and-set on what this tick read: when another tick moved it
+    (a hung leader's tick overlapping the next leader's), nothing is enqueued or recorded here."""
+    class Claimed(_Conn):
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "UPDATE 0" if "IS NOT DISTINCT FROM" in query else "UPDATE 1"
+
+    conn = Claimed([_target_row()])
+
+    async def must_not_run(*_args, **_kwargs):
+        raise AssertionError("a target another tick dispatched must not be enqueued again")
+
+    async def must_not_record(*_args, **_kwargs):
+        raise AssertionError("the other tick's decision stands")
+
+    monkeypatch.setattr(api_module, "_enqueue_asm_recon", must_not_run)
+    monkeypatch.setattr(api_module, "_persist_asm_decision", must_not_record)
+    _run(_Pool(conn))
+    assert "already dispatched by another tick" in capsys.readouterr().out
+    claims = [args for query, args in conn.executed if "IS NOT DISTINCT FROM" in query]
+    assert len(claims) == 1 and claims[0][1] is None  # compared with the value this tick read

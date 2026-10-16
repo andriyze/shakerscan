@@ -155,6 +155,17 @@ Continuous ASM dispatcher, artifact retention, and the workers' budget-reservati
 in one process at a time: the process holding the loop's PostgreSQL advisory lock. A tick that
 outlives its time bound gives up that lock so another process can take over. Every tick does
 bounded work: batches read from a cursor, never a whole table or the whole Redis keyspace.
+A tick that gave up its lock may still be finishing while the next leader's first tick runs, so
+the Continuous ASM dispatcher also claims each target before dispatching it: the recon or test
+stamp it writes is a compare-and-set on the value its tick read, and a tick that finds it already
+moved leaves the target to the dispatch that moved it. A dispatch that then fails gives the stamp
+back.
+
+The indexes these loops and the bounded lists read through are built after the API starts serving,
+concurrently, by one process at a time; the same builder drops indexes they made redundant.
+`GET /health` reports the outcome as `loop_indexes`: `ok`, `building`, or `failed` when declared
+indexes are missing or invalid and no build is running (the next start retries them), with the
+names and this process's last run.
 
 The loops read the Redis queues in pages and stop after `SHAKERSCAN_QUEUE_SCAN_MAX_ENTRIES` entries
 (default 20,000). A job not seen in a read that stopped at that bound, or that failed, is treated as

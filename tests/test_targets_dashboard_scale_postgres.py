@@ -1024,6 +1024,107 @@ def test_read_path_indexes_are_built_by_the_background_builder():
     _run(check)
 
 
+def test_redundant_scans_indexes_are_dropped_once_their_covering_index_is_valid():
+    """idx_scans_target_id and idx_scans_unified_target (scans(target_id)) and idx_scans_status
+    (scans(status)) are served by the declared (target_id, created_at DESC) and (status,
+    created_at DESC) indexes. The builder drops them concurrently, only after the covering index is
+    valid, and leaves an index under one of those names with another definition alone. The scans
+    lookups they served (by target, by status, the targets delete cascade) plan on the covering
+    indexes."""
+    from runtime.loop_scale_indexes import REDUNDANT_INDEXES, ensure_loop_scale_indexes
+    from targets.asset_migration import BoundConnectionPool
+
+    async def present(conn):
+        return {r["relname"] for r in await conn.fetch(
+            "SELECT relname FROM pg_class WHERE relname = ANY($1::text[])",
+            [name for name, *_rest in REDUNDANT_INDEXES])}
+
+    async def check(conn):
+        # The fixture ran the builder already: a fresh install converges to no redundant index.
+        assert await present(conn) == set()
+        # A database as every earlier release left it (init.sql and the asset conversion made them).
+        for name, table, column, _covering in REDUNDANT_INDEXES:
+            await conn.execute(f"CREATE INDEX {name} ON {table} ({column})")
+        await conn.execute("DROP INDEX idx_scans_status_created")
+        pool = BoundConnectionPool(conn)
+        # A covering index that cannot be built yet keeps the index it would replace.
+        await conn.execute("CREATE INDEX idx_scans_status_created ON scans (status, created_at DESC)")
+        await conn.execute("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'idx_scans_status_created'::regclass")
+        assert await ensure_loop_scale_indexes(pool, retry_delays=()) == ["idx_scans_status_created"]
+        assert await present(conn) == set()
+        # Another definition under a redundant name is not the old schema's index: kept.
+        await conn.execute("CREATE INDEX idx_scans_status ON scans (status) WHERE status = 'running'")
+        assert await ensure_loop_scale_indexes(pool, retry_delays=()) == []
+        assert await present(conn) == {"idx_scans_status"}
+        await conn.execute("DROP INDEX idx_scans_status")
+
+        target = await conn.fetchval("SELECT target_id FROM scans WHERE target_id IS NOT NULL LIMIT 1")
+        used = []
+        for query, args in (
+            ("SELECT id FROM scans WHERE target_id = $1", (target,)),
+            ("SELECT count(*) FROM scans WHERE target_id = $1", (target,)),
+            ("SELECT id FROM scans WHERE status = 'running'", ()),
+            ("SELECT count(*) FROM scans WHERE status IN ('pending', 'queued', 'running')", ()),
+        ):
+            async with conn.transaction():
+                await conn.execute("SET LOCAL enable_seqscan = off")
+                plan = json.loads(await conn.fetchval(f"EXPLAIN (FORMAT JSON) {query}", *args))[0]["Plan"]
+            names = set()
+            stack = [plan]
+            while stack:
+                node = stack.pop()
+                names.add(node.get("Index Name"))
+                stack.extend(node.get("Plans", []))
+            used.append(names)
+            assert names & {"idx_scans_target_created", "idx_scans_status_created", "idx_scans_active_target"}, (query, names)
+        # The delete cascade from targets finds a target's scans through the covering index too.
+        async with conn.transaction():
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            plan = json.loads(await conn.fetchval(
+                "EXPLAIN (FORMAT JSON) SELECT 1 FROM ONLY scans x WHERE $1 OPERATOR(pg_catalog.=) target_id FOR KEY SHARE OF x",
+                target))[0]["Plan"]
+        assert "idx_scans_target_created" in json.dumps(plan)
+    _run(check)
+
+
+def test_index_health_reports_a_build_that_gave_up_and_one_in_progress():
+    from runtime import loop_scale_indexes
+    from targets.asset_migration import BoundConnectionPool
+
+    async def check(conn):
+        pool = BoundConnectionPool(conn)
+        assert await loop_scale_indexes.ensure_loop_scale_indexes(pool, retry_delays=()) == []
+        health = await loop_scale_indexes.index_health(conn)
+        assert health["status"] == "ok" and health["missing"] == [] and health["invalid"] == []
+        assert health["last_run"]["state"] == "done" and health["redundant_present"] == []
+
+        # A build that keeps failing (here: a definition the server refuses) is "failed".
+        original = loop_scale_indexes.LOOP_SCALE_INDEXES
+        broken = ("idx_targets_broken_health", "targets", "targets (no_such_column)")
+        loop_scale_indexes.LOOP_SCALE_INDEXES = (*original, broken)
+        try:
+            await loop_scale_indexes.ensure_loop_scale_indexes(pool, retry_delays=(0.0,))
+            health = await loop_scale_indexes.index_health(conn)
+            assert health["status"] == "failed", health
+            assert health["missing"] == ["idx_targets_broken_health"]
+            assert health["last_run"]["state"] == "failed"
+            assert health["last_run"]["failed"] == [
+                {"index": "idx_targets_broken_health", "error": "UndefinedColumnError"}]
+
+            # While another process holds the build lock, the same gap reads "building".
+            holder = await _connect()
+            try:
+                assert await holder.fetchval("SELECT pg_try_advisory_lock($1::int, $2::int)",
+                                             loop_scale_indexes._LOCK_NAMESPACE, loop_scale_indexes._LOCK_KEY)
+                assert (await loop_scale_indexes.index_health(conn))["status"] == "building"
+            finally:
+                await holder.close()
+        finally:
+            loop_scale_indexes.LOOP_SCALE_INDEXES = original
+        assert (await loop_scale_indexes.index_health(conn))["status"] == "ok"
+    _run(check)
+
+
 def test_concurrent_builds_never_wait_under_the_startup_lock_with_a_waiter_present():
     """CREATE/DROP INDEX CONCURRENTLY under the startup lock (8675309) deadlocks with a process
     waiting for that lock (its waiting statement holds a snapshot the build waits for). The
@@ -1067,7 +1168,8 @@ def test_a_restart_during_builds_on_every_loop_index_table_completes_without_dea
     an open snapshot while holding its table lock; a process restarts and runs the startup
     migrations, and another queues on the startup lock (8675309). Every startup statement on an
     up-to-date database must be a catalog check that takes no lock a build holds: the startup
-    completes while the builds still wait, and nothing deadlocks."""
+    completes while the builds still wait, and nothing deadlocks. This is the one restart-during-builds
+    test: findings, scans, targets and every other builder table are derived, not listed."""
     from retest_contract import run_schema_migrations
     from runtime.loop_scale_indexes import LOOP_SCALE_INDEXES
 
@@ -1075,7 +1177,7 @@ def test_a_restart_during_builds_on_every_loop_index_table_completes_without_dea
         dsn = require_disposable_database(DSN, DATABASE)
         tables = {table for _name, table, _definition in LOOP_SCALE_INDEXES}
         present = {table for table in tables if await conn.fetchval("SELECT to_regclass($1)", table)}
-        assert "hunt_permission_requests" in present
+        assert {"findings", "scans", "targets", "hunt_permission_requests"} <= present
         picks: dict[str, tuple[str, str]] = {}
         for name, table, definition in LOOP_SCALE_INDEXES:
             if table in present and table not in picks and "gin_trgm_ops" not in definition:

@@ -26,6 +26,26 @@ AI_SCAN_CHECKPOINT: ContextVar[dict[str, Any] | None] = ContextVar(
 )
 
 
+def authority_stopped_result(stopped: Any, target: Any, checkpoint: Mapping[str, Any]) -> dict[str, Any]:
+    """The result of a run stopped on its authorization that did not return a report.
+
+    An AI target scan stopped hard (it did not return within its stop grace) keeps what its
+    finished probes had checkpointed: the report reads partial and names the stop, as the
+    report of one that returned after the stop does. Anything else records the stop error.
+    """
+    result = {'target': target, **stopped.report}
+    if stopped.before_start or not checkpoint.get("findings"):
+        return result
+    from ai_gate_scan import kept_checkpoint_findings
+    kept = kept_checkpoint_findings(checkpoint)
+    if not kept:
+        return result
+    result = {key: value for key, value in result.items() if key != 'error'}
+    result['findings'] = kept
+    result['ai_gate_stopped_hard'] = True
+    return result
+
+
 class AIGateWorkerHandler(ProductWorkerHandler):
     async def run(
         self,

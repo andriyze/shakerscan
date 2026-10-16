@@ -670,6 +670,72 @@ def test_a_page_reads_a_page_of_rows_from_an_index(monkeypatch):
     run(scenario, undetermined=0)
 
 
+def test_a_hunt_filter_reads_the_runs_findings_once_not_a_probe_per_row(monkeypatch):
+    """GET /findings?hunt_id= computes the run's finding set once from its indexes (A.9): no
+    attribution table is probed once per finding, and the same rows come back as the correlated
+    form that came before."""
+    async def scenario(conn, pool):
+        await conn.execute("""
+            INSERT INTO findings (target_id, fingerprint, title, severity, status, evidence, last_seen_at)
+            SELECT $1, 'hunt-bulk-' || i, 'bulk ' || i, 'medium', 'active', '{}'::jsonb,
+                   $2::timestamptz - (i || ' seconds')::interval
+            FROM generate_series(1, 30000) AS i""", WEB[0], T0)
+        hunt = await conn.fetchval("""INSERT INTO hunt_runs(target_kind, target_id, status, objective)
+            VALUES ('web', $1, 'active', 'a.9 hunt filter') RETURNING id""", WEB[0])
+        other = await conn.fetchval("""INSERT INTO hunt_runs(target_kind, target_id, status, objective)
+            VALUES ('web', $1, 'active', 'another run') RETURNING id""", WEB[0])
+        picked = [row["id"] for row in await conn.fetch(
+            "SELECT id FROM findings WHERE fingerprint LIKE 'hunt-bulk-%' ORDER BY id LIMIT 30")]
+        # Ten created by the run, ten re-verified by it (owned by another run), ten proven by
+        # its deterministic verification without any direct attribution.
+        await conn.execute("UPDATE findings SET hunt_run_id = $1 WHERE id = ANY($2::uuid[])", hunt, picked[:10])
+        await conn.execute("UPDATE findings SET hunt_run_id = $1 WHERE id = ANY($2::uuid[])", other, picked[10:20])
+        for finding in picked[10:20]:
+            action = await conn.fetchval("""INSERT INTO hunt_actions(hunt_run_id, capability_name, status)
+                VALUES ($1, 'candidate.verify', 'completed') RETURNING id""", hunt)
+            await conn.execute("""INSERT INTO finding_hunt_verifications (finding_id, hunt_run_id, action_id, role)
+                VALUES ($1, $2, $3, 'additional')""", finding, hunt, action)
+        for finding in picked[20:]:
+            await conn.execute("""INSERT INTO finding_verifications
+                (finding_id, target_id, target_url, finding_type, status, verdict, verification_mode,
+                 requested_by)
+                VALUES ($1, $2, 'https://app.alpha.test', 'xss', 'completed', 'exploited', 'deterministic', $3)""",
+                finding, WEB[0], f"hunt_v2:{hunt}")
+        await conn.execute("VACUUM ANALYZE findings")
+        await conn.execute("ANALYZE finding_verifications")
+        await conn.execute("ANALYZE finding_hunt_verifications")
+
+        result, queries = await route(pool, monkeypatch, limit=50, hunt_id=str(hunt))
+        assert {str(item["id"]) for item in result["findings"]} == {str(value) for value in picked}
+        legacy = await conn.fetch("""SELECT f.id FROM findings f WHERE (
+            f.hunt_run_id = $1 OR EXISTS (SELECT 1 FROM finding_hunt_verifications fhv
+                WHERE fhv.finding_id = f.id AND fhv.hunt_run_id = $1)
+            OR EXISTS (SELECT 1 FROM finding_verifications hv JOIN hunt_runs hr ON hr.id = $1
+                WHERE hv.finding_id = f.id AND hv.requested_by = 'hunt_v2:' || CAST(hr.id AS TEXT)
+                  AND hv.status = 'completed' AND hv.verdict = 'exploited'
+                  AND hv.verification_mode = 'deterministic'
+                  AND hv.target_id IS NOT DISTINCT FROM f.target_id
+                  AND hv.device_target_id IS NOT DISTINCT FROM f.device_target_id
+                  AND hr.target_id IS NOT DISTINCT FROM f.target_id
+                  AND hr.device_target_id IS NOT DISTINCT FROM f.device_target_id))""", hunt)
+        assert {row["id"] for row in legacy} == set(picked)
+
+        page_query, args = next((q, a) for q, a in queries if "SELECT f.id FROM findings f" in q)
+        plan = await _explain(conn, page_query, args)
+        nodes = list(_nodes(plan))
+        for node in nodes:
+            if node.get("Relation Name") in ("finding_hunt_verifications", "finding_verifications", "hunt_runs"):
+                assert node["Actual Loops"] == 1, (node["Relation Name"], node["Actual Loops"])
+        # The findings rows read are the run's, never the 30k under the other filters.
+        findings_reads = [node for node in nodes if node.get("Relation Name") == "findings"]
+        assert findings_reads
+        assert max(node["Actual Rows"] * node["Actual Loops"] for node in findings_reads) <= 200, [
+            (node["Node Type"], node.get("Index Name"), node["Actual Rows"], node["Actual Loops"])
+            for node in findings_reads]
+
+    run(scenario, undetermined=0)
+
+
 # --- the upgrade migration -------------------------------------------------------------------------
 
 LIST_INDEX_NAMES = [name for name, _table, _definition in list_schema.FINDINGS_SCALE_INDEXES]
@@ -786,60 +852,8 @@ def test_api_and_worker_starting_together_on_a_2_10_database_do_not_deadlock():
     run(scenario)
 
 
-def test_a_restart_during_concurrent_builds_on_every_builder_table_completes_without_deadlock():
-    """The background builder is mid-CREATE INDEX CONCURRENTLY on findings, scans and every other
-    table it builds on (stalled on an open snapshot, holding its lock), a process restarts and runs
-    the startup migrations, and another process queues on the startup lock. Every statement the
-    startup runs on an up-to-date database must be a catalog check that takes no lock the builds
-    hold: the startup completes while the builds are still waiting, and nothing deadlocks."""
-    async def scenario(conn, pool):
-        from retest_contract import run_schema_migrations
-        dsn = require_disposable_database(DSN or "", "shakerscan_findings_list_test")
-        picks = {}
-        for name, table, definition in loop_scale_indexes.LOOP_SCALE_INDEXES:
-            if table not in picks and await conn.fetchval("SELECT to_regclass($1)", table):
-                picks[table] = (name, definition)
-        assert {"findings", "scans", "targets"} <= set(picks)
-        for name, _definition in picks.values():
-            await conn.execute(f"DROP INDEX IF EXISTS {name}")
-        before = await _deadlocks(conn)
-        holder = await asyncpg.connect(dsn)
-        builders = []
-        startup_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
-        waiter = await asyncpg.connect(dsn)
-        try:
-            # An open snapshot stalls every concurrent build after it has taken its table lock.
-            await holder.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
-            await holder.fetchval("SELECT 1")
-            for name, definition in picks.values():
-                session = await asyncpg.connect(dsn)
-                builders.append((session, asyncio.create_task(
-                    session.execute(f"CREATE INDEX CONCURRENTLY {name} ON {definition}"))))
-            await asyncio.sleep(1.0)
-            assert not any(task.done() for _session, task in builders)
-            startup = asyncio.create_task(run_schema_migrations(startup_pool))
-            await asyncio.sleep(0.2)
-            queued = asyncio.create_task(waiter.execute("SELECT pg_advisory_lock(8675309)"))
-            await asyncio.wait_for(startup, 60)  # blocked behind a build, it would never finish
-            assert not any(task.done() for _session, task in builders)
-            await asyncio.wait_for(queued, 30)
-            await waiter.execute("SELECT pg_advisory_unlock(8675309)")
-            await holder.execute("ROLLBACK")
-            for _session, task in builders:
-                await asyncio.wait_for(task, 60)
-        finally:
-            for session, _task in builders:
-                await session.close()
-            await holder.close()
-            await waiter.close()
-            await startup_pool.close()
-        await asyncio.sleep(1.5)  # backends flush their statistics when they go idle
-        assert await _deadlocks(conn) == before
-        for name, _definition in picks.values():
-            assert await conn.fetchval(
-                "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)", name) is True, name
-
-    run(scenario)
+# A restart during the background builds (every builder table, findings included) is covered by
+# tests/test_targets_dashboard_scale_postgres.py::test_a_restart_during_builds_on_every_loop_index_table_completes_without_deadlock.
 
 
 def test_a_load_that_bypasses_the_trigger_succeeds_and_is_repaired():
