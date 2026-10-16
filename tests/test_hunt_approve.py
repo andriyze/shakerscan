@@ -812,3 +812,44 @@ def test_a_request_named_without_its_hunt_is_found_through_the_feed():
     found = approval.find_request(with_reads, wanted)
     assert found["hunt_id"] == OTHER_HUNT
     assert not any(path.startswith("/hunts?") for _m, path, _p in engine.sent), "no scan of every open Hunt"
+
+
+@pytest.mark.parametrize("state", ["granted", "pending", "failed", "expired"])
+def test_sso_handoff_waits_for_exact_gateway_confirmation(state):
+    terminal = Terminal("")
+    calls = []
+    def send(method, path, payload):
+        calls.append((method, path, payload))
+        return 200, {"schema_version": "shakerscan-approval-status/v1", "state": state}
+    stepup = approval.StepUp(send, ORIGIN, terminal, account="sso:employee", method="sso")
+    challenge = {
+        "approval_id": "apv_test", "set_digest": "d" * 64, "methods": ["sso"],
+        "sso": {"authorize_url": ORIGIN + "/_enterprise/approvals/browser/" + "a" * 43},
+    }
+    if state == "granted":
+        assert stepup.prove(challenge) == {"method": "sso"}
+    else:
+        with pytest.raises(approval.ApprovalError, match="not confirmed"):
+            stepup.prove(challenge)
+    assert len(calls) == 1
+    assert calls[0][1] == "/_enterprise/approvals/sso/status"
+    assert calls[0][2]["set_digest"] == challenge["set_digest"]
+    assert calls[0][2]["approval_id"] == challenge["approval_id"]
+    assert "review the exact decision" in terminal.text
+
+
+@pytest.mark.parametrize("url", [
+    "https://evil.example/_enterprise/approvals/browser/" + "a" * 43,
+    ORIGIN + "/_enterprise/approvals/browser/" + "a" * 43 + "?redirect=evil",
+    ORIGIN + "/_enterprise/approvals/browser/../login",
+    "https://user:password@scanner.example.com/_enterprise/approvals/browser/" + "a" * 43,
+    ORIGIN + "/_enterprise/approvals/browser/" + "a" * 43 + "#fragment",
+])
+def test_sso_handoff_never_opens_an_unbound_url(url):
+    def send(*args):
+        pytest.fail("an unbound handoff must make no request")
+    terminal = Terminal()
+    stepup = approval.StepUp(send, ORIGIN, terminal, account="sso:employee")
+    with pytest.raises(approval.ApprovalError, match="not on this gateway"):
+        stepup.prove({"methods": ["sso"], "sso": {"authorize_url": url}})
+    assert terminal.text == ""

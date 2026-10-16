@@ -676,7 +676,19 @@ pre-authorized …") and exits 2. There is no fallback.
    plus the purpose's part: `decisions` sorted by (`hunt_id`, `request_id`) with exactly the six
    keys above; `preauthorization` with `allow` sorted and de-duplicated and `use`; or `session`
    with `ttl_seconds`. The client computes the same digest and refuses a challenge that differs.
-   `methods` lists only what the person has enrolled. The WebAuthn `challenge` is
+   `methods` lists only what the person can use. Single sign-on people name
+   `sso:<provider subject>` as their account; supporting gateways answer `methods: ["sso"]`
+   and `sso: {"authorize_url": "https://<gateway>/_enterprise/approvals/browser/<opaque>"}`.
+   The client accepts only a handoff URL on the configured gateway. Open it, sign in to the
+   gateway if needed and reload, review the exact approval document and digest, then confirm
+   fresh provider sign-in. Return to the terminal and press Enter. The client checks
+   `POST /_enterprise/approvals/sso/status` with the finish envelope and empty `proof` for
+   `{"schema_version": "shakerscan-approval-status/v1", "state": "granted"}` before sending
+   `proof: {"method": "sso"}` to finish. A status read never applies the decision. The one-use
+   proof binds the person, originating connection token, approval digest and browser session;
+   fresh `auth_time`, configured assurance, account, role, issuer and expiry are checked.
+   Pending handoffs expire on a gateway restart. A service token alone cannot confirm them.
+   The WebAuthn `challenge` is
    `base64url(SHA-256(base64url_decode(nonce) || bytes.fromhex(set_digest)))`; the client checks
    it before asking the key, so a key touch signs exactly this set.
 2. `POST /_enterprise/approvals/finish`
