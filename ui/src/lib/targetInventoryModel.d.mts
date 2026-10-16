@@ -46,3 +46,16 @@ export function inventoryParams(filters: TargetFilters, offset: number, limit: n
 export function activeFilterCount(filters: TargetFilters): number
 export function scanUrls(asset: { locator?: string | null; origins?: Array<{ url: string; is_active: boolean }> } | null | undefined): string[]
 export function configureScanHref(targets: string[], forceBatch?: boolean): string
+export const SCAN_BATCH_MAX: number
+export function domainBatchHref(rootDomain: string, targets: string[], membersTruncated?: boolean): string
+export function domainBatchTargets(rootDomain: string, page: unknown): {
+  targets: string[]; total: number; found: boolean; moreMembers: boolean; memberCount?: number
+}
+export function capBatchTargets(targets: string[]): { targets: string[]; total: number }
+export function batchCapNotice(total: number, source: string, options?: { memberCount?: number; moreMembers?: boolean }): string | null
+export const INVENTORY_MEMBER_LIMIT: number
+export function inventoryPageParams(filters: TargetFilters, cursor: string | null, limit: number, memberLimit?: number): Record<string, string | number | boolean>
+export interface InventoryPageView<G = any> {
+  groups: G[]; totalGroups: number | null; hasMore: boolean; nextCursor: string | null; facets: any; listV1: boolean
+}
+export function inventoryPageFromBody(body: unknown): InventoryPageView

@@ -124,13 +124,20 @@ const json = (method: string, body: unknown): RequestInit => ({ method, headers:
 
 // discoverable: the server's Public Suffix List check that POST /discovery would accept the
 // domain (false for an IP or a group that is itself a public suffix, such as github.io).
-export interface TargetAssetGroup { root_domain: string; discoverable?: boolean; targets: TargetAsset[] }
+export interface TargetAssetGroup {
+  root_domain: string; discoverable?: boolean; targets: TargetAsset[]
+  /** list/v1: the group's full size, and whether `targets` holds only the first member_limit. */
+  member_count?: number; members_truncated?: boolean
+}
 
 export interface InventoryQuery {
   search?: string; offset?: number; limit?: number; connected_only?: boolean; include_inactive?: boolean
   include_services?: boolean; group_by?: 'domain'; asset_type?: 'web' | 'network'; environment?: string
   authorization?: 'authorized' | 'unauthorized'; findings?: 'any' | 'critical_high' | 'none'
-  activity?: 'never' | 'scanned' | 'scanning'; sort?: 'name' | 'risk' | 'recent' | 'created'; include_facets?: boolean
+  activity?: 'never' | 'scanned' | 'scanning'; include_facets?: boolean
+  sort?: 'name' | 'risk' | 'recent' | 'created' | '-name' | '-risk' | '-recent' | '-created'
+  /** list/v1 */
+  cursor?: string; count?: 'none' | 'estimate' | 'exact'; member_limit?: number
 }
 export interface InventoryPage {
   targets: TargetAsset[]; groups?: TargetAssetGroup[]; total_groups?: number; total: number

@@ -10,7 +10,7 @@ import {
   type InventoryFacets, type TargetAsset, type TargetAssetGroup,
 } from '@/lib/targetAssetApi'
 import { usePoll } from '@/lib/usePoll'
-import { filtersFromQuery, groupSections, inventoryParams, queryFromFilters } from '@/lib/targetInventoryModel.mjs'
+import { filtersFromQuery, groupSections, inventoryPageFromBody, inventoryPageParams, queryFromFilters } from '@/lib/targetInventoryModel.mjs'
 import { AddTargetsDialog } from './inventory/AddTargetsDialog'
 import { AuthorizeDialog } from './inventory/AuthorizeDialog'
 import { InventorySummary, InventoryToolbar, type InventoryFilters } from './inventory/InventoryControls'
@@ -18,6 +18,7 @@ import { ColumnHeader, DomainGroup, NetworkGroup } from './inventory/TargetGroup
 import { assetKind, type RowActions } from './inventory/TargetRow'
 
 const PAGE_GROUPS = 40
+const plural = (count: number, noun: string) => `${count.toLocaleString()} ${noun}${count === 1 ? '' : 's'}`
 const SCANNING_REFRESH_MS = 10_000
 const GROUPS_KEY = 'shakerscan.targets.expandedGroups'
 
@@ -28,10 +29,15 @@ export function TargetInventory() {
   const parameters = useSearchParams()
   const [filters, setFilters] = useState<InventoryFilters>(() => filtersFromQuery(parameters))
   const [query, setQuery] = useState(filters)
-  const [offset, setOffset] = useState(0)
+  // list/v1 keyset paging: the cursor of every page visited, so Previous can go back.
+  const [cursors, setCursors] = useState<Array<string | null>>([null])
+  const pageIndex = cursors.length - 1
+  const cursor = cursors[pageIndex]
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const firstPage = useCallback(() => setCursors([null]), [])
   const [groups, setGroups] = useState<TargetAssetGroup[]>([])
   const [facets, setFacets] = useState<InventoryFacets | null>(null)
-  const [totals, setTotals] = useState({ targets: 0, groups: 0 })
+  const [totals, setTotals] = useState<{ targets: number; groups: number | null }>({ targets: 0, groups: 0 })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
@@ -81,19 +87,24 @@ export function TargetInventory() {
   useEffect(() => {
     const controller = new AbortController()
     setLoading(true)
-    getTargetAssets(inventoryParams(query, offset, PAGE_GROUPS) as Parameters<typeof getTargetAssets>[0], controller.signal)
+    getTargetAssets(inventoryPageParams(query, cursor, PAGE_GROUPS) as Parameters<typeof getTargetAssets>[0], controller.signal)
       .then(result => {
         if (controller.signal.aborted) return
-        // Tolerate an older server's flat response during a rolling upgrade.
-        setGroups(result.groups || result.targets.map(asset => ({ root_domain: asset.locator, targets: [asset] })))
-        setFacets(result.facets || null)
-        setTotals({ targets: result.total, groups: result.total_groups ?? result.total })
+        // list/v1, or (during a rolling upgrade) an older server's legacy or flat answer.
+        const view = inventoryPageFromBody(result)
+        setGroups(view.groups as TargetAssetGroup[])
+        setFacets(view.facets)
+        setNextCursor(view.nextCursor)
+        setTotals(current => ({
+          targets: view.facets?.total ?? current.targets,
+          groups: view.totalGroups ?? (cursor ? current.groups : view.groups.length),
+        }))
         setError(null)
       })
       .catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load targets') })
       .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
-  }, [query, offset, refreshVersion])
+  }, [query, cursor, refreshVersion])
 
   const assets = useMemo(() => groups.flatMap(group => group.targets), [groups])
   const scanningNow = assets.some(asset => asset.scanning)
@@ -113,7 +124,7 @@ export function TargetInventory() {
 
   function change(next: Partial<InventoryFilters>) {
     setFilters(current => ({ ...current, ...next }))
-    setOffset(0)
+    firstPage()
     setSelected(new Set())
   }
 
@@ -239,12 +250,12 @@ export function TargetInventory() {
                 <NetworkGroup targets={sections.network} selection={selection} actions={actions} busy={busy} />
               </div>}
       </div>
-      {totals.groups > PAGE_GROUPS && <div className="mt-4 flex items-center justify-between gap-3">
-        <Button variant="secondary" size="sm" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0, offset - PAGE_GROUPS))}>Previous</Button>
-        <span className="text-xs text-gray-500">Groups {offset + 1}–{Math.min(totals.groups, offset + PAGE_GROUPS)} of {totals.groups} · {totals.targets} targets</span>
-        <Button variant="secondary" size="sm" disabled={offset + PAGE_GROUPS >= totals.groups || loading} onClick={() => setOffset(offset + PAGE_GROUPS)}>Next</Button>
+      {(pageIndex > 0 || nextCursor) && <div className="mt-4 flex items-center justify-between gap-3">
+        <Button variant="secondary" size="sm" disabled={pageIndex === 0 || loading} onClick={() => setCursors(current => current.slice(0, -1))}>Previous</Button>
+        <span className="text-xs text-gray-500">Groups {(pageIndex * PAGE_GROUPS + 1).toLocaleString()}–{(pageIndex * PAGE_GROUPS + groups.length).toLocaleString()}{totals.groups != null ? ` of ${totals.groups.toLocaleString()}` : ''} · {plural(totals.targets, 'target')}</span>
+        <Button variant="secondary" size="sm" disabled={!nextCursor || loading} onClick={() => { if (nextCursor) setCursors(current => [...current, nextCursor]) }}>Next</Button>
       </div>}
-      {!loading && groups.length > 0 && totals.groups <= PAGE_GROUPS && <p className="mt-3 text-center text-xs text-gray-600" aria-live="polite">{totals.targets} target{totals.targets === 1 ? '' : 's'} in {totals.groups} group{totals.groups === 1 ? '' : 's'}</p>}
+      {!loading && groups.length > 0 && pageIndex === 0 && !nextCursor && <p className="mt-3 text-center text-xs text-gray-600" aria-live="polite">{plural(totals.targets, 'target')} in {plural(totals.groups ?? groups.length, 'group')}</p>}
     </>}
 
     {selected.size > 0 && <div className="fixed inset-x-0 bottom-0 z-40 md:left-64" role="region" aria-label="Selected targets">
@@ -256,7 +267,7 @@ export function TargetInventory() {
       </div>
     </div>}
 
-    <AddTargetsDialog open={adding} onClose={() => setAdding(false)} onAdded={() => { setOffset(0); refresh() }} />
+    <AddTargetsDialog open={adding} onClose={() => setAdding(false)} onAdded={() => { firstPage(); refresh() }} />
     {authorizing.length > 0 && <AuthorizeDialog assets={authorizing} onClose={() => setAuthorizing([])} onDone={(count, failures) => {
       setAuthorizing([])
       if (count) toast.success(`Authorized ${count} target${count === 1 ? '' : 's'} for testing`)
