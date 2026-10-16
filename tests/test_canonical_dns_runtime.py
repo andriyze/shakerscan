@@ -597,3 +597,41 @@ def test_an_explicit_host_root_under_a_spanning_domain_asks_the_registrable_doma
     assert result["status"] == "success", result
     zone = {name for name, query_type, _kwargs in resolver.calls if query_type in {"NS", "SOA", "DS"}}
     assert zone == {"typeform.com"}
+
+
+def test_queries_the_deadline_cut_off_are_named_and_never_read_as_absent_records():
+    """The overall deadline recorded only a summary error and left each cut-off label as an
+    empty list, which the posture rules read as an answered-empty TXT/_dmarc/CAA: verified
+    "No SPF", "No DMARC" and "No CAA" findings from a slow resolver."""
+    from api.scan.posture_findings import dns_posture_findings
+
+    class _Hanging(_Resolver):
+        async def resolve(self, name, query_type, **kwargs):
+            if query_type in {"TXT", "CAA"}:
+                await asyncio.sleep(30)
+            return await super().resolve(name, query_type, **kwargs)
+
+    observation = asyncio.run(inspect_dns_posture(
+        _target(), timeout_seconds=1, resolver=_Hanging(),
+    ))["observation"]
+    for label in ("host_txt", "host_caa", "dmarc"):
+        assert f"{label}:Timeout" in observation["errors"]
+        assert label not in observation["record_metadata"]
+    made = []
+    findings = dns_posture_findings(
+        {**observation, "canonical_host": "example.com"}, make=lambda **kw: made.append(kw) or kw,
+    )
+    assert findings == []
+
+
+def test_an_nxdomain_answer_is_recorded_as_answered_empty():
+    class _NoDmarc(_Resolver):
+        async def resolve(self, name, query_type, **kwargs):
+            if name.startswith("_dmarc."):
+                raise type("NXDOMAIN", (Exception,), {})()
+            return await super().resolve(name, query_type, **kwargs)
+
+    observation = asyncio.run(inspect_dns_posture(_target(), timeout_seconds=1, resolver=_NoDmarc()))["observation"]
+    assert observation["records"]["dmarc"] == []
+    assert observation["record_metadata"]["dmarc"]["answer_count"] == 0
+    assert observation["record_metadata"]["dmarc"]["negative"] == "NXDOMAIN"

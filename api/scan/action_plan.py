@@ -39,8 +39,11 @@ try:
 except ModuleNotFoundError:
     from ..capabilities.exposure_probe import exposure_first_slice_hold
     from ..capabilities.graphql_probe import graphql_first_slice_hold
-from .capability_execution import SCAN_BASE_ORIGIN_CAPABILITIES, scan_discovery_reservation
+from .capability_execution import (
+    SCAN_BASE_ORIGIN_CAPABILITIES, scan_discovery_reservation, tls_connections_per_pair,
+)
 from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
+from .posture_findings import CORS_PROBE_ACTIONS
 from .execution import ScanExecutionPlan
 from .work_manifests import (
     CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
@@ -79,6 +82,7 @@ _BATCH_CAPABILITIES = frozenset({
     "nosqli.verify_batch",
     "authz_surface.verify_batch",
     "graphql.verify_batch",
+    "redirect.verify_batch",
 })
 # (slice_size, reservation) per capability, derived per profile from two measured
 # tables rather than hand-tuned absolutes.
@@ -122,6 +126,9 @@ _BATCH_ATTEMPT_COSTS: Mapping[str, Mapping[str, int]] = {
     # route costs at most six GETs. The conventional locations are held separately for the
     # first slice (graphql_first_slice_hold).
     "graphql.verify_batch": {"http_requests": 1, "tool_wall_seconds": 1},
+    # Per manifest entry: most routes have no redirect-named parameter and cost nothing; one
+    # that has costs one GET per parameter (open_redirect.MAX_PARAMETERS_PER_ROUTE at most).
+    "redirect.verify_batch": {"http_requests": 1, "tool_wall_seconds": 1},
 }
 _BATCH_WALL_SHARE: Mapping[str, float] = {
     "xss.verify_batch": 0.12,
@@ -136,6 +143,7 @@ _BATCH_WALL_SHARE: Mapping[str, float] = {
     "nosqli.verify_batch": 0.05,
     "authz_surface.verify_batch": 0.05,
     "graphql.verify_batch": 0.02,
+    "redirect.verify_batch": 0.02,
 }
 # A discovered candidate manifest can mix query and body entries while its public
 # reference reveals only a count. Every verifier slice therefore carries one
@@ -1236,6 +1244,19 @@ class ScanActionPlanCompiler:
                 {"method": "GET", "path": "/.well-known/security.txt", "follow_redirects": False},
                 dependencies=("baseline.http",),
             )
+            # Two read-only CORS probes of the same page: one foreign Origin, one `null`. The
+            # response headers say whether the server grants them (posture_findings).
+            for cors_action_id, probe_origin in CORS_PROBE_ACTIONS.items():
+                add(
+                    cors_action_id,
+                    "deterministic_baseline",
+                    "http.request",
+                    # The Origin value is fixed by the action id (posture_findings); request
+                    # headers are never plan inputs.
+                    {"method": "GET", "path": "/", "follow_redirects": False,
+                     "cors_probe_origin": probe_origin},
+                    dependencies=("baseline.http",),
+                )
             if target_binding.canonical_host:
                 add(
                     "baseline.dns",
@@ -1473,6 +1494,7 @@ class ScanActionPlanCompiler:
                     "nosqli.verify_batch": 20,
                     "authz_surface.verify_batch": 15,
                     "graphql.verify_batch": 15,
+                    "redirect.verify_batch": 15,
                 }[blueprint.capability_name]
                 budget = {
                     name: max(
@@ -1571,8 +1593,12 @@ class ScanActionPlanCompiler:
                     int(blueprint.capability_args.get("origin_count") or 0)
                     * int(blueprint.capability_args.get("address_count") or 0)
                 )
+                # Per pair: up to four stdlib handshakes (TLS 1.2, TLS 1.3, default, trust)
+                # plus the raw legacy-protocol/weak-suite probes (tls_legacy_probe.PROBE_COUNT)
+                # when the Scan's TCP authority pays for them on every pair.
+                tcp_granted = int(getattr(execution_plan.budget, "max_tcp_ports", 0) or 0)
                 requested = {
-                    "tcp_ports_attempted": 4 * pair_count,
+                    "tcp_ports_attempted": tls_connections_per_pair(tcp_granted, pair_count) * pair_count,
                     "tool_wall_seconds": 15 * pair_count,
                 }
             return requested
@@ -2025,6 +2051,21 @@ class ScanActionPlanCompiler:
                 manifest_ref=endpoint_ref,
                 dependencies=active_dependencies,
                 required="graphql" in explicitly_requested,
+                minimum_batches=1,
+                reserve_dependency_slots=int(authz_will_run),
+            )
+        if scope in {"full", "endpoint"} and xss and not defer_manifest_actions:
+            # Open redirects ride the XSS family's authority: both test how the application
+            # uses a request parameter it reflects (into the page, into a Location header), and
+            # both read the same discovered query parameters. Best-effort, never required.
+            add_manifest_batches(
+                "verify.redirect",
+                "verify_candidates",
+                "redirect.verify_batch",
+                {"endpoint_manifest_ref": endpoint_ref or None},
+                manifest_ref=endpoint_ref,
+                dependencies=active_dependencies,
+                required=False,
                 minimum_batches=1,
                 reserve_dependency_slots=int(authz_will_run),
             )

@@ -81,7 +81,7 @@ export function TargetDiscoveredSecrets({ targetId, origin, hideWhenEmpty = fals
   const own = (rows || []).filter(row => row.found_on === targetId)
   const granted = (rows || []).filter(row => row.found_on !== targetId)
   if (hideWhenEmpty && !error && !stepUp && !dialog && (!rows || rows.length === 0)) return null
-  return <Card className="mb-6">
+  return <Card className="mb-6 scroll-mt-6" id={origin ? undefined : 'discovered-secrets'}>
     <h2 className="text-lg font-semibold text-white">{origin ? <>Discovered secrets <span className="break-all text-sm font-normal text-gray-400">· {origin}</span></> : 'Discovered secrets'}</h2>
     <p className="mt-1 text-xs text-gray-500">Values ShakerScan found on this target (a configuration file, a response, a Hunt&apos;s output). Hunts use them by reference and never see them; this list never shows a value.</p>
     {stepUp && <div className="mt-3 rounded border border-amber-700 bg-amber-950/40 p-3 text-sm text-amber-100" role="status">

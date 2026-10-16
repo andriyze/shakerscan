@@ -394,8 +394,9 @@ def test_scan_process_reserves_only_remaining_report_wall_time():
 
 def test_tls_capability_owns_tcp_budget_outside_report_process():
     allocation = scan_tls_capability_allocation(_budget())
+    # One pair: four handshakes plus the legacy-protocol/weak-suite probes (2.11).
     assert allocation == {
-        "tcp_ports_attempted": 4,
+        "tcp_ports_attempted": 10,
         "tool_wall_seconds": 15,
     }
     prepared = prepare_scan_inline_capability(
@@ -413,7 +414,7 @@ def test_tls_capability_owns_tcp_budget_outside_report_process():
         prepared, ledger_limits=scan_budget_ledger_limits(_budget()),
     )
     assert prepared.estimated_budget == {
-        "tcp_ports_attempted": 4,
+        "tcp_ports_attempted": 10,
         "tool_wall_seconds": 15,
     }
     assert {

@@ -7,6 +7,7 @@ import socket
 
 from api.capabilities import tls as tls_capability
 from api.capabilities.tls import inspect_tls_binding, inspect_tls_origin
+from api.capabilities.tls_legacy_probe import PROBE_COUNT as LEGACY_PROBES
 from api.runtime.models import TargetBinding
 from scanner import scanner as scanner_main
 
@@ -92,9 +93,13 @@ def test_shared_tls_capability_runs_typed_protocol_and_trust_handshakes(monkeypa
         timeout_seconds=15,
     ))
 
-    assert len(calls) == 3
+    # Three stdlib handshakes (TLS 1.2, TLS 1.3, trust) plus the raw legacy probes, which open
+    # plain TCP connections to the same frozen address.
+    handshakes = [call for call in calls if "ssl" in call]
+    assert len(handshakes) == 3
+    assert len(calls) == 3 + LEGACY_PROBES
     assert {call["host"] for call in calls} == {"192.0.2.10"}
-    assert {call["server_hostname"] for call in calls} == {"app.example.test"}
+    assert {call["server_hostname"] for call in handshakes} == {"app.example.test"}
     assert result["status"] == "success"
     assert result["observation"]["protocol"] == "TLSv1.3"
     assert result["observation"]["supported_protocols"] == [
@@ -106,7 +111,7 @@ def test_shared_tls_capability_runs_typed_protocol_and_trust_handshakes(monkeypa
     assert result["observation"]["connected_addresses"] == ["192.0.2.10"]
     assert result["observation"]["address_policy"]["no_runtime_resolution"] is True
     assert result["budget_consumed"] == {
-        "tcp_ports_attempted": 3,
+        "tcp_ports_attempted": 3 + LEGACY_PROBES,
         "tool_wall_seconds": 1,
     }
     assert writer.closed is True
@@ -192,8 +197,8 @@ def test_tls_binding_inspects_every_frozen_origin_and_address(monkeypatch):
         for origin in target.allowed_origins
         for address in target.allowed_addresses
     }
-    assert len(calls) == 12
-    assert result["budget_consumed"]["tcp_ports_attempted"] == 12
+    assert len(calls) == 4 * (3 + LEGACY_PROBES)
+    assert result["budget_consumed"]["tcp_ports_attempted"] == 4 * (3 + LEGACY_PROBES)
 
 
 def test_shared_tls_capability_blocks_origin_outside_binding(monkeypatch):
@@ -344,7 +349,8 @@ def test_addresses_the_worker_cannot_route_do_not_make_a_cdn_target_partial(
     # A locally refused connect is not retried per protocol profile.
     assert calls.count("2001:db8::10") == 1
     assert calls.count("2001:db8::11") == 1
-    assert result["budget_consumed"]["tcp_ports_attempted"] == 3 + 3 + 1 + 1
+    # The locally unroutable addresses get no legacy probes either.
+    assert result["budget_consumed"]["tcp_ports_attempted"] == 2 * (3 + LEGACY_PROBES) + 1 + 1
 
 
 def test_a_remote_unreachable_answer_stays_a_partial_failure(monkeypatch):
@@ -373,7 +379,8 @@ def test_a_remote_unreachable_answer_stays_a_partial_failure(monkeypatch):
         attempt["error_errno"] == "ENETUNREACH"
         for item in failed for attempt in item["protocol_attempts"]
     )
-    assert calls.count("2001:db8::10") == 3
+    # The target path refused every handshake; the legacy probes still ask once each.
+    assert calls.count("2001:db8::10") == 3 + LEGACY_PROBES
 
 
 def test_a_binding_with_no_routable_address_fails_rather_than_passing(monkeypatch):

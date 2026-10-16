@@ -47,6 +47,7 @@ V2_API_RUNTIME_PACKAGES: tuple[str, ...] = (
     "devices",
     "data_lifecycle",
     "exposure",
+    "finding_detail",
     "finding_exceptions",
     "finding_routes",
     "fleet_routes",

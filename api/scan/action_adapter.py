@@ -58,6 +58,10 @@ try:
     )
     from capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
+    from capabilities.open_redirect import (
+        OPEN_REDIRECT_PARSER_VERSION, probe_candidate as probe_redirect_candidate,
+        redirect_candidates,
+    )
     from capabilities.graphql_probe import (
         GRAPHQL_PROBE_PARSER_VERSION,
         GRAPHQL_REQUEST_HEADERS,
@@ -143,6 +147,10 @@ except (ImportError, ModuleNotFoundError):
     )
     from ..capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from ..capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
+    from ..capabilities.open_redirect import (
+        OPEN_REDIRECT_PARSER_VERSION, probe_candidate as probe_redirect_candidate,
+        redirect_candidates,
+    )
     from ..capabilities.graphql_probe import (
         GRAPHQL_PROBE_PARSER_VERSION,
         GRAPHQL_REQUEST_HEADERS,
@@ -275,6 +283,7 @@ from .capability_execution import (
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import _observed_url_key, finalize_scan_report
 from .nuclei_execution import active_template_window, resolve_active_scan_nuclei_options
+from .posture_findings import CORS_PROBE_ACTIONS
 from .negative_control import negative_control_entries
 from .nuclei_template_index import nuclei_templates_directory
 from .private_inputs import BrokerPrivateScanInputs
@@ -1302,6 +1311,10 @@ class DatabaseNeutralScanActionDispatcher:
         )
         follow = action.action_id == "baseline.http_redirect"
         args = {"method": "GET", "path": path, "follow_redirects": follow}
+        cors_probe_origin = CORS_PROBE_ACTIONS.get(action.action_id)
+        if cors_probe_origin is not None:
+            # A browser-like cross-origin read: the server's CORS answer is the evidence.
+            args["headers"] = {"Origin": cors_probe_origin}
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=action.capability_name,
         )
@@ -2996,6 +3009,133 @@ class DatabaseNeutralScanActionDispatcher:
                 "soft_404_controls_requested": absent_bodies is not None,
                 "checkpoint_mode": "after_each_candidate",
                 "secret_values_visible": False,
+            },
+        )
+
+    async def _redirect_verify_batch(
+        self, action: ScanAction, heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        """One GET per discovered redirect parameter, set to a non-resolving canary URL.
+
+        Redirects are never followed; the Location header is the evidence
+        (``capabilities.open_redirect``). Candidates come from this slice of the endpoint
+        manifest; a route without a redirect-named parameter is recorded as inapplicable.
+        """
+        endpoints = await self._work_manifest(
+            action, "endpoint_manifest_ref", ScanWorkManifestKind.ENDPOINT,
+        )
+        if endpoints is None:
+            return self._skip(action, "manifest_unavailable")
+        raw_slice = action.capability_args.get("slice")
+        start = raw_slice.get("start") if isinstance(raw_slice, Mapping) else None
+        count = raw_slice.get("count") if isinstance(raw_slice, Mapping) else None
+        if (
+            isinstance(start, bool) or not isinstance(start, int) or start < 0
+            or isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 100
+        ):
+            raise ScanActionAdapterError("redirect batch slice is invalid")
+        load_attempts = getattr(self.backend, "load_batch_attempts", None)
+        checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
+        if not callable(load_attempts) or not callable(checkpoint_attempt):
+            raise ScanActionAdapterError("redirect backend lacks durable checkpoints")
+        completed = {
+            str(item.get("attempt_id") or ""): dict(item)
+            for item in await load_attempts(action.action_id) if isinstance(item, Mapping)
+        }
+        manifest_digest = endpoints.reference().manifest_digest
+        window = endpoints.entries[start:min(len(endpoints.entries), start + count)]
+        candidates = redirect_candidates(window)
+        with_candidates = {item["route_id"] for item in candidates}
+        observations: list[Mapping[str, Any]] = [
+            {
+                "kind": "candidate_inapplicable", "family": "open_redirect",
+                "candidate_id": str(entry.get("route_id") or ""),
+                "reason": "no_redirect_parameter",
+            }
+            for entry in window if str(entry.get("route_id") or "") not in with_candidates
+        ]
+        transport = self._scan_replay_transport(action, principal_slot="anonymous")
+        started_at = datetime.now(timezone.utc).isoformat()
+        consumed = {name: 0 for name in action.requested_budget}
+        http_ceiling = int(action.requested_budget.get("http_requests") or 0)
+        wall_deadline = time.monotonic() + max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
+        errors: list[str] = []
+        attempted = resumed = 0
+        ordinal = start * 1000
+
+        async def send(url: str) -> tuple[int | None, Mapping[str, Any] | None]:
+            nonlocal ordinal
+            ordinal += 1
+            request = ReplayRequest(
+                request_id=f"redirect:{ordinal}", ordinal=ordinal, name="open redirect probe",
+                folder="", method="GET", url=url, headers=(), body=b"",
+                body_mode="none", auth_type="none", has_sensitive_material=False,
+            )
+            result = await transport.send(
+                request, target=self.target, follow_redirects=False,
+                timeout_seconds=max(1.0, min(15.0, wall_deadline - time.monotonic())),
+            )
+            consumed["http_requests"] = min(http_ceiling, consumed["http_requests"] + 1)
+            if result.error_code:
+                errors.append(str(result.error_code))
+            await heartbeat()
+            return result.status_code, result.response_headers
+
+        for candidate in candidates:
+            attempt_id = hashlib.sha256(
+                f"{manifest_digest}:redirect:{candidate['attempt_key']}".encode()
+            ).hexdigest()
+            prior = completed.get(attempt_id)
+            if prior is not None:
+                resumed += 1
+                attempted += 1
+                observations.extend(prior.get("observations") or ())
+                continue
+            if (
+                self.cancelled() or consumed["http_requests"] >= http_ceiling
+                or wall_deadline - time.monotonic() < 1.0
+            ):
+                break
+            proof = await probe_redirect_candidate(candidate, send)
+            bundled = ({
+                "kind": "candidate_attempt", "attempt_id": attempt_id,
+                "candidate_id": attempt_id[:32], "family": "open_redirect",
+                "status": "success", "proof_state": proof["proof_state"],
+                "budget_consumed": {"http_requests": 1},
+            }, proof)
+            observations.extend(bundled)
+            attempted += 1
+            if not self.cancelled():
+                await checkpoint_attempt(action.action_id, {
+                    "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
+                    "status": "success", "observations": bundled,
+                    "budget_consumed": {"http_requests": 1},
+                    "proof_state": proof["proof_state"],
+                })
+        unattempted = max(0, len(candidates) - attempted)
+        partial = bool(unattempted)
+        if "tool_wall_seconds" in consumed:
+            consumed["tool_wall_seconds"] = min(
+                int(action.requested_budget["tool_wall_seconds"]), max(1, consumed["http_requests"]),
+            )
+        stopped_by = (
+            CapabilityResultReason.CANCELLED.value if self.cancelled()
+            else CapabilityResultReason.HTTP_REQUEST_BUDGET_EXHAUSTED.value
+            if consumed["http_requests"] >= http_ceiling
+            else CapabilityResultReason.TIMED_OUT.value
+        )
+        return self._receipt(
+            action, status="partial" if partial else "success",
+            parser_version=OPEN_REDIRECT_PARSER_VERSION, started_at=started_at,
+            observations=tuple(observations),
+            errors=tuple(([stopped_by] if partial else []) + errors[:20]), consumed=consumed,
+            partial=partial, timed_out=partial and stopped_by == CapabilityResultReason.TIMED_OUT.value,
+            redacted_execution={
+                "action_id": action.action_id, "manifest_digest": manifest_digest,
+                "slice": {"start": start, "count": count},
+                "candidate_count": len(candidates), "attempted_count": attempted,
+                "resumed_count": resumed, "unattempted_count": unattempted,
+                "checkpoint_mode": "after_each_candidate",
             },
         )
 
@@ -4978,6 +5118,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._authz_surface_batch(action, heartbeat)
         if action.capability_name == "graphql.verify_batch":
             return await self._graphql_verify_batch(action, heartbeat)
+        if action.capability_name == "redirect.verify_batch":
+            return await self._redirect_verify_batch(action, heartbeat)
         if action.capability_name == "authz.verify":
             return await self._authz(action, heartbeat)
         raise ScanActionAdapterError(

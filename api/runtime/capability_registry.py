@@ -1111,6 +1111,35 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=False,
         ),
         CapabilitySpec(
+            "redirect.verify_batch",
+            "Check discovered redirect parameters for open redirects: one GET per parameter set "
+            "to a non-resolving out-of-scope canary URL, redirects not followed, the Location "
+            "header is the proof.",
+            # Active: the parameter value is varied. Every request is still a read-only GET and
+            # the canary destination is never contacted.
+            "internal", "active", _HTTP_TARGETS, "redirect.verify_batch", "1",
+            "active_testing",
+            {"http_requests": 100, "tool_wall_seconds": 60},
+            {
+                "network_reachability": True,
+                "runtime_target_binding": True,
+                "deterministic_proof_contract": True,
+                "single_worker_batch": True,
+                "durable_attempt_checkpoints": True,
+            },
+            _schema({
+                "endpoint_manifest_ref": {"type": "object"},
+                "slice": {"type": "object"},
+                "profile": {"type": "string"},
+                "proof_policy": {"type": "string"},
+            }, required=("endpoint_manifest_ref", "slice", "profile", "proof_policy")),
+            "open-redirect-probe-batch/v1",
+            ("candidate_attempt", "open_redirect_proof"),
+            arsenal_status="wired",
+            retest_contract="rerun-exact-redirect-probe",
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "graphql.verify_batch",
             "Check discovered GraphQL endpoints for field suggestions and missing alias or "
             "duplicate-field limits with fixed GET documents over one bounded slice.",
@@ -1494,7 +1523,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "tls.inspect", "Inspect TLS configuration for a target-bound origin.",
             "internal", "passive", _HTTP_TARGETS, "scanner.tls", "1", None,
-            {"tcp_ports_attempted": 4, "tool_wall_seconds": 15},
+            # Four stdlib handshakes plus six raw legacy-protocol/weak-suite probes.
+            {"tcp_ports_attempted": 10, "tool_wall_seconds": 15},
             {"network_reachability": True},
             _schema({
                 "origins_ref": {

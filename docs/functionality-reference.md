@@ -2844,8 +2844,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `DB_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
-| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
-| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
+| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/finding_detail/other.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
+| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/finding_detail/other.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
 | `DEVICE_ONLY_WORKER` | `api/worker.py` |
 | `DEVICE_POSTURE_ENABLED` | `api/devices/router.py`, `api/worker_handlers/device.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEVICE_QUEUE_NAME` | `api/api.py`, `api/devices/router.py`, `api/operations/router.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |

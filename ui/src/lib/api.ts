@@ -2400,6 +2400,9 @@ export interface Finding {
   retest_type?: string | null
   retest_modes?: string[]
   retest_unsupported_reason?: string
+  // Per-class brief (finding-detail/v1) and related findings, from GET /findings/{id}
+  detail?: unknown
+  related_findings?: unknown
   // Optional compatibility view when GET /findings explicitly opts into candidates.
   is_candidate?: boolean
   verification_status?: string
