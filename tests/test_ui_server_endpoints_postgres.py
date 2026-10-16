@@ -425,3 +425,91 @@ def test_inventory_web_only_never_drops_a_row_the_ui_accepts_and_drops_what_it_c
         finally:
             await conn.execute("DELETE FROM targets WHERE root_domain = 'webrule.invalid' OR name LIKE 'webrule %'")
     _run(body)
+
+
+def _api_module():
+    import importlib
+    module = importlib.import_module("api")
+    return importlib.import_module("api.api") if hasattr(module, "__path__") else module
+
+
+class _Pool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        conn = self.conn
+
+        class Ctx:
+            async def __aenter__(self_inner):
+                return conn
+
+            async def __aexit__(self_inner, *exc):
+                return False
+        return Ctx()
+
+
+_SCANS_ARGS = dict(status=None, target_id=None, target=None, root_domain=None, created_within_days=None,
+                   include_shards=False, include_internal=False, include_model_intake=False,
+                   include_devices=False, offset=0, include_details=False, fields=None)
+
+
+def test_scans_list_v1_walk_equals_the_legacy_list_and_since_returns_changes(monkeypatch):
+    api = _api_module()
+
+    async def body(conn):
+        monkeypatch.setattr(api, "db_pool", _Pool(conn))
+        # Seeded rows were written moments ago; age them (the trigger would stamp now()).
+        await conn.execute("ALTER TABLE scans DISABLE TRIGGER scans_touch_updated_at")
+        await conn.execute("UPDATE scans SET updated_at = now() - interval '1 hour', "
+                           "created_at = created_at - interval '1 hour'")
+        await conn.execute("ALTER TABLE scans ENABLE TRIGGER scans_touch_updated_at")
+        args = {**_SCANS_ARGS, "root_domain": "g1.example.invalid"}
+        legacy = await api.list_scans(None, limit=200, cursor=None, count=None, since=None, **args)
+        assert 20 < legacy["total"] <= 200
+        walked, cursor, first = [], None, None
+        while True:
+            page = await api.list_scans(None, limit=7, cursor=cursor, count="exact" if cursor is None else None,
+                                        since=None, **args)
+            first = first or page
+            walked.extend(page["items"])
+            if not page["has_more"]:
+                break
+            cursor = page["next_cursor"]
+        assert first["total"] == legacy["total"] and first["total_kind"] == "exact"
+        assert [row["id"] for row in walked] == [row["id"] for row in legacy["scans"]]
+        assert walked == legacy["scans"]  # the same row shape
+        # since=: only rows changed at or after the watermark come back.
+        watermark = first["generated_at"]
+        from datetime import datetime
+        changed = walked[3]["id"]
+        await conn.execute("UPDATE scans SET grade = 'A' WHERE id = $1", changed)
+        delta = await api.list_scans(None, limit=50, cursor=None, count=None,
+                                     since=datetime.fromisoformat(watermark), **args)
+        assert [row["id"] for row in delta["items"]] == [changed]
+        assert delta["items"][0]["grade"] == "A"
+        # A filter and the deprecated shape are honoured as before.
+        failed = await api.list_scans(None, limit=50, cursor=None, count="exact", since=None,
+                                      **{**args, "status": "failed"})
+        assert failed["items"] == [] and failed["total"] == 0
+    _run(body)
+
+
+def test_scans_updated_at_install_is_a_catalog_check_on_restart():
+    from scan.list_v1 import install_scan_updated_at
+
+    async def body(conn):
+        async with conn.transaction():
+            await install_scan_updated_at(conn)
+            locks = await conn.fetch(
+                "SELECT relation::regclass::text AS rel, mode FROM pg_locks "
+                "WHERE pid = pg_backend_pid() AND locktype = 'relation' AND relation = 'scans'::regclass")
+            assert all(row["mode"] == "AccessShareLock" for row in locks), locks
+        row = await conn.fetchrow(
+            "INSERT INTO scans(target_url, status, execution_context, coverage_json) "
+            "VALUES ('https://stamp.example.invalid', 'pending', '{}', '{}') RETURNING id, updated_at")
+        try:
+            assert row["updated_at"] is not None
+        finally:
+            await conn.execute("DELETE FROM scans WHERE id = $1", row["id"])
+    _run(body)

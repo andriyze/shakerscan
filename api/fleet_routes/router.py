@@ -64,6 +64,7 @@ try:
     from runtime.sealed_inputs import SealedInputError, seal_private_input, validate_sealed_input_public_key
     from scan.action_plan import ScanActionPlan, ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from scan.action_store import PostgresScanActionStore
+    from scan.live_log import append_scan_log_lines
     from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
     from scan.broker_authority import RunningBrokerAuthority
     from scan.broker_backend import AUTHORITY_WITHDRAWN_DETAIL
@@ -118,6 +119,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.sealed_inputs import SealedInputError, seal_private_input, validate_sealed_input_public_key
     from ..scan.action_plan import ScanActionPlan, ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from ..scan.action_store import PostgresScanActionStore
+    from ..scan.live_log import append_scan_log_lines
     from ..scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
     from ..scan.broker_authority import RunningBrokerAuthority
     from ..scan.broker_backend import AUTHORITY_WITHDRAWN_DETAIL
@@ -1776,10 +1778,7 @@ async def heartbeat_broker_job(
             mapping["progress"] = str(body.progress)
         redis_client.hset(f"job:{row['job_id']}", mapping=mapping)
         if body.log_lines:
-            key = f"scan:{row['scan_id']}:logs"
-            redis_client.rpush(key, *body.log_lines)
-            redis_client.ltrim(key, -1000, -1)
-            redis_client.expire(key, 86400)
+            append_scan_log_lines(redis_client, row["scan_id"], body.log_lines, tail=1000, ttl_seconds=86400)
     return {
         "lease_id": lease_id,
         "lease_expires_at": expires_at.isoformat(),

@@ -21,6 +21,7 @@ import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
 import { blockerOrigin, blockerProvenanceText, carriedOverFromDecision, carriedSourceText, carriedOverSummary, domainRatePresentation, groupScanFindings, isProvenFinding, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { emptyScanLogState, mergeScanLogReply } from '@/lib/scanLogDelta.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 import { failedScanHeadline } from '@/lib/authorizationStop'
 
@@ -1930,6 +1931,7 @@ function ScanDetailContent() {
   const [error, setError] = useState<string | null>(null)
   const [retryNonce, setRetryNonce] = useState(0)
   const [logs, setLogs] = useState<string[]>([])
+  const [logsPartial, setLogsPartial] = useState(false)
   const [logsError, setLogsError] = useState<string | null>(null)
   const [logFilter, setLogFilter] = useState<ScanLogFilter>('key')
   const [logSearch, setLogSearch] = useState('')
@@ -1994,14 +1996,15 @@ function ScanDetailContent() {
   }, [postureTargetId, scan?.id])
 
   const scanStatus: string | null = scan?.status ?? null
-  const scanLive = scanStatus === 'running' || scanStatus === 'pending'
-  const scanTerminal = scanStatus === 'completed' || scanStatus === 'failed'
+  const scanLive = ['running', 'pending', 'queued'].includes(scanStatus ?? '')
+  const scanTerminal = ['completed', 'failed', 'cancelled'].includes(scanStatus ?? '')
   const scanRef = useRef<any | null>(null)
   scanRef.current = scan
   useEffect(() => {
     // A different scan (or a retry) starts from nothing: no stale rows from the previous one.
     setScan(null)
     setLogs([])
+    setLogsPartial(false)
     setLoading(true)
   }, [scanId])
 
@@ -2024,33 +2027,32 @@ function ScanDetailContent() {
     }
   }, { intervalMs: SCAN_REFRESH_MS, idleIntervalMs: null, live: scan === null || scanLive, deps: [scanId, retryNonce] })
 
-  // The log tail. /scans/{id}/logs has no after-seq cursor, so the tail is re-read, but slower
-  // while it does not change: every 5 s while it moves, then 10, 20 and 30 s while it is still.
-  // Only while the scan is live, plus one final read when it turns terminal.
-  const logTailRef = useRef<string>('')
+  // Read only new numbered lines. Older engines and aggregated parent/device feeds keep
+  // their full-tail replacement behavior. Quiet polls back off; a terminal status gets a final read.
+  const logDeltaRef = useRef(emptyScanLogState())
   const logSkipRef = useRef({ every: 1, since: 0 })
   const logForceRef = useRef(true)
   const fetchLogs = async (signal: AbortSignal) => {
     const current = scanRef.current
-    const logData = await getScanLogs(scanId, 500, signal)
-    let nextLogs: string[] = logData?.lines || []
+    let logData = await getScanLogs(scanId, 500, signal, logDeltaRef.current.nextSeq)
     const isDeviceScan = ['device_posture', 'device_probe'].includes(
       String(current?.run_kind || current?.scan_type),
     )
-    if (isDeviceScan && nextLogs.length === 0) {
+    if (isDeviceScan && logData?.lines?.length === 0 && logDeltaRef.current.lines.length === 0) {
       try {
-        nextLogs = deviceActivityLogLines(await getDeviceScanActivity(scanId))
+        logData = { lines: deviceActivityLogLines(await getDeviceScanActivity(scanId)), seq_supported: false }
       } catch {
         // The ordinary log endpoint remains authoritative when the
         // content-free device activity feed is unavailable.
       }
     }
     if (signal.aborted) return
-    const tail = `${nextLogs.length}:${nextLogs[nextLogs.length - 1] ?? ''}`
-    if (tail !== logTailRef.current) {
-      logTailRef.current = tail
+    const next = mergeScanLogReply(logDeltaRef.current, logData, 500)
+    if (next !== logDeltaRef.current) {
+      logDeltaRef.current = next
       logSkipRef.current.every = 1
-      setLogs(nextLogs)
+      setLogs(next.lines)
+      setLogsPartial(next.partial)
     } else {
       logSkipRef.current.every = Math.min(LOG_MAX_SKIP, logSkipRef.current.every * 2)
     }
@@ -2064,7 +2066,7 @@ function ScanDetailContent() {
   const logLoopKeyRef = useRef<string | null>(null)
   if (logLoopKeyRef.current !== logLoopKey) {
     logLoopKeyRef.current = logLoopKey
-    logTailRef.current = ''
+    logDeltaRef.current = emptyScanLogState()
     logSkipRef.current = { every: 1, since: 0 }
     logForceRef.current = true
   }
@@ -2089,7 +2091,7 @@ function ScanDetailContent() {
   useEffect(() => {
     const before = previousStatus.current
     previousStatus.current = scanStatus
-    if (scanTerminal && (before === 'running' || before === 'pending')) {
+    if (scanTerminal && ['running', 'pending', 'queued'].includes(before ?? '')) {
       logForceRef.current = true
       logsPoll.refresh()
     }
@@ -2189,11 +2191,11 @@ function ScanDetailContent() {
               <p className="mt-1 text-xs text-gray-500">
                 {live
                   ? `Updates every 5–30 seconds (slower while quiet)${logsUpdatedAt ? ` · last checked ${logsUpdatedAt.toLocaleTimeString()}` : ''}`
-                  : 'A durable record of the worker activity captured for this scan.'}
+                  : 'Recent worker activity captured for this scan.'}
               </p>
             </div>
             <div className="flex items-center gap-2 text-xs text-gray-500">
-              <span>{filteredLogs.length} shown · {logs.length} total</span>
+              <span>{filteredLogs.length} shown · {logs.length} in this window</span>
               <button
                 type="button"
                 onClick={copyVisibleLogs}
@@ -2204,6 +2206,7 @@ function ScanDetailContent() {
               </button>
             </div>
           </div>
+          {logsPartial && <p className="mt-2 text-xs text-amber-300">Earlier activity is outside this log window; the latest captured lines are shown.</p>}
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <div className="flex flex-wrap gap-1" aria-label="Log filters">
               {filterOptions.map((option) => (

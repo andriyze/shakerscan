@@ -53,6 +53,13 @@ LOOP_SCALE_INDEXES: tuple[tuple[str, str, str], ...] = (
     # Scans of one target newest first; scans in a status newest first (dashboard recent/failed).
     ("idx_scans_target_created", "scans", "scans (target_id, created_at DESC)"),
     ("idx_scans_status_created", "scans", "scans (status, created_at DESC)"),
+    # /scans list/v1: newest first by (created_at, id), and since= deltas on the change time.
+    (
+        "idx_scans_list_created_id",
+        "scans",
+        "scans ((COALESCE(created_at, '-infinity'::timestamptz)) DESC, id DESC)",
+    ),
+    ("idx_scans_changed_at", "scans", "scans ((COALESCE(updated_at, created_at)))"),
     # "Is anything queued or running on this asset" (inventory activity facet and filter).
     ("idx_scans_active_target", "scans", "scans (target_id) WHERE status IN ('pending', 'queued', 'running')"),
     # The dashboard's latest completed scan per URL (the latest_scans view) as an index-only scan.

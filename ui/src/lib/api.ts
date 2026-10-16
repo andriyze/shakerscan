@@ -4220,8 +4220,10 @@ export async function getTargetPosture(targetId: string, scanId?: string): Promi
   return res.json()
 }
 
-export async function getScanLogs(id: string, limit: number = 200, signal?: AbortSignal) {
-  return getJson(`${API_URL}/scans/${id}/logs?limit=${limit}`, { signal, label: 'Failed to fetch scan logs' })
+export async function getScanLogs(id: string, limit: number = 200, signal?: AbortSignal, afterSeq?: number | null) {
+  const params = new URLSearchParams({ limit: String(limit) })
+  if (afterSeq != null) params.set('after_seq', String(afterSeq))
+  return getJson(`${API_URL}/scans/${id}/logs?${params}`, { signal, label: 'Failed to fetch scan logs' })
 }
 
 export async function submitScan(target: string, options: Record<string, unknown> = {}) {
