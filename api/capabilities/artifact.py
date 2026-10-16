@@ -54,6 +54,12 @@ except ModuleNotFoundError:
 MAX_INSPECT_BYTES = 16_384
 MAX_JAVASCRIPT_BYTES = 262_144
 MAX_PUBLIC_TEXT = 4_096
+try:
+    from scanner_tools.frontend_http import extract_frontend_http_requests
+    from scanner_tools.surface_hints import corporate_surface_hints
+except ModuleNotFoundError:
+    from scanner.scanner_tools.frontend_http import extract_frontend_http_requests
+    from scanner.scanner_tools.surface_hints import corporate_surface_hints
 _JWT_RE = re.compile(r"(?<![A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})(?![A-Za-z0-9_-])")
 _ROUTE_RE = re.compile(
     r"[\"']((?:/api|/rest|/graphql|/rpc|/auth|/admin)(?:/[A-Za-z0-9._~!$&'()*+,;=:@%{}$-]*)*)[\"']"
@@ -151,7 +157,22 @@ def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[st
             break
 
     # A route can carry a value (``/api/reset;token=...``, a provider key in a path segment).
-    routes = sorted({_masked_string(route, 500) for route in set(_ROUTE_RE.findall(text))})[:200]
+    shapes = []
+    for request in extract_frontend_http_requests(text, max_requests=100):
+        try:
+            url = urllib.parse.urlsplit(request['url'])
+            if url.username is not None or url.password is not None:
+                continue
+        except ValueError:
+            continue
+        # Query values and body values are irrelevant to the request shape, and may be secrets.
+        public_url = urllib.parse.urlunsplit((url.scheme, url.netloc, url.path, '', ''))
+        shapes.append({'method': request['method'], 'url': _masked_string(public_url, 500),
+                       'query_parameter_names': [_masked_string(str(p), 80) for p in request.get('params', [])[:30]],
+                       'body_parameter_names': [_masked_string(str(p), 80) for p in request.get('body_params', [])[:30]],
+                       'reachability': 'unverified', 'provenance': 'static_http_call'})
+    routes = sorted({_masked_string(route, 500) for route in set(_ROUTE_RE.findall(text))}
+                    | {shape['url'] for shape in shapes})[:200]
     # A reference the bundle's end cuts is skipped as a cut token is: masked alone, a piece of a
     # userinfo password or a key in its path would show.
     source_maps = sorted({
@@ -171,6 +192,8 @@ def analyze_javascript_bytes(body: bytes, *, truncated: bool = False) -> dict[st
         # secret in the bundle, recognised or not.
         "content_sha256": keyed_body_digest(body),
         "routes": routes,
+        "request_shapes": shapes,
+        "corporate_surface_leads": corporate_surface_hints(text),
         "jwt_observations": jwt_observations,
         "supabase_origins": supabase_origins,
         "source_maps": source_maps,
