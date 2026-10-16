@@ -8,6 +8,8 @@
  *   `null` there means it stops until `trigger()` (or `isLive()` turning true on the next trigger).
  * - Errors back off exponentially (interval x 2^failures, capped at `maxBackoffMs`), and a busy
  *   answer's Retry-After (error.retryAfter, seconds) is a floor on the wait.
+ * - `leading: false` skips the immediate first tick on `start()`: the first one comes after the
+ *   live (or idle) wait, for a page that has just loaded the same data itself.
  * - `stop()` aborts the tick in flight (its AbortSignal) and clears every timer and listener.
  */
 
@@ -44,13 +46,14 @@ export function backoffDelay(baseMs, failures, { maxBackoffMs = DEFAULT_MAX_BACK
  * @param {number | null} [options.idleIntervalMs] wait while not live; null stops until trigger()
  * @param {() => boolean} [options.isLive]
  * @param {number} [options.maxBackoffMs]
+ * @param {boolean} [options.leading] run the first tick on start() (default true)
  * @param {(error: unknown, failures: number) => void} [options.onError]
  * @param {(state: { failures: number, nextDelayMs: number | null }) => void} [options.onSchedule]
  * @param {{ hidden(): boolean, subscribe(listener: () => void): () => void }} [options.visibility]
  * @param {{ set(fn: () => void, ms: number): unknown, clear(id: unknown): void }} [options.timers]
  */
 export function createPoller({
-  run, intervalMs, idleIntervalMs = null, isLive = () => true, maxBackoffMs = DEFAULT_MAX_BACKOFF_MS,
+  run, intervalMs, idleIntervalMs = null, isLive = () => true, maxBackoffMs = DEFAULT_MAX_BACKOFF_MS, leading = true,
   onError = () => {}, onSchedule = () => {}, visibility = documentVisibility(), timers = realTimers,
 }) {
   let timer = null
@@ -134,7 +137,8 @@ export function createPoller({
       stopped = false
       failures = 0
       unsubscribe = visibility.subscribe(onVisibility)
-      tick()
+      if (leading) tick()
+      else schedule(isLive() ? intervalMs : idleIntervalMs)
     },
     stop() {
       stopped = true

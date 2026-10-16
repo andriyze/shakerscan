@@ -15,6 +15,8 @@ export interface UsePollOptions {
   /** Restart the loop (with an immediate tick) when any of these change. */
   deps?: ReadonlyArray<unknown>
   maxBackoffMs?: number
+  /** False skips the immediate first tick (the page just loaded the same data). Default true. */
+  leading?: boolean
 }
 
 export interface PollState {
@@ -33,7 +35,7 @@ export interface PollState {
  * deps change, so a late answer can never land on the wrong page.
  */
 export function usePoll(tick: (signal: AbortSignal) => Promise<unknown>, {
-  intervalMs, idleIntervalMs = null, live = true, enabled = true, deps = [], maxBackoffMs,
+  intervalMs, idleIntervalMs = null, live = true, enabled = true, deps = [], maxBackoffMs, leading = true,
 }: UsePollOptions): PollState {
   const tickRef = useRef(tick)
   tickRef.current = tick
@@ -57,6 +59,7 @@ export function usePoll(tick: (signal: AbortSignal) => Promise<unknown>, {
       idleIntervalMs,
       isLive: () => liveRef.current,
       maxBackoffMs,
+      leading,
       onError: (cause, count) => {
         setFailures(count)
         setError(cause)
@@ -70,7 +73,7 @@ export function usePoll(tick: (signal: AbortSignal) => Promise<unknown>, {
     }
     // `deps` is the caller's restart key.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, intervalMs, idleIntervalMs, maxBackoffMs, ...deps])
+  }, [enabled, intervalMs, idleIntervalMs, maxBackoffMs, leading, ...deps])
 
   // Live changed: the next tick comes at the live (or idle) pace, counted from now.
   useEffect(() => {

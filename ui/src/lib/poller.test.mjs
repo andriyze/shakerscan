@@ -219,3 +219,34 @@ test('a restart is not disturbed by the stopped tick finishing late', async () =
   assert.equal(h.nextDelay(), 5000)
   poller.stop()
 })
+
+test('leading: false waits one interval before the first tick, and an idle null loop stays off', async () => {
+  const h = harness()
+  let calls = 0
+  const poller = createPoller({
+    intervalMs: 5000, leading: false, timers: h.timers, visibility: h.visibility,
+    run: () => { calls += 1; return Promise.resolve() },
+  })
+  poller.start()
+  await h.flush()
+  assert.equal(calls, 0)
+  assert.equal(h.nextDelay(), 5000)
+  await h.advance(5000)
+  assert.equal(calls, 1)
+  poller.stop()
+
+  let idleCalls = 0
+  const idle = createPoller({
+    intervalMs: 5000, idleIntervalMs: null, isLive: () => false, leading: false,
+    timers: h.timers, visibility: h.visibility,
+    run: () => { idleCalls += 1; return Promise.resolve() },
+  })
+  idle.start()
+  await h.advance(60_000)
+  assert.equal(idleCalls, 0)
+  assert.equal(idle.state().scheduled, false)
+  idle.trigger()
+  await h.flush()
+  assert.equal(idleCalls, 1)
+  idle.stop()
+})

@@ -70,6 +70,7 @@ import {
   type ModelIntakeTrustMode,
   type ModelIntakeTrustPreviewStatus,
 } from '@/lib/modelIntakeTrust'
+import { usePoll } from '@/lib/usePoll'
 import { ControlledModelIntakeWorkflow } from './ControlledWorkflow'
 import {
   IntakeContextBar,
@@ -693,11 +694,8 @@ function ModelIntakeSettingsContent() {
     !['technical_review_complete', 'attention_required', 'failed', 'cancelled'].includes(review.state)
   )
 
-  useEffect(() => {
-    if (!automaticReviewRunning) return
-    const timer = setInterval(loadAutomaticReviews, 5_000)
-    return () => clearInterval(timer)
-  }, [automaticReviewRunning, loadAutomaticReviews])
+  // Every 5 s while an automatic review is still running; off once every review settled.
+  usePoll(loadAutomaticReviews, { intervalMs: 5_000, enabled: automaticReviewRunning, leading: false, deps: [loadAutomaticReviews] })
 
   const queuedScans = useMemo(
     () => queuedScanIds
@@ -709,11 +707,7 @@ function ModelIntakeSettingsContent() {
 
   // Poll only while a scan this page queued is still running, so the handoff
   // into admission lights up on its own instead of needing a manual reload.
-  useEffect(() => {
-    if (!awaitingScanCompletion) return
-    const timer = setInterval(loadIntakeScans, 10_000)
-    return () => clearInterval(timer)
-  }, [awaitingScanCompletion, loadIntakeScans])
+  usePoll(loadIntakeScans, { intervalMs: 10_000, enabled: awaitingScanCompletion, leading: false, deps: [loadIntakeScans] })
 
   function trackQueuedScan(scanId: string) {
     setQueuedScanIds((prev) => {
