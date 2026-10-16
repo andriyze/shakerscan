@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from scanner.scanner_tools.surface_hints import corporate_surface_hints
 from api.capabilities.artifact import analyze_javascript_bytes
@@ -50,3 +51,35 @@ def test_hunt_reuses_scan_http_shapes_for_routes_outside_api_prefix_without_body
     assert shapes['/login']['method'] == 'POST'
     assert all(item['reachability'] == 'unverified' for item in shapes.values())
     assert 'private-' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('path', [
+    '/storage/v1/b/example-bucket',
+    '/storage/v1/b/example-bucket/o/private-object',
+    '/download/storage/v1/b/example-bucket/o/private-object',
+    '/upload/storage/v1/b/example-bucket/o',
+    '/example-bucket/private-object',
+])
+def test_google_storage_api_and_xml_paths_name_the_actual_bucket_only(path):
+    hints = corporate_surface_hints(f'https://storage.googleapis.com{path}?token=private-value')
+    assert len(hints) == 1
+    assert hints[0]['identifier'] == 'example-bucket'
+    assert 'private-' not in json.dumps(hints)
+    result = analyze_javascript_bytes(f'const storage="https://storage.googleapis.com{path}"'.encode())
+    assert result['corporate_surface_leads'] == hints
+
+
+@pytest.mark.parametrize('path', [
+    '/storage/v1/b?project=example-project',
+    '/storage/v1/b/',
+    '/upload/storage/v1/b',
+    '/download/storage/v1/b',
+    '/storage/v1/b/with%2Fslash/o/private-object',
+])
+def test_google_storage_collections_do_not_invent_a_bucket(path):
+    assert corporate_surface_hints(f'https://storage.googleapis.com{path}') == []
+
+
+def test_google_storage_xml_bucket_can_itself_be_named_storage():
+    hints = corporate_surface_hints('https://storage.googleapis.com/storage/private-object')
+    assert hints[0]['identifier'] == 'storage'
