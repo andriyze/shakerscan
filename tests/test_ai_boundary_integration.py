@@ -39,7 +39,13 @@ async def test_worker_preserves_legacy_dispatch(monkeypatch):
  legacy=AsyncMock(return_value={"legacy":True});monkeypatch.setattr(ai_gate_scan,"run_ai_target_scan",legacy)
  @asynccontextmanager
  async def hydrate(options,scan_id):yield dict(options)
- s=SimpleNamespace(update_scan_progress=AsyncMock(),hydrate_ai_gate_options=hydrate,scan_cancel_requested=lambda _:False);o={"ai_probe_pack":"shaker-ai-smoke"};r=await AIGateWorkerHandler(s).run("https://example.test/chat",o,scan_id="scan",job_id=None);assert r=={"legacy":True};legacy.assert_awaited_once_with("https://example.test/chat",o)
+ s=SimpleNamespace(update_scan_progress=AsyncMock(),hydrate_ai_gate_options=hydrate,scan_cancel_requested=lambda _:False);o={"ai_probe_pack":"shaker-ai-smoke"};r=await AIGateWorkerHandler(s).run("https://example.test/chat",o,scan_id="scan",job_id=None);assert r=={"legacy":True}
+ legacy.assert_awaited_once()
+ args, kwargs = legacy.await_args
+ assert args == ("https://example.test/chat", o)
+ assert kwargs["checkpoint"] is None and kwargs["cancelled"]() is False
+ s.scan_cancel_requested = lambda _: True
+ assert kwargs["cancelled"]() is True
 @pytest.mark.asyncio
 async def test_verified_disclosure_uses_shared_proof_contract():
  from ai_verdict_policy import has_deterministic_exploit_proof

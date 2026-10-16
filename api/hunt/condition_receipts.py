@@ -65,6 +65,19 @@ def _capability_named(technique: Any) -> str | None:
     return name
 
 
+def testing_capability(name: Any) -> bool:
+    """Whether ``name`` is a capability that exercises the target (not a control-plane step)."""
+    try:
+        from runtime.capability_registry import CAPABILITY_REGISTRY
+    except ModuleNotFoundError:  # package import
+        from ..runtime.capability_registry import CAPABILITY_REGISTRY
+    try:
+        spec = CAPABILITY_REGISTRY.require(str(name))
+    except KeyError:
+        return False
+    return not spec.placement_requirements.get("control_plane")
+
+
 def route_matches(route: str, path: str) -> bool:
     """A route as written matches a requested path: equal segments, placeholders fill one segment."""
     written = route.split("?", 1)[0].split("#", 1)[0]
