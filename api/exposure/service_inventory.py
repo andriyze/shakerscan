@@ -23,6 +23,9 @@ SERVICE_NAMESPACE = uuid.UUID("e4089322-9875-4dca-a92d-60be1c2694a1")
 MAX_EVIDENCE = 12
 MAX_HISTORY = 12
 STALE_AFTER = timedelta(days=7)
+_SERVER_PRODUCT_VERSION = re.compile(
+    r'^([A-Za-z][A-Za-z0-9_.-]{0,79})/([0-9][0-9A-Za-z._+~-]{0,40})(?:[ \t].*)?$'
+)
 
 
 def object_value(value: Any) -> dict[str, Any]:
@@ -39,6 +42,16 @@ def text(value: Any, limit: int = 200) -> str:
     if not isinstance(value, (str, int, float)) or isinstance(value, bool):
         return ""
     return re.sub(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", "", str(value))[:limit]
+
+
+def http_server_identity(value: Any) -> tuple[str | None, str | None]:
+    """Read an explicit Server product/version pair; never infer a missing version."""
+    label = text(value) or None
+    if (not isinstance(value, str) or len(value) > 200
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        return label, None
+    match = _SERVER_PRODUCT_VERSION.fullmatch(value.strip())
+    return (match.group(1), match.group(2)) if match else (label, None)
 
 
 def timestamp(value: Any) -> datetime | None:
@@ -138,11 +151,12 @@ def normalized_observation(raw: Mapping[str, Any]) -> dict[str, Any] | None:
             return None
         parts = urlsplit(app_origin)
         network_address = address(request.get("pinned_address") or row.get("pinned_address") or row.get("address"))
+        product, version = http_server_identity(row.get("webserver"))
         row = {
             "state": "open", "transport": "tcp",
             "port": parts.port or (443 if parts.scheme == "https" else 80),
-            "service": parts.scheme, "product": row.get("webserver"),
-            "method": "http_response", "version": None,
+            "service": parts.scheme, "product": product,
+            "method": "http_response", "version": version,
             "encrypted": parts.scheme == "https",
         }
     elif kind not in {"service", "open_port", "device_service"}:
