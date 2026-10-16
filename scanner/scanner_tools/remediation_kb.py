@@ -1508,6 +1508,8 @@ EXPOSURE_CLASS_REMEDIATION = {
     "debug_interface_exposure": "exposed_debug_interface",
     "graphql_introspection_enabled": "graphql_introspection",
     "graphql_ide_exposure": "graphql_ide_exposed",
+    "html_comment_secret": "html_comment_secret",
+    "credential_record_disclosure": "credential_record_disclosure",
 }
 
 
