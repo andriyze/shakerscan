@@ -26,7 +26,9 @@ ORDER BY s.created_at DESC, s.id
 LIMIT $2
 """
 VERIFY_ACTIONS_SQL = """
-SELECT scan_id, status, reason_code FROM scan_capability_actions
+SELECT scan_id, status, reason_code,
+       receipt_json->'redacted_execution'->'verify_selection' AS verify_selection
+FROM scan_capability_actions
 WHERE scan_id=ANY($1::uuid[]) AND (action_id='active.templates' OR action_id LIKE 'active.templates.%')
 """
 VERIFY_FINDINGS_SQL = """
@@ -97,7 +99,10 @@ def candidate_verification(target: Mapping[str, Any], service: Mapping[str, Any]
     checks = candidate_check_ids(candidate)
     if not checks:
         return {"status": "no_check", "template_ids": [], "reason": "No check in this release names this CVE."}
-    blocked = verify_bound(target, service)
+    blocked = verify_bound(target, service) or (
+        "exploit_class_needs_exploit_tier" if any(
+            isinstance(check, Mapping) and check.get("safety") == "exploit"
+            for check in candidate.get("checks") or ()) else None)
     request = None if blocked else {
         "target": target.get("locator"), "budget_profile": "fast",
         "policy": dict(VERIFY_POLICY), "verify_templates": checks,
@@ -122,12 +127,53 @@ def candidate_verification(target: Mapping[str, Any], service: Mapping[str, Any]
         if status in _RUNNING:
             return {**summary, "status": "pending"}
         steps = records.get("actions", {}).get(scan_id) or []
-        ran = steps and all(str(step.get("status")) == "success" for step in steps)
-        if status in _FINISHED and ran:
+        reasons = _not_matched_blockers(wanted, _verify_list(scan.get("verify_templates")), steps)
+        if status in _FINISHED and not reasons:
             return {**summary, "status": "check_not_matched"}
-        reasons = sorted({text(step.get("reason_code"), 80) for step in steps if step.get("reason_code")})
-        return {**summary, "status": "inconclusive", "reason": ", ".join(reasons) or status or "unknown"}
+        if status not in _FINISHED:
+            reasons = [status or "unknown", *reasons]
+        return {**summary, "status": "inconclusive", "reason": ", ".join(reasons) or "unknown"}
     return {**base, "status": "unavailable" if blocked else "available"}
+
+
+def _object(value: Any) -> dict[str, Any]:
+    import json
+
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _not_matched_blockers(wanted: set[str], requested: list[str], steps: list[Mapping[str, Any]]) -> list[str]:
+    """Why this Scan's silence is not "not affected": every candidate check must have been
+    requested, and every active-template step must have succeeded, run each of them, and be able
+    to give a reliable negative. An empty list means the negative holds."""
+    blockers: set[str] = set()
+    if not wanted <= set(requested):
+        blockers.add("not_every_check_requested")
+    if not steps:
+        blockers.add("no_active_template_step")
+    for step in steps:
+        selection = _object(step.get("verify_selection"))
+        if str(step.get("status")) != "success":
+            blockers.add(text(step.get("reason_code"), 80) or f"step_{text(step.get('status'), 30) or 'unknown'}")
+        if not selection:
+            blockers.add("selection_not_recorded")
+            continue
+        ran = {str(item) for item in selection.get("ran") or ()}
+        excluded = _object(selection.get("excluded"))
+        unreliable = _object(selection.get("negative_unreliable"))
+        for check in wanted:
+            if check in excluded:
+                blockers.add(text(excluded[check], 60) or "excluded")
+            elif check not in ran:
+                blockers.add("check_did_not_run")
+            if check in unreliable:
+                blockers.add(text(unreliable[check], 60) or "negative_unreliable")
+    return sorted(blockers)
 
 
 def attach_verification(target: Mapping[str, Any], services: list[dict[str, Any]], records: Mapping[str, Any]) -> None:

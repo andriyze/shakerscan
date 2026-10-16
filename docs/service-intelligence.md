@@ -93,12 +93,17 @@ under a key the engine trusts (the vendor keys in `scanner/scanner_tools/intel_b
 operator pins with `SHAKERSCAN_INTEL_TRUSTED_KEYS=<key id>=<base64 public key>`), the snapshot
 matches the signed digest, and the bundle is not older than the snapshot built into the image.
 Otherwise the built-in snapshot stays in force and the page names the reason (`untrusted_key`,
-`bad_signature`, `older_than_builtin`, ...). An operator pin (`DEVICE_INTEL_DB_*` set to anything
-but the built-in file) always wins over a bundle.
+`bad_signature`, `older_than_builtin`, `version_rollback`, ...). The highest `bundle_version` ever in
+force is recorded outside the bundle directory (`results/intel.high-water` and the
+`intel_bundle_high_water` table, which API startup copies back to the file), and a lower bundle is
+refused. Setting `DEVICE_INTEL_DB_PATH`/`DEVICE_INTEL_DB_SHA256` at all, even to the built-in file,
+is an operator pin: it freezes the intelligence and no bundle replaces it. The image sets neither.
 
 `./scanner.sh intel status` shows what is in force; `./scanner.sh intel install <archive, directory
 or https URL>` verifies a bundle inside the engine and activates it, refusing a lower
-`bundle_version` than the installed one and keeping the previous bundle as `results/intel.previous`.
+`bundle_version` than the recorded mark (even when the installed bundle no longer verifies; with a
+configured database that cannot be reached it refuses) and keeping the previous bundle as
+`results/intel.previous`.
 Bundles are built and signed with `scripts/intel_bundle.py` (`keygen`, `build`, `verify`); the
 private key never belongs in a checkout.
 
@@ -112,11 +117,18 @@ stale once per row, and inconclusive rows with nothing linked are folded by defa
 A candidate whose CVE has a check in this release carries `verification`. When the listener is the
 target's own origin, **Verify** submits an ordinary Scan with `verify_templates` (the named checks
 only, `policy.active_testing` and the `nuclei_active` family, under the target's standing
-authorization and budgets). The worker still drops intrusive templates, and non-GET templates
-unless state-changing HTTP is authorized. The outcome is read back from durable records:
-`check_matched` links the finding with its own proof state; `check_not_matched` means that check
-ran and did not match, which is evidence about that check only; a skipped or failed step is
-`inconclusive`. A version match without a run stays a candidate.
+authorization and budgets). The worker runs each named check or records why it did not:
+`intrusive`, `needs_oob_interaction` (Scans run without interactsh), `needs_state_changing_http`,
+`exploit_class_needs_exploit_tier` (checks tagged rce, lfi, sqli, deserialization, ssti, xxe,
+code-injection, cmdi or ssrf, or with a code/javascript/flow step, need state-changing authority;
+admission refuses them up front when the snapshot classes them `safety: exploit`), or
+`not_in_template_bundle`; checks that follow redirects run but cannot give a reliable negative
+(`needs_redirects`, Scans disable redirects). This selection is recorded on the step's receipt.
+The outcome is read back from durable records: `check_matched` links the finding with its own
+proof state; `check_not_matched` is reported only when every check for the CVE was requested, ran
+in every active-template step, and can give a reliable negative, and is evidence about those checks
+only; anything else is `inconclusive` with the reasons. A version match without a run stays a
+candidate.
 
 Hunt reads the same rows with `query kind=service_intelligence filter={"view": "candidates"}`: one
 row per listener and CVE, known exploited and likely first, with the check that exists and its

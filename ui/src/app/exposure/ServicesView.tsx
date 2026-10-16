@@ -49,6 +49,16 @@ const UNAVAILABLE: Record<string, string> = {
   listener_is_not_the_target_origin: 'A Scan runs against the target origin; this listener is on another port or host.',
   device_services_verify_in_the_device_workflow: 'Device services are verified from the device workflow.',
   refresh_evidence_first: 'Refresh the service evidence first.',
+  exploit_class_needs_exploit_tier: 'This check sends attack payloads (rce, lfi, sqli, …); it runs only in a Scan with state-changing authority, started from the Scan form or API.',
+}
+const INCONCLUSIVE: Record<string, string> = {
+  needs_oob_interaction: 'the check needs an out-of-band callback, which Scans do not enable',
+  needs_redirects: 'the check follows redirects, which Scans disable, so a non-match is not reliable',
+  exploit_class_needs_exploit_tier: 'the check is exploit-class and the Scan had no state-changing authority',
+  needs_state_changing_http: 'the check sends non-GET requests and the Scan had no state-changing authority',
+  intrusive: 'the check is intrusive and never runs in a Scan',
+  not_in_template_bundle: 'the check is not in this release’s template bundle',
+  not_every_check_requested: 'the Scan did not request every check for this CVE',
 }
 const SEVERITY_STYLE: Record<string, string> = {
   critical: 'bg-red-500/15 text-red-200', high: 'bg-orange-500/15 text-orange-200',
@@ -83,7 +93,7 @@ function CandidateVerification({ candidate }: { candidate: ServiceCandidate }) {
     <p className={verification.status === 'check_matched' ? 'font-medium text-red-200' : 'text-gray-300'}>{label}{verification.template_ids.length > 0 && <span className="text-gray-500"> · {verification.template_ids.join(', ')}</span>}</p>
     {verification.status === 'check_matched' && verification.finding_id && <p className="mt-1 text-gray-400">The check matched: <Link href={`/findings/${encodeURIComponent(verification.finding_id)}`} className="text-blue-300 hover:underline">open the finding</Link> (proof: {verification.proof_state || 'not supplied'}).</p>}
     {verification.status === 'check_not_matched' && <p className="mt-1 text-gray-400">The check ran and did not match. This is evidence about this check only, not a clean assessment of the service.</p>}
-    {verification.status === 'inconclusive' && <p className="mt-1 text-amber-200">The check did not run to completion ({verification.reason || 'reason not recorded'}); the candidate is unchanged.</p>}
+    {verification.status === 'inconclusive' && <p className="mt-1 text-amber-200">The checks did not settle this candidate ({(verification.reason || 'reason not recorded').split(', ').map((item) => INCONCLUSIVE[item] || readable(item)).join('; ')}); the candidate is unchanged.</p>}
     {verification.scan_id && <Link href={`/scans/${encodeURIComponent(verification.scan_id)}`} className="mt-1 inline-block text-blue-300 hover:underline">Open the verify Scan</Link>}
     {verification.status === 'unavailable' && <p className="mt-1 text-gray-500">{UNAVAILABLE[verification.unavailable_reason || ''] || readable(verification.unavailable_reason || 'unavailable')}</p>}
     {verification.request && !['pending', 'check_matched'].includes(verification.status) && !started && (confirming

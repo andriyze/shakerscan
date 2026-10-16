@@ -12,6 +12,17 @@ from .verify_templates import VerifyTemplatesError, normalized_verify_template_i
 _TEMPLATE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 
 
+def snapshot_exploit_checks(snapshot: Mapping[str, Any]) -> frozenset[str]:
+    """Check ids the snapshot classes as exploit-class (``safety: exploit``)."""
+    ids: set[str] = set()
+    for record in snapshot.get("advisories") or ():
+        if isinstance(record, Mapping):
+            for check in list(record.get("checks") or ())[:5]:
+                if isinstance(check, Mapping) and check.get("safety") == "exploit":
+                    ids.add(str(check.get("id") or "").strip().lower())
+    return frozenset(ids)
+
+
 def snapshot_check_ids(snapshot: Mapping[str, Any]) -> frozenset[str]:
     """Template ids the intelligence snapshot in force names as checks for some CVE."""
     ids: set[str] = set()
@@ -26,15 +37,17 @@ def snapshot_check_ids(snapshot: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(ids)
 
 
-_CHECK_IDS: dict[str, frozenset[str]] = {}
+_CHECK_IDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
 
 
-def _check_ids_in_force(load_snapshot: Callable[[], Mapping[str, Any]]) -> frozenset[str]:
+def _check_ids_in_force(load_snapshot: Callable[[], Mapping[str, Any]]) -> tuple[frozenset[str], frozenset[str]]:
     snapshot = load_snapshot()
     key = str(snapshot.get("snapshot_sha256") or "")
     cached = _CHECK_IDS.get(key)
     if cached is None:
-        cached = snapshot_check_ids(snapshot) if snapshot.get("status") == "available" else frozenset()
+        available = snapshot.get("status") == "available"
+        cached = (snapshot_check_ids(snapshot) if available else frozenset(),
+                  snapshot_exploit_checks(snapshot) if available else frozenset())
         _CHECK_IDS.clear()
         _CHECK_IDS[key] = cached
     return cached
@@ -71,13 +84,23 @@ async def admit_verify_templates(
             "error": "verify_templates_need_active_templates",
             "message": "verify_templates runs active checks: set policy.active_testing=true and include the nuclei_active family.",
         })
-    known = await asyncio.to_thread(_check_ids_in_force, load_snapshot)
+    known, exploit = await asyncio.to_thread(_check_ids_in_force, load_snapshot)
     unknown = [item for item in ids if item not in known]
     if unknown:
         raise HTTPException(status_code=422, detail={
             "error": "verify_templates_not_a_known_check",
             "message": "Only checks the vulnerability intelligence in force names for a CVE can be verified.",
             "template_ids": unknown,
+        })
+    risky = [item for item in ids if item in exploit]
+    if risky and not policy.allow_state_changing_http:
+        # Exploit-class checks (rce, lfi, sqli, ...) send attack payloads, not probes: plain active
+        # testing does not cover them. The worker enforces the same rule from the template itself.
+        raise HTTPException(status_code=422, detail={
+            "error": "verify_check_needs_exploit_tier",
+            "message": "These checks are exploit-class (rce, lfi, sqli, deserialization, ...); set "
+                       "policy.allow_state_changing_http=true to run them, or verify another way.",
+            "template_ids": risky,
         })
     return {"verify_templates": list(ids)}
 

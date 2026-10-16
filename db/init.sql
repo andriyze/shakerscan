@@ -2781,6 +2781,14 @@ END
 $continue_events_index$;
 
 -- Discovered secrets (2.10): api/hunt/discovered_secrets.py, installed by the startup migration too.
+-- The highest signed intelligence bundle_version ever put in force; the loader refuses a lower one.
+CREATE TABLE IF NOT EXISTS intel_bundle_high_water (
+    singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    bundle_version BIGINT NOT NULL CHECK (bundle_version > 0),
+    key_id TEXT,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS discovered_secrets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     target_id UUID NOT NULL REFERENCES targets(id) ON DELETE CASCADE,

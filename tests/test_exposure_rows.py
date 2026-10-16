@@ -104,3 +104,43 @@ def test_hunt_rows_put_known_exploited_and_likely_first_with_the_check_state():
     assert rows[0]["verification"] == "available" and rows[0]["applicability"] == "candidate"
     assert rows[1]["product"] == "OpenSSH"       # control characters stripped from banner labels
     assert rows[2]["verification"] == "no_check"
+
+
+def _scan_records(requested, steps, status="completed"):
+    scan = uuid.uuid4()
+    return scan, {"scans": [{"id": scan, "status": status, "created_at": datetime.now(timezone.utc),
+                             "completed_at": datetime.now(timezone.utc), "verify_templates": requested}],
+                  "actions": {str(scan): steps}, "findings": []}
+
+
+def _step(ran, excluded=None, unreliable=None, status="success", reason=None):
+    return {"status": status, "reason_code": reason, "verify_selection": {
+        "requested": sorted(set(ran) | set(excluded or {})), "ran": list(ran),
+        "excluded": dict(excluded or {}), "negative_unreliable": dict(unreliable or {})}}
+
+
+def test_not_matched_only_when_every_check_was_requested_and_ran_reliably():
+    two = {"id": "CVE-X", "severity": "high", "checks": [
+        {"kind": "nuclei_template", "id": "a"}, {"kind": "nuclei_template", "id": "b"}]}
+
+    def state(requested, steps):
+        _scan, records = _scan_records(requested, steps)
+        return candidate_verification(TARGET, _service("s"), two, records)
+
+    assert state(["a", "b"], [_step(["a", "b"]), _step(["a", "b"])])["status"] == "check_not_matched"
+    partial = state(["a", "b"], [_step(["a"], {"b": "needs_oob_interaction"})])
+    assert (partial["status"], partial["reason"]) == ("inconclusive", "needs_oob_interaction")
+    assert "not_every_check_requested" in state(["a"], [_step(["a"])])["reason"]
+    assert state(["a", "b"], [_step(["a", "b"], unreliable={"b": "needs_redirects"})])["reason"] == "needs_redirects"
+    assert state(["a", "b"], [{"status": "success", "reason_code": None}])["reason"] == "selection_not_recorded"
+    assert state(["a", "b"], [_step(["a", "b"]), _step([], status="skipped", reason="verify_checks_excluded")
+                              ])["status"] == "inconclusive"
+    assert state(["a", "b"], [])["reason"] == "no_active_template_step"
+
+
+def test_an_exploit_class_check_is_not_offered_as_a_one_click_verify():
+    candidate = {"id": "CVE-Y", "severity": "critical",
+                 "checks": [{"kind": "nuclei_template", "id": "cve-y", "safety": "exploit"}]}
+    state = candidate_verification(TARGET, _service("s"), candidate, {})
+    assert (state["status"], state["request"]) == ("unavailable", None)
+    assert state["unavailable_reason"] == "exploit_class_needs_exploit_tier"

@@ -74,7 +74,7 @@ async def test_verify_scan_outcomes_read_from_real_scan_action_and_finding_rows(
     try:
         await conn.execute("""
           CREATE TEMP TABLE scans (id uuid,target_id uuid,status text,created_at timestamptz,completed_at timestamptz,options jsonb);
-          CREATE TEMP TABLE scan_capability_actions (scan_id uuid,action_id text,status text,reason_code text);
+          CREATE TEMP TABLE scan_capability_actions (scan_id uuid,action_id text,status text,reason_code text,receipt_json jsonb);
           CREATE TEMP TABLE findings (id uuid,target_id uuid,scan_id uuid,first_seen_scan_id uuid,last_seen_scan_id uuid,
             status text,severity text,last_seen_at timestamptz,evidence jsonb,proof_state text);
         """)
@@ -91,10 +91,16 @@ async def test_verify_scan_outcomes_read_from_real_scan_action_and_finding_rows(
             await conn.execute("INSERT INTO scans VALUES ($1,$2,$3,$4,$4,$5::jsonb)", scan_id, target, status, created,
                                json.dumps({"verify_templates": ids}))
         await conn.execute("INSERT INTO scans VALUES ($1,$2,'completed',$3,$3,'{}'::jsonb)", uuid.uuid4(), web, stamp)
-        await conn.execute("INSERT INTO scan_capability_actions VALUES ($1,'active.templates','success',NULL)", matched)
-        await conn.execute("INSERT INTO scan_capability_actions VALUES ($1,'active.templates.002','success',NULL)", clean)
-        await conn.execute("INSERT INTO scan_capability_actions VALUES ($1,'active.templates','skipped','no_eligible_nuclei_templates')", gap)
-        await conn.execute("INSERT INTO scan_capability_actions VALUES ($1,'active.templates','success',NULL)", unrelated)
+        def receipt(ran, excluded=None):
+            return json.dumps({"redacted_execution": {"verify_selection": {
+                "requested": sorted(set(ran) | set(excluded or {})), "ran": ran,
+                "excluded": excluded or {}, "negative_unreliable": {}}}})
+        insert = "INSERT INTO scan_capability_actions VALUES ($1,$2,$3,$4,$5::jsonb)"
+        await conn.execute(insert, matched, 'active.templates', 'success', None, receipt(['cve-2021-41773']))
+        await conn.execute(insert, clean, 'active.templates.002', 'success', None, receipt(['cve-2023-0001']))
+        await conn.execute(insert, gap, 'active.templates', 'skipped', 'verify_checks_excluded',
+                           receipt([], {'cve-2024-0002': 'needs_oob_interaction'}))
+        await conn.execute(insert, unrelated, 'active.templates', 'success', None, receipt(['cve-2024-0002']))
         finding = uuid.uuid4()
         await conn.execute("""INSERT INTO findings VALUES ($1,$2,$3,$3,$3,'active','critical',$4,
                            '{"template_id":"CVE-2021-41773"}'::jsonb,'candidate')""", finding, web, matched, stamp)
@@ -117,8 +123,32 @@ async def test_verify_scan_outcomes_read_from_real_scan_action_and_finding_rows(
         assert states['CVE-2021-41773']['proof_state'] == 'candidate'
         assert states['CVE-2023-0001']['status'] == 'check_not_matched'
         assert states['CVE-2024-0002']['status'] == 'inconclusive'
+        assert 'needs_oob_interaction' in states['CVE-2024-0002']['reason']
         assert states['CVE-2024-0002']['scan_id'] == str(gap)  # never the other target's Scan
         assert states['CVE-2024-0003']['status'] == 'available'
         assert states['CVE-2024-0003']['request']['verify_templates'] == ['cve-2024-0003']
     finally:
+        await conn.close()
+
+
+
+@pytest.mark.asyncio
+async def test_intel_bundle_high_water_mark_only_rises_and_repairs_the_mark_file(tmp_path):
+    import asyncpg
+    from scanner.scanner_tools import intel_bundle
+
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("DROP TABLE IF EXISTS intel_bundle_high_water")
+        await conn.execute(intel_bundle.HIGH_WATER_SCHEMA_SQL)
+        await conn.execute(intel_bundle.HIGH_WATER_SCHEMA_SQL)  # idempotent on restart
+        assert await intel_bundle.database_high_water(conn) == 0
+        assert await intel_bundle.record_database_high_water(conn, 7, "aaaaaaaaaaaaaaaa") == 7
+        assert await intel_bundle.record_database_high_water(conn, 3, "bbbbbbbbbbbbbbbb") == 7
+        directory = str(tmp_path / "intel")
+        assert intel_bundle.read_high_water(directory) == 0
+        assert await intel_bundle.sync_high_water_from_database(conn, directory) == 7
+        assert intel_bundle.read_high_water(directory) == 7
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS intel_bundle_high_water")
         await conn.close()

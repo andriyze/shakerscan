@@ -227,13 +227,101 @@ def verify_bundle(
     }
 
 
-def bundle_status(directory: str | None = None, *, not_older_than: str | None = None) -> dict[str, Any]:
+def bundle_status(directory: str | None = None, *, not_older_than: str | None = None,
+                  minimum_version: int | None = None) -> dict[str, Any]:
     """Non-raising form for the loader and status views: ``verified`` or the refusal reason."""
     location = str(directory or default_bundle_dir())
     try:
-        return verify_bundle(location, not_older_than=not_older_than)
+        return verify_bundle(location, not_older_than=not_older_than, minimum_version=minimum_version)
     except BundleError as exc:
         return {"status": exc.reason, "directory": location}
+
+
+# --- Rollback protection -----------------------------------------------------------------
+#
+# The highest bundle_version ever put in force is recorded outside the bundle directory, in a mark
+# file beside it (results/intel.high-water) and in the database (intel_bundle_high_water), and kept
+# per process. The loader refuses a bundle below it (``version_rollback``), so swapping an older but
+# validly signed bundle into results/intel does not roll the intelligence back. API startup repairs
+# a missing or lower mark file from the database row.
+
+_PROCESS_HIGH_WATER: dict[str, int] = {}
+
+
+def high_water_path(directory: str | None = None) -> str:
+    return os.path.abspath(str(directory or default_bundle_dir())).rstrip("/") + ".high-water"
+
+
+def read_high_water(directory: str | None = None) -> int:
+    path = high_water_path(directory)
+    recorded = 0
+    try:
+        value = json.loads(_read_regular(path, 4096).decode("utf-8")).get("bundle_version")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            recorded = value
+    except (BundleError, UnicodeError, ValueError, AttributeError):
+        recorded = 0
+    return max(recorded, _PROCESS_HIGH_WATER.get(path, 0))
+
+
+def note_version_in_force(version: int, directory: str | None = None) -> None:
+    path = high_water_path(directory)
+    _PROCESS_HIGH_WATER[path] = max(int(version), _PROCESS_HIGH_WATER.get(path, 0))
+
+
+def record_high_water(version: int, directory: str | None = None) -> int:
+    """Raise the mark file to ``version`` (never lower it); returns the mark now in force."""
+    path = high_water_path(directory)
+    current = read_high_water(directory)
+    target = max(int(version), current)
+    note_version_in_force(target, directory)
+    if target == current and os.path.exists(path):
+        return target
+    temporary = f"{path}.{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"bundle_version": target}) + "\n")
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, path)
+    return target
+
+
+HIGH_WATER_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS intel_bundle_high_water (
+    singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    bundle_version BIGINT NOT NULL CHECK (bundle_version > 0),
+    key_id TEXT,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+"""
+
+
+async def database_high_water(conn: Any) -> int:
+    value = await conn.fetchval(
+        "SELECT bundle_version FROM intel_bundle_high_water WHERE singleton")
+    return int(value or 0)
+
+
+async def record_database_high_water(conn: Any, version: int, key_id: str | None) -> int:
+    value = await conn.fetchval("""
+        INSERT INTO intel_bundle_high_water (singleton, bundle_version, key_id) VALUES (true, $1, $2)
+        ON CONFLICT (singleton) DO UPDATE SET
+          bundle_version=GREATEST(intel_bundle_high_water.bundle_version, EXCLUDED.bundle_version),
+          key_id=CASE WHEN EXCLUDED.bundle_version >= intel_bundle_high_water.bundle_version
+                      THEN EXCLUDED.key_id ELSE intel_bundle_high_water.key_id END,
+          recorded_at=now()
+        RETURNING bundle_version""", int(version), key_id)
+    return int(value)
+
+
+async def sync_high_water_from_database(conn: Any, directory: str | None = None) -> int:
+    """At API startup: the mark file is never lower than the database row."""
+    version = await database_high_water(conn)
+    if version:
+        try:
+            return record_high_water(version, directory)
+        except OSError:
+            note_version_in_force(version, directory)
+    return version
 
 
 # --- Vendor side ---------------------------------------------------------------------------
@@ -333,7 +421,7 @@ def _copy_directory(source: str, staging: str) -> None:
 
 
 def install_bundle(source: str, target: str | None = None, *,
-                   keys: Mapping[str, bytes] | None = None) -> dict[str, Any]:
+                   keys: Mapping[str, bytes] | None = None, floor: int = 0) -> dict[str, Any]:
     """Verify a bundle (directory or tar archive) and make it the one in force.
 
     The installed bundle is replaced only by a verified bundle whose ``bundle_version`` is not
@@ -353,6 +441,8 @@ def install_bundle(source: str, target: str | None = None, *,
         current_version = verify_bundle(destination, keys=keys)["bundle_version"]
     except BundleError:
         current_version = None
+    # The recorded high-water mark holds even when the installed bundle no longer verifies.
+    minimum = max(int(floor or 0), read_high_water(destination), int(current_version or 0)) or None
     staging = tempfile.mkdtemp(prefix=".intel-staging-", dir=parent)
     try:
         if os.path.isdir(source):
@@ -361,7 +451,7 @@ def install_bundle(source: str, target: str | None = None, *,
             _extract_archive(source, staging)
         verified = verify_bundle(
             staging, keys=keys, not_older_than=device_advisories.BUNDLED_SNAPSHOT_GENERATED_AT,
-            minimum_version=current_version,
+            minimum_version=minimum,
         )
         loaded = device_advisories._load_pinned_snapshot(
             verified["snapshot_path"], verified["snapshot_sha256"],
@@ -378,11 +468,40 @@ def install_bundle(source: str, target: str | None = None, *,
             os.rename(destination, previous)
         os.rename(staging, destination)
         staging = ""
+        record_high_water(verified["bundle_version"], destination)
         return {**verified, "directory": destination, "snapshot_path": os.path.join(destination, SNAPSHOT_NAME),
                 "record_count": loaded.get("record_count"), "replaced_version": current_version}
     finally:
         if staging and os.path.isdir(staging):
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def _install_with_database(source: str, target: str | None) -> dict[str, Any]:
+    """Install under the database high-water mark and raise it; without a configured database
+    (development) only the mark file applies. A configured but unreachable database refuses."""
+    import asyncio
+
+    url = str(os.environ.get("DATABASE_URL") or "").strip()
+    if not url:
+        return install_bundle(source, target)
+
+    async def run() -> dict[str, Any]:
+        try:
+            import asyncpg
+
+            conn = await asyncpg.connect(url, timeout=15)
+        except Exception as exc:  # noqa: BLE001 - any connection failure refuses the install
+            raise BundleError("high_water_unavailable") from exc
+        try:
+            await conn.execute(HIGH_WATER_SCHEMA_SQL)
+            floor = await database_high_water(conn)
+            result = install_bundle(source, target, floor=floor)
+            await record_database_high_water(conn, result["bundle_version"], result.get("key_id"))
+            return result
+        finally:
+            await conn.close()
+
+    return asyncio.run(run())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -410,7 +529,7 @@ def main(argv: list[str] | None = None) -> int:
         }, indent=2, sort_keys=True))
         return 0
     try:
-        result = install_bundle(args.source, args.target)
+        result = _install_with_database(args.source, args.target)
     except BundleError as exc:
         print(json.dumps({"status": "refused", "reason": exc.reason}))
         return 2

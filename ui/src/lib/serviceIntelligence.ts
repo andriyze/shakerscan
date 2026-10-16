@@ -29,7 +29,7 @@ export interface ServiceCandidate {
   cvss_score?: number | null
   known_exploited?: { date_added: string | null; ransomware: boolean } | null
   epss?: { score: number; percentile: number | null } | null
-  checks?: Array<{ kind: string; id: string }>
+  checks?: Array<{ kind: string; id: string; safety?: 'exploit' | 'probe' }>
   // 2.11: whether the named check ran in a verify Scan and what it found. Absent on an older engine.
   verification?: ServiceVerification
 }

@@ -190,25 +190,29 @@ def load_verified_snapshot(
 ) -> dict[str, Any]:
     """Load the advisory snapshot in force, verified before use.
 
-    An operator pin (a path and digest other than the built-in snapshot's) is used as given. Otherwise
-    a signed external bundle (``intel_bundle``) that verifies is preferred, and the snapshot built into
-    the image is the fallback; ``source`` and ``bundle`` say which was used and why.
+    An operator pin (``DEVICE_INTEL_DB_PATH``/``DEVICE_INTEL_DB_SHA256`` set at all, even to the
+    built-in file) is used as given and freezes the intelligence: no bundle replaces it. The image sets
+    neither. Otherwise a signed external bundle (``intel_bundle``) that verifies, and is not below the
+    recorded high-water ``bundle_version``, is preferred, and the snapshot built into the image is the
+    fallback; ``source`` and ``bundle`` say which was used and why.
     """
     location = str(path or "").strip()
     expected = str(expected_sha256 or "").strip().lower()
     if location or expected:
-        if expected != BUNDLED_SNAPSHOT_SHA256:
-            return _labelled(_load_pinned_snapshot(location, expected, max_bytes=max_bytes), "operator_pinned", None)
+        return _labelled(_load_pinned_snapshot(location, expected, max_bytes=max_bytes), "operator_pinned", None)
     intel_bundle = _bundle_module()
-    bundle = intel_bundle.bundle_status(not_older_than=BUNDLED_SNAPSHOT_GENERATED_AT)
+    bundle = intel_bundle.bundle_status(
+        not_older_than=BUNDLED_SNAPSHOT_GENERATED_AT, minimum_version=intel_bundle.read_high_water(),
+    )
     if bundle.get("status") == "verified":
         loaded = _load_pinned_snapshot(bundle["snapshot_path"], bundle["snapshot_sha256"], max_bytes=max_bytes)
         public = {key: bundle.get(key) for key in ("status", "bundle_version", "generated_at", "key_id")}
         if loaded.get("status") == "available":
+            intel_bundle.note_version_in_force(bundle["bundle_version"])
             return _labelled(loaded, "external_bundle", public)
         # The signed manifest named content the file does not hold: refuse it, keep the built-in data.
         bundle = {"status": f"snapshot_{loaded.get('status') or 'unavailable'}"}
-    builtin = _load_pinned_snapshot(location or BUNDLED_SNAPSHOT_PATH, BUNDLED_SNAPSHOT_SHA256, max_bytes=max_bytes)
+    builtin = _load_pinned_snapshot(BUNDLED_SNAPSHOT_PATH, BUNDLED_SNAPSHOT_SHA256, max_bytes=max_bytes)
     return _labelled(builtin, "builtin", {"status": str(bundle.get("status") or "absent")})
 
 

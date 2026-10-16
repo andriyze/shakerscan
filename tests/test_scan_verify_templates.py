@@ -86,7 +86,8 @@ def test_exact_selection_still_drops_intrusive_and_unauthorized_mutating_templat
     assert set(authorized.template_ids) == {"django-debug-exposure", "squid-analysis-report-generator"}
     missing = resolve_active_nuclei_selection(
         str(FIXTURES), allow_state_changing_http=True, only_template_ids="cve-2099-0001")
-    assert missing.skip and missing.skip_reason == "no_eligible_nuclei_templates"
+    assert missing.skip and missing.skip_reason == "verify_checks_excluded"
+    assert missing.verify_selection["excluded"] == {"cve-2099-0001": "not_in_template_bundle"}
 
 
 def _drive_verify(monkeypatch, ids, **kwargs):
@@ -109,6 +110,12 @@ def test_verify_scan_worker_receives_only_the_named_get_checks(monkeypatch):
     assert receipt.status == "success"
     assert captured["scanner_options"]["template_ids"] == "squid-analysis-report-generator"
     assert captured["scanner_options"]["nuclei_active_state_changing"] is False
+    # Which checks ran and why the others did not is on the step's receipt.
+    assert receipt.redacted_execution["verify_selection"] == {
+        "requested": sorted(VERIFY), "ran": ["squid-analysis-report-generator"],
+        "excluded": {"django-debug-exposure": "needs_state_changing_http", "put-method-enabled": "intrusive"},
+        "negative_unreliable": {},
+    }
 
 
 def test_verify_scan_with_state_changing_authority_runs_the_named_post_check(monkeypatch):
@@ -128,7 +135,9 @@ def test_verify_scan_whose_check_is_absent_from_the_bundle_records_a_gap(monkeyp
         requested_budget={"http_requests": 120, "tool_wall_seconds": 45},
     )
     assert receipt.status == "skipped"
-    assert "no_eligible_nuclei_templates" in receipt.errors
+    assert "verify_checks_excluded" in receipt.errors
+    assert receipt.redacted_execution["verify_selection"]["excluded"] == {
+        "cve-2099-0001": "not_in_template_bundle"}
 
 
 def _plan(active=True, families=("nuclei_passive", "nuclei_active")):
@@ -252,3 +261,82 @@ def test_a_check_that_needs_out_of_band_interaction_is_never_run_as_a_verify_che
         str(tmp_path / "templates"), allow_state_changing_http=False, tags="oast", severities="critical")
     assert general.template_ids == ("oob-only-check",)
     clear_index_cache()
+
+
+EXPLOIT_TEMPLATE = """\
+# Test fixture (not an upstream template): a GET check tagged as an exploit class.
+id: exploit-class-check
+info:
+  name: Exploit-class fixture
+  author: shakerscan-tests
+  severity: critical
+  tags: cve,rce,fixture
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/?cmd=id"
+    matchers:
+      - type: word
+        words:
+          - "uid="
+"""
+REDIRECT_TEMPLATE = """\
+# Test fixture (not an upstream template): a check that follows redirects.
+id: redirect-check
+info:
+  name: Redirect fixture
+  author: shakerscan-tests
+  severity: high
+  tags: cve,fixture
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/login"
+    redirects: true
+    matchers:
+      - type: word
+        words:
+          - "admin"
+"""
+
+
+def _bundle_with(tmp_path, **templates):
+    import shutil
+
+    root = tmp_path / "templates"
+    shutil.copytree(FIXTURES, root)
+    for name, body in templates.items():
+        (root / "http" / f"{name}.yaml").write_text(body)
+    clear_index_cache()
+    return str(root)
+
+
+def test_exploit_class_checks_need_the_state_changing_tier_and_redirect_checks_are_unreliable(tmp_path):
+    root = _bundle_with(tmp_path, exploit=EXPLOIT_TEMPLATE, redirect=REDIRECT_TEMPLATE)
+    ids = "exploit-class-check,redirect-check"
+    plain = resolve_active_nuclei_selection(root, allow_state_changing_http=False, only_template_ids=ids)
+    assert plain.template_ids == ("redirect-check",)
+    assert plain.verify_selection["excluded"] == {"exploit-class-check": "exploit_class_needs_exploit_tier"}
+    assert plain.verify_selection["negative_unreliable"] == {"redirect-check": "needs_redirects"}
+    tiered = resolve_active_nuclei_selection(
+        root, allow_state_changing_http=True, only_template_ids=ids, allow_exploit_classes=True)
+    assert tiered.template_ids == ("exploit-class-check", "redirect-check")
+    clear_index_cache()
+
+
+def test_admission_refuses_an_exploit_class_check_without_the_state_changing_tier():
+    def snapshot():
+        return {"status": "available", "snapshot_sha256": "b" * 64, "advisories": [
+            {"cve": "CVE-2021-41773",
+             "checks": [{"kind": "nuclei_template", "id": "cve-2021-41773", "safety": "exploit"}]}]}
+
+    verify_admission._CHECK_IDS.clear()
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(verify_admission.admit_verify_templates(["cve-2021-41773"], _plan(), load_snapshot=snapshot))
+    assert refused.value.detail["error"] == "verify_check_needs_exploit_tier"
+    tiered = SimpleNamespace(
+        policy=ScanPolicy(active_testing=True, allow_state_changing_http=True, include_families=("nuclei_active",)),
+        resolved_families=("nuclei_active",))
+    verify_admission._CHECK_IDS.clear()
+    assert asyncio.run(verify_admission.admit_verify_templates(
+        ["cve-2021-41773"], tiered, load_snapshot=snapshot)) == {"verify_templates": ["cve-2021-41773"]}

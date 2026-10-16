@@ -55,6 +55,7 @@ def _write_bundle(directory, seed, *, version=1, snapshot=None, generated_at="20
 
 @pytest.fixture
 def vendor(monkeypatch, tmp_path):
+    intel_bundle._PROCESS_HIGH_WATER.clear()
     seed = _seed()
     public = intel_bundle.public_key_for(seed)
     key_id = intel_bundle.key_id_for(public)
@@ -80,17 +81,13 @@ def test_no_bundle_keeps_the_builtin_snapshot(vendor):
     assert loaded["status"] == "available"
     assert loaded["source"] == "builtin"
     assert loaded["bundle"] == {"status": "absent"}
-    # The image's own env pin (built-in path + digest) is the built-in, not an operator pin.
-    pinned = device_advisories.load_verified_snapshot(
-        device_advisories.BUNDLED_SNAPSHOT_PATH, device_advisories.BUNDLED_SNAPSHOT_SHA256)
-    assert pinned["source"] == "builtin"
+
 
 
 def test_verified_bundle_is_preferred_over_the_builtin_snapshot(vendor):
     seed, bundle_dir = vendor
     _write_bundle(str(bundle_dir), seed, version=7)
-    loaded = device_advisories.load_verified_snapshot(
-        device_advisories.BUNDLED_SNAPSHOT_PATH, device_advisories.BUNDLED_SNAPSHOT_SHA256)
+    loaded = device_advisories.load_verified_snapshot(None, None)
     assert loaded["status"] == "available"
     assert loaded["source"] == "external_bundle"
     assert loaded["bundle"]["bundle_version"] == 7
@@ -268,3 +265,51 @@ def test_vendor_tool_refuses_a_private_key_inside_the_checkout():
                             capture_output=True, text=True)
     assert result.returncode != 0 and "inside the source checkout" in result.stderr
     assert not os.path.exists(os.path.join(REPO_ROOT, "results", "never.key"))
+
+
+def test_pinning_the_builtin_digest_freezes_the_intelligence(vendor):
+    seed, bundle_dir = vendor
+    _write_bundle(str(bundle_dir), seed, version=7)
+    pinned = device_advisories.load_verified_snapshot(
+        device_advisories.BUNDLED_SNAPSHOT_PATH, device_advisories.BUNDLED_SNAPSHOT_SHA256)
+    assert pinned["source"] == "operator_pinned"
+    assert pinned["snapshot_sha256"] == device_advisories.BUNDLED_SNAPSHOT_SHA256
+
+
+def test_the_loader_refuses_a_bundle_below_the_recorded_high_water_mark(vendor, tmp_path):
+    seed, bundle_dir = vendor
+    _write_bundle(str(bundle_dir), seed, version=5)
+    assert device_advisories.load_verified_snapshot(None, None)["source"] == "external_bundle"
+    # Someone swaps an older, validly signed bundle into place.
+    import shutil
+    shutil.rmtree(bundle_dir)
+    _write_bundle(str(bundle_dir), seed, version=4)
+    within_process = device_advisories.load_verified_snapshot(None, None)
+    assert (within_process["source"], within_process["bundle"]["status"]) == ("builtin", "version_rollback")
+    # A new process still refuses it: the mark file outside the bundle directory holds 5.
+    intel_bundle._PROCESS_HIGH_WATER.clear()
+    intel_bundle.record_high_water(5, str(bundle_dir))
+    intel_bundle._PROCESS_HIGH_WATER.clear()
+    fresh = device_advisories.load_verified_snapshot(None, None)
+    assert fresh["bundle"]["status"] == "version_rollback"
+    assert intel_bundle.high_water_path(str(bundle_dir)) == str(bundle_dir) + ".high-water"
+
+
+def test_install_refuses_below_the_mark_even_when_the_installed_bundle_no_longer_verifies(vendor, tmp_path):
+    seed, bundle_dir = vendor
+    v6, v5 = tmp_path / "v6", tmp_path / "v5"
+    _write_bundle(str(v6), seed, version=6)
+    _write_bundle(str(v5), seed, version=5)
+    intel_bundle.install_bundle(str(v6), str(bundle_dir))
+    assert intel_bundle.read_high_water(str(bundle_dir)) == 6
+    (bundle_dir / intel_bundle.SIGNATURE_NAME).unlink()   # installed bundle broken
+    intel_bundle._PROCESS_HIGH_WATER.clear()
+    with pytest.raises(intel_bundle.BundleError) as refused:
+        intel_bundle.install_bundle(str(v5), str(bundle_dir))
+    assert refused.value.reason == "version_rollback"
+    # A database floor applies too, even with no mark file.
+    (tmp_path / "intel.high-water").unlink()
+    intel_bundle._PROCESS_HIGH_WATER.clear()
+    with pytest.raises(intel_bundle.BundleError):
+        intel_bundle.install_bundle(str(v5), str(bundle_dir), floor=6)
+    assert intel_bundle.install_bundle(str(v6), str(bundle_dir), floor=6)["bundle_version"] == 6

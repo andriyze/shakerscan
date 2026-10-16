@@ -1926,7 +1926,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 117 | `db/init.sql` + migrations |
+| Durable tables | 118 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2829,7 +2829,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `COMPOSE_PROJECT_NAME` | `api/api.py`, `scripts/fleet_cli.py` |
 | `COVERAGE_ALLOCATION_DEFAULT` | `api/parallel_scan.py` |
 | `DASHBOARD_CACHE_SECONDS` | `api/operations/dashboard_data.py` |
-| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
+| `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scanner/scanner_tools/intel_bundle.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
 | `DB_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
@@ -3330,6 +3330,7 @@ Scan feature or a second orchestration engine.
 | `hunt_runs` | `db/init.sql` |
 | `hunt_skill_events` | `db/init.sql` |
 | `hypotheses` | `api/retest_contract.py` |
+| `intel_bundle_high_water` | `db/init.sql` |
 | `investigation_candidate_observations` | `api/retest_contract.py` |
 | `investigation_candidates` | `api/retest_contract.py` |
 | `knowledge_continue_events` | `db/init.sql` |
