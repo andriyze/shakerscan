@@ -395,6 +395,25 @@ def test_devices_legacy_pages_equal_the_previous_query_and_list_v1_walks_every_d
                                               limit=8, offset=0, cursor=first["next_cursor"], count=None,
                                               fields=None, since=None)
         assert caught.value.detail["error"] == "cursor_mismatch"
+        # A device without a change time sorts last in both the legacy page and the list/v1 walk.
+        unchanged = legacy["devices"][0]["id"]
+        await conn.execute("ALTER TABLE target_device_profiles ALTER COLUMN updated_at DROP NOT NULL")
+        await conn.execute("UPDATE targets SET updated_at = NULL WHERE id = $1", unchanged)
+        await conn.execute("UPDATE target_device_profiles SET updated_at = NULL WHERE target_id = $1", unchanged)
+        legacy = await devices_router.list_devices(None, include_inactive=True, device_class=None, search=None,
+                                                   limit=500, offset=0, cursor=None, count=None, fields=None, since=None)
+        walked, cursor = [], None
+        while True:
+            page = await devices_router.list_devices(None, include_inactive=True, device_class=None, search=None,
+                                                     limit=8, offset=0, cursor=cursor,
+                                                     count="none" if cursor is None else None, fields=None, since=None)
+            walked.extend(page["items"])
+            cursor = page["next_cursor"]
+            if not page["has_more"]:
+                break
+        assert legacy["devices"][-1]["id"] == unchanged and walked == legacy["devices"]
+        await conn.execute("UPDATE targets SET updated_at = now() WHERE id = $1", unchanged)
+        await conn.execute("UPDATE target_device_profiles SET updated_at = now() WHERE target_id = $1", unchanged)
     _run(body)
 
 

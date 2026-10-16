@@ -8,7 +8,7 @@ them for every row an offset skipped. Now:
   enriched, the report's ``device_posture`` object read once per row;
 * the legacy limit/offset response keeps its shape (``Deprecation: true``);
 * list/v1 (``cursor``/``count``/``fields``/``since``, ``api/list_compat.py``): keyset pages by the
-  same order (last change first) with the same rows.
+  same order (last change first, a device without a change time last, then id) with the same rows.
 
 ``device_targets`` is a view over targets and their device profiles, so its change time is not an
 indexable column: a page sorts the filtered devices (a device inventory is thousands of rows, not
@@ -76,7 +76,9 @@ async def legacy_devices(conn: Any, *, where: list[str], params: SqlParams, limi
                          offset: int) -> tuple[list[dict[str, Any]], int]:
     """The deprecated limit/offset page (rows as the old query returned them) and its exact total."""
     values = params.snapshot()
-    order = "d.updated_at DESC, d.id DESC"  # the id only breaks ties the old order left arbitrary
+    # The list/v1 order: the id only breaks ties the old order left arbitrary, and a device without
+    # a change time sorts last in both (the old ``updated_at DESC`` put it first).
+    order = f"{CHANGED_AT} DESC, d.id DESC"
     page = (f"SELECT d.id AS __page_id, row_number() OVER (ORDER BY {order}) AS __page_position "
             f"FROM device_targets d WHERE {' AND '.join(where)} "
             f"ORDER BY {order} LIMIT {int(limit)} OFFSET {int(offset)}")
