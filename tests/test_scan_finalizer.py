@@ -580,9 +580,13 @@ def _baseline_and_header_matches(security_headers, matchers):
         plan=plan, target_url="https://app.example.test",
         action_results=results, observations=observations,
     )
+    # A header the baseline itself proves absent is reported once, by the baseline finding
+    # (the template's duplicate is folded into it); the others remain template findings.
     return {
-        item["evidence"]["header_name"]: item for item in report["findings"]
+        (item["evidence"].get("header_name") or item["evidence"].get("header")): item
+        for item in report["findings"]
         if item["evidence"].get("template_id") == "http-missing-security-headers"
+        or str(item["evidence"].get("check") or "").startswith("missing_header_")
     }
 
 
@@ -1400,6 +1404,9 @@ def test_a_redirect_baseline_does_not_verify_a_missing_header(monkeypatch):
                 for origin, row in original(observations).items()}
 
     monkeypatch.setattr(finalizer_module, "_baseline_header_responses", as_redirect)
+    # Isolate the template-attachment rule: keep the template finding instead of folding it.
+    monkeypatch.setattr(finalizer_module, "_fold_duplicate_header_findings", lambda findings: [
+        item for item in findings if item.get("tool") != "http_baseline"])
     by_header = _baseline_and_header_matches({"server": "nginx"}, ["permissions-policy"])
     finding = by_header["permissions-policy"]
     assert finding["evidence"]["observed_response"]["response_status"] == 302

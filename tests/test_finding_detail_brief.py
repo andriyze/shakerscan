@@ -249,3 +249,17 @@ def test_ai_gate_brief_is_tentative_about_model_variance():
         "evidence": {"probe_family": "prompt_leakage", "judge_layer": "regex_classifier", "matched_markers": ["CANARY"]}})
     assert brief["class"] == "ai.prompt_leakage"
     assert brief["confidence"]["level"] == "likely" and "varies" in brief["confidence"]["reason"]
+
+
+def test_a_missing_header_proven_by_the_baseline_is_not_reported_again_by_the_template():
+    from api.scan.finalizer import _fold_duplicate_header_findings
+    baseline = {"tool": "http_baseline", "url": "https://app.fixture.invalid",
+                "evidence": {"check": "missing_header_referrer-policy"}}
+    template = {"tool": "nuclei", "url": "https://app.fixture.invalid", "evidence": {
+        "template_id": "http-missing-security-headers", "header_name": "referrer-policy",
+        "matched_urls": ["https://app.fixture.invalid/a"], "matched_url_count": 7}}
+    frame = {"tool": "nuclei", "url": "https://app.fixture.invalid", "evidence": {
+        "template_id": "http-missing-security-headers", "header_name": "x-frame-options"}}
+    kept = _fold_duplicate_header_findings([baseline, template, frame])
+    assert kept == [baseline, frame]
+    assert baseline["evidence"]["matched_url_count"] == 7

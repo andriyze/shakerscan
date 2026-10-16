@@ -1471,6 +1471,42 @@ def _findings_for_action(
     return calibrate_findings(findings)
 
 
+def _fold_duplicate_header_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One finding per missing header and origin.
+
+    The baseline request proves a missing CSP/HSTS/Referrer/Permissions header itself; the passive
+    template reports the same header again ("Missing HTTP response header: Referrer-Policy").
+    The baseline finding is kept and takes the template's matched-page evidence.
+    """
+    baseline: dict[tuple[str, str], dict[str, Any]] = {}
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        check = str(evidence.get("check") or "")
+        if finding.get("tool") == "http_baseline" and check.startswith("missing_header_"):
+            origin = _http_origin(finding.get("url"))
+            if origin:
+                baseline[(check.removeprefix("missing_header_"), origin)] = finding
+    if not baseline:
+        return findings
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        header = str(evidence.get("header_name") or "").lower()
+        twin = (
+            baseline.get((header, _http_origin(finding.get("url")) or ""))
+            if finding.get("tool") == "nuclei" and evidence.get("template_id") == "http-missing-security-headers"
+            else None
+        )
+        if twin is None:
+            kept.append(finding)
+            continue
+        twin_evidence = twin["evidence"]
+        twin_evidence["matched_url_count"] = int(evidence.get("matched_url_count") or 0)
+        twin_evidence["matched_urls"] = list(evidence.get("matched_urls") or ())[:5]
+        twin_evidence["also_reported_by"] = "nuclei:http-missing-security-headers"
+    return kept
+
+
 def _finding_identity(finding: Mapping[str, Any]) -> str:
     evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
     material = {
@@ -2168,7 +2204,7 @@ def finalize_scan_report(
             "budget_reserved": dict(result.budget_reserved),
             "budget_consumed": dict(result.budget_consumed),
         })
-    findings = list(findings_by_id.values())
+    findings = _fold_duplicate_header_findings(list(findings_by_id.values()))
     baseline_result = action_results.get("baseline.http")
     _attach_observed_header_responses(
         findings, observations,
