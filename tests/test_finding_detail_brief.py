@@ -263,3 +263,31 @@ def test_a_missing_header_proven_by_the_baseline_is_not_reported_again_by_the_te
     kept = _fold_duplicate_header_findings([baseline, template, frame])
     assert kept == [baseline, frame]
     assert baseline["evidence"]["matched_url_count"] == 7
+
+
+@pytest.mark.parametrize("url,klass,needle", [
+    ("https://app.fixture.invalid/actuator/env", "actuator_secret_disclosure", "location ^~ /actuator/ { deny all; }"),
+    ("https://app.fixture.invalid/.git-credentials", "configuration_secret_file", "location = /.git-credentials { return 404; }"),
+    ("https://app.fixture.invalid/swagger.json", "api_specification_secret", "location = /swagger.json { return 404; }"),
+    ("https://app.fixture.invalid/files/", "directory_listing", "location /files/ { autoindex off; }"),
+])
+def test_exposure_fix_and_check_use_the_finding_path(url, klass, needle):
+    brief = build_finding_detail({"tool": "shakerscan_exposure_probe", "severity": "high", "url": url,
+                                  "evidence": {"exposure_class": klass, "request_url": url, "response_status": 200}})
+    assert needle in json.dumps(brief["examples"])
+    assert url in brief["verify"]["command"] and "example.com" not in json.dumps(brief)
+
+
+def test_knowledge_base_check_commands_target_the_finding_not_example_com():
+    from api.finding_routes.remediation import finding_remediation, localize_command
+    finding = {"tool": "shakerscan_exposure_probe", "title": "Sensitive exposure: actuator secret disclosure",
+               "url": "https://app.fixture.invalid/actuator/env",
+               "evidence": {"exposure_class": "actuator_secret_disclosure", "request_url": "https://app.fixture.invalid/actuator/env"}}
+    assert localize_command("curl -sI https://example.com/.env", finding) == "curl -sI https://app.fixture.invalid/actuator/env"
+    assert localize_command("curl -sI https://example.com | grep -i csp", finding) == "curl -sI https://app.fixture.invalid | grep -i csp"
+    assert localize_command("dig +short CAA example.com", finding) == "dig +short CAA app.fixture.invalid"
+    hostile = {"url": "https://app.fixture.invalid/a'$(id)"}
+    assert "'\"'\"'$(id)" in localize_command("curl https://example.com/x", hostile)
+    remediation = finding_remediation(finding)
+    assert "https://app.fixture.invalid/actuator/env" in remediation["verification"]
+    assert "example.com" not in remediation["verification"]

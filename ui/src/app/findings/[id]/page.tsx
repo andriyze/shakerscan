@@ -54,7 +54,7 @@ import { ExceptionDialog, type ExceptionFormValues } from '@/components/findings
 import { Fact, Section } from '@/components/findings/detail/Section'
 import { WhatWeFound } from '@/components/findings/detail/WhatWeFound'
 import { FindingBriefView } from '@/components/findings/detail/FindingBriefView'
-import { parseFindingBrief, parseRelatedFindings, severityLine } from '@/lib/findingBrief'
+import { displayTitle, maskedUrl, parseFindingBrief, parseRelatedFindings, severityLine } from '@/lib/findingBrief'
 
 function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'device') {
@@ -615,9 +615,11 @@ function FindingDetailContent() {
   const retestUnsupportedMessage =
     finding?.retest_unsupported_reason === 'model_intake'
       ? 'Model Intake findings are re-checked by re-running the Model Intake scan for the artifact.'
-      : featureEnabled('engine_admin')
-        ? 'No deterministic prover covers this finding type. Enable AI verification in AI settings to retest it.'
-        : 'No automated retest is available for this finding type in this workspace.'
+      : canonicalProofVerified
+        ? 'Automated retest is not available for this finding type; the scan-time proof above still stands. Run a new Scan to observe it again.'
+        : featureEnabled('engine_admin')
+          ? 'No deterministic prover covers this finding type. Enable AI verification in AI settings to retest it.'
+          : 'No automated retest is available for this finding type in this workspace.'
   const manualVerifyCommands = evidenceStringList(rawEvidenceObject, 'verify_commands')
   const aiProbePrompt = evidenceString(rawEvidenceObject, 'prompt')
   const aiResponseExcerpt = evidenceString(rawEvidenceObject, 'response_excerpt')
@@ -713,7 +715,7 @@ function FindingDetailContent() {
               <ProofStateBadge proofState={finding.proof_state} />
               <SourceTypeBadge type={getFindingSourceType(finding)} />
             </div>
-            <h1 className="mt-2 text-2xl font-semibold leading-tight text-white wrap-break-word">{finding.title}</h1>
+            <h1 className="mt-2 text-2xl font-semibold leading-tight text-white wrap-break-word" title={displayTitle(finding.title, canonicalProofVerified) !== finding.title ? `Recorded as: ${finding.title}` : undefined}>{displayTitle(finding.title, canonicalProofVerified)}</h1>
             {whySeverity && (
               <p className="mt-1 text-sm text-gray-400 wrap-break-word" data-testid="finding-why-severity">
                 <a href="#brief" className="text-gray-300 hover:text-white">Why {finding.severity}:</a> {whySeverity}
@@ -728,7 +730,7 @@ function FindingDetailContent() {
               {primaryUrl && (
                 <span className="inline-flex min-w-0 max-w-full items-center gap-1">
                   <code className="min-w-0 truncate font-mono text-xs text-blue-300" title={primaryUrl}>{pathOf(primaryUrl)}</code>
-                  <CopyButton text={primaryUrl} label="Copy URL" />
+                  <CopyButton text={maskedUrl(primaryUrl).usable} label="Copy URL" />
                 </span>
               )}
               {finding.cwe && (
@@ -883,11 +885,14 @@ function FindingDetailContent() {
               <ul className="space-y-1.5">
                 {locations.map((url, i) => {
                   // A path-only location belongs to the finding's target; show and copy it in full.
-                  const full = /^[a-z][a-z0-9+.-]*:\/\//i.test(url) || !finding?.target_url ? url : `${finding.target_url.replace(/\/+$/, '')}${url.startsWith('/') ? '' : '/'}${url}`
+                  const joined = /^[a-z][a-z0-9+.-]*:\/\//i.test(url) || !finding?.target_url ? url : `${finding.target_url.replace(/\/+$/, '')}${url.startsWith('/') ? '' : '/'}${url}`
+                  // Redacted query values are shown masked and left empty in what is copied/opened.
+                  const { display, usable: full, masked } = maskedUrl(joined)
                   return (
                   <li key={i} className="flex items-start justify-between gap-2 rounded-md bg-gray-950/70 px-2.5 py-2">
                     <div className="min-w-0 flex-1">
-                      <code className="block font-mono text-xs text-blue-300 break-all">{extractEndpoint(url)}</code>
+                      <code className="block font-mono text-xs text-blue-300 break-all">{masked ? (display.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+/i, '') || '/') : extractEndpoint(url)}</code>
+                      {masked && <span className="block text-xs text-gray-500">A value the scanner masked is left empty in the copied link.</span>}
                       {hostOf(full) && <span className="text-xs text-gray-500">{hostOf(full)}</span>}
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
@@ -1209,7 +1214,7 @@ function FindingDetailContent() {
         <aside className="min-w-0 space-y-5" aria-label="Finding status and history">
           <Section id="triage" title="Triage">
             <div className="space-y-3">
-              <label className="grid gap-1 text-xs text-gray-500">
+              <label className="grid min-w-0 gap-1 text-xs text-gray-500">
                 Analyst verdict
                 <select
                   value={finding.analyst_verdict || ''}
@@ -1218,7 +1223,7 @@ function FindingDetailContent() {
                     void handleAnalystVerdict(verdict ? verdict.value : null)
                   }}
                   disabled={statusUpdating}
-                  className="rounded-lg border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-100 focus:border-blue-500 focus:outline-hidden disabled:opacity-50"
+                  className="w-full min-w-0 max-w-full rounded-lg border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-100 focus:border-blue-500 focus:outline-hidden disabled:opacity-50"
                 >
                   <option value="">No verdict recorded</option>
                   {ANALYST_VERDICTS.map((verdict) => (

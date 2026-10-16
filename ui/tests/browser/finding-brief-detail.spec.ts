@@ -83,3 +83,24 @@ test('a finding without a brief keeps the existing page', async ({ page }) => {
   await expect(page.getByTestId('finding-brief')).toHaveCount(0)
   await expect(page.getByTestId('finding-why-severity')).toHaveCount(0)
 })
+
+test('a proven candidate-titled finding reads as proven, masks redacted values and keeps the verdict select in its card', async ({ page }) => {
+  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5'
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await mockFinding(page, id, {
+    title: 'Potential SQL injection', severity: 'high', tool: 'sqlmap', proof_state: 'verified', verified: true,
+    is_verified: true, url: 'https://shop.fixture.invalid/rest/products/search?q=%3Credacted%3E',
+    evidence: { url: 'https://shop.fixture.invalid/rest/products/search?q=%3Credacted%3E', param: 'q' },
+    retest_supported: false, retest_unsupported_reason: 'no_prover',
+  })
+  await page.goto(`/findings/${id}`)
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('SQL injection')
+  await expect(page.getByText('<redacted>', { exact: false })).toHaveCount(0)
+  await expect(page.getByText('/rest/products/search?q=•••', { exact: true })).toBeVisible()
+  await expect(page.locator('a[title="Open in new tab"]').first()).toHaveAttribute('href', 'https://shop.fixture.invalid/rest/products/search?q=')
+  await expect(page.getByText('No deterministic prover covers this finding type', { exact: false })).toHaveCount(0)
+  const select = page.getByLabel('Analyst verdict')
+  const card = page.locator('#triage')
+  const [selectBox, cardBox] = [await select.boundingBox(), await card.boundingBox()]
+  expect(selectBox && cardBox && selectBox.x + selectBox.width <= cardBox.x + cardBox.width).toBe(true)
+})

@@ -125,3 +125,37 @@ export function severityLine(brief: FindingBrief | null): string {
 export function secretLink(targetId: string | undefined, ref: string): string {
   return targetId && SECRET_REF.test(ref) ? `/targets/${encodeURIComponent(targetId)}/asset#discovered-secrets` : ''
 }
+
+// Query values the server replaced with a redaction marker. Shown masked, never as the literal marker.
+const REDACTED_VALUE = /^(?:<redacted>|\[redacted\]|redacted|\*{3,}|•+)$/i
+
+// A stored URL with redacted query values: `display` masks only those values (••• ),
+// `usable` drops them (`q=`) so a copied or opened URL reaches the same endpoint.
+export function maskedUrl(url: string): { display: string; usable: string; masked: boolean } {
+  let parsed: URL
+  try { parsed = new URL(url) } catch { return { display: url, usable: url, masked: false } }
+  let masked = false
+  const shown: string[] = []
+  const usable = new URL(parsed.toString())
+  usable.search = ''
+  for (const [name, value] of parsed.searchParams) {
+    if (REDACTED_VALUE.test(value.trim())) {
+      masked = true
+      shown.push(`${name}=•••`)
+      usable.searchParams.append(name, '')
+    } else {
+      shown.push(`${name}=${value}`)
+      usable.searchParams.append(name, value)
+    }
+  }
+  if (!masked) return { display: url, usable: url, masked: false }
+  const base = `${parsed.origin}${parsed.pathname}`
+  return { display: `${base}?${shown.join('&')}`, usable: usable.toString(), masked: true }
+}
+
+// "Potential SQL injection" once a deterministic proof verified it reads as the proven issue.
+export function displayTitle(title: string, proofVerified: boolean): string {
+  if (!proofVerified) return title
+  const stripped = title.replace(/^(?:potential|possible|suspected)\s+/i, '')
+  return stripped === title ? title : stripped.charAt(0).toUpperCase() + stripped.slice(1)
+}

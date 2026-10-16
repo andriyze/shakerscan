@@ -44,3 +44,17 @@ test('related findings require an id and a title', () => {
   ])
   assert.deepEqual(rows.map(row => row.title), ['Same cert'])
 })
+
+test('redacted query values are masked for display and emptied for copy, other values kept', async () => {
+  const { maskedUrl, displayTitle } = await import('./findingBrief.ts')
+  const result = maskedUrl('https://shop.invalid/rest/products/search?q=%3Credacted%3E&page=2')
+  assert.equal(result.masked, true)
+  assert.equal(result.display, 'https://shop.invalid/rest/products/search?q=•••&page=2')
+  assert.equal(result.usable, 'https://shop.invalid/rest/products/search?q=&page=2')
+  assert.ok(!result.display.includes('redacted') && !result.usable.includes('redacted'))
+  assert.deepEqual(maskedUrl('https://a.invalid/x?y=1'), { display: 'https://a.invalid/x?y=1', usable: 'https://a.invalid/x?y=1', masked: false })
+  assert.equal(maskedUrl('not a url').usable, 'not a url')
+  assert.equal(displayTitle('Potential SQL injection', true), 'SQL injection')
+  assert.equal(displayTitle('Potential SQL injection', false), 'Potential SQL injection')
+  assert.equal(displayTitle('Verified SQL injection', true), 'Verified SQL injection')
+})

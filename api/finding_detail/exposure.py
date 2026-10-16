@@ -140,6 +140,29 @@ def secret_refs(evidence: Mapping[str, Any]) -> list[str]:
     return refs[:20]
 
 
+def _block_examples(exposure_class: str, path: str) -> list[dict[str, str]]:
+    """Server rules that close exactly the path this finding was served at."""
+    if not path.startswith("/"):
+        return []
+    segments = [part for part in path.split("/") if part]
+    prefix = ""
+    if segments and (segments[0] in {".git", ".svn", ".hg", "actuator", "server-status", "debug"} or exposure_class == "directory_listing"):
+        prefix = "/" + segments[0] + "/" if exposure_class != "directory_listing" else (path if path.endswith("/") else path.rsplit("/", 1)[0] + "/")
+    target = prefix or path
+    nginx = (f"location ^~ {target} {{ deny all; }}" if prefix else f"location = {target} {{ return 404; }}")
+    apache = (f'<Location "{target}">\n    Require all denied\n</Location>')
+    examples = []
+    if exposure_class.startswith("actuator_"):
+        examples.append({"label": "Spring Boot", "code": "management.endpoints.web.exposure.include=health\nmanagement.server.port=8081  # internal-only management port"})
+    if exposure_class == "directory_listing":
+        examples.append({"label": "nginx", "code": f"location {target} {{ autoindex off; }}"})
+        examples.append({"label": "Apache httpd", "code": f'<Directory "/var/www/html{target}">\n    Options -Indexes\n</Directory>'})
+        return examples
+    examples.append({"label": "nginx", "code": nginx})
+    examples.append({"label": "Apache httpd", "code": apache})
+    return examples
+
+
 def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     exposure_class = text(evidence.get("exposure_class"), 80)
     label, what, why, fix = _CLASSES.get(exposure_class, (
@@ -188,6 +211,7 @@ def build(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, 
         "verify": command(curl, expect="404 or 403"),
         "fix": list(fix) + ([f"Credentials to rotate: {join_limited(fields, 12)}."] if secrets and not any("named below" in step for step in fix) else []),
         "secret_refs": secret_refs(evidence),
+        "examples": _block_examples(exposure_class, path),
     }
 
 
