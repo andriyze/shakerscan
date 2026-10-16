@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 
-import { mockPageApi, queryNames, type MockHandler } from './mock-page-api'
+import { mockPageApi, queryNames, serverError, type MockHandler } from './mock-page-api'
 
 // Browser contract fixture for the 2.11 lab UI audit fixes: the real pages, a scripted API; no
 // scan, Hunt or discovery runs. Hosts are RFC 6761 `.invalid`, as in the scale seed.
@@ -182,4 +182,37 @@ test('Next while a search is settling never pairs the old cursor with the new se
   await next.click()
   await expect.poll(() => api.requests.some(entry => entry.includes('cursor=page-2%3Aapp'))).toBe(true)
   expect(refused).toEqual([])
+})
+
+// Review of the audit fixes: a failed Refresh still said "updated", and the time outlived a
+// target change.
+test('a failed Refresh on /deep-hunt/leads says so, and a target change clears the time', async ({ page }) => {
+  let contractReads = 0
+  let failContracts = false
+  const target = { ...asset(1), name: 'Leads app' }
+  await mockPageApi(page, {
+    '/health': () => ({ status: 'healthy' }),
+    '/arsenal/family-proof/contracts': () => { contractReads += 1; return failContracts ? serverError() : { contracts: {}, aliases: {} } },
+    '/targets/inventory': () => ({ items: [target], has_more: false, next_cursor: null, generated_at: now }),
+    '/arsenal/hypotheses/schedule': () => ({ version: '1', scheduled: [], deferred: [], excluded: [],
+      counts: { scheduled: 0, deferred: 0, excluded: 0 }, execution_enabled: false }),
+  })
+  await page.goto('/deep-hunt/leads')
+  await expect.poll(() => contractReads).toBeGreaterThan(0)
+  const refresh = page.getByRole('button', { name: 'Refresh', exact: true })
+  await refresh.click()
+  await expect(page.getByTestId('leads-refreshed')).toContainText('Proof contracts updated')
+  failContracts = true
+  await refresh.click()
+  await expect(page.getByTestId('leads-refresh-failed')).toContainText('Refresh failed at')
+  await expect(page.getByTestId('leads-refreshed')).toHaveCount(0)
+  failContracts = false
+  await refresh.click()
+  await expect(page.getByTestId('leads-refreshed')).toBeVisible()
+  // Choosing a target: the earlier Refresh time was for no target, so it goes.
+  await page.locator('#leads-target').click()
+  await page.getByRole('combobox', { name: /Search targets/ }).fill('app')
+  await page.getByRole('option', { name: /app-00001/ }).click()
+  await expect(page.getByTestId('leads-refreshed')).toHaveCount(0)
+  await expect(page.getByTestId('leads-refresh-failed')).toHaveCount(0)
 })
