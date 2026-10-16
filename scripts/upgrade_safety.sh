@@ -157,13 +157,39 @@ release_record_is_stale() {
     [ -f "$marker" ] && [ -f "$RELEASE_STATE_CURRENT" ] && [ "$marker" -nt "$RELEASE_STATE_CURRENT" ]
 }
 
-# The kept-release records of an install directory (current, previous, previous.2, ...).
+# An install path the launcher can name safely: one with a newline (or another control character)
+# would split wherever a list of paths is read, and the cleanup must never act on a fragment.
+install_path_is_safe() {
+    case "${1:-$SCRIPT_DIR}" in
+        *[[:cntrl:]]*) return 1 ;;
+    esac
+    return 0
+}
+
+ensure_install_path_safe() {
+    install_path_is_safe "$SCRIPT_DIR" && return 0
+    echo -e "${RED}The install directory's path contains a newline or another control character; ShakerScan does not start from it.${NC}" >&2
+    echo "Nothing was changed. Move the install to a directory whose path has none (spaces are fine), then start it there." >&2
+    return 1
+}
+
+# The kept-release records of an install directory (current, previous, previous.2, ...), each
+# NUL-terminated: read them with `read -r -d ''`, never by line or word.
 release_kept_files() {
     local dir="${1:-$SCRIPT_DIR}" file
     for file in "$dir/.release-images.current" "$dir/.release-images.previous" "$dir"/.release-images.previous.[0-9]*; do
-        [ -f "$file" ] && printf '%s\n' "$file"
+        [ -f "$file" ] && printf '%s\0' "$file"
     done
     return 0
+}
+
+# Whether an install directory has any kept-release record.
+has_kept_release_files() {
+    local dir="${1:-$SCRIPT_DIR}" file
+    for file in "$dir/.release-images.current" "$dir/.release-images.previous" "$dir"/.release-images.previous.[0-9]*; do
+        [ -f "$file" ] && return 0
+    done
+    return 1
 }
 
 # Remember this install host-wide (best effort: an unwritable registry only loses the protection
@@ -171,30 +197,36 @@ release_kept_files() {
 register_install() {
     local dir
     dir="$(cd "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || return 0
+    install_path_is_safe "$dir" || return 0   # the registry holds one path per line
     grep -qxF "$dir" "$INSTALL_REGISTRY" 2>/dev/null && return 0
     mkdir -p "$(dirname "$INSTALL_REGISTRY")" 2>/dev/null && printf '%s\n' "$dir" >> "$INSTALL_REGISTRY" 2>/dev/null || true
 }
 
 # Every install whose records protect images: this one, the registered ones and the default curl
-# install, whether running or stopped. A directory that no longer exists is skipped.
+# install, whether running or stopped, each NUL-terminated. A directory that no longer exists, or
+# whose path holds a control character, is skipped.
 registered_install_dirs() {
-    local dir
+    local dir real seen=$'\n'
     {
         printf '%s\n' "$SCRIPT_DIR" "${SHAKERSCAN_HOME:-${HOME:-/root}/.shakerscan}"
         grep -v '^#' "$INSTALL_REGISTRY" 2>/dev/null || true
-    } | sed '/^$/d' | while IFS= read -r dir; do
-        [ -d "$dir" ] && (cd "$dir" 2>/dev/null && pwd -P)
-    done | sort -u
+    } | while IFS= read -r dir; do
+        [ -n "$dir" ] && install_path_is_safe "$dir" && [ -d "$dir" ] || continue
+        real="$(cd "$dir" 2>/dev/null && pwd -P)" || continue
+        case "$seen" in *$'\n'"$real"$'\n'*) continue ;; esac
+        seen="$seen$real"$'\n'
+        printf '%s\0' "$real"
+    done
 }
 
 # Image refs every install on this host keeps (its current release and its kept rollback releases).
 host_kept_release_refs() {
     local dir file
-    registered_install_dirs | while IFS= read -r dir; do
-        # One record at a time, read line by line: an install path may contain spaces, and
+    registered_install_dirs | while IFS= read -r -d '' dir; do
+        # One record at a time, NUL-delimited: an install path may contain spaces, and
         # release_state_refs with no file would read this loop's own input.
-        release_kept_files "$dir" | while IFS= read -r file; do
-            [ -n "$file" ] && release_state_refs "$file"
+        release_kept_files "$dir" | while IFS= read -r -d '' file; do
+            [ -n "$file" ] && release_state_refs "$file" </dev/null
         done
     done
 }
@@ -222,6 +254,7 @@ protected_image_ids() {
 # Prints how many were removed.
 prune_superseded_release_images() {
     local protected ref id removed=0 keep=""
+    install_path_is_safe || { echo 0; return 0; }
     [ -f "$RELEASE_STATE_SUPERSEDED" ] || { echo 0; return 0; }
     protected="$(protected_image_ids)"
     for ref in $(release_state_refs "$RELEASE_STATE_SUPERSEDED" | sort -u); do
@@ -255,7 +288,8 @@ prune_superseded_release_images() {
 # rollback). Prints how many were removed.
 prune_unused_release_images() {
     local protected repo id
-    if [ -z "$(release_kept_files)" ]; then
+    install_path_is_safe || { echo 0; return 0; }
+    if ! has_kept_release_files; then
         echo 0
         return 0
     fi
@@ -328,12 +362,18 @@ release_record_version() {
     sed -n 's/^# release //p' "$1" 2>/dev/null | head -1
 }
 
-# This install's kept rollback records in order: previous, previous.2, previous.3, ...
+# This install's kept rollback records in order: previous, previous.2, previous.3, ...,
+# NUL-terminated. The numbers come from a glob (never a parsed listing), sorted as numbers.
 kept_rollback_files() {
-    local n
-    [ ! -f "$RELEASE_STATE_PREVIOUS" ] || printf '%s\n' "$RELEASE_STATE_PREVIOUS"
-    for n in $(ls -1A "$SCRIPT_DIR" 2>/dev/null | sed -n 's/^\.release-images\.previous\.\([0-9][0-9]*\)$/\1/p' | sort -n); do
-        printf '%s\n' "$RELEASE_STATE_PREVIOUS.$n"
+    local file n numbers=""
+    [ ! -f "$RELEASE_STATE_PREVIOUS" ] || printf '%s\0' "$RELEASE_STATE_PREVIOUS"
+    for file in "$RELEASE_STATE_PREVIOUS".[0-9]*; do
+        n="${file##*.}"
+        case "$n" in ''|*[!0-9]*) continue ;; esac
+        [ -f "$file" ] && numbers="$numbers$n"$'\n'
+    done
+    for n in $(printf '%s' "$numbers" | sort -n); do
+        printf '%s\0' "$RELEASE_STATE_PREVIOUS.$n"
     done
 }
 
@@ -345,8 +385,8 @@ push_kept_release() {
     local record="$1" version slots index file kept=() tmp
     version="$(release_record_version "$record")"
     slots=$((RELEASE_KEEP - 1))
-    # Read line by line, never word-split: the install path may contain spaces.
-    while IFS= read -r file; do
+    # NUL-delimited, never word-split: the install path may contain spaces.
+    while IFS= read -r -d '' file; do
         [ -n "$file" ] || continue
         if [ -n "$version" ] && [ "$(release_record_version "$file")" = "$version" ]; then
             supersede_release_record "$file"
@@ -409,7 +449,7 @@ record_started_release() {
         rm -f "$running_record"
     fi
     # A lowered SHAKERSCAN_KEEP_RELEASES releases the records beyond it.
-    while IFS= read -r tmp; do
+    while IFS= read -r -d '' tmp; do
         case "$tmp" in
             "") ;;
             "$RELEASE_STATE_PREVIOUS") [ "$RELEASE_KEEP" -ge 2 ] || supersede_release_record "$tmp" ;;
@@ -505,12 +545,18 @@ ensure_pre_upgrade_backup() {
         printf '%s\n' "$pending" > "$RELEASE_BACKUP_PENDING"
     fi
     # Names start with the time: the newest two are kept, never the one just made, and never the
-    # pending upgrade's first one.
-    # Line by line, never word-split: the install path may contain spaces.
-    while IFS= read -r old; do
-        [ -n "$old" ] || continue
-        [ "$old" = "$dir" ] || [ "$(basename "$old")" = "$pending" ] || rm -rf -- "$old"
-    done < <(ls -1d "$SCRIPT_DIR"/backups/pre-upgrade-* 2>/dev/null | sort -r | tail -n +3)
+    # pending upgrade's first one. A glob into an array (sorted by name, so oldest first), never a
+    # parsed listing: no path is ever split, whatever it contains.
+    local backups=() index
+    for old in "$SCRIPT_DIR"/backups/pre-upgrade-*; do
+        [ -d "$old" ] && [ ! -L "$old" ] && backups+=("$old")
+    done
+    index=$(( ${#backups[@]} - 3 ))
+    while [ "$index" -ge 0 ]; do
+        old="${backups[$index]}"
+        [ "$old" = "$dir" ] || [ "${old##*/}" = "$pending" ] || rm -rf -- "$old"
+        index=$((index - 1))
+    done
 }
 
 # healthy, starting, unhealthy, exited, missing, or unknown (Docker could not be asked).
@@ -742,6 +788,8 @@ install_dir_free_gb() {
 # little room there stops before anything changes; any other start only warns.
 ensure_install_dir_space() {
     local free
+    # A start refuses an install path a list of paths cannot carry, before anything changes.
+    ensure_install_path_safe || return 1
     free="$(install_dir_free_gb)" || return 0
     [ "$free" -lt "$INSTALL_DIR_MIN_FREE_GB" ] || return 0
     note_running_release
@@ -813,6 +861,8 @@ datastore_persistence_problems() {
 # queued work and job state would be lost with the old containers. Nothing changed on refusal.
 ensure_datastores_persisting() {
     local problems
+    # A restart refuses it too, before the running release is stopped.
+    ensure_install_path_safe || return 1
     stack_is_running || return 0
     note_running_release
     [ -n "$(pending_upgrade_from)" ] || return 0
@@ -896,10 +946,10 @@ image_keep_reasons() {
     for ref in $(release_image_refs_all); do
         id="$(docker_cli image inspect --format '{{.Id}}' "$ref" 2>/dev/null)" && echo "$id this-release"
     done
-    while IFS= read -r dir; do
-        # The record paths one per line, never word-split: an install path may contain spaces.
+    while IFS= read -r -d '' dir; do
+        # The record paths NUL-delimited, never word-split: an install path may contain spaces.
         files=()
-        while IFS= read -r file; do [ -n "$file" ] && files+=("$file"); done < <(release_kept_files "$dir")
+        while IFS= read -r -d '' file; do [ -n "$file" ] && files+=("$file"); done < <(release_kept_files "$dir")
         for file in ${files[@]+"${files[@]}"}; do
             version="$(release_record_version "$file")"
             case "$file" in
@@ -938,7 +988,8 @@ list_shakerscan_images() {
 
 prune_shakerscan_images() {
     local before after removed
-    if [ -z "$(release_kept_files)" ]; then
+    ensure_install_path_safe || return 1
+    if ! has_kept_release_files; then
         echo "This install has no release record yet, so nothing marks the images to keep for rollback; nothing was removed."
         echo "Start ShakerScan once with this launcher ('$(cli_hint) start'), then run '$(cli_hint) images prune' again."
         return 0
