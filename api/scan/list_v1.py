@@ -70,6 +70,44 @@ async def install_scan_updated_at(conn: Any) -> None:
         await conn.execute(trigger)
 
 
+def summary_options_sql(column: str, keys: Sequence[str]) -> str:
+    """Project the existing list option keys before transfer to Python. The caller owns the
+    canonical key set and still applies the normal credential redaction after projection.
+    Provider metadata exposes only the same two summary fields as the legacy list.
+    """
+    names = ", ".join("'" + key.replace("'", "''") + "'" for key in sorted(keys))
+    provider = f"{column}->'metadata_json'->'provider_resolution'"
+    return f"""(CASE WHEN jsonb_typeof({column})='object' THEN
+        COALESCE((SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each({column}) e
+                  WHERE e.key IN ({names})), '{{}}'::jsonb)
+        || CASE WHEN jsonb_typeof({provider})='object' THEN
+            jsonb_build_object('metadata_json', jsonb_build_object('provider_resolution',
+                COALESCE((SELECT jsonb_object_agg(p.key, p.value) FROM jsonb_each({provider}) p
+                          WHERE p.key IN ('provider', 'source_kind')), '{{}}'::jsonb)))
+           ELSE '{{}}'::jsonb END
+        ELSE {column} END)"""
+
+
+def scan_list_columns(include_details: bool, option_keys: Sequence[str]) -> str:
+    """Canonical Scan summary projection, shared by legacy and keyset list queries."""
+    from .assessment import SCAN_LIST_ASSESSMENT_COLUMNS
+
+    scan_columns = "s.*" if include_details else f"""
+               s.id, s.target_id, s.target_url, s.status, s.progress,
+               s.current_phase, {summary_options_sql('s.options', option_keys)} AS options,
+               s.scan_type, s.score, s.grade,
+               s.assurance_score,
+               s.findings_count, s.created_at, s.started_at, s.completed_at,
+               s.duration_seconds, s.error_message, s.run_kind, s.ai_target_id,
+               s.device_target_id, s.parent_scan_id, s.scan_role,
+               s.shard_index, s.shard_count
+    """
+    return f"""{scan_columns}, {SCAN_LIST_ASSESSMENT_COLUMNS},
+               COALESCE(t.name, ait.name) as target_name,
+               t.root_domain,
+               ait.target_type as ai_target_type"""
+
+
 async def scans_page(
     conn: Any,
     page: Page,

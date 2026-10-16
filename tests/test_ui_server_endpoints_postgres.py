@@ -513,3 +513,50 @@ def test_scans_updated_at_install_is_a_catalog_check_on_restart():
         finally:
             await conn.execute("DELETE FROM scans WHERE id = $1", row["id"])
     _run(body)
+
+
+
+def test_scan_summary_projects_large_options_before_the_database_transfer(monkeypatch):
+    api = _api_module()
+
+    async def body(conn):
+        options = {
+            "budget_profile": "balanced", "auth_header": "Bearer fixture-only-private-value",
+            "large_job_manifest": "x" * 500000,
+            "metadata_json": {"large_unrelated": "y" * 500000,
+                              "provider_resolution": {"provider": "fixture", "source_kind": "fixture",
+                                                      "large_detail": "z" * 500000}},
+        }
+        identifier = await conn.fetchval(
+            "INSERT INTO scans(target_url,status,options) VALUES($1,'completed',$2::jsonb) RETURNING id",
+            "https://large-options.example.invalid", json.dumps(options))
+        transferred = []
+
+        class MeasuredConn:
+            def __init__(self, inner):
+                self.inner = inner
+
+            async def fetch(self, query, *args):
+                rows = await self.inner.fetch(query, *args)
+                for row in rows:
+                    if "options" in row:
+                        transferred.append(len(json.dumps(row["options"])))
+                return rows
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        monkeypatch.setattr(api, "db_pool", _Pool(MeasuredConn(conn)))
+        try:
+            for count in (None, "none"):
+                result = await api.list_scans(None, limit=50, cursor=None, count=count, since=None,
+                    **{**_SCANS_ARGS, "target": "large-options.example.invalid"})
+                rows = result["items"] if count else result["scans"]
+                assert len(rows) == 1
+                assert rows[0]["options"] == api._scan_list_options(options)
+                assert "fixture-only-private-value" not in json.dumps(rows, default=str)
+            assert transferred and max(transferred) < 2048
+        finally:
+            await conn.execute("DELETE FROM scans WHERE id=$1", identifier)
+
+    _run(body)

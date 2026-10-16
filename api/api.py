@@ -51,8 +51,8 @@ except ModuleNotFoundError:
     from scanner.release_identity import build_fingerprint as release_build_fingerprint
     from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
-from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
-from scan.list_v1 import scans_page
+from scan.assessment import project_scan_assessment_row
+from scan.list_v1 import scans_page, scan_list_columns
 from scan.live_log import read_scan_log
 from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
 from list_contract import CURSOR_MAX_LENGTH
@@ -11715,19 +11715,7 @@ async def list_scans(
     if v1 and fields is not None:
         raise HTTPException(status_code=400, detail={
             "error": "fields_unsupported", "message": "the scans list does not support fields="})
-    scan_columns = "s.*" if include_details else """
-               s.id, s.target_id, s.target_url, s.status, s.progress,
-               s.current_phase, s.options, s.scan_type, s.score, s.grade,
-               s.assurance_score,
-               s.findings_count, s.created_at, s.started_at, s.completed_at,
-               s.duration_seconds, s.error_message, s.run_kind, s.ai_target_id,
-               s.device_target_id, s.parent_scan_id, s.scan_role,
-               s.shard_index, s.shard_count
-    """
-    columns = f"""{scan_columns}, {SCAN_LIST_ASSESSMENT_COLUMNS},
-               COALESCE(t.name, ait.name) as target_name,
-               t.root_domain,
-               ait.target_type as ai_target_type"""
+    columns = scan_list_columns(include_details, _SCAN_LIST_OPTION_KEYS)
     from_sql = """scans s
             LEFT JOIN targets t ON s.target_id = t.id
             LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id"""
