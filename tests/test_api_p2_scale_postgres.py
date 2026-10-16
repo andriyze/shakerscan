@@ -266,6 +266,14 @@ def test_assessment_columns_restart_takes_no_lock_and_reads_are_the_same_before_
         after = {row["id"]: row["updated_at"] for row in await conn.fetch(
             "SELECT id, updated_at FROM scans WHERE id = ANY($1::uuid[])", legacy)}
         assert after == before  # the projection is not a change in /scans?since=
+        # The backfill's batch query is the partial index's predicate, so it reads the index.
+        from runtime.loop_scale_indexes import LOOP_SCALE_INDEXES
+        (definition,) = [spec[2] for spec in LOOP_SCALE_INDEXES if spec[0] == "idx_scans_assessment_unprojected"]
+        await conn.execute(f"CREATE INDEX IF NOT EXISTS idx_scans_assessment_unprojected ON {definition}")
+        async with conn.transaction():
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            plan = "\n".join(row[0] for row in await conn.fetch("EXPLAIN " + ac.UNPROJECTED_IDS_SQL, None, 7))
+        assert "idx_scans_assessment_unprojected" in plan, plan
         assert not await conn.fetchval("SELECT count(*) FROM scans WHERE assessment_projected IS NULL")
         old, new = await _old_and_new_assessment(conn, written + legacy)
         assert new == old

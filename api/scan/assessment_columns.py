@@ -10,8 +10,9 @@ They are now columns on ``scans``:
   ``grade_reliable`` boolean (the text ``true``/``false`` at that path, as the metrics compared
   it), ``grade_reliability_reasons`` text[] (the array's elements as text; empty otherwise);
 * ``assessment_projected``: true once the four columns hold the projection of the row's current
-  ``result``. NULL means "not projected yet" and every reader falls back to the JSON for that row
-  (``assessment_sql``), so a read is the same before, during and after the backfill.
+  ``result``. Anything else (NULL) means "not projected yet" and every reader falls back to the
+  JSON for that row (``assessment_sql``), so a read is the same before, during and after the
+  backfill.
 
 A BEFORE INSERT / UPDATE OF result trigger keeps the columns in step with ``result``, so no writer
 has to know about them. Rows written before 2.11 are projected after the API serves, by
@@ -19,7 +20,7 @@ has to know about them. Rows written before 2.11 are projected after the API ser
 transaction, resumable, and without moving ``scans.updated_at`` (``BACKFILL_SETTING``), so the
 backfill never shows up as a change in ``/scans?since=``. A load that bypasses the trigger (a
 data-only restore with triggers disabled) leaves ``assessment_projected`` as it was in the dump or
-NULL; the next start's pass projects any NULL row again.
+NULL; the next start's pass projects any row not marked true again.
 
 ``install_scan_assessment_columns`` runs in the startup schema transaction under the startup lock
 and is a catalog check on every later start: no table lock on a steady-state restart.
@@ -157,7 +158,14 @@ _BACKFILL_UPDATE_SQL = (
     "UPDATE scans SET "
     + ", ".join(f"{name} = {expr.format(r='result')}" for name, _type, expr in PROJECTIONS)
     + ", assessment_projected = true "
-    "WHERE id = ANY($1::uuid[]) AND assessment_projected IS NULL"
+    "WHERE id = ANY($1::uuid[]) AND assessment_projected IS NOT TRUE"
+)
+#: The next batch of rows not projected yet. ``IS NOT TRUE`` is the predicate of the partial index
+#: idx_scans_assessment_unprojected (runtime/loop_scale_indexes.py): ``IS NULL`` would not let the
+#: planner use it, and every pass would walk the primary key over every Scan.
+UNPROJECTED_IDS_SQL = (
+    "SELECT id FROM scans WHERE ($1::uuid IS NULL OR id > $1::uuid) "
+    "AND assessment_projected IS NOT TRUE ORDER BY id LIMIT $2"
 )
 
 
@@ -167,11 +175,7 @@ async def backfill_scan_assessment(conn: Any, *, batch: int = BACKFILL_BATCH) ->
     projected = 0
     last_id = None
     while True:
-        ids = await conn.fetch(
-            "SELECT id FROM scans WHERE ($1::uuid IS NULL OR id > $1::uuid) "
-            "AND assessment_projected IS NULL ORDER BY id LIMIT $2",
-            last_id, batch,
-        )
+        ids = await conn.fetch(UNPROJECTED_IDS_SQL, last_id, batch)
         if not ids:
             break
         last_id = ids[-1]["id"]
