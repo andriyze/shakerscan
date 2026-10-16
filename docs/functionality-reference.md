@@ -2903,7 +2903,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `HTTP_ARCHIVE_MAX_CAPTURED_CALLS` | `scanner/scanner_tools/http_archive_capture.py` |
 | `HTTP_ARCHIVE_MAX_CAPTURE_BYTES` | `scanner/scanner_tools/http_archive_capture.py` |
 | `LOCAL_ENV_FILE` | `api/settings_routes/router.py` |
-| `METRICS_CACHE_SECONDS` | `api/api.py` |
+| `METRICS_CACHE_SECONDS` | `api/operations/metrics_cache.py` |
 | `MINIO_BUCKET` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_ROOT_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |

@@ -60,7 +60,7 @@ from scan.detail_bounds import (
     read_detail_findings,
 )
 from research_routes.autopilot_loop import run_research_autopilot
-from operations.dashboard_data import SingleFlightCache
+from operations.metrics_cache import METRICS_CACHE as _METRICS_CACHE
 from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
 from list_contract import CURSOR_MAX_LENGTH
 from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
@@ -8849,16 +8849,6 @@ async def health():
         },
         "deployment_policy": deployment_policy.health_report(),
     }
-
-
-def _metrics_cache_seconds() -> float:
-    try:
-        return max(0.0, float(os.environ.get("METRICS_CACHE_SECONDS", "15")))
-    except ValueError:
-        return 15.0
-
-
-_METRICS_CACHE = SingleFlightCache(ttl=_metrics_cache_seconds)
 
 
 @app.get("/metrics/v2")
