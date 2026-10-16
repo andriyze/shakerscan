@@ -221,8 +221,11 @@ async def service_page_v1(conn: Any, page: Page, *, target_kind: str, target_id:
              + (f" WHERE {' AND '.join(keyset)}" if keyset else "")
              + f" ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}")
     generated_at = await snapshot_time(conn)
+    # The outer query keeps the inner page's order, ascending or descending, through its aliases.
+    direction = "DESC" if plan.descending else "ASC"
     rows = await conn.fetch(
-        page_targets_sql(inner, ", page.__list_sort, page.__list_id") + " ORDER BY page.__list_sort, page.__list_id",
+        page_targets_sql(inner, ", page.__list_sort, page.__list_id")
+        + f" ORDER BY page.__list_sort {direction}, page.__list_id {direction}",
         *sql_params.values,
     )
     total, total_kind = await count_total(conn, page.count, from_sql=f"({FILTERED_TARGETS_SQL}) f",

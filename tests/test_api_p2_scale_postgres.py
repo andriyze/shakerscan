@@ -568,6 +568,16 @@ def test_exposure_services_pages_are_the_previous_targets_and_list_v1_walks_them
             if not body_["has_more"]:
                 break
         assert walked == legacy_ids
+        # Descending: the same targets, each page in the reverse order (the outer query keeps it).
+        walked, cursor = [], None
+        while True:
+            body_ = await ss.service_page_v1(conn, lc.Page(limit=25, cursor=cursor, sort="-kind"), snapshot=snapshot,
+                                             matcher=matcher, registry=registry, **args)
+            walked.extend(item["id"] for item in body_["items"])
+            cursor = body_["next_cursor"]
+            if not body_["has_more"]:
+                break
+        assert walked == legacy_ids[::-1]
         # The device locator-change time is still computed for the page's devices.
         device = await conn.fetchrow(ss.page_targets_sql(ss.FILTERED_TARGETS_SQL + " AND kind='device' LIMIT 1"),
                                      "all", None, None, "")
