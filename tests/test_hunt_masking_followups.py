@@ -119,7 +119,6 @@ ALLOWED_PLAIN_DIGESTS = {
     # Presented public DER certificates have standard interoperable SHA-256 fingerprints.
     ("api/capabilities/tls.py", "_chain_details"): "public",
     ("api/capabilities/tls.py", "inspect_tls_origin"): "public",
-    ("api/device_agent.py", "_read_local_intel_snapshot"): "integrity",
     ("api/devices/collection_environments.py", "hydrate_environment"): "request",
     ("api/devices/router.py", "_execute_device_capability_operation"): "canonical",
     ("api/devices/router.py", "_verify_device_control_authorization_candidate"): "canonical",
