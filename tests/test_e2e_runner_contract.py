@@ -2,8 +2,34 @@ from __future__ import annotations
 
 import json
 import sys
+import pytest
 
 from tests.e2e import run_e2e
+
+
+@pytest.mark.parametrize('observed', [True, False, None])
+def test_juice_shop_smoke_requires_current_workers_and_actual_examination(monkeypatch, observed):
+    submissions = []
+    def post(path, body, **_kwargs):
+        assert path == '/scans'
+        submissions.append(body)
+        return 202, {'scan_id': 'fixture'}
+    monkeypatch.setattr(run_e2e.H, 'post', post)
+    monkeypatch.setattr(run_e2e.H, 'wait_for_scan', lambda *a, **k: {'status': 'completed'})
+    monkeypatch.setattr(run_e2e.H, 'scan_result', lambda *_: {
+        'grade': 'A', 'findings': [{'title': 'posture'}], 'application_observed': observed,
+        'risk_assessment_state': 'not_examined' if observed is not True else 'examined',
+    })
+    monkeypatch.setattr(run_e2e.H, 'get', lambda *a, **k: {'lines': []})
+    def no_active_fixture():
+        raise RuntimeError('this unit case covers the passive smoke only')
+    monkeypatch.setattr(run_e2e, '_dast_fixture_authority', no_active_fixture)
+    card = run_e2e.run_dast()
+    assert len(submissions) == 1
+    assert submissions[0]['options']['require_current_workers'] is True
+    assert submissions[0]['policy']['active_testing'] is False
+    row = next(row for row in card.rows if row['name'] == 'D-1 application examination established')
+    assert row['passed'] is (observed is True)
 
 
 def test_e2e_runner_writes_machine_readable_scorecard(monkeypatch, tmp_path):
