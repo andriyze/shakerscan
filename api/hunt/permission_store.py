@@ -277,8 +277,8 @@ $permission_status$;
 DO $permission_kind_secret_try$
 BEGIN
     -- 2.11 adds the secret.try kind. Checked first, so a steady-state restart takes no table
-    -- lock; on the one upgrade the constraint is replaced NOT VALID (no scan of existing rows,
-    -- which all hold an older kind) and still checks every new row.
+    -- lock; on the one upgrade the constraint is replaced and validated, as hunt_actions' status
+    -- constraint was (both tables hold a few rows per Hunt), so the schema equals a fresh install's.
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid='hunt_permission_requests'::regclass AND conname='hunt_permission_requests_kind_check'
@@ -286,7 +286,7 @@ BEGIN
     ) THEN
         ALTER TABLE hunt_permission_requests DROP CONSTRAINT IF EXISTS hunt_permission_requests_kind_check;
         ALTER TABLE hunt_permission_requests ADD CONSTRAINT hunt_permission_requests_kind_check
-            CHECK (kind IN ({_quoted(PERMISSION_KINDS)})) NOT VALID;
+            CHECK (kind IN ({_quoted(PERMISSION_KINDS)}));
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
@@ -295,7 +295,7 @@ BEGIN
     ) THEN
         ALTER TABLE hunt_permission_grants DROP CONSTRAINT IF EXISTS hunt_permission_grants_kind_check;
         ALTER TABLE hunt_permission_grants ADD CONSTRAINT hunt_permission_grants_kind_check
-            CHECK (kind IN ({_quoted(PERMISSION_KINDS)})) NOT VALID;
+            CHECK (kind IN ({_quoted(PERMISSION_KINDS)}));
     END IF;
 END
 $permission_kind_secret_try$;
