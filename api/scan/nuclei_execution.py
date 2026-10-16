@@ -27,6 +27,7 @@ def resolve_active_scan_nuclei_options(
         severities=template_options.get("severity"),
         tags=template_options.get("tags"),
         allow_state_changing_http=allow_state_changing_http,
+        only_template_ids=template_options.get("verify_template_ids"),
     )
     if selection.skip:
         return ActiveScanNucleiOptions(

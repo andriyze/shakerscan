@@ -268,12 +268,16 @@ def resolve_active_nuclei_selection(
     severities: Any = None,
     tags: Any = None,
     allow_state_changing_http: bool,
+    only_template_ids: Any = None,
 ) -> ActiveNucleiSelection:
     """Resolve the authorization-aware active Nuclei template allowlist.
 
     ``skip`` is set (fail closed) when the index cannot be built or no permitted
     template remains; the caller then records a coverage gap, not a clean result.
+    ``only_template_ids`` (a verify Scan) selects exactly those templates instead of the
+    severity/tag filter; intrusive and unauthorized non-GET templates are still dropped.
     """
+    exact_ids = _as_tag_set(only_template_ids)
     want_sev = _normalize_filter(severities, _DEFAULT_SEVERITIES)
     want_tags = _normalize_filter(tags, _DEFAULT_TAGS)
     try:
@@ -292,10 +296,13 @@ def resolve_active_nuclei_selection(
             total_matched=0, get_only_count=0, state_changing_count=0,
             intrusive_excluded=0,
         )
-    matched = [
-        record for record in index.templates
-        if record.severity in want_sev and (record.tags & want_tags)
-    ]
+    if exact_ids:
+        matched = [record for record in index.templates if record.template_id in exact_ids]
+    else:
+        matched = [
+            record for record in index.templates
+            if record.severity in want_sev and (record.tags & want_tags)
+        ]
     get_only: list[str] = []
     state_changing: list[str] = []
     intrusive_excluded = 0
