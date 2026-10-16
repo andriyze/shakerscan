@@ -11,7 +11,7 @@ test('evidence browse loads bounded rows and expands one full proof on demand', 
   assert.match(page, /summary_only: true/)
   assert.match(page, /getEvidenceInstance\(inst\.id\)/)
   assert.match(api, /searchParams\.set\('summary_only', 'true'\)/)
-  assert.match(api, /evidence\/instances\/\$\{encodeURIComponent\(id\)\}/)
+  assert.match(api, /evidence\/instances\/\$\{pathSegment\(id\)\}/)
 })
 
 test('evidence labels both nested family proofs and root proof contracts', () => {

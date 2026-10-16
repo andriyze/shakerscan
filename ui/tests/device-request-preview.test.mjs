@@ -10,6 +10,6 @@ test('device collection previews are loaded from the detail endpoint on demand',
   assert.match(devicePage, /onToggle=/)
   assert.match(devicePage, /Loading redacted requests/)
   assert.match(devicePage, /requestPreviews\[collection\.id\]\.requests\.map/)
-  assert.match(apiClient, /request-collections\/\$\{encodeURIComponent\(collectionId\)\}/)
+  assert.match(apiClient, /request-collections\/\$\{pathSegment\(collectionId\)\}/)
   assert.match(apiClient, /summary\.requests_preview/)
 })

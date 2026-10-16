@@ -548,7 +548,7 @@ jobs:
 
       - name: Audit locked Python dependencies
         run: |
-          python3 -m pip install --disable-pip-version-check pip-audit==2.10.1
+          python3 -m pip install --disable-pip-version-check --require-hashes -r .github/requirements/pip-audit.lock
           python3 -m pip_audit --no-deps --disable-pip -r scanner/requirements.lock
 
   # Build each architecture on a NATIVE runner (no QEMU emulation — that is what
