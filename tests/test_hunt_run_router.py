@@ -500,6 +500,8 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
                 )
             if "FROM http_archive_stats" in query:
                 return {"attempted": 0, "stored": 0, "failed": 0, "dropped": 0}
+            if "AS opaque_tunnels" in query:
+                return {"capture_limited": 0, "tunnel_records": 0, "opaque_tunnels": 0}
             raise AssertionError(query)
 
         async def fetchval(self, query, *args):
@@ -521,7 +523,9 @@ def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive()
                     "started_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
                     "completed_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
                 }]
-            if "FROM http_transactions t" in query:
+            if "FROM http_transactions t" in query or "FROM http_transactions WHERE" in query:
+                return []
+            if "AS refused" in query:
                 return []
             if "FROM hunt_actions action" in query:
                 return []
