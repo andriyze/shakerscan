@@ -697,10 +697,10 @@ def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
     # Bounded content/dir discovery. Read-only (GET). One tunable: wordlist in {common,api,admin}
     # -> a small BUNDLED list (unknown/invalid -> common; no arbitrary path). Automatic
     # calibration stays off because it adds requests outside the exact wordlist count. The
-    # authoritative worker replaces this source with an owner-only exact-size subset.
-    wordlist = _AGENT_FFUF_WORDLISTS.get(
-        str(opts.get("wordlist") or "").strip().lower(), _AGENT_FFUF_WORDLISTS["common"]
-    )
+    # authoritative worker replaces this source with an owner-only exact-size subset of every
+    # source the selection reads; unmaterialized, ffuf takes one list, the selection's first
+    # (``corporate`` starts with the common list, never the corporate tail alone).
+    wordlist = scanner_ffuf_wordlist_source(opts)
     base = url.split("?", 1)[0].rstrip("/")
     return ["-u", f"{base}/FUZZ", "-w", wordlist,
             "-mc", "200,204,301,302,307,401,403,405",
@@ -1155,16 +1155,17 @@ def _replace_argv_value(argv: list[str], flag: str, value: Any) -> None:
         raise AgentToolError(f"scanner command is missing required flag: {flag}") from exc
 
 
-def scanner_ffuf_wordlist_source(options: Mapping[str, Any] | None = None) -> str:
-    """Resolve one bundled FFUF source path; callers can never supply a filesystem path."""
-    selected = str(dict(options or {}).get("wordlist") or "").strip().lower()
-    return _AGENT_FFUF_WORDLISTS.get(selected, _AGENT_FFUF_WORDLISTS["common"])
-
-
 def scanner_ffuf_wordlist_sources(options: Mapping[str, Any] | None = None) -> tuple[str, ...]:
     """The bundled source paths a selection reads, in order (never a caller-supplied path)."""
     selected = str(dict(options or {}).get("wordlist") or "").strip().lower()
-    return _AGENT_FFUF_WORDLIST_SOURCES.get(selected) or (scanner_ffuf_wordlist_source(options),)
+    return _AGENT_FFUF_WORDLIST_SOURCES.get(selected) or (
+        _AGENT_FFUF_WORDLISTS.get(selected, _AGENT_FFUF_WORDLISTS["common"]),
+    )
+
+
+def scanner_ffuf_wordlist_source(options: Mapping[str, Any] | None = None) -> str:
+    """The first bundled source a selection reads; callers can never supply a filesystem path."""
+    return scanner_ffuf_wordlist_sources(options)[0]
 
 
 def build_enforced_scanner_plan(
