@@ -1471,8 +1471,10 @@ def test_tls_stage_uses_registered_inline_capability_with_exact_hold(monkeypatch
     }
     assert call["action_id"] == "deterministic_baseline.tls.inspect"
     assert call["target_binding"] == target
+    # One pair, ten connections (2.11): four handshakes plus the six legacy-protocol/weak-suite
+    # probes, which this budget pays for (capability_execution.tls_connections_per_pair).
     assert call["reservation_limits"] == {
-        "tcp_ports_attempted": 4,
+        "tcp_ports_attempted": 10,
         "tool_wall_seconds": 15,
     }
     assert callable(call["inline_operation"])

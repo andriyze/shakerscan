@@ -46,30 +46,38 @@ _NON_SECRET_HEADER_VALUES = {
     "auth_state": frozenset({"anonymous", "user1", "user2"}),
     "auth_states": frozenset({"anonymous", "user1", "user2"}),
 }
-# ``set_cookie_metadata`` is what the HTTP capability records of each Set-Cookie header: the
-# cookie's name and its flags, never its value. The word ``cookie`` masked the whole list to
-# "***" in every stored observation, so the finalizer's session-cookie flag proof (HttpOnly /
-# Secure) never saw a cookie on a real Scan. It stays exempt only while it has exactly that
-# value-free shape; anything else under the key is still masked.
-_COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$")
+# Cookie posture recorded from ``Set-Cookie``: the cookie's name and its security attributes,
+# never its value. The word `cookie` in `set_cookie_metadata` masked the whole list to "***",
+# and every stored baseline then lost the evidence the session-cookie checks read. Exempt only
+# that exact shape: a list of objects holding a token name and the attribute flags. Anything
+# else under the key -- a string, a `value` field, an unknown attribute -- stays masked.
+_COOKIE_METADATA_KEYS = frozenset({"set_cookie_metadata", "cookie_flags"})
 _COOKIE_METADATA_FIELDS = frozenset({"name", "secure", "httponly", "samesite"})
+_COOKIE_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}$")
+_SAMESITE_VALUES = frozenset({"strict", "lax", "none"})
 
 
-def _value_free_cookie_metadata(item: Any) -> bool:
-    if not isinstance(item, (list, tuple)) or len(item) > 50:
+def _cookie_flags_only(entry: Any, *, named: bool) -> bool:
+    if not isinstance(entry, Mapping) or not set(entry) <= _COOKIE_METADATA_FIELDS:
         return False
-    for cookie in item:
-        if not isinstance(cookie, Mapping) or not set(cookie) <= _COOKIE_METADATA_FIELDS:
-            return False
-        name = cookie.get("name")
-        if name is not None and (not isinstance(name, str) or not _COOKIE_NAME_RE.match(name)):
-            return False
-        if any(cookie.get(flag) is not None and not isinstance(cookie.get(flag), bool)
-               for flag in ("secure", "httponly")):
-            return False
-        if cookie.get("samesite") not in (None, "strict", "lax", "none"):
-            return False
-    return True
+    name = entry.get("name")
+    if named and not (isinstance(name, str) and _COOKIE_NAME_RE.match(name)):
+        return False
+    if not named and "name" in entry:
+        return False
+    return (
+        all(entry.get(flag) in (None, True, False) for flag in ("secure", "httponly"))
+        and entry.get("samesite") in (None, *_SAMESITE_VALUES)
+    )
+
+
+def _is_cookie_metadata(joined: str, item: Any) -> bool:
+    """True when ``item`` is value-free cookie posture under its known key."""
+    if joined == "cookie_flags":
+        return _cookie_flags_only(item, named=False)
+    if joined != "set_cookie_metadata" or not isinstance(item, (list, tuple)) or len(item) > 50:
+        return False
+    return all(_cookie_flags_only(entry, named=True) for entry in item)
 
 
 _EXACT_SENSITIVE_KEYS = frozenset({
@@ -159,8 +167,6 @@ def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
     # Strings, booleans, and arbitrary numbers under these names remain masked.
     if joined in {"credential_version", "credential_record_version"} and type(item) is int and 0 < item <= 2_147_483_647:
         return False
-    if joined == "set_cookie_metadata" and item is not _UNSET and _value_free_cookie_metadata(item):
-        return False
     allowed_header_values = _NON_SECRET_HEADER_VALUES.get(joined)
     if allowed_header_values is not None:
         if item is _UNSET:
@@ -173,6 +179,9 @@ def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
             str(candidate).strip().lower() not in allowed_header_values
             for candidate in candidates
         )
+    if joined in _COOKIE_METADATA_KEYS and item is not _UNSET:
+        if _is_cookie_metadata(joined, item):
+            return False
     describes = _describes_a_value(parts)
     # Only a bool. A descriptor name over a boolean is a statement about a secret --
     # `secret_values_visible: False` -- and a secret is never True or False. Numbers are

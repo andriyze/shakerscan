@@ -275,6 +275,7 @@ COPY api/data_lifecycle /app/data_lifecycle
 COPY api/exposure /app/exposure
 COPY api/finding_exceptions /app/finding_exceptions
 COPY api/finding_routes /app/finding_routes
+COPY api/finding_detail /app/finding_detail
 COPY api/fleet_routes /app/fleet_routes
 COPY api/hunt /app/hunt
 COPY api/model_intake /app/model_intake

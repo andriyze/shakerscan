@@ -292,6 +292,33 @@ def scan_content_discovery_capability_allocation(
     return scan_discovery_capability_allocation(budget, "web.content_discover")
 
 
+# TCP connections one TLS origin/address pair may open: four stdlib handshakes (TLS 1.2, TLS 1.3,
+# default negotiation, trust) and the raw legacy-protocol/weak-suite probes
+# (capabilities/tls_legacy_probe.PROBE_COUNT; a test pins the two together).
+TLS_CONNECTIONS_PER_PAIR = 10
+# The four stdlib handshakes alone. A Scan whose TCP authority cannot pay for the legacy probes on
+# every pair still inspects the certificate and modern protocols; the probes are skipped and the
+# observation says so (``legacy_probes_skipped``), rather than the whole TLS action being skipped.
+TLS_HANDSHAKE_CONNECTIONS_PER_PAIR = 4
+
+
+def tls_connections_per_pair(tcp_ports: int, pairs: int) -> int:
+    """The connections each pair is reserved: with the legacy probes when affordable, else the
+    handshakes only."""
+    return (
+        TLS_CONNECTIONS_PER_PAIR if int(tcp_ports) >= max(1, int(pairs)) * TLS_CONNECTIONS_PER_PAIR
+        else TLS_HANDSHAKE_CONNECTIONS_PER_PAIR
+    )
+
+
+def tls_legacy_probes_affordable(allocation: Mapping[str, Any], pairs: int) -> bool:
+    """True when a TLS allocation pays for the legacy-protocol/weak-suite probes on every pair.
+
+    A TCP budget that pays only for the handshakes still inspects every pair, without those
+    probes (the observation records the skip)."""
+    return int(allocation.get("tcp_ports_attempted") or 0) >= TLS_CONNECTIONS_PER_PAIR * max(0, int(pairs))
+
+
 def scan_tls_capability_allocation(
     budget: Mapping[str, Any],
     *,
@@ -302,7 +329,7 @@ def scan_tls_capability_allocation(
     tcp_ports = _budget_integer(budget, "max_tcp_ports")
     wall = _budget_integer(budget, "max_tool_wall_seconds")
     pairs = max(0, int(origin_count)) * max(0, int(address_count))
-    required_tcp = pairs * 4
+    required_tcp = pairs * tls_connections_per_pair(tcp_ports, pairs)
     required_wall = pairs * 15
     if pairs < 1 or tcp_ports < required_tcp or wall < required_wall:
         return None
@@ -353,7 +380,7 @@ SCAN_BASE_ORIGIN_CAPABILITIES = frozenset({
     "xss.verify", "sqli.verify", "authz.verify",
     # The canonical-host probes read the origin the scan selected. Taking the first frozen
     # origin sent a scheme-less target's seed sweep to http:// (soak N38: 12 verified, not 19).
-    "web.spec_ingest", "exposure.verify_batch", "graphql.verify_batch",
+    "web.spec_ingest", "exposure.verify_batch", "graphql.verify_batch", "redirect.verify_batch",
     "vhost.discover", "web.param_discover",
 })
 

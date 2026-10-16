@@ -98,6 +98,15 @@ def _origin_summary(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _probe_rows(rows: Any, label: str) -> list[dict[str, Any]]:
+    """Value-free raw-probe outcomes (tls_legacy_probe), bounded."""
+    keys = (label, "supported", "result", "negotiated_protocol", "cipher", "cipher_bits", "weakness")
+    return [
+        {key: row.get(key) for key in keys if row.get(key) is not None}
+        for row in list(rows or ())[:8] if isinstance(row, Mapping)
+    ]
+
+
 def tls_finding_evidence(
     item: Mapping[str, Any], observations: Sequence[Mapping[str, Any]], *, check: str,
 ) -> dict[str, Any]:
@@ -120,12 +129,27 @@ def tls_finding_evidence(
         "trust": _trust(item),
     }
     if check == "tls_legacy_protocol":
+        evidence["legacy_protocols_supported"] = [
+            str(item)[:20] for item in list(item.get("legacy_protocols_supported") or ())[:4]
+        ]
+        evidence["legacy_protocol_probes"] = _probe_rows(item.get("legacy_protocol_probes"), "protocol")
         evidence["protocol_attempts"] = [
             {key: attempt.get(key) for key in ("protocol", "supported", "negotiated_protocol", "cipher", "error_type")
              if attempt.get(key) is not None}
             for attempt in list(item.get("protocol_attempts") or ())[:6]
             if isinstance(attempt, Mapping)
         ]
+    if check == "tls_weak_cipher":
+        weak = [str(name)[:80] for name in list(item.get("weak_ciphers_supported") or ())[:12]]
+        evidence["weak_ciphers_supported"] = weak
+        evidence["weak_cipher_probes"] = _probe_rows(item.get("weak_cipher_probes"), "group")
+        if weak:
+            # The weakest suite the server accepts is the one the finding is about; the
+            # negotiated suite of a modern handshake stays as `negotiated_cipher`.
+            evidence["negotiated_cipher"] = item.get("cipher")
+            evidence["cipher"] = weak[0]
+    if item.get("examined_by"):
+        evidence["examined_by"] = str(item["examined_by"])[:40]
     sha = item.get("certificate_sha256")
     same: list[str] = []
     others: list[dict[str, Any]] = []

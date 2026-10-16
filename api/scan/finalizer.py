@@ -16,6 +16,10 @@ from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
 from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
 from .finding_evidence import template_classification, tls_finding_evidence
+from .posture_findings import (
+    CORS_PROBE_ACTIONS, OPT_IN_HEADERS, cors_findings, dns_posture_findings, open_redirect_finding,
+    redact_url_queries, weak_header_findings,
+)
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 from .severity_calibration import calibrate_findings
 from .sqli_stages import INCONCLUSIVE_RECORD_KIND, sqli_budget_outcomes
@@ -554,6 +558,30 @@ def _baseline_cookie_findings(
     return found
 
 
+def baseline_observed_response(
+    request: Mapping[str, Any], response: Mapping[str, Any], headers: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The recorded baseline exchange a header or cookie finding is about (bounded, value-free).
+
+    Only the request line, status and the fixed posture/selected header set are kept; cookie
+    values, bodies and credentials are never part of it.
+    """
+    origin = _http_origin(request.get("origin") or response.get("final_url")) or ""
+    method = str(request.get("method") or "GET").upper()[:16]
+    path = str(request.get("path") or "/")[:2_000]
+    return {
+        "request_line": f"{method} {origin}{path if path.startswith('/') else '/' + path}",
+        "response_status": response.get("status"),
+        "observed_headers": dict(sorted(
+            (str(name).lower()[:120], redact_url_queries(str(value))[:2_000]) for name, value in headers.items()
+            if str(name).lower() not in {"set-cookie", "authorization", "cookie"}
+        )),
+        "source_action_id": "baseline.http",
+        # Which principal slot the proof was observed as, as on the redirect-landing proofs.
+        "principal": _observed_principal(request),
+    }
+
+
 def _attach_observed_header_responses(
     findings: Sequence[dict[str, Any]],
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
@@ -603,6 +631,18 @@ def _attach_observed_header_responses(
         })
 
 
+def _authz_object_facts(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Which object the authorization proof is about: field names and id location, no values."""
+    facts: dict[str, Any] = {
+        name: str(item[key])[:120]
+        for key, name in (("object_id_key", "id_key"), ("object_id_location", "id_location"))
+        if item.get(key)
+    }
+    if isinstance(item.get("sensitive_field_names"), (list, tuple)):
+        facts["sensitive_field_names"] = [str(name)[:80] for name in item["sensitive_field_names"]][:20]
+    return facts
+
+
 def canonical_authz_findings(
     observations: Sequence[Mapping[str, Any]], *, receipt: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
@@ -640,6 +680,10 @@ def canonical_authz_findings(
                     "accepted_principal_responses": dict(
                         item.get("accepted_principal_responses") or {}
                     ),
+                    # Names and locations only: which fields made the object sensitive, where its id
+                    # is. Nested, never top-level: a top-level ``object_id_key`` is a parameter of
+                    # the templated finding identity and would re-key every BOLA row on upgrade.
+                    **({"object": _authz_object_facts(item)} if _authz_object_facts(item) else {}),
                     "distinct_principal_control": True,
                     "object_id_absent_from_attacker_listing": True,
                     "responses_equivalent": True,
@@ -739,6 +783,36 @@ def _takeover_finding(
     return finding
 
 
+def _verified_posture_factory(result: CapabilityResultReference, receipt: Any, kind: str):
+    """A finding builder for the posture rules: verified by this capability's own receipt."""
+
+    def make(
+        *, tool: str, title: str, severity: str, cwe: str, url: Any,
+        evidence: Mapping[str, Any], verification_reason: str,
+    ) -> dict[str, Any]:
+        finding = _base_finding(
+            tool=tool, title=title, severity=severity, cwe=cwe, url=url,
+            evidence={
+                **evidence,
+                "canonical_capability": result.capability_name,
+                "capability_receipt": receipt,
+            },
+        )
+        finding.update({
+            "verified": True,
+            "suspected": False,
+            "needs_verification": False,
+            "proof_state": "verified",
+            "proof_contract_v2": _canonical_proof_contract_v2(
+                capability_name=result.capability_name, kind=kind, receipt=receipt,
+            ),
+            "verification_reason": verification_reason,
+        })
+        return finding
+
+    return make
+
+
 def _findings_for_action(
     result: CapabilityResultReference,
     observations: Sequence[Mapping[str, Any]],
@@ -772,7 +846,9 @@ def _findings_for_action(
         "templates.active_batch": {"candidate_attempt", "template_match"},
         "templates.passive_batch": {"candidate_attempt", "template_match"},
         "tls.inspect": {"tls_protocol"},
+        "dns.inspect": {"dns_posture"},
         "subdomains.takeover_check": {"takeover_check"},
+        "redirect.verify_batch": {"candidate_attempt", "open_redirect_proof"},
     }.get(result.capability_name, set())
     for raw in observations:
         item = dict(raw)
@@ -794,9 +870,18 @@ def _findings_for_action(
                 dict(response.get("selected_headers") or {})
                 if isinstance(response.get("selected_headers"), Mapping) else {}
             )
+            # The posture headers are recorded on every response (present ones only); the
+            # dispatcher's baseline selects no other headers, so they are the record of absence.
+            posture_recorded = isinstance(response.get("security_headers"), Mapping)
+            if posture_recorded:
+                headers.update({
+                    str(name).lower(): value
+                    for name, value in response["security_headers"].items()
+                })
+            observed_response = baseline_observed_response(request, response, headers)
             status = response.get("status")
             if (
-                headers
+                (headers or posture_recorded)
                 and isinstance(status, int)
                 and 200 <= status < 400
             ):
@@ -826,6 +911,7 @@ def _findings_for_action(
                             "url": origin,
                             "status": status,
                             "header": header_name,
+                            "observed_response": {**observed_response, "header_absent": header_name},
                             "pinned_address": request.get("pinned_address"),
                             "canonical_capability": "http.request",
                             "capability_receipt": receipt,
@@ -844,10 +930,36 @@ def _findings_for_action(
                         ),
                     })
                     findings.append(finding)
-            findings.extend(_baseline_cookie_findings(
+            for cookie_finding in _baseline_cookie_findings(
                 request, response, receipt=receipt, capability_name=result.capability_name,
                 kind=str(kind),
+            ):
+                cookie_finding["evidence"]["observed_response"] = observed_response
+                findings.append(cookie_finding)
+            if posture_recorded and isinstance(status, int) and 200 <= status < 400:
+                # Present headers whose VALUE leaves the protection open (CSP *, short HSTS...).
+                findings.extend(weak_header_findings(
+                    headers, origin=str(request.get("origin") or response.get("final_url") or ""),
+                    status=status, observed_response=observed_response,
+                    make=_verified_posture_factory(result, receipt, str(kind)),
+                ))
+        elif kind == "http_observation" and result.action_id in CORS_PROBE_ACTIONS:
+            request = item.get("request") if isinstance(item.get("request"), Mapping) else {}
+            response = item.get("response") if isinstance(item.get("response"), Mapping) else {}
+            findings.extend(cors_findings(
+                result.action_id, request, response,
+                make=_verified_posture_factory(result, receipt, str(kind)),
             ))
+        elif kind == "dns_posture":
+            findings.extend(dns_posture_findings(
+                item, make=_verified_posture_factory(result, receipt, str(kind)),
+            ))
+        elif kind == "open_redirect_proof":
+            redirect = open_redirect_finding(
+                item, make=_verified_posture_factory(result, receipt, str(kind)),
+            )
+            if redirect is not None:
+                findings.append(redirect)
         elif kind == "xss_alert" and item.get("proof_state") == "verified":
             proof_contract = {
                 "schema_version": "proof-contract/v2",
@@ -885,6 +997,10 @@ def _findings_for_action(
                     "param": item.get("param"),
                     "payload_sha256": item.get("payload_sha256"),
                     "message": item.get("message"),
+                    # Nested: a top-level ``client_route`` joins a CWE-79 finding's identity and
+                    # would re-key every verified XSS row on upgrade.
+                    **({"browser_alert": {key: item[key] for key in ("alert_type", "client_route") if item.get(key)}}
+                       if item.get("alert_type") or item.get("client_route") else {}),
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                     "detail": {"verified": True, "type": "verified"},
@@ -1002,10 +1118,14 @@ def _findings_for_action(
                 ),
                 severity="high",
                 cwe="CWE-79" if expected_family == "xss" else "CWE-89",
+                # No URL: these rows have always been keyed without one (the origin is in the
+                # evidence, under a key that is not an endpoint), so upgrading keeps their identity.
                 url=None,
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "request_ref_id": item.get("request_ref_id"),
+                    "origin": item.get("origin"),
+                    "request_class": item.get("request_class"),
                     "method": item.get("method"),
                     "body_encoding": item.get("body_encoding"),
                     "field_path": item.get("field_path"),
@@ -1038,6 +1158,12 @@ def _findings_for_action(
         elif kind == "sqli_finding":
             # SQLMap labels remain candidates until a payload/control
             # differential produces the deterministic proof contract.
+            dbms = next((
+                str(row.get("dbms") or row.get("message") or "").split("back-end DBMS:", 1)[-1].strip()[:120]
+                for row in observations
+                if isinstance(row, Mapping) and row.get("kind") == "sqli_dbms_fingerprint"
+                and (row.get("dbms") or row.get("message"))
+            ), None)
             finding = _base_finding(
                 tool="sqlmap",
                 title="Potential SQL injection",
@@ -1049,6 +1175,7 @@ def _findings_for_action(
                     "method": item.get("method") or "GET",
                     "param": item.get("param"),
                     "sqlmap_message": item.get("message"),
+                    **({"dbms": dbms} if dbms else {}),
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                 },
@@ -1100,6 +1227,7 @@ def _findings_for_action(
                         item.get("database_error_signatures") or ()
                     ),
                     "redacted_excerpt": item.get("redacted_excerpt"),
+                    **{key: item[key] for key in ("payload_shape", "timing_ms") if item.get(key)},
                     "session_state_discarded": item.get(
                         "session_state_discarded"
                     ),
@@ -1577,6 +1705,48 @@ def _corroborated_exposure_proof(
     return None
 
 
+def _fold_duplicate_header_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One finding per missing header and origin.
+
+    The baseline request proves a missing CSP/HSTS/Referrer/Permissions header itself; the passive
+    template reports the same header again ("Missing HTTP response header: Referrer-Policy").
+    The baseline finding is kept and takes the template's matched-page evidence. (A template
+    HSTS match on a plain-HTTP URL never gets here: the template projection drops it.)
+    """
+    baseline: dict[tuple[str, str], dict[str, Any]] = {}
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        check = str(evidence.get("check") or "")
+        if finding.get("tool") == "http_baseline" and check.startswith("missing_header_"):
+            origin = _http_origin(finding.get("url"))
+            if origin:
+                baseline[(check.removeprefix("missing_header_"), origin)] = finding
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        header = str(evidence.get("header_name") or "").lower()
+        # Opt-in headers whose absence is the browser default (posture_findings.OPT_IN_HEADERS):
+        # kept in the report's posture section, not reported as findings.
+        if (
+            finding.get("tool") == "nuclei" and header in OPT_IN_HEADERS
+            and evidence.get("template_id") == "http-missing-security-headers"
+        ):
+            continue
+        twin = (
+            baseline.get((header, _http_origin(finding.get("url")) or ""))
+            if finding.get("tool") == "nuclei" and evidence.get("template_id") == "http-missing-security-headers"
+            else None
+        )
+        if twin is None:
+            kept.append(finding)
+            continue
+        twin_evidence = twin["evidence"]
+        twin_evidence["matched_url_count"] = int(evidence.get("matched_url_count") or 0)
+        twin_evidence["matched_urls"] = list(evidence.get("matched_urls") or ())[:5]
+        twin_evidence["also_reported_by"] = "nuclei:http-missing-security-headers"
+    return kept
+
+
 def _finding_identity(finding: Mapping[str, Any]) -> str:
     evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
     material = {
@@ -1825,10 +1995,14 @@ def _posture_sections(
             if kind == "http_observation" and str(action_id) == "baseline.http":
                 request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
                 response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
-                headers = (
-                    response.get("security_headers")
-                    if isinstance(response.get("security_headers"), Mapping) else {}
-                )
+                headers = {
+                    # Report endpoints' query tokens never reach the stored report.
+                    name: redact_url_queries(value) if isinstance(value, str) else value
+                    for name, value in (
+                        response.get("security_headers")
+                        if isinstance(response.get("security_headers"), Mapping) else {}
+                    ).items()
+                }
                 # A request that never completed observed nothing. Reporting its empty
                 # header set as `missing_security_headers` published five confirmed
                 # findings from a failure -- the UI renders each one red -- so posture is
@@ -2325,7 +2499,9 @@ def finalize_scan_report(
             "budget_reserved": dict(result.budget_reserved),
             "budget_consumed": dict(result.budget_consumed),
         })
-    findings = _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values()))
+    findings = _fold_duplicate_header_findings(
+        _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values())),
+    )
     _attach_observed_header_responses(
         findings, observations,
         {

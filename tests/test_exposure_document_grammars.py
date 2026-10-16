@@ -219,7 +219,7 @@ def test_the_http_capability_records_cookie_names_only():
 
 
 def test_the_http_capability_reads_cookie_flags_as_attributes_not_substrings():
-    from api.capabilities.http import _set_cookie_metadata
+    from api.capabilities.http import cookie_metadata as _set_cookie_metadata
 
     # A value, name or Path containing "secure"/"httponly" sets neither flag.
     assert _set_cookie_metadata("session=securehttponly; Path=/secure/httponly") == {

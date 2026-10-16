@@ -889,11 +889,165 @@ def _credential_store(path: str, text: str) -> ExposureSignature | None:
     return None
 
 
+# --- Password-hash files ---------------------------------------------------------------------
+# ``user:hash`` lines as htpasswd (and the shadow file, with its trailing fields) store them. The
+# hash shape is the proof: modular crypt (``$apr1$``, ``$1$``, ``$5$``, ``$6$``, bcrypt, argon2) or
+# an LDAP-style ``{SHA}``/``{SSHA}`` digest. Thirteen-character DES crypt has no marker of its own,
+# so it counts only in a file named as a password file.
+_PASSWORD_FILE_LINE_RE = re.compile(r"([^:\s#][^:\s]{0,255}):([^:\s]{1,512})(?::\S{0,1024})?")
+_PASSWORD_HASH_FIELD_RE = re.compile(
+    r"\$(?:apr1|1|5|6)\$(?:rounds=\d{1,9}\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{22,86}"
+    r"|\$2[abxy]?\$\d{2}\$[./A-Za-z0-9]{53}"
+    r"|\$argon2(?:id|i|d)\$[A-Za-z0-9+/=,$]{20,256}"
+    r"|\{SHA\}[A-Za-z0-9+/]{27}="
+    r"|\{SSHA\}[A-Za-z0-9+/]{24,128}={0,2}"
+)
+_DES_CRYPT_FIELD_RE = re.compile(r"[./A-Za-z0-9]{13}")
+_PASSWORD_FILE_NAME_RE = re.compile(
+    r"(?i)^(?:\.?htpasswd[\w.\-]{0,32}|[\w.\-]{0,32}\.htpasswd|\.?passwd|shadow)$"
+)
+
+
+def _password_hash_file(path: str, text: str) -> ExposureSignature | None:
+    """A password file: every meaningful line is ``user:field`` and at least one field is a hash.
+
+    The hash is the secret: it is cracked offline at the attacker's pace. Each one is
+    fingerprinted under ``<user>.password`` (category ``password_hash``) and the whole body is
+    withheld.
+    """
+    lines = _grammar_lines(text)
+    if not lines:
+        return None
+    named = bool(_PASSWORD_FILE_NAME_RE.match(_last_segment(path)))
+    grammar = 0
+    pairs: list[tuple[str, object]] = []
+    for line in lines:
+        match = _PASSWORD_FILE_LINE_RE.fullmatch(line)
+        if match is None:
+            continue
+        grammar += 1
+        user, hashed = match.group(1), match.group(2)
+        if _PASSWORD_HASH_FIELD_RE.fullmatch(hashed) or (
+            named and _DES_CRYPT_FIELD_RE.fullmatch(hashed)
+        ):
+            pairs.append((f"{user}.password", hashed))
+            if len(pairs) >= _MAX_DOCUMENT_PAIRS:
+                break
+    if not pairs or grammar * 5 < len(lines) * 4:
+        return None
+    secrets = _dedupe([secret_evidence(str(key), "password_hash", str(value)) for key, value in pairs])
+    # The signature name avoids secret words: receipt redaction masks ``password_*`` labels.
+    return _sig("configuration_secret_file", "htpasswd_hash_lines", secrets, pairs=pairs)
+
+
+# --- YAML configuration ----------------------------------------------------------------------
+# Block-mapping YAML as configuration files are written: ``key:`` opens a section, ``key: value``
+# sets a scalar, ``- item`` lists. Only read from a body named or typed as YAML, and only when
+# those lines make up the document, so prose with colons in it is not configuration.
+_YAML_NAME_RE = re.compile(r"(?i)\.ya?ml$")
+_YAML_MAPPING_RE = re.compile(
+    r"( {0,64})([A-Za-z_][A-Za-z0-9_.\-]{0,127})[ \t]*:(?:[ \t]+([^\r\n]{0,2048}))?"
+)
+_YAML_LIST_RE = re.compile(r" {0,64}-(?:[ \t][^\r\n]{0,2048})?")
+_YAML_QUOTED_RE = re.compile(r"\"((?:[^\"\\]|\\.){0,1024})\"|'((?:[^']|''){0,1024})'")
+
+
+def _yaml_scalar(raw: str) -> str | None:
+    """The plain or quoted scalar a YAML value holds; None for a block, flow, anchor or alias."""
+    value = raw.strip()
+    if not value or value[0] in "|>{[&*!":
+        return None
+    quoted = _YAML_QUOTED_RE.match(value)
+    if quoted is not None:
+        return quoted.group(1) if quoted.group(1) is not None else quoted.group(2).replace("''", "'")
+    comment = value.find(" #")
+    return (value[:comment] if comment >= 0 else value).strip() or None
+
+
+def _yaml_pairs(text: str) -> list[tuple[str, object]] | None:
+    """``(dotted.key, scalar)`` of a block-mapping YAML document, or None when it is not one."""
+    meaningful = structural = 0
+    stack: list[tuple[int, str]] = []
+    pairs: list[tuple[str, object]] = []
+    for line in text[:_PARSE_MAX_CHARS].splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped in {"---", "..."}:
+            continue
+        meaningful += 1
+        line = line.rstrip()
+        match = _YAML_MAPPING_RE.fullmatch(line)
+        if match is None:
+            structural += 1 if _YAML_LIST_RE.fullmatch(line) else 0
+            continue
+        structural += 1
+        indent, key = len(match.group(1)), match.group(2)
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        scalar = _yaml_scalar(match.group(3) or "")
+        if scalar is None:
+            if len(stack) < 16:
+                stack.append((indent, key))
+        elif len(pairs) < _MAX_DOCUMENT_PAIRS:
+            pairs.append((".".join([name for _indent, name in stack] + [key]), scalar))
+    if structural < 2 or structural * 5 < meaningful * 4:
+        return None
+    return pairs
+
+
+def _yaml_configuration(path: str, text: str, content_type: str) -> ExposureSignature | None:
+    if "yaml" not in content_type and not _YAML_NAME_RE.search(_last_segment(path)):
+        return None
+    pairs = _yaml_pairs(text)
+    # An API description in YAML describes parameters, it does not configure a server; its
+    # example values are documentation (the JSON form is read by ``_openapi_secrets``).
+    if not pairs or any(key in {"openapi", "swagger"} for key, _value in pairs):
+        return None
+    pairs = [
+        (key, value) for key, value in pairs
+        if not _EXAMPLE_KEYS.intersection(segment.lower() for segment in key.split("."))
+    ]
+    secrets = _secrets(text, pairs, server_side=True)
+    if secrets:
+        return _sig("configuration_secret_file", "yaml_configuration_secret", secrets, pairs=pairs)
+    if redactable_assignments(pairs)[0]:
+        # Secret-named keys whose values prove no secret: an observation, its body withheld.
+        return _sig("configuration_file", "yaml_configuration", pairs=pairs)
+    return None
+
+
+# --- Server status pages ---------------------------------------------------------------------
+# Apache mod_status (HTML and its ``?auto`` text form) and nginx stub_status, each by its own fixed
+# output: a page that only mentions server-status has neither the heading with its fields nor the
+# counters in this order.
+_APACHE_STATUS_RE = re.compile(r"Apache Server Status for ")
+_APACHE_STATUS_FIELD_RE = re.compile(r"Server (?:Version|MPM|Built|uptime):")
+_APACHE_STATUS_AUTO_RE = re.compile(r"(?m)^Scoreboard: [_SRWKDCLGI.]{1,4096}[ \t]*\r?$")
+_APACHE_STATUS_WORKERS_RE = re.compile(r"(?m)^(?:BusyWorkers|IdleWorkers): \d{1,9}[ \t]*\r?$")
+_NGINX_STATUS_RE = re.compile(r"(?m)^Active connections:[ \t]*\d{1,12}[ \t]*\r?$")
+_NGINX_STATUS_COUNTERS_RE = re.compile(
+    r"(?m)^server accepts handled requests[ \t]*\r?\n[ \t]*\d{1,20}[ \t]+\d{1,20}[ \t]+\d{1,20}"
+)
+
+
+def _server_status(text: str) -> ExposureSignature | None:
+    head = text[:_PARSE_MAX_CHARS]
+    if _APACHE_STATUS_RE.search(head) and _APACHE_STATUS_FIELD_RE.search(head):
+        return _sig("metrics_endpoint", _APACHE_STATUS_RE.pattern)
+    if _APACHE_STATUS_AUTO_RE.search(head) and _APACHE_STATUS_WORKERS_RE.search(head):
+        return _sig("metrics_endpoint", _APACHE_STATUS_AUTO_RE.pattern)
+    if _NGINX_STATUS_RE.search(head) and _NGINX_STATUS_COUNTERS_RE.search(head):
+        return _sig("metrics_endpoint", _NGINX_STATUS_RE.pattern)
+    return None
+
+
 def _structured_text(path: str, text: str, content_type: str = "") -> ExposureSignature | None:
     """Proofs for non-HTML bodies whose own grammar identifies the file type."""
     credential_store = _credential_store(path, text)
     if credential_store is not None:
         return credential_store
+    password_file = _password_hash_file(path, text)
+    if password_file is not None:
+        return password_file
     if _GIT_CORE_HEADER_RE.search(text) and _GIT_CORE_KEY_RE.search(text):
         return _sig("version_control_exposure", "git_config_core_section",
                     _dedupe(selfevident_secret_evidence(text)))
@@ -905,6 +1059,9 @@ def _structured_text(path: str, text: str, content_type: str = "") -> ExposureSi
     document = _json_document(text)
     if document is not None:
         return _json_signature(path, text, document)
+    yaml_config = _yaml_configuration(path, text, content_type)
+    if yaml_config is not None:
+        return yaml_config
     dotenv = _dotenv_pairs(text)
     if dotenv is not None:
         pairs: list[tuple[str, object]] = list(dotenv)
@@ -1230,6 +1387,10 @@ def classify_exposure(
     php = _php_source(text)
     if php is not None:
         return php
+    # A server status page is HTML (Apache) or plain text (Apache ?auto, nginx): read both.
+    status_page = _server_status(text)
+    if status_page is not None:
+        return status_page
     structured = (
         _structured_html(text, path) if is_html else _structured_text(path, text, content_type)
     )
@@ -1333,7 +1494,8 @@ _CONFIG_DOCUMENT_PATTERNS = frozenset({
     "aspnet_web_config_backup", "actuator_property_sources", "json_configuration_secret",
     "sql_dump", "git_credentials_store", "netrc_credentials", "npmrc_auth_token",
     "pypirc_credentials", "php_configuration_secret", "php_source_served",
-    "markdown_env_block_secret",
+    "markdown_env_block_secret", "htpasswd_hash_lines", "yaml_configuration_secret",
+    "yaml_configuration",
     # Diagnostic messages can echo unrecognized credential values; keep metadata only.
     "http_error_stack_trace",
 })
