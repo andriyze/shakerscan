@@ -1202,6 +1202,10 @@ export interface Scan {
   // How much of the application the scan examined, scored independently of the findings.
   assurance_score?: number | null
   findings_count: number
+  /** Persisted findings of the Scan (the detail lists at most 500 of them by default). */
+  findings_total?: number
+  /** True when the detail lists fewer persisted findings than the Scan has. */
+  findings_truncated?: boolean
   created_at: string
   started_at?: string | null
   completed_at?: string

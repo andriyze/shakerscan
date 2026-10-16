@@ -55,7 +55,10 @@ except ModuleNotFoundError:
 from scan.assessment import project_scan_assessment_row
 from scan.list_v1 import scans_page, scan_list_columns
 from scan.live_log import read_scan_log
-from scan.detail_bounds import MAX_DETAIL_FINDINGS, PARALLEL_CHILDREN_SQL, scan_detail_findings
+from scan.detail_bounds import (
+    FINDINGS_LIMIT_QUERY, INCLUDE_RESULT_QUERY, PARALLEL_CHILDREN_SQL, detail_params, fetch_scan_detail_row,
+    read_detail_findings,
+)
 from research_routes.autopilot_loop import run_research_autopilot
 from operations.dashboard_data import SingleFlightCache
 from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
@@ -11838,32 +11841,26 @@ async def list_scans(
 async def get_scan(
     scan_id: str,
     verified_only: bool = False,
-    findings_limit: int = Query(MAX_DETAIL_FINDINGS, ge=0, le=MAX_DETAIL_FINDINGS),
-    include_result: bool = True,
+    findings_limit: int = FINDINGS_LIMIT_QUERY,
+    include_result: bool = INCLUDE_RESULT_QUERY,
 ):
     """Get scan details: at most ``findings_limit`` persisted findings (``findings_total`` and
-    ``findings_truncated`` say how many there are; scan/detail_bounds.py), and the report body
-    unless ``include_result=false``."""
-    findings_limit, include_result = direct(findings_limit), direct(include_result)
+    ``findings_truncated`` say how many there are), and the report body unless
+    ``include_result=false`` (scan/detail_bounds.py)."""
+    findings_limit, include_result = detail_params(findings_limit, include_result)
     async with db_pool.acquire() as conn:
-        scan = await conn.fetchrow("""
-            SELECT s.*,
-                   COALESCE(t.name, ait.name) as target_name,
-                   ait.target_type as ai_target_type
-            FROM scans s
-            LEFT JOIN targets t ON s.target_id = t.id
-            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
-            WHERE s.id = $1
-        """, uuid.UUID(scan_id))
+        scan = await fetch_scan_detail_row(
+            conn, uuid.UUID(scan_id), include_result=include_result, with_findings=findings_limit > 0)
 
         if not scan:
             raise HTTPException(status_code=404, detail="Scan not found")
 
-        # Get findings for this scan. Verified-only filtering is applied after
-        # merging raw scan-time proof below, so stale persisted retest verdicts
-        # cannot hide findings that this scan just proved.
-        findings, findings_total = await scan_detail_findings(
-            conn, SCAN_DETAIL_FINDINGS_SQL, uuid.UUID(scan_id), findings_limit)
+        report = scan['result']
+        if report is not None:
+            report = _normalize_scan_result_for_api(_decode_json_value(report))
+        findings, findings_total, findings_truncated = await read_detail_findings(
+            conn, uuid.UUID(scan_id), report, limit=findings_limit, verified_only=verified_only,
+            project=finding_proof_fields, identities=finding_identity_keys)
 
         action_rows = await conn.fetch(
             _PUBLIC_SCAN_ACTIONS_SQL, uuid.UUID(scan_id),
@@ -11890,24 +11887,9 @@ async def get_scan(
 
     result = dict(scan)
     result['execution_context'] = _json_object(result.get('execution_context'))
-    if result.get('result') is not None:
-        result['result'] = _normalize_scan_result_for_api(_decode_json_value(result['result']))
-    verification_overrides = _scan_result_verification_overrides(result.get('result'))
-    merged_findings = []
-    for row in findings:
-        finding = dict(row)
-        override = matching_verification_override(verification_overrides, finding)
-        if override:
-            finding.update(override)
-        if verified_only and finding.get("last_verification_verdict") != "exploited":
-            continue
-        merged_findings.append(finding)
-    result['findings'] = project_scan_finding_proof(
-        result.get('result'), merged_findings, project=finding_proof_fields, identities=finding_identity_keys,
-    )
-    result['findings_total'], result['findings_truncated'] = findings_total, len(findings) < findings_total
-    if not include_result:
-        result['result'] = None
+    result['result'] = report if include_result else None
+    result['findings'], result['findings_total'] = findings, findings_total
+    result['findings_truncated'] = findings_truncated
     if canonical_stage_checkpoint:
         result["canonical_stage_checkpoint"] = dict(
             canonical_stage_checkpoint

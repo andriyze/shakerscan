@@ -671,6 +671,58 @@ def test_scan_detail_children_give_the_same_contributions_and_findings_are_bound
     _run(body)
 
 
+def test_scan_detail_reads_only_what_it_answers(monkeypatch):
+    """Default 500 rows; include_result=false selects the explanation's report parts only;
+    verified_only filters in SQL before the limit and still admits rows this run proved."""
+    api = _api_module()
+    from scan import detail_bounds
+
+    async def body(conn):
+        monkeypatch.setattr(api, "db_pool", _Pool(conn))
+        scan = uuid.uuid4()
+        proven = {"title": "Proved now", "severity": "high", "tool": "nuclei",
+                  "url": "https://web1.example.invalid/p", "template_id": "proved-now",
+                  "proof_of_exploitation": True, "verified": True, "confidence": 0.9}
+        report = {"findings": [proven], "coverage": {"reasons": ["r"]}, "body": "b" * 5000,
+                  "parallel": {"canonical_action_execution": {"actions": []}, "shards": ["x"] * 10}}
+        await conn.execute(
+            "INSERT INTO scans(id, target_url, status, run_kind, execution_context, coverage_json, result) "
+            "VALUES ($1, 'https://web1.example.invalid', 'completed', 'web_dast', '{}', '{}', $2::jsonb)",
+            scan, json.dumps(report))
+        await conn.execute("""
+            INSERT INTO findings(scan_id, fingerprint, title, severity, tool, url, evidence, status, source,
+                                 last_seen_at, last_verification_verdict)
+            SELECT $1, 'many-'||g, 'F '||g, 'critical', 'nuclei', 'https://web1.example.invalid/f/'||g, '{}',
+                   'active', 'scan', now() - g * interval '1 second',
+                   CASE WHEN g IN (590, 595) THEN 'exploited' END
+            FROM generate_series(1, 600) g""", scan)
+        fingerprint = api.generate_finding_fingerprint(proven)
+        await conn.execute(
+            "INSERT INTO findings(scan_id, fingerprint, title, severity, tool, url, evidence, status,"
+            " source, last_seen_at, last_verification_verdict) VALUES ($1, $2, 'Proved now', 'low', 'nuclei',"
+            " 'https://web1.example.invalid/p', '{}', 'active', 'scan', now() - interval '1 day',"
+            " 'false_positive')", scan, fingerprint)
+        default = await api.get_scan(str(scan))
+        assert (len(default["findings"]), default["findings_total"], default["findings_truncated"]) == (500, 601, True)
+        assert default["result"]["body"] == report["body"]
+
+        row = await detail_bounds.fetch_scan_detail_row(conn, scan, include_result=False, with_findings=False)
+        assert json.loads(row["result"]) == {"coverage": report["coverage"],
+                                             "parallel": {"canonical_action_execution": {"actions": []}}}
+        assert set(dict(row)) == set(dict(await detail_bounds.fetch_scan_detail_row(
+            conn, scan, include_result=True, with_findings=True)))
+        lean = await api.get_scan(str(scan), findings_limit=0, include_result=False)
+        assert lean["result"] is None and lean["execution_explanation"] == default["execution_explanation"]
+
+        verified = await api.get_scan(str(scan), verified_only=True, findings_limit=2, include_result=False)
+        assert sorted(item["title"] for item in verified["findings"]) == ["F 590", "F 595"]
+        assert (verified["findings_total"], verified["findings_truncated"]) == (3, True)
+        everything = await api.get_scan(str(scan), verified_only=True, findings_limit=10, include_result=False)
+        assert sorted(item["title"] for item in everything["findings"]) == ["F 590", "F 595", "Proved now"]
+        assert everything["findings_truncated"] is False
+    _run(body)
+
+
 # --- research autopilot claims ---------------------------------------------------------------
 
 

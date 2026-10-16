@@ -635,7 +635,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   const findings = sortBySeverity(rawFindings)
   const persistedFindingIndex = buildFindingLinkageIndex(persistedFindings)
   const rawFindingsWithoutRecords = rawFindings.filter((finding: any) => !linkedPersistedFinding(finding, persistedFindingIndex))
-  const partiallyPersistedFindings = rawFindings.length > 0 && persistedFindings.length > 0 && rawFindingsWithoutRecords.length > 0
+  // The detail lists a bounded number of saved records; past it, an unlinked result may well have
+  // a record that was not listed, so it is not reported as unsaved.
+  const persistedFindingsTruncated = scan.findings_truncated === true
+  const partiallyPersistedFindings = !persistedFindingsTruncated && rawFindings.length > 0 && persistedFindings.length > 0 && rawFindingsWithoutRecords.length > 0
   const result = scanData.result || {}
   const triage = scanData.triage || {}
   const coverage = scanData.coverage || {}
@@ -3568,6 +3571,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 {rawOnlyFindings
                   ? 'These results came from scanner evidence but do not yet have saved finding records. They remain visible here; status and remediation actions become available after a record is linked.'
                   : `${rawFindingsWithoutRecords.length} of ${rawFindings.length} scan result(s) do not yet have saved finding records. Status and remediation actions are available only for linked findings.`}
+              </p>
+            )}
+            {persistedFindingsTruncated && scan.id && (
+              <p className="mt-2 text-sm text-gray-400">
+                Saved records are linked for the first {persistedFindings.length} of {Number(scan.findings_total || 0).toLocaleString()} findings of this scan.{' '}
+                <Link href={`/findings?scan_id=${encodeURIComponent(String(scan.id))}&freshness=all`} className="text-blue-300 underline hover:text-blue-200">Open all of them in Findings</Link>
               </p>
             )}
           </div>
