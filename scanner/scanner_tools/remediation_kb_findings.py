@@ -40,6 +40,42 @@ def _header(title: str, cwe: str, description: str, impact: str, steps: list[str
 
 
 FINDING_TYPE_REMEDIATIONS: dict[str, dict[str, Any]] = {
+    "html_comment_secret": {
+        "title": "Credentials Disclosed in HTML Comments",
+        "severity_base": "high",
+        "cwe": "CWE-615",
+        "owasp": "A05:2021 - Security Misconfiguration",
+        "description": "An HTML comment contains credential material. Comments remain readable in the response even when the browser does not display them.",
+        "business_impact": "Anyone who can retrieve the page can copy the disclosed credential material; whether it grants access requires separate validation.",
+        "remediation_steps": [
+            "Remove credential material from templates, generated HTML comments and other client-delivered assets",
+            "Keep server credentials in protected server-side configuration or a secret manager",
+            "Revoke or rotate the exposed credentials and review their use for unauthorized access",
+            "Remove affected cached responses and build artifacts, and prevent secrets from entering future builds",
+        ],
+        "code_examples": {},
+        "documentation_links": [],
+        "verification": "Repeat the authorized exposure check and inspect the returned HTML to confirm it no longer contains credential material",
+        "effort": "hours",
+    },
+    "credential_record_disclosure": {
+        "title": "Account Records Disclose Plaintext Passwords",
+        "severity_base": "critical",
+        "cwe": "CWE-200",
+        "owasp": "A01:2021 - Broken Access Control",
+        "description": "A response discloses multiple distinct account identities with plaintext password fields. This proves disclosure, not that those passwords were accepted by a login endpoint.",
+        "business_impact": "Disclosed account credentials can enable account takeover where still valid and expose users to credential reuse attacks.",
+        "remediation_steps": [
+            "Remove password fields from response serializers, account exports and debug output, including for authorized readers",
+            "Enforce authentication, account ownership and administrative authorization on account-data routes",
+            "Store passwords using an appropriate salted password hash rather than recoverable plaintext",
+            "Reset affected passwords, revoke affected sessions or tokens as appropriate, and investigate access to the disclosed records",
+        ],
+        "code_examples": {},
+        "documentation_links": [],
+        "verification": "Repeat the authorized disclosure check and confirm responses omit all password values and deny unauthorized account-data access",
+        "effort": "days",
+    },
     # ------------------------------------------------------------------ HTTP response headers
     "missing_referrer_policy": _header(
         "Referrer-Policy Header Missing", "CWE-200",
