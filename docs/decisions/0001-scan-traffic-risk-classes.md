@@ -63,15 +63,27 @@ approval receipt. It reads only lists the project authored and bundles, measures
 control before reporting anything, meters every question or request against its
 reservation, and stops between bounded batches when cancelled:
 
-- `dns.enumerate` asks the resolver for `<label>.<bound root>` names (it also needs
-  the subdomain-discovery authority) after a random-label wildcard baseline. Names
-  are leads recorded like passive discovery; nothing is connected to.
+- Guessing names needs apex authority: the subdomain-discovery authority and an
+  operator-declared apex, meaning the bound host is the root itself or its `www` name
+  and the root is a registrable domain. The registrable domain of a host bound below
+  it (`acme.vendor.example` binds `vendor.example`) is a provider's, so neither
+  `dns.enumerate` nor `vhost.discover` is planned, and the bound HTTP executor
+  refuses any other Host or SNI for it.
+- `dns.enumerate` asks the resolver for `<label>.<apex>` names after a random-label
+  wildcard baseline; when that baseline cannot be judged, resolving names are
+  withheld and counted. Names are leads recorded like passive discovery (target
+  source `dns-enumeration`); nothing is connected to.
 - `vhost.discover` requests `/` from the Scan's own frozen origin and address under
-  other names below the bound root (Host and TLS SNI), against the bound name and
-  random never-published names. A lead is never a route or a target.
+  other names below the apex (Host and TLS SNI), against the bound name and random
+  never-published names under each apex. It does not apply on a shared edge (a CDN
+  or hosting platform named by infrastructure intelligence or the bound name's
+  response headers), where the Host header selects other customers' sites. A lead is
+  never a route or a target.
 - `web.param_discover` sends GETs with random marker values for authored parameter
   names to routes discovery already observed, after a random-name control per route.
-  A confirmed name feeds the existing candidate pipeline for that route.
+  Routes named like actions (the crawler's action words) or carrying token-like
+  segments are skipped. A confirmed name feeds the existing candidate pipeline for
+  that route.
 
 ### State changing
 

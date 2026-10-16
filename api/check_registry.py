@@ -399,10 +399,11 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         aliases=("active_recon", "active-recon"),
         runnable=False,
         description=(
-            "Authorized active recon from bundled authored lists: DNS name enumeration under "
-            "the bound root (needs subdomain discovery), virtual-host discovery on the bound "
-            "address, and parameter discovery on observed routes. Wildcard, catch-all and "
-            "random-parameter controls; leads only, never findings or proof."
+            "Authorized active recon from bundled authored lists: DNS name enumeration and "
+            "virtual-host discovery under a declared apex (the target is the apex or its www "
+            "name; needs subdomain discovery; virtual hosts not on a shared edge), and "
+            "parameter discovery on observed routes. Wildcard, catch-all and random-parameter "
+            "controls; leads only, never findings or proof."
         ),
     ),
     CheckFamilySpec(

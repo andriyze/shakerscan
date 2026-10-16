@@ -13,7 +13,7 @@ import uuid
 import pytest
 
 from api.capabilities import recon_active as ra
-from api.capabilities.http import bound_virtual_host, execute_bound_http_request
+from api.capabilities.http import _host_port_suffix, bound_virtual_host, execute_bound_http_request
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from api.scan.action_plan import ScanActionPlanCompiler
@@ -38,7 +38,7 @@ def _target(**overrides) -> TargetBinding:
 
 
 def _plan(*, families=("recon", "recon_active"), subdomains=True, active=True,
-          budget: ScanBudget | None = None):
+          budget: ScanBudget | None = None, target: TargetBinding | None = None):
     policy = ScanPolicy(
         active_testing=active, subdomain_discovery=subdomains,
         include_families=tuple(families), approval_receipt_id=RECEIPT if active else None,
@@ -48,7 +48,7 @@ def _plan(*, families=("recon", "recon_active"), subdomains=True, active=True,
                                   requested_families=tuple(families),
                                   resolved_families=tuple(families))
     return ScanActionPlanCompiler().compile(
-        scan_id=SCAN_ID, execution_plan=execution, target_binding=_target())
+        scan_id=SCAN_ID, execution_plan=execution, target_binding=target or _target())
 
 
 def _counter():
@@ -98,10 +98,35 @@ def test_plan_adds_recon_actions_only_when_explicitly_selected():
     assert not without & {"discover.parameters", "discover.virtual_hosts", "discover.dns_names"}
 
 
-def test_dns_enumeration_needs_subdomain_discovery_authority():
+def test_name_guessing_needs_subdomain_discovery_authority():
     ids = {action.action_id for action in _plan(subdomains=False).actions}
-    assert "discover.dns_names" not in ids
-    assert {"discover.parameters", "discover.virtual_hosts"} <= ids
+    assert not {"discover.dns_names", "discover.virtual_hosts"} & ids
+    assert "discover.parameters" in ids
+
+
+def test_a_tenant_on_a_vendor_domain_plans_no_name_guessing():
+    # acme.vendor.test binds the registrable domain vendor.test: the provider's, not the
+    # operator's. Neither Host/SNI nor DNS guessing is planned under it.
+    tenant = _target(canonical_host="acme.vendor.test",
+                     allowed_origins=("https://acme.vendor.test",),
+                     allowed_root_domains=("vendor.test",))
+    assert tenant.declared_apex_roots() == ()
+    ids = {action.action_id for action in _plan(target=tenant).actions}
+    assert not {"discover.dns_names", "discover.virtual_hosts"} & ids
+    assert "discover.parameters" in ids
+
+
+def test_name_guessing_is_planned_only_under_the_declared_apex():
+    actions = {a.action_id: a for a in _plan().actions}
+    assert actions["discover.virtual_hosts"].capability_args["root_domains"] == ("example.test",)
+    assert actions["discover.dns_names"].capability_args["root_domains"] == ("example.test",)
+    apex = _target(canonical_host="example.test", allowed_origins=("https://example.test",))
+    assert apex.declared_apex_roots() == ("example.test",)
+    # A host below the apex (other than www) or a root that is not a registrable domain
+    # declares nothing.
+    assert _target(canonical_host="app.example.test").declared_apex_roots() == ()
+    assert _target(canonical_host="console.aws.example.test",
+                   allowed_root_domains=("console.aws.example.test",)).declared_apex_roots() == ()
 
 
 def test_corporate_content_list_is_pinned_only_with_active_authority():
@@ -166,6 +191,23 @@ def test_dns_enumeration_suppresses_wildcard_echoes_but_keeps_distinct_aliases()
     assert hosts == ["vpn.wild.test"]
     root = [o for o in result["observations"] if o["kind"] == "dns_enumeration"][0]["roots"][0]
     assert root["wildcard_suppressed"] == 2 and root["wildcards"][0]["pattern"] == "*.wild.test"
+
+
+def test_dns_enumeration_withholds_names_when_the_wildcard_baseline_is_unjudged():
+    # Both random-label probes hit a resolver fault: a resolving name may be nothing but a
+    # wildcard's answer, so none is reported as found.
+    probes = {f"{index:016x}.example.test" for index in range(2)}
+    result = asyncio.run(ra.enumerate_dns_names(
+        roots=["example.test"], labels=["www", "vpn"],
+        answer=_resolver({"www.example.test": (["192.0.2.1"], None),
+                          "vpn.example.test": (["192.0.2.2"], None)}, fail=probes),
+        name_limit=50, deadline_seconds=10, cancelled=lambda: False, token=_counter(),
+    ))
+    assert [o for o in result["observations"] if o["kind"] == "subdomain"] == []
+    root = [o for o in result["observations"] if o["kind"] == "dns_enumeration"][0]["roots"][0]
+    assert root["wildcard_judged"] is False and root["found"] == 0
+    assert root["withheld_wildcard_unjudged"] == 2
+    assert result["partial"] is True and result["status"] == "partial"
 
 
 def test_dns_enumeration_respects_the_reserved_name_budget():
@@ -248,7 +290,80 @@ def test_vhost_lead_must_differ_from_baseline_and_every_random_control():
     assert leads == ["admin.example.test", "intranet.example.test"]
     assert "www.example.test" not in asked[3:]  # the bound name is the baseline, not a guess
     summary = [o for o in result["observations"] if o["kind"] == "virtual_host_discovery"][0]
-    assert summary["controls"]["catch_all"] is True and summary["leads"] == 2
+    assert summary["controls"]["catch_all"] == {"example.test": True} and summary["leads"] == 2
+
+
+def test_each_root_has_its_own_catch_all_controls():
+    # The server answers every unknown name under other.test with one page; under example.test
+    # it has none. A name under other.test answered with that page is not a lead.
+    other = _sig(body=b"<h1>Parked</h1>" * 40)
+
+    async def request(host):
+        asked.append(host)
+        if host and host.endswith(".other.test"):
+            return _sig(body=b"<h1>Portal</h1>" * 120) if host == "portal.other.test" else other
+        return _sig(body=b"<h1>Intranet</h1>" * 20) if host == "intranet.example.test" else _sig()
+
+    asked: list = []
+    result = asyncio.run(ra.discover_virtual_hosts(
+        canonical_host="www.example.test", roots=["example.test", "other.test"],
+        labels=["intranet", "vpn", "portal"], request=request, request_limit=60,
+        deadline_seconds=10, cancelled=lambda: False, token=_counter()))
+    leads = sorted(o["host"] for o in result["observations"] if o["kind"] == "virtual_host")
+    assert leads == ["intranet.example.test", "portal.other.test"]
+    controls = [host for host in asked[1:5]]
+    assert sum(1 for host in controls if host.endswith(".example.test")) == ra.VHOST_CONTROLS
+    assert sum(1 for host in controls if host.endswith(".other.test")) == ra.VHOST_CONTROLS
+    summary = [o for o in result["observations"] if o["kind"] == "virtual_host_discovery"][0]
+    assert summary["controls"]["catch_all"] == {"example.test": True, "other.test": False}
+
+
+def test_vhost_discovery_does_not_apply_on_a_shared_edge():
+    asked: list = []
+
+    async def request(host):
+        asked.append(host)
+        return ra.ResponseSignature(200, 10, "0" * 64, None, edge=ra.edge_from_headers(
+            {"server": "cloudflare", "cf-ray": "8a1b2c3d4e5f-AMS"}))
+
+    result = asyncio.run(ra.discover_virtual_hosts(
+        canonical_host="www.example.test", roots=["example.test"], labels=["intranet"],
+        request=request, request_limit=40, deadline_seconds=10, cancelled=lambda: False,
+        token=_counter()))
+    assert asked == [None]  # the bound name only
+    summary = result["observations"][-1]
+    assert result["status"] == "success" and summary["skipped"] == "not_applicable"
+    assert summary["reason"] == "shared_edge_or_cdn" and summary["edge"] == "Cloudflare"
+    assert summary["edge_basis"] == "response_headers"
+
+
+def test_infrastructure_intelligence_cdn_skips_vhost_discovery_before_any_request():
+    edge = ra.edge_from_infrastructure([{
+        "kind": "infrastructure_intelligence",
+        "addresses": [{"address": "192.0.2.10", "asn": {"asn": "13335", "name": "CLOUDFLARENET"}}],
+    }])
+    assert edge == "Cloudflare"
+    assert ra.edge_from_infrastructure([{
+        "kind": "infrastructure_intelligence",
+        "addresses": [{"address": "192.0.2.10", "asn": {"asn": "64500", "name": "ACME-CORP"}}],
+    }]) is None
+
+    async def request(host):
+        raise AssertionError("no request on a shared edge")
+
+    result = asyncio.run(ra.discover_virtual_hosts(
+        canonical_host="www.example.test", roots=["example.test"], labels=["intranet"],
+        request=request, request_limit=40, deadline_seconds=10, cancelled=lambda: False,
+        edge=edge))
+    assert result["budget_consumed"]["http_requests"] == 0
+    assert result["observations"][-1]["edge_basis"] == "infrastructure_intelligence"
+
+
+def test_edge_headers_name_cdns_and_shared_platforms_only():
+    assert ra.edge_from_headers({"x-amz-cf-id": "abc"}) == "AWS CloudFront"
+    assert ra.edge_from_headers({"x-vercel-id": "fra1::abc"}) == "Vercel"
+    assert ra.edge_from_headers({"server": "nginx/1.25.3"}) is None
+    assert ra.edge_from_headers({}) is None
 
 
 def test_catch_all_and_self_redirecting_servers_produce_no_leads():
@@ -303,6 +418,15 @@ def test_bound_request_admits_only_virtual_hosts_under_the_bound_root():
     assert bound_virtual_host("example.test", target) is None
     assert bound_virtual_host("intranet.evil.test", target) is None
     assert bound_virtual_host("notexample.test", target) is None
+    # A tenant on a provider's domain declares no apex: no other name is ever sent.
+    tenant = _target(canonical_host="acme.vendor.test",
+                     allowed_origins=("https://acme.vendor.test",),
+                     allowed_root_domains=("vendor.test",))
+    assert bound_virtual_host("vpn.vendor.test", tenant) is None
+    result = asyncio.run(execute_bound_http_request(
+        "https://acme.vendor.test", {"method": "GET", "path": "/"}, target=tenant,
+        virtual_host="vpn.vendor.test"))
+    assert result["ok"] is False and result["error"].startswith("scope:")
     result = asyncio.run(execute_bound_http_request(
         "https://www.example.test", {"method": "GET", "path": "/"}, target=target,
         virtual_host="intranet.evil.test"))
@@ -367,14 +491,26 @@ def test_parameter_routes_are_observed_same_origin_gets_only():
         {"kind": "discovered_route", "method": "GET", "url": "https://other.example.test/x"},
         {"kind": "discovered_route", "method": "GET", "url": "https://www.example.test/app.js"},
         {"kind": "discovered_route", "method": "GET", "url": "https://www.example.test/logout"},
+        {"kind": "discovered_route", "method": "GET", "url": "https://www.example.test/api/logoutUser"},
+        {"kind": "discovered_route", "method": "GET",
+         "url": "https://www.example.test/account/close-account"},
+        {"kind": "discovered_route", "method": "GET",
+         "url": "https://www.example.test/orders/create"},
+        {"kind": "discovered_route", "method": "GET",
+         "url": "https://www.example.test/confirm/Zx8kQ2mP9vLr4TbW7yNc"},
+        {"kind": "discovered_route", "method": "GET",
+         "url": "https://www.example.test/u/5f2b9c1e8a7d6b4c3e2f1a09"},
+        {"kind": "discovered_route", "method": "GET", "url": "https://www.example.test/runbook"},
         {"kind": "content_discovery", "url": "https://www.example.test/report", "status": 200,
          "length": 900},
         {"kind": "content_discovery", "url": "https://www.example.test/gone", "status": 404},
         {"kind": "content_discovery", "url": "https://www.example.test/.shakerscan-absent-0",
          "status": 200, "length": 12, "negative_control": True},
     ]
+    # Action words (the crawler's own list, camelCase included) and token-like segments
+    # (confirmation and magic links) are never probed; a word inside another word is fine.
     assert ra.parameter_routes(observations, origin="https://www.example.test") == [
-        "/", "/search", "/report"]
+        "/", "/search", "/runbook", "/report"]
 
 
 def test_soft_404_content_hits_are_not_parameter_routes():
@@ -435,3 +571,14 @@ def test_report_lists_recon_leads_and_enumerated_names_with_their_source():
     assert discovery["virtual_hosts"]["items"][0]["host"] == "intranet.example.test"
     assert discovery["virtual_hosts"]["scope"].startswith("leads")
     assert discovery["parameters"]["items"] == [{"path": "/search", "parameter": "q"}]
+
+
+# --- transport -------------------------------------------------------------
+
+
+def test_virtual_host_header_carries_the_requested_port_only_when_it_is_not_default():
+    assert _host_port_suffix("https://www.example.test/") == ""
+    assert _host_port_suffix("https://www.example.test:443/") == ""
+    assert _host_port_suffix("http://www.example.test:80/") == ""
+    assert _host_port_suffix("https://www.example.test:8443/x") == ":8443"
+    assert _host_port_suffix("http://192.0.2.10:8080/") == ":8080"

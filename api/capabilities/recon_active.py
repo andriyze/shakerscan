@@ -2,8 +2,8 @@
 
 These run only in the opt-in ``recon_active`` Scan family. It is outside every preset, so a
 saved schedule or policy never gains it by upgrading; it needs the Scan's active-testing
-authority and a target-bound approval receipt, and DNS enumeration additionally needs the
-policy's subdomain discovery. Each operation:
+authority and a target-bound approval receipt, and DNS enumeration and virtual-host discovery
+additionally need apex authority (below). Each operation:
 
 * reads a fixed list the project authored and bundles (``scanner/wordlists``), never a list a
   caller supplies, and names its version and digest in the receipt;
@@ -12,15 +12,19 @@ policy's subdomain discovery. Each operation:
 * measures a baseline before it reports anything: random never-published DNS labels (wildcard
   DNS), random never-published virtual-host names (a catch-all server), and a random parameter
   name (a page that echoes or reacts to any parameter);
+* guesses names (DNS or Host/SNI) only under an apex the Scan holds authority for: the
+  policy's subdomain discovery and an operator-declared apex (``runtime.models.apex_recon_roots``),
+  never the registrable domain of a host bound below it; virtual-host discovery does not apply
+  on a shared edge (CDN or hosting platform);
 * reports leads only. An enumerated name is a DNS observation recorded like passive discovery
   (a separate target for its own authorized Scan). A virtual host is a name the bound address
   answered differently for; it never becomes a route or a target. A parameter is a name a route
   observably read; it becomes an input to this Scan's own existing candidate pipeline for that
   already observed route, and is never proof of a vulnerability.
 
-Traffic stays on the binding: DNS questions are only for names under the Scan's bound root
-domains; HTTP goes only to the Scan's frozen origin and addresses (``execute_bound_http_request``
-with a ``virtual_host`` that must itself be under a bound root). Pure decision logic is separated
+Traffic stays on the binding: DNS questions are only for names under the Scan's declared apex
+roots; HTTP goes only to the Scan's frozen origin and addresses (``execute_bound_http_request``
+with a ``virtual_host`` that must itself be under a declared apex of the binding). Pure decision logic is separated
 from I/O so the controls are unit-testable without a network.
 """
 
@@ -42,9 +46,15 @@ try:
 except ModuleNotFoundError:  # package import (api.capabilities.recon_active)
     from .. import discovery_wildcards, target_resolution
 try:
+    from scanner_tools.asn_discovery import identify_hosting_provider
+    from scanner_tools.client_side import detect_server_versions
     from scanner_tools.discovered_names import canonical_name, name_under_apex, subdomain_of
+    from scanner_tools.unsafe_actions import path_may_change_state
 except ModuleNotFoundError:  # package import
+    from scanner.scanner_tools.asn_discovery import identify_hosting_provider
+    from scanner.scanner_tools.client_side import detect_server_versions
     from scanner.scanner_tools.discovered_names import canonical_name, name_under_apex, subdomain_of
+    from scanner.scanner_tools.unsafe_actions import path_may_change_state
 
 Cancelled = Callable[[], bool]
 
@@ -62,9 +72,14 @@ _STATIC_SUFFIXES = (
     ".js", ".mjs", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
     ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".zip", ".gz", ".mp4", ".mp3",
 )
-# Routes a parameter probe never touches, even with a meaningless value.
-_AVOIDED_PATH_WORDS = ("logout", "signout", "sign-out", "log-out", "delete", "remove",
-                       "destroy", "unsubscribe", "reset", "revoke", "cancel")
+# Response headers a shared edge (CDN or hosting platform) answers with; read only to decide
+# whether virtual-host discovery applies, never recorded.
+EDGE_HEADERS = (
+    "server", "via", "cf-ray", "cf-cache-status", "x-served-by", "x-amz-cf-id", "x-amz-cf-pop",
+    "x-akamai-transformed", "x-vercel-id", "x-vercel-cache", "x-nf-request-id",
+)
+# Hosting platforms that route every customer's name on one shared edge by Host.
+_SHARED_PLATFORMS = frozenset({"Vercel", "Netlify", "Heroku"})
 
 
 # ---------------------------------------------------------------------------------------------
@@ -193,9 +208,17 @@ async def enumerate_dns_names(
             evidence=None, resolves=target_resolution.RESOLVES,
         ) if wildcards else (set(), {})
         records, _notes = discovery_wildcards.wildcard_summary(wildcards, per_parent)
+        # Every enumerated name sits directly under the root, so the root's probes judge them
+        # all. When those probes could not be judged (a resolver fault, the deadline), a
+        # resolving name may be nothing but a wildcard's answer: withheld, counted, never found.
+        wildcard_judged = root in judged_parents
         found = 0
+        withheld = 0
         for name, status, addresses, first_hop in names:
             if status != target_resolution.RESOLVES or name in suppressed:
+                continue
+            if not wildcard_judged:
+                withheld += 1
                 continue
             found += 1
             observations.append({
@@ -213,14 +236,18 @@ async def enumerate_dns_names(
             "no_address": statuses.count(target_resolution.NO_ADDRESS),
             "unjudged": statuses.count(target_resolution.UNKNOWN),
             "not_checked": statuses.count(target_resolution.NOT_CHECKED) + len(planned) - len(names),
-            "wildcard_judged": root in judged_parents,
+            "wildcard_judged": wildcard_judged,
             "wildcards": records,
             "wildcard_suppressed": len(suppressed),
+            "withheld_wildcard_unjudged": withheld,
             "beyond_budget": max(0, len(candidates) - len(planned)),
         })
         if stopped in {"cancelled", "deadline"}:
             break
-    partial = stopped is not None or any(item["beyond_budget"] or item["not_checked"] for item in summaries)
+    partial = stopped is not None or any(
+        item["beyond_budget"] or item["not_checked"] or item["withheld_wildcard_unjudged"]
+        for item in summaries
+    )
     observations.append({
         "kind": "dns_enumeration",
         "wordlist": dict(wordlist or {}),
@@ -248,6 +275,39 @@ class ResponseSignature:
     length: int
     sha256: str
     location: str | None = None
+    # The shared edge (CDN or hosting platform) the response came through, when its headers
+    # name one. Not part of the comparison.
+    edge: str | None = None
+
+
+def edge_from_headers(headers: Mapping[str, Any] | None) -> str | None:
+    """The CDN or shared hosting platform a response names in its headers (the scanner's
+    server-header classifier), else None."""
+    if not headers:
+        return None
+    detected = detect_server_versions(dict(headers))
+    cdn = detected.get("cdn") if isinstance(detected.get("cdn"), Mapping) else None
+    if cdn and cdn.get("name"):
+        return str(cdn["name"])
+    platform = detected.get("platform") if isinstance(detected.get("platform"), Mapping) else None
+    if platform and platform.get("name") in _SHARED_PLATFORMS:
+        return str(platform["name"])
+    return None
+
+
+def edge_from_infrastructure(observations: Iterable[Mapping[str, Any]]) -> str | None:
+    """The CDN infrastructure intelligence attributes a bound address to (by its origin AS)."""
+    for item in observations:
+        if not isinstance(item, Mapping) or item.get("kind") != "infrastructure_intelligence":
+            continue
+        for row in item.get("addresses") or ():
+            asn = row.get("asn") if isinstance(row, Mapping) else None
+            if not isinstance(asn, Mapping):
+                continue
+            provider = identify_hosting_provider(str(asn.get("asn") or ""), str(asn.get("name") or ""))
+            if provider.get("is_cdn"):
+                return str(provider.get("provider") or "cdn")
+    return None
 
 
 def _distinct(left: ResponseSignature, right: ResponseSignature) -> bool:
@@ -301,12 +361,17 @@ async def discover_virtual_hosts(
     cancelled: Cancelled,
     token: Callable[[int], str] = secrets.token_hex,
     wordlist: Mapping[str, Any] | None = None,
+    edge: str | None = None,
 ) -> dict[str, Any]:
-    """Ask the bound address for ``/`` under other names below the bound root.
+    """Ask the bound address for ``/`` under other names below the apex roots given.
 
     A name is a lead only when its answer differs from the bound name's own answer and from
-    every random never-published name (the server's catch-all), with a lead status, and a second
-    request reproduces it. ``request(None)`` is the bound name.
+    every random never-published name under its own root (that root's catch-all), with a lead
+    status, and a second request reproduces it. ``request(None)`` is the bound name.
+
+    On a shared edge (a CDN or hosting platform, named by ``edge`` from infrastructure
+    intelligence or by the bound name's own response headers) the Host header selects among
+    other customers' sites, so nothing is asked beyond the bound name: not applicable.
     """
     started = time.monotonic()
     stop_at = started + max(1.0, float(deadline_seconds))
@@ -331,22 +396,39 @@ async def discover_virtual_hosts(
                 "observations": observation.pop("_leads") + [observation],
                 "budget_consumed": {"http_requests": used, "tool_wall_seconds": _elapsed(started)}}
 
+    def shared_edge(name: str, basis: str) -> dict[str, Any]:
+        return finish("success", {**summary, "tested": 0, "skipped": "not_applicable",
+                                  "reason": "shared_edge_or_cdn", "edge": name[:80],
+                                  "edge_basis": basis})
+
     summary: dict[str, Any] = {"kind": "virtual_host_discovery", "wordlist": dict(wordlist or {}),
-                               "bound_host": canonical, "_leads": []}
-    if not bound or limit < 2 + VHOST_CONTROLS:
+                               "bound_host": canonical, "roots": bound, "_leads": []}
+    if edge:
+        return shared_edge(edge, "infrastructure_intelligence")
+    if not bound or limit < 2 + VHOST_CONTROLS * len(bound):
         return finish("success", {**summary, "tested": 0, "skipped": "insufficient_budget_or_scope"})
     baseline = await ask(None)
-    controls = [await ask(f"{token(8)}.{bound[0]}") for _ in range(VHOST_CONTROLS)]
-    if baseline is None or any(item is None for item in controls):
+    if baseline is not None and baseline.edge:
+        return shared_edge(baseline.edge, "response_headers")
+    # Each root gets its own catch-all controls: a server's answer for an unknown name under one
+    # apex says nothing about its answer under another.
+    controls: dict[str, list[ResponseSignature | None]] = {}
+    if baseline is not None:
+        for root in bound:
+            controls[root] = [await ask(f"{token(8)}.{root}") for _ in range(VHOST_CONTROLS)]
+    if baseline is None or any(item is None for rows in controls.values() for item in rows):
         return finish("failed", {**summary, "tested": 0, "error": "baseline_unavailable"})
-    candidates = [
-        name for name in dict.fromkeys(
-            subdomain_of(f"{label}.{root}", root) for root in bound for label in labels
-        ) if name and name != canonical
-    ]
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for root in bound:
+        for label in labels:
+            name = subdomain_of(f"{label}.{root}", root)
+            if name and name != canonical and name not in seen:
+                seen.add(name)
+                candidates.append((name, root))
     room = max(0, limit - used - VHOST_CONFIRM_LIMIT)
-    tested: list[tuple[str, ResponseSignature]] = []
-    for name in candidates[:room]:
+    tested: list[tuple[str, str, ResponseSignature]] = []
+    for name, root in candidates[:room]:
         if cancelled():
             stopped = "cancelled"
             break
@@ -355,12 +437,13 @@ async def discover_virtual_hosts(
             break
         answer = await ask(name)
         if answer is not None:
-            tested.append((name, answer))
+            tested.append((name, root, answer))
     leads: list[dict[str, Any]] = []
-    for name, answer in tested:
+    for name, root, answer in tested:
         if answer.status not in LEAD_STATUSES:
             continue
-        if not _distinct(answer, baseline) or any(not _distinct(answer, item) for item in controls):
+        if not _distinct(answer, baseline) or any(
+                not _distinct(answer, item) for item in controls[root] if item is not None):
             continue
         if len(leads) >= VHOST_CONFIRM_LIMIT or used >= limit or cancelled():
             stopped = stopped or "confirmation_budget"
@@ -380,8 +463,11 @@ async def discover_virtual_hosts(
         **summary,
         "tested": len(tested), "candidates_in_list": len(candidates), "beyond_budget": beyond,
         "errors": errors, "leads": len(leads), "stopped": stopped,
-        "controls": {"random_names": VHOST_CONTROLS,
-                     "catch_all": all(not _distinct(item, baseline) for item in controls)},
+        "controls": {
+            "random_names_per_root": VHOST_CONTROLS,
+            "catch_all": {root: all(not _distinct(item, baseline) for item in rows if item)
+                          for root, rows in controls.items()},
+        },
     })
 
 
@@ -443,8 +529,10 @@ def parameter_routes(
             continue
         path = parts.path or "/"
         lowered = path.lower()
+        # A route whose name is an action (the crawler's own action words) or that carries a
+        # token-like segment (a magic, confirmation or unsubscribe link) is never probed.
         if (lowered.endswith(_STATIC_SUFFIXES) or "<redacted>" in lowered or "{" in path
-                or any(word in lowered for word in _AVOIDED_PATH_WORDS)):
+                or path_may_change_state(path)):
             continue
         paths.append(path)
     return list(dict.fromkeys(paths))[:max(1, int(limit))]
@@ -586,6 +674,7 @@ async def discover_parameters(
 
 __all__ = [
     "BundledList", "DNS_WORDLIST", "PARAMETER_WORDLIST", "ParameterResponse", "ResponseSignature",
-    "VHOST_WORDLIST", "discover_parameters", "discover_virtual_hosts", "enumerate_dns_names",
+    "EDGE_HEADERS", "VHOST_WORDLIST", "discover_parameters", "discover_virtual_hosts",
+    "edge_from_headers", "edge_from_infrastructure", "enumerate_dns_names",
     "load_bundled_list", "normalized_location", "parameter_routes",
 ]

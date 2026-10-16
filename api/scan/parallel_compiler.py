@@ -967,9 +967,10 @@ class ParallelActionPlanCompiler:
         if include_network:
             names.extend(("ports.discover", "service.fingerprint"))
         if include_recon_active:
-            names.extend(("web.param_discover", "vhost.discover"))
+            names.append("web.param_discover")
+            # Name guessing (Host/SNI and DNS) needs subdomain-discovery apex authority.
             if include_subdomains:
-                names.append("dns.enumerate")
+                names.extend(("vhost.discover", "dns.enumerate"))
         totals: dict[str, int] = {}
         for name in names:
             try:

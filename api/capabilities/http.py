@@ -423,16 +423,29 @@ def _bound_redirect_url(
 
 
 def bound_virtual_host(value: Any, target: TargetBinding) -> str | None:
-    """The canonical name when it lies strictly below a root domain of the binding."""
+    """The canonical name when it lies strictly below an apex the binding declares.
+
+    Only an operator-declared apex (``TargetBinding.declared_apex_roots``) admits other names:
+    the registrable domain of a host bound below it (``zendesk.com`` for ``acme.zendesk.com``)
+    belongs to a provider, and its other names are other tenants on a shared edge.
+    """
     try:
         from scanner_tools.discovered_names import subdomain_of
     except ModuleNotFoundError:  # package import
         from scanner.scanner_tools.discovered_names import subdomain_of
-    for root in target.allowed_root_domains:
+    for root in target.declared_apex_roots():
         name = subdomain_of(value, root)
         if name:
             return name
     return None
+
+
+def _host_port_suffix(url: str) -> str:
+    """``:port`` for a Host header when the URL names a non-default port, else empty."""
+    parsed = urllib.parse.urlsplit(url)
+    port = parsed.port
+    default = 443 if parsed.scheme.lower() == "https" else 80
+    return f":{port}" if port is not None and port != default else ""
 
 
 def request_error_class(exc: BaseException) -> str:
@@ -646,7 +659,7 @@ async def execute_bound_http_request(
                     )
                     if virtual_host is not None:
                         sni_hostname = virtual_host
-                        host_header = virtual_host + host_header[len(target.canonical_host or ""):]
+                        host_header = virtual_host + _host_port_suffix(current_url)
                     request = client.build_request(
                         current_method,
                         pinned_url,

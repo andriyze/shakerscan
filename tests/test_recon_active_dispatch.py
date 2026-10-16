@@ -25,6 +25,15 @@ TARGET = TargetBinding(
     allowed_addresses=("192.0.2.10",),
     allowed_root_domains=("example.test",),
 )
+# The operator declared the apex itself: name guessing under it is authorized.
+APEX = TargetBinding(
+    target_id="target-2",
+    target_kind="web",
+    canonical_host="example.test",
+    allowed_origins=("https://example.test",),
+    allowed_addresses=("192.0.2.10",),
+    allowed_root_domains=("example.test",),
+)
 
 
 def _action(
@@ -135,14 +144,16 @@ ACTIVE = ScanPolicy(active_testing=True, subdomain_discovery=True,
                     include_families=("recon_active",), approval_receipt_id="receipt-1")
 
 
-def _plan(*actions):
+def _plan(*actions, target=TARGET):
     return ScanActionPlan(scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
-                          target_binding_digest=TARGET.digest, actions=tuple(actions))
+                          target_binding_digest=target.digest, actions=tuple(actions))
 
 
-def _run(action, *, policy=ACTIVE, backend=None, cancelled=None):
-    plan = _plan(action)
-    dispatcher = _dispatcher(plan, backend or Backend(), policy=policy)
+def _run(action, *, policy=ACTIVE, backend=None, cancelled=None, target=TARGET, extra=()):
+    plan = _plan(*extra, action, target=target)
+    host = target.canonical_host
+    dispatcher = _dispatcher(plan, backend or Backend(), policy=policy, target=target,
+                             target_url=f"https://{host}/")
     if cancelled is not None:
         dispatcher.cancelled = cancelled
     return asyncio.run(dispatcher(action, _lease(plan, action), _noop))
@@ -160,10 +171,30 @@ def test_without_active_approval_nothing_is_asked(monkeypatch):
 
 
 def test_dns_enumeration_needs_subdomain_discovery(monkeypatch):
-    action = _action("discover.dns_names", "dns.enumerate", 0)
+    action = _action("discover.dns_names", "dns.enumerate", 0, target=APEX)
     policy = ScanPolicy(active_testing=True, include_families=("recon_active",),
                         approval_receipt_id="receipt-1")
-    assert _run(action, policy=policy).status == "skipped"
+    assert _run(action, policy=policy, target=APEX).status == "skipped"
+
+
+def test_name_guessing_is_refused_without_apex_authority(monkeypatch):
+    # app.example.test binds example.test only as its registrable domain (it may be one tenant
+    # of a provider's domain): no DNS question and no other Host is ever sent, even when the
+    # action is in the plan with arguments naming the root.
+    async def answer(_name):
+        raise AssertionError("no DNS question without apex authority")
+
+    async def bound(*_args, **_kwargs):
+        raise AssertionError("no request without apex authority")
+
+    monkeypatch.setattr(target_resolution, "system_answer", answer)
+    monkeypatch.setattr(recon_actions, "execute_bound_http_request", bound)
+    for action_id, capability in (("discover.dns_names", "dns.enumerate"),
+                                  ("discover.virtual_hosts", "vhost.discover")):
+        action = _action(action_id, capability, 0,
+                         capability_args={"root_domains": ["example.test"]})
+        receipt = _run(action)
+        assert receipt.status == "skipped" and receipt.errors == ("not_applicable",)
 
 
 def test_dns_enumeration_meters_questions_and_reports_names(monkeypatch):
@@ -174,8 +205,8 @@ def test_dns_enumeration_meters_questions_and_reports_names(monkeypatch):
         return (["192.0.2.5"], None) if name in {"vpn.example.test", "mail.example.test"} else ([], None)
 
     monkeypatch.setattr(target_resolution, "system_answer", answer)
-    action = _action("discover.dns_names", "dns.enumerate", 0)
-    receipt = _run(action)
+    action = _action("discover.dns_names", "dns.enumerate", 0, target=APEX)
+    receipt = _run(action, target=APEX)
     assert receipt.status in {"success", "partial"}
     hosts = {row["host"] for row in receipt.observations if row.get("kind") == "subdomain"}
     assert hosts == {"vpn.example.test", "mail.example.test"}
@@ -194,12 +225,12 @@ def test_cancelled_dns_enumeration_settles_cancelled_with_what_it_spent(monkeypa
         return [], None
 
     monkeypatch.setattr(target_resolution, "system_answer", answer)
-    action = _action("discover.dns_names", "dns.enumerate", 0)
+    action = _action("discover.dns_names", "dns.enumerate", 0, target=APEX)
 
     def cancelled():  # the operator cancels once the first batch has been asked
         return bool(asked)
 
-    receipt = _run(action, cancelled=cancelled)
+    receipt = _run(action, cancelled=cancelled, target=APEX)
     assert receipt.status == "cancelled"
     assert 0 < receipt.budget_consumed["hosts_attempted"] < action.requested_budget["hosts_attempted"]
 
@@ -227,13 +258,50 @@ def test_vhost_discovery_uses_the_bound_origin_and_reports_only_confirmed_leads(
         return {"ok": True}
 
     monkeypatch.setattr(recon_actions, "execute_bound_http_request", bound)
-    action = _action("discover.virtual_hosts", "vhost.discover", 0)
-    receipt = _run(action)
+    action = _action("discover.virtual_hosts", "vhost.discover", 0, target=APEX)
+    receipt = _run(action, target=APEX)
     leads = [row["host"] for row in receipt.observations if row.get("kind") == "virtual_host"]
     assert leads == ["intranet.example.test"]
-    assert {call[0] for call in calls} == {"https://app.example.test"}
-    assert all(call[3] is False and call[4] == TARGET.digest for call in calls)
+    assert {call[0] for call in calls} == {"https://example.test"}
+    assert all(call[3] is False and call[4] == APEX.digest for call in calls)
     assert receipt.budget_consumed["http_requests"] == len(calls) <= action.requested_budget["http_requests"]
+
+
+def test_vhost_discovery_skips_a_bound_address_infrastructure_places_on_a_cdn(monkeypatch):
+    async def bound(*_args, **_kwargs):
+        raise AssertionError("no request on a shared edge")
+
+    monkeypatch.setattr(recon_actions, "execute_bound_http_request", bound)
+    infra = _action("baseline.infrastructure", "infrastructure.inspect", 0, target=APEX)
+    action = _action("discover.virtual_hosts", "vhost.discover", 1, target=APEX)
+    backend = Backend(observations={"baseline.infrastructure": ({
+        "kind": "infrastructure_intelligence",
+        "addresses": [{"address": "192.0.2.10", "asn": {"asn": "54113", "name": "FASTLY"}}],
+    },)})
+    receipt = _run(action, target=APEX, backend=backend, extra=(infra,))
+    summary = [row for row in receipt.observations if row.get("kind") == "virtual_host_discovery"][0]
+    assert summary["skipped"] == "not_applicable" and summary["reason"] == "shared_edge_or_cdn"
+    assert summary["edge"] == "Fastly" and receipt.budget_consumed["http_requests"] == 0
+
+
+def test_vhost_discovery_reads_edge_headers_of_the_bound_name(monkeypatch):
+    calls = []
+
+    async def bound(origin, args, *, private_response_sink, private_response_headers=(),
+                    virtual_host=None, **_kwargs):
+        calls.append((virtual_host, tuple(private_response_headers)))
+        response = _Private(200, b"default")
+        response._headers = {"server": "cloudflare", "cf-ray": "8a1b-AMS"}
+        private_response_sink(response)
+        return {"ok": True}
+
+    monkeypatch.setattr(recon_actions, "execute_bound_http_request", bound)
+    action = _action("discover.virtual_hosts", "vhost.discover", 0, target=APEX)
+    receipt = _run(action, target=APEX)
+    assert [call[0] for call in calls] == [None]
+    assert "cf-ray" in calls[0][1]
+    summary = [row for row in receipt.observations if row.get("kind") == "virtual_host_discovery"][0]
+    assert summary["reason"] == "shared_edge_or_cdn" and summary["edge"] == "Cloudflare"
 
 
 def test_parameter_discovery_reads_observed_routes_and_meters_requests(monkeypatch):

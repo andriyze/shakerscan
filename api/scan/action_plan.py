@@ -18,7 +18,7 @@ try:
         HTTP_CREDENTIAL_KINDS,
         normalize_credential_kind,
     )
-    from runtime.models import TargetBinding
+    from runtime.models import TargetBinding, apex_recon_roots
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.budgets import BUDGET_DIMENSIONS
     from ..runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityRegistry
@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         HTTP_CREDENTIAL_KINDS,
         normalize_credential_kind,
     )
-    from ..runtime.models import TargetBinding
+    from ..runtime.models import TargetBinding, apex_recon_roots
 
 try:
     from runtime.browser_login_contract import browser_login_action_arguments
@@ -1387,16 +1387,20 @@ class ScanActionPlanCompiler:
                 {"route_refs": list(route_producers)},
                 dependencies=route_producers, required=recon_required, supporting=True,
             )
-            add(
-                "discover.virtual_hosts", "discover_network", "vhost.discover", {},
-                dependencies=primary_dependency, supporting=True,
-            )
-            if policy.subdomain_discovery and target_binding.allowed_root_domains:
-                # DNS enumeration is name discovery under the apex: it needs the same
-                # subdomain-discovery authority as the passive sources.
+            # Guessing names under a root (Host/SNI or DNS) needs apex authority: the policy's
+            # subdomain discovery and an operator-declared apex. The registrable domain of a
+            # host bound below it (acme.zendesk.com -> zendesk.com) is a provider's, not the
+            # operator's, so neither action is planned for it.
+            apex_roots = apex_recon_roots(policy, target_binding)
+            if apex_roots:
+                add(
+                    "discover.virtual_hosts", "discover_network", "vhost.discover",
+                    {"root_domains": list(apex_roots)},
+                    dependencies=primary_dependency, supporting=True,
+                )
                 add(
                     "discover.dns_names", "discover_network", "dns.enumerate",
-                    {"root_domains": list(target_binding.allowed_root_domains)},
+                    {"root_domains": list(apex_roots)},
                     supporting=True,
                 )
         replay_inputs_required = scope in {"full", "endpoint"}
