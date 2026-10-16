@@ -137,7 +137,8 @@ class _Connection:
             return []
         if "FROM hunt_skill_events" in query:
             return list(self.events)
-        if "FROM hunt_credential_uses" in query or "FROM hunt_permission_requests" in query:
+        if ("FROM hunt_credential_uses" in query or "FROM hunt_permission_requests" in query
+                or "FROM discovered_secret_uses" in query):
             return []
         raise AssertionError(query)
 

@@ -356,6 +356,8 @@ class IndexConn:
             return args[0]
         if "indisvalid" in query:
             return self.states.get(args[0])
+        if "i.indnatts = 1" in query:
+            return None
         raise AssertionError(query)
 
     async def execute(self, query, *args):
