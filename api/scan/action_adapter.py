@@ -2282,11 +2282,6 @@ class DatabaseNeutralScanActionDispatcher:
             # the browser XSS proof; skip it here.
             if candidate.get("browser_fragment_path"):
                 continue
-            # A path-segment candidate has no request field to mutate; the repeated differential
-            # proof operates on a body or query parameter, so a path SQLi is left at the sqlmap
-            # verification tier rather than proven here.
-            if candidate.get("parameter_location") == "path":
-                continue
             if candidate_id not in candidate_signals:
                 continue
             attempt_id = hashlib.sha256(
