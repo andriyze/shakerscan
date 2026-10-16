@@ -90,7 +90,9 @@ test('executive posture defaults to an explicit operational cohort scope', () =>
   const dashboard = read('src/app/page.tsx')
   const targets = read('src/components/targets/inventory/AddTargetsDialog.tsx')
   const detail = read('src/components/targets/TargetAssetDetail.tsx')
-  assert.match(dashboard, /useState<CohortView>\('operational'\)/)
+  // The scope is in the URL (?cohort=), defaulting to operational (parseCohortView).
+  assert.match(dashboard, /const cohortView: CohortView = parseCohortView\(scopeFilters\.cohort\)/)
+  assert.match(dashboard, /view === 'operational' \? undefined : view/)
   assert.match(dashboard, /Lab data is never silently mixed into it/)
   assert.match(dashboard, /buildCohortActions\(scopedExposure\)/)
   assert.match(targets, /<option value="calibration">Calibration<\/option>/)

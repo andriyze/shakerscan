@@ -37,7 +37,7 @@ export function InventorySummary({ facets, filters, onChange }: {
     onChange(filters[key] === patch[key] ? { [key]: '' } : patch)
   }
   return <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-    <Tile icon={<Layers3 />} tone="blue" label="Targets" value={count(facets?.total)}
+    <Tile icon={<Layers3 />} tone="blue" label={facets?.total === 1 ? 'Target' : 'Targets'} value={count(facets?.total)}
       active={activeFilterCount(filters) === 0} onClick={() => onChange({ environment: '', authorization: '', findings: '', activity: '', asset_type: '', archived: false })} />
     <Tile icon={<ShieldOff />} tone="gray" label="Not authorized"
       value={count(facets?.authorization.unauthorized)} active={filters.authorization === 'unauthorized'} onClick={() => only({ authorization: 'unauthorized' })} />

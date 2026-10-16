@@ -217,6 +217,77 @@ export function inventoryParams(filters, offset, limit) {
   return params
 }
 
+/** Members per domain group on the Targets page; larger groups say how many are not shown. */
+export const INVENTORY_MEMBER_LIMIT = 200
+
+const V1_SORT = { name: 'name', risk: '-risk', recent: '-recent', created: '-created' }
+
+/**
+ * One Targets page as list/v1 (keyset `cursor`, `member_limit` members per group, exact group
+ * count). The legacy grouping read every asset of the install into the API and returned whole
+ * groups: 3.5 s and a 10,000-member group at the 10k-target scale seed.
+ */
+export function inventoryPageParams(filters, cursor, limit, memberLimit = INVENTORY_MEMBER_LIMIT) {
+  const params = { group_by: 'domain', include_facets: true, limit, member_limit: memberLimit,
+    sort: V1_SORT[filters.sort] || 'name' }
+  if (cursor) params.cursor = cursor
+  else params.count = 'exact'
+  if (filters.search.trim()) params.search = filters.search.trim()
+  for (const key of ['environment', 'authorization', 'findings', 'activity', 'asset_type']) {
+    if (filters[key]) params[key] = filters[key]
+  }
+  if (filters.archived) params.include_inactive = true
+  return params
+}
+
+/**
+ * A Targets page from either answer: list/v1 (`items`, `next_cursor`, groups carrying
+ * `member_count` / `members_truncated`) or an older engine's legacy shape.
+ */
+export function inventoryPageFromBody(body) {
+  const item = body && typeof body === 'object' ? body : {}
+  if (Array.isArray(item.items)) {
+    return {
+      groups: item.items.map(group => ({ ...group, targets: Array.isArray(group.targets) ? group.targets : [] })),
+      totalGroups: Number.isFinite(item.total) ? item.total : null,
+      // Every filtered target (an engine without `target_total` leaves it null).
+      targetTotal: Number.isFinite(item.target_total)
+        ? { count: item.target_total, kind: item.target_total_kind === 'at_least' ? 'at_least' : 'exact' } : null,
+      hasMore: Boolean(item.has_more), nextCursor: item.has_more ? item.next_cursor || null : null,
+      facets: item.facets || null, listV1: true,
+    }
+  }
+  const targets = Array.isArray(item.targets) ? item.targets : []
+  const groups = Array.isArray(item.groups) ? item.groups : targets.map(asset => ({ root_domain: asset.locator, targets: [asset] }))
+  // The legacy `total` counts every filtered asset.
+  const targetTotal = Number.isFinite(item.total) ? { count: item.total, kind: 'exact' } : null
+  return { groups, totalGroups: item.total_groups ?? item.total ?? groups.length, targetTotal, hasMore: false, nextCursor: null,
+    facets: item.facets || null, listV1: false }
+}
+
+/**
+ * The Targets count to show, with every filter applied. The facets' `total` counts the search
+ * scope before the other filters, so it is never used here. Without a server total (an older
+ * engine), the loaded groups' `member_count` is summed: the whole answer when every group is on
+ * this page, otherwise only this page's targets, and the label says so.
+ * Returns `{ count, kind }` with kind `exact`, `at_least` or `page`.
+ */
+export function inventoryTargetTotal(view, allGroupsLoaded) {
+  if (view?.targetTotal) return view.targetTotal
+  const count = (view?.groups || []).reduce((sum, group) => sum
+    + (Number.isFinite(group.member_count) ? group.member_count : (group.targets || []).length), 0)
+  return { count, kind: allGroupsLoaded ? 'exact' : 'page' }
+}
+
+/** "1,200 targets", "10,000+ targets" or "40 targets on this page". */
+export function targetTotalLabel(total) {
+  const count = Number(total?.count) || 0
+  const noun = `target${count === 1 && total?.kind !== 'at_least' ? '' : 's'}`
+  if (total?.kind === 'at_least') return `${count.toLocaleString('en-US')}+ ${noun}`
+  if (total?.kind === 'page') return `${count.toLocaleString('en-US')} ${noun} on this page`
+  return `${count.toLocaleString('en-US')} ${noun}`
+}
+
 export function activeFilterCount(filters) {
   return ['environment', 'authorization', 'findings', 'activity', 'asset_type'].filter(key => filters[key]).length
     + (filters.archived ? 1 : 0)
@@ -230,11 +301,82 @@ export function scanUrls(asset) {
   return isDomainGroup(locator) ? [locator] : []
 }
 
+/** POST /scans/batch takes at most this many targets (api.py `_BatchRequestBase.targets`). */
+export const SCAN_BATCH_MAX = 50
+
+function uniqueScanTargets(targets) {
+  return Array.from(new Set((targets || []).map(target => String(target).trim()).filter(Boolean)))
+}
+
 /** New Scan, prefilled with one target or, for several, in batch mode. */
 export function configureScanHref(targets, forceBatch = false) {
-  const uniqueTargets = Array.from(new Set((targets || []).map(target => String(target).trim()).filter(Boolean)))
+  const uniqueTargets = uniqueScanTargets(targets)
   const params = new URLSearchParams()
   if (forceBatch || uniqueTargets.length > 1) params.set('targets', uniqueTargets.join('\n'))
   else if (uniqueTargets[0]) params.set('target', uniqueTargets[0])
   return `/scan/new?${params.toString()}`
+}
+
+/**
+ * New Scan for a whole domain group. Up to one batch of web apps travels in the link; a larger
+ * domain is passed by reference (`domain=`), and New Scan reads its web apps from the inventory.
+ * Listing every URL made a 450 KB link that the UI server refused (HTTP 431) at 10k targets.
+ */
+export function domainBatchHref(rootDomain, targets, membersTruncated = false) {
+  const uniqueTargets = uniqueScanTargets(targets)
+  if (!membersTruncated && uniqueTargets.length <= SCAN_BATCH_MAX) return configureScanHref(uniqueTargets, true)
+  return `/scan/new?${new URLSearchParams({ domain: String(rootDomain || '').trim() })}`
+}
+
+/**
+ * The web apps of `rootDomain` in an inventory answer (group_by=domain), capped at one batch.
+ * `total` counts every web app found, so New Scan can say how many were left for later batches.
+ */
+export function domainBatchTargets(rootDomain, page) {
+  const wanted = String(rootDomain || '').trim().toLowerCase()
+  const group = inventoryPageFromBody(page).groups.find(item => String(item.root_domain || '').toLowerCase() === wanted)
+  if (!group) return { targets: [], total: 0, found: false, moreMembers: false }
+  const urls = uniqueScanTargets((group.targets || []).filter(asset => asset.is_active).flatMap(asset => scanUrls(asset)))
+  // A list/v1 group lists at most member_limit members; the rest exist but were not read.
+  const moreMembers = Boolean(group.members_truncated)
+  return { targets: urls.slice(0, SCAN_BATCH_MAX), total: urls.length, found: true, moreMembers,
+    memberCount: Number(group.member_count) || (group.targets || []).length }
+}
+
+/** Domain-group pages New Scan reads, at most, to find a `domain=` reference (10 groups each). */
+export const DOMAIN_LOOKUP_PAGE = 10
+export const DOMAIN_LOOKUP_MAX_PAGES = 5
+
+/**
+ * Find one domain group by exact name. The inventory search is a substring match, so groups such
+ * as `aapp.io` sort before `app.io` and can fill the first page; this follows `next_cursor` until
+ * the exact group appears, the matches end, or `maxPages` pages were read.
+ * `fetchPage(cursor)` returns one list/v1 answer (`cursor` is null for the first page).
+ * `exhausted` is true when every matching group was read, so "not found" is definitive.
+ */
+export async function findDomainGroup(rootDomain, fetchPage, maxPages = DOMAIN_LOOKUP_MAX_PAGES) {
+  let cursor = null
+  for (let read = 0; read < maxPages; read += 1) {
+    const page = await fetchPage(cursor)
+    const resolved = domainBatchTargets(rootDomain, page)
+    if (resolved.found) return { ...resolved, exhausted: false }
+    cursor = inventoryPageFromBody(page).nextCursor
+    if (!cursor) return { ...resolved, exhausted: true }
+  }
+  return { targets: [], total: 0, found: false, moreMembers: false, exhausted: false }
+}
+
+/** Explicit `targets=` beyond one batch are cut to the batch size (the API refuses more). */
+export function capBatchTargets(targets) {
+  const uniqueTargets = uniqueScanTargets(targets)
+  return { targets: uniqueTargets.slice(0, SCAN_BATCH_MAX), total: uniqueTargets.length }
+}
+
+export function batchCapNotice(total, source, { memberCount = 0, moreMembers = false } = {}) {
+  if (total <= SCAN_BATCH_MAX && !moreMembers) return null
+  const size = moreMembers
+    ? `${Number(memberCount).toLocaleString('en-US')} targets`
+    : `${total.toLocaleString('en-US')} web apps`
+  return `${source} has ${size}; a batch scans at most ${SCAN_BATCH_MAX} at once. `
+    + `The first ${Math.min(total, SCAN_BATCH_MAX)} are filled in below; queue the rest in further batches.`
 }
