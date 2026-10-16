@@ -1399,6 +1399,13 @@ def _findings_for_action(
             if severity not in scoring.SEVERITY_WEIGHT:
                 severity = "info"
             title, header_name = _header_template_title(item)
+            # HSTS is honoured only over HTTPS (RFC 6797 §8.1): a browser ignores the header on a
+            # plain-HTTP response, so its absence there is not a weakness of that origin.
+            if (
+                header_name == "strict-transport-security"
+                and urllib.parse.urlsplit(str(matched_url or "")).scheme.lower() != "https"
+            ):
+                continue
             classification = template_classification(item)
             # A response header policy is a property of the origin, not of the path that
             # happened to be requested. Emitting the match per URL turned one missing header
@@ -1453,6 +1460,58 @@ def _findings_for_action(
             findings.append(finding)
     # One calibrated severity per class, with its reason kept in the evidence.
     return calibrate_findings(findings)
+
+
+def _exposure_location(url: Any) -> str | None:
+    origin = _http_origin(url)
+    if not origin:
+        return None
+    path = urllib.parse.urlsplit(str(url)).path or "/"
+    return f"{origin}{path.rstrip('/') or '/'}"
+
+
+def _merge_template_candidates_into_exposure_proofs(
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One finding per exposed file: a template candidate at a proven exposure's URL joins it.
+
+    The passive pack's git-config / git-credentials templates match the same file the exposure
+    probe proves (``/.git/config``, ``/.git-credentials``), so a Scan reported the issue twice,
+    once proven and once as a candidate still to verify. A candidate template match whose URL
+    (origin and path) is the URL of a verified exposure proof is kept as corroborating evidence
+    on that finding instead of a finding of its own; a match anywhere else stays.
+    """
+    proven: dict[str, dict[str, Any]] = {}
+    for finding in findings:
+        if (
+            finding.get("tool") == "shakerscan_exposure_probe"
+            and finding.get("proof_state") == "verified"
+        ):
+            location = _exposure_location(finding.get("url"))
+            if location:
+                proven.setdefault(location, finding)
+    if not proven:
+        return findings
+    kept: list[dict[str, Any]] = []
+    for finding in findings:
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        target = (
+            proven.get(_exposure_location(finding.get("url")) or "")
+            if finding.get("tool") == "nuclei" and finding.get("proof_state") == "candidate"
+            and not evidence.get("header_name") else None
+        )
+        if target is None:
+            kept.append(finding)
+            continue
+        corroborating = target["evidence"].setdefault("corroborating_templates", [])
+        if len(corroborating) < 10:
+            corroborating.append({
+                "template_id": evidence.get("template_id"),
+                "matcher_name": evidence.get("matcher_name"),
+                "title": finding.get("title"),
+                "severity": finding.get("severity"),
+            })
+    return kept
 
 
 def _finding_identity(finding: Mapping[str, Any]) -> str:
@@ -2152,7 +2211,7 @@ def finalize_scan_report(
             "budget_reserved": dict(result.budget_reserved),
             "budget_consumed": dict(result.budget_consumed),
         })
-    findings = list(findings_by_id.values())
+    findings = _merge_template_candidates_into_exposure_proofs(list(findings_by_id.values()))
     _attach_observed_header_responses(
         findings, observations,
         {

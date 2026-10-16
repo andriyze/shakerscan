@@ -1531,3 +1531,59 @@ def test_a_root_redirect_is_proven_from_the_same_origin_landing_page():
 def test_a_redirect_landing_on_another_origin_proves_nothing():
     [finding] = _redirecting_origin_header_matches("https://sso.example.test/login")
     assert finding["proof_state"] == "candidate"
+
+
+def _hsts_template_findings(origin: str):
+    templates = _action("passive.templates", 0, capability_name="templates.passive_batch")
+    final = _action("finalize.report", 1, dependencies=(templates.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64, target_binding_digest="a" * 64,
+        actions=(templates, final),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url=origin,
+        action_results={templates.action_id: _result_with_observation_count(templates, 2)},
+        observations={templates.action_id: tuple({
+            "kind": "template_match", "template_id": "http-missing-security-headers",
+            "name": "HTTP Missing Security Headers", "severity": "info",
+            "matched_at": f"{origin}/", "matcher_name": matcher,
+        } for matcher in ("strict-transport-security", "x-frame-options"))},
+    )
+    return sorted(item["evidence"].get("header_name") for item in report["findings"]
+                  if item["evidence"].get("template_id") == "http-missing-security-headers")
+
+
+def test_no_hsts_finding_on_a_plain_http_origin():
+    # Lab UI audit (wrongsecrets on http://...:8090): HSTS is ignored over HTTP, so its
+    # absence there is not a finding; other headers still are.
+    assert _hsts_template_findings("http://app.example.test") == ["x-frame-options"]
+    assert _hsts_template_findings("https://app.example.test") == [
+        "strict-transport-security", "x-frame-options",
+    ]
+
+
+def test_a_template_match_on_a_proven_exposure_joins_that_finding():
+    # Lab UI audit (honey): nuclei "Git Configuration - Detect" stood beside the proven
+    # exposure of the same /.git/config as a second finding still to verify.
+    proven = {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified",
+        "title": "Sensitive exposure: vcs metadata", "url": "http://honey.test/.git/config",
+        "evidence": {"exposure_class": "vcs_metadata"},
+    }
+    template = {
+        "tool": "nuclei", "proof_state": "candidate", "title": "Git Configuration - Detect",
+        "severity": "medium", "url": "http://honey.test/.git/config",
+        "evidence": {"template_id": "git-config", "matcher_name": None},
+    }
+    elsewhere = {**template, "url": "http://honey.test/app/.git/config"}
+    header = {**template, "url": "http://honey.test/.git/config",
+              "evidence": {"template_id": "http-missing-security-headers",
+                           "header_name": "x-frame-options"}}
+    kept = finalizer_module._merge_template_candidates_into_exposure_proofs(
+        [proven, template, elsewhere, header],
+    )
+    assert kept == [proven, elsewhere, header]
+    assert proven["evidence"]["corroborating_templates"] == [{
+        "template_id": "git-config", "matcher_name": None,
+        "title": "Git Configuration - Detect", "severity": "medium",
+    }]
