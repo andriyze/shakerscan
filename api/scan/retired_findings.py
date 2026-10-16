@@ -42,8 +42,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from typing import Any, Iterable, Literal, Mapping
+from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping
 import urllib.parse
+import uuid
 
 try:
     from finding_routes.list_schema import FINDING_ORIGIN_SQL
@@ -51,6 +52,7 @@ except ModuleNotFoundError:  # package import layout
     from ..finding_routes.list_schema import FINDING_ORIGIN_SQL
 
 from .finalizer import _SEVERITY_RANK, _TEMPLATE_EXPOSURE_CLASSES, _exposure_location
+from .finding_identity import finding_identity_keys
 from .posture_findings import OPT_IN_HEADERS
 
 #: Rows one statement updates, and rows one scan retires in all.
@@ -315,8 +317,46 @@ async def retire_superseded_findings(
     return retired
 
 
+async def retire_after_scan(
+    pool: Any,
+    *,
+    scan_id: str,
+    target_id: str,
+    report: Any,
+    findings: Iterable[Any] | None,
+    refresh_active_count: Callable[[Any, uuid.UUID], Awaitable[Any]],
+    log_prefix: str = "",
+) -> int:
+    """The worker's post-save step: retire superseded rows of one target, never raising.
+
+    Runs after the scan's findings are saved, so a row this scan reports again is matched there
+    and never retired here. One transaction; the target's active count is refreshed after it.
+    """
+    if not isinstance(report, Mapping):
+        return 0
+    try:
+        seen = {
+            key for finding in findings or () if isinstance(finding, Mapping)
+            for key in finding_identity_keys(finding)
+        }
+        target_uuid = uuid.UUID(str(target_id))
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                retired = await retire_superseded_findings(
+                    conn, target_id=target_uuid, scan_id=scan_id, report=report, seen_fingerprints=seen,
+                )
+            if retired:
+                await refresh_active_count(conn, target_uuid)
+    except Exception as exc:  # retirement is best-effort; the scan's own results stand
+        print(f"{log_prefix}retire_superseded_findings error: {type(exc).__name__}", flush=True)
+        return 0
+    if retired:
+        print(f"{log_prefix}Resolved {retired} finding(s) of retired kinds", flush=True)
+    return retired
+
+
 __all__ = [
     "RETIRED_FINDING_KINDS", "RETIRE_BATCH_SIZE", "RETIRE_EXPOSURE_SQL", "RETIRE_MAX_ROWS_PER_SCAN",
     "RETIRE_SQL", "RetiredFindingKind", "baseline_covered_origin", "baseline_missing_headers",
-    "retire_superseded_findings", "scan_completed", "verified_exposure_locations",
+    "retire_after_scan", "retire_superseded_findings", "scan_completed", "verified_exposure_locations",
 ]

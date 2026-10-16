@@ -106,7 +106,7 @@ def _plans(target=None):
         # Mirrors admission: the passive preset's read-only exposure checks are allowed work.
         allowed_capabilities=(
             "templates.passive_batch", "xss.verify_batch", "xss.browser_prove_batch",
-            "exposure.verify_batch",
+            "exposure.verify_batch", "redirect.verify_batch",
         ),
     )
     endpoints = build_endpoint_manifest(
@@ -477,7 +477,7 @@ def test_continuation_request_verifier_binds_parent_collection_replay():
         required_capabilities=("xss.request_verify_batch",),
         allowed_capabilities=(
             "templates.passive_batch", "xss.request_verify_batch", "xss.verify_batch",
-            "xss.browser_prove_batch", "exposure.verify_batch",
+            "xss.browser_prove_batch", "exposure.verify_batch", "redirect.verify_batch",
         ),
     )
     continuation_raw = ScanActionPlanCompiler().compile(
@@ -619,7 +619,8 @@ def test_continuation_cannot_change_existing_private_input_authority():
         budget_ceiling=parent_allocation.residual_scan_execute_budget,
         max_endpoint_entries=contract.budget.max_endpoints,
         max_candidate_entries=contract.budget.max_http_requests,
-        allowed_capabilities=("templates.passive_batch", "xss.verify_batch", "exposure.verify_batch"),
+        allowed_capabilities=("templates.passive_batch", "xss.verify_batch", "exposure.verify_batch",
+                              "redirect.verify_batch"),
     )
     continuation = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,

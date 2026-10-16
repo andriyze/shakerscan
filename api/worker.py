@@ -203,7 +203,7 @@ from scan.capability_execution import (
     scan_sqli_verification_capability_allocation,
     scan_template_capability_allocation,
     scan_tls_capability_allocation,
-    TLS_CONNECTIONS_PER_PAIR,
+    tls_legacy_probes_affordable,
     scan_web_crawl_capability_allocation,
     scan_web_probe_capability_allocation,
     scan_xss_verification_capability_allocation,
@@ -456,15 +456,15 @@ try:
 except ImportError:
     from scanner.constants import resolve_scan_budget
 try:
-    from scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
+    from scan.finding_identity import canonical_finding_fingerprint
     from scan.finding_reconciliation import reconcile_legacy_finding_row
-    from scan.retired_findings import retire_superseded_findings
+    from scan.retired_findings import retire_after_scan
 except ModuleNotFoundError as exc:
     if exc.name not in {"findings", "scan"}:
         raise
-    from api.scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
+    from api.scan.finding_identity import canonical_finding_fingerprint
     from api.scan.finding_reconciliation import reconcile_legacy_finding_row
-    from api.scan.retired_findings import retire_superseded_findings
+    from api.scan.retired_findings import retire_after_scan
 
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
@@ -3362,22 +3362,6 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
         await _refresh_target_active_finding_count(conn, target_uuid)
 
     return saved
-
-
-async def retire_superseded_web_findings(scan_id: str, target_id: str, report: dict, findings: list) -> int:
-    """Resolve this target's stored findings of kinds the scanner no longer reports, on the
-    origin this scan's baseline covered (scan/retired_findings.py). Rows this scan reported
-    again, triaged rows and rows on other origins are left alone."""
-    seen = {key for finding in findings or () if isinstance(finding, dict) for key in finding_identity_keys(finding)}
-    target_uuid = uuid.UUID(target_id)
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            retired = await retire_superseded_findings(
-                conn, target_id=target_uuid, scan_id=scan_id, report=report, seen_fingerprints=seen,
-            )
-        if retired:
-            await _refresh_target_active_finding_count(conn, target_uuid)
-    return retired
 
 
 async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> int:
@@ -10138,11 +10122,7 @@ async def _execute_scan_tls_capability(
     )
     if allocation is None:
         return _skipped_scan_tls_summary("insufficient_stage_budget")
-    # A TCP budget that pays only for the handshakes still inspects every pair, without the
-    # legacy-protocol/weak-suite probes (the observation records the skip).
-    legacy_probes = allocation["tcp_ports_attempted"] >= (
-        TLS_CONNECTIONS_PER_PAIR * len(https_origins) * len(target.allowed_addresses)
-    )
+    legacy_probes = tls_legacy_probes_affordable(allocation, len(https_origins) * len(target.allowed_addresses))
     stored, idempotent_redelivery = await _execute_reserved_scan_capability(
         admission=admission,
         execution=execution,
@@ -13781,14 +13761,9 @@ async def process_scan_job(job_data: dict):
             except Exception as e:
                 print(f"[{job_id[:8]}] save_device_findings error: {e}", flush=True)
 
-        if target_id and not error and isinstance(result, dict):
-            # After the save: a row this scan reports again is matched there, never retired here.
-            try:
-                retired_count = await retire_superseded_web_findings(scan_id, target_id, result, findings)
-                if retired_count:
-                    print(f"[{job_id[:8]}] Resolved {retired_count} finding(s) of retired kinds", flush=True)
-            except Exception as e:
-                print(f"[{job_id[:8]}] retire_superseded_findings error: {type(e).__name__}", flush=True)
+        if target_id and not error:
+            await retire_after_scan(db_pool, scan_id=scan_id, target_id=target_id, report=result, findings=findings,
+                                    refresh_active_count=_refresh_target_active_finding_count, log_prefix=f"[{job_id[:8]}] ")
 
         if device_target_id and not error and (options or {}).get("run_kind") == "device_posture":
             try:

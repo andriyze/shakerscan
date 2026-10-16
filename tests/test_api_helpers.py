@@ -22229,9 +22229,11 @@ def test_active_scan_admission_freezes_discovery_then_residual_continuation():
     assert continuation.required_capabilities == ("xss.verify_batch",)
     # Selecting xss also allows its exact-request verifier and its canonical
     # headless browser proof, so a continuation can escalate a reflection to a
-    # verified browser-execution finding without new admission authority.
+    # verified browser-execution finding without new admission authority. The open-redirect
+    # probe rides the same authority (2.11: it reads the same discovered query parameters).
     assert continuation.allowed_capabilities == (
-        "xss.browser_prove_batch", "xss.request_verify_batch", "xss.verify_batch",
+        "redirect.verify_batch", "xss.browser_prove_batch", "xss.request_verify_batch",
+        "xss.verify_batch",
     )
     assert "finalize.report" not in {
         action.action_id for action in parent.actions

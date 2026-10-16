@@ -198,3 +198,50 @@ def test_the_retire_statements_never_touch_triaged_or_re_reported_rows():
         ):
             assert clause in compact, (clause, sql)
     assert "header_name', '') = ''" in RETIRE_EXPOSURE_SQL
+
+
+class _Pool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        pool = self
+
+        class _Acquire:
+            async def __aenter__(self):
+                return pool.conn
+
+            async def __aexit__(self, *exc):
+                return False
+        return _Acquire()
+
+
+class _TxConn(_Conn):
+    def transaction(self):
+        class _Tx:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *exc):
+                return False
+        return _Tx()
+
+
+def test_the_worker_step_refreshes_counts_and_never_raises():
+    from api.scan.retired_findings import retire_after_scan
+    refreshed = []
+
+    async def refresh(_conn, target):
+        refreshed.append(target)
+
+    target = "22222222-2222-4222-8222-222222222222"
+    run = lambda report, pool: asyncio.run(retire_after_scan(  # noqa: E731
+        pool, scan_id="s", target_id=target, report=report, findings=[], refresh_active_count=refresh))
+    assert run(_report(missing=("referrer-policy",)), _Pool(_TxConn())) >= 1
+    assert len(refreshed) == 1
+    assert run(None, _Pool(_TxConn())) == 0, "no report, nothing to do"
+
+    class _Broken:
+        def acquire(self):
+            raise RuntimeError("database down")
+    assert run(_report(), _Broken()) == 0

@@ -299,6 +299,14 @@ def tls_connections_per_pair(tcp_ports: int, pairs: int) -> int:
     )
 
 
+def tls_legacy_probes_affordable(allocation: Mapping[str, Any], pairs: int) -> bool:
+    """True when a TLS allocation pays for the legacy-protocol/weak-suite probes on every pair.
+
+    A TCP budget that pays only for the handshakes still inspects every pair, without those
+    probes (the observation records the skip)."""
+    return int(allocation.get("tcp_ports_attempted") or 0) >= TLS_CONNECTIONS_PER_PAIR * max(0, int(pairs))
+
+
 def scan_tls_capability_allocation(
     budget: Mapping[str, Any],
     *,

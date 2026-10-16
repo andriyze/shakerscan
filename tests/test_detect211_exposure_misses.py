@@ -195,7 +195,9 @@ def test_a_host_serving_all_three_reports_three_findings(monkeypatch):
     import scan.action_adapter as action_adapter_module
     from runtime.models import ScanPolicy
     from runtime.request_replay_executor import ReplayTransportResult
-    from scan.action_plan import ScanActionPlan
+    # The runtime layout's plan class, read off the adapter module: importing ``scan.action_plan``
+    # here beside this file's ``api.scan.action_plan`` import would load it under both roots.
+    ScanActionPlan = action_adapter_module.ScanActionPlan
 
     class Transport:
         async def send(self, request, *, target, timeout_seconds, follow_redirects):
