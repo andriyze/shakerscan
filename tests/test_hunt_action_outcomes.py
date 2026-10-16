@@ -291,6 +291,9 @@ def test_unified_startup_installs_the_candidate_schema_on_converted_instances(mo
         # Exposure facts have dedicated real PostgreSQL migration tests.
         ("api.exposure.asset_rank", "install_exposure_facts"),
         ("exposure.asset_rank", "install_exposure_facts"),
+        # Scan change stamps have dedicated real PostgreSQL migration coverage.
+        ("scan.list_v1", "install_scan_updated_at"),
+        ("api.scan.list_v1", "install_scan_updated_at"),
     ):
         monkeypatch.setattr(importlib.import_module(module), name, noop)
 
