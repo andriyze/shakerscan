@@ -202,7 +202,8 @@ def test_device_overviews_preserve_latest_posture_completeness():
 
 def test_device_list_uses_bounded_reachability_summary():
     api = api_tree_source()
-    listing = route_source("GET", "/devices")
+    # The list route delegates its SQL to devices/list_query.py.
+    listing = route_source("GET", "/devices") + (ROOT / "api" / "devices" / "list_query.py").read_text()
     detail = route_source("GET", "/devices/{device_id}")
 
     assert "- 'attempts' - 'nmap_host_discovery'" in listing

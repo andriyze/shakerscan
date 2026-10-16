@@ -126,7 +126,8 @@ def test_deleted_research_plan_step_keeps_internal_autopilot_planner():
     )
     assert "async def plan_research_episode_step" not in tree
     assert "async def _plan_research_episode_step" in tree
-    assert "await _plan_research_episode_step(" in tree
+    # The autopilot loop (research_routes/autopilot_loop.py) calls it through the composition root.
+    assert "await hub._plan_research_episode_step(" in tree
 
 
 def test_no_non_cancel_write_exists_under_the_legacy_agent_hunt_surface():
