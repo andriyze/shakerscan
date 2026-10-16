@@ -1567,8 +1567,9 @@ def test_a_template_match_on_a_proven_exposure_joins_that_finding():
     # exposure of the same /.git/config as a second finding still to verify.
     proven = {
         "tool": "shakerscan_exposure_probe", "proof_state": "verified",
-        "title": "Sensitive exposure: vcs metadata", "url": "http://honey.test/.git/config",
-        "evidence": {"exposure_class": "vcs_metadata"},
+        "title": "Sensitive exposure: version control exposure", "severity": "high",
+        "url": "http://honey.test/.git/config",
+        "evidence": {"exposure_class": "version_control_exposure"},
     }
     template = {
         "tool": "nuclei", "proof_state": "candidate", "title": "Git Configuration - Detect",
@@ -1587,3 +1588,73 @@ def test_a_template_match_on_a_proven_exposure_joins_that_finding():
         "template_id": "git-config", "matcher_name": None,
         "title": "Git Configuration - Detect", "severity": "medium",
     }]
+    assert proven["evidence"]["corroborating_template_count"] == 1
+
+
+def _console_proof() -> dict:
+    return {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified", "severity": "medium",
+        "title": "Sensitive exposure: debug interface exposure", "url": "https://app.test/console",
+        "evidence": {"exposure_class": "debug_interface_exposure"},
+    }
+
+
+def test_an_unrelated_template_at_a_proven_exposure_path_stays_its_own_finding():
+    # Review of the merge: a critical RCE template at /console, or GraphQL batching at
+    # /graphql, matches the URL of a proven exposure but reports something else.
+    proof = _console_proof()
+    rce = {
+        "tool": "nuclei", "proof_state": "candidate", "title": "Werkzeug Debug Console - RCE",
+        "severity": "critical", "url": "https://app.test/console",
+        "evidence": {"template_id": "werkzeug-debugger-rce", "matcher_name": None},
+    }
+    graphql_proof = {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified", "severity": "low",
+        "title": "GraphQL introspection enabled", "url": "https://app.test/graphql",
+        "evidence": {"exposure_class": "graphql_introspection_enabled"},
+    }
+    batching = {**rce, "title": "GraphQL batching", "severity": "medium",
+                "url": "https://app.test/graphql",
+                "evidence": {"template_id": "graphql-alias-batching"}}
+    findings = [proof, rce, graphql_proof, batching]
+    assert finalizer_module._merge_template_candidates_into_exposure_proofs(findings) == findings
+    assert "corroborating_templates" not in proof["evidence"]
+    assert "corroborating_templates" not in graphql_proof["evidence"]
+
+
+def test_a_mapped_template_folds_only_into_its_class_and_not_above_the_proof_severity():
+    proof = {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified", "severity": "low",
+        "title": "Sensitive exposure", "url": "https://app.test/.git/config",
+        "evidence": {"exposure_class": "version_control_exposure"},
+    }
+    template = {
+        "tool": "nuclei", "proof_state": "candidate", "title": "Git Configuration - Detect",
+        "severity": "medium", "url": "https://app.test/.git/config",
+        "evidence": {"template_id": "git-config"},
+    }
+    other_class = {**_console_proof(), "url": "https://app.test/.git/config"}
+    findings = [other_class, template]
+    # Same URL, wrong class: kept.
+    assert finalizer_module._merge_template_candidates_into_exposure_proofs(findings) == findings
+    # Right class, but the template is graver than the proof: kept.
+    findings = [proof, template]
+    assert finalizer_module._merge_template_candidates_into_exposure_proofs(findings) == findings
+
+
+def test_corroborating_templates_past_the_sample_cap_are_counted():
+    proof = {
+        "tool": "shakerscan_exposure_probe", "proof_state": "verified", "severity": "high",
+        "title": "Sensitive exposure", "url": "https://app.test/.git/config",
+        "evidence": {"exposure_class": "version_control_exposure"},
+    }
+    templates = [{
+        "tool": "nuclei", "proof_state": "candidate", "title": f"Git Configuration {index}",
+        "severity": "medium", "url": "https://app.test/.git/config",
+        "evidence": {"template_id": "git-config", "matcher_name": str(index)},
+    } for index in range(13)]
+    assert finalizer_module._merge_template_candidates_into_exposure_proofs(
+        [proof, *templates],
+    ) == [proof]
+    assert len(proof["evidence"]["corroborating_templates"]) == 10
+    assert proof["evidence"]["corroborating_template_count"] == 13

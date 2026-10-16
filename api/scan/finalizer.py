@@ -7,6 +7,7 @@ import json
 import re
 import urllib.parse
 from collections import Counter
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from . import scoring
@@ -1470,18 +1471,37 @@ def _exposure_location(url: Any) -> str | None:
     return f"{origin}{path.rstrip('/') or '/'}"
 
 
+# A passive-pack template folds into a proven exposure only when it detects the same exposure
+# class (``exposure_probe._CLASS_SEVERITY``) that the probe proved at the same URL. Any other
+# template matching that URL -- a CVE at /console, GraphQL batching at /graphql -- reports
+# something else and stays a finding of its own.
+_TEMPLATE_EXPOSURE_CLASSES: Mapping[str, frozenset[str]] = MappingProxyType({
+    "git-config": frozenset({"version_control_exposure"}),
+    "git-credentials-disclosure": frozenset({"configuration_secret_file"}),
+    "web-config": frozenset({"configuration_secret_file"}),
+    "openapi": frozenset({"api_specification_secret"}),
+})
+_CORROBORATING_TEMPLATE_SAMPLES = 10
+_SEVERITY_RANK = MappingProxyType({
+    "info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4,
+})
+
+
 def _merge_template_candidates_into_exposure_proofs(
     findings: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """One finding per exposed file: a template candidate at a proven exposure's URL joins it.
+    """One finding per exposed file: a template candidate for a proven exposure joins it.
 
     The passive pack's git-config / git-credentials templates match the same file the exposure
     probe proves (``/.git/config``, ``/.git-credentials``), so a Scan reported the issue twice,
-    once proven and once as a candidate still to verify. A candidate template match whose URL
-    (origin and path) is the URL of a verified exposure proof is kept as corroborating evidence
-    on that finding instead of a finding of its own; a match anywhere else stays.
+    once proven and once as a candidate still to verify. A candidate template match is kept as
+    corroborating evidence on a verified exposure proof only when all of these hold: its URL
+    (origin and path) is the proof's URL, its template detects the proof's exposure class
+    (``_TEMPLATE_EXPOSURE_CLASSES``), and its severity does not exceed the proof's. Every
+    other match stays a finding of its own. The first samples are listed and every folded
+    match is counted, so nothing disappears past the sample cap.
     """
-    proven: dict[str, dict[str, Any]] = {}
+    proven: dict[str, list[dict[str, Any]]] = {}
     for finding in findings:
         if (
             finding.get("tool") == "shakerscan_exposure_probe"
@@ -1489,22 +1509,26 @@ def _merge_template_candidates_into_exposure_proofs(
         ):
             location = _exposure_location(finding.get("url"))
             if location:
-                proven.setdefault(location, finding)
+                proven.setdefault(location, []).append(finding)
     if not proven:
         return findings
     kept: list[dict[str, Any]] = []
     for finding in findings:
-        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
         target = (
-            proven.get(_exposure_location(finding.get("url")) or "")
+            _corroborated_exposure_proof(finding, proven)
             if finding.get("tool") == "nuclei" and finding.get("proof_state") == "candidate"
-            and not evidence.get("header_name") else None
+            else None
         )
         if target is None:
             kept.append(finding)
             continue
-        corroborating = target["evidence"].setdefault("corroborating_templates", [])
-        if len(corroborating) < 10:
+        evidence = finding["evidence"]
+        target_evidence = target["evidence"]
+        target_evidence["corroborating_template_count"] = (
+            int(target_evidence.get("corroborating_template_count") or 0) + 1
+        )
+        corroborating = target_evidence.setdefault("corroborating_templates", [])
+        if len(corroborating) < _CORROBORATING_TEMPLATE_SAMPLES:
             corroborating.append({
                 "template_id": evidence.get("template_id"),
                 "matcher_name": evidence.get("matcher_name"),
@@ -1512,6 +1536,24 @@ def _merge_template_candidates_into_exposure_proofs(
                 "severity": finding.get("severity"),
             })
     return kept
+
+
+def _corroborated_exposure_proof(
+    candidate: Mapping[str, Any], proven: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), Mapping) else {}
+    if evidence.get("header_name"):
+        return None
+    classes = _TEMPLATE_EXPOSURE_CLASSES.get(str(evidence.get("template_id") or ""))
+    candidate_rank = _SEVERITY_RANK.get(str(candidate.get("severity") or "").lower())
+    if not classes or candidate_rank is None:
+        return None
+    for proof in proven.get(_exposure_location(candidate.get("url")) or "", ()):
+        proof_evidence = proof.get("evidence") if isinstance(proof.get("evidence"), Mapping) else {}
+        proof_rank = _SEVERITY_RANK.get(str(proof.get("severity") or "").lower(), -1)
+        if str(proof_evidence.get("exposure_class") or "") in classes and candidate_rank <= proof_rank:
+            return proof
+    return None
 
 
 def _finding_identity(finding: Mapping[str, Any]) -> str:
