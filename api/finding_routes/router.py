@@ -14,6 +14,7 @@ app -> router and existing test patches of those names keep working.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -43,7 +44,7 @@ try:
     )
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
-    from finding_detail import RELATED_SQL, build_finding_detail, related_findings
+    from finding_detail import RELATED_SQL, build_finding_detail, related_findings, related_sql_args
     from list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import (
@@ -62,7 +63,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
-    from ..finding_detail import RELATED_SQL, build_finding_detail, related_findings
+    from ..finding_detail import RELATED_SQL, build_finding_detail, related_findings, related_sql_args
     from ..list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 
 
@@ -678,7 +679,7 @@ async def get_finding(finding_id: str):
         if not finding:
             raise HTTPException(status_code=404, detail="Finding not found")
         related_rows = (
-            await conn.fetch(RELATED_SQL, finding["target_id"], finding["id"])
+            await conn.fetch(RELATED_SQL, *related_sql_args(finding))
             if finding.get("target_id") else []
         )
 
@@ -687,7 +688,8 @@ async def get_finding(finding_id: str):
     result.update(finding_proof_fields(result))
     result["remediation"] = finding_remediation(result)
     # The per-class brief (facts, proof, reproduce, fix, verify, severity reason), from stored data.
-    result["detail"] = build_finding_detail(result)
+    # Off the event loop: a CVE brief reads (and on first use hashes) the offline advisory snapshot.
+    result["detail"] = await asyncio.to_thread(build_finding_detail, result)
     result["related_findings"] = related_findings(result, [dict(row) for row in related_rows])
 
     # Retest capability hints so the UI can gate the retest button instead of
