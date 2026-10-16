@@ -422,11 +422,18 @@ def _baseline_header_responses(
             "response_status": status,
             "observed_headers": dict(sorted(headers.items())),
             "source_action_id": "baseline.http",
+            "principal": _observed_principal(request),
         }
     # An origin whose root answers with a redirect (a login page behind ``/``) shows its
-    # application headers on the page it redirects to. ``baseline.http_redirect`` follows one
-    # redirect; when that lands on a 2xx of the SAME origin, the landing response is the origin's
-    # recorded application response. A landing on another origin proves nothing about this one.
+    # application headers on the page it redirects to. ``baseline.http_redirect`` starts at
+    # ``http://host/`` and follows redirects within the bound origins (MAX_REDIRECT_HOPS), so an
+    # HTTP origin lands on ``/login`` in one hop and an HTTPS one through the scheme upgrade in
+    # two. When that lands on a 2xx of the SAME origin whose root answered 3xx, the landing
+    # response is the origin's recorded application response. A landing on another origin proves
+    # nothing about this one. The landing request is anonymous, so it is credited only when the
+    # root response it stands in for was anonymous too: an authenticated root redirects to a page
+    # the anonymous login page does not describe. An HTTPS target whose plain-HTTP origin is not
+    # bound has no landing observation, and its root-redirect proof stays a candidate.
     for row in observations.get("baseline.http_redirect", ()) or ():
         if not isinstance(row, Mapping) or row.get("kind") != "http_observation":
             continue
@@ -435,8 +442,12 @@ def _baseline_header_responses(
         final_url = str(response.get("final_url") or "")
         origin = _http_origin(final_url)
         current = responses.get(origin) if origin else None
+        landing_principal = _observed_principal(
+            row.get("request") if isinstance(row.get("request"), Mapping) else {},
+        )
         if (
             current is None or not 300 <= int(current["response_status"]) < 400
+            or current.get("principal") != landing_principal
             or type(status) is not int or not 200 <= status < 300
             or not isinstance(response.get("security_headers"), Mapping)
         ):
@@ -454,8 +465,14 @@ def _baseline_header_responses(
             "response_status": status,
             "observed_headers": dict(sorted(headers.items())),
             "source_action_id": "baseline.http_redirect",
+            "principal": landing_principal,
         }
     return responses
+
+
+def _observed_principal(request: Mapping[str, Any]) -> str:
+    """The principal slot an HTTP observation was sent as (``anonymous`` unless recorded)."""
+    return str(request.get("as_principal") or "anonymous")[:80]
 
 
 # Cookies that carry a login session by their conventional names. A flag missing on one of these

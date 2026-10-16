@@ -62,6 +62,8 @@ _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$")
 _SCHEMA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+/-]{0,127}$")
 _MAX_CANONICAL_BYTES = 512 * 1024
+# Equal to api/http_experiment.MAX_REDIRECT_HOPS (pinned by a test; that module imports httpx).
+BASELINE_REDIRECT_MAX_HOPS = 3
 _MAX_ACTIONS = 512
 _MAX_DEPENDENCIES = 511
 _BATCH_CAPABILITIES = frozenset({
@@ -1218,7 +1220,13 @@ class ScanActionPlanCompiler:
                 "baseline.http_redirect",
                 "deterministic_baseline",
                 "http.request",
-                {"method": "GET", "path": "/", "scheme": "http", "follow_redirects": True, "max_redirects": 1},
+                {
+                    "method": "GET", "path": "/", "scheme": "http", "follow_redirects": True,
+                    # The bound HTTP capability follows up to MAX_REDIRECT_HOPS on the bound
+                    # origins: http://host/ -> https://host/ -> https://host/login takes two.
+                    # The reservation covers every hop the capability may send.
+                    "max_redirects": BASELINE_REDIRECT_MAX_HOPS,
+                },
                 dependencies=("baseline.http",),
             )
             add(

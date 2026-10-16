@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from api.http_experiment import MAX_REDIRECT_HOPS
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from api.scan.action_plan import (
@@ -363,7 +364,7 @@ def test_compiler_closes_focused_xss_prerequisites_without_unrequested_families(
     assert "verify.sqli" not in by_id
     assert "active.templates" not in by_id
     assert "discover.web_content" not in by_id
-    assert by_id["baseline.http_redirect"].requested_budget["http_requests"] == 2
+    assert by_id["baseline.http_redirect"].requested_budget["http_requests"] == 1 + MAX_REDIRECT_HOPS
     assert by_id["baseline.tls"].capability_args == {
         "origins_ref": "frozen_https_origins",
         "origin_count": 1,

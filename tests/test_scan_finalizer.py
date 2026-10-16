@@ -600,6 +600,7 @@ def test_a_missing_header_finding_carries_the_recorded_response_that_lacks_it():
         "response_status": 200,
         "observed_headers": {"server": "nginx", "x-frame-options": "DENY"},
         "source_action_id": "baseline.http",
+        "principal": "anonymous",
         "header_absent": "permissions-policy",
     }
     # A header the baseline saw contradicts the match there: no contradicting response is attached.
@@ -1478,8 +1479,10 @@ def test_a_stored_baseline_observation_still_proves_a_session_cookie_flag():
     ]
 
 
-def _redirecting_origin_header_matches(landing_url: str):
-    origin = "http://dvwa.example.test"
+def _redirecting_origin_header_matches(
+    landing_url: str, *, origin: str = "http://dvwa.example.test",
+    root_principal: str | None = None,
+):
     baseline = _action("baseline.http", 0, capability_name="http.request")
     landing = _action("baseline.http_redirect", 1, dependencies=(baseline.action_id,),
                       capability_name="http.request")
@@ -1498,12 +1501,15 @@ def _redirecting_origin_header_matches(landing_url: str):
     observations = {
         baseline.action_id: ({
             "kind": "http_observation",
-            "request": {"method": "GET", "origin": origin, "path": "/"},
+            "request": {"method": "GET", "origin": origin, "path": "/",
+                        **({"as_principal": root_principal} if root_principal else {})},
             "response": {"status": 302, "security_headers": {}, "selected_headers": {}},
         },),
         landing.action_id: ({
             "kind": "http_observation",
-            "request": {"method": "GET", "origin": origin, "path": "/"},
+            # baseline.http_redirect always starts at the plain-HTTP root, anonymously.
+            "request": {"method": "GET", "origin": "http://" + origin.split("://", 1)[1],
+                        "path": "/", "as_principal": "anonymous"},
             "response": {"status": 200, "final_url": landing_url, "security_headers": {},
                          "selected_headers": {"server": "Apache"}},
         },),
@@ -1526,6 +1532,30 @@ def test_a_root_redirect_is_proven_from_the_same_origin_landing_page():
     observed = finding["evidence"]["observed_response"]
     assert observed["source_action_id"] == "baseline.http_redirect"
     assert observed["request_line"] == "GET http://dvwa.example.test/login.php"
+    assert observed["principal"] == "anonymous"
+
+
+def test_an_https_root_redirect_is_proven_through_the_scheme_upgrade():
+    # http://host/ -> https://host/ -> https://host/login: the landing is a 2xx of the HTTPS
+    # origin whose root answered 3xx, reached within the capability's redirect limit.
+    [finding] = _redirecting_origin_header_matches(
+        "https://app.example.test/login", origin="https://app.example.test",
+    )
+    assert finding["proof_state"] == "verified"
+    observed = finding["evidence"]["observed_response"]
+    assert observed["request_line"] == "GET https://app.example.test/login"
+    assert observed["principal"] == "anonymous"
+
+
+def test_an_anonymous_landing_does_not_prove_an_authenticated_root():
+    # The root was requested as the scan's primary principal; the anonymous login page the
+    # redirect probe lands on does not describe the page that principal is sent to.
+    [finding] = _redirecting_origin_header_matches(
+        "https://app.example.test/login", origin="https://app.example.test",
+        root_principal="primary",
+    )
+    assert finding["proof_state"] == "candidate"
+    assert finding["evidence"]["observed_response"]["principal"] == "primary"
 
 
 def test_a_redirect_landing_on_another_origin_proves_nothing():
