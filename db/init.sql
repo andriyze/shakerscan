@@ -2752,10 +2752,33 @@ CREATE TABLE IF NOT EXISTS discovered_secrets (
     state_changed_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ NOT NULL,
     promoted_profile_id UUID,
+    -- 2.11: what the worker read from the value without disclosing it (hunt/secret_transforms.py);
+    -- NULL until derived (a row stored before 2.11 is filled in by the sweeper).
+    derived JSONB CHECK (derived IS NULL OR jsonb_typeof(derived) = 'object'),
     CONSTRAINT discovered_secrets_target_value_unique UNIQUE (target_id, value_digest)
 );
-CREATE INDEX IF NOT EXISTS idx_discovered_secrets_target
-    ON discovered_secrets(target_id, last_seen_at DESC);
+DO $ds_derived$
+BEGIN
+    -- Checked first: ALTER TABLE takes an exclusive lock even when the column exists.
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'discovered_secrets'
+          AND column_name = 'derived'
+    ) THEN
+        -- Nullable, no default, no backfill: no table rewrite under the startup lock.
+        ALTER TABLE discovered_secrets ADD COLUMN derived JSONB
+            CHECK (derived IS NULL OR jsonb_typeof(derived) = 'object');
+    END IF;
+END
+$ds_derived$;
+DO $i_discovered_secrets_target$
+BEGIN
+    IF to_regclass('idx_discovered_secrets_target') IS NULL THEN
+        CREATE INDEX idx_discovered_secrets_target
+            ON discovered_secrets(target_id, last_seen_at DESC);
+    END IF;
+END
+$i_discovered_secrets_target$;
 CREATE TABLE IF NOT EXISTS discovered_secret_uses (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
@@ -2766,10 +2789,21 @@ CREATE TABLE IF NOT EXISTS discovered_secret_uses (
     revealed_by TEXT CHECK (revealed_by IS NULL OR length(revealed_by) BETWEEN 1 AND 200),
     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_secret
-    ON discovered_secret_uses(secret_id, used_at DESC);
-CREATE INDEX IF NOT EXISTS idx_discovered_secret_uses_run
-    ON discovered_secret_uses(hunt_run_id);
+DO $i_discovered_secret_uses_secret$
+BEGIN
+    IF to_regclass('idx_discovered_secret_uses_secret') IS NULL THEN
+        CREATE INDEX idx_discovered_secret_uses_secret
+            ON discovered_secret_uses(secret_id, used_at DESC);
+    END IF;
+END
+$i_discovered_secret_uses_secret$;
+DO $i_discovered_secret_uses_run$
+BEGIN
+    IF to_regclass('idx_discovered_secret_uses_run') IS NULL THEN
+        CREATE INDEX idx_discovered_secret_uses_run ON discovered_secret_uses(hunt_run_id);
+    END IF;
+END
+$i_discovered_secret_uses_run$;
 CREATE TABLE IF NOT EXISTS discovered_secret_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,
@@ -2778,5 +2812,10 @@ CREATE TABLE IF NOT EXISTS discovered_secret_grants (
     granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT discovered_secret_grants_unique UNIQUE (secret_id, target_id)
 );
-CREATE INDEX IF NOT EXISTS idx_discovered_secret_grants_target
-    ON discovered_secret_grants(target_id);
+DO $i_discovered_secret_grants_target$
+BEGIN
+    IF to_regclass('idx_discovered_secret_grants_target') IS NULL THEN
+        CREATE INDEX idx_discovered_secret_grants_target ON discovered_secret_grants(target_id);
+    END IF;
+END
+$i_discovered_secret_grants_target$;
