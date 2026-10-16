@@ -211,3 +211,44 @@ def test_shard_children_rebuild_the_same_verify_set():
     assert options["template_manifest_ref"] == templates.reference().canonical_dict()
     assert canonical_nuclei_options_for_manifest(templates, action_id="active.templates")[
         "verify_template_ids"] == "squid-analysis-report-generator"
+
+
+OOB_ONLY_TEMPLATE = """\
+# Test fixture (not an upstream template): a check that can only match through an
+# out-of-band interaction, which Scan never enables (-no-interactsh).
+id: oob-only-check
+info:
+  name: OOB-only check fixture
+  author: shakerscan-tests
+  severity: critical
+  tags: cve,oast,fixture
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/?callback={{interactsh-url}}"
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+"""
+
+
+def test_a_check_that_needs_out_of_band_interaction_is_never_run_as_a_verify_check(tmp_path):
+    import shutil
+
+    shutil.copytree(FIXTURES, tmp_path / "templates")
+    (tmp_path / "templates" / "http" / "oob-only-check.yaml").write_text(OOB_ONLY_TEMPLATE)
+    clear_index_cache()
+    only_oob = resolve_active_nuclei_selection(
+        str(tmp_path / "templates"), allow_state_changing_http=True, only_template_ids="oob-only-check")
+    assert only_oob.skip and only_oob.skip_reason == "verify_checks_need_oob_interaction"
+    mixed = resolve_active_nuclei_selection(
+        str(tmp_path / "templates"), allow_state_changing_http=False,
+        only_template_ids="oob-only-check,squid-analysis-report-generator")
+    assert mixed.template_ids == ("squid-analysis-report-generator",) and mixed.oob_excluded == 1
+    # The general active pack is unchanged: OOB templates are only dropped for a verify Scan.
+    general = resolve_active_nuclei_selection(
+        str(tmp_path / "templates"), allow_state_changing_http=False, tags="oast", severities="critical")
+    assert general.template_ids == ("oob-only-check",)
+    clear_index_cache()

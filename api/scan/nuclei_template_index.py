@@ -64,6 +64,10 @@ class _TemplateRecord:
     tags: frozenset[str]
     methods: frozenset[str]
     intrusive: bool
+    # Needs an out-of-band interaction (``{{interactsh-url}}``). Scan runs Nuclei with
+    # ``-no-interactsh``, so such a template can never match: a verify Scan must not read its
+    # silence as "not affected".
+    oob: bool = False
 
     @property
     def state_changing(self) -> bool:
@@ -92,6 +96,7 @@ class ActiveNucleiSelection:
     get_only_count: int
     state_changing_count: int
     intrusive_excluded: int
+    oob_excluded: int = 0
 
 
 _INDEX_CACHE: dict[tuple[str, int], NucleiMethodIndex] = {}
@@ -195,8 +200,9 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                 continue
             try:
                 with open(full, "r", encoding="utf-8") as handle:
-                    document = yaml.safe_load(handle)
-            except (OSError, yaml.YAMLError):
+                    source = handle.read()
+                document = yaml.safe_load(source)
+            except (OSError, UnicodeError, yaml.YAMLError):
                 parse_errors += 1
                 continue
             if not isinstance(document, Mapping) or "info" not in document:
@@ -222,6 +228,7 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                 tags=tags,
                 methods=methods,
                 intrusive="intrusive" in tags,
+                oob="interactsh" in source,
             )
             prior = records.get(template_id)
             if prior is not None:
@@ -233,6 +240,7 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
                     tags=prior.tags | record.tags,
                     methods=prior.methods | record.methods,
                     intrusive=prior.intrusive or record.intrusive,
+                    oob=prior.oob or record.oob,
                 )
             records[template_id] = record
     return NucleiMethodIndex(
@@ -306,7 +314,13 @@ def resolve_active_nuclei_selection(
     get_only: list[str] = []
     state_changing: list[str] = []
     intrusive_excluded = 0
+    oob_excluded = 0
     for record in matched:
+        if exact_ids and record.oob:
+            # A verify Scan reports a non-match as "not affected per this check"; a check that
+            # cannot match without out-of-band interaction would make that a false negative.
+            oob_excluded += 1
+            continue
         if record.intrusive:
             # Destructive templates need more than state-changing permission, and
             # Scan has no dangerous/destructive tier to grant it, so they are
@@ -326,10 +340,13 @@ def resolve_active_nuclei_selection(
     if not allow_ids:
         return ActiveNucleiSelection(
             template_ids=(), includes_state_changing=False, skip=True,
-            skip_reason="no_eligible_nuclei_templates",
+            skip_reason=(
+                "verify_checks_need_oob_interaction" if oob_excluded and not (get_only or state_changing)
+                else "no_eligible_nuclei_templates"
+            ),
             total_matched=len(matched), get_only_count=len(get_only),
             state_changing_count=len(state_changing),
-            intrusive_excluded=intrusive_excluded,
+            intrusive_excluded=intrusive_excluded, oob_excluded=oob_excluded,
         )
     includes_state_changing = allow_state_changing_http and bool(state_changing)
     return ActiveNucleiSelection(
@@ -338,5 +355,5 @@ def resolve_active_nuclei_selection(
         skip=False, skip_reason=None,
         total_matched=len(matched), get_only_count=len(get_only),
         state_changing_count=len(state_changing),
-        intrusive_excluded=intrusive_excluded,
+        intrusive_excluded=intrusive_excluded, oob_excluded=oob_excluded,
     )
