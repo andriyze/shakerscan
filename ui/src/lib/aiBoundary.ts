@@ -1,3 +1,4 @@
+import { pathSegment } from './apiPath.mjs'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 
 export interface BoundaryPrincipal {
@@ -120,11 +121,11 @@ async function responseJson<T>(responsePromise: Promise<Response>, fallback: str
 }
 
 function candidateUrl(huntId: string, candidateId: string): string {
-  return `${API_URL}/hunts/${encodeURIComponent(huntId)}/candidates/${encodeURIComponent(candidateId)}`
+  return `${API_URL}/hunts/${pathSegment(huntId)}/candidates/${pathSegment(candidateId)}`
 }
 
 export async function discoverBoundaryDrafts(huntId: string): Promise<BoundaryDiscovery> {
-  return responseJson(fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/boundary-discovery`, {
+  return responseJson(fetch(`${API_URL}/hunts/${pathSegment(huntId)}/boundary-discovery`, {
     method: 'POST', cache: 'no-store',
   }), 'Failed to discover boundary drafts')
 }
@@ -133,7 +134,7 @@ export async function prepareBoundaryCandidate(
   huntId: string, draft: BoundaryDiscoveryDraft,
 ): Promise<{ candidate: { id: string } }> {
   return responseJson(fetch(
-    `${API_URL}/hunts/${encodeURIComponent(huntId)}/boundary-discovery/${encodeURIComponent(draft.draft_id)}/prepare`,
+    `${API_URL}/hunts/${pathSegment(huntId)}/boundary-discovery/${pathSegment(draft.draft_id)}/prepare`,
     { method: 'POST', cache: 'no-store' },
   ), 'Failed to prepare boundary candidate')
 }
@@ -165,7 +166,7 @@ export async function queueBoundaryVerification(
   environment: 'preview' | 'staging' | 'development',
   scanProfile: 'smoke' | 'trace' | 'standard' | 'deep',
 ): Promise<{ scan_id: string; status: string }> {
-  return responseJson(fetch(`${API_URL}/ai/targets/${encodeURIComponent(targetId)}/boundary/verify`, {
+  return responseJson(fetch(`${API_URL}/ai/targets/${pathSegment(targetId)}/boundary/verify`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ proposal, boundary_base: boundaryBase, environment, scan_profile: scanProfile }),
   }), 'Failed to queue AI Boundary verification')
@@ -175,7 +176,7 @@ export async function exportBoundaryRegression(
   targetId: string, sourceScanId: string, proposal: BoundaryProposal,
   boundaryBase: Record<string, unknown>,
 ): Promise<BoundaryRegressionArtifact> {
-  return responseJson(fetch(`${API_URL}/ai/targets/${encodeURIComponent(targetId)}/boundary/regressions/export`, {
+  return responseJson(fetch(`${API_URL}/ai/targets/${pathSegment(targetId)}/boundary/regressions/export`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ source_scan_id: sourceScanId, proposal, boundary_base: boundaryBase }),
   }), 'Failed to export AI Boundary regression')
@@ -184,7 +185,7 @@ export async function exportBoundaryRegression(
 export async function evaluateBoundaryRegression(
   targetId: string, artifact: BoundaryRegressionArtifact, scanId: string,
 ): Promise<BoundaryRegressionEvaluation> {
-  return responseJson(fetch(`${API_URL}/ai/targets/${encodeURIComponent(targetId)}/boundary/regressions/evaluate`, {
+  return responseJson(fetch(`${API_URL}/ai/targets/${pathSegment(targetId)}/boundary/regressions/evaluate`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ artifact, scan_id: scanId }),
   }), 'Failed to evaluate AI Boundary regression')

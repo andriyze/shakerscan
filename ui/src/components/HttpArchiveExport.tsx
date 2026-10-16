@@ -1,5 +1,6 @@
 'use client'
 
+import { pathSegment } from '@/lib/apiPath.mjs'
 import { useEffect, useRef, useState } from 'react'
 import { Download, Search } from 'lucide-react'
 import { API_URL } from '@/lib/api'
@@ -178,7 +179,7 @@ export default function HttpArchiveExport({
     if (search.trim()) params.set('search', search.trim())
     if (method) params.set('method', method)
     if (statusCode.trim()) params.set('status_code', statusCode.trim())
-    return `${API_URL}/${ownerPath}/${encodeURIComponent(ownerId)}/http-transactions?${params}`
+    return `${API_URL}/${ownerPath}/${pathSegment(ownerId)}/http-transactions?${params}`
   }
 
   const load = async (nextOffset = 0) => {
@@ -273,7 +274,7 @@ export default function HttpArchiveExport({
   const downloadHuntRecord = async () => {
     setDownloading('hunt-record')
     try {
-      const response = await fetchRetryingBusy(`${API_URL}/hunts/${encodeURIComponent(ownerId)}/record`, undefined, whenBusy)
+      const response = await fetchRetryingBusy(`${API_URL}/hunts/${pathSegment(ownerId)}/record`, undefined, whenBusy)
       if (!response.ok) {
         const detail = await response.json().catch(() => null)
         throw new Error(refusalMessage(detail, `Hunt record export failed (${response.status})`))

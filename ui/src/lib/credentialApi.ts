@@ -1,3 +1,4 @@
+import { pathSegment } from './apiPath.mjs'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import type {
   CredentialProfileCreate as GeneratedCredentialProfileCreate,
@@ -137,7 +138,7 @@ export async function rotateCredentialProfile(
   profileId: string,
   payload: CredentialSecretPayload & { expected_record_version: number; created_by?: string },
 ): Promise<{ profile: CredentialProfile }> {
-  const response = await fetch(`${API_URL}/credential-profiles/${encodeURIComponent(profileId)}/rotate`, {
+  const response = await fetch(`${API_URL}/credential-profiles/${pathSegment(profileId)}/rotate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -149,7 +150,7 @@ export async function rotateCredentialProfile(
 export async function deactivateCredentialProfile(
   profileId: string,
 ): Promise<{ status: string; profile: CredentialProfile }> {
-  const response = await fetch(`${API_URL}/credential-profiles/${encodeURIComponent(profileId)}`, {
+  const response = await fetch(`${API_URL}/credential-profiles/${pathSegment(profileId)}`, {
     method: 'DELETE',
   })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to deactivate credential profile'))
@@ -174,7 +175,7 @@ export async function listCredentialLibrary(params: {
 }
 
 export async function listCredentialGrants(profileId: string): Promise<{ grants: CredentialGrant[] }> {
-  const response = await fetch(`${API_URL}/credential-profiles/${encodeURIComponent(profileId)}/grants`, { cache: 'no-store' })
+  const response = await fetch(`${API_URL}/credential-profiles/${pathSegment(profileId)}/grants`, { cache: 'no-store' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to load where this credential is used'))
   return response.json()
 }
@@ -183,7 +184,7 @@ export async function grantCredentialProfile(
   profileId: string,
   payload: { target_kind: CredentialTargetKind; target_id: string; approval_receipt_id?: string },
 ): Promise<{ grant: CredentialGrant }> {
-  const response = await fetch(`${API_URL}/credential-profiles/${encodeURIComponent(profileId)}/grants`, {
+  const response = await fetch(`${API_URL}/credential-profiles/${pathSegment(profileId)}/grants`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...payload, granted_by: 'credentials_ui' }),
@@ -194,7 +195,7 @@ export async function grantCredentialProfile(
 
 export async function revokeCredentialGrant(profileId: string, targetId: string): Promise<{ grant: CredentialGrant }> {
   const response = await fetch(
-    `${API_URL}/credential-profiles/${encodeURIComponent(profileId)}/grants/${encodeURIComponent(targetId)}`,
+    `${API_URL}/credential-profiles/${pathSegment(profileId)}/grants/${pathSegment(targetId)}`,
     { method: 'DELETE' },
   )
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to stop sharing credential'))

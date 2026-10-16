@@ -42,7 +42,7 @@ test('archive viewer explains historical and partial capture instead of implying
 
 test('Hunt archive offers a full explicit decision record separately from requests only', () => {
   assert.match(source, /Full Hunt record/)
-  assert.match(source, /\/hunts\/\$\{encodeURIComponent\(ownerId\)\}\/record/)
+  assert.match(source, /\/hunts\/\$\{pathSegment\(ownerId\)\}\/record/)
   assert.match(source, /ownerKind === 'hunt'/)
 })
 

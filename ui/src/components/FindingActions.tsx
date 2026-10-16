@@ -1,5 +1,6 @@
 'use client'
 
+import { pathSegment } from '@/lib/apiPath.mjs'
 import { useState } from 'react'
 import { getApiUrl } from '@/lib/api'
 import { useToast } from '@/components/ui'
@@ -51,7 +52,7 @@ export default function FindingActions({
     try {
       // Use backend API to update finding status (pass scanId for precise scoping)
       const backendStatus = STATUS_TO_BACKEND[status]
-      const url = `${API_URL}/findings/${findingId}?scan_id=${scanId}`
+      const url = `${API_URL}/findings/${pathSegment(findingId)}?${new URLSearchParams({ scan_id: scanId })}`
       const res = await fetch(url, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },

@@ -47,7 +47,7 @@ test('shared Credentials UI supports every canonical credential kind and lifecyc
     assert.match(page, new RegExp(`value: '${kind}'`))
   }
   assert.match(credentialApi, /fetch\(`\$\{API_URL\}\/credential-profiles`/)
-  assert.match(credentialApi, /credential-profiles\/\$\{encodeURIComponent\(profileId\)\}\/rotate/)
+  assert.match(credentialApi, /credential-profiles\/\$\{pathSegment\(profileId\)\}\/rotate/)
   assert.match(credentialApi, /method: 'DELETE'/)
   assert.doesNotMatch(api, /export async function listCredentialProfiles/)
 })
@@ -75,7 +75,7 @@ test('a credential is shared with other targets explicitly, and a shared copy is
   assert.match(dialog, /riskTier: 'credential'/)
   assert.match(dialog, /disabled=\{!chosen \|\| busy \|\| \(needsApproval && !approveActive\)\}/)
   assert.match(dialog, /Each still needs\s+its own authorization/)
-  assert.match(client, /\/credential-profiles\/\$\{encodeURIComponent\(profileId\)\}\/grants/)
+  assert.match(client, /\/credential-profiles\/\$\{pathSegment\(profileId\)\}\/grants/)
 })
 
 test('a share names the target as it is and only offers targets the credential can authenticate to', () => {

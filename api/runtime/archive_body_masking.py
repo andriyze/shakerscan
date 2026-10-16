@@ -657,6 +657,14 @@ _QUERY_VALUE_END_RE = re.compile(r"[&#\s]")
 _VALUE_END_RE = re.compile(r"[\s\"'<>]")
 
 
+def _secret_named_value(name: str, value: str) -> bool:
+    """A non-empty value under a secret name that is not already a withheld marker or a plain
+    location URL (``TOKEN_URL=https://idp/token``)."""
+    if not value or WITHHELD_MARKER_RE.fullmatch(value) or not is_withheld_key(name):
+        return False
+    return not is_location_value(name, value)
+
+
 def mask_credential_shaped(text: str) -> str:
     """Withhold every credential-shaped token in ``text`` (one linear scan). In a ``NAME=value``
     assignment the name stays readable and a credential-shaped value is withheld whole, up to the
@@ -676,8 +684,11 @@ def mask_credential_shaped(text: str) -> str:
         pieces.append(_mask_shaped_tokens(text[position:start]))
         pieces.append(match.group(1) + "=")
         # A value that is one credential as a whole is withheld whole; otherwise (a URL, a list)
-        # each credential-shaped run in it is, as anywhere else.
-        whole = "://" not in value and _is_credential_shaped(value)
+        # each credential-shaped run in it is, as anywhere else. A secret-named assignment
+        # (``PASSWORD=hunter2``, ``API_KEY=...``) is withheld whole whatever its shape, so this
+        # function is safe on its own and not only after the labelled-value rules.
+        whole = ("://" not in value and _is_credential_shaped(value)) or _secret_named_value(
+            match.group(1), value)
         pieces.append(_withhold(value) if whole else _mask_shaped_tokens(value))
         position = value_end
     pieces.append(_mask_shaped_tokens(text[position:]))

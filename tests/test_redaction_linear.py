@@ -77,7 +77,9 @@ def reference_redact_text(text: str) -> str:
 
 
 def test_the_reference_covers_every_rewritten_rule_and_keeps_the_rest():
-    assert len(redaction._TEXT_PATTERNS) == 13
+    # 14: the provider-key rule (review sweep M2) was appended; it is a plain regex, unchanged.
+    assert len(redaction._TEXT_PATTERNS) == 14
+    assert redaction._TEXT_PATTERNS[13][0] is redaction._PROVIDER_KEY_RE
     assert redaction._TEXT_PATTERNS[8] is redaction._mask_xml_elements
     assert redaction._TEXT_PATTERNS[9] is redaction._mask_url_userinfo
     assert redaction._TEXT_PATTERNS[11] is redaction._mask_mysql_passwords

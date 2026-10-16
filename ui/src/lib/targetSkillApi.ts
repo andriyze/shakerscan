@@ -1,3 +1,4 @@
+import { pathSegment } from './apiPath.mjs'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 
 export interface TargetSkill {
@@ -34,7 +35,7 @@ export interface TargetSkillSnapshot extends TargetSkillState {
 }
 
 async function request(id: string, init?: RequestInit, query = ''): Promise<TargetSkillState> {
-  const response = await fetch(`${API_URL}/targets/${encodeURIComponent(id)}/skill${query}`, {cache:'no-store', ...init})
+  const response = await fetch(`${API_URL}/targets/${pathSegment(id)}/skill${query}`, {cache:'no-store', ...init})
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Could not update target instructions'))
   const value: TargetSkillState = await response.json()
   if (!Number.isSafeInteger(value.revision) || value.revision < 0 || !Number.isSafeInteger(value.max_characters) || value.max_characters <= 0 || (value.skill !== null && typeof value.skill?.methodology !== 'string') || (value.operator_skill != null && typeof value.operator_skill.methodology !== 'string') || (value.knowledge != null && typeof value.knowledge.methodology !== 'string') || (value.unconfirmed_instructions != null && typeof value.unconfirmed_instructions.methodology !== 'string') || (value.trust !== undefined && !['none', 'operator', 'operator_delegated', 'agent_unconfirmed', 'hunt_advisory', 'unknown_advisory'].includes(value.trust))) {

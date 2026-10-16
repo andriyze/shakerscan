@@ -1,3 +1,4 @@
+import { pathSegment } from './apiPath.mjs'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import { createApprovalReceipt } from './api'
 
@@ -51,7 +52,7 @@ export interface DeletionResult {
 }
 
 export async function archiveRecordTarget(targetId: string): Promise<void> {
-  const response = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/archive`, { method: 'POST' })
+  const response = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/archive`, { method: 'POST' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Could not archive target'))
 }
 
