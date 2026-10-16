@@ -18,6 +18,7 @@ import sys
 import uuid
 
 import pytest
+from starlette.requests import Request
 
 from tests.disposable_postgres import require_disposable_database
 
@@ -80,7 +81,9 @@ def _run_update(monkeypatch, conn, body):
 
     monkeypatch.setattr(findings_router, "_pool_provider", lambda: _Pool())
     return asyncio.run(findings_router.update_finding(
-        str(FINDING), findings_router.FindingUpdate.model_validate(body), scan_id=None,
+        str(FINDING), findings_router.FindingUpdate.model_validate(body),
+        Request({"type": "http", "method": "PATCH", "path": f"/findings/{FINDING}", "headers": []}),
+        scan_id=None,
     ))
 
 
