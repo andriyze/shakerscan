@@ -21,6 +21,10 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+# `shakerscan record`: a recorded Chromium (then `python -m playwright install chromium`).
+record = ["playwright>=1.44"]
+
 [project.urls]
 Homepage = "https://shakerscan.com"
 Source = "https://github.com/andriyze/shakerscan"
