@@ -162,15 +162,16 @@ def test_a_secret_try_is_a_person_only_permission_no_start_bound_covers():
 
 def test_destinations_are_keyed_canonically_and_denied_logins_resist_respelling(monkeypatch):
     monkeypatch.delenv("SHAKERSCAN_SECRET_TRY_DENY", raising=False)
-    assert secret_try.destination_of({"path": "/login", "method": "post"}, "https://APP.example.test/base") == {
+    app = "https://APP.example.test/base"
+    assert secret_try.destination_of({"origin": app, "path": "/login", "method": "post"}) == {
         "origin": "https://app.example.test:443", "host": "app.example.test", "path": "/login", "method": "POST"}
-    assert secret_try.destination_of({"origin": "http://app.example.test:8080", "path": "x"}, None)["origin"] == (
+    assert secret_try.destination_of({"origin": "http://app.example.test:8080", "path": "x"})["origin"] == (
         "http://app.example.test:8080")
-    assert secret_try.destination_of({"path": "/"}, "ftp://app.example.test") is None
+    assert secret_try.destination_of({"origin": "ftp://app.example.test", "path": "/"}) is None
     # Never truncated: a path the request may carry but the try cannot name exactly is no destination.
     long_path = "/" + "a" * secret_try.MAX_PATH_CHARS
-    assert secret_try.destination_of({"path": long_path}, "https://app.example.test") is None
-    assert secret_try.destination_of({"path": long_path[:secret_try.MAX_PATH_CHARS]}, "https://app.example.test")
+    assert secret_try.destination_of({"origin": app, "path": long_path}) is None
+    assert secret_try.destination_of({"origin": app, "path": long_path[:secret_try.MAX_PATH_CHARS]})
     for path in ("/hub", "/hub/", "/hub/login", "/Hub/Login", "/%68ub/login", "/%2568ub/login",
                  "/a/../hub/login", "//hub//login", "/hub/login?next=/"):
         assert secret_try.denied_destination("honey.shakerscan.com", path), path
@@ -183,6 +184,30 @@ def test_destinations_are_keyed_canonically_and_denied_logins_resist_respelling(
     assert secret_try.denied_destination("sso.example.test", "/anything")
     assert secret_try.denied_destination("app.example.test", "/auth/login")
     assert not secret_try.denied_destination("app.example.test", "/login")
+
+
+def test_a_secret_goes_only_to_the_origin_the_request_names_never_a_default():
+    """The target binding's first origin (the latest scanned) need not be where a request without
+    its own origin is sent (the target URL): such a request carries no secret, and the grant, the
+    deny check and the worker key on the one origin the request names."""
+    from hunt.target_binding import web_hunt_target
+    from runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityInputContractError
+
+    run = {"target_kind": "web", "target_id": "00000000-0000-0000-0000-000000000001"}
+    context = {"target": {"url": "https://app.example.test",
+                          "origins": ["http://app.example.test:8080", "https://app.example.test"]},
+               "authorized_target_addresses": ["10.0.0.5"]}
+    binding, target_url = web_hunt_target(run, context, {})
+    assert binding.allowed_origins[0] != target_url.rstrip("/")   # the shape that misdirected a try
+    bound = {"method": "POST", "path": "/login", "json_body": {"password": ""},
+             "request_bindings": [{"secret_ref": "secret://00000000-0000-4000-8000-000000000001",
+                                   "body_pointer": "/password"}]}
+    assert secret_try.destination_of(bound) is None
+    with pytest.raises(CapabilityInputContractError, match="must name its origin"):
+        CAPABILITY_REGISTRY.validate_hunt_input("http.request", bound)
+    named = {**bound, "origin": "http://app.example.test:8080"}
+    CAPABILITY_REGISTRY.validate_hunt_input("http.request", named)
+    assert secret_try.destination_of(named)["origin"] == "http://app.example.test:8080"
 
 
 def test_the_person_reads_names_and_ids_never_a_value():
@@ -238,7 +263,8 @@ def test_a_request_carrying_a_discovered_secret_follows_no_redirect_even_on_its_
         allowed_origins=("https://app.example.test",), allowed_addresses=("203.0.113.10",),
         allowed_root_domains=("example.test",), scope_receipt_id="scope-1",
     )
-    inputs = {"method": "GET", "path": "/account", "follow_redirects": True, "request_bindings": [
+    inputs = {"method": "GET", "origin": "https://app.example.test", "path": "/account",
+              "follow_redirects": True, "request_bindings": [
         {"secret_ref": "secret://00000000-0000-4000-8000-000000000001", "header": "X-Api-Key"}]}
 
     async def exchange(conn, *, values, trusted_headers, capture_state, **_):

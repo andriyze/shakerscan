@@ -1916,7 +1916,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/secrets.inspect"
       },
-      "description": "List secrets discovered on this target earlier (metadata only: reference, kind, field name, length, when seen). Send one with an http.request binding {\"secret_ref\": \"secret://<id>\"}; the worker sends the value, which is never shown. related_target_secrets lists secrets of related targets: sending one to this Hunt's login waits for a person's secret.try permission.",
+      "description": "List secrets discovered on this target earlier (metadata only: reference, kind, field name, length, when seen). Send one with an http.request binding {\"secret_ref\": \"secret://<id>\"} on a request that names its origin; the worker sends the value, which is never shown. related_target_secrets lists secrets of related targets: sending one to this Hunt's login waits for a person's secret.try permission.",
       "input": {
         "fields": [],
         "required": []

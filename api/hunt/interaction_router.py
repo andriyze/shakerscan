@@ -2112,17 +2112,10 @@ async def _execute_hunt_capability_lifecycle(
                         # A secret found on another target goes only to a login a person allowed
                         # (secret.try); refused here, before anything is reserved.
                         try:
-                            from hunt.secret_try import admit_secret_references, binding_origin
+                            from hunt.secret_try import admit_secret_references
                         except ModuleNotFoundError:
-                            from api.hunt.secret_try import admit_secret_references, binding_origin
-                        try:
-                            secret_binding, _secret_url = web_hunt_target(run, context, policy)
-                            secret_base_origin = binding_origin(secret_binding)
-                        except (CapabilityInputError, ValueError):
-                            secret_base_origin = None  # refused: no exact destination
-                        await admit_secret_references(
-                            conn, run=run, values=request.input, fallback_origin=secret_base_origin,
-                        )
+                            from api.hunt.secret_try import admit_secret_references
+                        await admit_secret_references(conn, run=run, values=request.input)
                     used = _hunt_json(run["budget_used_json"], {})
                     budget = _hunt_json(run["budget_json"], {})
                     if name in {"candidate.verify", "authz.verify"}:

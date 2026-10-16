@@ -178,18 +178,13 @@ async def denied_destination_resolved(host: Any, path: Any, addresses: Any = ())
     return denied_destination(host, path, addresses)
 
 
-def binding_origin(binding: Any) -> str | None:
-    """The origin a request without its own ``origin`` goes to: the target binding's first
-    origin. Admission and the worker key a try on this one value."""
-    origins = tuple(getattr(binding, "allowed_origins", ()) or ())
-    return str(origins[0]) if origins else None
-
-
-def destination_of(values: Mapping[str, Any], fallback_origin: Any) -> dict[str, Any] | None:
+def destination_of(values: Mapping[str, Any]) -> dict[str, Any] | None:
     """Where an ``http.request`` sends its bindings: canonical origin, host, path and method.
-    None when it cannot be named exactly (no origin, or a path over ``MAX_PATH_CHARS``): such a
-    request never carries a discovered secret."""
-    text = str(values.get("origin") or fallback_origin or "").strip()
+    None when it cannot be named exactly (no ``origin`` of its own, or a path over
+    ``MAX_PATH_CHARS``): such a request never carries a discovered secret. The request's own
+    ``origin`` is the only source, never a default of the target binding, so the grant, the deny
+    check and the worker all key on where the request is actually sent."""
+    text = str(values.get("origin") or "").strip()
     try:
         parsed = urllib.parse.urlsplit(text)
         port = parsed.port
@@ -313,9 +308,7 @@ def _pinned_addresses(run: Mapping[str, Any], destination: Mapping[str, Any]) ->
     return found
 
 
-async def admit_secret_references(
-    conn: Any, *, run: Mapping[str, Any], values: Mapping[str, Any], fallback_origin: Any,
-) -> None:
+async def admit_secret_references(conn: Any, *, run: Mapping[str, Any], values: Mapping[str, Any]) -> None:
     """At admission: refuse (and so ask a person about) every ``secret_ref`` binding the worker
     would refuse for want of a ``secret.try`` grant, before anything is reserved. A request that
     cannot name its destination exactly, or goes to a denied login, never carries a secret."""
@@ -323,11 +316,11 @@ async def admit_secret_references(
                 and item.get("secret_ref")]
     if not bindings:
         return
-    destination = destination_of(values, fallback_origin)
+    destination = destination_of(values)
     if destination is None:
         raise HuntRefusal("scope_origin_invalid", (
-            "A request carrying a discovered secret must name one HTTP(S) origin and a path of at "
-            f"most {MAX_PATH_CHARS} characters; nothing was sent."))
+            "A request carrying a discovered secret must name its own HTTP(S) origin "
+            f"(scheme://host:port) and a path of at most {MAX_PATH_CHARS} characters; nothing was sent."))
     # The denied hosts' addresses are cached (RESOLVE_TTL); a refresh is bounded by RESOLVE_TIMEOUT.
     if await denied_destination_resolved(destination["host"], destination["path"], _pinned_addresses(run, destination)):
         raise HuntRefusal(SECRET_TRY_DESTINATION_DENIED, (
@@ -486,7 +479,7 @@ async def apply_secret_try(conn: Any, run: Mapping[str, Any], request: Mapping[s
 __all__ = [
     "DEFAULT_ATTEMPTS", "DENIED_LOGINS_FILE", "MAX_ATTEMPTS", "SECRET_TRY_DESTINATION_DENIED",
     "SECRET_TRY_EXHAUSTED", "SECRET_TRY_RATE_LIMITED", "SecretTryError", "WINDOW", "WINDOW_MAX",
-    "MAX_RELATED", "SECRET_TRY_UNRELATED", "admit_secret_references", "binding_origin",
+    "MAX_RELATED", "SECRET_TRY_UNRELATED", "admit_secret_references",
     "denied_addresses", "denied_destination_resolved", "is_related", "lock_window", "apply_secret_try", "related_secrets", "claim_attempt", "denied_destination",
     "destination_of", "has_live_grant", "render_secret_try", "window_attempts",
 ]

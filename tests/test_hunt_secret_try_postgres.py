@@ -27,7 +27,7 @@ from tests.test_hunt_permission_requests_postgres import DSN, permission_environ
 pytestmark = pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not configured")
 
 VALUE = "synthetic-found-password-91c2e7"
-LOGIN = {"method": "POST", "path": "/login", "json_body": {"user": "admin", "password": ""},
+LOGIN = {"method": "POST", "origin": "https://app.example.test", "path": "/login", "json_body": {"user": "admin", "password": ""},
          "request_bindings": [{"secret_ref": "", "body_pointer": "/password"}]}
 ACTIVE = {"active_testing": True, "allow_state_changing_http": True, "mutation_allowed": True,
           "approval_receipt_id": str(uuid.uuid4()), "authorization_confirmed": True}
@@ -98,7 +98,7 @@ async def _everything(env, hunt) -> str:
 
 
 def _destination(path="/login", method="POST"):
-    return secret_try.destination_of({"path": path, "method": method}, "https://app.example.test")
+    return secret_try.destination_of({"origin": "https://app.example.test", "path": path, "method": method})
 
 
 def test_another_targets_secret_waits_for_a_person_and_is_tried_only_on_that_login(env):
@@ -211,12 +211,12 @@ def test_the_shared_hub_login_never_receives_a_secret_and_is_never_asked_about(e
             assert secret_try.denied_destination("honey.shakerscan.com", path)
             with pytest.raises(HTTPException) as refused:
                 await secret_try.admit_secret_references(
-                    env.conn, run=hunt, values=values, fallback_origin="https://app.example.test")
+                    env.conn, run=hunt, values=values)
             assert refused.value.detail["reason_code"] == "secret_try_destination_denied"
             with pytest.raises(store.DiscoveredSecretError) as worker:
                 await store.resolve_for_hunt(
                     env.conn, reference=ref, target_id=_other, hunt_run_id=hunt["id"],
-                    action_id=uuid.uuid4(), destination=secret_try.destination_of(values, None))
+                    action_id=uuid.uuid4(), destination=secret_try.destination_of(values))
             assert worker.value.reason == secret_try.SECRET_TRY_DESTINATION_DENIED
         assert not secret_try.denied_destination("honey.shakerscan.com", "/hubris")
         assert not secret_try.denied_destination("app.example.test", "/hub/login")

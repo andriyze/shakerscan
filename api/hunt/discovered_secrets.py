@@ -429,7 +429,7 @@ async def briefing_counts(conn: Any, target_id: Any) -> dict[str, Any]:
         "never_used": sum(int(row["never_used"]) for row in rows),
         "by_kind": by_kind,
         "list_with": "secrets.inspect",
-        "use_with": 'http.request request_bindings: {"secret_ref": "secret://<id>", ...}; '
+        "use_with": 'http.request with its own origin and request_bindings: {"secret_ref": "secret://<id>", ...}; '
                     "the worker sends the value, which is never shown",
     }
 
