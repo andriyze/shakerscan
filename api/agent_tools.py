@@ -463,6 +463,13 @@ _AGENT_FFUF_WORDLISTS: dict[str, str] = {
     "common": "/app/wordlists/common.txt",
     "api": "/app/wordlists/api-resources.txt",
     "admin": "/app/wordlists/admin-common.txt",
+    # Corporate applications and edge appliances; read after ``common`` (see the sources map).
+    "corporate": "/app/wordlists/corporate.txt",
+}
+# A selection may read several bundled lists in order: ``corporate`` keeps the common entries
+# first and then adds the authored corporate paths, within the same exact reservation.
+_AGENT_FFUF_WORDLIST_SOURCES: dict[str, tuple[str, ...]] = {
+    "corporate": (_AGENT_FFUF_WORDLISTS["common"], _AGENT_FFUF_WORDLISTS["corporate"]),
 }
 
 
@@ -690,10 +697,10 @@ def _tmpl_ffuf(url: str, opts: dict[str, Any]) -> list[str]:
     # Bounded content/dir discovery. Read-only (GET). One tunable: wordlist in {common,api,admin}
     # -> a small BUNDLED list (unknown/invalid -> common; no arbitrary path). Automatic
     # calibration stays off because it adds requests outside the exact wordlist count. The
-    # authoritative worker replaces this source with an owner-only exact-size subset.
-    wordlist = _AGENT_FFUF_WORDLISTS.get(
-        str(opts.get("wordlist") or "").strip().lower(), _AGENT_FFUF_WORDLISTS["common"]
-    )
+    # authoritative worker replaces this source with an owner-only exact-size subset of every
+    # source the selection reads; unmaterialized, ffuf takes one list, the selection's first
+    # (``corporate`` starts with the common list, never the corporate tail alone).
+    wordlist = scanner_ffuf_wordlist_source(opts)
     base = url.split("?", 1)[0].rstrip("/")
     return ["-u", f"{base}/FUZZ", "-w", wordlist,
             "-mc", "200,204,301,302,307,401,403,405",
@@ -756,7 +763,7 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
         f"only; all flags are fixed. Tools: {sorted(RUN_TOOL_NAMES)} — httpx = passive "
         "fingerprint; nuclei = bounded focused templates by default (options {severity,tags}; explicit broad tags may return partial evidence at the hard wall); katana = crawl + "
         "JS endpoint extraction (finds linked/JS-referenced routes); ffuf = content/dir "
-        "discovery over a bundled wordlist (options {wordlist: common|api|admin} — finds "
+        "discovery over a bundled wordlist (options {wordlist: common|api|admin|corporate} — finds "
         "UNLINKED paths); dalfox = XSS scan of one URL (options {severity}); sqlmap = "
         "bounded SQLi test of one URL (boolean/error/union/time-based techniques, level/risk 2); "
         "nmap = read-only service/version probe of the single port behind a target URL (no "
@@ -777,7 +784,7 @@ RUN_TOOL_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "description": (
                     "nuclei: {severity:'high,critical', tags:'cve,exposure'} (omit tags for the focused pack); "
-                    "ffuf: {wordlist:'common'|'api'|'admin'}; "
+                    "ffuf: {wordlist:'common'|'api'|'admin'|'corporate'}; "
                     "dalfox: {severity:'low'|'medium'|'high'}; other tools have no tunable options"
                 ),
             },
@@ -1148,10 +1155,17 @@ def _replace_argv_value(argv: list[str], flag: str, value: Any) -> None:
         raise AgentToolError(f"scanner command is missing required flag: {flag}") from exc
 
 
-def scanner_ffuf_wordlist_source(options: Mapping[str, Any] | None = None) -> str:
-    """Resolve one bundled FFUF source path; callers can never supply a filesystem path."""
+def scanner_ffuf_wordlist_sources(options: Mapping[str, Any] | None = None) -> tuple[str, ...]:
+    """The bundled source paths a selection reads, in order (never a caller-supplied path)."""
     selected = str(dict(options or {}).get("wordlist") or "").strip().lower()
-    return _AGENT_FFUF_WORDLISTS.get(selected, _AGENT_FFUF_WORDLISTS["common"])
+    return _AGENT_FFUF_WORDLIST_SOURCES.get(selected) or (
+        _AGENT_FFUF_WORDLISTS.get(selected, _AGENT_FFUF_WORDLISTS["common"]),
+    )
+
+
+def scanner_ffuf_wordlist_source(options: Mapping[str, Any] | None = None) -> str:
+    """The first bundled source a selection reads; callers can never supply a filesystem path."""
+    return scanner_ffuf_wordlist_sources(options)[0]
 
 
 def build_enforced_scanner_plan(

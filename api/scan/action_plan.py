@@ -18,7 +18,7 @@ try:
         HTTP_CREDENTIAL_KINDS,
         normalize_credential_kind,
     )
-    from runtime.models import TargetBinding
+    from runtime.models import TargetBinding, apex_recon_roots
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.budgets import BUDGET_DIMENSIONS
     from ..runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityRegistry
@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         HTTP_CREDENTIAL_KINDS,
         normalize_credential_kind,
     )
-    from ..runtime.models import TargetBinding
+    from ..runtime.models import TargetBinding, apex_recon_roots
 
 try:
     from runtime.browser_login_contract import browser_login_action_arguments
@@ -1107,6 +1107,12 @@ class ScanActionPlanCompiler:
         nosqli = active and enabled("nosqli")
         authz_surface = active and enabled("authz_surface")
         graphql = active and enabled("graphql")
+        # Only an explicit selection: recon_active is in no preset, so a policy that names no
+        # families (or a legacy plan without resolved families) never runs it.
+        recon_active = (
+            active and enabled("recon_active")
+            and "recon_active" in set(execution_plan.resolved_families or ())
+        )
         template_actions_expected = (
             (scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions)
             or (scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions)
@@ -1313,7 +1319,13 @@ class ScanActionPlanCompiler:
                     "discover.web_content",
                     "discover_surface",
                     "web.content_discover",
-                    {"target_manifest_ref": endpoint_ref or None},
+                    {
+                        "target_manifest_ref": endpoint_ref or None,
+                        # Active authority adds the authored corporate paths (mail, identity,
+                        # VPN and admin consoles) after the common list, in the same
+                        # reservation. Pinned here so the action is immutable.
+                        "wordlist": "corporate" if policy.active_testing else "common",
+                    },
                     dependencies=("discover.web_probe",),
                 )
             # The application's own API description declares routes a black-box crawl never
@@ -1368,6 +1380,37 @@ class ScanActionPlanCompiler:
                 required=True,
                 supporting=True,
             )
+        if scope in {"full", "discovery"} and recon_active:
+            recon_required = "recon_active" in explicitly_requested
+            route_producers = tuple(
+                row.action_id for row in blueprints
+                if row.capability_name in {
+                    "web.crawl", "web.browser_crawl", "web.content_discover", "web.spec_ingest",
+                }
+            ) or primary_dependency
+            # Confirmed parameter names become inputs to this Scan's own candidate pipeline
+            # for routes discovery already observed, so it runs before manifests compile.
+            add(
+                "discover.parameters", "discover_surface", "web.param_discover",
+                {"route_refs": list(route_producers)},
+                dependencies=route_producers, required=recon_required, supporting=True,
+            )
+            # Guessing names under a root (Host/SNI or DNS) needs apex authority: the policy's
+            # subdomain discovery and an operator-declared apex. The registrable domain of a
+            # host bound below it (acme.zendesk.com -> zendesk.com) is a provider's, not the
+            # operator's, so neither action is planned for it.
+            apex_roots = apex_recon_roots(policy, target_binding)
+            if apex_roots:
+                add(
+                    "discover.virtual_hosts", "discover_network", "vhost.discover",
+                    {"root_domains": list(apex_roots)},
+                    dependencies=primary_dependency, supporting=True,
+                )
+                add(
+                    "discover.dns_names", "discover_network", "dns.enumerate",
+                    {"root_domains": list(apex_roots)},
+                    supporting=True,
+                )
         replay_inputs_required = scope in {"full", "endpoint"}
         if (
             scope == "endpoint"
