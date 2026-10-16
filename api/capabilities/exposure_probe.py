@@ -26,6 +26,7 @@ import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from .error_disclosure import runtime_error_disclosed
 
 from .graphql_probe import (
     GRAPHQL_IDE_HEADERS,
@@ -379,6 +380,8 @@ class ExposureSignature:
     def proof_contract(self) -> str | None:
         if not self.proves_sensitive_exposure:
             return None
+        if self.matched_pattern == "http_error_stack_trace":
+            return "verbose_error_exposure/v2"
         return EXPOSURE_PROOF_CONTRACTS.get(self.exposure_class)
 
     def secret_evidence(self) -> list[dict[str, object]]:
@@ -1186,8 +1189,14 @@ def classify_exposure(
     proof matches the file's own grammar, never a word that a page of prose about
     the file could also contain; and a generic secret pattern is only read from a
     non-HTML body, so a documentation page quoting a sample key proves nothing.
+    A 5xx response is examined only for a structured runtime stack trace, under
+    its own versioned contract; its status alone is never an exposure.
     """
-    if status != 200 or not body:
+    if not body:
+        return None
+    if status != 200:
+        if type(status) is int and 500 <= status <= 599 and runtime_error_disclosed(_decode(body), _content_type(headers)):
+            return _sig("verbose_error_disclosure", "http_error_stack_trace")
         return None
     if body.startswith(_DS_STORE_MAGIC):
         return _sig("directory_metadata_file", "ds_store_bud1_header")
@@ -1307,6 +1316,8 @@ _CONFIG_DOCUMENT_PATTERNS = frozenset({
     "sql_dump", "git_credentials_store", "netrc_credentials", "npmrc_auth_token",
     "pypirc_credentials", "php_configuration_secret", "php_source_served",
     "markdown_env_block_secret",
+    # Diagnostic messages can echo unrecognized credential values; keep metadata only.
+    "http_error_stack_trace",
 })
 # A known value shorter than this is too common to scrub or to test an excerpt for.
 _MIN_SCRUBBED_VALUE_LENGTH = 4

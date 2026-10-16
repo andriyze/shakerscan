@@ -38,6 +38,7 @@ CANONICAL_PROOF_CONTRACTS: frozenset[str] = frozenset({
     "private_key_exposure/v1",
     "vcs_metadata_exposure/v1",
     "verbose_error_exposure/v1",
+    "verbose_error_exposure/v2",
     "graphql_ide_exposure/v1",
     "graphql_introspection_exposure/v1",
     "html_comment_secret_exposure/v1",
