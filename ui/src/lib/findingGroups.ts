@@ -58,6 +58,18 @@ export function isServerGroupsPage<G = ServerFindingGroup<GroupableFinding>>(bod
     && Boolean((item as { lead?: unknown }).lead))
 }
 
+/**
+ * True for the 422 an engine gives when it cannot group these filters exactly (too many findings
+ * whose triage only it can read). The page then groups the loaded rows in the browser for this
+ * request only: the engine does group, just not this filter.
+ */
+export function isGroupingTooBroadError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const { status, detail } = error as { status?: unknown; detail?: unknown }
+  return Number(status) === 422 && Boolean(detail) && typeof detail === 'object'
+    && (detail as { error?: unknown }).error === 'proof_filter_too_broad'
+}
+
 /** Members a group lists (all of them, unless the server listed only the first ones). */
 export function groupSize<T extends GroupableFinding>(group: FindingGroup<T>): number {
   return Math.max(group.count ?? 0, group.members.length)

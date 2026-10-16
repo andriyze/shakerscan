@@ -12,6 +12,7 @@ import {
   groupSize,
   groupedCountSummary,
   groupsFromServer,
+  isGroupingTooBroadError,
   isServerGroupsPage,
   retestSignal,
   statusViewParam,
@@ -142,4 +143,13 @@ test('the count line for server groups states complete groups and the groups sho
   assert.equal(groupedCountSummary({ findings: 1, groups: 1, start: 1, shown: 1, statusLabel: 'open' }), '1 open finding in 1 group')
   assert.equal(groupedCountSummary({ findings: 120, groups: 75, start: 51, shown: 25, statusLabel: '' }),
     '120 findings in 75 groups · showing groups 51–75')
+})
+
+test('only the engine refusing these filters as too broad falls back for one request', () => {
+  const tooBroad = { status: 422, detail: { error: 'proof_filter_too_broad', message: 'more than 10000 …' } }
+  assert.equal(isGroupingTooBroadError(tooBroad), true)
+  assert.equal(isGroupingTooBroadError({ ...tooBroad, status: 400 }), false)
+  assert.equal(isGroupingTooBroadError({ status: 422, detail: { error: 'invalid_group_by' } }), false)
+  assert.equal(isGroupingTooBroadError({ status: 422, detail: 'proof_filter_too_broad' }), false)
+  assert.equal(isGroupingTooBroadError(null), false)
 })

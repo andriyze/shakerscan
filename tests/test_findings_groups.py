@@ -142,3 +142,29 @@ def test_fields_are_refused_before_any_query():
     with pytest.raises(HTTPException) as caught:
         _run(conn, _page(fields="id,title"))
     assert caught.value.detail["error"] == "invalid_fields" and conn.queries == []
+
+
+def test_since_is_refused_before_any_query():
+    conn = FakeConn([])
+    with pytest.raises(HTTPException) as caught:
+        _run(conn, _page(since=T0))
+    assert caught.value.status_code == 400 and caught.value.detail["error"] == "invalid_since"
+    assert conn.queries == []
+
+
+def test_without_a_proof_filter_too_many_unreadable_rows_are_keyed_not_refused(monkeypatch):
+    monkeypatch.setattr(list_query, "UNDETERMINED_LIMIT", 0)
+
+    class Unreadable(FakeConn):
+        async def fetch(self, query, *args):
+            if "AS latest_retest_mode" in query and "unnest" not in query:  # undetermined rows
+                self.queries.append(query)
+                return [{"id": uuid.uuid4(), "evidence": None, "severity": "high",
+                         "last_verification_verdict": None, "latest_retest_mode": None}]
+            return await super().fetch(query, *args)
+
+    conn = Unreadable([_group(1)])
+    body = _run(conn, _page())
+    assert body["total"] == 1
+    grouped = next(q for q in conn.queries if "GROUP BY" in q)
+    assert f"'{list_groups.UNDETERMINED_PROOF_KEY}'" in grouped and "row_number()" in grouped

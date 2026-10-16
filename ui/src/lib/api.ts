@@ -18,7 +18,7 @@ import { fetchHeavyRead } from './busyRetry.mjs'
 import { getJson } from './fetchLayer.mjs'
 import { exposureAssetsFromBody, exposureAssetsParams } from './exposureAssets.mjs'
 import { LIST_V1_MAX_LIMIT, isListV1, isUnknownListParamError, listV1Params, type ListV1Page, type TotalKind } from './listPage.mjs'
-import { isServerGroupsPage } from './findingGroups'
+import { isGroupingTooBroadError, isServerGroupsPage } from './findingGroups'
 
 export { API_URL, getApiUrl } from './apiConfig'
 
@@ -6082,8 +6082,9 @@ let findingGroupsUnsupported = false
 
 /**
  * One page of finding groups, grouped by the engine over every match (`group_by=issue`), or null
- * when this engine cannot: it rejects the parameter (a 400 naming it) or answers rows instead of
- * groups. The caller then groups the loaded rows in the browser, as before.
+ * when this engine cannot: it rejects the parameter (a 400 naming it), answers rows instead of
+ * groups, or refuses these filters as too broad to group exactly (a 422). The caller then groups
+ * the loaded rows in the browser, as before.
  */
 export async function getFindingGroupsPage(
   filters: FindingFilterParams,
@@ -6097,13 +6098,17 @@ export async function getFindingGroupsPage(
     params.set(key, value === true ? 'true' : String(value))
   }
   params.set('group_by', 'issue')
-  for (const [key, value] of Object.entries(listV1Params({ limit, cursor, sort }))) params.set(key, value)
-  // The engine counts groups in the same pass that forms them, so every page asks for the count.
-  params.set('count', 'exact')
+  // The first page asks for the counts (exact: the engine counts groups in the pass that forms
+  // them); later pages keep the first page's totals.
+  for (const [key, value] of Object.entries(listV1Params({ limit, cursor, sort, count: 'exact' }))) {
+    params.set(key, value)
+  }
   let body: unknown
   try {
     body = await getJson(`${API_URL}/findings?${params}`, { signal, heavy: true, label: 'Failed to fetch findings' })
   } catch (cause) {
+    // These filters only: the browser groups this page, and the next request asks the engine again.
+    if (isGroupingTooBroadError(cause)) return null
     if (!isUnknownListParamError(cause)) throw cause
     findingGroupsUnsupported = true
     return null

@@ -321,12 +321,13 @@ async def resolved_proof_filter(
 
 async def undetermined_proof_states(
     conn: Any, where: list[str], values: list[Any],
-    project: Callable[[dict[str, Any]], dict[str, Any]], *, too_broad: str,
-) -> dict[Any, str]:
+    project: Callable[[dict[str, Any]], dict[str, Any]], *, too_broad: Optional[str],
+) -> Optional[dict[Any, str]]:
     """``{id: proof_state}`` for the rows under ``where`` whose proof only Python can decide.
 
     They are read through their partial index and projected by ``project`` (finding_proof_fields);
-    more than ``UNDETERMINED_LIMIT`` of them is a 422 whose message ends with ``too_broad``.
+    more than ``UNDETERMINED_LIMIT`` of them is a 422 whose message ends with ``too_broad``, or
+    None when ``too_broad`` is None (the caller then answers without the projection).
     """
     rows = await conn.fetch(
         f"""SELECT f.id, f.evidence, f.severity, f.last_verification_verdict,
@@ -337,6 +338,8 @@ async def undetermined_proof_states(
         *values,
     )
     if len(rows) > UNDETERMINED_LIMIT:
+        if too_broad is None:
+            return None
         # Not transient: a retry gets the same answer, so this is the request's to change.
         raise HTTPException(status_code=422, detail={
             "error": "proof_filter_too_broad",

@@ -247,6 +247,7 @@ def test_the_grouped_read_refuses_what_it_does_not_serve(monkeypatch):
         plain, _ = await scale.route(pool, monkeypatch, count="none", limit=5)
         assert (await refused(group_by="issue", cursor=plain["next_cursor"]))["error"] == "cursor_mismatch"
         assert (await refused(group_by="issue", fields="id,title"))["error"] == "invalid_fields"
+        assert (await refused(group_by="issue", since=scale.T0))["error"] == "invalid_since"
         assert (await refused(group_by="title"))["error"] == "invalid_group_by"
         assert "offset" in await refused(group_by="issue", offset=10)
         assert "sort_by" in await refused(group_by="issue", sort_by="severity")
@@ -272,5 +273,24 @@ def test_the_grouped_read_groups_the_match_set_in_one_aggregate(monkeypatch):
         assert len(by_id) == 2
         assert all(len(args[0]) <= 20 * list_groups.GROUP_MEMBER_LIMIT for q, args in queries
                    if "unnest($1::uuid[])" in q)
+
+    scale.run(scenario)
+
+
+def test_too_many_unreadable_triage_rows_key_as_undetermined_without_a_proof_filter(monkeypatch):
+    async def scenario(conn, pool):
+        await add_repeats(conn)
+        unreadable = await conn.fetchval(
+            f"SELECT count(*) FROM findings f WHERE {list_query.INDEXED_UNDETERMINED_SQL}")
+        assert unreadable > 1
+        monkeypatch.setattr(list_query, "UNDETERMINED_LIMIT", 1)
+        groups, first = await group_walk(pool, monkeypatch, sort="-severity", limit=50)
+        # No proof_state filter: the page is served, those rows keyed 'undetermined', none lost.
+        assert first["findings_total"] == sum(group["count"] for group in groups)
+        assert sum(group["count"] for group in groups if group["proof_state"] == "undetermined") == unreadable
+        # With a proof_state filter the exact answer needs the projection, so it is still a 422.
+        with pytest.raises(HTTPException) as caught:
+            await scale.route(pool, monkeypatch, group_by="issue", proof_state="suspected")
+        assert caught.value.status_code == 422 and caught.value.detail["error"] == "proof_filter_too_broad"
 
     scale.run(scenario)

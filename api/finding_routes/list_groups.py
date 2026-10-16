@@ -8,7 +8,7 @@ ui/src/lib/findingGroups.ts); here it covers every finding the filters match, so
 is the whole group and the group count is every group.
 
 The request is the list/v1 request of GET /findings (the same filters, ``sort``, ``limit``,
-``cursor``, ``count``, ``since``) plus ``group_by=issue``; ``fields`` is refused. The answer is the
+``cursor``, ``count``) plus ``group_by=issue``; ``fields`` and ``since`` are refused (400). The answer is the
 list/v1 envelope whose items are groups::
 
     {"title_key", "severity", "subject", "proof_state", "status",   # the group key
@@ -20,14 +20,18 @@ list/v1 envelope whose items are groups::
      "members": [{"id", "url", "last_seen_at", "latest_retest_verdict"}, ...]}  # same order
 
 plus ``findings_total`` (members over every group) beside ``total`` when a count is requested.
+A row whose triage only Python can read is keyed by its projected proof state; when more than
+UNDETERMINED_LIMIT such rows match and no ``proof_state`` filter was given, they are keyed
+``undetermined`` instead of refusing the page.
 Groups are ordered by their lead's position in the requested sort, which is the order the browser
 gave them: walking the findings in that sort, a group appears where its first member does. The
 cursor is bound to the filters, the sort and ``group_by`` (list_contract), and continues after the
 previous page's last lead.
 
 Cost. A group's count and lead depend on every member, so each page groups the whole match set:
-one pass over the filtered findings computing the key (the proof projection included) and one
-aggregate. That is linear in the matches (about 1.4 s for 430k matching findings, most of it the
+one pass over the filtered findings computing the key (the proof projection included), one sort
+ranking members inside their group (row_number), and one aggregate that keeps only the first
+GROUP_MEMBER_LIMIT ids per group. That is linear in the matches (about 1.4 s for 430k matching findings, most of it the
 key and proof expressions), so the route is an admission-controlled heavy read (request_guards)
 under the heavy statement timeout. Only the page's
 groups then read their lead rows and member locations. The group count comes from the same
@@ -48,6 +52,7 @@ except ModuleNotFoundError:  # package import in host-side tests
 from .list_query import (
     FINDINGS_LIST,
     FINDINGS_LIST_UNRANKED,
+    INDEXED_UNDETERMINED_SQL,
     PROOF_STATE_FILTER_SQL,
     ROW_JOINS_SQL,
     V1_PROOF_INPUT_COLUMNS,
@@ -62,6 +67,8 @@ from .list_query import (
 GROUP_BY_VALUES = ("issue",)
 #: Members listed per group (the lead first); ``member_ids_truncated`` says when there are more.
 GROUP_MEMBER_LIMIT = 50
+#: The proof key of a row only Python can project, when too many such rows match to project them.
+UNDETERMINED_PROOF_KEY = "undetermined"
 
 # String.prototype.trim() removes ECMAScript WhiteSpace and LineTerminator characters.
 _JS_WHITESPACE = (
@@ -143,6 +150,9 @@ async def groups_page(
     """One list/v1 page of finding groups (summary rows only, never evidence or bodies)."""
     if page.fields is not None:
         raise _bad_request("invalid_fields", "fields cannot be combined with group_by")
+    if page.since is not None:
+        # A delta of changed rows cannot be merged into groups whose counts span every member.
+        raise _bad_request("invalid_since", "since cannot be combined with group_by")
     plan = FINDING_GROUPS_LIST.plan(page, filters={
         **filters.fingerprint(), "proof_state": proof_states, "group_by": group_by,
     })
@@ -154,41 +164,58 @@ async def groups_page(
     where += plan.filter_clauses(params)
     if proof_states:
         where.append(await resolved_proof_filter(conn, where, params, proof_states, project))
-    # The rows whose proof only Python can decide take their projected state into the key.
+    # The rows whose proof only Python can decide take their projected state into the key. Without
+    # a proof_state filter too many of them is no reason to refuse the page: they are keyed
+    # 'undetermined' instead (the lead row still carries its exact proof fields).
     overrides = await undetermined_proof_states(
         conn, where, params.values, project,
-        too_broad="add a target_id, scan_id, severity or seen_within_days filter",
+        too_broad="add a target_id, scan_id, severity or seen_within_days filter" if proof_states else None,
     )
     proof_sql = PROOF_STATE_FILTER_SQL
     from_sql = "findings f"
-    if overrides:
+    if overrides is None:
+        proof_sql = f"(CASE WHEN {INDEXED_UNDETERMINED_SQL} THEN '{UNDETERMINED_PROOF_KEY}' ELSE {proof_sql} END)"
+    elif overrides:
         ids = params.add(list(overrides))
         states = params.add(list(overrides.values()))
         from_sql += (f" LEFT JOIN unnest({ids}::uuid[], {states}::text[]) AS proof_override(id, state)"
                      " ON proof_override.id = f.id")
         proof_sql = f"COALESCE(proof_override.state, {proof_sql})"
 
+    # One sort ranks every member inside its group (row_number); the aggregate then keeps the
+    # first GROUP_MEMBER_LIMIT ids and the lead's sort values instead of collecting whole groups.
     member_order = ", ".join(
-        [f"{expr} {direction}" for expr, _kind in member_sorts] + [f"f.id {direction}"])
+        [f"m_s{index} {direction}" for index in range(len(member_sorts))] + [f"id {direction}"])
+    sort_select = ", ".join(f"{expr} AS m_s{index}" for index, (expr, _kind) in enumerate(member_sorts))
     lead_values = ", ".join(
-        f"(array_agg({expr} ORDER BY {member_order}))[1] AS {_SORT_COLUMNS[index]}"
-        for index, (expr, _kind) in enumerate(member_sorts)
+        f"(array_agg(m_s{index}) FILTER (WHERE rn = 1))[1] AS {_SORT_COLUMNS[index]}"
+        for index in range(len(member_sorts))
     )
+    keys = ", ".join(_KEY_COLUMNS)
     generated_at = await snapshot_time(conn)
     keyset = plan.keyset_clauses(params)
     rows = await conn.fetch(
-        f"""WITH g AS (
-                SELECT {TITLE_KEY_SQL} AS k_title, COALESCE(f.severity, '') AS k_severity,
+        f"""WITH keyed AS (
+                SELECT f.id, f.last_seen_at, f.first_seen_at, {sort_select},
+                       {TITLE_KEY_SQL} AS k_title, COALESCE(f.severity, '') AS k_severity,
                        {SUBJECT_KEY_SQL} AS k_subject, COALESCE({proof_sql}, '') AS k_proof,
-                       COALESCE(f.status, '') AS k_status,
-                       count(*) AS member_count,
-                       max(f.last_seen_at) AS last_seen_at, min(f.first_seen_at) AS first_seen_at,
-                       (array_agg(f.id ORDER BY {member_order}))[1:{GROUP_MEMBER_LIMIT}] AS member_ids,
-                       (array_agg(f.id ORDER BY {member_order}))[1] AS lead_id,
-                       {lead_values}
+                       COALESCE(f.status, '') AS k_status
                 FROM {from_sql}
                 WHERE {where_sql(where)}
-                GROUP BY 1, 2, 3, 4, 5
+            ),
+            ranked AS (
+                SELECT keyed.*, row_number() OVER (PARTITION BY {keys} ORDER BY {member_order}) AS rn
+                FROM keyed
+            ),
+            g AS (
+                SELECT {keys},
+                       count(*) AS member_count,
+                       max(last_seen_at) AS last_seen_at, min(first_seen_at) AS first_seen_at,
+                       array_agg(id ORDER BY rn) FILTER (WHERE rn <= {GROUP_MEMBER_LIMIT}) AS member_ids,
+                       (array_agg(id) FILTER (WHERE rn = 1))[1] AS lead_id,
+                       {lead_values}
+                FROM ranked
+                GROUP BY {keys}
             ),
             totals AS (SELECT count(*) AS groups_total, COALESCE(sum(member_count), 0) AS findings_total FROM g)
             SELECT g.*, {plan.keyset_select}, totals.groups_total, totals.findings_total
