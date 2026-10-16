@@ -215,3 +215,24 @@ test('the Targets count applies every filter, never the facets\' search-scope to
   // The legacy answer's total is already filtered.
   assert.deepEqual(inventoryPageFromBody({ targets: [], groups: [], total: 7, total_groups: 2 }).targetTotal, { count: 7, kind: 'exact' })
 })
+
+// Review of the 2.11 audit fixes: New Scan read one page of a substring search, so groups such as
+// aapp.io filled it and app.io itself was "not found".
+test('New Scan finds a domain group by exact name across a bounded number of pages', async () => {
+  const { DOMAIN_LOOKUP_MAX_PAGES, findDomainGroup } = await import('./targetInventoryModel.mjs')
+  const member = host => ({ is_active: true, locator: host, origins: [{ url: `https://${host}`, is_active: true }] })
+  const pages = {
+    '': { items: Array.from({ length: 10 }, (_, i) => ({ root_domain: `a${i}app.io`, targets: [member(`a${i}app.io`)] })), has_more: true, next_cursor: 'p2' },
+    p2: { items: [{ root_domain: 'app.io', targets: [member('www.app.io')], member_count: 1 }, { root_domain: 'myapp.io', targets: [] }], has_more: false },
+  }
+  const asked = []
+  const fetchPage = async cursor => { asked.push(cursor); return pages[cursor || ''] }
+  const found = await findDomainGroup('app.io', fetchPage)
+  assert.deepEqual([found.found, found.targets, asked], [true, ['https://www.app.io'], [null, 'p2']])
+  const missing = await findDomainGroup('none.io', fetchPage)
+  assert.deepEqual([missing.found, missing.exhausted], [false, true])
+  // Never more than the bound, and "not found" then is not definitive.
+  let reads = 0
+  const endless = await findDomainGroup('app.io', async () => { reads += 1; return { items: [{ root_domain: 'xapp.io', targets: [] }], has_more: true, next_cursor: `c${reads}` } })
+  assert.deepEqual([endless.found, endless.exhausted, reads], [false, false, DOMAIN_LOOKUP_MAX_PAGES])
+})

@@ -24,7 +24,7 @@ import { preferredCredentialId } from '@/lib/credentialDefaults'
 import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/components/ui'
 import { useTargetSearch } from '@/lib/useTargetSearch'
 import { getTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
-import { INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, domainBatchTargets } from '@/lib/targetInventoryModel.mjs'
+import { DOMAIN_LOOKUP_MAX_PAGES, DOMAIN_LOOKUP_PAGE, INVENTORY_MEMBER_LIMIT, SCAN_BATCH_MAX, batchCapNotice, capBatchTargets, findDomainGroup } from '@/lib/targetInventoryModel.mjs'
 import { credentialDescription, credentialOptions } from '@/lib/pickerOptions'
 import {
   RequestCollectionPicker,
@@ -121,10 +121,17 @@ export default function NewScanPage() {
       setBatchMode(true)
       setBatchResolving(true)
       // list/v1 reads at most INVENTORY_MEMBER_LIMIT members of the group, never the whole install.
-      getTargetAssets({ group_by: 'domain', search: requestedDomain, count: 'none', limit: 10, member_limit: INVENTORY_MEMBER_LIMIT })
-        .then((page) => {
+      // The search is a substring match, so the exact group is looked for over a few pages.
+      findDomainGroup(requestedDomain, (cursor) => getTargetAssets({
+        group_by: 'domain', search: requestedDomain, count: 'none', limit: DOMAIN_LOOKUP_PAGE,
+        member_limit: INVENTORY_MEMBER_LIMIT, ...(cursor ? { cursor } : {}),
+      }))
+        .then((resolved) => {
           if (cancelled) return
-          const resolved = domainBatchTargets(requestedDomain, page)
+          if (!resolved.found && !resolved.exhausted) {
+            setBatchNotice(`${requestedDomain} was not among the first ${(DOMAIN_LOOKUP_PAGE * DOMAIN_LOOKUP_MAX_PAGES).toLocaleString('en-US')} matching domain groups. Type its targets below.`)
+            return
+          }
           if (!resolved.found || !resolved.targets.length) {
             setBatchNotice(`No active web apps were found for ${requestedDomain}. Add targets, or type them below.`)
             return

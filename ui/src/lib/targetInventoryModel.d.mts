@@ -63,3 +63,8 @@ export interface InventoryPageView<G = any> {
 export function inventoryPageFromBody(body: unknown): InventoryPageView
 export function inventoryTargetTotal(view: Pick<InventoryPageView, 'groups' | 'targetTotal'> | null | undefined, allGroupsLoaded: boolean): InventoryTargetTotal
 export function targetTotalLabel(total: InventoryTargetTotal | null | undefined): string
+export const DOMAIN_LOOKUP_PAGE: number
+export const DOMAIN_LOOKUP_MAX_PAGES: number
+export function findDomainGroup(rootDomain: string, fetchPage: (cursor: string | null) => Promise<unknown>, maxPages?: number): Promise<{
+  targets: string[]; total: number; found: boolean; moreMembers: boolean; memberCount?: number; exhausted: boolean
+}>

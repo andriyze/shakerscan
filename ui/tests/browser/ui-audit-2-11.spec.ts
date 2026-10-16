@@ -216,3 +216,25 @@ test('a failed Refresh on /deep-hunt/leads says so, and a target change clears t
   await expect(page.getByTestId('leads-refreshed')).toHaveCount(0)
   await expect(page.getByTestId('leads-refresh-failed')).toHaveCount(0)
 })
+
+// Review of the audit fixes: New Scan read one page of a substring search for `domain=`, so
+// groups such as aapp.io filled it and app.io was reported as having no web apps.
+test('New Scan finds the exact domain group past substring matches', async ({ page }) => {
+  const app = (host: string) => ({ ...asset(1), url: `https://${host}`, locator: host, root_domain: 'app.io',
+    origins: [{ id: `o-${host}`, url: `https://${host}`, name: null, is_active: true }] })
+  const api = await mockPageApi(page, {
+    '/health': () => ({ status: 'healthy' }),
+    '/targets/inventory': (url) => url.searchParams.get('cursor') === 'p2'
+      ? { items: [{ root_domain: 'app.io', targets: [app('www.app.io')], member_count: 1, members_truncated: false }],
+        has_more: false, next_cursor: null, generated_at: now }
+      : { items: Array.from({ length: 10 }, (_, i) => ({ root_domain: `a${i}app.io`, targets: [], member_count: 1, members_truncated: true })),
+        has_more: true, next_cursor: 'p2', generated_at: now },
+  })
+  await page.goto('/scan/new?domain=app.io')
+  await expect(page.getByRole('textbox', { name: /Target URLs/ })).toHaveValue('https://www.app.io')
+  await expect(page.getByText(/No active web apps were found/)).toHaveCount(0)
+  const domainReads = api.requests.filter(entry => entry.startsWith('GET /targets/inventory') && entry.includes('group_by=domain'))
+  expect(domainReads[0]).not.toContain('cursor=')
+  expect([...new URL(domainReads[domainReads.length - 1].split(' ')[1], 'http://x').searchParams.keys()].sort())
+    .toEqual(['count', 'cursor', 'group_by', 'limit', 'member_limit', 'search'])
+})

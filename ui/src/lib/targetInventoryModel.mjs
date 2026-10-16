@@ -343,6 +343,29 @@ export function domainBatchTargets(rootDomain, page) {
     memberCount: Number(group.member_count) || (group.targets || []).length }
 }
 
+/** Domain-group pages New Scan reads, at most, to find a `domain=` reference (10 groups each). */
+export const DOMAIN_LOOKUP_PAGE = 10
+export const DOMAIN_LOOKUP_MAX_PAGES = 5
+
+/**
+ * Find one domain group by exact name. The inventory search is a substring match, so groups such
+ * as `aapp.io` sort before `app.io` and can fill the first page; this follows `next_cursor` until
+ * the exact group appears, the matches end, or `maxPages` pages were read.
+ * `fetchPage(cursor)` returns one list/v1 answer (`cursor` is null for the first page).
+ * `exhausted` is true when every matching group was read, so "not found" is definitive.
+ */
+export async function findDomainGroup(rootDomain, fetchPage, maxPages = DOMAIN_LOOKUP_MAX_PAGES) {
+  let cursor = null
+  for (let read = 0; read < maxPages; read += 1) {
+    const page = await fetchPage(cursor)
+    const resolved = domainBatchTargets(rootDomain, page)
+    if (resolved.found) return { ...resolved, exhausted: false }
+    cursor = inventoryPageFromBody(page).nextCursor
+    if (!cursor) return { ...resolved, exhausted: true }
+  }
+  return { targets: [], total: 0, found: false, moreMembers: false, exhausted: false }
+}
+
 /** Explicit `targets=` beyond one batch are cut to the batch size (the API refuses more). */
 export function capBatchTargets(targets) {
   const uniqueTargets = uniqueScanTargets(targets)
