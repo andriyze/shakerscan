@@ -343,7 +343,7 @@ def test_a_weak_policy_is_not_reported_as_a_missing_one():
     # Reached only by the .aws alternative (no "cloud metadata" in the title); an over-escaped
     # pattern sent it to the generic confidential-file guidance.
     ({"title": "Accessible Sensitive File: /.aws/credentials", "tool": "forced_browsing"}, "Exposed Cloud Credentials"),
-    ({"title": "Legacy TLS protocol negotiated", "tool": "tls.inspect"}, "Weak TLS Configuration"),
+    ({"title": "Legacy TLS protocol negotiated", "tool": "tls.inspect"}, "Legacy TLS protocol negotiated"),
     # AI Gate: the catalog title decides, whatever probe family produced it.
     ({"title": "PII or credential pattern in response", "source": "ai_gate", "evidence": {"family": "tool_abuse"}}, "Sensitive Data in AI Responses"),
     ({"title": "Excessive agency (LLM08)", "source": "ai_gate"}, "Excessive Agency"),

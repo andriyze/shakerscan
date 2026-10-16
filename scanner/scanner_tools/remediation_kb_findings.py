@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from .remediation_kb_devices import DEVICE_REMEDIATIONS
+from .remediation_kb_tls import TLS_REMEDIATIONS, TLS_TITLE_CHECKS
 
 _MDN = "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/"
 
@@ -658,6 +659,7 @@ max_age: 86400""",
 }
 
 FINDING_TYPE_REMEDIATIONS.update(DEVICE_REMEDIATIONS)
+FINDING_TYPE_REMEDIATIONS.update(TLS_REMEDIATIONS)
 
 # Nuclei template ids (evidence.template_id), matched exactly. Only ids reviewed from the pinned
 # template bundle (api/scan/work_manifests.py); their titles ("Git Credentials - Detect") name no
@@ -810,6 +812,12 @@ def finding_type_remediation_key(finding: dict[str, Any], evidence: dict[str, An
     """The knowledge-base key for a finding identified by its check, template id, catalog title or header."""
     title = normalized_title(finding.get("title"))
     tool = str(finding.get("tool") or "").strip().lower()
+    if tool == 'tls.inspect':
+        check = str(evidence.get('check') or '')
+        if check in TLS_REMEDIATIONS:
+            return check
+        if title in TLS_TITLE_CHECKS:
+            return TLS_TITLE_CHECKS[title]
     if title in EXACT_TITLE_REMEDIATION:
         return EXACT_TITLE_REMEDIATION[title]
     template_id = str(evidence.get("template_id") or "").strip().lower()

@@ -2000,6 +2000,40 @@ def _public_discovered_url(value: Any) -> str | None:
     return f"{public_url}#{client_route}" if client_route else public_url
 
 
+def _template_metadata(info: Mapping[str, Any], item: Mapping[str, Any]) -> dict[str, Any]:
+    """Template description, tags, references and classification (CVE/CWE/CVSS/EPSS/CPE), plus
+    extractor value lengths. Extracted values and their prefixes are never copied."""
+    classification = info.get("classification") if isinstance(info.get("classification"), Mapping) else {}
+
+    def bounded(value: Any, limit: int, chars: int) -> list[str] | str | None:
+        if isinstance(value, str):
+            return value[:chars] or None
+        if isinstance(value, (list, tuple)):
+            return [str(entry)[:chars] for entry in value[:limit] if entry not in (None, "")] or None
+        return None
+
+    metadata = {
+        "description": bounded(info.get("description"), 1, 600),
+        "tags": bounded(info.get("tags"), 12, 40),
+        "reference": bounded(info.get("reference"), 5, 300),
+        "template_remediation": bounded(info.get("remediation"), 1, 600),
+        "cve_id": bounded(classification.get("cve-id"), 5, 30),
+        "cwe_id": bounded(classification.get("cwe-id"), 5, 12),
+        "cvss_score": classification.get("cvss-score"),
+        "cvss_metrics": bounded(classification.get("cvss-metrics"), 1, 120),
+        "epss_score": classification.get("epss-score"),
+        "epss_percentile": classification.get("epss-percentile"),
+        "cpe": bounded(classification.get("cpe"), 1, 200),
+        # Extractor values may be credentials. Keep only bounded lengths, never prefixes.
+        "extracted_result_lengths": [len(str(value)) for value in
+            (item.get("extracted-results") or item.get("extracted_results") or ())[:5]]
+            if isinstance(item.get("extracted-results") or item.get("extracted_results"), (list, tuple)) else None,
+    }
+    if isinstance(metadata["tags"], str):
+        metadata["tags"] = [tag.strip() for tag in metadata["tags"].split(",") if tag.strip()][:12]
+    return {key: value for key, value in metadata.items() if value not in (None, "", [])}
+
+
 def parse_scanner_output(
     name: str, stdout: str, *, allowed_host: str | None = None,
 ) -> dict[str, Any]:
@@ -2071,6 +2105,7 @@ def parse_scanner_output(
                 "severity": str(info.get("severity") or item.get("severity") or "").lower()[:20] or None,
                 "matched_at": matched_at,
                 "matcher_name": str(item.get("matcher-name") or item.get("matcher_name") or "")[:200] or None,
+                **_template_metadata(info, item),
                 "proof_state": "candidate",
             })
         elif scanner in KATANA_TOOLS:
