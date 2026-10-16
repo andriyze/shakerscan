@@ -1,19 +1,23 @@
-"""The research autopilot: one leader advances opted-in episodes, maintenance bounded (2.11).
+"""The research autopilot: every process advances opted-in episodes, one leader maintains (2.11).
 
 Every API process ran this loop on its own: once a second each one reconciled stale dispatches
 and (every 30 s / 5 min) queue handoffs, orphaned queue work, campaign chaining and the abandoned
 episode reaper, and polled for an episode to claim with a query that examined every eligible
 episode's linked Scans and retests. Now:
 
-* Leadership (``loop_leader``): only the process that leads ``research_autopilot_maintenance``
-  runs the maintenance passes (``run_tick``, each tick bounded by ``MAINTENANCE_TICK_TIMEOUT``),
-  and only the process that leads ``research_autopilot`` claims episodes. A follower costs one
-  try-lock query per ``FOLLOWER_POLL_SECONDS``. The Postgres lease on each episode stays, so a
-  leader that dies mid-step is taken over when its lease expires, exactly as before.
+* Maintenance (``loop_leader``): only the process that leads ``research_autopilot_maintenance``
+  runs the maintenance passes, on a task of their own (``run_led_loop``, every
+  ``MAINTENANCE_INTERVAL``, each tick bounded by ``MAINTENANCE_TICK_TIMEOUT``), so a planner step
+  never delays them. A follower costs one try-lock query per interval.
+* Claims: every process claims its own episodes. The Postgres lease on each episode and
+  ``FOR UPDATE SKIP LOCKED`` keep two processes off the same episode, and a process that dies
+  mid-step is taken over when its lease expires, exactly as before.
+* Steps: a claimed episode's planner step (up to ~240 s) runs as a task; at most
+  ``STEP_CONCURRENCY`` per process at once, and a process at that bound claims nothing more.
 * Bounded claims: each poll examines at most ``CLAIM_BATCH`` eligible episodes (oldest change
   first, from a cursor that wraps), so episodes blocked on running work cannot make the poll scan
   them all, nor starve the ones behind them.
-* An idle leader backs off from 1 s to ``IDLE_MAX_SECONDS`` between polls.
+* An idle process backs off from 1 s to ``IDLE_MAX_SECONDS`` between polls.
 
 The collaborators (planner step, lease release, observation settlement...) still live in the API
 composition root and are read from it at call time (``hub``), so their test patches apply.
@@ -33,10 +37,13 @@ except ModuleNotFoundError:  # package import layout
     from .. import loop_leader
 
 MAINTENANCE_LOOP = "research_autopilot_maintenance"
-CLAIM_LOOP = "research_autopilot"
+MAINTENANCE_INTERVAL = 1.0
 CLAIM_BATCH = 50
+#: Planner steps one process runs at once.
+STEP_CONCURRENCY = 2
 IDLE_MAX_SECONDS = 5.0
-FOLLOWER_POLL_SECONDS = 5.0
+#: How often a process with every step slot busy looks again.
+BUSY_POLL_SECONDS = 1.0
 MAINTENANCE_TICK_TIMEOUT = 120.0
 CAMPAIGN_INTERVAL = 30.0
 QUEUE_INTERVAL = 30.0
@@ -166,19 +173,33 @@ async def _settle_observation(conn: Any, hub: Any, row: Any, owner: str) -> bool
         return settlement.get("next_status") == "awaiting_planner"
 
 
-async def run_research_autopilot(pool: Any, hub: Any) -> None:
+async def run_research_autopilot(pool: Any, hub: Any, *, concurrency: int = STEP_CONCURRENCY) -> None:
     """Durably advance opted-in episodes independent of any browser session."""
-    owner = f"api-autopilot:{os.getpid()}:{uuid.uuid4()}"
     clock = MaintenanceClock()
+    maintenance = asyncio.create_task(loop_leader.run_led_loop(
+        pool, MAINTENANCE_LOOP, lambda: maintenance_tick(pool, hub, clock),
+        interval=MAINTENANCE_INTERVAL, timeout=MAINTENANCE_TICK_TIMEOUT,
+    ))
+    steps: set[asyncio.Task] = set()
+    try:
+        await _claim_loop(pool, hub, steps, max(1, int(concurrency)))
+    finally:
+        # Shutdown: each step releases its lease when cancelled (see _advance).
+        maintenance.cancel()
+        for step in steps:
+            step.cancel()
+        await asyncio.gather(maintenance, *steps, return_exceptions=True)
+
+
+async def _claim_loop(pool: Any, hub: Any, steps: set[asyncio.Task], concurrency: int) -> None:
+    owner = f"api-autopilot:{os.getpid()}:{uuid.uuid4()}"
     cursor = ClaimCursor()
     idle = 1.0
     while True:
         episode_id: str | None = None
         try:
-            await loop_leader.run_tick(pool, MAINTENANCE_LOOP, lambda: maintenance_tick(pool, hub, clock),
-                                       timeout=MAINTENANCE_TICK_TIMEOUT)
-            if not await loop_leader.lead(pool, CLAIM_LOOP):
-                await asyncio.sleep(FOLLOWER_POLL_SECONDS)
+            if len(steps) >= concurrency:
+                await asyncio.sleep(BUSY_POLL_SECONDS)
                 continue
             should_plan = False
             async with pool.acquire() as conn:
@@ -196,16 +217,32 @@ async def run_research_autopilot(pool: Any, hub: Any) -> None:
             if not should_plan:
                 await hub._release_research_autopilot_lease(pool, episode_id, owner)
                 continue
-            await _advance(pool, hub, row, episode_id, owner)
+            step = asyncio.create_task(_run_step(pool, hub, row, episode_id, owner))
+            steps.add(step)
+            step.add_done_callback(steps.discard)
         except asyncio.CancelledError:
             raise
         except Exception:
             if episode_id:
-                try:
-                    await hub._release_research_autopilot_lease(pool, episode_id, owner, error="autopilot_controller_error")
-                except Exception:
-                    pass
+                await _release_after_error(pool, hub, episode_id, owner)
             await asyncio.sleep(2.0)
+
+
+async def _release_after_error(pool: Any, hub: Any, episode_id: str, owner: str) -> None:
+    try:
+        await hub._release_research_autopilot_lease(pool, episode_id, owner, error="autopilot_controller_error")
+    except Exception:
+        pass
+
+
+async def _run_step(pool: Any, hub: Any, row: Any, episode_id: str, owner: str) -> None:
+    """One step as a task: an unexpected failure releases the lease instead of being lost."""
+    try:
+        await _advance(pool, hub, row, episode_id, owner)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        await _release_after_error(pool, hub, episode_id, owner)
 
 
 async def _advance(pool: Any, hub: Any, row: Any, episode_id: str, owner: str) -> None:
@@ -314,8 +351,8 @@ async def _advance(pool: Any, hub: Any, row: Any, episode_id: str, owner: str) -
 
 __all__ = [
     "CLAIM_BATCH",
-    "CLAIM_LOOP",
     "MAINTENANCE_LOOP",
+    "STEP_CONCURRENCY",
     "ClaimCursor",
     "MaintenanceClock",
     "claim_episode",

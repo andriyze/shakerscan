@@ -1,4 +1,4 @@
-"""The research autopilot runs its maintenance and claims only where this process leads them."""
+"""The research autopilot: one leader maintains, every process claims and runs bounded steps."""
 from __future__ import annotations
 
 import asyncio
@@ -14,10 +14,6 @@ for path in (ROOT / "api", ROOT / "scanner"):
         sys.path.insert(0, str(path))
 
 from research_routes import autopilot_loop as loop  # noqa: E402
-
-
-class _Stop(BaseException):  # not an Exception: the loop handles those and keeps going
-    pass
 
 
 class _Pool:
@@ -37,54 +33,115 @@ class _Pool:
         return Ctx()
 
 
-def _run_loop(monkeypatch, *, leads: set[str], iterations: int = 3):
-    calls: list[str] = []
-    pool = _Pool()
+def _fast(monkeypatch):
+    monkeypatch.setattr(loop, "MAINTENANCE_INTERVAL", 0.001)
+    monkeypatch.setattr(loop, "BUSY_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(loop, "IDLE_MAX_SECONDS", 0.001)
+
+
+def _hub(released: list):
+    async def release(_pool, episode_id, owner, error=None):
+        released.append((episode_id, error))
+    return SimpleNamespace(_release_research_autopilot_lease=release)
+
+
+async def _until(predicate, *, seconds=2.0):
+    deadline = asyncio.get_running_loop().time() + seconds
+    while not predicate():
+        assert asyncio.get_running_loop().time() < deadline, "timed out"
+        await asyncio.sleep(0.002)
+
+
+def _setup(monkeypatch, *, leads: set[str], episodes: int):
+    """Leadership per loop name, ``episodes`` claimable rows, and steps that block until released."""
+    _fast(monkeypatch)
+    calls = {"maintenance": 0, "claims": 0, "steps": [], "cancelled": []}
+    gate = asyncio.Event()
 
     async def lead(_pool, name):
-        calls.append(f"lead:{name}")
         return name in leads
-
-    async def run_tick(_pool, name, tick, *, timeout):
-        calls.append(f"tick:{name}")
-        if name in leads:
-            await tick()
-        return name in leads
-
-    sleeps = []
-
-    async def sleep(seconds):
-        sleeps.append(seconds)
-        if len(sleeps) >= iterations:
-            raise _Stop
-
-    async def claim(conn, hub, owner, cursor, *, batch=loop.CLAIM_BATCH):
-        calls.append("claim")
-        return None
 
     async def maintenance(_pool, hub, clock):
-        calls.append("maintenance")
+        calls["maintenance"] += 1
+
+    async def claim(conn, hub, owner, cursor, *, batch=loop.CLAIM_BATCH):
+        calls["claims"] += 1
+        if len(calls["steps"]) + len(calls["cancelled"]) >= episodes or calls["claims"] > episodes:
+            return None
+        return {"id": f"episode-{calls['claims']}", "status": "awaiting_planner"}
+
+    async def advance(_pool, hub, row, episode_id, owner):
+        calls["steps"].append(episode_id)
+        try:
+            await gate.wait()
+        except asyncio.CancelledError:
+            calls["cancelled"].append(episode_id)
+            raise
 
     monkeypatch.setattr(loop.loop_leader, "lead", lead)
-    monkeypatch.setattr(loop.loop_leader, "run_tick", run_tick)
-    monkeypatch.setattr(loop.asyncio, "sleep", sleep)
     monkeypatch.setattr(loop, "claim_episode", claim)
     monkeypatch.setattr(loop, "maintenance_tick", maintenance)
-    with pytest.raises(_Stop):
-        asyncio.run(loop.run_research_autopilot(pool, SimpleNamespace()))
-    return calls, sleeps
+    monkeypatch.setattr(loop, "_advance", advance)
+    return calls, gate
 
 
-def test_a_follower_neither_maintains_nor_claims_and_polls_slowly(monkeypatch):
-    calls, sleeps = _run_loop(monkeypatch, leads=set())
-    assert "claim" not in calls and "maintenance" not in calls
-    assert sleeps == [loop.FOLLOWER_POLL_SECONDS] * 3
+def test_maintenance_keeps_running_while_planner_steps_are_in_flight(monkeypatch):
+    released: list = []
+
+    async def scenario():
+        calls, _gate = _setup(monkeypatch, leads={loop.MAINTENANCE_LOOP}, episodes=5)
+        task = asyncio.create_task(loop.run_research_autopilot(_Pool(), _hub(released), concurrency=2))
+        await _until(lambda: len(calls["steps"]) == 2)
+        before = calls["maintenance"]
+        await _until(lambda: calls["maintenance"] >= before + 5)
+        # Both slots stay busy: nothing more is claimed while they run.
+        claims = calls["claims"]
+        await asyncio.sleep(0.02)
+        assert calls["claims"] == claims and len(calls["steps"]) == 2
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Shutdown cancels the in-flight steps (each releases its own lease in _advance).
+        assert sorted(calls["cancelled"]) == sorted(calls["steps"])
+
+    asyncio.run(scenario())
 
 
-def test_the_leader_maintains_claims_and_backs_off_while_idle(monkeypatch):
-    calls, sleeps = _run_loop(monkeypatch, leads={loop.MAINTENANCE_LOOP, loop.CLAIM_LOOP}, iterations=5)
-    assert calls.count("maintenance") == 5 and calls.count("claim") == 5
-    assert sleeps == [1.0, 2.0, 4.0, loop.IDLE_MAX_SECONDS, loop.IDLE_MAX_SECONDS]
+def test_a_maintenance_follower_still_claims_and_runs_its_own_steps(monkeypatch):
+    released: list = []
+
+    async def scenario():
+        calls, gate = _setup(monkeypatch, leads=set(), episodes=3)
+        gate.set()
+        task = asyncio.create_task(loop.run_research_autopilot(_Pool(), _hub(released), concurrency=2))
+        await _until(lambda: len(calls["steps"]) == 3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert calls["maintenance"] == 0 and calls["cancelled"] == []
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_step_releases_its_lease_and_frees_its_slot(monkeypatch):
+    released: list = []
+
+    async def scenario():
+        calls, _gate = _setup(monkeypatch, leads=set(), episodes=2)
+
+        async def broken(_pool, hub, row, episode_id, owner):
+            calls["steps"].append(episode_id)
+            raise RuntimeError("release raced")
+
+        monkeypatch.setattr(loop, "_advance", broken)
+        task = asyncio.create_task(loop.run_research_autopilot(_Pool(), _hub(released), concurrency=1))
+        await _until(lambda: len(released) == 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert released == [("episode-1", "autopilot_controller_error"), ("episode-2", "autopilot_controller_error")]
+
+    asyncio.run(scenario())
 
 
 def test_maintenance_runs_each_periodic_pass_on_its_own_interval(monkeypatch):

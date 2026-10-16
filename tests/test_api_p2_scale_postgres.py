@@ -768,3 +768,38 @@ def test_autopilot_claims_past_blocked_episodes_in_bounded_batches():
         assert await conn.fetchval("SELECT lease_owner FROM research_episodes WHERE id = $1", episodes[12]) == "owner-test"
         await conn.execute("DELETE FROM research_episodes WHERE id = ANY($1::uuid[])", episodes)
     _run(body)
+
+
+def test_processes_claiming_at_once_never_lease_the_same_episode():
+    """Every API process claims (2.11): concurrent claims split the episodes, none twice."""
+    from research_routes import autopilot_loop as loop
+
+    async def body(conn):
+        target = await conn.fetchval("SELECT id FROM targets WHERE url LIKE 'https://web%' LIMIT 1")
+        episodes = [await conn.fetchval(
+            "INSERT INTO research_episodes(target_id, objective, episode_version, status, autopilot_enabled, "
+            "updated_at) VALUES ($1, 'o', 'v1', 'awaiting_planner', true, $2) RETURNING id",
+            target, T0 + timedelta(minutes=index)) for index in range(6)]
+        hub = SimpleNamespace(RESEARCH_AUTOPILOT_LEASE_SECONDS=30)
+        others = [await _connect() for _ in range(3)]
+        try:
+            async def process(index, other):
+                cursor, claimed = loop.ClaimCursor(), []
+                for _ in range(4):
+                    row = await loop.claim_episode(other, hub, f"process-{index}", cursor)
+                    if row:
+                        claimed.append(row["id"])
+                return claimed
+
+            results = await asyncio.gather(*(process(i, other) for i, other in enumerate(others)))
+        finally:
+            for other in others:
+                await other.close()
+        claimed = [episode for result in results for episode in result]
+        assert sorted(claimed) == sorted(episodes)  # each once, by whichever process got it
+        owners = await conn.fetch("SELECT id, lease_owner FROM research_episodes WHERE id = ANY($1::uuid[])", episodes)
+        by_owner = {row["id"]: row["lease_owner"] for row in owners}
+        for index, result in enumerate(results):
+            assert all(by_owner[episode] == f"process-{index}" for episode in result)
+        await conn.execute("DELETE FROM research_episodes WHERE id = ANY($1::uuid[])", episodes)
+    _run(body)
