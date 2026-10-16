@@ -2111,7 +2111,10 @@ async def _execute_hunt_capability_lifecycle(
                     if name == "http.request" and request.input.get("request_bindings"):
                         # A secret found on another target goes only to a login a person allowed
                         # (secret.try); refused here, before anything is reserved.
-                        from .secret_try import admit_secret_references
+                        try:
+                            from hunt.secret_try import admit_secret_references
+                        except ModuleNotFoundError:
+                            from api.hunt.secret_try import admit_secret_references
                         try:
                             _secret_target, secret_base_url = web_hunt_target(run, context, policy)
                         except (CapabilityInputError, ValueError):
@@ -2749,7 +2752,10 @@ async def _execute_hunt_capability_lifecycle(
                     from hunt.discovered_secrets import planner_view
                 except ModuleNotFoundError:
                     from api.hunt.discovered_secrets import planner_view
-                from .secret_try import related_secrets
+                try:
+                    from hunt.secret_try import related_secrets
+                except ModuleNotFoundError:
+                    from api.hunt.secret_try import related_secrets
                 async with _pool().acquire() as conn:
                     listed = [planner_view(row, run.get("target_id")) for row in
                               await list_for_target(conn, run.get("target_id"), usable_only=True)]
@@ -3790,7 +3796,10 @@ async def _execute_hunt_capability_lifecycle(
     if name == "secrets.inspect" and status == "completed" and policy.get("secret_values_visible") is True:
         # The starting person let this Hunt's agent see the values: added to this live answer
         # only, after the action, receipt and ledger were stored without them.
-        from .discovered_secrets import values_for_agent
+        try:
+            from hunt.discovered_secrets import values_for_agent
+        except ModuleNotFoundError:
+            from api.hunt.discovered_secrets import values_for_agent
         async with _pool().acquire() as conn:
             shown = await values_for_agent(
                 conn, hunt_run_id=run["id"], target_id=run.get("target_id"), action_id=action_id,

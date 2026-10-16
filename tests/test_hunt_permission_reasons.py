@@ -41,6 +41,7 @@ HARD = (
     "capability_unregistered", "capability_target_kind_mismatch", "capability_requires_credentials",
     "scope_destination_blocked", "scope_credential_other_host", "scope_origin_invalid", "scope_scanner_other_host",
     "credential_inactive", "credential_version_changed", "budget_dimension_needs_permission",
+    "secret_try_rate_limited", "secret_try_destination_denied",
 )
 
 
@@ -55,7 +56,7 @@ def test_the_reason_codes_and_kinds_are_closed_and_hard_limits_have_no_kind():
     assert len(REASON_CODES) == len(set(REASON_CODES))
     assert set(PERMISSION_KINDS) == {
         "target.authorize", "credential.use", "capability.enable", "budget.raise", "ssh.exec",
-        "ssh.host_trust", "preauthorization",
+        "ssh.host_trust", "preauthorization", "secret.try",
     }
     for code in HARD:
         assert reason_kind(code) is None, code

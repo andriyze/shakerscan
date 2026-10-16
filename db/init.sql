@@ -2834,10 +2834,7 @@ CREATE TABLE IF NOT EXISTS discovered_secret_uses (
     destination_host TEXT NOT NULL DEFAULT '' CHECK (length(destination_host) <= 255),
     -- An operator who revealed the value (no Hunt, no action), or NULL for a Hunt's use.
     revealed_by TEXT CHECK (revealed_by IS NULL OR length(revealed_by) BETWEEN 1 AND 200),
-    used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- 2.11 (api/hunt/secret_try.py): the secret.try grant an attempt used, and the login's answer.
-    permission_grant_id UUID,
-    outcome TEXT CHECK (outcome IS NULL OR length(outcome) <= 80)
+    used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 DO $i_discovered_secret_uses_secret$
 BEGIN
@@ -2854,6 +2851,28 @@ BEGIN
     END IF;
 END
 $i_discovered_secret_uses_run$;
+DO $ds_uses_try$
+BEGIN
+    -- 2.11 (hunt/secret_try.py): the person's grant an attempt on another target's login used,
+    -- and what the login answered. Checked first: ALTER TABLE takes an exclusive lock even when
+    -- the column exists. Nullable, no default, no foreign key: no rewrite, no lock on another table.
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'discovered_secret_uses'
+          AND column_name = 'permission_grant_id'
+    ) THEN
+        ALTER TABLE discovered_secret_uses ADD COLUMN permission_grant_id UUID;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'discovered_secret_uses'
+          AND column_name = 'outcome'
+    ) THEN
+        ALTER TABLE discovered_secret_uses ADD COLUMN outcome TEXT
+            CHECK (outcome IS NULL OR length(outcome) <= 80);
+    END IF;
+END
+$ds_uses_try$;
 CREATE TABLE IF NOT EXISTS discovered_secret_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     secret_id UUID NOT NULL REFERENCES discovered_secrets(id) ON DELETE CASCADE,

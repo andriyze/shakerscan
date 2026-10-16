@@ -19,7 +19,7 @@ Hunt of another target T may send it only under an operator's grant of that secr
   destination host and the login's answer (``http_<status>``), shown on the Hunt record; the
   request, decision and use are ``hunt_permission_events``.
 * **Hard limits.** Some logins never receive any discovered secret, whoever asks
-  (``DENIED_DESTINATIONS`` plus ``SHAKERSCAN_SECRET_TRY_DENY``): shared demonstration logins whose
+  (``secret_try_denied_logins.txt`` plus ``SHAKERSCAN_SECRET_TRY_DENY``): shared demonstration logins whose
   accounts other people rely on.
 """
 from __future__ import annotations
@@ -29,12 +29,16 @@ from datetime import timedelta
 import json
 import os
 import posixpath
+import re
 from typing import Any
 import urllib.parse
 import uuid
 
 from .permission_reasons import KIND_SECRET_TRY, HuntRefusal
 
+# discovered_secrets.SECRET_REF_PATTERN (kept here so the store and this module do not import each other).
+_SECRET_REF_RE = re.compile(
+    r"^secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 DEFAULT_ATTEMPTS = 3
 MAX_ATTEMPTS = 10
 WINDOW = timedelta(minutes=15)
@@ -43,9 +47,17 @@ MAX_PATH_CHARS = 2048
 SECRET_TRY_DESTINATION_DENIED = "secret_try_destination_denied"
 SECRET_TRY_RATE_LIMITED = "secret_try_rate_limited"
 SECRET_TRY_EXHAUSTED = "secret_try_attempts_exhausted"
-# (host, path prefix): a login under this prefix on this host never receives a discovered secret.
-# honey.shakerscan.com/hub is the shared Halvern Hub demonstration login.
-DENIED_DESTINATIONS: tuple[tuple[str, str], ...] = (("honey.shakerscan.com", "/hub"),)
+# Shipped logins that never receive a discovered secret (host/path prefix per line); the shared
+# demonstration hub login of the project's public test site is one.
+DENIED_LOGINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "secret_try_denied_logins.txt")
+
+
+def _shipped_rules() -> tuple[str, ...]:
+    try:
+        with open(DENIED_LOGINS_FILE, encoding="utf-8") as handle:
+            return tuple(line.strip() for line in handle if line.strip() and not line.lstrip().startswith("#"))
+    except OSError:
+        return ()
 
 
 def _json(value: Any, default: Any) -> Any:
@@ -66,9 +78,10 @@ def _canonical_host(value: Any) -> str:
 
 
 def _denied_rules() -> tuple[tuple[str, str], ...]:
-    """The built-in rules plus ``SHAKERSCAN_SECRET_TRY_DENY`` (``host/path,host/path``)."""
+    """The shipped rules plus ``SHAKERSCAN_SECRET_TRY_DENY`` (``host/path,host/path``)."""
     extra = []
-    for item in str(os.environ.get("SHAKERSCAN_SECRET_TRY_DENY") or "").split(","):
+    configured = str(os.environ.get("SHAKERSCAN_SECRET_TRY_DENY") or "").split(",")
+    for item in (*_shipped_rules(), *configured):
         text = item.strip()
         if not text:
             continue
@@ -76,7 +89,7 @@ def _denied_rules() -> tuple[tuple[str, str], ...]:
         host = _canonical_host(host)
         if host:
             extra.append((host, _normal_path("/" + path)))
-    return (*DENIED_DESTINATIONS, *extra)
+    return tuple(extra)
 
 
 def _normal_path(path: Any) -> str:
@@ -166,12 +179,17 @@ async def remaining_grant(conn: Any, grants: list[dict[str, Any]]) -> Any:
     return None
 
 
+class SecretTryError(ValueError):
+    """A refused try; ``reason`` is one of the SECRET_TRY_* codes (or ``secret_target_mismatch``),
+    safe to show. The store re-raises it as its own refusal."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 def _error(code: str, message: str) -> Exception:
-    try:
-        from hunt.discovered_secrets import DiscoveredSecretError
-    except ModuleNotFoundError:
-        from .discovered_secrets import DiscoveredSecretError
-    return DiscoveredSecretError(code, message)
+    return SecretTryError(code, message)
 
 
 async def has_live_grant(conn: Any, *, hunt_run_id: Any, secret_id: Any, destination: Mapping[str, Any] | None) -> bool:
@@ -213,16 +231,12 @@ async def admit_secret_references(
     if not bindings:
         return
     destination = destination_of(values, fallback_origin)
-    try:
-        from hunt.discovered_secrets import DiscoveredSecretError, parse_reference
-    except ModuleNotFoundError:
-        from .discovered_secrets import DiscoveredSecretError, parse_reference
     consuming = run.get("target_id")
     for binding in bindings:
-        try:
-            secret_id = parse_reference(binding["secret_ref"])
-        except DiscoveredSecretError:
+        text = str(binding["secret_ref"])
+        if not _SECRET_REF_RE.fullmatch(text):
             continue  # the input schema and the worker refuse it with its code
+        secret_id = uuid.UUID(text.removeprefix("secret://"))
         if destination is not None and denied_destination(destination["host"], destination["path"]):
             raise HuntRefusal(SECRET_TRY_DESTINATION_DENIED, (
                 f"{destination['origin']}{destination['path']} never receives a discovered secret: "
@@ -350,8 +364,8 @@ async def apply_secret_try(conn: Any, run: Mapping[str, Any], request: Mapping[s
 
 
 __all__ = [
-    "DEFAULT_ATTEMPTS", "DENIED_DESTINATIONS", "MAX_ATTEMPTS", "SECRET_TRY_DESTINATION_DENIED",
-    "SECRET_TRY_EXHAUSTED", "SECRET_TRY_RATE_LIMITED", "WINDOW", "WINDOW_MAX",
+    "DEFAULT_ATTEMPTS", "DENIED_LOGINS_FILE", "MAX_ATTEMPTS", "SECRET_TRY_DESTINATION_DENIED",
+    "SECRET_TRY_EXHAUSTED", "SECRET_TRY_RATE_LIMITED", "SecretTryError", "WINDOW", "WINDOW_MAX",
     "MAX_RELATED", "admit_secret_references", "apply_secret_try", "related_secrets", "claim_attempt", "denied_destination",
     "destination_of", "has_live_grant", "render_secret_try", "window_attempts",
 ]

@@ -387,11 +387,11 @@ async def read_hunt_uses(conn: Any, hunt_run_id: Any, *, limit: int = 2000) -> l
         "found_on": str(row["target_id"]),
         "used_at": row["used_at"].isoformat() if hasattr(row["used_at"], "isoformat") else row["used_at"],
         # A try on another target's login: the person's grant that allowed it, and the answer.
-        "permission_grant_id": str(row["permission_grant_id"]) if row["permission_grant_id"] else None,
-        "outcome": row["outcome"],
+        "permission_grant_id": str(row.get("permission_grant_id")) if row.get("permission_grant_id") else None,
+        "outcome": row.get("outcome"),
         # The starting person let this Hunt's agent see the value (secrets.inspect); the record
         # says it was shown, never what it was.
-        "disclosed_to_agent": bool(row["revealed_by"]),
+        "disclosed_to_agent": bool(row.get("revealed_by")),
         "secret_values_visible": False,
     } for row in rows]
 
@@ -498,8 +498,11 @@ async def resolve_for_hunt(
 
     if other_target:
         # Claimed and recorded under the grant's row lock, in one transaction.
-        use_id = await try_rules.claim_attempt(
-            conn, hunt_run_id=hunt_run_id, secret_id=secret_id, destination=destination, record=record)
+        try:
+            use_id = await try_rules.claim_attempt(
+                conn, hunt_run_id=hunt_run_id, secret_id=secret_id, destination=destination, record=record)
+        except try_rules.SecretTryError as exc:
+            raise DiscoveredSecretError(exc.reason, str(exc)) from None
     else:
         use_id = await record(None)
     if use_ids is not None:
