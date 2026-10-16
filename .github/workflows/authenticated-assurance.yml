@@ -66,14 +66,15 @@ jobs:
           password: ${{ secrets.DOCKERHUB_READ_TOKEN }}
       - name: Start explicitly disposable restore fixture
         run: |
-          # Docker Hub's official postgres:16 through Google's mirror, like the service containers.
+          # The release's digest-pinned PostgreSQL 18 (docker-compose.release.yml) through Google's mirror,
+          # like the service containers; pg_dump and psql run inside it, so their major matches the server.
           container="assurance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "ASSURANCE_TEST_POSTGRES_CONTAINER=$container" >> "$GITHUB_ENV"
           docker run --detach --rm --name "$container" \
             --label shakerscan.assurance_restore_fixture=true \
             --publish 127.0.0.1::5432 \
             --env POSTGRES_HOST_AUTH_METHOD=trust \
-            --env POSTGRES_DB=shakerscan_assurance_test mirror.gcr.io/library/postgres:16
+            --env POSTGRES_DB=shakerscan_assurance_test mirror.gcr.io/library/postgres:18.6-alpine3.23@sha256:885cf05d376c7cf27afef02073e6bdac3841252537f16e244fd1c1e6a7c99fb1
           port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$container")
           echo "ASSURANCE_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:${port}/shakerscan_assurance_test" >> "$GITHUB_ENV"
           for attempt in $(seq 1 30); do

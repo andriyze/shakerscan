@@ -22,7 +22,7 @@ from docker/setup-buildx-action gets the same mirror in its buildkitd config, wh
 The hosted runner image ships a docker.io login ("githubactions"). dockerd reuses docker.io
 credentials for docker.io mirrors, mirror.gcr.io rejects them with 401, and dockerd then falls
 back to Docker Hub (seen on PR #380), so the mirror action logs that out first. The read-only
-login runs after it. CI-only commands name the mirror directly: the disposable PostgreSQL 16
+login runs after it. CI-only commands name the mirror directly: the disposable PostgreSQL 18
 fixture, the buildx builder image and the digest-pinned Go builder of the native-tools build.
 """
 import re
@@ -195,7 +195,7 @@ def test_ci_only_commands_name_the_mirror_directly():
     docs = {p.name: d for p, d in _pr_workflows()}
     fixture = next(step for step in docs["authenticated-assurance.yml"]["jobs"]["acceptance"]["steps"]
                    if step.get("name") == "Start explicitly disposable restore fixture")
-    assert "shakerscan_assurance_test mirror.gcr.io/library/postgres:16\n" in fixture["run"]
+    assert "shakerscan_assurance_test mirror.gcr.io/library/postgres:18.6-alpine3.23@sha256:885cf05d376c7cf27afef02073e6bdac3841252537f16e244fd1c1e6a7c99fb1\n" in fixture["run"]
     build = next(step for step in docs["verify-rc-native-tools.yml"]["jobs"]["verify"]["steps"]
                  if step.get("name") == "Build and verify patched native scanners")
     assert "sed -n 's/^ARG MODEL_INTAKE_GO_BUILDER=//p' scanner/Dockerfile.model-intake" in build["run"]
