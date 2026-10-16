@@ -35,6 +35,8 @@ try:
 except ModuleNotFoundError:  # package import layout
     from ..finding_routes.list_schema import FINDING_ORIGIN_SQL
 
+from .posture_findings import OPT_IN_HEADERS
+
 
 @dataclass(frozen=True)
 class RetiredFindingKind:
@@ -78,6 +80,13 @@ RETIRED_FINDING_KINDS: tuple[RetiredFindingKind, ...] = (
         header_names=frozenset({"content-security-policy", "referrer-policy", "permissions-policy"}),
         schemes=frozenset({"http"}),
         superseded_by_baseline=True,
+    ),
+    RetiredFindingKind(
+        name="nuclei_opt_in_header_absent",
+        reason="An opt-in header whose absence is the browser default; not a finding (2.11).",
+        tool="nuclei",
+        template_id=_MISSING_HEADERS_TEMPLATE,
+        header_names=OPT_IN_HEADERS,
     ),
     RetiredFindingKind(
         name="nuclei_hsts_on_plain_http",

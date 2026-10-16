@@ -49,8 +49,7 @@ def test_nothing_is_retired_without_an_observed_baseline():
 
 def test_a_template_duplicate_is_retired_only_for_a_header_the_baseline_reports_missing():
     count, calls = _retire(_report(missing=("referrer-policy",)), seen=("fp-1",))
-    assert count == 1
-    (args,) = calls
+    (args,) = [call for call in calls if json.loads(call[6])["kind"] == "nuclei_missing_header_folded_into_baseline"]
     target, tool, template, headers, origins, seen, retired = args
     assert (target, tool, template) == ("t", "nuclei", "http-missing-security-headers")
     assert headers == ["referrer-policy"], "CSP is present on the baseline: its template rows stay"
@@ -61,14 +60,14 @@ def test_a_template_duplicate_is_retired_only_for_a_header_the_baseline_reports_
         "reason": "Reported by the baseline response's missing-header finding for this origin (2.11).",
         "scan_id": "s",
     }
-    # A header the baseline does not report missing retires nothing.
-    assert _retire(_report(missing=()))[0] == 0
+    # A header the baseline does not report missing retires none of the folded kind.
+    assert not [call for call in _retire(_report(missing=()))[1]
+                if json.loads(call[6])["kind"] == "nuclei_missing_header_folded_into_baseline"]
 
 
 def test_hsts_on_plain_http_is_retired_once_the_baseline_observed_the_origin():
-    count, calls = _retire(_report(target="http://app.test:8080", missing=()))
-    assert count == 1
-    (args,) = calls
+    _count, calls = _retire(_report(target="http://app.test:8080", missing=()))
+    (args,) = [call for call in calls if json.loads(call[6])["kind"] == "nuclei_hsts_on_plain_http"]
     assert args[3] == ["strict-transport-security"]
     assert args[4] == ["http://app.test:8080"]
     assert json.loads(args[6])["kind"] == "nuclei_hsts_on_plain_http"
@@ -85,3 +84,11 @@ def test_the_retired_kinds_are_a_list_others_can_extend():
     names = [kind.name for kind in RETIRED_FINDING_KINDS]
     assert len(names) == len(set(names))
     assert all(kind.reason and kind.header_names for kind in RETIRED_FINDING_KINDS)
+
+
+def test_opt_in_isolation_header_rows_are_retired_once_the_baseline_observed_the_origin():
+    from api.scan.posture_findings import OPT_IN_HEADERS
+    count, calls = _retire(_report(missing=()))
+    by_kind = {json.loads(args[6])["kind"]: args for args in calls}
+    assert set(by_kind) == {"nuclei_opt_in_header_absent"}
+    assert by_kind["nuclei_opt_in_header_absent"][3] == sorted(OPT_IN_HEADERS)
