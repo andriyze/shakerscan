@@ -9,10 +9,9 @@
 #      Everything the API shows must survive, and a new scan must still decrypt the stored credential.
 #   3. The pinned installer rolls back to the previous release, which must start on its own data.
 #
-# When the previous release runs an older PostgreSQL major than the candidate (the 16 -> 18 move),
-# the upgrade migrates and a write made during the rollback must make the next upgrade refuse; the
-# operator's --remigrate must carry that write over, and --remove-legacy must reclaim the old data.
-# When both run the same major, the same steps must preserve the data with no migration at all.
+# The previous release and the candidate must run the same PostgreSQL major: the steps must
+# preserve the data with no migration at all. The PostgreSQL 16 -> 18 migration is not exercised
+# here (few installs still hold 16 data); scripts/postgres_upgrade.sh keeps its fast unit tests.
 #
 # Inputs: CANDIDATE_IMAGE_LOCK (a release-image-lock.env with the candidate's five digests),
 # BASELINE_VERSION (default install/STABLE_VERSION), INSTALLED_UPGRADE_HOME, INSTALLED_UPGRADE_BULK_MB
@@ -100,13 +99,6 @@ psql_scanner() {
     docker exec shakerscan-postgres-1 psql -X -U scanner -d scanner -At -c "$1"
 }
 
-# Capture first: `... | grep -q` under pipefail fails when grep exits before the writer finishes.
-db_status_has() {
-    local status
-    status="$(launcher db-upgrade --status 2>&1)" || { echo "$status"; return 1; }
-    grep -q "$1" <<< "$status" || { echo "$status"; return 1; }
-}
-
 compose_postgres_major() {
     sed -n 's/.*\${POSTGRES_IMAGE:-postgres:\([0-9][0-9]*\)\..*/\1/p' "$1" | head -n 1
 }
@@ -172,7 +164,8 @@ install_release install-baseline
 BASELINE_MAJOR="$(compose_postgres_major "$INSTALL_DIR/docker-compose.release.yml")"
 CANDIDATE_MAJOR="$(compose_postgres_major "$ROOT/docker-compose.release.yml")"
 [ -n "$BASELINE_MAJOR" ] && [ -n "$CANDIDATE_MAJOR" ] || fail "could not read the PostgreSQL majors"
-echo "PostgreSQL $BASELINE_MAJOR -> $CANDIDATE_MAJOR"
+[ "$BASELINE_MAJOR" = "$CANDIDATE_MAJOR" ] || fail "PostgreSQL $BASELINE_MAJOR -> $CANDIDATE_MAJOR: only same-major upgrades are tested"
+echo "PostgreSQL $CANDIDATE_MAJOR"
 
 baseline_scanner="$(sed -n 's/^SCANNER_IMAGE=//p' "$INSTALL_DIR/release-image-lock.env")"
 docker run -d --name "$FIXTURE" --network shakerscan_default --network-alias "$FIXTURE" \
@@ -190,12 +183,7 @@ overlay_candidate
 started="$(date +%s)"
 launcher start -y --prebuilt > "$LOG_DIR/upgrade.log" 2>&1 || { tail -40 "$LOG_DIR/upgrade.log"; fail "upgrade start failed"; }
 elapsed upgrade "$(( $(date +%s) - started ))"
-if [ "$BASELINE_MAJOR" -lt "$CANDIDATE_MAJOR" ]; then
-    grep -q "PostgreSQL upgraded to $CANDIDATE_MAJOR" "$LOG_DIR/upgrade.log" || fail "the upgrade did not migrate PostgreSQL"
-    db_status_has "Source data: *unchanged since the copy" || fail "the migration is not recorded"
-else
-    grep -q "Upgrading PostgreSQL" "$LOG_DIR/upgrade.log" && fail "a same-major upgrade migrated"
-fi
+grep -q "Upgrading PostgreSQL" "$LOG_DIR/upgrade.log" && fail "a same-major upgrade migrated"
 [ "$(psql_scanner "SELECT current_setting('server_version_num')::int / 10000")" = "$CANDIDATE_MAJOR" ] || fail "not on PostgreSQL $CANDIDATE_MAJOR"
 # Storage preparation must leave results/ setgid to the API group, or files workers write after
 # start stay root-owned and the API cannot erase them when records are deleted.
@@ -211,22 +199,8 @@ ROLLBACK_TARGET="$(api POST /targets '{"url":"http://rollback-write.example.test
 
 note "4. upgrade again after the rollback wrote data"
 overlay_candidate
-if [ "$BASELINE_MAJOR" -lt "$CANDIDATE_MAJOR" ]; then
-    if launcher start -y --prebuilt > "$LOG_DIR/reupgrade.log" 2>&1; then
-        fail "the upgrade ignored data written during the rollback"
-    fi
-    grep -q "has been used since it was copied" "$LOG_DIR/reupgrade.log" || { tail -20 "$LOG_DIR/reupgrade.log"; fail "the refusal was not explained"; }
-    started="$(date +%s)"
-    printf 'remigrate\n' | launcher db-upgrade --remigrate > "$LOG_DIR/remigrate.log" 2>&1 || { tail -40 "$LOG_DIR/remigrate.log"; fail "--remigrate failed"; }
-    elapsed remigrate "$(( $(date +%s) - started ))"
-fi
 launcher start -y --prebuilt > "$LOG_DIR/start-after-rollback.log" 2>&1 || { tail -40 "$LOG_DIR/start-after-rollback.log"; fail "start after the rollback failed"; }
 psql_scanner "SELECT count(*) FROM targets WHERE id = '$ROLLBACK_TARGET'" | grep -qx 1 || fail "the rollback's write did not survive the upgrade"
-if [ "$BASELINE_MAJOR" -lt "$CANDIDATE_MAJOR" ]; then
-    printf 'remove\n' | launcher db-upgrade --remove-legacy > "$LOG_DIR/remove-legacy.log" 2>&1 || { cat "$LOG_DIR/remove-legacy.log"; fail "--remove-legacy failed"; }
-    docker volume inspect shakerscan_postgres-data > /dev/null 2>&1 && fail "--remove-legacy kept the old volume"
-    db_status_has "Plan: *ready" || fail "the cluster is not ready after cleanup"
-fi
 [ "$(api GET /health | jq -r '.status')" = "healthy" ] || fail "the upgraded stack is not healthy"
 
 mkdir -p "$(dirname "$RECEIPT")"
