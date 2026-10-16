@@ -113,7 +113,7 @@ remember_running_release() {
     local images version
     [ ! -f "$RELEASE_STATE_CURRENT" ] && [ ! -f "$RELEASE_STATE_PREVIOUS" ] || return 0
     images="$(project_container_image_ids | sed '/^$/d' | sort -u | while read -r id; do
-        image_is_shakerscan "$id" && echo "$id"; done)"
+        if image_is_shakerscan "$id"; then echo "$id"; fi; done)"
     [ -n "$images" ] || return 0
     version="$(running_api_version)"
     { printf '# release %s\n' "${version:-running-before-upgrade}"; printf '%s\n' "$images"; } > "$RELEASE_STATE_PREVIOUS"
@@ -143,7 +143,7 @@ note_running_release() {
     case "$RELEASE_RUNNING_BEFORE_START" in latest|dev|unknown) RELEASE_RUNNING_BEFORE_START="" ;; esac
     if [ -n "$RELEASE_RUNNING_BEFORE_START" ]; then
         RELEASE_RUNNING_IMAGES="$(project_container_image_ids | sed '/^$/d' | sort -u | while read -r id; do
-            image_is_shakerscan "$id" && echo "$id"; done)"
+            if image_is_shakerscan "$id"; then echo "$id"; fi; done)"
     fi
     RELEASE_RUNNING_NOTED=1
 }
