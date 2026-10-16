@@ -1117,7 +1117,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hunt_start.add_argument("--preauthorization", help="Enterprise: a pre-authorization id from an earlier step-up")
     hunt_start.add_argument("--account", help="Enterprise step-up: your sign-in name")
-    hunt_start.add_argument("--method", choices=("totp", "security_key"), help="Enterprise step-up method")
+    hunt_start.add_argument("--method", choices=("totp", "security_key", "sso"), help="Enterprise step-up method")
     hunt_start.add_argument(
         "--skill-id", action="append", default=[],
         help=(
@@ -1270,7 +1270,7 @@ def build_parser() -> argparse.ArgumentParser:
     for command in (promote, reveal) + tuple(
             secret_commands.choices[name] for name in ("grant",)):
         command.add_argument("--account", default=None, help="Enterprise: your account (default: the token's)")
-        command.add_argument("--method", choices=["totp", "security-key"], default=None)
+        command.add_argument("--method", choices=["totp", "security-key", "security_key", "sso"], default=None)
 
     knowledge = products.add_parser(
         "knowledge", help="Review proposals, read interpretations, and dismiss or reopen findings in your own terminal",
@@ -1363,7 +1363,7 @@ def build_parser() -> argparse.ArgumentParser:
                                help="stop Hunts editing the instructions directly (no step-up needed)")
     for command in (review, allow_changes, release, dismiss, reopen):
         command.add_argument("--account", help="Enterprise: your sign-in name (asked for otherwise)")
-        command.add_argument("--method", choices=("totp", "security_key"),
+        command.add_argument("--method", choices=("totp", "security_key", "sso"),
                              help="Enterprise step-up: a TOTP code, or a USB/NFC security key (needs python-fido2)")
 
     credentials = products.add_parser(
