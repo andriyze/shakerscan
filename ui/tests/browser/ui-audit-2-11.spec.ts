@@ -132,3 +132,20 @@ test('#7 Refresh on /deep-hunt/leads makes a request and says when', async ({ pa
   expect(contractReads).toBe(2)
   expect(api.unhandled).toEqual([])
 })
+
+// Review of the audit fixes: the count read the facets' total (the search scope only), so a
+// narrowed page said "1,200 targets in 3 groups" for three small groups.
+test('the Targets count applies the filters, not the facets\' search-scope total', async ({ page }) => {
+  await mockPageApi(page, {
+    '/health': () => ({ status: 'healthy' }),
+    '/targets/inventory': () => ({
+      items: ['a', 'b', 'c'].map((name, index) => ({ root_domain: `${name}.invalid`, discoverable: true,
+        targets: [{ ...asset(index + 1), root_domain: `${name}.invalid` }], member_count: 1, members_truncated: false })),
+      has_more: false, next_cursor: null, total: 3, total_kind: 'exact', target_total: 3, target_total_kind: 'exact',
+      generated_at: now, facets: facets(1200),
+    }),
+  })
+  await page.goto('/targets?authorization=unauthorized')
+  await expect(page.getByText('3 targets in 3 groups', { exact: true })).toBeVisible()
+  await expect(page.getByText(/1,200 targets/)).toHaveCount(0)
+})

@@ -55,7 +55,11 @@ export function capBatchTargets(targets: string[]): { targets: string[]; total: 
 export function batchCapNotice(total: number, source: string, options?: { memberCount?: number; moreMembers?: boolean }): string | null
 export const INVENTORY_MEMBER_LIMIT: number
 export function inventoryPageParams(filters: TargetFilters, cursor: string | null, limit: number, memberLimit?: number): Record<string, string | number | boolean>
+export interface InventoryTargetTotal { count: number; kind: 'exact' | 'at_least' | 'page' }
 export interface InventoryPageView<G = any> {
-  groups: G[]; totalGroups: number | null; hasMore: boolean; nextCursor: string | null; facets: any; listV1: boolean
+  groups: G[]; totalGroups: number | null; targetTotal: InventoryTargetTotal | null
+  hasMore: boolean; nextCursor: string | null; facets: any; listV1: boolean
 }
 export function inventoryPageFromBody(body: unknown): InventoryPageView
+export function inventoryTargetTotal(view: Pick<InventoryPageView, 'groups' | 'targetTotal'> | null | undefined, allGroupsLoaded: boolean): InventoryTargetTotal
+export function targetTotalLabel(total: InventoryTargetTotal | null | undefined): string

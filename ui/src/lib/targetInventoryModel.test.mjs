@@ -195,3 +195,23 @@ test('a domain group loaded in part always opens New Scan by reference', async (
   assert.equal(batchCapNotice(resolved.total, 'scale-seed.invalid', resolved),
     'scale-seed.invalid has 10,000 targets; a batch scans at most 50 at once. The first 50 are filled in below; queue the rest in further batches.')
 })
+
+// Review of the 2.11 audit fixes: the Targets count said "1,200 targets in 3 groups" under
+// authorization=unauthorized because it read the facets' total (the search scope only).
+test('the Targets count applies every filter, never the facets\' search-scope total', async () => {
+  const { inventoryPageFromBody, inventoryTargetTotal, targetTotalLabel } = await import('./targetInventoryModel.mjs')
+  const groups = [{ root_domain: 'a.invalid', targets: [{ id: '1' }], member_count: 2 }, { root_domain: 'b.invalid', targets: [{ id: '2' }], member_count: 1 }]
+  const served = inventoryPageFromBody({ items: groups, has_more: false, total: 2, target_total: 3, target_total_kind: 'exact', facets: { total: 1200 } })
+  assert.deepEqual(inventoryTargetTotal(served, true), { count: 3, kind: 'exact' })
+  assert.equal(targetTotalLabel(inventoryTargetTotal(served, true)), '3 targets')
+  const capped = inventoryPageFromBody({ items: groups, has_more: true, next_cursor: 'c', total: 2, target_total: 10000, target_total_kind: 'at_least' })
+  assert.equal(targetTotalLabel(inventoryTargetTotal(capped, false)), '10,000+ targets')
+  // An engine without target_total: the loaded groups' member counts, labelled when partial.
+  const older = inventoryPageFromBody({ items: groups, has_more: false, total: 2, facets: { total: 1200 } })
+  assert.equal(older.targetTotal, null)
+  assert.deepEqual(inventoryTargetTotal(older, true), { count: 3, kind: 'exact' })
+  assert.equal(targetTotalLabel(inventoryTargetTotal(older, false)), '3 targets on this page')
+  assert.equal(targetTotalLabel({ count: 1, kind: 'exact' }), '1 target')
+  // The legacy answer's total is already filtered.
+  assert.deepEqual(inventoryPageFromBody({ targets: [], groups: [], total: 7, total_groups: 2 }).targetTotal, { count: 7, kind: 'exact' })
+})

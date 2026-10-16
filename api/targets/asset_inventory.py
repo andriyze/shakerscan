@@ -572,6 +572,10 @@ async def _domain_groups_v1(conn: Any, page: Page, query: _Query, *, from_sql: s
         {'WHERE ' + ' AND '.join(keyset) if keyset else ''}
         ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}""", *params.values)
     total, kind = await count_total(conn, page.count, from_sql=groups_from, values=count_values)
+    # The matching assets across every group, with every filter applied (the facets' ``total``
+    # counts the search scope only), under the same ``count=`` bound as the group total.
+    target_total, target_kind = await count_total(conn, page.count, from_sql=from_sql, where=[query.where],
+                                                  values=query.parameters)
     domains = [row['root_domain'] for row in rows[: page.limit]]
     members: dict[str, list[Any]] = {domain: [] for domain in domains}
     if domains:
@@ -610,5 +614,7 @@ async def _domain_groups_v1(conn: Any, page: Page, query: _Query, *, from_sql: s
                 'members_truncated': int(item['member_count']) > len(targets)}
 
     body = plan.envelope(rows, total=total, total_kind=kind, transform=group_item, generated_at=generated_at)
-    body.update({'inventory_kind': 'assets', 'group_by': 'domain'})
+    body.update({'inventory_kind': 'assets', 'group_by': 'domain', 'target_total_kind': target_kind})
+    if target_kind != 'none':
+        body['target_total'] = target_total
     return body

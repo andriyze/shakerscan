@@ -10,7 +10,10 @@ import {
   type InventoryFacets, type TargetAsset, type TargetAssetGroup,
 } from '@/lib/targetAssetApi'
 import { usePoll } from '@/lib/usePoll'
-import { filtersFromQuery, groupSections, inventoryPageFromBody, inventoryPageParams, queryFromFilters } from '@/lib/targetInventoryModel.mjs'
+import {
+  filtersFromQuery, groupSections, inventoryPageFromBody, inventoryPageParams, inventoryTargetTotal, queryFromFilters,
+  targetTotalLabel, type InventoryTargetTotal,
+} from '@/lib/targetInventoryModel.mjs'
 import { AddTargetsDialog } from './inventory/AddTargetsDialog'
 import { AuthorizeDialog } from './inventory/AuthorizeDialog'
 import { InventorySummary, InventoryToolbar, type InventoryFilters } from './inventory/InventoryControls'
@@ -37,7 +40,7 @@ export function TargetInventory() {
   const firstPage = useCallback(() => setCursors([null]), [])
   const [groups, setGroups] = useState<TargetAssetGroup[]>([])
   const [facets, setFacets] = useState<InventoryFacets | null>(null)
-  const [totals, setTotals] = useState<{ targets: number; groups: number | null }>({ targets: 0, groups: 0 })
+  const [totals, setTotals] = useState<{ targets: InventoryTargetTotal; groups: number | null }>({ targets: { count: 0, kind: 'exact' }, groups: 0 })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
@@ -95,8 +98,11 @@ export function TargetInventory() {
         setGroups(view.groups as TargetAssetGroup[])
         setFacets(view.facets)
         setNextCursor(view.nextCursor)
+        // Targets with every filter applied: never the facets' total, which counts the search
+        // scope only. Later pages carry no count, so the first page's total stands.
+        const pageTotal = inventoryTargetTotal(view, !cursor && !view.nextCursor)
         setTotals(current => ({
-          targets: view.facets?.total ?? current.targets,
+          targets: cursor && current.targets.kind !== 'page' && !view.targetTotal ? current.targets : pageTotal,
           groups: view.totalGroups ?? (cursor ? current.groups : view.groups.length),
         }))
         setError(null)
@@ -252,10 +258,10 @@ export function TargetInventory() {
       </div>
       {(pageIndex > 0 || nextCursor) && <div className="mt-4 flex items-center justify-between gap-3">
         <Button variant="secondary" size="sm" disabled={pageIndex === 0 || loading} onClick={() => setCursors(current => current.slice(0, -1))}>Previous</Button>
-        <span className="text-xs text-gray-500">Groups {(pageIndex * PAGE_GROUPS + 1).toLocaleString()}–{(pageIndex * PAGE_GROUPS + groups.length).toLocaleString()}{totals.groups != null ? ` of ${totals.groups.toLocaleString()}` : ''} · {plural(totals.targets, 'target')}</span>
+        <span className="text-xs text-gray-500">Groups {(pageIndex * PAGE_GROUPS + 1).toLocaleString()}–{(pageIndex * PAGE_GROUPS + groups.length).toLocaleString()}{totals.groups != null ? ` of ${totals.groups.toLocaleString()}` : ''} · {targetTotalLabel(totals.targets)}</span>
         <Button variant="secondary" size="sm" disabled={!nextCursor || loading} onClick={() => { if (nextCursor) setCursors(current => [...current, nextCursor]) }}>Next</Button>
       </div>}
-      {!loading && groups.length > 0 && pageIndex === 0 && !nextCursor && <p className="mt-3 text-center text-xs text-gray-600" aria-live="polite">{plural(totals.targets, 'target')} in {plural(totals.groups ?? groups.length, 'group')}</p>}
+      {!loading && groups.length > 0 && pageIndex === 0 && !nextCursor && <p className="mt-3 text-center text-xs text-gray-600" aria-live="polite">{targetTotalLabel(totals.targets)} in {plural(totals.groups ?? groups.length, 'group')}</p>}
     </>}
 
     {selected.size > 0 && <div className="fixed inset-x-0 bottom-0 z-40 md:left-64" role="region" aria-label="Selected targets">

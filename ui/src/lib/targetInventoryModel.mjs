@@ -250,14 +250,42 @@ export function inventoryPageFromBody(body) {
     return {
       groups: item.items.map(group => ({ ...group, targets: Array.isArray(group.targets) ? group.targets : [] })),
       totalGroups: Number.isFinite(item.total) ? item.total : null,
+      // Every filtered target (an engine without `target_total` leaves it null).
+      targetTotal: Number.isFinite(item.target_total)
+        ? { count: item.target_total, kind: item.target_total_kind === 'at_least' ? 'at_least' : 'exact' } : null,
       hasMore: Boolean(item.has_more), nextCursor: item.has_more ? item.next_cursor || null : null,
       facets: item.facets || null, listV1: true,
     }
   }
   const targets = Array.isArray(item.targets) ? item.targets : []
   const groups = Array.isArray(item.groups) ? item.groups : targets.map(asset => ({ root_domain: asset.locator, targets: [asset] }))
-  return { groups, totalGroups: item.total_groups ?? item.total ?? groups.length, hasMore: false, nextCursor: null,
+  // The legacy `total` counts every filtered asset.
+  const targetTotal = Number.isFinite(item.total) ? { count: item.total, kind: 'exact' } : null
+  return { groups, totalGroups: item.total_groups ?? item.total ?? groups.length, targetTotal, hasMore: false, nextCursor: null,
     facets: item.facets || null, listV1: false }
+}
+
+/**
+ * The Targets count to show, with every filter applied. The facets' `total` counts the search
+ * scope before the other filters, so it is never used here. Without a server total (an older
+ * engine), the loaded groups' `member_count` is summed: the whole answer when every group is on
+ * this page, otherwise only this page's targets, and the label says so.
+ * Returns `{ count, kind }` with kind `exact`, `at_least` or `page`.
+ */
+export function inventoryTargetTotal(view, allGroupsLoaded) {
+  if (view?.targetTotal) return view.targetTotal
+  const count = (view?.groups || []).reduce((sum, group) => sum
+    + (Number.isFinite(group.member_count) ? group.member_count : (group.targets || []).length), 0)
+  return { count, kind: allGroupsLoaded ? 'exact' : 'page' }
+}
+
+/** "1,200 targets", "10,000+ targets" or "40 targets on this page". */
+export function targetTotalLabel(total) {
+  const count = Number(total?.count) || 0
+  const noun = `target${count === 1 && total?.kind !== 'at_least' ? '' : 's'}`
+  if (total?.kind === 'at_least') return `${count.toLocaleString('en-US')}+ ${noun}`
+  if (total?.kind === 'page') return `${count.toLocaleString('en-US')} ${noun} on this page`
+  return `${count.toLocaleString('en-US')} ${noun}`
 }
 
 export function activeFilterCount(filters) {
