@@ -30,6 +30,22 @@ _AZURE = re.compile(r'(?P<account>[a-z0-9]{3,24})\.blob\.core\.windows\.net\Z')
 _GCS = re.compile(r'(?P<bucket>[a-z0-9][a-z0-9._-]{1,220}[a-z0-9])\.storage\.googleapis\.com\Z')
 
 
+def _gcs_path_bucket(parts: list[str]) -> str:
+    """Select a bucket from documented JSON or XML endpoints, never an object key.
+
+    JSON API collection URLs can have no bucket at all. Do not fall back to interpreting
+    their first path segment (``storage``, ``upload`` or ``download``) as a bucket.
+    """
+    api = parts[1:] if parts and parts[0] in {'upload', 'download'} else parts
+    if len(api) >= 2 and api[:2] == ['storage', 'v1']:
+        if len(api) >= 4 and api[1:3] == ['v1', 'b']:
+            return api[3] if _LABEL.fullmatch(api[3]) else ''
+        return ''
+    if parts and parts[0] not in {'upload', 'download'} and _LABEL.fullmatch(parts[0]):
+        return parts[0]
+    return ''
+
+
 def corporate_surface_hints(content: str) -> list[dict[str, str]]:
     """At most 50 metadata-only leads; discard userinfo, query, fragment and object keys."""
     hints: list[dict[str, str]] = []
@@ -68,8 +84,10 @@ def corporate_surface_hints(content: str) -> list[dict[str, str]]:
                 kind, provider, identifier = 'storage_account', 'azure_blob', azure['account']
             elif gcs:
                 kind, provider, identifier = 'storage_bucket', 'google_cloud_storage', gcs['bucket']
-            elif host == 'storage.googleapis.com' and parts and _LABEL.fullmatch(parts[0]):
-                kind, provider, identifier = 'storage_bucket', 'google_cloud_storage', parts[0]
+            elif host == 'storage.googleapis.com':
+                bucket = _gcs_path_bucket(parts)
+                if bucket:
+                    kind, provider, identifier = 'storage_bucket', 'google_cloud_storage', bucket
         if (not kind or redact_text(identifier) != identifier or redact_text(origin) != origin
                 or selfevident_secret_matches(identifier)):
             continue
