@@ -433,7 +433,7 @@ async def _subdomains(conn: Any, target: uuid.UUID, at: datetime, *, names_allow
         return {"checked": False, "note": "Subdomains are reported for an apex a person added on the Targets page."}
     names = await conn.fetch("""SELECT url, discovery_source, created_at, metadata_json->'discovery' AS provenance FROM targets
         WHERE root_domain=$1 AND created_at > $2 AND COALESCE(discovery_source,'manual') = ANY($3::text[])
-        ORDER BY created_at DESC LIMIT $4""", apex, at, ["subfinder", "gungnir-monitor"], MAX_LISTED + 1)
+        ORDER BY created_at DESC LIMIT $4""", apex, at, ["subfinder", "dns-enumeration", "gungnir-monitor"], MAX_LISTED + 1)
     runs = await conn.fetch("""SELECT id, status, new_subdomains, completed_at FROM discovery_runs
         WHERE root_domain=$1 AND completed_at > $2 ORDER BY completed_at DESC LIMIT 5""", apex, at)
     if not names_allowed:

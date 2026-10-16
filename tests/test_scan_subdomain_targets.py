@@ -152,6 +152,92 @@ def test_a_recording_fault_is_reported_and_never_fails_the_scan():
     assert report["discovery"]["subdomains"]["targets"] == outcome
 
 
+class _SourceConn(_FakeConn):
+    """Keeps every inserted target's ``discovery_source`` as well as its URL."""
+
+    def __init__(self, existing=None):
+        super().__init__(existing)
+        self.sources = {}
+
+    async def execute(self, query, *args):
+        if "INSERT INTO targets" in query:
+            self.sources[args[0]] = args[2]
+        return await super().execute(query, *args)
+
+
+def _enumerated_report():
+    return {"discovery": {"subdomains": {
+        "root_domain": "shakerscan.com",
+        "hosts": ["api.shakerscan.com", "vpn.shakerscan.com", "mail.shakerscan.com"],
+        "total": 3,
+        "sources": {
+            "api.shakerscan.com": ["crtsh"],
+            "vpn.shakerscan.com": ["dns_enumeration"],
+            "mail.shakerscan.com": ["crtsh", "dns_enumeration"],
+        },
+    }}}
+
+
+async def _all_resolve(names):
+    return {"scannable": list(names), "unresolved": [], "unknown": []}
+
+
+def test_a_name_only_the_scans_enumeration_named_keeps_its_own_target_source():
+    conn = _SourceConn()
+    asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
+        _pool(conn), _enumerated_report(), scan_id=str(SCAN_ID), allowed_root_domains=BOUND,
+        plan_targets=_all_resolve,
+    ))
+    assert conn.sources == {
+        "https://api.shakerscan.com": "subfinder",
+        "https://vpn.shakerscan.com": "dns-enumeration",
+        "https://mail.shakerscan.com": "subfinder",
+    }
+    # An enumerated name is not a person's declaration: it grants no apex for discovery.
+    from api.operations.discovery import UNDECLARED_SOURCES
+    assert subdomain_targets.ENUMERATION_TARGET_SOURCE in UNDECLARED_SOURCES
+
+
+def test_a_fleet_report_claims_dns_enumeration_only_when_the_job_could_plan_it():
+    # The node's report is not authority for which sources ran: a name only "dns_enumeration"
+    # named is dropped, and the source is stripped from the others, unless the job's own
+    # policy and binding admit dns.enumerate.
+    conn = _SourceConn()
+    report = _enumerated_report()
+    asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
+        _pool(conn), report, scan_id=str(SCAN_ID), allowed_root_domains=BOUND,
+        plan_targets=_all_resolve, planned_capabilities=frozenset(),
+    ))
+    assert conn.sources == {
+        "https://api.shakerscan.com": "subfinder", "https://mail.shakerscan.com": "subfinder",
+    }
+    conn = _SourceConn()
+    asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
+        _pool(conn), _enumerated_report(), scan_id=str(SCAN_ID), allowed_root_domains=BOUND,
+        plan_targets=_all_resolve, planned_capabilities=frozenset({"dns.enumerate"}),
+    ))
+    assert conn.sources["https://vpn.shakerscan.com"] == "dns-enumeration"
+
+
+def test_ingested_reports_derive_enumeration_authority_from_the_job(monkeypatch):
+    seen = {}
+
+    async def record(pool, report, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(subdomain_targets, "record_scan_subdomain_discovery", record)
+    monkeypatch.setattr(subdomain_targets, "_job_binding",
+                        lambda options: (("shakerscan.com",), frozenset()))
+    asyncio.run(subdomain_targets.record_ingested_report_subdomains(
+        None, _enumerated_report(), scan_id=str(SCAN_ID), options={}))
+    assert seen["allowed_root_domains"] == ("shakerscan.com",)
+    assert seen["planned_capabilities"] == frozenset()
+    monkeypatch.setattr(subdomain_targets, "_job_binding", lambda options: None)
+    asyncio.run(subdomain_targets.record_ingested_report_subdomains(
+        None, _enumerated_report(), scan_id=str(SCAN_ID), options={}))
+    assert seen["allowed_root_domains"] is None and seen["planned_capabilities"] == frozenset()
+
+
 def test_a_report_without_subdomains_records_nothing():
     report = {"discovery": {"tech": {"items": []}}}
     assert asyncio.run(subdomain_targets.record_scan_subdomain_discovery(
@@ -304,3 +390,57 @@ def test_the_recorder_writes_the_real_discovery_and_target_tables():
     assert [row["url"] for row in targets] == ["https://api.shakerscan.com", "https://docs.shakerscan.com"]
     assert {row["discovery_source"] for row in targets} == {"subfinder"}
     assert len(runs) == 1 and runs[0]["status"] == "completed" and runs[0]["subdomains_found"] == 3
+
+
+@pytest.mark.skipif(not DSN, reason="Requires an explicit disposable PostgreSQL database")
+def test_provenance_insert_and_last_observed_refresh_on_real_postgres():
+    """The ``metadata_json`` INSERT (``jsonb_build_object``) and the ``jsonb_set`` refresh run on
+    PostgreSQL: a later run moves ``last_observed_at`` only on rows discovery created, and a name
+    only the Scan's enumeration named is stored under its own source."""
+    asyncpg = pytest.importorskip("asyncpg")
+    dsn = require_disposable_database(DSN or "", "shakerscan_subdomain_test")
+
+    async def go():
+        conn = await asyncpg.connect(dsn)
+        try:
+            await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+            await conn.execute((ROOT / "db" / "init.sql").read_text(encoding="utf-8"))
+            # A person added this one: it has no discovery provenance and must keep none.
+            await conn.execute(
+                "INSERT INTO targets (url, root_domain, is_root) VALUES ($1, $2, false)",
+                "https://mail.shakerscan.com", "shakerscan.com",
+            )
+            await subdomain_targets.record_scan_subdomain_discovery(
+                _pool(conn), _enumerated_report(), scan_id=str(SCAN_ID),
+                allowed_root_domains=BOUND, plan_targets=_all_resolve,
+            )
+            before = {row["url"]: row for row in await conn.fetch(
+                "SELECT url, discovery_source, metadata_json FROM targets")}
+            await subdomain_targets.record_scan_subdomain_discovery(
+                _pool(conn), _enumerated_report(), scan_id="30000000-0000-0000-0000-000000000009",
+                allowed_root_domains=BOUND, plan_targets=_all_resolve,
+            )
+            after = {row["url"]: row for row in await conn.fetch(
+                "SELECT url, discovery_source, metadata_json FROM targets")}
+            return before, after
+        finally:
+            await conn.close()
+
+    before, after = asyncio.run(go())
+
+    def provenance(row):
+        value = row["metadata_json"]
+        value = json.loads(value) if isinstance(value, str) else (value or {})
+        return value.get("discovery")
+
+    assert before["https://vpn.shakerscan.com"]["discovery_source"] == "dns-enumeration"
+    assert before["https://api.shakerscan.com"]["discovery_source"] == "subfinder"
+    vpn_before = provenance(before["https://vpn.shakerscan.com"])
+    vpn_after = provenance(after["https://vpn.shakerscan.com"])
+    assert vpn_before["sources"] == ["dns_enumeration"]
+    assert vpn_after["first_observed_at"] == vpn_before["first_observed_at"]
+    assert vpn_after["last_observed_at"] >= vpn_before["last_observed_at"]
+    assert vpn_after["last_observed_at"] != vpn_before["last_observed_at"]
+    # The person-added row is reported as known and never gains discovery provenance.
+    assert provenance(after["https://mail.shakerscan.com"]) is None
+    assert after["https://mail.shakerscan.com"]["discovery_source"] in {None, "manual"}

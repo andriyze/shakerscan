@@ -491,6 +491,7 @@ async def store_discovered_targets(
     evidence: Mapping[str, Iterable[str]] | None = None,
     discovery_id: str | None = None,
     observed_at: str | None = None,
+    source_by_name: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Insert the plan's scannable names; return the run's content-free DNS outcome.
 
@@ -501,7 +502,8 @@ async def store_discovered_targets(
     the sources that named it, whether only a certificate did (historical issuance, not
     ownership), its DNS status, and that no service was checked. A name that is already a
     target is reported as already known; when that row was itself recorded by discovery its
-    ``last_observed_at`` moves, and nothing else about it changes.
+    ``last_observed_at`` moves, and nothing else about it changes. ``source_by_name`` names a
+    row's ``discovery_source`` when it differs from ``source`` (a Scan's own DNS enumeration).
     """
     planned = list(plan.get("scannable") or [])
     # Insert exactly the canonical name and root this gate validated, never the plan's spelling.
@@ -527,7 +529,8 @@ async def store_discovered_targets(
                 VALUES ($1, $2, false, $3, jsonb_build_object('discovery', $4::jsonb))
                 ON CONFLICT (canonical_key) DO NOTHING
                 """,
-                f"https://{name}", root, source, json.dumps(provenance),
+                f"https://{name}", root, (source_by_name or {}).get(name) or source,
+                json.dumps(provenance),
             )
         except Exception:  # noqa: BLE001 -- one refused row must not drop the rest of the run
             failed += 1
