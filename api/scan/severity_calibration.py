@@ -119,6 +119,22 @@ CLASS_RULES: Mapping[str, tuple[str, str]] = {
         "Unauthenticated metrics reveal internal names, versions, routes and load figures that "
         "help an attacker plan; no credential or user data was proven in the response.",
     ),
+    "exposure_verbose_error_disclosure": (
+        "low",
+        "A stack trace or framework error reveals versions, file paths and code structure. It "
+        "helps an attacker aim other attacks but grants no access by itself; a credential proven "
+        "in the same response keeps the higher severity.",
+    ),
+    "session_cookie_missing_httponly": (
+        "low",
+        "Scripts can read the session cookie, so a separate script-injection flaw could steal "
+        "the session. The missing attribute does not expose the cookie by itself.",
+    ),
+    "session_cookie_missing_secure": (
+        "low",
+        "The browser would also send the session cookie over plain HTTP, where a network "
+        "attacker can read it; exploiting it needs a network position and a plain-HTTP request.",
+    ),
 }
 
 # Producers whose class severity is already the calibrated one: recorded, not changed.
@@ -131,7 +147,56 @@ _PRODUCER_REASONS: Mapping[str, str] = {
         "The exposure class sets the severity: secret material outranks structural disclosure, "
         "and a proven provider secret raises any class."
     ),
+    "dalfox": (
+        "Script executed in a real browser from a request parameter: it runs with the victim's "
+        "session on this origin (account actions, data theft). High, not critical, because a "
+        "victim must open a crafted link or page."
+    ),
+    "shakerscan_browser_proof": (
+        "Script executed in a real browser on this origin: it runs with the victim's session "
+        "(account actions, data theft). High, not critical, because a victim must load the page."
+    ),
+    "shakerscan_nosqli_verify": (
+        "Operator injection changes the database query; an authentication bypass is critical, "
+        "other query changes are high."
+    ),
+    "shakerscan_graphql_probe": (
+        "A GraphQL hardening gap: it eases schema discovery or resource exhaustion but exposes no "
+        "data by itself."
+    ),
+    "subdomain_takeover": (
+        "A verified unclaimed resource lets anyone serve content on this name (phishing, cookie "
+        "theft on the parent domain): high. A dangling CNAME whose claimability is unproven is "
+        "medium."
+    ),
+    "smart_authz": (
+        "One principal read another principal's object: broken object-level authorization on "
+        "user data is high."
+    ),
+    "shakerscan_authz_surface": (
+        "Medium until someone confirms the function is meant to be private: anonymous and "
+        "authenticated users receive the same data, which is only a flaw on a private function."
+    ),
+    "sqlmap": (
+        "Rated by the impact of SQL injection if it is real (high); it is a candidate until the "
+        "payload/control proof runs, which the proof state shows separately."
+    ),
+    "request_sqli_differential": (
+        "Rated by the impact of SQL injection if it is real (high); a database error alone is a "
+        "candidate, which the proof state shows separately."
+    ),
+    "request_xss_differential": (
+        "Rated by the impact of cross-site scripting if it executes (high); reflection alone is a "
+        "candidate, which the proof state shows separately."
+    ),
+    "nuclei": (
+        "The matching template's author set this severity for the issue the template detects; "
+        "a template match is a candidate until a deterministic proof confirms it."
+    ),
 }
+
+
+PRODUCER_REASONS = _PRODUCER_REASONS
 
 
 def rule_for(finding: Mapping[str, Any]) -> str | None:
@@ -154,7 +219,7 @@ def rule_for(finding: Mapping[str, Any]) -> str | None:
             if "RSA" in str(certificate.get("public_key_type") or "").upper() and isinstance(bits, int) and bits < 1024:
                 return "tls_certificate_weak_public_key_broken"
         return check if check in CLASS_RULES else None
-    if tool == "http_baseline" and check.startswith("missing_header_"):
+    if tool == "http_baseline" and check.startswith(("missing_header_", "session_cookie_missing_")):
         return check if check in CLASS_RULES else None
     if tool == "shakerscan_exposure_probe":
         rule = f"exposure_{evidence.get('exposure_class')}"
@@ -245,6 +310,7 @@ def current_rule_severity(finding: Mapping[str, Any]) -> dict[str, Any] | None:
 
 __all__ = [
     "CLASS_RULES",
+    "PRODUCER_REASONS",
     "SEVERITY_BASIS_SCHEMA",
     "calibrate_finding",
     "calibrate_findings",

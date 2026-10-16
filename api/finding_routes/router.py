@@ -43,6 +43,7 @@ try:
     )
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
+    from finding_detail import RELATED_SQL, build_finding_detail, related_findings
     from list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import (
@@ -61,6 +62,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
+    from ..finding_detail import RELATED_SQL, build_finding_detail, related_findings
     from ..list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 
 
@@ -675,11 +677,18 @@ async def get_finding(finding_id: str):
         finding = await get_finding_record(conn, finding_id)
         if not finding:
             raise HTTPException(status_code=404, detail="Finding not found")
+        related_rows = (
+            await conn.fetch(RELATED_SQL, finding["target_id"], finding["id"])
+            if finding.get("target_id") else []
+        )
 
     result = dict(finding)
     # Same single proof-state the list uses, so list and detail never disagree (§7).
     result.update(finding_proof_fields(result))
     result["remediation"] = finding_remediation(result)
+    # The per-class brief (facts, proof, reproduce, fix, verify, severity reason), from stored data.
+    result["detail"] = build_finding_detail(result)
+    result["related_findings"] = related_findings(result, [dict(row) for row in related_rows])
 
     # Retest capability hints so the UI can gate the retest button instead of
     # surfacing a 400 after the click.

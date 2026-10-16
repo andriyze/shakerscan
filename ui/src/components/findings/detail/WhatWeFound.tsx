@@ -29,6 +29,7 @@ export function WhatWeFound({
   anomaly,
   aiProbe,
   detailEvidence,
+  hideSeverityReason = false,
 }: {
   observation: FindingObservation
   description: string | null
@@ -37,17 +38,21 @@ export function WhatWeFound({
   anomaly: string | null
   aiProbe: AiProbeEvidence | null
   detailEvidence?: unknown
+  /** The brief above already states why this severity (and stands in for an empty section). */
+  hideSeverityReason?: boolean
 }) {
   const allSignals = Array.from(new Set([...observation.signals, ...signals]))
-  const details = findingDetailEvidence(detailEvidence)
+  const parsed = findingDetailEvidence(detailEvidence)
+  const details = hideSeverityReason ? { ...parsed, severityReason: null } : parsed
   // The probe block and the payload list already show these; a fact would repeat them.
   const facts = observation.facts.filter((fact) => (
     !(aiProbe && fact.label === 'Technique') && !(payloads.length > 0 && fact.label === 'Payload')
   ))
   const empty = !description && !aiProbe && !hasObservation(observation) && !hasDetailEvidence(details) && payloads.length === 0 && allSignals.length === 0 && !anomaly
+  if (empty && hideSeverityReason) return null
 
   return (
-    <Section id="evidence" title="What we found">
+    <Section id="evidence" title={hideSeverityReason ? 'Recorded evidence' : 'What we found'}>
       <div className="space-y-5">
         {description && <p className="whitespace-pre-wrap text-sm leading-6 text-gray-200">{description}</p>}
 

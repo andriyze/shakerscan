@@ -53,6 +53,8 @@ import { EvidenceObjectsList } from '@/components/findings/detail/EvidenceObject
 import { ExceptionDialog, type ExceptionFormValues } from '@/components/findings/detail/ExceptionDialog'
 import { Fact, Section } from '@/components/findings/detail/Section'
 import { WhatWeFound } from '@/components/findings/detail/WhatWeFound'
+import { FindingBriefView } from '@/components/findings/detail/FindingBriefView'
+import { parseFindingBrief, parseRelatedFindings, severityLine } from '@/lib/findingBrief'
 
 function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'device') {
@@ -562,6 +564,9 @@ function FindingDetailContent() {
       ? JSON.stringify(finding.evidence, null, 2)
       : ''
   const rawEvidenceObject = useMemo(() => asEvidenceObject(rawEvidence), [rawEvidence])
+  const brief = useMemo(() => parseFindingBrief(finding?.detail), [finding?.detail])
+  const relatedFindings = useMemo(() => parseRelatedFindings(finding?.related_findings), [finding?.related_findings])
+  const whySeverity = severityLine(brief)
   const rawEvidenceDisplay = rawEvidenceObject ? JSON.stringify(rawEvidenceObject, null, 2) : rawEvidence
   const isAiFinding = finding ? isAiReplayFinding(finding) : false
   const research = finding ? getFindingResearchProvenance(finding) : null
@@ -709,6 +714,11 @@ function FindingDetailContent() {
               <SourceTypeBadge type={getFindingSourceType(finding)} />
             </div>
             <h1 className="mt-2 text-2xl font-semibold leading-tight text-white wrap-break-word">{finding.title}</h1>
+            {whySeverity && (
+              <p className="mt-1 text-sm text-gray-400 wrap-break-word" data-testid="finding-why-severity">
+                <a href="#brief" className="text-gray-300 hover:text-white">Why {finding.severity}:</a> {whySeverity}
+              </p>
+            )}
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-400">
               {hostLabel && (
                 finding.target_id
@@ -840,7 +850,10 @@ function FindingDetailContent() {
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="min-w-0 space-y-5">
+          {brief && <FindingBriefView brief={brief} targetId={finding.target_id} related={relatedFindings} />}
+
           <WhatWeFound
+            hideSeverityReason={Boolean(brief?.severity?.reason)}
             detailEvidence={rawEvidenceObject}
             observation={observation}
             description={showSummaryDescription ? summaryDescription : null}
@@ -858,7 +871,8 @@ function FindingDetailContent() {
             } : null}
           />
 
-          <HowToFix remediation={finding.remediation} toolSteps={evidence.remediation} />
+          <HowToFix remediation={finding.remediation} toolSteps={evidence.remediation}
+            specificSteps={brief?.fix || []} specificExamples={brief?.examples || []} specificVerify={brief?.verify || null} />
 
           {locations.length > 0 && (
             <Section

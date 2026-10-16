@@ -500,6 +500,28 @@ def _baseline_cookie_findings(
     return found
 
 
+def baseline_observed_response(
+    request: Mapping[str, Any], response: Mapping[str, Any], headers: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The recorded baseline exchange a header or cookie finding is about (bounded, value-free).
+
+    Only the request line, status and the fixed posture/selected header set are kept; cookie
+    values, bodies and credentials are never part of it.
+    """
+    origin = _http_origin(request.get("origin") or response.get("final_url")) or ""
+    method = str(request.get("method") or "GET").upper()[:16]
+    path = str(request.get("path") or "/")[:2_000]
+    return {
+        "request_line": f"{method} {origin}{path if path.startswith('/') else '/' + path}",
+        "response_status": response.get("status"),
+        "observed_headers": dict(sorted(
+            (str(name).lower()[:120], str(value)[:2_000]) for name, value in headers.items()
+            if str(name).lower() not in {"set-cookie", "authorization", "cookie"}
+        )),
+        "source_action_id": "baseline.http",
+    }
+
+
 def _attach_observed_header_responses(
     findings: Sequence[dict[str, Any]],
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
@@ -585,6 +607,10 @@ def canonical_authz_findings(
                     "accepted_principal_responses": dict(
                         item.get("accepted_principal_responses") or {}
                     ),
+                    # Names and locations only: which fields made the object sensitive, where its id is.
+                    **({"sensitive_field_names": [str(name)[:80] for name in item["sensitive_field_names"]][:20]}
+                       if isinstance(item.get("sensitive_field_names"), (list, tuple)) else {}),
+                    **{key: str(item[key])[:120] for key in ("object_id_key", "object_id_location") if item.get(key)},
                     "distinct_principal_control": True,
                     "object_id_absent_from_attacker_listing": True,
                     "responses_equivalent": True,
@@ -739,9 +765,18 @@ def _findings_for_action(
                 dict(response.get("selected_headers") or {})
                 if isinstance(response.get("selected_headers"), Mapping) else {}
             )
+            # The posture headers are recorded on every response (present ones only); the
+            # dispatcher's baseline selects no other headers, so they are the record of absence.
+            posture_recorded = isinstance(response.get("security_headers"), Mapping)
+            if posture_recorded:
+                headers.update({
+                    str(name).lower(): value
+                    for name, value in response["security_headers"].items()
+                })
+            observed_response = baseline_observed_response(request, response, headers)
             status = response.get("status")
             if (
-                headers
+                (headers or posture_recorded)
                 and isinstance(status, int)
                 and 200 <= status < 400
             ):
@@ -771,6 +806,7 @@ def _findings_for_action(
                             "url": origin,
                             "status": status,
                             "header": header_name,
+                            "observed_response": {**observed_response, "header_absent": header_name},
                             "pinned_address": request.get("pinned_address"),
                             "canonical_capability": "http.request",
                             "capability_receipt": receipt,
@@ -789,10 +825,12 @@ def _findings_for_action(
                         ),
                     })
                     findings.append(finding)
-            findings.extend(_baseline_cookie_findings(
+            for cookie_finding in _baseline_cookie_findings(
                 request, response, receipt=receipt, capability_name=result.capability_name,
                 kind=str(kind),
-            ))
+            ):
+                cookie_finding["evidence"]["observed_response"] = observed_response
+                findings.append(cookie_finding)
         elif kind == "xss_alert" and item.get("proof_state") == "verified":
             proof_contract = {
                 "schema_version": "proof-contract/v2",
@@ -830,6 +868,7 @@ def _findings_for_action(
                     "param": item.get("param"),
                     "payload_sha256": item.get("payload_sha256"),
                     "message": item.get("message"),
+                    **{key: item[key] for key in ("alert_type", "client_route") if item.get(key)},
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                     "detail": {"verified": True, "type": "verified"},
@@ -947,10 +986,12 @@ def _findings_for_action(
                 ),
                 severity="high",
                 cwe="CWE-79" if expected_family == "xss" else "CWE-89",
-                url=None,
+                url=item.get("origin"),
                 evidence={
                     "candidate_id": item.get("candidate_id"),
                     "request_ref_id": item.get("request_ref_id"),
+                    "origin": item.get("origin"),
+                    "request_class": item.get("request_class"),
                     "method": item.get("method"),
                     "body_encoding": item.get("body_encoding"),
                     "field_path": item.get("field_path"),
@@ -983,6 +1024,12 @@ def _findings_for_action(
         elif kind == "sqli_finding":
             # SQLMap labels remain candidates until a payload/control
             # differential produces the deterministic proof contract.
+            dbms = next((
+                str(row.get("dbms") or row.get("message") or "").split("back-end DBMS:", 1)[-1].strip()[:120]
+                for row in observations
+                if isinstance(row, Mapping) and row.get("kind") == "sqli_dbms_fingerprint"
+                and (row.get("dbms") or row.get("message"))
+            ), None)
             finding = _base_finding(
                 tool="sqlmap",
                 title="Potential SQL injection",
@@ -994,6 +1041,7 @@ def _findings_for_action(
                     "method": item.get("method") or "GET",
                     "param": item.get("param"),
                     "sqlmap_message": item.get("message"),
+                    **({"dbms": dbms} if dbms else {}),
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
                 },
@@ -1045,6 +1093,7 @@ def _findings_for_action(
                         item.get("database_error_signatures") or ()
                     ),
                     "redacted_excerpt": item.get("redacted_excerpt"),
+                    **{key: item[key] for key in ("payload_shape", "timing_ms") if item.get(key)},
                     "session_state_discarded": item.get(
                         "session_state_discarded"
                     ),

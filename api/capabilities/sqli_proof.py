@@ -58,6 +58,15 @@ _SECRET_RE = re.compile(
 )
 
 
+# The payload each proof technique sends, with the target's value as ``<original>``.
+_PAYLOAD_SHAPES = {
+    "error_based_repeated": "<original>'",
+    "authentication_bypass_repeated": "' OR 1=1-- ",
+    "boolean_pair_repeated": "<original>' AND '1'='1  vs  <original>' AND '1'='2",
+    "time_median_repeated": "<original>' AND SLEEP(1)-- ",
+}
+
+
 class SQLiProofError(ValueError):
     """A SQLi proof request does not match immutable candidate authority."""
 
@@ -379,6 +388,13 @@ class SQLiProofAdapter:
             "response_pairs": hashes,
             "database_error_signatures": sorted(repeated_error) if 'repeated_error' in locals() else [],
             "redacted_excerpt": _excerpt(proof_pairs[0][1]) if verified and technique == "error_based_repeated" else None,
+            # What was sent, value-free: the target's own value stays ``<original>``.
+            **({"payload_shape": _PAYLOAD_SHAPES.get(technique)} if verified and technique in _PAYLOAD_SHAPES
+               and not (technique == "time_median_repeated" and self.candidate.get("time_payload")) else {}),
+            **({"timing_ms": {
+                "control_median": sorted(pair[0].elapsed_ms for pair in proof_pairs)[1],
+                "payload_median": sorted(pair[1].elapsed_ms for pair in proof_pairs)[1],
+            }} if verified and technique == "time_median_repeated" else {}),
             "session_state_discarded": request_class == "safe_authentication",
             "secret_values_visible": False,
         }
