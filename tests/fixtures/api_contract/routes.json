@@ -1836,6 +1836,13 @@
     "name": "get_investigation_candidate"
   },
   {
+    "path": "/knowledge/continue/usage",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_continue_usage"
+  },
+  {
     "path": "/knowledge/decisions",
     "methods": [
       "GET"
@@ -3299,6 +3306,13 @@
       "GET"
     ],
     "name": "get_target_knowledge_continue"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/continue/measures",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_continue_measures"
   },
   {
     "path": "/targets/{target_id}/knowledge/decisions",

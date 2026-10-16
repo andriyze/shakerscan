@@ -1295,6 +1295,11 @@
     "operation_id": "get_investigation_candidate_investigation_candidates__candidate_id__get"
   },
   {
+    "path": "/knowledge/continue/usage",
+    "method": "get",
+    "operation_id": "get_continue_usage_knowledge_continue_usage_get"
+  },
+  {
     "path": "/knowledge/decisions",
     "method": "get",
     "operation_id": "get_decisions_knowledge_decisions_get"
@@ -2328,6 +2333,11 @@
     "path": "/targets/{target_id}/knowledge/continue",
     "method": "get",
     "operation_id": "get_target_knowledge_continue_targets__target_id__knowledge_continue_get"
+  },
+  {
+    "path": "/targets/{target_id}/knowledge/continue/measures",
+    "method": "get",
+    "operation_id": "get_target_continue_measures_targets__target_id__knowledge_continue_measures_get"
   },
   {
     "path": "/targets/{target_id}/knowledge/decisions",

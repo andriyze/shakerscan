@@ -1,5 +1,6 @@
 """Operator HTTP entry points for receipts and guarded reversal."""
 from uuid import UUID
+from typing import get_args
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -24,7 +25,8 @@ async def get_decisions(request: Request, limit: int = Query(50, ge=1, le=100)):
     _operator(request)
     async with pool().acquire() as conn:
         rows = await conn.fetch('SELECT * FROM target_operator_decisions ORDER BY created_at DESC,id DESC LIMIT $1', limit)
-    return {'decisions': [public_receipt(row) for row in rows]}
+    return {'decisions': [public_receipt(row) for row in rows],
+            'supported_decisions': list(get_args(DecisionInput.model_fields['decision'].annotation))}
 
 
 @router.get('/targets/{target_id}/knowledge/decisions/{receipt_id}')

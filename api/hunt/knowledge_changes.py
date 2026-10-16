@@ -492,10 +492,14 @@ class _BoundedCache:
         self._bytes = 0
 
     def get(self, key: str) -> dict[str, Any] | None:
+        found = self.get_with_age(key)
+        return found[0] if found else None
+
+    def get_with_age(self, key: str) -> tuple[dict[str, Any], float] | None:
         item = self._items.get(key)
         if item is None or time.monotonic() - item[0] >= self._ttl():
             return None
-        return item[2]
+        return item[2], time.monotonic() - item[0]
 
     def put(self, key: str, value: dict[str, Any]) -> None:
         size = len(json.dumps(value, default=str))
@@ -538,14 +542,20 @@ async def target_changes(conn: Any, target_id: Any, *, device: bool, since: Any 
     repeated calls return it (``built_at`` says when)."""
     since_key = _cache_key(since)
     key = json.dumps([str(target_id), device, since_key, str(current_hunt_id), int(limit)]) if since_key else None
-    cached = _report_cache.get(key) if key else None
+    cached = _report_cache.get_with_age(key) if key else None
     if cached is not None:
-        return cached
+        return {**cached[0], "cache": _cache_view(cached[1])}
     report = await _target_changes(conn, target_id, device=device, since=since, current_hunt_id=current_hunt_id,
                                    limit=limit)
     if key:
         _report_cache.put(key, report)
-    return report
+    return {**report, "cache": _cache_view(None)}
+
+
+def _cache_view(age: float | None) -> dict[str, Any]:
+    """Whether a report was served from this process's short cache (``built_at`` says when it was built)."""
+    return {"cached": age is not None, "age_seconds": round(age, 1) if age is not None else 0.0,
+            "max_age_seconds": REPORT_CACHE_SECONDS}
 
 
 async def _target_changes(conn: Any, target_id: Any, *, device: bool, since: Any, current_hunt_id: Any,

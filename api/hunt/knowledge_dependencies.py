@@ -1027,6 +1027,8 @@ def public_dependencies(recorded: Any) -> dict[str, Any]:
         return {"tracked": False}
     return {"tracked": True, "captured_at": recorded.get("captured_at"),
             **({"binding": recorded["binding"]} if isinstance(recorded.get("binding"), Mapping) else {}),
+            **({"conditions_check": recorded["conditions_check"]}
+               if isinstance(recorded.get("conditions_check"), Mapping) else {}),
             "items": [{"type": item.get("type"), "key": item.get("key"),
                        "observed_at": (item.get("observed") or {}).get("completed_at")}
                       for item in recorded.get("items") or ()],

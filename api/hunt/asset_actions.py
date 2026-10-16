@@ -51,10 +51,14 @@ async def execute_asset_action(pool, run, name, values):
 
 
 #: Writes refused once an operator retracted this Hunt's entries (proposals and reads remain): every
-#: write of text other Hunts or operators later read, target names included.
+#: write of text other Hunts or operators later read, target names included, and collection bindings
+#: (the origins a later Hunt replays a collection against). Hunts write no hypotheses, and their only
+#: graph writes are the authorization workflow's server-built nodes (a fixed label and attributes
+#: projected by reference allowlist, hunt/graph_projection.py), so neither carries a Hunt's text.
 QUARANTINED_WRITES = frozenset({'knowledge.record', 'targets.skill.create', 'targets.skill.update',
                                 'targets.skill.delete', 'targets.actions.create', 'targets.actions.update',
-                                'targets.actions.delete', 'targets.create', 'targets.update'})
+                                'targets.actions.delete', 'targets.create', 'targets.update',
+                                'collections.bind'})
 
 
 async def _perform_asset_action(pool, run, name, values):
@@ -93,7 +97,8 @@ async def _perform_asset_action(pool, run, name, values):
                                                  device=bool(run.get('device_target_id')), audience='hunt',
                                                  since=values.get('since') or 'release',
                                                  run=dict(current) if current else run,
-                                                 limit=values.get('limit') or 25, after=values.get('after'))
+                                                 limit=values.get('limit') or 25, after=values.get('after'),
+                                                 reader=f"hunt:{run['id']}")
                 except CursorError as exc:
                     raise HTTPException(422, {'error':'invalid_cursor', 'message':str(exc)}) from None
                 except ChangeQueryError as exc:

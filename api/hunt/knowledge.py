@@ -187,7 +187,8 @@ async def query_knowledge_page(
             run = dict(found) if found else None
         try:
             report = await continue_report(conn, target_id, device=device, audience="hunt", since=since, run=run,
-                                           limit=min(int(limit), 100), after=after)
+                                           limit=min(int(limit), 100), after=after,
+                                           reader=f"hunt:{current_hunt_id}" if current_hunt_id else None)
         except (ChangeQueryError, CursorError) as exc:
             raise KnowledgeQueryError(str(exc)) from exc
         return {**report, "supported": True, "count": 0, "rows": [], "has_more": False, "next_cursor": None}

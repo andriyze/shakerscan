@@ -125,7 +125,7 @@ async def get_target_knowledge_continue(target_id: str, request: Request,
     """Continue investigating this target after its latest release: what changed, what still applies,
     what needs re-testing, and the next experiments ranked by fixed rules. Reads only; a passive refresh
     is offered, never started (``shakerscan knowledge continue --refresh`` starts it after a keypress)."""
-    _operator(request)
+    actor = _operator(request)
     try:
         from hunt.knowledge_changes import ChangeQueryError
         from hunt.knowledge_continue import CursorError, continue_report
@@ -136,11 +136,43 @@ async def get_target_knowledge_continue(target_id: str, request: Request,
         row = await target_metadata_row(conn, target_id)
         try:
             return await continue_report(conn, row['id'], device=True, audience='operator', since=since, limit=limit,
-                                         after=after)
+                                         after=after, reader=actor)
         except CursorError as exc:
             raise HTTPException(422, {'error': 'invalid_cursor', 'message': str(exc)}) from None
         except ChangeQueryError as exc:
             raise HTTPException(422, {'error': 'invalid_since', 'message': str(exc)}) from None
+
+
+@router.get('/targets/{target_id}/knowledge/continue/measures')
+async def get_target_continue_measures(target_id: str, request: Request,
+                                       since: str = Query('release', max_length=100)):
+    """How continuing after the release went on this target, from server records: required re-tests run,
+    time to the first useful step, redundant requests, new results and contradicted skip advice."""
+    _operator(request)
+    try:
+        from hunt.knowledge_changes import ChangeQueryError
+        from hunt.knowledge_measures import continuation_measures
+    except ModuleNotFoundError:  # package import
+        from ..hunt.knowledge_changes import ChangeQueryError
+        from ..hunt.knowledge_measures import continuation_measures
+    async with pool().acquire() as conn:
+        row = await target_metadata_row(conn, target_id)
+        try:
+            return await continuation_measures(conn, row['id'], since=since)
+        except ChangeQueryError as exc:
+            raise HTTPException(422, {'error': 'invalid_since', 'message': str(exc)}) from None
+
+
+@router.get('/knowledge/continue/usage')
+async def get_continue_usage(request: Request, weeks: int = Query(8, ge=1, le=52)):
+    """Continue-report reads per ISO week across the installation (operators, Hunts, targets)."""
+    _operator(request)
+    try:
+        from hunt.knowledge_measures import continue_usage
+    except ModuleNotFoundError:  # package import
+        from ..hunt.knowledge_measures import continue_usage
+    async with pool().acquire() as conn:
+        return await continue_usage(conn, weeks=weeks)
 
 
 @router.get('/targets/{target_id}/knowledge/releases')

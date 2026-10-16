@@ -153,6 +153,8 @@ MERGE_PLAIN_TABLES: list[str] = [
     "target_invariant_contracts",
     # Interpretations (and finding dismissals) and instruction proposals follow their target.
     "target_interpretations", "target_instruction_proposals", "target_release_markers", "target_operator_decisions",
+    # Continue-report usage and reuse advice follow their target (the continuation measures).
+    "knowledge_continue_events",
 ]
 
 
