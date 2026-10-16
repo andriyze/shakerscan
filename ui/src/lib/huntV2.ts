@@ -1,4 +1,4 @@
-import { pathSegment } from './apiPath.mjs'
+import { pathSegment, queryString } from './apiPath.mjs'
 import type { DeviceAgentShellPlan } from './api'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import {
@@ -289,8 +289,7 @@ export async function listHuntsV2(params: HuntListParams = {}): Promise<HuntList
   if (params.sortOrder) search.set('sort_order', params.sortOrder)
   if (params.limit) search.set('limit', String(params.limit))
   if (params.offset) search.set('offset', String(params.offset))
-  const suffix = search.size ? `?${search.toString()}` : ''
-  const response = await fetch(`${API_URL}/hunts${suffix}`, { cache: 'no-store' })
+  const response = await fetch(`${API_URL}/hunts${queryString(search)}`, { cache: 'no-store' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to list Hunts (${response.status})`))
   const payload = await response.json()
   // Older servers returned neither total nor offset; fall back to what was returned so a

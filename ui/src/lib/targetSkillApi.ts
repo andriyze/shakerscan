@@ -1,4 +1,4 @@
-import { pathSegment } from './apiPath.mjs'
+import { pathSegment, queryString } from './apiPath.mjs'
 import { API_URL, getApiErrorMessage } from './apiConfig'
 
 export interface TargetSkill {
@@ -34,8 +34,8 @@ export interface TargetSkillSnapshot extends TargetSkillState {
   advisory?: {title?:string;methodology?:string;written_by?:string|null;source_hunt_id?:string|null;revision:string;body_included:boolean;authority_granted:false} | null
 }
 
-async function request(id: string, init?: RequestInit, query = ''): Promise<TargetSkillState> {
-  const response = await fetch(`${API_URL}/targets/${pathSegment(id)}/skill${query}`, {cache:'no-store', ...init})
+async function request(id: string, init?: RequestInit, query = new URLSearchParams()): Promise<TargetSkillState> {
+  const response = await fetch(`${API_URL}/targets/${pathSegment(id)}/skill${queryString(query)}`, {cache:'no-store', ...init})
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Could not update target instructions'))
   const value: TargetSkillState = await response.json()
   if (!Number.isSafeInteger(value.revision) || value.revision < 0 || !Number.isSafeInteger(value.max_characters) || value.max_characters <= 0 || (value.skill !== null && typeof value.skill?.methodology !== 'string') || (value.operator_skill != null && typeof value.operator_skill.methodology !== 'string') || (value.knowledge != null && typeof value.knowledge.methodology !== 'string') || (value.unconfirmed_instructions != null && typeof value.unconfirmed_instructions.methodology !== 'string') || (value.trust !== undefined && !['none', 'operator', 'operator_delegated', 'agent_unconfirmed', 'hunt_advisory', 'unknown_advisory'].includes(value.trust))) {
@@ -48,4 +48,4 @@ export const saveTargetSkill = (id: string, state: TargetSkillState, title: stri
   method: (purpose==='knowledge' ? state.knowledge : state.operator_skill ?? (['operator','operator_delegated'].includes(state.trust || '') ? state.skill : null)) ? 'PUT' : 'POST', headers: {'Content-Type':'application/json'},
   body: JSON.stringify({title,methodology,expected_revision:state.revision,purpose}),
 })
-export const deleteTargetSkill = (id: string, revision: number, purpose:'instructions'|'knowledge'='instructions') => request(id, {method:'DELETE'}, `?expected_revision=${revision}&purpose=${purpose}`)
+export const deleteTargetSkill = (id: string, revision: number, purpose:'instructions'|'knowledge'='instructions') => request(id, {method:'DELETE'}, new URLSearchParams({expected_revision: String(revision), purpose}))

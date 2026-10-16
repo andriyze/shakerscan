@@ -13,7 +13,7 @@ import type {
   ModelIntakeScanRequest as GeneratedModelIntakeScanRequest,
 } from './publicApi.generated'
 import { API_URL, getApiErrorMessage } from './apiConfig'
-import { pathSegment } from './apiPath.mjs'
+import { pathSegment, queryString } from './apiPath.mjs'
 import { fetchHeavyRead } from './busyRetry.mjs'
 import { getJson } from './fetchLayer.mjs'
 import { exposureAssetsFromBody, exposureAssetsParams } from './exposureAssets.mjs'
@@ -3228,19 +3228,19 @@ export async function createOperationPlan(payload: OperationPlanRequest): Promis
 }
 
 export async function getOperationPlans(limit: number = 20): Promise<{ operation_plans: OperationPlan[]; execution_enabled: boolean; count: number }> {
-  const res = await fetch(`${API_URL}/arsenal/plans?limit=${limit}`)
+  const res = await fetch(`${API_URL}/arsenal/plans?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load operation plans'))
   return res.json()
 }
 
 export async function getCommandResults(limit: number = 20): Promise<{ command_results: CommandResult[]; execution_enabled: boolean; count: number }> {
-  const res = await fetch(`${API_URL}/arsenal/command-results?limit=${limit}`)
+  const res = await fetch(`${API_URL}/arsenal/command-results?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load command result audit records'))
   return res.json()
 }
 
 export async function getCampaignActions(limit: number = 20): Promise<{ campaign_actions: CampaignAction[]; execution_enabled: boolean; count: number }> {
-  const res = await fetch(`${API_URL}/arsenal/campaign-actions?limit=${limit}`)
+  const res = await fetch(`${API_URL}/arsenal/campaign-actions?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaign action records'))
   return res.json()
 }
@@ -3267,8 +3267,7 @@ export async function getMissionTimeline(params?: {
     const value = params?.[key]
     if (value !== undefined) searchParams.set(key, value ? 'true' : 'false')
   }
-  const query = searchParams.toString()
-  return getJson(`${API_URL}/timeline${query ? `?${query}` : ''}`, { signal, label: 'Failed to load mission timeline' })
+  return getJson(`${API_URL}/timeline${queryString(searchParams)}`, { signal, label: 'Failed to load mission timeline' })
 }
 
 // Mission campaigns.
@@ -3281,14 +3280,13 @@ export async function getCampaigns(params?: {
   if (params?.limit) searchParams.set('limit', String(params.limit))
   if (params?.target_id) searchParams.set('target_id', params.target_id)
   if (params?.status) searchParams.set('status', params.status)
-  const query = searchParams.toString()
-  const res = await fetchHeavyRead(`${API_URL}/arsenal/campaigns${query ? `?${query}` : ''}`)
+  const res = await fetchHeavyRead(`${API_URL}/arsenal/campaigns${queryString(searchParams)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaigns'))
   return res.json()
 }
 
 export async function getCampaign(id: string, actionLimit: number = 50): Promise<CampaignDetailResponse> {
-  const res = await fetch(`${API_URL}/arsenal/campaigns/${pathSegment(id)}?action_limit=${actionLimit}`)
+  const res = await fetch(`${API_URL}/arsenal/campaigns/${pathSegment(id)}?action_limit=${encodeURIComponent(actionLimit)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load campaign'))
   return res.json()
 }
@@ -3339,8 +3337,7 @@ export async function getEvidenceInstances(params?: {
   if (params?.tool_receipt_id) searchParams.set('tool_receipt_id', params.tool_receipt_id)
   if (params?.limit) searchParams.set('limit', String(params.limit))
   if (params?.summary_only) searchParams.set('summary_only', 'true')
-  const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/evidence/instances${query ? `?${query}` : ''}`)
+  const res = await fetch(`${API_URL}/evidence/instances${queryString(searchParams)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence instances'))
   return res.json()
 }
@@ -3377,8 +3374,7 @@ export async function getEvidenceExportManifest(params?: {
   retention_class?: string
   limit?: number
 }): Promise<EvidenceExportManifest> {
-  const query = evidenceQuery(params).toString()
-  const res = await fetchHeavyRead(`${API_URL}/evidence/export-manifest${query ? `?${query}` : ''}`)
+  const res = await fetchHeavyRead(`${API_URL}/evidence/export-manifest${queryString(evidenceQuery(params))}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load evidence export manifest'))
   return res.json()
 }
@@ -3438,8 +3434,7 @@ export async function getEvidenceRetentionExecutions(params?: {
   const query = new URLSearchParams()
   if (params?.target_id) query.set('target_id', params.target_id)
   if (params?.limit) query.set('limit', String(params.limit))
-  const suffix = query.toString() ? `?${query.toString()}` : ''
-  const res = await fetch(`${API_URL}/evidence/retention/executions${suffix}`)
+  const res = await fetch(`${API_URL}/evidence/retention/executions${queryString(query)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load unfinished retention cleanup'))
   return res.json()
 }
@@ -3482,7 +3477,7 @@ export async function promoteAuthzReplay(
 }
 
 export async function getHypotheses(limit: number = 20): Promise<{ hypotheses: Hypothesis[]; execution_enabled: boolean; count: number }> {
-  const res = await fetch(`${API_URL}/arsenal/hypotheses?limit=${limit}`)
+  const res = await fetch(`${API_URL}/arsenal/hypotheses?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load hypotheses'))
   return res.json()
 }
@@ -3520,7 +3515,7 @@ export async function scheduleHypotheses(params?: {
   if (params?.authAvailable) q.set('auth_available', 'true')
   if (params?.remainingRequests != null) q.set('remaining_requests', String(params.remainingRequests))
   if (params?.limit != null) q.set('limit', String(params.limit))
-  const res = await fetch(`${API_URL}/arsenal/hypotheses/schedule${q.toString() ? `?${q.toString()}` : ''}`)
+  const res = await fetch(`${API_URL}/arsenal/hypotheses/schedule${queryString(q)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to schedule hypotheses'))
   return res.json()
 }
@@ -3765,7 +3760,7 @@ export async function getRefuterWorkSummary(limit: number = 5, findingWindow: nu
 }
 
 export async function getRefuterReviews(limit: number = 20): Promise<RefuterReviewsResponse> {
-  const res = await fetch(`${API_URL}/arsenal/refuter-reviews?limit=${limit}`)
+  const res = await fetch(`${API_URL}/arsenal/refuter-reviews?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load refuter reviews'))
   return res.json()
 }
@@ -3856,7 +3851,7 @@ export async function createAgentContextPack(payload: AgentContextPackRequest): 
 }
 
 export async function getAgentContextPacks(limit: number = 20): Promise<{ context_packs: AgentContextPack[]; execution_enabled: boolean; count: number }> {
-  const res = await fetch(`${API_URL}/arsenal/context-packs?limit=${limit}`)
+  const res = await fetch(`${API_URL}/arsenal/context-packs?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load context packs'))
   return res.json()
 }
@@ -3882,7 +3877,7 @@ export async function createAgentDecisionTrace(payload: AgentDecisionTraceReques
 }
 
 export async function getAgentDecisionTraces(limit: number = 20): Promise<{ decision_traces: AgentDecisionTrace[]; execution_enabled: boolean; count: number }> {
-  const res = await fetch(`${API_URL}/arsenal/decision-traces?limit=${limit}`)
+  const res = await fetch(`${API_URL}/arsenal/decision-traces?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load decision traces'))
   return res.json()
 }
@@ -4008,8 +4003,7 @@ export async function cancelResearchEpisode(episodeId: string): Promise<Research
 export async function getArsenalTools(params?: { probeVersions?: boolean }): Promise<ArsenalToolsResponse> {
   const searchParams = new URLSearchParams()
   if (params?.probeVersions) searchParams.set('probe_versions', 'true')
-  const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/arsenal/tools${query ? `?${query}` : ''}`)
+  const res = await fetch(`${API_URL}/arsenal/tools${queryString(searchParams)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch tool status'))
   return res.json()
 }
@@ -4017,8 +4011,7 @@ export async function getArsenalTools(params?: { probeVersions?: boolean }): Pro
 export async function getLocalAgents(params?: { probeVersions?: boolean }): Promise<LocalAgentsResponse> {
   const searchParams = new URLSearchParams()
   if (params?.probeVersions) searchParams.set('probe_versions', 'true')
-  const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/agents/local${query ? `?${query}` : ''}`)
+  const res = await fetch(`${API_URL}/agents/local${queryString(searchParams)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch local agents'))
   return res.json()
 }
@@ -4057,8 +4050,7 @@ export async function getExposureAssets(params?: {
     if (params?.cohort) searchParams.set('cohort', params.cohort)
     if (params?.limit) searchParams.set('limit', String(params.limit))
     if (params?.offset) searchParams.set('offset', String(params.offset))
-    const query = searchParams.toString()
-    return getJson(`${API_URL}/exposure/assets${query ? `?${query}` : ''}`, {
+    return getJson(`${API_URL}/exposure/assets${queryString(searchParams)}`, {
       signal, heavy: true, label: 'Failed to fetch exposure assets',
     }) as Promise<ExposureAssetsResponse>
   }
@@ -4152,8 +4144,7 @@ export async function getExposureChanges(params?: {
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
   if (params?.since) searchParams.set('since', params.since)
   if (params?.days) searchParams.set('days', String(params.days))
-  const query = searchParams.toString()
-  const res = await fetchHeavyRead(`${API_URL}/exposure/changes${query ? `?${query}` : ''}`)
+  const res = await fetchHeavyRead(`${API_URL}/exposure/changes${queryString(searchParams)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch exposure changes'))
   return res.json()
 }
@@ -4232,8 +4223,7 @@ export interface TargetPosture {
 
 /** Latest known headers, TLS, DNS, and network posture for a target, each naming its scan. */
 export async function getTargetPosture(targetId: string, scanId?: string): Promise<TargetPosture> {
-  const query = scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ''
-  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/posture${query}`)
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/posture${queryString(new URLSearchParams(scanId ? { scan_id: scanId } : {}))}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch target posture'))
   return res.json()
 }
@@ -4372,7 +4362,7 @@ export async function getModelIntakeRunnerBundle(
   artifact_path?: string
 }> {
   const res = await fetch(
-    `${API_URL}/model-intake/submissions/${pathSegment(submissionId)}/runner-bundle?operation=${operation}`,
+    `${API_URL}/model-intake/submissions/${pathSegment(submissionId)}/runner-bundle?operation=${encodeURIComponent(operation)}`,
     { headers: modelIntakeWorkflowHeaders(operatorToken) },
   )
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to resolve the authoritative runner bundle'))
@@ -4437,7 +4427,7 @@ export async function downloadModelIntakeSbom(
   scanId: string,
   format: 'cyclonedx' | 'spdx' | 'aibom' = 'cyclonedx',
 ): Promise<void> {
-  const res = await fetch(`${API_URL}/model-intake/scans/${pathSegment(scanId)}/sbom?format=${format}`)
+  const res = await fetch(`${API_URL}/model-intake/scans/${pathSegment(scanId)}/sbom?format=${encodeURIComponent(format)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to export the bill of materials'))
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
@@ -4624,7 +4614,7 @@ export async function createModelIntakeAutomaticReview(data: {
 }
 
 export async function listModelIntakeAutomaticReviews(limit: number = 10): Promise<{ reviews: ModelIntakeAutomaticReview[] }> {
-  const res = await fetch(`${API_URL}/model-intake/automatic-reviews?limit=${limit}`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/model-intake/automatic-reviews?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load automatic Model Intake reviews'))
   const payload = await res.json()
   const reviews = Array.isArray(payload?.reviews)
@@ -4645,7 +4635,7 @@ export async function downloadModelIntakeAutomaticReport(
   id: string,
   format: 'json' | 'html' | 'sarif',
 ): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch(`${API_URL}/model-intake/automatic-reviews/${pathSegment(id)}/report?format=${format}`)
+  const res = await fetch(`${API_URL}/model-intake/automatic-reviews/${pathSegment(id)}/report?format=${encodeURIComponent(format)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, `Failed to export automatic Model Intake ${format.toUpperCase()} report`))
   const suffix = format === 'sarif' ? 'sarif.json' : format
   return { blob: await res.blob(), filename: `model-intake-automatic-${id}.${suffix}` }
@@ -4659,8 +4649,7 @@ export async function listModelIntakeSubmissions(
   if (params?.state) query.set('state', params.state)
   if (params?.limit) query.set('limit', String(params.limit))
   if (params?.offset) query.set('offset', String(params.offset))
-  const suffix = query.toString()
-  const res = await fetch(`${API_URL}/model-intake/submissions${suffix ? `?${suffix}` : ''}`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions${queryString(query)}`, {
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load controlled Model Intake submissions'))
@@ -4707,7 +4696,7 @@ export async function downloadModelIntakeSubmissionReport(
   format: 'json' | 'html' | 'sarif',
   operatorToken: string,
 ): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/report?format=${format}`, {
+  const res = await fetch(`${API_URL}/model-intake/submissions/${pathSegment(id)}/report?format=${encodeURIComponent(format)}`, {
     headers: modelIntakeWorkflowHeaders(operatorToken),
   })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, `Failed to export Model Intake ${format.toUpperCase()} report`))
@@ -4888,7 +4877,7 @@ export async function promoteModelIntakeSubmission(id: string, policyDecisionId:
 }
 
 export async function getModelIntakeTrustAnchors(activeOnly: boolean = true): Promise<{ trust_anchors: ModelIntakeTrustAnchor[] }> {
-  const res = await fetch(`${API_URL}/model-intake/trust-anchors?active_only=${activeOnly}`)
+  const res = await fetch(`${API_URL}/model-intake/trust-anchors?active_only=${encodeURIComponent(activeOnly)}`)
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake trust anchors'))
   }
@@ -4934,7 +4923,7 @@ export async function deactivateModelIntakeTrustAnchor(id: string, operatorToken
 }
 
 export async function getModelIntakeAdmissions(limit: number = 20): Promise<{ admissions: ModelIntakeAdmission[] }> {
-  const res = await fetch(`${API_URL}/model-intake/admissions?limit=${limit}`)
+  const res = await fetch(`${API_URL}/model-intake/admissions?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to load Model Intake admissions'))
   }
@@ -4956,8 +4945,7 @@ export async function resolveModelIntakeReference(data: ModelIntakeResolveReques
 export async function getAITestScenarios(params?: { includeDemo?: boolean }): Promise<AITestScenariosResponse> {
   const searchParams = new URLSearchParams()
   if (params?.includeDemo) searchParams.set('include_demo', 'true')
-  const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/ai/test-scenarios${query ? `?${query}` : ''}`)
+  const res = await fetch(`${API_URL}/ai/test-scenarios${queryString(searchParams)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch AI test scenarios'))
   return res.json()
 }
@@ -5292,8 +5280,7 @@ export async function getInvestigationCandidates(params: {
   if (params.status) search.set('status', params.status)
   if (params.limit) search.set('limit', String(params.limit))
   if (params.offset) search.set('offset', String(params.offset))
-  const suffix = search.size ? `?${search.toString()}` : ''
-  const res = await fetch(`${API_URL}/investigation/candidates${suffix}`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/investigation/candidates${queryString(search)}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load investigation candidates'))
   return res.json()
 }
@@ -5454,8 +5441,7 @@ export async function listDeviceAgentSessions(params: {
   if (params.device_target_id) search.set('device_target_id', params.device_target_id)
   if (params.status) search.set('status', params.status)
   if (params.limit) search.set('limit', String(params.limit))
-  const suffix = search.size ? `?${search.toString()}` : ''
-  const res = await fetch(`${API_URL}/device-agent/runs${suffix}`, { cache: 'no-store' })
+  const res = await fetch(`${API_URL}/device-agent/runs${queryString(search)}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to list device Hunt runs'))
   return res.json()
 }
@@ -6334,8 +6320,7 @@ export async function getFindingExceptions(params?: {
   if (params?.queue_filter) searchParams.set('queue_filter', params.queue_filter)
   if (params?.expiring_within_days) searchParams.set('expiring_within_days', params.expiring_within_days.toString())
   if (params?.limit) searchParams.set('limit', params.limit.toString())
-  const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/finding-exceptions${query ? `?${query}` : ''}`)
+  const res = await fetch(`${API_URL}/finding-exceptions${queryString(searchParams)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to fetch finding exceptions'))
   return res.json()
 }
@@ -6417,8 +6402,7 @@ export async function retestFinding(
   approval_receipt_id?: string | null
   scope_receipt_id?: string | null
 }> {
-  const query = mode ? `?mode=${mode}` : ''
-  const res = await fetch(`${API_URL}/findings/${pathSegment(id)}/retest${query}`, {
+  const res = await fetch(`${API_URL}/findings/${pathSegment(id)}/retest${queryString(new URLSearchParams(mode ? { mode } : {}))}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params)
@@ -6565,7 +6549,7 @@ export interface AiScanCampaignHistory {
 }
 
 export async function getAiScanCampaignHistory(id: string, limit: number = 6): Promise<AiScanCampaignHistory> {
-  const res = await fetch(`${API_URL}/ai/scans/${pathSegment(id)}/campaign-history?limit=${limit}`)
+  const res = await fetch(`${API_URL}/ai/scans/${pathSegment(id)}/campaign-history?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to load AI Gate campaign history'))
   }
@@ -6634,7 +6618,7 @@ export interface AiTargetCampaignHistory {
 }
 
 export async function getAiTargetCampaignHistory(id: string, limit: number = 12): Promise<AiTargetCampaignHistory> {
-  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(id)}/campaign-history?limit=${limit}`)
+  const res = await fetch(`${API_URL}/ai/targets/${pathSegment(id)}/campaign-history?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) {
     throw new Error(await getApiErrorMessage(res, 'Failed to load AI Gate target campaign history'))
   }
@@ -6646,7 +6630,7 @@ export async function getFindingRetests(id: string, limit: number = 20): Promise
   retests: RetestRecord[]
   count: number
 }> {
-  const res = await fetch(`${API_URL}/retests/finding/${pathSegment(id)}?limit=${limit}`)
+  const res = await fetch(`${API_URL}/retests/finding/${pathSegment(id)}?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) throw new Error('Failed to fetch retest history')
   return res.json()
 }
@@ -7200,7 +7184,7 @@ export async function getFleetNodes(operatorToken?: string): Promise<FleetNodesR
 }
 
 export async function getFleetNodeActivity(nodeId: string, limit = 25, operatorToken?: string): Promise<FleetNodeActivityResponse> {
-  const res = await fetch(`${API_URL}/fleet/nodes/${pathSegment(nodeId)}/activity?limit=${limit}`, {
+  const res = await fetch(`${API_URL}/fleet/nodes/${pathSegment(nodeId)}/activity?limit=${encodeURIComponent(limit)}`, {
     cache: 'no-store',
     headers: fleetOperatorHeaders(operatorToken),
   })
@@ -7209,7 +7193,7 @@ export async function getFleetNodeActivity(nodeId: string, limit = 25, operatorT
 }
 
 export async function getFleetNodeEvents(nodeId: string, limit = 25, operatorToken?: string): Promise<FleetNodeEventsResponse> {
-  const res = await fetch(`${API_URL}/fleet/nodes/${pathSegment(nodeId)}/events?limit=${limit}`, {
+  const res = await fetch(`${API_URL}/fleet/nodes/${pathSegment(nodeId)}/events?limit=${encodeURIComponent(limit)}`, {
     cache: 'no-store',
     headers: fleetOperatorHeaders(operatorToken),
   })
@@ -7707,7 +7691,7 @@ export async function listInteractiveSessions(): Promise<InteractiveSessionsList
 }
 
 export async function getTargetPrincipalMatrix(targetId: string, limit: number = 200): Promise<TargetPrincipalMatrixResponse> {
-  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/principal-matrix?limit=${limit}`)
+  const res = await fetch(`${API_URL}/targets/${pathSegment(targetId)}/principal-matrix?limit=${encodeURIComponent(limit)}`)
   if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to load target principal matrix'))
   return res.json()
 }
@@ -7919,8 +7903,7 @@ export async function captureInteractiveScreenshot(
   const searchParams = new URLSearchParams()
   if (params?.full_page !== undefined) searchParams.set('full_page', String(params.full_page))
   if (params?.user) searchParams.set('user', params.user)
-  const query = searchParams.toString()
-  const res = await fetch(`${API_URL}/session/${pathSegment(sessionId)}/screenshot${query ? `?${query}` : ''}`, {
+  const res = await fetch(`${API_URL}/session/${pathSegment(sessionId)}/screenshot${queryString(searchParams)}`, {
     method: 'POST',
   })
   if (!res.ok) {
