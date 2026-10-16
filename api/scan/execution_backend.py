@@ -393,24 +393,33 @@ class PostgresScanExecutionBackend:
     ) -> dict[str, int]:
         """Keep the secret values an action of this Scan found (exposure probe) for the Scan's
         target, encrypted, usable later by reference. Optional on a backend: a remote one does
-        not hold the values' key. Never raises; returns counts only."""
+        not hold the values' key. Never raises; returns counts and, aligned with ``values``, the
+        ``secret://`` reference each value is kept under (None when it was not kept)."""
         self._require_action(action_id)
+        nothing = {"stored": 0, "refreshed": 0, "refs": [None] * len(values)}
         try:
             try:
-                from hunt.discovered_secrets import record_discovered
+                from hunt.discovered_secrets import record_discovered, reference_for
             except ModuleNotFoundError:
-                from ..hunt.discovered_secrets import record_discovered
+                from ..hunt.discovered_secrets import record_discovered, reference_for
             async with self._pool.acquire() as conn:
                 target_id = await conn.fetchval(
                     "SELECT target_id FROM scans WHERE id=$1", uuid.UUID(self._plan.scan_id))
                 if not target_id:
-                    return {"stored": 0, "refreshed": 0}
-                return await record_discovered(
+                    return nothing
+                counts = await record_discovered(
                     conn, target_id=target_id, values=values,
                     source={"kind": "scan_finding", "id": str(self._plan.scan_id),
                             "resource": str(resource or "")[:200]})
+                refs = []
+                for value, _label in values:
+                    try:
+                        refs.append(await reference_for(conn, target_id=target_id, value=value))
+                    except Exception:
+                        refs.append(None)
+                return {**counts, "refs": refs}
         except Exception:
-            return {"stored": 0, "refreshed": 0}
+            return nothing
 
     async def _persist_recovered_terminal_action(
         self,

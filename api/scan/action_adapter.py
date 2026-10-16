@@ -2801,9 +2801,20 @@ class DatabaseNeutralScanActionDispatcher:
                 # secret-looking names are unproven and are not kept.
                 recorder = getattr(self.backend, "record_discovered_secrets", None)
                 if callable(recorder) and signature.proves_sensitive_exposure:
-                    found = [(item.value, item.key) for item in signature.secrets if item.value]
-                    if found:
-                        await recorder(action.action_id, found, probe_url)
+                    kept = [item for item in signature.secrets if item.value]
+                    if kept:
+                        outcome = await recorder(
+                            action.action_id, [(item.value, item.key) for item in kept], probe_url)
+                        # Each fingerprint links the reference its value is kept under, so a
+                        # finding names the secret a Hunt can use (``secret://``), never the value.
+                        refs = list((outcome or {}).get("refs") or ()) if isinstance(outcome, Mapping) else []
+                        by_fingerprint = {
+                            item.fingerprint: ref for item, ref in zip(kept, refs)
+                            if item.fingerprint and isinstance(ref, str)
+                        }
+                        for entry in attempt_observations[0].get("exposure_fingerprints") or ():
+                            if isinstance(entry, dict) and entry.get("value_fingerprint") in by_fingerprint:
+                                entry["stored_as"] = by_fingerprint[entry["value_fingerprint"]]
                 # A listing is metadata, not proof that children are confidential.
                 # Existing bounded follow-up still records content observations.
                 if (
