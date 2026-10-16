@@ -7,7 +7,7 @@ import { type Finding } from '@/lib/api'
 import { SEVERITY_RAIL_CLASSES, type FindingSourceType, type SeverityLevel } from '@/lib/constants'
 import { cn } from '@/lib/cn'
 import { formatRelativeTime } from '@/lib/format'
-import { findingLocation, type FindingGroup } from '@/lib/findingGroups'
+import { findingLocation, groupSize, type FindingGroup } from '@/lib/findingGroups'
 import { FindingStatusBadge, ProofStateBadge, SeverityBadge } from '@/components/ui'
 import { FindingRow, FindingWhere, LastSeen, RetestNote, findingFacts } from '@/app/findings/FindingRow'
 
@@ -58,8 +58,11 @@ export function FindingGroupRow({
   const [expanded, setExpanded] = useState(false)
   const membersId = useId()
   const { lead, members } = group
+  // The server lists the first members of a large group; the count is still the whole group.
+  const size = groupSize(group)
+  const unlisted = size - members.length
 
-  if (members.length === 1) {
+  if (size === 1) {
     return (
       <FindingRow
         finding={lead}
@@ -85,7 +88,9 @@ export function FindingGroupRow({
           <div className="flex w-10 shrink-0 items-center justify-center">
             {selectable.length > 0 && (
               <GroupCheckbox
-                label={`Select ${selectable.length} findings: ${lead.title}`}
+                label={unlisted > 0
+                  ? `Select the ${selectable.length} listed of ${size} findings: ${lead.title}`
+                  : `Select ${selectable.length} findings: ${lead.title}`}
                 checked={selectedCount === selectable.length}
                 indeterminate={selectedCount > 0 && selectedCount < selectable.length}
                 onChange={(checked) => onToggle(selectable.map((member) => member.id), checked)}
@@ -115,18 +120,18 @@ export function FindingGroupRow({
             />
             <span className="line-clamp-2 text-sm font-medium text-gray-100 sm:truncate" title={facts || undefined}>{lead.title}</span>
             <span className="shrink-0 rounded-sm bg-gray-800 px-1.5 text-xs font-semibold tabular-nums text-gray-300">
-              ×{members.length}
+              ×{size}
             </span>
           </span>
           <span className="flex min-w-0 items-center gap-3 text-xs sm:max-w-[48%]">
-            <FindingWhere finding={lead} sourceType={sourceType} more={members.length - 1} />
+            <FindingWhere finding={lead} sourceType={sourceType} more={size - 1} />
             {showStatus && <FindingStatusBadge status={lead.status} />}
             <LastSeen value={group.lastSeenAt} />
           </span>
         </button>
       </div>
       {expanded && (
-        <ul id={membersId} aria-label={`${members.length} locations of ${lead.title}`} className="border-l-[3px] border-l-transparent bg-gray-950/40">
+        <ul id={membersId} aria-label={`${size} locations of ${lead.title}`} className="border-l-[3px] border-l-transparent bg-gray-950/40">
           {members.map((member) => {
             const location = findingLocation(member) || member.url || 'no route recorded'
             const memberSelectable = selecting && !member.is_candidate
@@ -166,6 +171,11 @@ export function FindingGroupRow({
               </li>
             )
           })}
+          {unlisted > 0 && (
+            <li className={cn('border-t border-t-gray-800/70 py-1.5 pr-4 text-xs text-gray-500', selecting ? 'pl-11 sm:pl-[15.875rem]' : 'pl-3 sm:pl-[13.875rem]')}>
+              {`${unlisted.toLocaleString()} more not listed here. Narrow the filters to list them.`}
+            </li>
+          )}
         </ul>
       )}
     </div>

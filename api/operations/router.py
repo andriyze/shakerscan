@@ -48,6 +48,7 @@ try:
     from operations import queue_health
     from schedules.router import SCHEDULE_HEALTH_LOOKBACK_DAYS, _schedule_health_map_for_schedules
     from scan.compatibility import record_compatibility_call
+    from scan.detail_bounds import MAX_DETAIL_FINDINGS
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from request_guards import reraise_statement_timeout
     from operations.discovery import (
@@ -70,6 +71,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from . import queue_health
     from ..schedules.router import SCHEDULE_HEALTH_LOOKBACK_DAYS, _schedule_health_map_for_schedules
     from ..scan.compatibility import record_compatibility_call
+    from ..scan.detail_bounds import MAX_DETAIL_FINDINGS
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..request_guards import reraise_statement_timeout
     from . import dashboard_data
@@ -152,7 +154,7 @@ async def get_cli_v1_scan(
     """Compatibility bridge for CLI status and wait commands."""
     _set_cli_v1_deprecation_headers(response)
     record_compatibility_call(get_redis(), "cli_v1_status")
-    result = await get_scan(id)
+    result = await get_scan(id, findings_limit=MAX_DETAIL_FINDINGS)
     result.setdefault("scan_id", str(result.get("id") or id))
     scan_type = str(result.get("scan_type") or "") or None
     result.setdefault("requested_scan_type", scan_type)

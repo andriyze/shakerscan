@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import sys
 import random
 import re
 import secrets
@@ -54,6 +55,12 @@ except ModuleNotFoundError:
 from scan.assessment import project_scan_assessment_row
 from scan.list_v1 import scans_page, scan_list_columns
 from scan.live_log import read_scan_log
+from scan.detail_bounds import (
+    FINDINGS_LIMIT_QUERY, INCLUDE_RESULT_QUERY, PARALLEL_CHILDREN_SQL, detail_params, fetch_scan_detail_row,
+    read_detail_findings,
+)
+from research_routes.autopilot_loop import run_research_autopilot
+from operations.metrics_cache import METRICS_CACHE as _METRICS_CACHE
 from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
 from list_contract import CURSOR_MAX_LENGTH
 from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
@@ -76,6 +83,7 @@ except ModuleNotFoundError:
     from api import loop_leader
 from runtime.loop_scale_indexes import build_loop_scale_indexes_in_background, index_health as loop_index_health
 from finding_routes.list_schema import repair_severity_rank_in_background
+from scan.assessment_columns import project_scan_assessment_in_background
 from targets.scale_summary import summary_compactor as _summary_compactor
 from targets.insert_race import fetch_target_upsert
 from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
@@ -3978,6 +3986,7 @@ lifespan = create_api_lifespan(ApiLifecycleDependencies(
     background_maintenance=(
         ("loop_scale_indexes", lambda pool: build_loop_scale_indexes_in_background(pool)),
         ("findings_severity_rank_repair", lambda pool: repair_severity_rank_in_background(pool)),
+        ("scans_assessment_projection", lambda pool: project_scan_assessment_in_background(pool)),
     ),
 ))
 
@@ -8846,7 +8855,15 @@ async def health():
 
 @app.get("/metrics/v2")
 async def get_v2_operational_metrics():
-    """Expose content-free canonical runtime counters and actionable alerts."""
+    """Expose content-free canonical runtime counters and actionable alerts.
+
+    Counting every Scan and action is a pass over the largest tables, so the answer is served from
+    a single-flight cache (``METRICS_CACHE_SECONDS``, default 15 s, 0 disables it): any number of
+    pollers cost one computation per interval. ``generated_at`` says when it was computed."""
+    return await _METRICS_CACHE.get(_compute_v2_operational_metrics)
+
+
+async def _compute_v2_operational_metrics() -> dict[str, Any]:
     running_worker_ids = await asyncio.to_thread(
         _running_scan_worker_container_ids_best_effort
     )
@@ -8888,6 +8905,7 @@ async def get_v2_operational_metrics():
         )
     metrics["worker_build"] = worker_build
     metrics["legacy_compatibility"] = legacy
+    metrics["generated_at"] = datetime.now(timezone.utc).isoformat()
     return metrics
 
 
@@ -11807,26 +11825,29 @@ async def list_scans(
 
 
 @app.get("/scans/{scan_id}")
-async def get_scan(scan_id: str, verified_only: bool = False):
-    """Get scan details."""
+async def get_scan(
+    scan_id: str,
+    verified_only: bool = False,
+    findings_limit: int = FINDINGS_LIMIT_QUERY,
+    include_result: bool = INCLUDE_RESULT_QUERY,
+):
+    """Get scan details: at most ``findings_limit`` persisted findings (``findings_total`` and
+    ``findings_truncated`` say how many there are), and the report body unless
+    ``include_result=false`` (scan/detail_bounds.py)."""
+    findings_limit, include_result = detail_params(findings_limit, include_result)
     async with db_pool.acquire() as conn:
-        scan = await conn.fetchrow("""
-            SELECT s.*,
-                   COALESCE(t.name, ait.name) as target_name,
-                   ait.target_type as ai_target_type
-            FROM scans s
-            LEFT JOIN targets t ON s.target_id = t.id
-            LEFT JOIN ai_targets ait ON s.ai_target_id = ait.id
-            WHERE s.id = $1
-        """, uuid.UUID(scan_id))
+        scan = await fetch_scan_detail_row(
+            conn, uuid.UUID(scan_id), include_result=include_result, with_findings=findings_limit > 0)
 
         if not scan:
             raise HTTPException(status_code=404, detail="Scan not found")
 
-        # Get findings for this scan. Verified-only filtering is applied after
-        # merging raw scan-time proof below, so stale persisted retest verdicts
-        # cannot hide findings that this scan just proved.
-        findings = await conn.fetch(SCAN_DETAIL_FINDINGS_SQL, uuid.UUID(scan_id))
+        report = scan['result']
+        if report is not None:
+            report = _normalize_scan_result_for_api(_decode_json_value(report))
+        findings, findings_total, findings_truncated = await read_detail_findings(
+            conn, uuid.UUID(scan_id), report, limit=findings_limit, verified_only=verified_only,
+            project=finding_proof_fields, identities=finding_identity_keys)
 
         action_rows = await conn.fetch(
             _PUBLIC_SCAN_ACTIONS_SQL, uuid.UUID(scan_id),
@@ -11853,21 +11874,9 @@ async def get_scan(scan_id: str, verified_only: bool = False):
 
     result = dict(scan)
     result['execution_context'] = _json_object(result.get('execution_context'))
-    if result.get('result') is not None:
-        result['result'] = _normalize_scan_result_for_api(_decode_json_value(result['result']))
-    verification_overrides = _scan_result_verification_overrides(result.get('result'))
-    merged_findings = []
-    for row in findings:
-        finding = dict(row)
-        override = matching_verification_override(verification_overrides, finding)
-        if override:
-            finding.update(override)
-        if verified_only and finding.get("last_verification_verdict") != "exploited":
-            continue
-        merged_findings.append(finding)
-    result['findings'] = project_scan_finding_proof(
-        result.get('result'), merged_findings, project=finding_proof_fields, identities=finding_identity_keys,
-    )
+    result['result'] = report if include_result else None
+    result['findings'], result['findings_total'] = findings, findings_total
+    result['findings_truncated'] = findings_truncated
     if canonical_stage_checkpoint:
         result["canonical_stage_checkpoint"] = dict(
             canonical_stage_checkpoint
@@ -11892,15 +11901,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     # can show per-shard progress under the single parent row.
     if result.get('scan_role') == 'parent':
         async with db_pool.acquire() as conn:
-            shard_rows = await conn.fetch("""
-                SELECT id, scan_role, shard_index, status, score, grade,
-                       findings_count, current_phase, progress, duration_seconds,
-                       executing_node_id, worker_id, execution_context,
-                       result, options
-                FROM scans
-                WHERE parent_scan_id = $1
-                ORDER BY shard_index
-        """, uuid.UUID(scan_id))
+            shard_rows = await conn.fetch(PARALLEL_CHILDREN_SQL, uuid.UUID(scan_id))
         child_rows = [row_to_dict(row) for row in shard_rows]
         discovery_rows = [
             row for row in child_rows
@@ -18694,11 +18695,14 @@ async def _reap_abandoned_research_episodes(conn) -> int:
     # stale-dispatch reconciler owns it; cancelling it would orphan a live scan) and autopilot
     # episodes (the runner advances/re-leases them). No hard delete of hunt transcripts — those are
     # run records under the evidence-retention discipline, not reaper-deletable. (External-audit P1/P2.)
+    # At most 500 per pass (oldest first); the next pass takes the rest.
     reaped = await conn.fetch(
         """UPDATE research_episodes re
            SET status='cancelled', stop_reason='abandoned_reaper_timeout',
                lease_expires_at=NULL, updated_at=NOW()
-           WHERE re.status IN ('awaiting_planner','awaiting_input')
+           WHERE re.id IN (
+             SELECT re.id FROM research_episodes re
+             WHERE re.status IN ('awaiting_planner','awaiting_input')
              AND re.autopilot_enabled=false
              AND re.cancel_requested=false
              AND re.updated_at < NOW() - make_interval(hours => $1::int)
@@ -18714,6 +18718,7 @@ async def _reap_abandoned_research_episodes(conn) -> int:
                        (SELECT max(ev2.created_at) FROM research_events ev2
                         WHERE ev2.episode_id=re.id AND ev2.event_type='autopilot_resumed'),
                        '-infinity'::timestamptz))
+             ORDER BY re.updated_at LIMIT 500 FOR UPDATE SKIP LOCKED)
            RETURNING id""",
         ttl,
     )
@@ -19167,210 +19172,8 @@ async def _reconcile_research_orphaned_queue_work(conn) -> int:
 
 
 async def research_autopilot_runner(pool) -> None:
-    """Durably advance opted-in episodes independent of any browser session.
-
-    A Postgres lease makes the controller safe across API replicas. Episodes with a linked active
-    scan or finding retest are left alone until that work settles, then receive exactly one fresh
-    result-bearing observation before planning.
-    """
-    owner = f"api-autopilot:{os.getpid()}:{uuid.uuid4()}"
-    last_queue_reconcile_monotonic = 0.0
-    last_campaign_reconcile_monotonic = 0.0
-    last_episode_reap_monotonic = 0.0
-    while True:
-        episode_id: str | None = None
-        try:
-            now_monotonic = time.monotonic()
-            if now_monotonic - last_campaign_reconcile_monotonic >= 30.0:
-                await _continue_autonomous_research_campaigns()
-                last_campaign_reconcile_monotonic = now_monotonic
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    await _reconcile_stale_research_dispatches(conn)
-                    now_monotonic = time.monotonic()
-                    if now_monotonic - last_queue_reconcile_monotonic >= 30.0:
-                        await _reconcile_unconfirmed_queue_handoffs(conn)
-                        await _reconcile_research_orphaned_queue_work(conn)
-                        last_queue_reconcile_monotonic = now_monotonic
-                    if now_monotonic - last_episode_reap_monotonic >= 300.0:
-                        await _reap_abandoned_research_episodes(conn)
-                        last_episode_reap_monotonic = now_monotonic
-                row = await conn.fetchrow(
-                    """
-                    WITH candidate AS (
-                        SELECT re.id
-                        FROM research_episodes re
-                        WHERE re.autopilot_enabled=true
-                          AND re.status IN ('awaiting_planner','awaiting_observation')
-                          AND re.cancel_requested=false
-                          AND (re.lease_expires_at IS NULL OR re.lease_expires_at < NOW())
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM research_decisions rd
-                              JOIN command_results cr ON cr.id=rd.command_result_id
-                              JOIN scans s ON s.id=cr.scan_id
-                              WHERE rd.episode_id=re.id AND s.status IN ('pending','queued','running')
-                          )
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM research_decisions rd
-                              JOIN command_results cr ON cr.id=rd.command_result_id
-                              JOIN finding_verifications fv ON fv.id=(CASE WHEN cr.result_json->>'retest_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (cr.result_json->>'retest_id')::uuid END)
-                              WHERE rd.episode_id=re.id AND fv.status IN ('queued','running')
-                          )
-                        ORDER BY re.updated_at ASC
-                        FOR UPDATE SKIP LOCKED
-                        LIMIT 1
-                    )
-                    UPDATE research_episodes re
-                    SET lease_owner=$1,
-                        lease_expires_at=NOW()+make_interval(secs => $2),
-                        updated_at=NOW()
-                    FROM candidate
-                    WHERE re.id=candidate.id
-                    RETURNING re.*
-                    """,
-                    owner,
-                    RESEARCH_AUTOPILOT_LEASE_SECONDS,
-                )
-                if row:
-                    episode_id = str(row["id"])
-                    should_plan = str(row["status"]) == "awaiting_planner"
-                    if str(row["status"]) == "awaiting_observation":
-                        async with conn.transaction():
-                            locked = await conn.fetchrow(
-                                "SELECT * FROM research_episodes WHERE id=$1 FOR UPDATE",
-                                row["id"],
-                            )
-                            if (
-                                not locked
-                                or str(locked["status"]) != "awaiting_observation"
-                                or bool(locked["cancel_requested"])
-                                or str(locked["lease_owner"] or "") != owner
-                            ):
-                                should_plan = False
-                            elif await _research_async_work(conn, row["id"], active_only=True):
-                                # Work became active after the candidate query; keep waiting.
-                                should_plan = False
-                            else:
-                                settlement = await _settle_research_awaiting_observation(conn, locked)
-                                should_plan = settlement.get("next_status") == "awaiting_planner"
-            if not episode_id:
-                await asyncio.sleep(1.0)
-                continue
-            if not should_plan:
-                await _release_research_autopilot_lease(pool, episode_id, owner)
-                continue
-            heartbeat_stop = asyncio.Event()
-            heartbeat_task = asyncio.create_task(
-                _research_lease_heartbeat(pool, episode_id, owner, heartbeat_stop)
-            )
-            try:
-                if _research_episode_uses_agent_loop(row):
-                    # Opt-in: drive this episode with the LLM ReAct hunt loop instead of the
-                    # menu planner. The existing create-MA/menu path is untouched (this branch
-                    # only fires when planner.agent_loop was set at launch).
-                    result = await _run_agent_hunt_for_episode(episode_id)
-                else:
-                    result = await _plan_research_episode_step(
-                        episode_id,
-                        ResearchPlannerStepRequest(
-                            execute=True,
-                            # 240s (of a 300s ceiling) so a large reasoning planner finishes the first big
-                            # pack with room for one retry after a transient provider connection error; the
-                            # full 8000 max_tokens so a filled mass_assignment/BOLA workflow isn't truncated
-                            # into a harness-repair/misinferred stop.
-                            timeout_seconds=240,
-                            max_tokens=8000,
-                            created_by="server_autopilot",
-                        ),
-                    )
-            except asyncio.CancelledError:
-                heartbeat_stop.set()
-                # Graceful shutdown cancels this task and awaits it BEFORE closing the pool (see
-                # lifespan), so release the lease we hold here. Otherwise a restarted controller must
-                # wait out the ~4-minute lease TTL before it can resume this episode -- the observed
-                # multi-minute dead window after an API restart. Shield so the cleanup completes
-                # despite the cancellation propagating.
-                try:
-                    await asyncio.shield(heartbeat_task)
-                except Exception:
-                    pass
-                try:
-                    await asyncio.shield(_release_research_autopilot_lease(pool, episode_id, owner))
-                except Exception:
-                    pass
-                raise
-            except Exception as exc:
-                heartbeat_stop.set()
-                await heartbeat_task
-                if _research_autopilot_expected_control_race(exc):
-                    await _release_research_autopilot_lease(pool, episode_id, owner)
-                else:
-                    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
-                    error = json.dumps(detail, default=str) if isinstance(detail, (dict, list)) else str(detail)
-                    await _release_research_autopilot_lease(pool, episode_id, owner, error=error or type(exc).__name__)
-            else:
-                heartbeat_stop.set()
-                await heartbeat_task
-                result_episode = result.get("episode") if isinstance(result, dict) else {}
-                if isinstance(result, dict) and result.get("accepted") is False and not (result_episode or {}).get("terminal"):
-                    errors = []
-                    decisions = result.get("decisions") if isinstance(result.get("decisions"), list) else []
-                    if decisions and isinstance(decisions[0], dict):
-                        errors = decisions[0].get("validation_errors") or []
-                    policy_steering = _research_rejection_is_policy_steering(errors)
-                    async with pool.acquire() as conn:
-                        episode_row = await conn.fetchrow(
-                            "SELECT * FROM research_episodes WHERE id=$1 AND lease_owner=$2",
-                            uuid.UUID(episode_id), owner,
-                        )
-                        if episode_row and str(episode_row["status"]) == "awaiting_planner":
-                            await _build_research_observation(
-                                conn,
-                                episode_row,
-                                previous_result={
-                                    "planner_rejection": {
-                                        "validation_errors": [str(item)[:300] for item in errors[:20]],
-                                        "instruction": (
-                                            "The deterministic policy excluded this exact action/hypothesis. "
-                                            "Choose a different planner-visible hypothesis or semantic dimension."
-                                            if policy_steering else
-                                            "Choose a named proposable command or provide a valid stop/input decision."
-                                        ),
-                                    }
-                                },
-                                next_status="awaiting_planner",
-                            )
-                            if policy_steering:
-                                await _record_research_event(
-                                    conn,
-                                    episode_row["id"],
-                                    event_type="planner_steered",
-                                    status="retrying",
-                                    summary="Deterministic policy steered the planner to different work",
-                                    details={"validation_errors": [str(item)[:300] for item in errors[:20]]},
-                                )
-                    if policy_steering:
-                        await _release_research_autopilot_lease(pool, episode_id, owner)
-                    else:
-                        await _release_research_autopilot_lease(
-                            pool,
-                            episode_id,
-                            owner,
-                            error=f"planner_decision_rejected:{','.join(str(item) for item in errors)[:800]}",
-                        )
-                else:
-                    await _release_research_autopilot_lease(pool, episode_id, owner)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            if episode_id:
-                try:
-                    await _release_research_autopilot_lease(pool, episode_id, owner, error="autopilot_controller_error")
-                except Exception:
-                    pass
-            await asyncio.sleep(2.0)
+    """Durably advance opted-in episodes under one leader (research_routes/autopilot_loop.py)."""
+    await run_research_autopilot(pool, sys.modules[__name__])
 
 
 

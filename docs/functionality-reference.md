@@ -1565,7 +1565,7 @@ See [`docs/mcp.md`](mcp.md).
 `GET /scans/{id}/deployment-decision` · `GET /scans/{id}/ai-redteam-report` ·
 `GET|DELETE /scans/{id}/http-transactions`
 
-**Findings**: `GET /findings` · `GET /findings/{id}` · `PATCH /findings/{id}` · `DELETE /findings/{id}` (list filters include `severity`, `status`, `source_type`, `target_id`, `scan_id`, `root_domain`, `search`, `seen_within_days`, `not_seen_within_days`, `first_seen_within_days`, `resolved_within_days`, `verification_verdict`, `verified_only`); sending any of `cursor`, `sort`, `fields`, `count` or `since` selects the bounded list contract (`limit` 1..200, opaque `next_cursor`, summary rows, `count=none|estimate|exact`), and the `limit`/`offset` response is deprecated for 2.11.x
+**Findings**: `GET /findings` · `GET /findings/{id}` · `PATCH /findings/{id}` · `DELETE /findings/{id}` (list filters include `severity`, `status`, `source_type`, `target_id`, `scan_id`, `root_domain`, `search`, `seen_within_days`, `not_seen_within_days`, `first_seen_within_days`, `resolved_within_days`, `verification_verdict`, `verified_only`); sending any of `cursor`, `sort`, `fields`, `count` or `since` selects the bounded list contract (`limit` 1..200, opaque `next_cursor`, summary rows, `count=none|estimate|exact`), `group_by=issue` answers that contract with groups of repeats (same title, severity, subject, proof state and status) formed over every match, each with its count, lead row and first 50 member ids (`fields` and `since` are refused with it), and the `limit`/`offset` response is deprecated for 2.11.x
 · `POST /findings/bulk` · `POST /findings/cleanup` · `POST /findings/manual` ·
 `POST /findings/{id}/retest` · `POST /findings/retest` · `GET /retests/{id}` ·
 `GET /retests/finding/{id}`
@@ -1919,7 +1919,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 428 | Python sources + Compose manifests |
+| Runtime environment keys | 429 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 137 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2903,6 +2903,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `HTTP_ARCHIVE_MAX_CAPTURED_CALLS` | `scanner/scanner_tools/http_archive_capture.py` |
 | `HTTP_ARCHIVE_MAX_CAPTURE_BYTES` | `scanner/scanner_tools/http_archive_capture.py` |
 | `LOCAL_ENV_FILE` | `api/settings_routes/router.py` |
+| `METRICS_CACHE_SECONDS` | `api/operations/metrics_cache.py` |
 | `MINIO_BUCKET` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MINIO_ROOT_PASSWORD` | `docker-compose.release.yml`, `docker-compose.yml` |
