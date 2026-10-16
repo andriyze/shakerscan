@@ -220,7 +220,10 @@ def test_estimates_come_from_statistics():
     async def check(conn):
         unfiltered, _, _ = await _page(conn, lc.Page(count="estimate"))
         assert unfiltered["total_kind"] == "estimate"
-        assert unfiltered["total"] == ROWS  # reltuples after ANALYZE
+        # reltuples is planner statistics, not a count: an autovacuum or ANALYZE racing the
+        # fixture's own ANALYZE (full-suite load) can leave it off by a few tuples (10051 seen).
+        # The contract only promises "about N", so allow 1%.
+        assert abs(unfiltered["total"] - ROWS) <= ROWS * 0.01
         filtered, _, _ = await _page(conn, lc.Page(count="estimate"), kind="odd")
         assert filtered["total_kind"] == "estimate"
         assert abs(filtered["total"] - ROWS // 2) < ROWS * 0.1
