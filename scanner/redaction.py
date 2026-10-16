@@ -347,9 +347,6 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str] | Callable[[str], str], ...] =
         re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}(?![A-Za-z0-9_-])"),
         "***",
     ),
-    # Provider credentials whose format names them, wherever they stand: Stripe secret and
-    # restricted keys, GitHub tokens, AWS access key IDs, Slack tokens, Google API keys.
-    (_PROVIDER_KEY_RE, "***"),
     # ``mysql ... -p<password>`` command lines.
     _mask_mysql_passwords,
     # Planner prose such as "token LEAKED_TOKEN_ABC123". Require an opaque-looking value
@@ -358,6 +355,10 @@ _TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str] | Callable[[str], str], ...] =
         re.compile(r"(?i)(\b(?:token|password|secret|api[_-]?key)\s+)(?=[A-Za-z0-9_./+=-]{8,}\b)(?=[A-Za-z0-9_./+=-]*[0-9_./+=-])[A-Za-z0-9_./+=-]+"),
         r"\1***",
     ),
+    # Provider credentials whose format names them, wherever they stand: Stripe secret and
+    # restricted keys, GitHub tokens, AWS access key IDs, Slack tokens, Google API keys. Last, so
+    # the rules before it keep their positions (tests/test_redaction_linear.py's reference).
+    (_PROVIDER_KEY_RE, "***"),
 )
 
 
