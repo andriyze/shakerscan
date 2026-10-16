@@ -1674,7 +1674,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "secrets.inspect",
             "List secrets discovered on this target earlier (metadata only: reference, kind, "
             "field name, length, when seen). Send one with an http.request binding "
-            "{\"secret_ref\": \"secret://<id>\"}; the worker sends the value, which is never shown.",
+            "{\"secret_ref\": \"secret://<id>\"}; the worker sends the value, which is never shown. "
+            "related_target_secrets lists secrets of related targets: sending one to this Hunt's "
+            "login waits for a person's secret.try permission.",
             "internal", "read_only", _HTTP_TARGETS,
             "secrets.inspect", "1", None, {"tool_wall_seconds": 5}, {"control_plane": True}, _schema(),
             "discovered-secret-index/v1", ("discovered_secret_observation",),

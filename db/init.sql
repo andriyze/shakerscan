@@ -1099,7 +1099,7 @@ CREATE INDEX IF NOT EXISTS idx_hunt_preauthorizations_run
 CREATE TABLE IF NOT EXISTS hunt_permission_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization')),
+    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization','secret.try')),
     reason_code TEXT NOT NULL CHECK (reason_code ~ '^[a-z][a-z_]{2,63}$'),
     subject_json JSONB NOT NULL,
     subject_digest TEXT NOT NULL CHECK (subject_digest ~ '^[0-9a-f]{64}$'),
@@ -1144,7 +1144,7 @@ CREATE TABLE IF NOT EXISTS hunt_permission_grants (
     hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
     request_id UUID NOT NULL REFERENCES hunt_permission_requests(id) ON DELETE CASCADE,
     preauthorization_id UUID REFERENCES hunt_preauthorizations(id) ON DELETE SET NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization')),
+    kind TEXT NOT NULL CHECK (kind IN ('target.authorize','credential.use','capability.enable','budget.raise','ssh.exec','ssh.host_trust','preauthorization','secret.try')),
     subject_json JSONB NOT NULL,
     subject_digest TEXT NOT NULL CHECK (subject_digest ~ '^[0-9a-f]{64}$'),
     scope TEXT NOT NULL CHECK (scope IN ('hunt','target')),
@@ -2834,7 +2834,10 @@ CREATE TABLE IF NOT EXISTS discovered_secret_uses (
     destination_host TEXT NOT NULL DEFAULT '' CHECK (length(destination_host) <= 255),
     -- An operator who revealed the value (no Hunt, no action), or NULL for a Hunt's use.
     revealed_by TEXT CHECK (revealed_by IS NULL OR length(revealed_by) BETWEEN 1 AND 200),
-    used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- 2.11 (api/hunt/secret_try.py): the secret.try grant an attempt used, and the login's answer.
+    permission_grant_id UUID,
+    outcome TEXT CHECK (outcome IS NULL OR length(outcome) <= 80)
 );
 DO $i_discovered_secret_uses_secret$
 BEGIN

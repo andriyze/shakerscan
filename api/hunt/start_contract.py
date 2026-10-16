@@ -36,8 +36,12 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "target_id", "target_kind", "goal", "objective", "budget_profile", "policy_profile",
     "budgets", "policy", "credential_refs", "capabilities", "request_collection_ids",
     "approval_receipt_id", "scope_receipt_id", "schema_version", "skill_ids",
-    "direct_origin_addresses", "allow", "proposed_allow", "allow_asserted_by",
+    "direct_origin_addresses", "allow", "proposed_allow", "allow_asserted_by", "secret_visibility",
 })
+# Whether the planner may read the values of the target's discovered secrets (``secrets.inspect``).
+# A person's choice at start, recorded as theirs, off by default; the MCP start tool never sends it
+# and nothing after start can change it (hunt/discovered_secrets.py, values_for_agent).
+SECRET_VISIBILITIES = ("withheld", "agent_may_see")
 # Who set ``allow`` bounds. The Enterprise gateway sets this after the person's step-up (PR G1)
 # and must strip any value a client sent; on local OSS the bounds are the operator's own.
 ALLOW_ASSERTION_PROOFS = frozenset({"stepup", "launch_stepup", "local"})
@@ -213,6 +217,10 @@ def hunt_start_public_contract() -> dict[str, Any]:
                 "capability:" + "|".join(sorted(CAPABILITY_FLAGS)), "ssh.host_trust:first-contact",
             ],
             "assertion_proofs": sorted(ALLOW_ASSERTION_PROOFS),
+        },
+        "secret_visibility": {
+            "field": "secret_visibility", "values": list(SECRET_VISIBILITIES), "default": "withheld",
+            "set_by": "the person starting the Hunt; never the agent, never changed after start",
         },
         "permission_reason_codes": sorted(REASON_CODES),
         "permission_kinds": list(PERMISSION_KINDS),
@@ -609,6 +617,24 @@ class HuntStartContract:
     allow: Sequence[str] = ()
     proposed_allow: Sequence[str] = ()
     allow_asserted_by: Mapping[str, str] | None = None
+    secret_visibility: str = "withheld"
+
+    @property
+    def secret_values_visible(self) -> bool:
+        return self.secret_visibility == "agent_may_see"
+
+    def secret_visibility_record(self) -> dict[str, Any]:
+        """Who chose the setting, as the start bounds' owner is recorded (``allow_asserted_by``)."""
+        assertion = self.allow_asserted_by or {}
+        return {
+            "secret_values_visible": self.secret_values_visible,
+            "secret_visibility_set_by": (
+                str(assertion.get("person") or "local-operator") if self.secret_values_visible else None
+            ),
+            "secret_visibility_proof": (
+                str(assertion.get("proof") or "local") if self.secret_values_visible else None
+            ),
+        }
 
     @property
     def resolved_budget(self) -> dict[str, int]:
@@ -677,6 +703,8 @@ class HuntStartContract:
             "budget_schema_version": HUNT_BUDGET_SCHEMA,
             "budget": asdict(budget),
             "allowed_capabilities": list(allowed_capabilities),
+            # Read by secrets.inspect only; no grant, amendment or planner call rewrites it.
+            **self.secret_visibility_record(),
         }
 
     def public_dict(self) -> dict[str, Any]:
@@ -698,7 +726,8 @@ class HuntStartContract:
             "policy_adjustments": list(self.adjustments),
             "allow": list(self.allow),
             "proposed_allow": list(self.proposed_allow),
-            "secret_values_visible": False,
+            "secret_visibility": self.secret_visibility,
+            **self.secret_visibility_record(),
         }
 
 
@@ -898,8 +927,18 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         ),
         direct_origin_addresses=direct_origin_addresses,
         adjustments=tuple(adjustments),
+        secret_visibility=_secret_visibility(payload),
         **_allow_fields(payload),
     )
+
+
+def _secret_visibility(payload: Mapping[str, Any]) -> str:
+    value = payload.get("secret_visibility")
+    if value is None:
+        return "withheld"
+    if value not in SECRET_VISIBILITIES:
+        raise HuntStartContractError("secret_visibility must be withheld or agent_may_see")
+    return str(value)
 
 
 def _allow_fields(payload: Mapping[str, Any]) -> dict[str, Any]:

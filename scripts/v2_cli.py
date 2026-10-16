@@ -521,6 +521,15 @@ def _start_preauthorization(
         payload["allow"] = allow
     if getattr(args, "propose_allow", None):
         payload["proposed_allow"] = list(dict.fromkeys(args.propose_allow))
+    if getattr(args, "agent_may_see_secrets", False):
+        if client.api_token:
+            # A connected instance records this as the person's only after their step-up, which
+            # its gateway does not offer for this setting yet: refuse rather than send it unproven.
+            raise CliError(
+                "--agent-may-see-secrets needs your step-up on a connected instance, which it does "
+                "not offer yet. No Hunt was started.", error_type="preauthorization_required",
+            )
+        payload["secret_visibility"] = "agent_may_see"
     if not payload.get("allow") or not client.api_token:
         return {}
     approval = _approval()
@@ -1114,6 +1123,14 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_start.add_argument(
         "--propose-allow", action="append", default=[], metavar="BOUND",
         help="propose bounds for a person to approve (one pending request); for agents",
+    )
+    hunt_start.add_argument(
+        "--agent-may-see-secrets", action="store_true",
+        help=(
+            "let this Hunt's agent read the values of the target's discovered secrets through "
+            "secrets.inspect (off by default: the agent sends them by secret:// reference only). "
+            "Your choice, recorded as yours; an agent cannot set it"
+        ),
     )
     hunt_start.add_argument("--preauthorization", help="Enterprise: a pre-authorization id from an earlier step-up")
     hunt_start.add_argument("--account", help="Enterprise step-up: your sign-in name")

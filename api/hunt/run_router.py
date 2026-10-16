@@ -102,6 +102,9 @@ class HuntStartV2Request(BaseModel):
     allow: list[str] | None = Field(default=None, max_length=MAX_BOUNDS)
     proposed_allow: list[str] | None = Field(default=None, max_length=MAX_BOUNDS)
     allow_asserted_by: HuntAllowAssertion | None = None
+    # A person's choice, off by default: may the planner read discovered secret values through
+    # secrets.inspect in this Hunt? Recorded with who chose it; the MCP start tool never sends it.
+    secret_visibility: Literal["withheld", "agent_may_see"] | None = None
 
 
 class HuntStartV2Response(BaseModel):

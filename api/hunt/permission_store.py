@@ -31,6 +31,7 @@ from .permission_reasons import (
     KIND_CAPABILITY_ENABLE,
     KIND_CREDENTIAL_USE,
     KIND_PREAUTHORIZATION,
+    KIND_SECRET_TRY,
     KIND_SSH_EXEC,
     KIND_SSH_HOST_TRUST,
     KIND_TARGET_AUTHORIZE,
@@ -273,6 +274,31 @@ BEGIN
     END IF;
 END
 $permission_status$;
+DO $permission_kind_secret_try$
+BEGIN
+    -- 2.11 adds the secret.try kind. Checked first, so a steady-state restart takes no table
+    -- lock; on the one upgrade the constraint is replaced NOT VALID (no scan of existing rows,
+    -- which all hold an older kind) and still checks every new row.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='hunt_permission_requests'::regclass AND conname='hunt_permission_requests_kind_check'
+          AND pg_get_constraintdef(oid) LIKE '%secret.try%'
+    ) THEN
+        ALTER TABLE hunt_permission_requests DROP CONSTRAINT IF EXISTS hunt_permission_requests_kind_check;
+        ALTER TABLE hunt_permission_requests ADD CONSTRAINT hunt_permission_requests_kind_check
+            CHECK (kind IN ({_quoted(PERMISSION_KINDS)})) NOT VALID;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='hunt_permission_grants'::regclass AND conname='hunt_permission_grants_kind_check'
+          AND pg_get_constraintdef(oid) LIKE '%secret.try%'
+    ) THEN
+        ALTER TABLE hunt_permission_grants DROP CONSTRAINT IF EXISTS hunt_permission_grants_kind_check;
+        ALTER TABLE hunt_permission_grants ADD CONSTRAINT hunt_permission_grants_kind_check
+            CHECK (kind IN ({_quoted(PERMISSION_KINDS)})) NOT VALID;
+    END IF;
+END
+$permission_kind_secret_try$;
 """
 
 
@@ -470,6 +496,9 @@ def render(kind: str, subject: Mapping[str, Any], display: Mapping[str, Any]) ->
             explanation += " Hosts covered: " + "; ".join(
                 f"{_label(item['bound'], 300)} covers {_label(item['display'], 600)}" for item in hosts
             ) + "."
+    elif kind == KIND_SECRET_TRY:
+        from .secret_try import render_secret_try
+        title, explanation, effect = render_secret_try(subject, display, _label)
     elif kind in {KIND_SSH_EXEC, KIND_SSH_HOST_TRUST}:
         title = f"{kind} for this Hunt"
         explanation = "SSH permission requests are not raised in this release."

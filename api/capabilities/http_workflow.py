@@ -42,6 +42,25 @@ def _scrub_bound_values(value: Any, bound: list[str]) -> Any:
     return scrub(value)
 
 
+async def _note_secret_outcome(pool: Any, exchange: HttpWorkflowExchange, response: Any) -> None:
+    """What the destination answered to a request that sent discovered secrets, on their use
+    rows (the audit of a try on another target's login). Status class only, never content."""
+    if not exchange.secret_use_ids:
+        return
+    summary = response.get('response') if isinstance(response, Mapping) else None
+    status = summary.get('status') if isinstance(summary, Mapping) else None
+    outcome = f"http_{int(status)}" if isinstance(status, int) and not isinstance(status, bool) else "no_response"
+    try:
+        from hunt.discovered_secrets import record_use_outcome
+    except ModuleNotFoundError:  # package import layout
+        from api.hunt.discovered_secrets import record_use_outcome
+    try:
+        async with pool.acquire() as conn:
+            await record_use_outcome(conn, exchange.secret_use_ids, outcome)
+    except Exception:  # noqa: BLE001 - the attempt and its use row stand; only the answer is missing
+        pass
+
+
 async def prepare_http_operation(
     *, pool: Any, run: Mapping[str, Any], context: Mapping[str, Any], policy: Mapping[str, Any],
     action_id: Any, target: Any, target_url: str, inputs: Mapping[str, Any],
@@ -108,6 +127,7 @@ async def prepare_http_operation(
                 response.pop('redirect_chain', None)
             if exchange.capture_error:
                 response.update(ok=False, error=exchange.capture_error)
+            await _note_secret_outcome(pool, exchange, response)
             return response
         finally:
             headers.clear()

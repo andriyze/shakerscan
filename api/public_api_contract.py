@@ -386,6 +386,9 @@ class PublicV2IdempotencyMiddleware:
             and isinstance(rejection, dict)
             and not any(rejection.get(field) for field in ("scan_id", "retest_id", "job_id", "id"))
         )
+        stored_body = response_body
+        if cacheable and isinstance(rejection, dict):
+            stored_body = _without_agent_values(rejection, response_body)
         async with pool.acquire() as conn:
             if cacheable:
                 await conn.execute(
@@ -396,7 +399,7 @@ class PublicV2IdempotencyMiddleware:
                        WHERE method=$1 AND path=$2 AND key_sha256=$3
                          AND request_sha256=$4 AND state='processing'""",
                     method, path, key_digest, request_digest, status,
-                    json.dumps(response_headers, sort_keys=True), response_body,
+                    json.dumps(response_headers, sort_keys=True), stored_body,
                 )
             elif definitive_rejection:
                 await conn.execute(
@@ -408,6 +411,25 @@ class PublicV2IdempotencyMiddleware:
                 )
         for message in response_messages:
             await send(message)
+
+
+def _without_agent_values(answer: dict[str, Any], body: bytes) -> bytes:
+    """The body a retry store keeps for an answer that carried discovered secret values (a Hunt
+    whose starting person let the agent see them): the same answer without the values, which
+    are shown once and never stored. Any other body is kept as it is."""
+    result = answer.get("result")
+    if not isinstance(result, dict) or result.get("values_in_this_answer_only") is not True:
+        return body
+    secrets = [
+        {key: value for key, value in item.items() if key != "value"}
+        for item in result.get("secrets") or () if isinstance(item, dict)
+    ]
+    stored = {**answer, "result": {
+        **result, "secrets": secrets, "secret_values_visible": False,
+        "values_in_this_answer_only": False,
+        "values_not_replayed": "The values were shown once; call secrets.inspect again to see them.",
+    }}
+    return json.dumps(stored, separators=(",", ":"), default=str).encode("utf-8")
 
 
 def public_v2_write_paths(openapi: Mapping[str, Any]) -> tuple[str, ...]:

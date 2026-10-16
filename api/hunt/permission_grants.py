@@ -11,6 +11,8 @@ A grant reuses the mechanism that already owns its authority; it never adds a pa
 * ``target.authorize`` adds the destination to the Hunt's authorized overlay
   (``policy.granted_destinations``), which ``resolve_hunt_http_origin`` honours at admission and
   in the worker. Remember on the Hunt's own host records the standing target authorization.
+* ``secret.try`` lets this Hunt send one discovered secret of another target to one login, a
+  bounded number of times (hunt/secret_try.py). Never pre-authorized, never remembered.
 * ``credential.use`` lets this Hunt use exactly one profile version after the same kind rules a
   credential grant applies, without creating a binding. Remember creates the normal credential
   grant (``granted_by="permission-request:<id>"``), which joins the one attached list.
@@ -51,6 +53,7 @@ from .permission_reasons import (
     KIND_CAPABILITY_ENABLE,
     KIND_CREDENTIAL_USE,
     KIND_PREAUTHORIZATION,
+    KIND_SECRET_TRY,
     KIND_TARGET_AUTHORIZE,
 )
 from .permission_store import (
@@ -318,6 +321,9 @@ async def apply_grant(
         effect = await _apply_target(conn, run, request, actor)
     elif kind == KIND_CREDENTIAL_USE:
         effect = await _apply_credential(conn, run, request)
+    elif kind == KIND_SECRET_TRY:
+        from .secret_try import apply_secret_try
+        effect = await apply_secret_try(conn, run, request, choice, refused=GrantRefused)
     elif kind == KIND_PREAUTHORIZATION:
         subject = _json(request["subject_json"], {})
         bounds = _approvable_proposal(subject)

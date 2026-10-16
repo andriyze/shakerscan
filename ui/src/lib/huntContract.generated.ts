@@ -315,7 +315,8 @@ export const HUNT_START_CONTRACT = {
     "budget.raise",
     "ssh.exec",
     "ssh.host_trust",
-    "preauthorization"
+    "preauthorization",
+    "secret.try"
   ],
   "permission_reason_codes": [
     "active_replay_not_allowed",
@@ -364,6 +365,10 @@ export const HUNT_START_CONTRACT = {
     "scope_other_host",
     "scope_other_service_port",
     "scope_scanner_other_host",
+    "secret_other_target",
+    "secret_try_attempts_exhausted",
+    "secret_try_destination_denied",
+    "secret_try_rate_limited",
     "ssh_exec_not_allowed",
     "ssh_host_key_untrusted",
     "state_changing_http_not_allowed",
@@ -408,6 +413,15 @@ export const HUNT_START_CONTRACT = {
     "scope_receipt_id"
   ],
   "schema_version": "hunt-start/v2",
+  "secret_visibility": {
+    "default": "withheld",
+    "field": "secret_visibility",
+    "set_by": "the person starting the Hunt; never the agent, never changed after start",
+    "values": [
+      "withheld",
+      "agent_may_see"
+    ]
+  },
   "skill_catalog": "/hunt/skills",
   "target_actions": {
     "auto_load_at_start": true,
@@ -1901,7 +1915,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/secrets.inspect"
       },
-      "description": "List secrets discovered on this target earlier (metadata only: reference, kind, field name, length, when seen). Send one with an http.request binding {\"secret_ref\": \"secret://<id>\"}; the worker sends the value, which is never shown.",
+      "description": "List secrets discovered on this target earlier (metadata only: reference, kind, field name, length, when seen). Send one with an http.request binding {\"secret_ref\": \"secret://<id>\"}; the worker sends the value, which is never shown. related_target_secrets lists secrets of related targets: sending one to this Hunt's login waits for a person's secret.try permission.",
       "input": {
         "fields": [],
         "required": []
