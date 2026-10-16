@@ -323,6 +323,15 @@ def test_legacy_triage_writes_record_a_reversible_receipt(monkeypatch):
                 assert await conn.fetchval('SELECT count(*) FROM finding_exceptions WHERE id=$1', UUID(kept_id)) == 0
                 assert (await _revert(client, target, deleted.json()['decision_receipt'])).status_code == 200
                 assert await conn.fetchval('SELECT reason FROM finding_exceptions WHERE id=$1', UUID(kept_id)) == 'original'
+                # Review sweep: the receipt's target is the finding's; a client naming another
+                # target for it is refused and nothing is written.
+                misfiled = await client.post('/finding-exceptions', headers={'x-shakerscan-decision-id': str(uuid4())},
+                                             json={'finding_id': str(finding), 'target_id': str(other),
+                                                   'owner': 'sec', 'approver': 'lead', 'reason': 'misfiled',
+                                                   'status': 'revoked', 'expires_at': (datetime.now(timezone.utc)
+                                                                                       + timedelta(days=30)).isoformat()})
+                assert misfiled.status_code == 409, misfiled.text
+                assert await conn.fetchval("SELECT count(*) FROM finding_exceptions WHERE reason='misfiled'") == 0
                 # An exception naming no target and no finding on one cannot carry a receipt.
                 targetless = await client.post('/finding-exceptions', headers={'x-shakerscan-decision-id': str(uuid4())},
                                                json={'fingerprint': 'abc', 'owner': 'sec', 'approver': 'lead',
