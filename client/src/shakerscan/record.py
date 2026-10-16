@@ -144,7 +144,9 @@ def create_capture(api: ApiClient, target: str, name: str | None) -> dict[str, A
         return api.request("POST", "/request-collections/captures", body,
                            headers={"Idempotency-Key": f"record-{uuid.uuid4().hex}"})
     except UploadError as exc:
-        if exc.status == 404 and isinstance(exc.detail, Mapping) and exc.detail.get("detail") == "Not Found":
+        # An engine without the route: no match (404), or the collection read route's path (405).
+        if exc.status == 405 or (exc.status == 404 and isinstance(exc.detail, Mapping)
+                                 and exc.detail.get("detail") == "Not Found"):
             raise RecordError("this instance has no browser capture (it is older than 2.11)") from None
         raise RecordError(f"could not open a capture: {_message(exc)}") from None
 

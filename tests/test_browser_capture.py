@@ -182,3 +182,15 @@ def test_an_oversized_batch_is_refused_with_413_before_parsing(path, limit):
     asyncio.run(PublicV2BodyLimitMiddleware(app)(scope, receive, send))
     assert sent[0]["status"] == 413 and not reached
     assert json.loads(sent[1]["body"])["detail"]["max_bytes"] == limit
+
+
+def test_a_failed_idle_close_does_not_stop_the_maintenance_tick(capsys):
+    from api.capture.store import close_idle_captures
+
+    class BrokenPool:
+        def acquire(self):
+            raise RuntimeError("database unavailable: secret-ish detail")
+
+    assert asyncio.run(close_idle_captures(BrokenPool())) == 0
+    out = capsys.readouterr().out
+    assert "idle close failed: RuntimeError" in out and "secret-ish" not in out

@@ -444,7 +444,16 @@ async def close_idle_captures(pool: Any, *, idle_seconds: int = IDLE_CLOSE_SECON
                               limit: int = IDLE_CLOSE_BATCH) -> int:
     """Close open captures with no batch for ``idle_seconds`` (a recorder that crashed or lost
     its network), at most ``limit`` per call; rows another transaction holds are left for the
-    next tick. Safe to run twice: it only ever moves an open capture to closed."""
+    next tick. Safe to run twice: it only ever moves an open capture to closed. A failure is
+    reported and skipped so the rest of the maintenance tick still runs."""
+    try:
+        return await _close_idle(pool, idle_seconds=idle_seconds, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - maintenance must not stop the tick
+        print(f"[capture] idle close failed: {type(exc).__name__}", flush=True)
+        return 0
+
+
+async def _close_idle(pool: Any, *, idle_seconds: int, limit: int) -> int:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """WITH idle AS (

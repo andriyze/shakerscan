@@ -423,3 +423,13 @@ def test_record_a_local_app_headless_and_upload_it(tmp_path, monkeypatch, capsys
     assert _CaptureApi.state["closed"]["client_dropped"]["assets"] >= 2
     assert "hunter2-password" not in json.dumps(result)
 
+
+
+@pytest.mark.parametrize(("status", "detail"), [(405, {"detail": "Method Not Allowed"}), (404, {"detail": "Not Found"})])
+def test_an_engine_without_captures_is_named(status, detail):
+    class OldEngine:
+        def request(self, *args, **kwargs):
+            raise UploadError("no route", status=status, detail=detail)
+
+    with pytest.raises(record.RecordError, match="older than 2.11"):
+        record.create_capture(OldEngine(), "https://app.example.test", None)
