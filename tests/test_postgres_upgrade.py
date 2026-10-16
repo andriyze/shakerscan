@@ -2,8 +2,9 @@
 
 PostgreSQL 18 images refuse the old /var/lib/postgresql/data mount and cannot read 16 data files.
 scripts/postgres_upgrade.sh copies an older cluster into the new major with pg_dumpall and verifies
-it; `compose()` runs that guard before every subcommand that can start PostgreSQL. The real-image
-path is exercised by scripts/postgres_upgrade_smoke.sh; these tests pin the decisions and wiring.
+it; `compose()` runs that guard before every subcommand that can start PostgreSQL. These fast
+tests pin the decisions and wiring; the real-image migration is no longer exercised in CI (few
+installs still hold PostgreSQL 16 data, and CI targets PostgreSQL 18 only).
 """
 
 from __future__ import annotations

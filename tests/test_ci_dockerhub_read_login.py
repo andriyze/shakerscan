@@ -50,7 +50,6 @@ STEP_PULLERS = [
     ("e2e-pr.yml", "smoke-shard", lambda s: "docker/bake-action" in s.get("uses", "")
      or "scanner.sh" in s.get("run", "")),
     ("installed-upgrade.yml", "installed-upgrade", lambda s: "installed_upgrade_smoke.sh" in s.get("run", "")),
-    ("postgres-upgrade.yml", "postgres-upgrade-smoke", lambda s: "postgres_upgrade_smoke.sh" in s.get("run", "")),
     ("release-sbom.yml", "registry-smoke", lambda s: "docker/setup-buildx-action" in s.get("uses", "")),
     ("verify-rc-native-tools.yml", "verify", lambda s: "docker/setup-buildx-action" in s.get("uses", "")),
 ]
