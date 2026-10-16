@@ -371,6 +371,17 @@ send `"preset": "custom"` to run only the named families. `POST /scans` and
 Permission and work are reported separately: the scan page's Testing tile names the active
 families that ran, or warns that active testing was allowed but no active family was selected.
 
+**Active Nuclei templates run in windows.** One `nuclei_active` endpoint attempt (120 requests,
+45 s) runs one window of 30 templates from the permitted active allowlist, a cross-section chosen
+by the endpoint's manifest position (`active_template_window`, `api/scan/nuclei_execution.py`), and
+records it as `template_window`. A Scan with at least as many endpoints as windows (39 for the
+1,146-template allowlist) runs every permitted template once; one with fewer endpoints runs that
+many windows, so a single-endpoint Scan runs 30 templates. Templates that address the host (most
+default-login and exposure checks) need no particular endpoint, but a template that tests the
+endpoint's own path or parameters runs on about one endpoint in 39: a Scan is not an exhaustive
+template-by-endpoint sweep. The window depends only on the manifest position, so rescanning the
+same manifest runs the same windows.
+
 **DNS posture over a limited forwarder.** `dns.inspect` asks the system resolver first. When a
 query times out and the bound host is a public name on public addresses, the same query is retried
 over DNS-over-HTTPS (`SHAKERSCAN_DNS_DOH_RESOLVERS`, comma-separated `https://` URLs, default
