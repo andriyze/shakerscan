@@ -1465,7 +1465,7 @@ def _capability_call_hint(unknown: Sequence[str]) -> str:
 
 
 def _normalized_capability_arguments(
-    arguments: Mapping[str, Any], properties: Mapping[str, Any],
+    arguments: Mapping[str, Any], properties: Mapping[str, Any], *, input_fields: Sequence[str] = (),
 ) -> dict[str, Any]:
     """B19: GLM sent http.request with no input sixteen times in one Hunt. Two shapes models send
     are taken for what they mean instead of refused: ``input`` as a JSON object encoded in a string,
@@ -1481,7 +1481,7 @@ def _normalized_capability_arguments(
         if isinstance(decoded, dict):
             normalized["input"] = decoded
     stray = [key for key in normalized if key not in properties]
-    if stray and normalized.get("input") in (None, {}):
+    if stray and set(stray) <= set(input_fields) and normalized.get("input") in (None, {}):
         normalized["input"] = {key: normalized.pop(key) for key in stray}
     return normalized
 
@@ -2187,6 +2187,7 @@ class ArsenalClient:
         if name == "shakerscan_public_check":
             return _call_posture_check(self, "/public/check", arguments)
         hunt_tool = HUNT_TOOL_BY_NAME.get(name)
+        normalization_hunt = None
         streaming_ssh = name == "shakerscan_hunt_ssh_exec"
         if streaming_ssh:
             # Use the generic manifest validation, with a fixed canonical capability.
@@ -2198,6 +2199,29 @@ class ArsenalClient:
                 hunt_tool = _hunt_start_tool(self.hunt_contract())
             if name == "shakerscan_hunt_capability" and not streaming_ssh:
                 arguments = _normalized_capability_arguments(arguments, hunt_tool.properties)
+                stray = set(arguments) - set(hunt_tool.properties)
+                if stray and arguments.get("input") in (None, {}) and all(
+                    key in arguments for key in ("hunt_id", "capability_name")
+                ):
+                    # Only declared fields of this Hunt's live capability may move into input.
+                    # An unknown envelope field (experiment_key, policy, etc.) must stay an
+                    # error even when a permissive capability schema allows additional fields.
+                    for key in ("hunt_id", "capability_name"):
+                        self._validate_argument(key, arguments[key], hunt_tool.properties[key])
+                    normalization_hunt = self.request_json(
+                        "GET", f"/hunts/{urllib.parse.quote(arguments['hunt_id'], safe='')}"
+                    )
+                    manifest = normalization_hunt.get("capabilities")
+                    capability = next((
+                        item for item in manifest or () if isinstance(item, dict)
+                        and item.get("name") == arguments["capability_name"]
+                    ), {}) if isinstance(manifest, list) else {}
+                    schema = capability.get("input_schema")
+                    fields = schema.get("properties") if isinstance(schema, dict) else None
+                    arguments = _normalized_capability_arguments(
+                        arguments, hunt_tool.properties,
+                        input_fields=list(fields) if isinstance(fields, dict) else (),
+                    )
             unknown = sorted(set(arguments) - set(hunt_tool.properties))
             missing = sorted(set(hunt_tool.required) - set(arguments))
             hint = _capability_call_hint(unknown) if name == "shakerscan_hunt_capability" and not streaming_ssh else ""
@@ -2289,7 +2313,9 @@ class ArsenalClient:
             if name == "shakerscan_hunt_capability":
                 hunt_id = str(arguments["hunt_id"])
                 capability_name = str(arguments["capability_name"])
-                hunt = self.request_json("GET", f"/hunts/{urllib.parse.quote(hunt_id, safe='')}")
+                hunt = normalization_hunt if normalization_hunt is not None else self.request_json(
+                    "GET", f"/hunts/{urllib.parse.quote(hunt_id, safe='')}"
+                )
                 caller_key = str(payload.get("idempotency_key") or "").strip()
                 if str(hunt.get("status") or "") not in {"active", "awaiting_planner"} and not caller_key:
                     raise MCPError(-32006, (

@@ -904,7 +904,7 @@ def test_b19_lifted_fields_are_still_validated_by_the_capability_schema():
         client.call_tool("shakerscan_hunt_capability", {
             "hunt_id": client.HUNT_ID, "capability_name": "http.request", "url": "https://x/",
         })
-    assert "Unknown input fields: url" in stray.value.message
+    assert "Unknown tool arguments: url" in stray.value.message
     assert not any("/capabilities/" in path for _m, path, _p in client.calls)
 
 
@@ -914,3 +914,17 @@ def test_b19_an_empty_input_is_named_as_empty():
         client.call_tool("shakerscan_hunt_capability", {
             "hunt_id": client.HUNT_ID, "capability_name": "http.request", "input": {}})
     assert refused.value.message.startswith("No input was sent (input is missing or {}).")
+
+
+
+def test_flat_capability_fields_must_be_declared_by_the_live_manifest():
+    client = ManifestHuntClient()
+    # JSON Schema allows additional properties by default, but that does not make an unknown
+    # envelope field a declared capability input. Nothing may reach execution in this case.
+    for extra in ({"experiment_key": "a" * 32}, {"policy": {"active_testing": True}},
+                  {"method": "GET", "path": "/login", "surprise": "value"}):
+        with pytest.raises(mcp.MCPError, match="Unknown tool arguments"):
+            client.call_tool("shakerscan_hunt_capability", {
+                "hunt_id": client.HUNT_ID, "capability_name": "http.request", "input": {}, **extra,
+            })
+    assert not any("/capabilities/" in path for _m, path, _p in client.calls)
