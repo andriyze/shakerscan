@@ -399,7 +399,9 @@ an existing snapshot; `--offline` emits only the generator's built-in curated se
 access; and `--from-raw DIR` rebuilds deterministically from cached NVD API responses. After a
 refresh, copy the printed SHA-256 into both `BUNDLED_SNAPSHOT_SHA256` in
 `scanner/scanner_tools/device_advisories.py` and the `ENV DEVICE_INTEL_DB_SHA256` line in
-`scanner/Dockerfile`; the drift tests fail until both match.
+`scanner/Dockerfile`, and the snapshot's `generated_at` into `BUNDLED_SNAPSHOT_GENERATED_AT`; the
+drift tests fail until they match. Between releases the same snapshot can be shipped as a signed
+bundle (see [Service intelligence](service-intelligence.md#signed-intelligence-bundles)).
 
 ## Wireless and non-IP extensions
 

@@ -1915,12 +1915,12 @@ for the profile contract, invocation, limits and acceptance gates.
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
-| Canonical scanner wrapper commands | 41 | `scanner.sh` |
+| Canonical scanner wrapper commands | 42 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 425 | Python sources + Compose manifests |
-| Internal compatibility scanner modules | 136 | `scanner/scanner_tools/` |
+| Runtime environment keys | 427 | Python sources + Compose manifests |
+| Internal compatibility scanner modules | 137 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
@@ -2737,7 +2737,7 @@ opaque profile, and collection-reference fields.
 
 | Surface | Names |
 |---|---|
-| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `db-upgrade`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `images`, `install-deps`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `redis`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `secrets`, `shell`, `start`, `status`, `stop`, `version` |
+| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `db-upgrade`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `images`, `install-deps`, `intel`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `redis`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `secrets`, `shell`, `start`, `status`, `stop`, `version` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-hunt-ssh`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
@@ -2833,8 +2833,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `DB_STATEMENT_TIMEOUT_MS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
-| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py` |
-| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py` |
+| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
+| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
 | `DEVICE_ONLY_WORKER` | `api/worker.py` |
 | `DEVICE_POSTURE_ENABLED` | `api/devices/router.py`, `api/worker_handlers/device.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEVICE_QUEUE_NAME` | `api/api.py`, `api/devices/router.py`, `api/operations/router.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2979,7 +2979,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
 | `RESEARCH_EPISODE_ABANDON_TTL_HOURS` | `api/api.py` |
-| `RESULTS_DIR` | `api/api.py`, `api/data_lifecycle/erasure.py`, `api/runtime/archive_blob_secrets.py`, `api/runtime/http_archive_reader.py`, `api/runtime/http_archive_router.py`, `api/secret_store.py`, `api/worker.py` |
+| `RESULTS_DIR` | `api/api.py`, `api/data_lifecycle/erasure.py`, `api/runtime/archive_blob_secrets.py`, `api/runtime/http_archive_reader.py`, `api/runtime/http_archive_router.py`, `api/secret_store.py`, `api/worker.py`, `scanner/scanner_tools/intel_bundle.py` |
 | `RETEST_AI_BUDGET_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_COOLDOWN_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_ERROR_THRESHOLD` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -3101,6 +3101,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_HUNT_INTERACTSH_TOKEN` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_PLANNER_GRANT_FILE` | `api/hunt/planner_gateway.py` |
 | `SHAKERSCAN_INSTALL_KIND` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_INTEL_BUNDLE_DIR` | `scanner/scanner_tools/intel_bundle.py` |
+| `SHAKERSCAN_INTEL_TRUSTED_KEYS` | `scanner/scanner_tools/intel_bundle.py` |
 | `SHAKERSCAN_MAX_ACTIVE_SCANS` | `api/api.py`, `api/worker.py` |
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` | `scripts/shakerscan_mcp.py` |
@@ -3261,7 +3263,7 @@ Implementation modules below are inventory only. The immutable action graph and 
 capability registry define execution authority; module presence does not advertise a public
 Scan feature or a second orchestration engine.
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `address_classes.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `destination_guard.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_shell.py`, `device_web.py`, `discovered_names.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `frontend_http.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `host_names.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `log_text.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `registrable.py`, `remediation_kb.py`, `remediation_kb_devices.py`, `remediation_kb_findings.py`, `remediation_kb_tls.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `subfinder_providers.py`, `surface_hints.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `address_classes.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `destination_guard.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_shell.py`, `device_web.py`, `discovered_names.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `frontend_http.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `host_names.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `intel_bundle.py`, `ip_reputation.py`, `log_text.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `registrable.py`, `remediation_kb.py`, `remediation_kb_devices.py`, `remediation_kb_findings.py`, `remediation_kb_tls.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `subfinder_providers.py`, `surface_hints.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
 
 ### Durable Storage Inventory
 

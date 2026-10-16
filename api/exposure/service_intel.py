@@ -84,11 +84,25 @@ def snapshot_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "snapshot_sha256": text(snapshot.get("snapshot_sha256"), 64) or None,
         "record_count": len(snapshot.get("advisories") or []),
         "coverage": "curated_offline_snapshot",
+        # builtin | external_bundle | operator_pinned; bundle says why an installed bundle is not used.
+        "source": text(snapshot.get("source"), 40) or "builtin",
+        "bundle": _bundle_summary(snapshot.get("bundle")),
         "limitations": [
             "This is a curated offline snapshot, not complete or live CVE coverage.",
             "Version and CPE matches do not establish configuration or distribution backport applicability.",
             "Public exploit references are unexecuted research links, not ShakerScan capabilities.",
         ],
+    }
+
+
+def _bundle_summary(value: Any) -> dict[str, Any]:
+    bundle = value if isinstance(value, Mapping) else {}
+    version = bundle.get("bundle_version")
+    return {
+        "status": text(bundle.get("status"), 60) or "absent",
+        "bundle_version": version if isinstance(version, int) and not isinstance(version, bool) else None,
+        "generated_at": text(bundle.get("generated_at"), 40) or None,
+        "key_id": text(bundle.get("key_id"), 16) or None,
     }
 
 
