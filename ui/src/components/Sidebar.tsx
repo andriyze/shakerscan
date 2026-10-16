@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 import { API_URL } from '@/lib/api'
+import { usePoll } from '@/lib/usePoll'
 import { DEFAULT_EDITION_LABEL, navigationAllowed, workspaceEdition } from '@/lib/workspaceCapabilities'
 import {
   deriveBuildIdentity,
@@ -363,25 +364,18 @@ export default function Sidebar() {
   const [fleetEnabled, setFleetEnabled] = useState(false)
   const openerRef = useRef<HTMLButtonElement>(null)
   const drawerRef = useRef<HTMLElement>(null)
+  const healthLoaded = useRef(false)
 
   // Fetch in the parent so opening the mobile drawer does not duplicate runtime requests.
   // Periodic refresh recovers from startup races and reflects a mid-session deploy.
-  useEffect(() => {
-    let cancelled = false
-    const refresh = (force = false) => {
-      loadHealthBuildIdentity(force).then((health) => {
-        if (cancelled) return
-        setBuildIdentity(deriveBuildIdentity(bakedVersion, health, bakedExpectedApiFingerprint))
-        setFleetEnabled(health?.fleet?.enabled === true)
-      })
-    }
-    refresh()
-    const interval = window.setInterval(() => refresh(true), HEALTH_BUILD_IDENTITY_REFRESH_MS)
-    return () => {
-      cancelled = true
-      window.clearInterval(interval)
-    }
-  }, [bakedExpectedApiFingerprint, bakedVersion])
+  // The first read may reuse the cached health answer; later ticks force a fresh one.
+  usePoll(async (signal) => {
+    const health = await loadHealthBuildIdentity(healthLoaded.current)
+    healthLoaded.current = true
+    if (signal.aborted) return
+    setBuildIdentity(deriveBuildIdentity(bakedVersion, health, bakedExpectedApiFingerprint))
+    setFleetEnabled(health?.fleet?.enabled === true)
+  }, { intervalMs: HEALTH_BUILD_IDENTITY_REFRESH_MS, deps: [bakedExpectedApiFingerprint, bakedVersion] })
 
   // Persist the "show all sections" preference across reloads (default off).
   useEffect(() => {

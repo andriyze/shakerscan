@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { API_URL } from '@/lib/apiConfig'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 import { formatRelativeTime } from '@/lib/format'
+import { usePoll } from '@/lib/usePoll'
 import type { CredentialProfile } from '@/lib/credentialApi'
 import type { ProfileConfiguration, ProfileWrite } from '@/lib/publicApi.generated'
 import AuthenticationValidation from './AuthenticationValidation'
@@ -64,7 +65,7 @@ export default function AuthenticationProfiles({ targetId, credentials }: {
   }, [targetId])
 
   const refresh = useCallback(() => {
-    void fetch(`${API_URL}/authenticated-scan-profiles?target_id=${encodeURIComponent(targetId)}`, { cache: 'no-store' })
+    return fetch(`${API_URL}/authenticated-scan-profiles?target_id=${encodeURIComponent(targetId)}`, { cache: 'no-store' })
       .then(async response => {
         if (!response.ok) throw new Error()
         const data = await response.json()
@@ -75,11 +76,9 @@ export default function AuthenticationProfiles({ targetId, credentials }: {
       })
   }, [targetId])
 
-  useEffect(() => {
-    if (!enabled) return
-    const timer = setInterval(refresh, 15000)
-    return () => clearInterval(timer)
-  }, [enabled, refresh])
+  // Identity assurance ages, so listed profiles re-validate every 15 s (slowly with none listed);
+  // paused in a hidden tab.
+  usePoll(refresh, { intervalMs: 15000, idleIntervalMs: 60_000, live: profiles.length > 0, enabled, leading: false, deps: [refresh] })
 
   function start(profile: Profile | null) {
     const credential = credentials.find(item => item.is_active && ['web', 'api'].includes(item.target_kind))

@@ -201,7 +201,8 @@ test('queueing a preflight scan hands off to admission instead of navigating awa
 
   // The handoff lights up on its own while the scan is still running.
   assert.match(page, /awaitingScanCompletion/)
-  assert.match(page, /setInterval\(loadIntakeScans/)
+  assert.match(page, /usePoll\(loadIntakeScans, \{ intervalMs: 10_000, enabled: awaitingScanCompletion/)
+  assert.doesNotMatch(page, /setInterval\(/)
   assert.match(api, /listRecentModelIntakeScans/)
 })
 

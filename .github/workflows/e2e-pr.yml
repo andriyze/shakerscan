@@ -487,7 +487,9 @@ jobs:
             data-lifecycle.spec.ts findings-triage.spec.ts \
             http-archive-withheld-bodies.spec.ts \
             hunt-budget-amendments.spec.ts hunt-review-refresh.spec.ts \
-            service-intelligence.spec.ts
+            service-intelligence.spec.ts \
+            dashboard-page.spec.ts asm-page.spec.ts request-collections-page.spec.ts \
+            schedules-page.spec.ts timeline-page.spec.ts deep-hunt-run.spec.ts
 
       - name: Upload this shard's E2E scorecard, browser and image results
         if: always() && steps.changes.outputs.ui == 'true'

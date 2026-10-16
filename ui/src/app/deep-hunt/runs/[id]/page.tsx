@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { usePoll } from '@/lib/usePoll'
 import Link from '@/components/WorkspaceLink'
 import { useParams } from 'next/navigation'
 import { ArrowLeft, CircleStop, Pause, Play } from 'lucide-react'
@@ -25,6 +26,8 @@ import {
   type Intensity,
 } from '@/components/hunt'
 import { InvestigatorTabs } from '@/components/hunt/InvestigatorTabs'
+
+const TERMINAL_CAMPAIGN_STATES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed'])
 
 function metaField<T>(campaign: Campaign | null, key: string): T | undefined {
   const meta = (campaign?.metadata_json?.autonomous_research ?? {}) as Record<string, unknown>
@@ -97,71 +100,56 @@ export default function RunDetailPage() {
     return () => { cancelled = true }
   }, [load])
 
-  // Heartbeat clock for relative times.
+  // The run is live until its campaign (and the episode on screen) reached a terminal state;
+  // after that nothing changes and polling stops.
+  const campaignFinished = campaign ? TERMINAL_CAMPAIGN_STATES.has(runState(campaign)) : true
+  const runLive = !campaignFinished || Boolean(detail && !detail.episode.terminal) || (!campaign && !detail)
+
+  // Heartbeat clock for relative times (a deadline countdown), only while the run is live.
   useEffect(() => {
+    if (!runLive) return
+    setNow(Date.now())
     const t = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(t)
-  }, [])
+  }, [runLive])
 
   // Findings this run produced (hunt-driven scanner findings, stamped with the
   // campaign's research provenance). Refreshed on a slow poll alongside the run.
-  useEffect(() => {
-    const campId = campaign?.id
-    if (!campId) return
-    let cancelled = false
-    const fetchRunFindings = () => {
-      getFindings({ research_campaign_id: campId, limit: 25, sort_by: 'severity', sort_order: 'desc' })
-        .then((d) => { if (!cancelled) setRunFindings(d.findings || []) })
-        .catch(() => undefined)
-    }
-    fetchRunFindings()
-    const t = window.setInterval(fetchRunFindings, 15000)
-    return () => { cancelled = true; window.clearInterval(t) }
-  }, [campaign?.id])
+  const campaignId = campaign?.id
+  usePoll(async (signal) => {
+    if (!campaignId) return
+    const d = await getFindings({ research_campaign_id: campaignId, limit: 25, sort_by: 'severity', sort_order: 'desc' })
+    if (!signal.aborted) setRunFindings(d.findings || [])
+  }, { intervalMs: 15000, live: runLive, enabled: Boolean(campaignId), deps: [campaignId] })
 
   // Live polling: follow the active episode; when it finishes, pick up the next
-  // one the campaign chains, and keep the run summary fresh.
-  useEffect(() => {
-    const timer = window.setInterval(async () => {
-      const current = detailRef.current
-      try {
-        if (!current) {
-          const campId = campaignIdRef.current
-          if (!campId) return
-          const [summary, list] = await Promise.all([
-            getCampaign(campId).catch(() => null),
-            getResearchEpisodes({ campaign_id: campId, limit: 50 }),
-          ])
-          if (summary) {
-            setCampaign(summary.campaign)
-            setYieldMetrics(summary.research_yield || null)
-          }
-          setEpisodeCount(list.episodes?.length || 0)
-          const next = (list.episodes || []).find((e) => !e.terminal)
-          if (next) setDetail(await getResearchEpisode(next.id))
-          return
-        }
-        if (!current.episode.terminal) {
-          setDetail(await getResearchEpisode(current.episode.id))
-          return
-        }
-        const campId = campaignIdRef.current
-        if (!campId) return
-        const [summary, list] = await Promise.all([
-          getCampaign(campId).catch(() => null),
-          getResearchEpisodes({ campaign_id: campId, limit: 50 }),
-        ])
-        if (summary) {
-          setCampaign(summary.campaign)
-          setYieldMetrics(summary.research_yield || null)
-        }
-        setEpisodeCount(list.episodes?.length || 0)
-        const next = (list.episodes || []).find((e) => !e.terminal)
-        if (next && next.id !== current.episode.id) setDetail(await getResearchEpisode(next.id))
-      } catch { /* keep last-good view on a transient error */ }
-    }, 2500)
-    return () => window.clearInterval(timer)
-  }, [])
+  // one the campaign chains, and keep the run summary fresh. A transient error keeps the
+  // last-good view and backs off.
+  usePoll(async (signal) => {
+    const current = detailRef.current
+    const campId = campaignIdRef.current
+    if (current && !current.episode.terminal) {
+      const next = await getResearchEpisode(current.episode.id)
+      if (!signal.aborted) setDetail(next)
+      return
+    }
+    if (!campId) return
+    const [summary, list] = await Promise.all([
+      getCampaign(campId).catch(() => null),
+      getResearchEpisodes({ campaign_id: campId, limit: 50 }),
+    ])
+    if (signal.aborted) return
+    if (summary) {
+      setCampaign(summary.campaign)
+      setYieldMetrics(summary.research_yield || null)
+    }
+    setEpisodeCount(list.episodes?.length || 0)
+    const next = (list.episodes || []).find((e) => !e.terminal)
+    if (next && next.id !== current?.episode.id) {
+      const nextDetail = await getResearchEpisode(next.id)
+      if (!signal.aborted) setDetail(nextDetail)
+    }
+  }, { intervalMs: 2500, live: runLive })
 
   const control = async (action: 'pause' | 'resume' | 'cancel') => {
     setBusy(true); setError(null)

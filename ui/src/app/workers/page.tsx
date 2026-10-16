@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Button, Card, ErrorState, LastUpdated, PageHeader } from '@/components/ui'
 import { getWorkers, type WorkerStats } from '@/lib/api'
 import { poolBadge, poolDetail } from '@/lib/workerPools.mjs'
+import { usePoll } from '@/lib/usePoll'
 
 const REFRESH_MS = 10_000
 const POOLS: { key: keyof NonNullable<WorkerStats['pools']>; label: string; detail: string; optIn?: boolean }[] = [
@@ -36,11 +37,9 @@ export default function WorkersPage() {
     }
   }, [])
 
-  useEffect(() => {
-    void load()
-    const timer = window.setInterval(() => void load(true), REFRESH_MS)
-    return () => window.clearInterval(timer)
-  }, [load])
+  useEffect(() => { void load() }, [load])
+  // Quiet refresh every 10 s after the first load; paused in a hidden tab.
+  usePoll(() => load(true), { intervalMs: REFRESH_MS, leading: false, deps: [load] })
 
   return (
     <div className="space-y-6">
