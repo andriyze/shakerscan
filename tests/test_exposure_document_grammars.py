@@ -174,6 +174,15 @@ def test_hashes_masked_values_single_records_and_unnamed_rows_are_not_credential
     assert _classify("/api/flags", policy, "application/json") is None
 
 
+def test_example_records_and_duplicate_identities_do_not_prove_an_account_dump():
+    records = [{"username": "a", "password": "pass1"}, {"username": "b", "password": "pass2"}]
+    for document in ({"examples": records}, {"example": {"users": records}},
+                     {"openapi": "3.0.0", "paths": {}, "users": records},
+                     [records[0], records[0]]):
+        signature = _classify('/api/users', json.dumps(document), 'application/json')
+        assert signature is None or not signature.proves_sensitive_exposure
+
+
 # --- Actuator audit events ---------------------------------------------------------------------
 
 def test_actuator_audit_events_with_a_received_key_verify_and_plain_logins_do_not():
