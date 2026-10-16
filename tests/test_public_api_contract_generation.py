@@ -21,6 +21,7 @@ from pydantic import ValidationError
 
 from api import api as api_module
 from api.public_api_contract import (
+    CAPTURE_BATCH_BODY_LIMIT,
     PUBLIC_V2_SURFACE_PREFIXES,
     PUBLIC_V2_WRITE_BODY_LIMITS,
     PublicV2BodyLimitMiddleware,
@@ -172,6 +173,10 @@ def test_every_release_critical_write_has_a_body_limit():
     for key in writes:
         method, path = key.split(" ", 1)
         limit = public_v2_write_body_limit(method, path)
+        if path.endswith("/capture-batches"):
+            # A browser-capture batch is bounded far below a collection import.
+            assert limit == CAPTURE_BATCH_BODY_LIMIT < PUBLIC_V2_WRITE_BODY_LIMITS["collections"], key
+            continue
         assert limit == PUBLIC_V2_WRITE_BODY_LIMITS[public_v2_surface(path)], key
 
 
