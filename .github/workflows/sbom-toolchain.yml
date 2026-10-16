@@ -4,6 +4,7 @@ on:
     paths:
       - 'scripts/release_sbom_toolchain.py'
       - '.github/actions/sbom-tools/**'
+      - '.github/requirements/sbom-tools.*'
       - '.github/workflows/sbom-toolchain.yml'
   workflow_dispatch:
 permissions:
