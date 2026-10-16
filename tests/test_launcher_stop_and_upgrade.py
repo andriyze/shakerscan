@@ -521,7 +521,7 @@ def test_reset_fails_when_the_fresh_stack_fails_its_identity_check(tmp_path):
     reset = SCRIPT.split("\nreset_database() {", 1)[1].split("\n}", 1)[0]
     tail = (
         "\nremove_containers_outside_compose_down() { :; }\nremove_scan_worker_containers() { :; }"
-        "\ndocker_cli() { :; }\npostgres_legacy_volume() { echo v; }\n"
+        "\ndocker_cli() { :; }\n"
         f"reset_database() {{{reset}\n}}\nreset_database\necho rc=$?\n"
     )
     harness = "set +e\n" + _real_start_harness("verify_running_build_identity", tail).replace("set -eu", "set -u", 1)
