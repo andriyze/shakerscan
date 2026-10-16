@@ -8,11 +8,20 @@ contract promotes one.
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import uuid
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
+
+try:
+    from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from list_contract import CURSOR_MAX_LENGTH, SqlParams
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from ..list_contract import CURSOR_MAX_LENGTH, SqlParams
+from .list_query import candidate_filters, candidates_page, legacy_candidates
 
 try:
     from action_scope import _decode_json_value
@@ -67,14 +76,26 @@ def _get(name: str) -> Any:
 __all__ = ["configure_investigation_router", "router"]
 @router.get("/investigation/candidates")
 async def list_investigation_candidates(
+    response: Response = None,
     plane: str | None = Query(None),
     target_id: str | None = Query(None),
     device_target_id: str | None = Query(None),
     status: str | None = Query(None),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    cursor: Optional[str] = Query(None, max_length=CURSOR_MAX_LENGTH),
+    count: Optional[Literal["none", "estimate", "exact"]] = None,
+    fields: Optional[str] = Query(None, max_length=2048),
+    since: Optional[datetime] = Query(None, description="list/v1: candidates changed at or after this time"),
 ):
-    """List non-authoritative hunt candidates and their verifier lifecycle."""
+    """List non-authoritative hunt candidates and their verifier lifecycle.
+
+    list/v1 (any of ``cursor``/``count``/``fields``/``since``; investigation_routes/list_query.py):
+    keyset pages of summary rows, newest first. Otherwise the deprecated limit/offset response.
+    """
+    plane, target_id, device_target_id, status, limit, offset, cursor, count, fields, since = (
+        direct(value) for value in (
+            plane, target_id, device_target_id, status, limit, offset, cursor, count, fields, since))
     normalized_plane = str(plane or "").strip().lower() or None
     normalized_status = str(status or "").strip().lower() or None
     if normalized_plane not in (None, *sorted(investigation_candidates.PLANES)):
@@ -92,27 +113,31 @@ async def list_investigation_candidates(
         raise HTTPException(status_code=422, detail="web candidates cannot use device_target_id")
     if normalized_plane == "device" and target_uuid:
         raise HTTPException(status_code=422, detail="device candidates cannot use target_id")
+    params = SqlParams()
+    where = candidate_filters(plane=normalized_plane, target_id=target_uuid, device_target_id=device_uuid,
+                              status=normalized_status, params=params)
     async with _pool().acquire() as conn:
-        rows = await conn.fetch(
-            """SELECT c.*, COUNT(*) OVER() AS total_count,
-                      (SELECT COUNT(*) FROM investigation_candidate_observations o
-                       WHERE o.candidate_id=c.id) AS observation_count
-               FROM investigation_candidates c
-               WHERE ($1::text IS NULL OR c.plane=$1)
-                 AND ($2::uuid IS NULL OR c.target_id=$2)
-                 AND ($3::uuid IS NULL OR c.device_target_id=$3)
-                 AND ($4::text IS NULL OR c.status=$4)
-               ORDER BY c.last_seen_at DESC, c.id DESC
-               LIMIT $5 OFFSET $6""",
-            normalized_plane, target_uuid, device_uuid, normalized_status, limit, offset,
-        )
-    total = int(rows[0]["total_count"] or 0) if rows else 0
-    candidates = []
-    for row in rows:
-        payload = _public_investigation_candidate(row)
-        payload.pop("total_count", None)
-        candidates.append(payload)
+        if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
+            page = v1_page(limit=limit, cursor=cursor, sort=None, fields=fields, count=count, since=since)
+            filters = {"plane": normalized_plane, "target_id": target_uuid, "device_target_id": device_uuid,
+                       "status": normalized_status}
+            return await candidates_page(conn, page, where=where, params=params, filters=filters,
+                                         transform=_summary_investigation_candidate)
+        limit = 100 if limit is None else limit
+        rows, total = await legacy_candidates(conn, where=where, params=params, limit=limit, offset=offset)
+    mark_deprecated(response)
+    candidates = [_public_investigation_candidate(row) for row in rows]
     return {"candidates": candidates, "total": total, "limit": limit, "offset": offset}
+
+
+def _summary_investigation_candidate(item: dict[str, Any]) -> dict[str, Any]:
+    payload = row_to_dict(item)
+    if "canonical_locus" in payload:
+        payload["canonical_locus"] = _decode_json_value(payload.get("canonical_locus")) or {}
+    payload["authoritative"] = False
+    if "status" in payload:
+        payload["promotion_ready"] = payload.get("status") == "verified"
+    return payload
 
 
 @router.get("/investigation/candidates/{candidate_id}")

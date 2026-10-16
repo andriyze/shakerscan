@@ -4,6 +4,10 @@ from __future__ import annotations
 from typing import Any
 import uuid
 
+try:
+    from list_contract import ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
+except ModuleNotFoundError:  # package import layout
+    from ..list_contract import ListSpec, Page, SortKey, SqlParams, count_total, snapshot_time
 from .hunt_service_sources import hunt_service_sources
 from .service_actions import hunt_handoff, service_activities
 from .service_intel import enrich_service, snapshot_summary
@@ -14,14 +18,15 @@ MAX_SOURCE_BYTES = 2 * 1024 * 1024
 MAX_SERVICES = 500
 MAX_FINDINGS = 300
 
-TARGETS_SQL = """
+# The filtered inventory without the device locator-change time, which only the page's rows need
+# (``page_targets_sql``): the count and the page order never compute it per skipped row.
+FILTERED_TARGETS_SQL = """
 WITH inventory_targets AS (
  SELECT id, 'web'::text AS kind, COALESCE(name,url) AS label, url AS locator,
-        root_domain, NULL::integer AS locator_generation, NULL::timestamptz AS locator_changed_at
+        root_domain, NULL::integer AS locator_generation, NULL::timestamptz AS created_at
  FROM targets WHERE is_active=true AND COALESCE(discovery_source,'') <> 'model-intake'
  UNION ALL
- SELECT d.id, 'device', d.name, d.primary_locator, NULL::text, d.locator_generation,
-        COALESCE((SELECT max(changed_at) FROM device_locator_history h WHERE h.device_target_id=d.id), d.created_at)
+ SELECT d.id, 'device', d.name, d.primary_locator, NULL::text, d.locator_generation, d.created_at
  FROM device_targets d WHERE d.is_active=true
 )
 SELECT * FROM inventory_targets
@@ -30,6 +35,28 @@ WHERE ($1::text='all' OR kind=$1) AND ($2::uuid IS NULL OR id=$2)
       (kind='device' AND (lower(locator)=$3 OR right(lower(locator),length($3)+1)='.'||$3)))
  AND ($4::text='' OR strpos(lower(label),$4)>0 OR strpos(lower(locator),$4)>0)
 """
+
+
+def page_targets_sql(page_sql: str, extra: str = "") -> str:
+    """The rows of ``page_sql`` (a query over ``FILTERED_TARGETS_SQL`` keeping its columns, in page
+    order) with the device locator-change time, the columns ``target_inventory`` reads."""
+    return f"""SELECT page.id, page.kind, page.label, page.locator, page.root_domain, page.locator_generation,
+       CASE WHEN page.kind = 'device' THEN COALESCE(
+           (SELECT max(changed_at) FROM device_locator_history h WHERE h.device_target_id=page.id),
+           page.created_at) END AS locator_changed_at{extra}
+FROM ({page_sql}) page"""
+
+
+SERVICES_V1 = ListSpec(
+    scope="exposure_services",
+    sorts={"kind": SortKey("f.kind", "text")},
+    default_sort="kind",
+    fields={"id": "f.id"},
+    id_expr="f.id",
+)
+
+
+TARGETS_SQL = FILTERED_TARGETS_SQL  # the filter (count and order), kept under its former name
 
 SCAN_SOURCES_SQL = """
 SELECT a.action_id,a.capability_name,a.action_digest,a.result_digest,a.result_json,
@@ -144,9 +171,11 @@ async def target_inventory(conn: Any, target: dict[str, Any], snapshot: dict[str
         warnings.append("The retained-evidence window is truncated; narrow to a target or inspect its source Scans and Hunts.")
     # The column name is server-selected, never user-supplied SQL.
     owner = "device_target_id" if target["kind"] == "device" else "target_id"
+    # findings has no proof_state column: the former ``to_jsonb(findings)->>'proof_state'`` was
+    # always NULL and serialised the whole row (evidence, request, response) to find that out.
     finding_rows = await conn.fetch(
         f"""SELECT id,{owner},url,title,severity,status,last_verification_verdict,
-                   to_jsonb(findings)->>'proof_state' AS proof_state,
+                   NULL::text AS proof_state,
                    jsonb_build_object('service_id',evidence->>'service_id',
                      'pinned_address',evidence->>'pinned_address','connect_address',evidence->>'connect_address') AS evidence
             FROM findings WHERE {owner}=$1 AND status='active'
@@ -167,19 +196,58 @@ async def target_inventory(conn: Any, target: dict[str, Any], snapshot: dict[str
     }
 
 
-async def service_page(conn: Any, *, target_kind: str, target_id: uuid.UUID | None, root_domain: str | None,
-                       search: str, limit: int, offset: int, snapshot: dict[str, Any], matcher: Any, registry: Any) -> dict[str, Any]:
-    params = (target_kind, target_id, root_domain.lower().rstrip(".") if root_domain else None, search.lower().strip())
-    total = int(await conn.fetchval(f"SELECT count(*) FROM ({TARGETS_SQL}) filtered", *params) or 0)
-    rows = await conn.fetch(TARGETS_SQL + " ORDER BY kind,id LIMIT $5 OFFSET $6", *params, limit, offset)
-    targets = [await target_inventory(conn, dict(row), snapshot, matcher, registry) for row in rows]
+def _intelligence_fields(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema_version": SCHEMA_VERSION, "targets": targets, "total_targets": total,
-        "limit": limit, "offset": offset, "has_more": offset + len(targets) < total,
+        "schema_version": SCHEMA_VERSION,
         "intelligence": snapshot_summary(snapshot),
         "limitations": [
             "This view reads existing evidence only; it performs no scans, logins or exploit execution.",
             "Web history is bounded to 12 canonical Scan actions and 12 settled Hunt receipts per target. Hunt output without a validated durable receipt is not imported.",
             "A missing service, CVE match or linked finding does not establish a clean assessment.",
         ],
+    }
+
+
+async def service_page_v1(conn: Any, page: Page, *, target_kind: str, target_id: uuid.UUID | None,
+                          root_domain: str | None, search: str, snapshot: dict[str, Any], matcher: Any,
+                          registry: Any) -> dict[str, Any]:
+    """One list/v1 page of targets (keyset by kind, then id), each with its service inventory."""
+    params = (target_kind, target_id, root_domain.lower().rstrip(".") if root_domain else None, search.lower().strip())
+    plan = SERVICES_V1.plan(page, filters={"target_kind": target_kind, "target_id": target_id,
+                                           "root_domain": params[2], "search": params[3]})
+    sql_params = SqlParams(params)
+    keyset = plan.keyset_clauses(sql_params)
+    inner = (f"SELECT f.*, {plan.keyset_select} FROM ({FILTERED_TARGETS_SQL}) f"
+             + (f" WHERE {' AND '.join(keyset)}" if keyset else "")
+             + f" ORDER BY {plan.order_by} LIMIT {plan.fetch_limit}")
+    generated_at = await snapshot_time(conn)
+    rows = await conn.fetch(
+        page_targets_sql(inner, ", page.__list_sort, page.__list_id") + " ORDER BY page.__list_sort, page.__list_id",
+        *sql_params.values,
+    )
+    total, total_kind = await count_total(conn, page.count, from_sql=f"({FILTERED_TARGETS_SQL}) f",
+                                          values=list(params))
+    inventories = {}
+    for row in rows[: page.limit]:
+        inventories[row["id"]] = await target_inventory(conn, dict(row), snapshot, matcher, registry)
+    body = plan.envelope(rows, total=total, total_kind=total_kind, generated_at=generated_at,
+                         transform=lambda item: inventories[item["id"]])
+    body.update(_intelligence_fields(snapshot))
+    return body
+
+
+async def service_page(conn: Any, *, target_kind: str, target_id: uuid.UUID | None, root_domain: str | None,
+                       search: str, limit: int, offset: int, snapshot: dict[str, Any], matcher: Any, registry: Any) -> dict[str, Any]:
+    params = (target_kind, target_id, root_domain.lower().rstrip(".") if root_domain else None, search.lower().strip())
+    total = int(await conn.fetchval(f"SELECT count(*) FROM ({FILTERED_TARGETS_SQL}) filtered", *params) or 0)
+    rows = await conn.fetch(
+        page_targets_sql(FILTERED_TARGETS_SQL + " ORDER BY kind,id LIMIT $5 OFFSET $6") + " ORDER BY page.kind, page.id",
+        *params, limit, offset,
+    )
+    targets = [await target_inventory(conn, dict(row), snapshot, matcher, registry) for row in rows]
+    fields = _intelligence_fields(snapshot)
+    return {
+        "schema_version": fields["schema_version"], "targets": targets, "total_targets": total,
+        "limit": limit, "offset": offset, "has_more": offset + len(targets) < total,
+        "intelligence": fields["intelligence"], "limitations": fields["limitations"],
     }

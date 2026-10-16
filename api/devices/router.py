@@ -31,8 +31,16 @@ import uuid
 from .readiness import capacity_state
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+try:
+    from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from list_contract import CURSOR_MAX_LENGTH, SqlParams
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..list_compat import direct, mark_deprecated, v1_page, wants_list_v1
+    from ..list_contract import CURSOR_MAX_LENGTH, SqlParams
+from .list_query import devices_page, device_filters, legacy_devices
 
 try:
     import deployment_policy
@@ -834,37 +842,42 @@ async def update_device_policy(policy_id: str, request: DevicePolicyUpdate):
 
 @router.get("/devices")
 async def list_devices(
+    response: Response = None,
     include_inactive: bool = False,
     device_class: Optional[str] = None,
     search: Optional[str] = None,
-    limit: int = Query(100, ge=1, le=500),
+    limit: Optional[int] = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    cursor: Optional[str] = Query(None, max_length=CURSOR_MAX_LENGTH),
+    count: Optional[Literal["none", "estimate", "exact"]] = None,
+    fields: Optional[str] = Query(None, max_length=2048),
+    since: Optional[datetime] = Query(None, description="list/v1: devices changed at or after this time"),
 ):
-    conditions = ["($1::boolean = true OR d.is_active = true)"]
-    params: list[Any] = [include_inactive]
-    if device_class:
-        params.append(device_class.strip().lower())
-        conditions.append(f"d.device_class=${len(params)}")
-    if search:
-        params.append(f"%{search.strip()}%")
-        conditions.append(f"(d.name ILIKE ${len(params)} OR d.primary_locator ILIKE ${len(params)} OR COALESCE(d.manufacturer,'') ILIKE ${len(params)})")
-    where = " AND ".join(conditions)
+    """Connected devices, most recently changed first.
+
+    list/v1 (any of ``cursor``/``count``/``since``; devices/list_query.py): keyset pages of at most
+    200 rows in the same row shape. Otherwise the deprecated limit/offset response (limit <= 500).
+    """
+    include_inactive, device_class, search, limit, offset, cursor, count, fields, since = (
+        direct(value) for value in (
+            include_inactive, device_class, search, limit, offset, cursor, count, fields, since))
+    v1 = wants_list_v1(cursor=cursor, count=count, fields=fields, since=since)
+    if v1 and fields is not None:
+        raise HTTPException(status_code=400, detail={
+            "error": "fields_unsupported", "message": "the devices list does not support fields="})
+    params = SqlParams()
+    where = device_filters(include_inactive=include_inactive, device_class=device_class,
+                           search=search, params=params)
     async with _pool().acquire() as conn:
-        rows = await conn.fetch(
-            f"""SELECT d.*, p.name AS policy_name,
-                       (SELECT COUNT(*) FROM device_services ds WHERE ds.device_target_id=d.id AND ds.state='open') AS services_count,
-                       (SELECT (s.result->'device_posture'->'completeness'->>'complete')::boolean
-                          FROM scans s WHERE s.id=d.last_scan_id) AS last_posture_complete,
-                       (SELECT s.result->'device_posture'->'decision'->>'decision'
-                          FROM scans s WHERE s.id=d.last_scan_id) AS last_posture_decision,
-                       (SELECT (s.result->'device_posture'->'reachability')
-                                   - 'attempts' - 'nmap_host_discovery'
-                          FROM scans s WHERE s.id=d.last_scan_id) AS last_reachability
-                FROM device_targets d LEFT JOIN device_policies p ON p.id=d.policy_id
-                WHERE {where} ORDER BY d.updated_at DESC LIMIT ${len(params)+1} OFFSET ${len(params)+2}""",
-            *params, limit, offset,
-        )
-        total = await conn.fetchval(f"SELECT COUNT(*) FROM device_targets d WHERE {where}", *params)
+        if v1:
+            page = v1_page(limit=limit, cursor=cursor, sort=None, fields=None, count=count, since=since)
+            filters = {"include_inactive": bool(include_inactive), "device_class": device_class,
+                       "search": search}
+            return await devices_page(conn, page, where=where, params=params, filters=filters,
+                                      decode=_decode_device_row)
+        limit = 100 if limit is None else limit
+        rows, total = await legacy_devices(conn, where=where, params=params, limit=limit, offset=offset)
+    mark_deprecated(response)
     return {"devices": [_decode_device_row(row) for row in rows], "total": total, "limit": limit, "offset": offset}
 
 
