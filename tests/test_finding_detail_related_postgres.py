@@ -157,7 +157,8 @@ def test_retired_kinds_resolve_only_untriaged_unseen_rows_on_the_covered_origin(
                                   {**template, "header_name": "referrer-policy"})
             baseline = await add("Missing Referrer Policy header", "http_baseline", "https://app.invalid",
                                  {"check": "missing_header_referrer-policy"})
-            report = {"target": "https://app.invalid", "http": {"posture_observed": True}, "findings": [{
+            report = {"target": "https://app.invalid", "http": {"posture_observed": True},
+                      "scan_metadata": {"status": "complete", "partial": False, "cancelled": False}, "findings": [{
                 "tool": "http_baseline", "url": "https://app.invalid",
                 "evidence": {"check": "missing_header_referrer-policy"}}]}
             count = await retire_superseded_findings(conn, target_id=TARGET, scan_id="scan-1", report=report,
@@ -178,3 +179,81 @@ def test_retired_kinds_resolve_only_untriaged_unseen_rows_on_the_covered_origin(
     assert statuses[accepted][0] == "accepted_risk"
     for kept in (judged, seen, present, elsewhere, baseline):
         assert statuses[kept][:2] == ("active", None)
+
+
+def test_retirement_adversarial_cases_on_the_real_schema():
+    """Folded exposure templates, triage of every kind, re-reports, scan state, idempotency, batches."""
+    from api.scan.retired_findings import retire_superseded_findings
+    dsn = require_disposable_database(DSN or "", "shakerscan_proof_sql_test")
+    scan = uuid.UUID("44444444-4444-4444-8444-444444444444")
+    git = {"template_id": "git-config"}
+
+    async def go():
+        conn = await asyncpg.connect(dsn)
+        try:
+            setup, add = _fresh_schema_and_adder(conn)
+            await setup()
+            await conn.execute("INSERT INTO scans (id, target_id, target_url) VALUES ($1, $2, 'https://app.invalid')", scan, TARGET)
+            ids = {
+                "folded": await add("Git config", "nuclei", "https://app.invalid/.git/config", git, severity="medium"),
+                "folded_port": await add("Git config", "nuclei", "https://APP.invalid:443/.git/config/", git,
+                                         severity="high"),
+                "more_severe": await add("Git config", "nuclei", "https://app.invalid/.git/config", git,
+                                         severity="critical"),
+                "other_path": await add("Git config", "nuclei", "https://app.invalid/sub/.git/config", git),
+                "other_origin": await add("Git config", "nuclei", "https://other.invalid/.git/config", git),
+                "other_class": await add("web.config", "nuclei", "https://app.invalid/.git/config",
+                                         {"template_id": "web-config"}),
+                "noted": await add("Git config", "nuclei", "https://app.invalid/.git/config", git),
+                "false_positive": await add("Git config", "nuclei", "https://app.invalid/.git/config", git,
+                                            status="false_positive"),
+                "verdict": await add("Git config", "nuclei", "https://app.invalid/.git/config", git,
+                                     verdict="needs_review"),
+                "excepted": await add("Git config", "nuclei", "https://app.invalid/.git/config", git),
+                "last_seen_now": await add("Git config", "nuclei", "https://app.invalid/.git/config", git),
+                "re_reported": await add("Git config", "nuclei", "https://app.invalid/.git/config", git,
+                                         fingerprint="seen-now"),
+            }
+            await conn.execute("UPDATE findings SET notes = 'owner says legacy' WHERE id = $1", ids["noted"])
+            await conn.execute("UPDATE findings SET last_seen_scan_id = $2 WHERE id = $1", ids["last_seen_now"], scan)
+            await conn.execute(
+                "INSERT INTO finding_exceptions (finding_id, target_id, status, reason) VALUES ($1, $2, 'approved', 'x')",
+                str(ids["excepted"]), TARGET)
+            proof = {"tool": "shakerscan_exposure_probe", "url": "https://app.invalid/.git/config",
+                     "severity": "high", "proof_state": "verified",
+                     "evidence": {"exposure_class": "version_control_exposure"}}
+
+            def report(status="complete"):
+                return {"target": "https://app.invalid", "http": {"posture_observed": True}, "findings": [proof],
+                        "scan_metadata": {"status": status, "partial": status == "partial",
+                                          "cancelled": status == "cancelled"}}
+
+            async def retire(rep, **kwargs):
+                async with conn.transaction():
+                    return await retire_superseded_findings(
+                        conn, target_id=TARGET, scan_id=str(scan), report=rep, seen_fingerprints=["seen-now"],
+                        **kwargs)
+
+            not_complete = [await retire(report(status)) for status in ("partial", "failed", "cancelled")]
+            first = await retire(report(), batch_size=1, max_rows=1)
+            rest = await retire(report(), batch_size=1)
+            again = await retire(report())
+            rows = {row["id"]: (row["status"], row["retired"]) for row in await conn.fetch(
+                "SELECT id, status, evidence->'retired' AS retired FROM findings")}
+            return ids, not_complete, first, rest, again, rows
+        finally:
+            await conn.close()
+
+    ids, not_complete, first, rest, again, rows = asyncio.run(go())
+    assert not_complete == [0, 0, 0], "a partial, failed or cancelled scan retires nothing"
+    assert (first, rest, again) == (1, 1, 0), "bounded per call, and idempotent"
+    for name in ("folded", "folded_port"):
+        status, record = rows[ids[name]]
+        assert status == "resolved"
+        record = json.loads(record)
+        assert record["kind"] == "nuclei_git_config_folded_into_exposure_proof"
+        assert record["superseded_by"]["location"] == "https://app.invalid/.git/config"
+    for name in ("more_severe", "other_path", "other_origin", "other_class", "noted", "verdict", "excepted",
+                 "last_seen_now", "re_reported"):
+        assert rows[ids[name]] == ("active", None), name
+    assert rows[ids["false_positive"]] == ("false_positive", None)

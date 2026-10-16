@@ -8,23 +8,33 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from api.scan.retired_findings import (
-    RETIRED_FINDING_KINDS, baseline_covered_origin, baseline_missing_headers, retire_superseded_findings,
+    RETIRE_EXPOSURE_SQL, RETIRE_SQL, RETIRED_FINDING_KINDS, baseline_covered_origin, baseline_missing_headers,
+    retire_superseded_findings,
 )
 
 
 class _Conn:
-    def __init__(self):
+    def __init__(self, available: int = 1):
         self.calls: list[tuple] = []
+        self.sql: list[str] = []
+        self.available = available
 
     async def fetch(self, sql, *args):
         self.calls.append(args)
-        return [{"id": 1}]
+        self.sql.append(sql)
+        taken = min(self.available, args[-1])
+        self.available -= taken
+        return [{"id": index} for index in range(taken)]
 
 
-def _report(target="https://app.test", posture_observed=True, missing=("content-security-policy",)):
+def _report(target="https://app.test", posture_observed=True, missing=("content-security-policy",),
+            status="complete"):
     return {
         "target": target,
+        "scan_metadata": {"status": status, "partial": status == "partial", "cancelled": status == "cancelled"},
         "http": {"posture_observed": posture_observed},
         "findings": [{
             "tool": "http_baseline", "url": target,
@@ -33,10 +43,10 @@ def _report(target="https://app.test", posture_observed=True, missing=("content-
     }
 
 
-def _retire(report, seen=()):
+def _retire(report, seen=(), **kwargs):
     conn = _Conn()
     count = asyncio.run(retire_superseded_findings(
-        conn, target_id="t", scan_id="s", report=report, seen_fingerprints=seen,
+        conn, target_id="t", scan_id="s", report=report, seen_fingerprints=seen, **kwargs,
     ))
     return count, conn.calls
 
@@ -50,8 +60,9 @@ def test_nothing_is_retired_without_an_observed_baseline():
 def test_a_template_duplicate_is_retired_only_for_a_header_the_baseline_reports_missing():
     count, calls = _retire(_report(missing=("referrer-policy",)), seen=("fp-1",))
     (args,) = [call for call in calls if json.loads(call[6])["kind"] == "nuclei_missing_header_folded_into_baseline"]
-    target, tool, template, headers, origins, seen, retired = args
-    assert (target, tool, template) == ("t", "nuclei", "http-missing-security-headers")
+    target, tool, template, headers, origins, seen, retired, scan, severities, limit = args
+    assert (target, tool, template, scan, severities) == ("t", "nuclei", "http-missing-security-headers", "s", None)
+    assert limit == 500
     assert headers == ["referrer-policy"], "CSP is present on the baseline: its template rows stay"
     assert origins == ["https://app.test", "https://app.test:443"]
     assert seen == ["fp-1"], "a row this scan reported again is never retired"
@@ -59,6 +70,7 @@ def test_a_template_duplicate_is_retired_only_for_a_header_the_baseline_reports_
         "kind": "nuclei_missing_header_folded_into_baseline",
         "reason": "Reported by the baseline response's missing-header finding for this origin (2.11).",
         "scan_id": "s",
+        "superseded_by": {"origin": "https://app.test"},
     }
     # A header the baseline does not report missing retires none of the folded kind.
     assert not [call for call in _retire(_report(missing=()))[1]
@@ -83,7 +95,9 @@ def test_the_baseline_headers_are_read_per_origin():
 def test_the_retired_kinds_are_a_list_others_can_extend():
     names = [kind.name for kind in RETIRED_FINDING_KINDS]
     assert len(names) == len(set(names))
-    assert all(kind.reason and kind.header_names for kind in RETIRED_FINDING_KINDS)
+    assert all(kind.reason for kind in RETIRED_FINDING_KINDS)
+    assert all(bool(kind.header_names) == (kind.predicate == "header") for kind in RETIRED_FINDING_KINDS)
+    assert all(bool(kind.exposure_classes) == (kind.predicate == "exposure_proof") for kind in RETIRED_FINDING_KINDS)
 
 
 def test_opt_in_isolation_header_rows_are_retired_once_the_baseline_observed_the_origin():
@@ -92,3 +106,95 @@ def test_opt_in_isolation_header_rows_are_retired_once_the_baseline_observed_the
     by_kind = {json.loads(args[6])["kind"]: args for args in calls}
     assert set(by_kind) == {"nuclei_opt_in_header_absent"}
     assert by_kind["nuclei_opt_in_header_absent"][3] == sorted(OPT_IN_HEADERS)
+
+
+@pytest.mark.parametrize("status", ["partial", "failed", "cancelled", None])
+def test_a_scan_that_did_not_complete_retires_nothing(status):
+    report = _report(missing=("referrer-policy",), status=status)
+    report["findings"].append(_exposure_proof())
+    assert _retire(report) == (0, [])
+    report["scan_metadata"] = {"status": "complete", "partial": True}
+    assert _retire(report) == (0, [])
+    report.pop("scan_metadata")
+    assert _retire(report) == (0, [])
+
+
+def _exposure_proof(url="https://app.test/.git/config", exposure_class="version_control_exposure",
+                    severity="high", proof_state="verified"):
+    return {"tool": "shakerscan_exposure_probe", "url": url, "severity": severity, "proof_state": proof_state,
+            "evidence": {"exposure_class": exposure_class}}
+
+
+def _folded_calls(report):
+    _count, calls = _retire(report)
+    return {json.loads(call[6])["kind"]: call for call in calls if "exposure_proof" in json.loads(call[6])["kind"]}
+
+
+def test_a_folded_template_is_retired_only_at_a_location_this_scan_verified_for_its_class():
+    report = _report(missing=())
+    report["findings"].append(_exposure_proof(url="https://app.test:443/.git/config/"))
+    calls = _folded_calls(report)
+    # Only git-config detects version_control_exposure; git-credentials / web-config / openapi stay.
+    assert set(calls) == {"nuclei_git_config_folded_into_exposure_proof"}
+    target, tool, template, paths, origins, _seen, record, _scan, severities, _limit = calls[
+        "nuclei_git_config_folded_into_exposure_proof"]
+    assert (tool, template, paths) == ("nuclei", "git-config", ["/.git/config"])
+    assert origins == ["https://app.test", "https://app.test:443"]
+    assert severities == ["high", "info", "low", "medium"], "never a template row more severe than the proof"
+    assert json.loads(record)["superseded_by"] == {
+        "exposure_class": "version_control_exposure", "location": "https://app.test/.git/config"}
+
+
+def test_no_folded_template_is_retired_without_a_verified_proof_or_on_an_unobserved_origin():
+    for proof in (
+        _exposure_proof(proof_state="candidate"),
+        _exposure_proof(exposure_class=""),
+        _exposure_proof(url="ftp://app.test/.git/config"),
+        _exposure_proof(severity="bogus"),
+        {**_exposure_proof(), "tool": "nuclei"},
+    ):
+        report = _report(missing=())
+        report["findings"].append(proof)
+        assert _folded_calls(report) == {}, proof
+    # The exposure retirement does not need the baseline, but the header kinds still do.
+    report = _report(missing=("referrer-policy",), posture_observed=False)
+    report["findings"].append(_exposure_proof())
+    kinds = {json.loads(call[6])["kind"] for call in _retire(report)[1]}
+    assert kinds == {"nuclei_git_config_folded_into_exposure_proof"}
+
+
+def test_one_proof_class_maps_to_every_template_of_that_class():
+    report = _report(missing=())
+    report["findings"].append(_exposure_proof(url="https://app.test/web.config",
+                                              exposure_class="configuration_secret_file", severity="medium"))
+    assert set(_folded_calls(report)) == {
+        "nuclei_git_credentials_disclosure_folded_into_exposure_proof",
+        "nuclei_web_config_folded_into_exposure_proof",
+    }
+
+
+def test_retirement_is_batched_and_bounded_per_scan():
+    conn = _Conn(available=10_000)
+    count = asyncio.run(retire_superseded_findings(
+        conn, target_id="t", scan_id="s", report=_report(missing=("referrer-policy",)), seen_fingerprints=(),
+        batch_size=100, max_rows=250,
+    ))
+    assert count == 250
+    assert [call[-1] for call in conn.calls] == [100, 100, 50]
+
+
+def test_the_retire_statements_never_touch_triaged_or_re_reported_rows():
+    for sql in (RETIRE_SQL, RETIRE_EXPOSURE_SQL):
+        compact = " ".join(sql.split())
+        for clause in (
+            "target_id = $1 AND status = 'active'",
+            "analyst_verdict IS NULL AND analyst_verdict_at IS NULL",
+            "NULLIF(btrim(COALESCE(notes, '')), '') IS NULL",
+            "NOT (fingerprint = ANY($6::text[]))",
+            "last_seen_scan_id::text IS DISTINCT FROM $8::text",
+            "FROM finding_exceptions",
+            "LIMIT $10",
+            "FOR UPDATE SKIP LOCKED",
+        ):
+            assert clause in compact, (clause, sql)
+    assert "header_name', '') = ''" in RETIRE_EXPOSURE_SQL
