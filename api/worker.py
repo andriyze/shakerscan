@@ -455,13 +455,15 @@ try:
 except ImportError:
     from scanner.constants import resolve_scan_budget
 try:
-    from scan.finding_identity import canonical_finding_fingerprint
+    from scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
     from scan.finding_reconciliation import reconcile_legacy_finding_row
+    from scan.retired_findings import retire_superseded_findings
 except ModuleNotFoundError as exc:
     if exc.name not in {"findings", "scan"}:
         raise
-    from api.scan.finding_identity import canonical_finding_fingerprint
+    from api.scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
     from api.scan.finding_reconciliation import reconcile_legacy_finding_row
+    from api.scan.retired_findings import retire_superseded_findings
 
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
@@ -3359,6 +3361,22 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
         await _refresh_target_active_finding_count(conn, target_uuid)
 
     return saved
+
+
+async def retire_superseded_web_findings(scan_id: str, target_id: str, report: dict, findings: list) -> int:
+    """Resolve this target's stored findings of kinds the scanner no longer reports, on the
+    origin this scan's baseline covered (scan/retired_findings.py). Rows this scan reported
+    again, triaged rows and rows on other origins are left alone."""
+    seen = {key for finding in findings or () if isinstance(finding, dict) for key in finding_identity_keys(finding)}
+    target_uuid = uuid.UUID(target_id)
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            retired = await retire_superseded_findings(
+                conn, target_id=target_uuid, scan_id=scan_id, report=report, seen_fingerprints=seen,
+            )
+        if retired:
+            await _refresh_target_active_finding_count(conn, target_uuid)
+    return retired
 
 
 async def save_ai_findings(scan_id: str, ai_target_id: str, findings: list) -> int:
@@ -13755,6 +13773,15 @@ async def process_scan_job(job_data: dict):
                 )
             except Exception as e:
                 print(f"[{job_id[:8]}] save_device_findings error: {e}", flush=True)
+
+        if target_id and not error and isinstance(result, dict):
+            # After the save: a row this scan reports again is matched there, never retired here.
+            try:
+                retired_count = await retire_superseded_web_findings(scan_id, target_id, result, findings)
+                if retired_count:
+                    print(f"[{job_id[:8]}] Resolved {retired_count} finding(s) of retired kinds", flush=True)
+            except Exception as e:
+                print(f"[{job_id[:8]}] retire_superseded_findings error: {type(e).__name__}", flush=True)
 
         if device_target_id and not error and (options or {}).get("run_kind") == "device_posture":
             try:

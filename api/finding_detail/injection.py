@@ -34,7 +34,8 @@ def _pairs(evidence: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _location(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> tuple[str, str, str]:
-    url = text(evidence.get("request_url") or evidence.get("url") or finding.get("url"), 800)
+    # Request-body differentials carry no URL, only the origin the request went to.
+    url = text(evidence.get("request_url") or evidence.get("url") or finding.get("url") or evidence.get("origin"), 800)
     if url.startswith("/") and finding.get("target_url"):
         url = text(finding.get("target_url"), 400).rstrip("/") + url
     method = text(evidence.get("method"), 12).upper() or "GET"
@@ -170,6 +171,7 @@ def build_xss(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[s
         "class_label": ("Stored" if stored else "Reflected" if location != "dom" else "DOM") + " cross-site scripting" + ("" if verified else " (candidate)"),
         "summary": summary,
         "where": facts(fact("Page", url, mono=True), fact("Parameter", parameter, mono=True), fact("Injection point", location),
+                       fact("Client route", record(evidence.get("browser_alert")).get("client_route"), mono=True),
                        fact("Where it executed", join_limited(related, 2), mono=True)),
         "observed": facts(fact("Execution signal", technique or text(evidence.get("message"), 200)),
                           fact("Browser events", join_limited(transcript, 4), mono=True),
@@ -197,11 +199,14 @@ def build_authz(finding: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict
     tool = text(finding.get("tool"), 60)
     url = text(evidence.get("url") or evidence.get("request_url") or finding.get("url"), 600)
     if tool == "smart_authz":
+        obj = record(evidence.get("object"))
         return {
             "class": "access.bola",
             "class_label": "Broken object-level authorization",
             "summary": f"A second account could read an object that belongs to the first account at {url}.",
-            "where": facts(fact("Object URL", url, mono=True), fact("Found via", evidence.get("producer_url"), mono=True)),
+            "where": facts(fact("Object URL", url, mono=True), fact("Found via", evidence.get("producer_url"), mono=True),
+                           fact("Object id", " in ".join(text(obj.get(key), 120) for key in ("id_key", "id_location") if obj.get(key)), mono=True),
+                           fact("Sensitive fields", join_limited(strings(obj.get("sensitive_field_names"), 20, 80), 6), mono=True)),
             "observed": facts(fact("Owner response", evidence.get("owner_status"), mono=True),
                               fact("Other account's response", evidence.get("attacker_status"), mono=True),
                               fact("Responses equivalent", "yes" if evidence.get("responses_equivalent") else "")),

@@ -102,16 +102,69 @@ def build_finding_detail(finding: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # Related findings: the same certificate, origin or class on the same target.
-RELATED_SQL = """
-    SELECT id, title, severity, url, tool, status, last_seen_at,
+#
+# Each relation is its own bounded subquery filtered by its key (the certificate fingerprint, the
+# URL's origin), so the page never sorts or scans a target's whole history: a target with 500k
+# active findings still reads at most a few dozen rows. Both keys are indexed by the background
+# builder (finding_routes/list_schema.py, idx_findings_active_target_origin and
+# idx_findings_active_target_certificate); without those indexes the query is still correct.
+try:
+    from finding_routes.list_schema import FINDING_CERTIFICATE_SQL as CERTIFICATE_SQL, FINDING_ORIGIN_SQL as ORIGIN_SQL
+except ModuleNotFoundError:  # package import layout
+    from ..finding_routes.list_schema import FINDING_CERTIFICATE_SQL as CERTIFICATE_SQL, FINDING_ORIGIN_SQL as ORIGIN_SQL
+_RELATED_COLUMNS = f"""id, title, severity, url, tool, status, last_seen_at,
            evidence->>'check' AS check_id,
            evidence->>'exposure_class' AS exposure_class,
-           COALESCE(evidence->>'certificate_sha256', evidence->'certificate'->>'sha256') AS certificate_sha256
-    FROM findings
-    WHERE target_id = $1 AND id <> $2 AND status = 'active'
-    ORDER BY created_at DESC
-    LIMIT 200
+           {CERTIFICATE_SQL} AS certificate_sha256"""
+_RELATED_BASE = "target_id = $1 AND id <> $2 AND status = 'active'"
+_RELATED_PER_RELATION = 20
+RELATED_SQL = f"""
+    (SELECT {_RELATED_COLUMNS} FROM findings
+     WHERE {_RELATED_BASE} AND $3::text IS NOT NULL AND {CERTIFICATE_SQL} = $3::text
+     LIMIT {_RELATED_PER_RELATION})
+    UNION ALL
+    (SELECT {_RELATED_COLUMNS} FROM findings
+     WHERE {_RELATED_BASE} AND $6::boolean AND {ORIGIN_SQL} = ANY($4::text[])
+       AND evidence->>'exposure_class' IS NOT NULL
+     LIMIT {_RELATED_PER_RELATION})
+    UNION ALL
+    (SELECT {_RELATED_COLUMNS} FROM findings
+     WHERE {_RELATED_BASE} AND $5::text IS NOT NULL AND {ORIGIN_SQL} = ANY($4::text[]) AND tool = $5::text
+     LIMIT {_RELATED_PER_RELATION})
+    UNION ALL
+    (SELECT {_RELATED_COLUMNS} FROM findings
+     WHERE {_RELATED_BASE} AND {ORIGIN_SQL} = ANY($4::text[]) AND severity IN ('critical', 'high')
+     LIMIT {_RELATED_PER_RELATION})
+    UNION ALL
+    (SELECT {_RELATED_COLUMNS} FROM findings
+     WHERE {_RELATED_BASE} AND {ORIGIN_SQL} = ANY($4::text[]) AND severity = 'medium'
+     LIMIT {_RELATED_PER_RELATION})
 """
+
+
+def _finding_origin(finding: Mapping[str, Any]) -> str:
+    from .common import origin_of
+    return origin_of(finding.get("url") or record(finding.get("evidence")).get("origin"))
+
+
+def related_sql_args(finding: Mapping[str, Any]) -> tuple[Any, ...]:
+    """The parameters of ``RELATED_SQL`` for ``finding`` (a stored row with ``target_id``)."""
+    evidence = record(finding.get("evidence"))
+    cert = text(evidence.get("certificate_sha256") or record(evidence.get("certificate")).get("sha256"), 64) or None
+    origin = _finding_origin(finding)
+    # A stored URL may spell the default port the shown origin omits.
+    origins = []
+    if origin:
+        origins.append(origin.lower())
+        scheme, _, authority = origin.partition("://")
+        if ":" not in authority.rsplit("]", 1)[-1]:
+            origins.append(f"{origin.lower()}:{443 if scheme == 'https' else 80}")
+    return (
+        finding["target_id"], finding["id"], cert, origins,
+        text(finding.get("tool"), 80) or None, bool(text(evidence.get("exposure_class"), 80)),
+    )
+
+
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 
@@ -120,11 +173,15 @@ def related_findings(finding: Mapping[str, Any], rows: list[Mapping[str, Any]], 
     from .common import origin_of
     evidence = record(finding.get("evidence"))
     cert = text(evidence.get("certificate_sha256") or record(evidence.get("certificate")).get("sha256"), 64)
-    origin = origin_of(finding.get("url"))
+    origin = _finding_origin(finding)
     tool = text(finding.get("tool"), 80)
     exposure_class = text(evidence.get("exposure_class"), 80)
     ranked: list[tuple[int, int, dict[str, Any]]] = []
+    seen: set[str] = set()
     for row in rows:
+        if str(row.get("id")) in seen:  # one row can answer several relation subqueries
+            continue
+        seen.add(str(row.get("id")))
         reason = ""
         priority = 9
         if cert and row.get("certificate_sha256") == cert:
@@ -145,4 +202,4 @@ def related_findings(finding: Mapping[str, Any], rows: list[Mapping[str, Any]], 
     return [item[2] for item in ranked[:limit]]
 
 
-__all__ = ["RELATED_SQL", "build_finding_detail", "related_findings"]
+__all__ = ["RELATED_SQL", "build_finding_detail", "related_findings", "related_sql_args"]
