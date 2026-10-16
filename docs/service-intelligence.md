@@ -75,6 +75,18 @@ This API does not perform network discovery, login attempts or exploitation on G
 Protocol review suggestions with no compatible registered capability remain manual; buttons do not
 pretend those capabilities exist.
 
+## Corporate applications and edge appliances
+
+HTTP evidence names common corporate products (mail portals, identity providers, VPN gateways
+and application delivery controllers, CI and collaboration servers, administration consoles)
+from three passive sources: an exact technology name the HTTP probe reported, an anchored page
+title, and a content-discovery hit on a product-specific path whose answer differs from the
+host's measured answer for a path that cannot exist. Scan reports list them under
+`discovery.corporate_surface` as unconfirmed leads with their basis. A version is used only when
+the fingerprint read a plain dotted version; CPE names are derived only for products whose
+versions map one-to-one onto the NVD product, so matches (including known-exploited ones) stay
+candidates for prioritisation until a deterministic check applies.
+
 ## Accuracy and coverage limits
 
 The bundled snapshot is a small curated dataset, not complete/live NVD coverage. Zero candidates

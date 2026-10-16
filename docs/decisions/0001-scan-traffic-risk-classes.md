@@ -3,7 +3,8 @@
 - Status: accepted
 - Date: 2026-08-23
 - Amended: 2026-10-07 (read-only exposure checks are passive), 2026-10-10 (the
-  fixed GraphQL reads among them)
+  fixed GraphQL reads among them), 2026-10-16 (the corporate content-discovery list
+  and the opt-in active recon family)
 - Scope: deterministic Scan V2
 
 ## Decision
@@ -50,6 +51,27 @@ Active authority does not imply permission to use a state-changing HTTP method,
 submit a form, use credentials, scan a network, discover subdomains, or contact
 an OOB service. Each of those authorities remains independently represented and
 validated.
+
+Content discovery reads one bundled list. With active authority the Scan reads the
+common list and then the authored corporate list (mail, identity, VPN gateway and
+administration console paths) in the same exact reservation; the traffic stays
+read-only GETs, and its larger volume is what active authority buys.
+
+The `recon_active` family is active and explicit: it is in no preset, so no saved
+policy or schedule gains it by upgrading, and it needs active testing and a live
+approval receipt. It reads only lists the project authored and bundles, measures a
+control before reporting anything, meters every question or request against its
+reservation, and stops between bounded batches when cancelled:
+
+- `dns.enumerate` asks the resolver for `<label>.<bound root>` names (it also needs
+  the subdomain-discovery authority) after a random-label wildcard baseline. Names
+  are leads recorded like passive discovery; nothing is connected to.
+- `vhost.discover` requests `/` from the Scan's own frozen origin and address under
+  other names below the bound root (Host and TLS SNI), against the bound name and
+  random never-published names. A lead is never a route or a target.
+- `web.param_discover` sends GETs with random marker values for authored parameter
+  names to routes discovery already observed, after a random-name control per route.
+  A confirmed name feeds the existing candidate pipeline for that route.
 
 ### State changing
 

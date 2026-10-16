@@ -329,6 +329,20 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "requires_active_testing": true,
       "requires_credentials": false,
       "risk_level": "medium"
+    },
+    {
+      "capabilities": [
+        "web.param_discover",
+        "vhost.discover",
+        "dns.enumerate"
+      ],
+      "default_enabled": false,
+      "description": "Authorized active recon from bundled authored lists: DNS name enumeration under the bound root (needs subdomain discovery), virtual-host discovery on the bound address, and parameter discovery on observed routes. Wildcard, catch-all and random-parameter controls; leads only, never findings or proof.",
+      "label": "Active recon (DNS names, virtual hosts, parameters)",
+      "name": "recon_active",
+      "requires_active_testing": true,
+      "requires_credentials": false,
+      "risk_level": "medium"
     }
   ],
   "family_presets": {

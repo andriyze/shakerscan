@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import asyncio
+from dataclasses import replace
 import time
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -244,6 +245,33 @@ class InfrastructureInspectionExecutionAdapter(_MeasuredObservationExecutionAdap
 
 class TakeoverCheckExecutionAdapter(_MeasuredObservationExecutionAdapter):
     """Normalize a passive takeover check: DNS evidence, bound-origin fingerprint only."""
+
+
+class ReconActiveExecutionAdapter(_MeasuredObservationExecutionAdapter):
+    """Normalize one bounded recon_active operation that checks cancellation itself.
+
+    The operation receives the cancellation predicate and stops between bounded batches, so a
+    cancelled run settles what it actually spent and keeps the leads it had already measured.
+    """
+
+    manages_cancellation = True
+
+    async def execute(
+        self, *, heartbeat: Heartbeat, cancelled: Cancelled,
+    ) -> CapabilityAdapterResult:
+        operation = self._operation
+        self._operation = lambda: operation(cancelled)  # type: ignore[misc, call-arg]
+        try:
+            result = await super().execute(heartbeat=heartbeat, cancelled=cancelled)
+        finally:
+            self._operation = operation
+        status = str(self.result.get("status") or "")
+        if status == "cancelled":
+            return replace(result, status="cancelled", partial=True,
+                           errors=(*result.errors, "cancelled"))
+        if status == "partial" or self.result.get("partial"):
+            return replace(result, status="partial", partial=True)
+        return result
 
 
 class ArtifactInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):

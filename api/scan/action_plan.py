@@ -1105,6 +1105,12 @@ class ScanActionPlanCompiler:
         nosqli = active and enabled("nosqli")
         authz_surface = active and enabled("authz_surface")
         graphql = active and enabled("graphql")
+        # Only an explicit selection: recon_active is in no preset, so a policy that names no
+        # families (or a legacy plan without resolved families) never runs it.
+        recon_active = (
+            active and enabled("recon_active")
+            and "recon_active" in set(execution_plan.resolved_families or ())
+        )
         template_actions_expected = (
             (scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions)
             or (scope in {"full", "endpoint"} and active_nuclei and not defer_manifest_actions)
@@ -1305,7 +1311,13 @@ class ScanActionPlanCompiler:
                     "discover.web_content",
                     "discover_surface",
                     "web.content_discover",
-                    {"target_manifest_ref": endpoint_ref or None},
+                    {
+                        "target_manifest_ref": endpoint_ref or None,
+                        # Active authority adds the authored corporate paths (mail, identity,
+                        # VPN and admin consoles) after the common list, in the same
+                        # reservation. Pinned here so the action is immutable.
+                        "wordlist": "corporate" if policy.active_testing else "common",
+                    },
                     dependencies=("discover.web_probe",),
                 )
             # The application's own API description declares routes a black-box crawl never
@@ -1360,6 +1372,33 @@ class ScanActionPlanCompiler:
                 required=True,
                 supporting=True,
             )
+        if scope in {"full", "discovery"} and recon_active:
+            recon_required = "recon_active" in explicitly_requested
+            route_producers = tuple(
+                row.action_id for row in blueprints
+                if row.capability_name in {
+                    "web.crawl", "web.browser_crawl", "web.content_discover", "web.spec_ingest",
+                }
+            ) or primary_dependency
+            # Confirmed parameter names become inputs to this Scan's own candidate pipeline
+            # for routes discovery already observed, so it runs before manifests compile.
+            add(
+                "discover.parameters", "discover_surface", "web.param_discover",
+                {"route_refs": list(route_producers)},
+                dependencies=route_producers, required=recon_required, supporting=True,
+            )
+            add(
+                "discover.virtual_hosts", "discover_network", "vhost.discover", {},
+                dependencies=primary_dependency, supporting=True,
+            )
+            if policy.subdomain_discovery and target_binding.allowed_root_domains:
+                # DNS enumeration is name discovery under the apex: it needs the same
+                # subdomain-discovery authority as the passive sources.
+                add(
+                    "discover.dns_names", "discover_network", "dns.enumerate",
+                    {"root_domains": list(target_binding.allowed_root_domains)},
+                    supporting=True,
+                )
         replay_inputs_required = scope in {"full", "endpoint"}
         if (
             scope == "endpoint"

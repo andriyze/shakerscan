@@ -334,10 +334,10 @@ export function notExaminedExplanation(report) {
 
 // sensitive_exposure is read-only GET traffic and runs in passive Scans, so it is not
 // something active permission bought.
-const ACTIVE_FAMILIES = new Set(['xss', 'sqli', 'nuclei_active', 'bola', 'nosqli', 'authz_surface', 'graphql'])
+const ACTIVE_FAMILIES = new Set(['xss', 'sqli', 'nuclei_active', 'bola', 'nosqli', 'authz_surface', 'graphql', 'recon_active'])
 const ACTIVE_FAMILY_LABELS = {
   xss: 'XSS', sqli: 'SQLi', nuclei_active: 'active templates', bola: 'BOLA',
-  nosqli: 'NoSQLi', authz_surface: 'authz', graphql: 'GraphQL',
+  nosqli: 'NoSQLi', authz_surface: 'authz', graphql: 'GraphQL', recon_active: 'active recon',
 }
 
 // The one thing to do next, derived from what limited this run. A page that lists every gap

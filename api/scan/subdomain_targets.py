@@ -12,6 +12,7 @@ It never widens a Scan: the names become targets for their own, separately autho
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from typing import Any, Mapping, Sequence
 import uuid
@@ -28,6 +29,8 @@ except ModuleNotFoundError:  # package import (api.scan.subdomain_targets)
 
 
 DISCOVERY_SOURCE = "subfinder"
+# Sources a Scan produced itself rather than read from a passive dataset.
+OWN_SOURCES = frozenset({"dns_enumeration"})
 # The whole DNS check of one scan's names, not each lookup. Recording runs between finalization
 # and the saved result; with a dead resolver every name used to cost its full lookup timeout --
 # about a minute for a full window -- before the finished scan was stored.
@@ -130,6 +133,10 @@ def _recorded_outcome(
         "notes": list(resolution.get("notes") or ()),
         "partial": bool(reasons),
         "partial_reasons": reasons,
+        # What each class of name means (a certificate is historical issuance; a resolving
+        # name is not a reachable service) and which names were already targets.
+        **({"provenance": dict(resolution["provenance"])}
+           if isinstance(resolution.get("provenance"), Mapping) else {}),
     }
 
 
@@ -179,7 +186,11 @@ async def record_scan_subdomain_discovery(
     # explain away). Absent in reports finalized before sources were listed.
     sources = section.get("sources") if isinstance(section.get("sources"), Mapping) else {}
     evidence = {
-        name: [f"{DISCOVERY_SOURCE}:{item}" for item in sources.get(name) or ()]
+        name: [
+            # A Scan's own DNS enumeration is not an upstream subfinder source.
+            item if item in OWN_SOURCES else f"{DISCOVERY_SOURCE}:{item}"
+            for item in sources.get(name) or ()
+        ]
         for name in hosts
     }
     planner = plan_targets or (
@@ -208,7 +219,9 @@ async def record_scan_subdomain_discovery(
             # enclosing transaction would turn into an aborted run.
             async with pool.acquire() as conn:
                 resolution = await target_resolution.store_discovered_targets(
-                    conn, plan, root_domain, source=DISCOVERY_SOURCE,
+                    conn, plan, root_domain, source=DISCOVERY_SOURCE, evidence=evidence,
+                    discovery_id=discovery_id,
+                    observed_at=datetime.now(timezone.utc).isoformat(),
                 )
                 resolution = {
                     **resolution,

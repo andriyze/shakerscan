@@ -140,12 +140,24 @@ SCAN_DISCOVERY_CAPABILITY_SCALING: Mapping[str, Mapping[str, tuple[int, int]]] =
             "http_requests": (6_000, 10),
             "tool_wall_seconds": (450, 10),
         }),
+        # recon_active: half the Scan's host grant asks DNS names (the bundled list holds about
+        # two hundred labels per root); parameter discovery scales with requests like content
+        # discovery. Virtual-host discovery keeps its fixed registry hold.
+        "dns.enumerate": MappingProxyType({
+            "hosts_attempted": (512, 2),
+            "tool_wall_seconds": (300, 20),
+        }),
+        "web.param_discover": MappingProxyType({
+            "http_requests": (2_400, 20),
+            "tool_wall_seconds": (450, 20),
+        }),
     })
 )
 _SCAN_CEILING_FOR_DIMENSION: Mapping[str, str] = MappingProxyType({
     "http_requests": "max_http_requests",
     "tool_wall_seconds": "max_tool_wall_seconds",
     "browser_actions": "max_browser_actions",
+    "hosts_attempted": "max_hosts",
 })
 
 
@@ -342,6 +354,7 @@ SCAN_BASE_ORIGIN_CAPABILITIES = frozenset({
     # The canonical-host probes read the origin the scan selected. Taking the first frozen
     # origin sent a scheme-less target's seed sweep to http:// (soak N38: 12 verified, not 19).
     "web.spec_ingest", "exposure.verify_batch", "graphql.verify_batch",
+    "vhost.discover", "web.param_discover",
 })
 
 

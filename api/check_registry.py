@@ -382,6 +382,30 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         ),
     ),
     CheckFamilySpec(
+        name="recon_active",
+        phase="recon",
+        family="discovery",
+        label="Active recon (DNS names, virtual hosts, parameters)",
+        # Explicit opt-in only: in no preset and no default profile, so a saved policy or
+        # schedule never gains it on upgrade. Needs active testing and an approval receipt.
+        default_profiles=(),
+        is_active=True,
+        risk_level="medium",
+        allowed_presets=("lab",),
+        telemetry_schema="discovery",
+        proof_contract=("wordlist_sha256", "baseline_control", "lead"),
+        severity_rules={"finding_ceiling_without_concrete_evidence": "info"},
+        dispatch_adapter="recon_active",
+        aliases=("active_recon", "active-recon"),
+        runnable=False,
+        description=(
+            "Authorized active recon from bundled authored lists: DNS name enumeration under "
+            "the bound root (needs subdomain discovery), virtual-host discovery on the bound "
+            "address, and parameter discovery on observed routes. Wildcard, catch-all and "
+            "random-parameter controls; leads only, never findings or proof."
+        ),
+    ),
+    CheckFamilySpec(
         name="authz_surface",
         phase="active",
         family="access_control",

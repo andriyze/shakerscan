@@ -17,6 +17,10 @@ try:
     from scanner_tools.host_names import HostNameError, canonical_host
 except ModuleNotFoundError:  # package import
     from scanner.scanner_tools.host_names import HostNameError, canonical_host
+try:
+    from scanner_tools.corporate_identity import identities_from_fingerprint
+except ModuleNotFoundError:  # package import
+    from scanner.scanner_tools.corporate_identity import identities_from_fingerprint
 
 SCHEMA_VERSION = "service-intelligence/v1"
 SERVICE_NAMESPACE = uuid.UUID("e4089322-9875-4dca-a92d-60be1c2694a1")
@@ -152,6 +156,12 @@ def normalized_observation(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         parts = urlsplit(app_origin)
         network_address = address(request.get("pinned_address") or row.get("pinned_address") or row.get("address"))
         product, version = http_server_identity(row.get("webserver"))
+        if kind == "http_fingerprint" and not version:
+            # A corporate product whose fingerprint read an exact version names the application
+            # behind the listener better than a version-less Server banner does.
+            versioned = [item for item in identities_from_fingerprint(row) if item.get("version")]
+            if versioned:
+                product, version = versioned[0]["product"], versioned[0]["version"]
         row = {
             "state": "open", "transport": "tcp",
             "port": parts.port or (443 if parts.scheme == "https" else 80),

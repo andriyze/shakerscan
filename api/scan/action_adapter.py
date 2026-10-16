@@ -33,6 +33,7 @@ try:
     from capabilities.infrastructure import inspect_infrastructure_intelligence
     from capabilities.http import execute_bound_http_request
     from capabilities.takeover import bound_takeover_hosts, check_takeovers
+    from scan.recon_active_actions import RECON_ACTIVE_CAPABILITIES, execute_recon_active
     from capabilities.replay import RecordedReplayTransport
     from capabilities.inline import (
         AuthSessionExecutionAdapter,
@@ -118,6 +119,7 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.infrastructure import inspect_infrastructure_intelligence
     from ..capabilities.http import execute_bound_http_request
     from ..capabilities.takeover import bound_takeover_hosts, check_takeovers
+    from .recon_active_actions import RECON_ACTIVE_CAPABILITIES, execute_recon_active
     from ..capabilities.replay import RecordedReplayTransport
     from ..capabilities.inline import (
         AuthSessionExecutionAdapter,
@@ -3638,8 +3640,11 @@ class DatabaseNeutralScanActionDispatcher:
                 args.update(template_options)
                 scanner_options.update(template_options)
         if tool == "ffuf":
-            args["wordlist"] = "common"
-            scanner_options["wordlist"] = "common"
+            # Only the plan's pinned bundled selection; a plan without one reads ``common``.
+            wordlist = str(action.capability_args.get("wordlist") or "common")
+            wordlist = wordlist if wordlist in {"common", "corporate"} else "common"
+            args["wordlist"] = wordlist
+            scanner_options["wordlist"] = wordlist
         if tool == "dalfox":
             args["severity"] = "high"
             scanner_options["severity"] = "high"
@@ -4918,6 +4923,8 @@ class DatabaseNeutralScanActionDispatcher:
             return await self._infrastructure(action, heartbeat)
         if action.capability_name == "subdomains.takeover_check":
             return await self._takeover(action, heartbeat)
+        if action.capability_name in RECON_ACTIVE_CAPABILITIES:
+            return await execute_recon_active(self, action, heartbeat)
         if action.capability_name == "tls.inspect":
             return await self._tls(action, heartbeat)
         if action.capability_name == "web.spec_ingest":

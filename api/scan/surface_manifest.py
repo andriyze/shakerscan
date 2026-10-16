@@ -249,6 +249,7 @@ def build_scan_surface_manifest(
     max_endpoints: int,
     browser: Mapping[str, Any] | None = None,
     spec: Mapping[str, Any] | None = None,
+    parameters: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize every fixed-stage surface producer without retaining URL values.
 
@@ -258,6 +259,7 @@ def build_scan_surface_manifest(
     """
     browser = _optional_summary(browser)
     spec = _optional_summary(spec)
+    parameters = _optional_summary(parameters)
     limit = max(1, min(100_000, int(max_endpoints)))
     manifest = EndpointManifest(auto_persist=False)
     allowed_origins = {
@@ -427,6 +429,17 @@ def build_scan_surface_manifest(
             if isinstance(item, Mapping) and item.get("kind") == "discovered_route"
         ),
         summary=spec,
+    )
+    # recon_active parameter discovery: a parameter name an already observed GET route was seen
+    # to read (confirmed against a random-name control), so its candidates can be built.
+    collect(
+        "web.param_discover",
+        (
+            ("GET", item.get("url"))
+            for item in parameters.get("observations") or ()
+            if isinstance(item, Mapping) and item.get("kind") == "discovered_route"
+        ),
+        summary=parameters,
     )
     # Discovered names are reported and become targets for their own, separately authorized scans
     # (``automatically_scanned_discovered_hosts: False``). They are never endpoints of this scan:

@@ -422,6 +422,19 @@ def _bound_redirect_url(
     ))
 
 
+def bound_virtual_host(value: Any, target: TargetBinding) -> str | None:
+    """The canonical name when it lies strictly below a root domain of the binding."""
+    try:
+        from scanner_tools.discovered_names import subdomain_of
+    except ModuleNotFoundError:  # package import
+        from scanner.scanner_tools.discovered_names import subdomain_of
+    for root in target.allowed_root_domains:
+        name = subdomain_of(value, root)
+        if name:
+            return name
+    return None
+
+
 def request_error_class(exc: BaseException) -> str:
     """Name a failed request by its cause, not just the exception the client wrapped it in.
 
@@ -466,8 +479,15 @@ async def execute_bound_http_request(
     private_response_sink: Callable[[WorkerPrivateHTTPResponse], None] | None = None,
     private_response_headers: tuple[str, ...] = (),
     response_body_limit: int = MAX_BODY_BYTES,
+    virtual_host: str | None = None,
 ) -> dict[str, Any]:
-    """Execute one bounded request while revalidating every destination hop."""
+    """Execute one bounded request while revalidating every destination hop.
+
+    ``virtual_host`` (virtual-host discovery only) asks the same frozen origin, address and port
+    under another name: the Host header and TLS SNI carry it. It must be a DNS name strictly
+    below one of the binding's root domains; redirects are never followed for it. It changes
+    only which site the bound server is asked for, never where the request goes.
+    """
     import httpx
 
     method = agent_tools.coerce_method(args.get("method"))
@@ -479,6 +499,12 @@ async def execute_bound_http_request(
             "error": f"{method} is a state-changing request and requires approval",
         }
     follow_redirects = args.get("follow_redirects") is True
+    if virtual_host is not None:
+        accepted_host = bound_virtual_host(virtual_host, target)
+        if accepted_host is None or method not in {"GET", "HEAD"}:
+            return {"ok": False, "error": "scope: virtual host is outside the bound root domains"}
+        virtual_host = accepted_host
+        follow_redirects = False
     if follow_redirects and method not in {"GET", "HEAD", "OPTIONS"}:
         return {
             "ok": False,
@@ -577,6 +603,7 @@ async def execute_bound_http_request(
         "direct_origin": bool(via_address),
         "address_policy": socket_factory.policy_receipt,
         "follow_redirects": follow_redirects,
+        **({"virtual_host": virtual_host} if virtual_host is not None else {}),
     }
     timeout = max(1, min(60, int(timeout_seconds)))
     started = time.perf_counter()
@@ -617,6 +644,9 @@ async def execute_bound_http_request(
                             current_url, candidate_address,
                         )
                     )
+                    if virtual_host is not None:
+                        sni_hostname = virtual_host
+                        host_header = virtual_host + host_header[len(target.canonical_host or ""):]
                     request = client.build_request(
                         current_method,
                         pinned_url,

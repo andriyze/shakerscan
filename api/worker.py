@@ -13969,7 +13969,7 @@ async def process_discovery_job(job_data: dict):
         else:
             # Only names that publish an address record become scannable targets; the rest are
             # counted in the run so the operator sees they were found and why they were skipped.
-            resolution = await target_resolution.store_discovered_targets(conn, dns_plan, root_domain)
+            resolution = await target_resolution.store_discovered_targets(conn, dns_plan, root_domain, evidence=result.get('name_sources'), discovery_id=str(discovery_id), observed_at=completed_at.isoformat())
             await conn.execute("""
                 UPDATE discovery_runs SET
                     status = 'completed',
@@ -18573,11 +18573,11 @@ def _materialize_bounded_ffuf_wordlist(
         raise agent_tools.AgentToolError("ffuf request reservation is invalid") from exc
     if request_limit < 1:
         raise agent_tools.AgentToolError("ffuf has no reserved requests")
-    source = Path(agent_tools.scanner_ffuf_wordlist_source(options))
     selected: list[str] = []
     seen: set[str] = set()
     try:
-        lines = source.read_text(encoding="utf-8").splitlines()
+        lines = [line for source in agent_tools.scanner_ffuf_wordlist_sources(options)
+                 for line in Path(source).read_text(encoding="utf-8").splitlines()]
     except OSError as exc:
         raise agent_tools.AgentToolError("ffuf bundled wordlist is unavailable") from exc
     for raw in lines:
