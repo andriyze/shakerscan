@@ -276,7 +276,11 @@ first match wins: `SHAKERSCAN_STATE_DIR` / `SHAKERSCAN_DATA_DIR`; beside `SHAKER
 when it is set (`<dir>.state`, `<dir>.data`, so an isolated profile stays isolated even when the
 session sets XDG variables); `$XDG_STATE_HOME/shakerscan` / `$XDG_DATA_HOME/shakerscan`;
 `~/.local/state/shakerscan` / `~/.local/share/shakerscan` (macOS too). Every path must be absolute (a relative XDG value is
-ignored, as the XDG specification says). A directory that cannot be created or written, or a
+ignored, as the XDG specification says). An isolated profile that kept its records and default
+workspace under the session's XDG directories before 2.11 loses neither: the record of the workspace
+it launches in is copied from `$XDG_STATE_HOME/shakerscan/workspaces` (never moved, another profile
+may share it), and its first launch with its own default workspace names the old shared one
+(`$XDG_DATA_HOME/shakerscan/agent`, left in place) and how to keep using it. A directory that cannot be created or written, or a
 `SHAKERSCAN_CONFIG_DIR` without a usable sibling (such as `/`), or `/` as
 `SHAKERSCAN_STATE_DIR` or `SHAKERSCAN_DATA_DIR`, stops `shakerscan agent` with an
 error naming the variable to set. `scripts/clean-shakerscan.sh` removes the records, and the

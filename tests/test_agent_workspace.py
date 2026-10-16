@@ -1022,3 +1022,52 @@ def test_d4_every_workspace_subdirectory_is_the_owners_alone(tmp_path, monkeypat
     root.write("older/c.md", b"z\n")
     assert ((workspace / "notes" / "hunts").stat().st_mode & 0o777) == 0o700
     assert ((workspace / "older").stat().st_mode & 0o777) == 0o700
+
+
+def test_an_isolated_profile_adopts_its_record_from_the_shared_xdg_directory(tmp_path, monkeypatch, capsys):
+    """Review sweep L2: before the profile won over XDG, an isolated profile with XDG_STATE_HOME
+    set kept its workspace records in $XDG_STATE_HOME/shakerscan/workspaces. The record of the
+    workspace it launches in is copied (never moved: another profile may share it), so changes
+    since the last launch are still checked."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    workspace = tmp_path / "ws"
+    shared = tmp_path / "state" / "shakerscan" / "workspaces"
+    cli.prepare_workspace(workspace, URL, "operator", "shakerscan", authenticated=False, state_directory=shared)
+    opencode = _json(workspace / "opencode.json")
+    opencode["permission"] = {"bash": {"env": "deny"}}
+    (workspace / "opencode.json").write_text(json.dumps(opencode), encoding="utf-8")
+    assert cli.main(["agent", "--url", URL, "--workspace", str(workspace), "--no-launch"]) == 0
+    out = capsys.readouterr().out
+    assert f"copied:    the record of {workspace.resolve()} from {shared}" in out, out
+    assert "record missing" not in out
+    assert _workspace.state_path(tmp_path / "cfg.state" / "workspaces", workspace).is_file()
+    assert _workspace.state_path(shared, workspace).is_file()  # left for any other profile
+    # Once adopted, nothing more is said.
+    assert cli.main(["agent", "--url", URL, "--workspace", str(workspace), "--no-launch"]) == 0
+    assert "copied:" not in capsys.readouterr().out
+
+
+def test_an_isolated_profile_is_told_where_its_old_shared_default_workspace_is(tmp_path, monkeypatch, capsys):
+    """Review sweep L2: the default workspace an isolated profile used under XDG_DATA_HOME is not
+    silently abandoned: the first launch with the profile's own default says where it is."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    shared = tmp_path / "data" / "shakerscan" / "agent"
+    cli.prepare_workspace(shared, URL, "operator", "shakerscan", authenticated=False,
+                          state_directory=tmp_path / "state" / "shakerscan" / "workspaces")
+    assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
+    out = capsys.readouterr().out
+    workspace = tmp_path / "cfg.data" / "agent"
+    assert f"workspace: {workspace} (" in out
+    assert f"remains at {shared} (nothing was moved)" in out and f"--workspace {shared}" in out, out
+    assert (shared / "opencode.json").is_file()
+    assert cli.main(["agent", "--url", URL, "--no-launch"]) == 0
+    assert "remains at" not in capsys.readouterr().out
+
+
+def test_without_an_isolated_profile_or_with_explicit_directories_nothing_is_adopted(tmp_path, monkeypatch):
+    environ = {"XDG_STATE_HOME": str(tmp_path / "state"), "XDG_DATA_HOME": str(tmp_path / "data")}
+    assert cli._shared_xdg_dir("state", environ) is None
+    isolated = {**environ, cli.ENV_CONFIG_DIR: str(tmp_path / "cfg")}
+    assert cli._shared_xdg_dir("state", isolated) == tmp_path / "state" / "shakerscan"
+    assert cli._shared_xdg_dir("data", {**isolated, "SHAKERSCAN_DATA_DIR": str(tmp_path / "x")}) is None
+    assert cli._shared_xdg_dir("data", {**isolated, "XDG_DATA_HOME": "relative"}) is None

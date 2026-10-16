@@ -645,6 +645,47 @@ def migrate_records(old: Path, new: Path) -> list[str]:
     return notes
 
 
+def adopt_shared_record(shared: Path, records: Path, workspace: Path) -> list[str]:
+    """Copy the record of ``workspace`` from ``shared`` (``$XDG_STATE_HOME/shakerscan/workspaces``,
+    where an isolated profile kept its records before 2.11, shared with every other profile of the
+    session) to this profile's ``records``, when this profile has none for it yet. Copied, never
+    moved: another profile may use the same record. Without it, a workspace this profile prepared
+    before would have its changes since the last launch go unchecked."""
+    source, target = state_path(shared, workspace), state_path(records, workspace)
+    try:
+        info = source.lstat()
+    except OSError:
+        return []
+    if not stat.S_ISREG(info.st_mode) or target.exists() or target.is_symlink():
+        return []
+    try:
+        state = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not _valid_state(state, workspace):
+        return []
+    try:
+        save_state(target, workspace, {key: value for key, value in state.items()
+                                       if key not in {"schema_version", "workspace"}})
+    except OSError as exc:
+        return [f"note:      could not copy the record of {workspace} from {shared} to {records} "
+                f"({exc.strerror or exc}); changes since the last launch are not checked this time"]
+    return [f"copied:    the record of {workspace} from {shared} (shared by every profile in this session) "
+            f"to this profile's {records}"]
+
+
+def note_shared_default_workspace(shared: Path, workspace: Path) -> list[str]:
+    """Say, on this profile's first launch with its own default workspace, that the default
+    workspace it used before 2.11 (``$XDG_DATA_HOME/shakerscan/agent``, shared by every profile of
+    the session) is still there and how to keep using it. It is never moved: another profile may
+    use it."""
+    if workspace.exists() or workspace.is_symlink() or shared.is_symlink() or not shared.is_dir():
+        return []
+    return [f"note:      this profile's default agent workspace is now {workspace}; the one it used before, "
+            f"shared by every profile under XDG_DATA_HOME, remains at {shared} (nothing was moved). To keep "
+            f"using it: shakerscan agent --workspace {shared}"]
+
+
 def migrate_default_workspace(old: Path, new: Path, records: Path) -> list[str]:
     """Move the default agent workspace from ``old`` (``~/.config/shakerscan/agent``, inside the
     client's configuration, next to its token) to ``new`` (``~/.local/share/shakerscan/agent``),
