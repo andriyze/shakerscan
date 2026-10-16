@@ -12,9 +12,17 @@ import re
 from typing import Any, Iterable, Mapping
 import urllib.parse
 
-from .device_postman import HARD_MAX_COLLECTION_BYTES, HARD_MAX_REQUESTS, SAFE_METHODS
+from .device_postman import (
+    HARD_MAX_COLLECTION_BYTES,
+    HARD_MAX_REQUESTS,
+    SAFE_METHODS,
+    SUPPORTED_METHODS,
+    public_request_url,
+)
 from .device_request_formats import (
     RequestImportError,
+    _request_id as _har_request_id,
+    _resolve_har,
     resolve_imported_requests,
     validate_request_document,
 )
@@ -268,6 +276,46 @@ def validate_and_index(
     rows = redacted_index(public_requests)
     summary["requests"] = rows
     return payload, summary, rows
+
+
+def index_appended_har_entries(
+    entries: list[Mapping[str, Any]], *, start_index: int,
+    tags: list[list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Redacted index rows for HAR entries appended at ``start_index`` of a stored document.
+
+    A browser capture grows one HAR document batch by batch. Each row keeps the request id and
+    ordinal the whole document resolves to (``_resolve_har`` numbers entries by position), so
+    the worker's selection over the decrypted document and this index agree without resolving
+    every earlier entry again. ``tags`` are per-entry labels (resource type, status). Like every
+    index row, no header value, body value or query value is copied.
+    """
+    resolved = _resolve_har({"log": {"entries": list(entries)}}, max_requests=max(1, len(entries)))
+    public: list[dict[str, Any]] = []
+    for offset, request in enumerate(resolved):
+        index = start_index + offset
+        method = str(request.get("method") or "GET").upper()
+        url = str(request.get("url") or "")
+        redacted = public_request_url(url)
+        content_type, body_field_names = _public_body_metadata(request)
+        public.append({
+            "id": _har_request_id("har", index, method, url),
+            "name": f"{method} {_canonical_index_path(redacted)}"[:300],
+            "folder": request.get("folder"),
+            "method": method,
+            "url": redacted,
+            "body_mode": str(request.get("body_mode") or "none")[:100],
+            "content_type": content_type,
+            "body_field_names": body_field_names,
+            "auth_type": str(request.get("auth_type") or "none")[:200],
+            "tags": list(tags[offset]) if tags and offset < len(tags) else [],
+            "safe_method": method in SAFE_METHODS,
+            "supported": method in SUPPORTED_METHODS and bool(url) and not request.get("error"),
+        })
+    rows = redacted_index(public)
+    for offset, row in enumerate(rows):
+        row["ordinal"] = start_index + offset
+    return rows
 
 
 def validate_request_collection(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:

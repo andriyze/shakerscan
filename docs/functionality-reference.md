@@ -1908,8 +1908,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 503 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 420 | `api/**/*.py` |
+| Public REST operations | 506 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 423 | `api/**/*.py` |
 | Check families | 19 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2269,9 +2269,12 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/queue/stats` | `queue_stats` |
 | `GET` | `/request-collections` | `list_request_collections` |
 | `POST` | `/request-collections` | `create_request_collection` |
+| `POST` | `/request-collections/captures` | `create_browser_capture` |
 | `DELETE` | `/request-collections/{collection_id}` | `deactivate_request_collection` |
 | `GET` | `/request-collections/{collection_id}` | `get_request_collection` |
 | `POST` | `/request-collections/{collection_id}/bindings` | `upsert_request_collection_binding` |
+| `POST` | `/request-collections/{collection_id}/capture-batches` | `append_capture_batch` |
+| `POST` | `/request-collections/{collection_id}/capture-close` | `close_browser_capture` |
 | `POST` | `/request-collections/{collection_id}/environments` | `upsert_request_collection_environment` |
 | `DELETE` | `/request-collections/{collection_id}/environments/{environment_id}` | `deactivate_request_collection_environment` |
 | `GET` | `/request-collections/{collection_id}/requests` | `list_request_collection_requests` |

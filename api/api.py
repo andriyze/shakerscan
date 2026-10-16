@@ -821,7 +821,9 @@ try:
         router as request_collection_router,
         select_request_collection_index_rows as _select_request_collection_index_rows,
     )
+    from capture.router import close_idle_captures, configure_capture_router, router as capture_router
 except ModuleNotFoundError:
+    from api.capture.router import close_idle_captures, configure_capture_router, router as capture_router
     from api.request_collection_api import (
         _request_collection_json_digest,
         _request_collection_owner_binding,
@@ -3028,6 +3030,7 @@ async def _stale_scan_tick(pool: asyncpg.Pool) -> None:
     await cleanup_stale_device_lifecycle(pool)
     await cleanup_orphaned_scan_queue_handoffs(pool)
     await cleanup_expired_auth_sessions_once(pool)
+    await close_idle_captures(pool)
     await queue_health.reconcile_job_hashes(
         pool, get_redis(), state=_JOB_HASH_RECONCILE_CURSOR, now=utc_now(), queue_name=QUEUE_NAME,
         scan_queue_job_ids=scan_queue_job_ids, heartbeat_timeout_minutes=QUEUE_HASH_HEARTBEAT_TIMEOUT_MINUTES,
@@ -4033,6 +4036,8 @@ configure_scan_read_router(lambda: db_pool)
 app.include_router(scan_read_router)
 configure_request_collection_router(lambda: db_pool)
 app.include_router(request_collection_router)
+configure_capture_router(lambda: db_pool)
+app.include_router(capture_router)
 try:
     from ai_gate.catalog_router import router as ai_catalog_router
 except ModuleNotFoundError:  # package import in host-side tests

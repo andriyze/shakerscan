@@ -49,6 +49,13 @@ LOOP_SCALE_INDEXES: tuple[tuple[str, str, str], ...] = (
         "target_endpoints",
         "target_endpoints (last_tested_at) WHERE last_tested_at IS NOT NULL",
     ),
+    # The idle browser-capture close (stale-scan tick): open captures by their last batch time.
+    (
+        "idx_request_collections_open_captures",
+        "request_collections",
+        "request_collections (updated_at) WHERE format = 'capture' AND is_active "
+        "AND (metadata_json->'capture'->>'state') = 'open'",
+    ),
     # --- Read paths: targets, scans, Hunts, graph and ASM coverage (2.11 list/v1 and dashboard).
     # Keyset lists newest first (list/v1 orders both columns one way).
     ("idx_targets_updated_id", "targets", "targets (updated_at DESC, id DESC)"),

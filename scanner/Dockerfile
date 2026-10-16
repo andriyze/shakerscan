@@ -269,6 +269,7 @@ COPY api/investigation_routes /app/investigation_routes
 COPY api/retest_routes /app/retest_routes
 COPY api/research_routes /app/research_routes
 COPY api/capabilities /app/capabilities
+COPY api/capture /app/capture
 COPY api/devices /app/devices
 COPY api/data_lifecycle /app/data_lifecycle
 COPY api/exposure /app/exposure
