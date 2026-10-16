@@ -174,21 +174,26 @@ async def reconcile_active_finding_counts(conn: Any) -> None:
 
     The legacy baseline repaired them once, but the baseline never runs again on a converted
     database, so a badge that drifted there survived every later upgrade. Only drifted rows are
-    rewritten, so a consistent database pays one read and no writes.
+    rewritten, so a consistent database pays one read and no writes. It runs on every start under
+    the startup lock, so the active findings are counted in one grouped pass (not one count per
+    target: ~3 s per start at 500k findings).
     """
     await conn.execute("""
         UPDATE targets t SET active_findings_count=counted.n
-        FROM (SELECT t2.id, (SELECT COUNT(*) FROM findings f
-                             WHERE f.target_id=t2.id AND f.status='active') AS n
-              FROM targets t2) counted
+        FROM (SELECT t2.id, COALESCE(c.n, 0) AS n
+              FROM targets t2
+              LEFT JOIN (SELECT f.target_id, COUNT(*) AS n FROM findings f
+                         WHERE f.status='active' AND f.target_id IS NOT NULL
+                         GROUP BY f.target_id) c ON c.target_id=t2.id) counted
         WHERE t.id=counted.id AND t.active_findings_count IS DISTINCT FROM counted.n
     """)
     await conn.execute("""
         UPDATE target_device_profiles p SET active_findings_count=counted.n
-        FROM (SELECT p2.target_id, (SELECT COUNT(*) FROM findings f
-                                    WHERE f.device_target_id=p2.target_id
-                                      AND f.status='active') AS n
-              FROM target_device_profiles p2) counted
+        FROM (SELECT p2.target_id, COALESCE(c.n, 0) AS n
+              FROM target_device_profiles p2
+              LEFT JOIN (SELECT f.device_target_id, COUNT(*) AS n FROM findings f
+                         WHERE f.status='active' AND f.device_target_id IS NOT NULL
+                         GROUP BY f.device_target_id) c ON c.device_target_id=p2.target_id) counted
         WHERE p.target_id=counted.target_id AND p.active_findings_count IS DISTINCT FROM counted.n
     """)
 
@@ -347,10 +352,12 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
             except ModuleNotFoundError:
                 from api.hunt.interpretations import import_knowledge_notes
             await import_knowledge_notes(conn)
-            # Outside any transaction, still under the lock: the one-time severity rank backfill
-            # (short batches, resumable). Its indexes are built CONCURRENTLY by the background
-            # builder (runtime/loop_scale_indexes.py): a concurrent build here would wait for the
-            # snapshot of every process waiting for this lock.
+            # Outside any transaction, still under the lock: a catalog check, and on a database
+            # without findings the severity rank is recorded as complete. Existing findings are
+            # ranked after serving starts (list_schema.repair_severity_rank_in_background; the
+            # list orders identically meanwhile). Its indexes are built CONCURRENTLY by the
+            # background builder (runtime/loop_scale_indexes.py): a concurrent build here would
+            # wait for the snapshot of every process waiting for this lock.
             try:
                 from finding_routes.list_schema import finish_findings_list_schema
             except ModuleNotFoundError:
