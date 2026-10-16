@@ -57,3 +57,46 @@ export function cohortScopingNote({ view, exposure }) {
   if (!Number.isFinite(total) || total <= shown) return null
   return `Cohort matching uses the ${shown.toLocaleString()} highest-ranked of ${total.toLocaleString()} assets; rows for other assets in this cohort may be missing. All cohorts shows everything.`
 }
+
+export const COHORT_VIEWS = ['operational', 'production', 'staging', 'non_operational', 'all']
+const COHORT_MEMBERS = {
+  operational: ['production', 'staging', 'unclassified'],
+  production: ['production'],
+  staging: ['staging'],
+  non_operational: ['lab', 'demo', 'calibration', 'internal'],
+}
+const COHORT_LABELS = { production: 'production', staging: 'staging', unclassified: 'unclassified', lab: 'lab',
+  demo: 'demo', calibration: 'calibration', internal: 'internal' }
+
+/** The dashboard scope a URL names (`?cohort=`); anything else is the default, operational. */
+export function parseCohortView(value) {
+  return COHORT_VIEWS.includes(value) ? value : 'operational'
+}
+
+/**
+ * When the chosen scope holds no assets but other cohorts do, say so instead of showing an empty
+ * install ("No scan results yet. Add a target…"). Counts come from the server: `cohort_counts`
+ * (assets per cohort, over every asset) and the dashboard's install-wide open findings, which all
+ * lie outside an empty scope. Null when the scope has assets, the install is empty, or the scope
+ * is "all".
+ */
+export function outOfScopeSummary({ view, exposure, installFindings }) {
+  if (view === 'all' || !exposure) return null
+  const scoped = Number(exposure.metrics?.asset_count ?? exposure.total ?? 0)
+  if (scoped > 0) return null
+  const counts = exposure.cohort_counts || {}
+  const members = new Set(COHORT_MEMBERS[view] || [])
+  const elsewhere = Object.entries(counts)
+    .filter(([cohort, count]) => !members.has(cohort) && Number(count) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+  const assets = elsewhere.reduce((sum, [, count]) => sum + Number(count), 0)
+  if (!assets) return null
+  const findings = Math.max(0, Number(installFindings) || 0)
+  const where = elsewhere.map(([cohort, count]) => `${Number(count).toLocaleString('en-US')} ${COHORT_LABELS[cohort] || cohort}`).join(', ')
+  const plural = (n, word) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`
+  return {
+    assets, findings, where,
+    text: `Nothing in this scope yet. ${plural(assets, 'target')}${findings ? ` and ${plural(findings, 'open finding')}` : ''} `
+      + `${assets + findings === 1 ? 'is' : 'are'} in other cohorts (${where}).`,
+  }
+}

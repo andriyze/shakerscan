@@ -2,7 +2,7 @@
 import { featureEnabled, navigationAllowed } from '@/lib/workspaceCapabilities'
 import { WorkspaceFeature } from '@/components/WorkspaceBoundary'
 
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useMemo, useRef, useState } from 'react'
 import { workerCapacityLabel, workerCountLabel } from '@/lib/labels'
 import Link from '@/components/WorkspaceLink'
 import { AlertTriangle, ArrowRight, CheckCircle2, CircleHelp, ListTodo, Minus, Plus, RadioTower, ScanLine, Server, ShieldAlert, Target, Trash2, Workflow } from 'lucide-react'
@@ -16,7 +16,8 @@ import {
 import { isAbortError } from '@/lib/fetchLayer.mjs'
 import { totalLabel, type ListV1Page } from '@/lib/listPage.mjs'
 import { usePoll } from '@/lib/usePoll'
-import { cohortScopingNote, coverageScope as describeCoverageScope, postureState, type CoverageScope, type PostureState } from '@/lib/dashboardScope.mjs'
+import { cohortScopingNote, coverageScope as describeCoverageScope, outOfScopeSummary, parseCohortView, postureState, type CoverageScope, type OutOfScopeSummary, type PostureState } from '@/lib/dashboardScope.mjs'
+import { useUrlFilters } from '@/lib/useUrlFilters'
 import {
   Badge,
   Card,
@@ -49,6 +50,10 @@ const FOCUS_RING = 'focus:outline-hidden focus-visible:ring-2 focus-visible:ring
 type CohortView = 'operational' | 'production' | 'staging' | 'non_operational' | 'all'
 
 export default function Dashboard() {
+  return <Suspense fallback={null}><DashboardContent /></Suspense>
+}
+
+function DashboardContent() {
   const toast = useToast()
   const [data, setData] = useState<DashboardResponse | null>(null)
   const [queue, setQueue] = useState<QueueStats | null>(null)
@@ -74,7 +79,10 @@ export default function Dashboard() {
   const [workersError, setWorkersError] = useState<string | null>(null)
   const [scaling, setScaling] = useState(false)
   const [gungnirActionLoading, setGungnirActionLoading] = useState(false)
-  const [cohortView, setCohortView] = useState<CohortView>('operational')
+  // The scope lives in the URL (?cohort=), so reload, Back and shared links keep it.
+  const { filters: scopeFilters, setFilter: setScopeFilter } = useUrlFilters<{ cohort?: string }>()
+  const cohortView: CohortView = parseCohortView(scopeFilters.cohort)
+  const setCohortView = useCallback((view: CohortView) => setScopeFilter('cohort', view === 'operational' ? undefined : view), [setScopeFilter])
 
   const dashboardLoadedOnce = useRef(false)
   const workersVisible = featureEnabled('worker_status') || featureEnabled('worker_admin')
@@ -271,6 +279,11 @@ export default function Dashboard() {
   })
   const exposureLoading = posture === 'loading'
   const cohortNote = cohortScopingNote({ view: cohortView, exposure: scopedExposure })
+  // An empty scope on a populated install is not an empty install: never offer "Add a target".
+  const outOfScope: OutOfScopeSummary | null = posture === 'ready'
+    ? outOfScopeSummary({ view: cohortView, exposure: scopedExposure, installFindings: data?.metrics?.active_findings })
+    : null
+  const showAllCohorts = useCallback(() => setCohortView('all'), [setCohortView])
   const groupedTargets = useMemo(() => groupsPage?.items || [], [groupsPage])
   const scopedTargets = useMemo(() => scopeTargetGroups(groupedTargets, cohortView), [groupedTargets, cohortView])
   // Cohort membership for recent scans and activity comes from the exposure page for this cohort
@@ -484,7 +497,16 @@ export default function Dashboard() {
 
       <CohortScopeBar value={cohortView} onChange={setCohortView} counts={cohortCounts} />
 
-      <WorkspaceFeature name="exposure"><SecurityPosture exposure={scopedExposure} state={posture} onRetry={exposurePoll.refresh} /></WorkspaceFeature>
+      {outOfScope ? (
+        <Card className="flex flex-col gap-3 border-amber-500/30 bg-amber-500/5 p-4 sm:flex-row sm:items-center sm:justify-between" data-testid="dashboard-out-of-scope" role="status">
+          <p className="text-sm text-amber-100">{outOfScope.text}</p>
+          <button type="button" onClick={showAllCohorts} className={`shrink-0 self-start rounded-lg border border-amber-500/40 px-3 py-1.5 text-sm font-medium text-amber-100 hover:bg-amber-500/10 ${FOCUS_RING}`}>
+            Show all cohorts
+          </button>
+        </Card>
+      ) : null}
+
+      <WorkspaceFeature name="exposure"><SecurityPosture exposure={scopedExposure} state={posture} onRetry={exposurePoll.refresh} outOfScope={Boolean(outOfScope)} onShowAll={showAllCohorts} /></WorkspaceFeature>
 
       <WorkspaceFeature name="timeline">{cohortView === 'all' ? (
         <ChangesStrip storageKey="dashboard" />
@@ -503,8 +525,8 @@ export default function Dashboard() {
         unavailable={cohortView !== 'all' && posture === 'unavailable' ? exposurePoll.refresh : null} />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <LatestResults scans={recentScans} loading={dashboardLoading && !data} />
-        <WorkspaceFeature name="timeline"><RecentActivity events={meaningfulActivity} loading={overviewLoading} /></WorkspaceFeature>
+        <LatestResults scans={recentScans} loading={dashboardLoading && !data} outOfScope={outOfScope} />
+        <WorkspaceFeature name="timeline"><RecentActivity events={meaningfulActivity} loading={overviewLoading} outOfScope={outOfScope} /></WorkspaceFeature>
       </div>
       {cohortNote ? <p className="text-xs text-gray-500" data-testid="cohort-scoping-note">{cohortNote}</p> : null}
     </div>
@@ -705,7 +727,7 @@ function ExposureUnavailable({ onRetry, compact = false }: { onRetry: () => void
   )
 }
 
-function SecurityPosture({ exposure, state, onRetry }: { exposure: ExposureAssetsResponse | null; state: PostureState; onRetry: () => void }) {
+function SecurityPosture({ exposure, state, onRetry, outOfScope = false, onShowAll }: { exposure: ExposureAssetsResponse | null; state: PostureState; onRetry: () => void; outOfScope?: boolean; onShowAll?: () => void }) {
   const loading = state === 'loading'
   const metrics = state === 'ready' ? exposure?.metrics : undefined
   const verified = metrics?.active_verified || 0
@@ -730,7 +752,11 @@ function SecurityPosture({ exposure, state, onRetry }: { exposure: ExposureAsset
           <h2 className="font-medium text-white">Security posture</h2>
           <p className="mt-1 text-sm text-gray-400">Verified risk, uncertain signals, and assets that need attention</p>
         </div>
-        {state === 'ready' ? (
+        {state === 'ready' && outOfScope && onShowAll ? (
+          <button type="button" onClick={onShowAll} className={`inline-flex items-center gap-1 self-start rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-blue-500/20 ${FOCUS_RING}`}>
+            Show all cohorts <ArrowRight className="h-4 w-4" />
+          </button>
+        ) : state === 'ready' ? (
           <Link href={primary.href} className={`inline-flex items-center gap-1 self-start rounded-lg border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-blue-500/20 ${FOCUS_RING}`}>
             {primary.label} <ArrowRight className="h-4 w-4" />
           </Link>
@@ -927,7 +953,7 @@ function ProgressRow({ label, value, total, color }: { label: string; value: num
   )
 }
 
-function LatestResults({ scans, loading }: { scans: Scan[]; loading: boolean }) {
+function LatestResults({ scans, loading, outOfScope = null }: { scans: Scan[]; loading: boolean; outOfScope?: OutOfScopeSummary | null }) {
   return (
     <Card className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-gray-800 p-4">
@@ -960,13 +986,13 @@ function LatestResults({ scans, loading }: { scans: Scan[]; loading: boolean }) 
               <ScanStatusBadge status={scan.status} />
             </Link>
             )
-          }) : <p className="p-5 text-sm text-gray-500">No scan results yet. Add a target and run the first scan.</p>}
+          }) : <p className="p-5 text-sm text-gray-500">{outOfScope ? 'No scan results in this scope. Results for the other cohorts show under All cohorts.' : 'No scan results yet. Add a target and run the first scan.'}</p>}
       </div>
     </Card>
   )
 }
 
-function RecentActivity({ events, loading }: { events: TimelineEvent[]; loading: boolean }) {
+function RecentActivity({ events, loading, outOfScope = null }: { events: TimelineEvent[]; loading: boolean; outOfScope?: OutOfScopeSummary | null }) {
   return (
     <Card className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-gray-800 p-4">
@@ -993,7 +1019,7 @@ function RecentActivity({ events, loading }: { events: TimelineEvent[]; loading:
             return href ? (
               <Link key={event.event_id} href={href} className={`flex items-start gap-3 p-4 hover:bg-gray-800/40 ${FOCUS_RING} focus-visible:ring-inset`}>{body}</Link>
             ) : <div key={event.event_id} className="flex items-start gap-3 p-4">{body}</div>
-          }) : <p className="p-5 text-sm text-gray-500">No meaningful activity has been recorded yet.</p>}
+          }) : <p className="p-5 text-sm text-gray-500">{outOfScope ? 'No activity in this scope. Activity for the other cohorts shows under All cohorts.' : 'No meaningful activity has been recorded yet.'}</p>}
       </div>
     </Card>
   )
