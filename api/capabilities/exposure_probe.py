@@ -357,6 +357,26 @@ _PARSE_MAX_CHARS = 262_144
 _MAX_DOCUMENT_PAIRS = 20_000
 
 
+def exposure_signature_contract(exposure_class: str, matched_pattern: str) -> str | None:
+    """The producer chooses a contract from recognized class/signature metadata."""
+    if matched_pattern == "http_error_stack_trace":
+        return "verbose_error_exposure/v2" if exposure_class == "verbose_error_disclosure" else None
+    return EXPOSURE_PROOF_CONTRACTS.get(exposure_class)
+
+
+def exposure_observation_contract(observation: Mapping[str, Any]) -> str | None:
+    """Reconstruct the producer's contract; a stored contract name grants no proof."""
+    exposure_class = str(observation.get("exposure_class") or "")
+    pattern = str(observation.get("matched_signature") or "")
+    status = observation.get("response_status")
+    if pattern == "http_error_stack_trace":
+        if type(status) is not int or not 500 <= status <= 599:
+            return None
+    elif type(status) is not int or status != 200:
+        return None
+    return exposure_signature_contract(exposure_class, pattern)
+
+
 @dataclass(frozen=True)
 class ExposureSignature:
     """One content classification; only an explicit subset proves sensitivity."""
@@ -380,9 +400,7 @@ class ExposureSignature:
     def proof_contract(self) -> str | None:
         if not self.proves_sensitive_exposure:
             return None
-        if self.matched_pattern == "http_error_stack_trace":
-            return "verbose_error_exposure/v2"
-        return EXPOSURE_PROOF_CONTRACTS.get(self.exposure_class)
+        return exposure_signature_contract(self.exposure_class, self.matched_pattern)
 
     def secret_evidence(self) -> list[dict[str, object]]:
         """Key names, categories and fingerprints only -- never a value."""

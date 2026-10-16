@@ -314,14 +314,14 @@ def _canonical_proof_contract_v2(
 
 try:
     from capabilities.exposure_probe import (
-        EXPOSURE_PROOF_CONTRACTS,
+        exposure_observation_contract,
         SECRET_MATERIAL_CLASSES,
         is_sensitive_exposure_class,
     )
     from capabilities.graphql_probe import GRAPHQL_PROOF_CONTRACTS
 except ModuleNotFoundError:
     from ..capabilities.exposure_probe import (
-        EXPOSURE_PROOF_CONTRACTS,
+        exposure_observation_contract,
         SECRET_MATERIAL_CLASSES,
         is_sensitive_exposure_class,
     )
@@ -1072,7 +1072,7 @@ def _findings_for_action(
             and item.get("proof_state") == "verified"
             and item.get("finding_verdict") == "verified"
             and is_sensitive_exposure_class(str(item.get("exposure_class") or ""))
-            and item.get("response_status") == 200
+            and (exposure_contract := exposure_observation_contract(item))
             # A body that may hold secrets carries an installation-keyed digest instead.
             and str(item.get("response_body_sha256") or item.get("response_body_hmac") or "")
         ):
@@ -1121,7 +1121,7 @@ def _findings_for_action(
                     "matched_signature": item.get("matched_signature"),
                     "redacted_excerpt": item.get("redacted_excerpt"),
                     # The class names the contract; a stored observation cannot pick its own.
-                    "proof_contract": EXPOSURE_PROOF_CONTRACTS.get(exposure_class),
+                    "proof_contract": exposure_contract,
                     "exposure_fingerprints": exposure_fingerprints,
                     **({"discovered_refs": secret_refs} if secret_refs else {}),
                     "discovered_via": item.get("discovered_via"),
