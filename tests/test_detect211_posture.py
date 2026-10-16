@@ -134,10 +134,15 @@ def test_cors_answers_that_grant_nothing_are_not_findings():
                 if f["evidence"].get("check", "").startswith("cors_")]
 
 
-def _dns(records: dict, host: str = "example.com", errors=()):
+def _dns(records: dict, host: str = "example.com", errors=(), answered=None):
     base = {key: [] for key in ("host_txt", "dmarc", "host_caa", "host_mx")}
+    records = {**base, **records}
+    failed = {item.split(":", 1)[0] for item in errors}
+    # The capability records metadata for every answered query, an empty answer included.
+    answered = [label for label in records if label not in failed] if answered is None else answered
     return {"baseline.dns": [{
-        "kind": "dns_posture", "canonical_host": host, "records": {**base, **records},
+        "kind": "dns_posture", "canonical_host": host, "records": records,
+        "record_metadata": {label: {"answer_count": len(records[label])} for label in answered},
         "query_names": {"host_txt": host, "dmarc": f"_dmarc.{host}", "host_caa": host}, "errors": list(errors),
     }]}
 
@@ -221,3 +226,55 @@ def test_a_proven_redirect_becomes_a_medium_finding_with_a_brief():
     assert brief["severity"]["reason"].startswith("A link on this trusted origin")
     not_proven = _probe(302, "/home")
     assert _report({"verify.redirect": [not_proven]}, capabilities={"verify.redirect": "redirect.verify_batch"})["findings"] == []
+
+
+def test_queries_the_deadline_cut_off_are_not_absent_records():
+    # The capability's overall deadline left these labels empty; only host_mx answered.
+    cut_off = ["dns_inspection:Timeout:3", "host_txt:Timeout", "dmarc:Timeout", "host_caa:Timeout"]
+    assert _dns_findings({}, errors=cut_off) == {}
+    # Before the per-label timeouts were recorded, only the summary error existed: the labels
+    # without metadata are still unanswered, not answered-empty.
+    assert _dns_findings({}, errors=["dns_inspection:Timeout:3"], answered=["host_mx"]) == {}
+    # An authoritative negative answer (NXDOMAIN for _dmarc) is an answer.
+    assert set(_dns_findings({}, answered=["dmarc", "host_mx"])) == {"dmarc_missing"}
+
+
+def test_strict_dynamic_ignores_the_host_and_scheme_fallbacks():
+    policy = "script-src 'nonce-r4nd' 'strict-dynamic' https: http: 'unsafe-inline'; object-src 'none'"
+    assert header_value_issues({"content-security-policy": policy}, origin="https://a.example") == {}
+    # Without 'strict-dynamic' the same fallbacks are real.
+    plain = header_value_issues({"content-security-policy": policy.replace(" 'strict-dynamic'", "")},
+                                origin="https://a.example")
+    assert [code for _l, code, _t in plain["content-security-policy"]] == ["csp_script_any_origin"]
+    # 'unsafe-eval' is not neutralised by 'strict-dynamic'.
+    eval_issues = header_value_issues({"content-security-policy": "script-src 'nonce-a' 'strict-dynamic' 'unsafe-eval'"},
+                                      origin="https://a.example")
+    assert [code for _l, code, _t in eval_issues["content-security-policy"]] == ["csp_unsafe_eval"]
+
+
+def test_a_header_sent_twice_with_the_same_valid_value_is_valid():
+    assert header_value_issues({"x-frame-options": "SAMEORIGIN, SAMEORIGIN",
+                                "x-content-type-options": "nosniff, nosniff"}, origin="https://a.example") == {}
+    assert header_value_issues({"x-frame-options": "deny,DENY"}, origin="https://a.example") == {}
+    conflicting = header_value_issues({"x-frame-options": "DENY, SAMEORIGIN", "x-content-type-options": "nosniff, none"},
+                                      origin="https://a.example")
+    assert set(conflicting) == {"x-frame-options", "x-content-type-options"}
+
+
+def test_a_csp_that_only_sets_frame_ancestors_is_reported_as_no_script_policy():
+    report = _report({"baseline.http": [_baseline("https://app.example.test", {**GOOD,
+                      "content-security-policy": "frame-ancestors 'self'"})]})
+    (csp,) = [f for f in report["findings"] if f["evidence"].get("check") == "weak_header_content-security-policy"]
+    assert [item["code"] for item in csp["evidence"]["issues"]] == ["csp_no_script_policy"]
+    assert "only frame-ancestors" in csp["evidence"]["issues"][0]["text"]
+
+
+def test_report_endpoint_tokens_in_a_recorded_policy_are_redacted():
+    policy = ("default-src * 'unsafe-inline'; report-uri https://o1.ingest.sentry.io/api/7/security/"
+              "?sentry_key=abc123def456&sentry_env=prodenv9")
+    report = _report({"baseline.http": [_baseline("https://app.example.test", {**GOOD, "content-security-policy": policy})]})
+    (csp,) = [f for f in report["findings"] if f["evidence"].get("check") == "weak_header_content-security-policy"]
+    stored = repr(csp["evidence"]) + repr(report["http"])
+    assert "abc123def456" not in stored and "prodenv9" not in stored
+    assert "?sentry_key=<redacted>&sentry_env=<redacted>" in csp["evidence"]["observed_value"]
+    assert "sentry_key=<redacted>" in csp["evidence"]["observed_response"]["observed_headers"]["content-security-policy"]

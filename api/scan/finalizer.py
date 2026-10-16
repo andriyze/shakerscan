@@ -17,7 +17,7 @@ from .contracts import SCAN_APPLICATION_SURFACE_FAMILIES
 from .finding_evidence import template_classification, tls_finding_evidence
 from .posture_findings import (
     CORS_PROBE_ACTIONS, OPT_IN_HEADERS, cors_findings, dns_posture_findings, open_redirect_finding,
-    weak_header_findings,
+    redact_url_queries, weak_header_findings,
 )
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 from .severity_calibration import calibrate_findings
@@ -519,7 +519,7 @@ def baseline_observed_response(
         "request_line": f"{method} {origin}{path if path.startswith('/') else '/' + path}",
         "response_status": response.get("status"),
         "observed_headers": dict(sorted(
-            (str(name).lower()[:120], str(value)[:2_000]) for name, value in headers.items()
+            (str(name).lower()[:120], redact_url_queries(str(value))[:2_000]) for name, value in headers.items()
             if str(name).lower() not in {"set-cookie", "authorization", "cookie"}
         )),
         "source_action_id": "baseline.http",
@@ -1841,10 +1841,14 @@ def _posture_sections(
             if kind == "http_observation" and str(action_id) == "baseline.http":
                 request = row.get("request") if isinstance(row.get("request"), Mapping) else {}
                 response = row.get("response") if isinstance(row.get("response"), Mapping) else {}
-                headers = (
-                    response.get("security_headers")
-                    if isinstance(response.get("security_headers"), Mapping) else {}
-                )
+                headers = {
+                    # Report endpoints' query tokens never reach the stored report.
+                    name: redact_url_queries(value) if isinstance(value, str) else value
+                    for name, value in (
+                        response.get("security_headers")
+                        if isinstance(response.get("security_headers"), Mapping) else {}
+                    ).items()
+                }
                 # A request that never completed observed nothing. Reporting its empty
                 # header set as `missing_security_headers` published five confirmed
                 # findings from a failure -- the UI renders each one red -- so posture is

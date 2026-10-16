@@ -58,6 +58,18 @@ _REFERRER_TOKENS = {
 
 FindingFactory = Callable[..., dict[str, Any]]
 
+# A URL's query in a recorded header value: CSP report-uri endpoints (and Reporting-Endpoints,
+# Location) commonly carry an ingest key or token there (Sentry's ?sentry_key=, report-uri.com).
+_URL_QUERY = re.compile(r"(https?://[^\s;,'\"?#]+)\?([^\s;,'\"#]*)", re.IGNORECASE)
+
+
+def redact_url_queries(value: str) -> str:
+    """``value`` with every URL query value replaced by ``<redacted>``; parameter names are kept."""
+    def redact(match: re.Match[str]) -> str:
+        names = [part.split("=", 1)[0] for part in match.group(2).split("&") if part]
+        return match.group(1) + "?" + "&".join(f"{name}=<redacted>" for name in names)
+    return _URL_QUERY.sub(redact, value)
+
 
 def _worst(levels: Iterable[str]) -> str:
     return max(levels, key=SEVERITY_ORDER.index, default="info")
@@ -87,16 +99,23 @@ def _csp_issues(policy: str) -> list[tuple[str, str, str]]:
     script = directives.get("script-src", directives.get("default-src"))
     issues: list[tuple[str, str, str]] = []
     if script is None:
+        # A policy that only sets framing (frame-ancestors) is still no script policy: an
+        # injected script runs exactly as without a CSP, and no missing-CSP finding says so.
+        only = ", ".join(sorted(directives)) or "no directives"
         issues.append(("low", "csp_no_script_policy",
-                       "No script-src or default-src directive: scripts may load from any origin."))
+                       f"No script-src or default-src directive (the policy sets only {only}): scripts may load from any origin."))
         script = []
-    wildcards = [token for token in script if token in {"*", "http:", "https:", "data:", "blob:"}]
+    # 'strict-dynamic' (CSP3) makes browsers ignore host and scheme sources and 'unsafe-inline':
+    # scripts load only through a nonce or hash and what those scripts load. Policies list
+    # https: and 'unsafe-inline' beside it on purpose, as the fallback for older browsers.
+    strict_dynamic = "'strict-dynamic'" in script
+    wildcards = [] if strict_dynamic else [token for token in script if token in {"*", "http:", "https:", "data:", "blob:"}]
     if wildcards:
         issues.append(("low", "csp_script_any_origin",
                        f"Scripts may load from any origin ({' '.join(wildcards)}), so an attacker-hosted script is allowed."))
     if "'unsafe-eval'" in script:
         issues.append(("low", "csp_unsafe_eval", "'unsafe-eval' lets injected strings run as code (eval, new Function)."))
-    neutralised = any(token.startswith(("'nonce-", "'sha256-", "'sha384-", "'sha512-")) or token == "'strict-dynamic'" for token in script)
+    neutralised = strict_dynamic or any(token.startswith(("'nonce-", "'sha256-", "'sha384-", "'sha512-")) for token in script)
     if "'unsafe-inline'" in script and not neutralised:
         issues.append(("info", "csp_unsafe_inline",
                        "'unsafe-inline' without a nonce or hash lets an injected inline <script> run; the policy still limits where scripts load from."))
@@ -144,8 +163,18 @@ def _referrer_issues(value: str) -> list[tuple[str, str, str]]:
     return []
 
 
+def _repeated_tokens(value: str) -> set[str]:
+    """The distinct comma-separated values of a header a server sent more than once.
+
+    Repeated header lines are recorded joined with ", " ("SAMEORIGIN, SAMEORIGIN"); the same
+    value twice is that value, not an invalid one.
+    """
+    return {token.strip().upper() for token in value.split(",") if token.strip()}
+
+
 def _xfo_issues(value: str, csp: str) -> list[tuple[str, str, str]]:
-    if value.strip().upper() in {"DENY", "SAMEORIGIN"} or "frame-ancestors" in csp.lower():
+    tokens = _repeated_tokens(value)
+    if (len(tokens) == 1 and tokens <= {"DENY", "SAMEORIGIN"}) or "frame-ancestors" in csp.lower():
         return []
     return [("low", "xfo_invalid",
              f"Browsers ignore X-Frame-Options: {value.strip()[:60]} (only DENY and SAMEORIGIN are honoured) and no CSP frame-ancestors is set, so any site can frame the page.")]
@@ -189,7 +218,7 @@ def header_value_issues(headers: Mapping[str, Any], *, origin: str) -> dict[str,
     if lowered.get("x-frame-options", "").strip():
         out["x-frame-options"] = _xfo_issues(lowered["x-frame-options"], csp)
     xcto = lowered.get("x-content-type-options", "").strip()
-    if xcto and xcto.lower() != "nosniff":
+    if xcto and _repeated_tokens(xcto) != {"NOSNIFF"}:
         out["x-content-type-options"] = [("info", "xcto_invalid", f"Only nosniff is defined; browsers ignore {xcto[:60]!r} and may sniff content types.")]
     if lowered.get("permissions-policy", "").strip():
         out["permissions-policy"] = _permissions_issues(lowered["permissions-policy"])
@@ -215,7 +244,7 @@ def weak_header_findings(
             tool="http_baseline", title=f"Weak {display} header value", severity=severity, cwe="CWE-693", url=origin,
             evidence={
                 "check": check, "url": origin, "status": status, "header": header,
-                "observed_value": lowered.get(header, "")[:2_000], "expected_value": expected,
+                "observed_value": redact_url_queries(lowered.get(header, ""))[:2_000], "expected_value": expected,
                 "issues": [{"severity": level, "code": code, "text": text} for level, code, text in issues],
                 "observed_response": dict(observed_response),
                 "severity_basis": severity_basis(check, severity, reason, [{"factor": code, "text": text} for _l, code, text in issues]),
@@ -345,7 +374,12 @@ def dns_posture_findings(observation: Mapping[str, Any], *, make: FindingFactory
         return []  # an address or a single-label name has no mail/CA policy of its own
     is_apex = apex == host
     url = f"https://{host}"  # as the takeover check names a host: its HTTPS origin
+    # A label is judged only when its query was answered (records or an authoritative negative
+    # answer recorded in record_metadata). A query that timed out or failed leaves its label with
+    # an empty list too, and reading that as "no record" reported verified missing DMARC/CAA/SPF.
+    metadata = observation.get("record_metadata") if isinstance(observation.get("record_metadata"), Mapping) else {}
     failed = {item.split(":", 1)[0] for item in errors}
+    failed.update(label for label in ("host_txt", "dmarc", "host_caa") if label not in metadata)
     txt = list(records.get("host_txt") or ())
     mx = list(records.get("host_mx") or ())
     dmarc_values = [str(value) for value in records.get("dmarc") or () if str(value).lower().startswith("v=dmarc1")]
@@ -416,5 +450,6 @@ def dns_posture_findings(observation: Mapping[str, Any], *, make: FindingFactory
 __all__ = [
     "CORS_PROBE_ACTIONS", "CORS_PROBE_ORIGIN", "OPT_IN_HEADERS", "REDIRECT_CANARY_HOST", "REDIRECT_CANARY_URL",
     "cors_findings", "dns_posture_findings", "header_value_issues", "is_redirect_parameter",
-    "open_redirect_finding", "redirects_to_canary", "severity_basis", "weak_header_findings",
+    "open_redirect_finding", "redact_url_queries", "redirects_to_canary", "severity_basis",
+    "weak_header_findings",
 ]
