@@ -21625,7 +21625,9 @@ def test_bulk_finding_update_reports_rows_actually_changed(monkeypatch):
         status="resolved",
         notes="audit",
     )
-    result = asyncio.run(api_module.bulk_update_findings(request))
+    from starlette.requests import Request
+    http_request = Request({"type": "http", "method": "POST", "path": "/findings/bulk", "headers": []})
+    result = asyncio.run(api_module.bulk_update_findings(request, http_request))
     assert result == {
         "updated": 1,
         "requested": 3,
@@ -21763,15 +21765,22 @@ def test_parent_scan_logs_carry_the_discovery_child_while_no_shard_exists(monkey
 
 
 def test_all_public_limit_parameters_have_explicit_lower_bounds():
-    # Routes now live across the api package; read the whole tree so an extracted
-    # route cannot slip past this bound check by leaving api.py.
-    source = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted((Path(api_module.__file__).parent).rglob("*.py"))
-    )
-    assert 'async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000))' in source
-    assert 'async def list_discovery_runs(limit: int = Query(20, ge=1, le=200))' in source
-    assert 'async def list_results(limit: int = Query(50, ge=1, le=500))' in source
+    import ast
+    bounds = {"get_scan_logs": 1000, "list_discovery_runs": 200, "list_results": 500}
+    found = set()
+    for path in (Path(api_module.__file__).parent).rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.AsyncFunctionDef) or node.name not in bounds:
+                continue
+            defaults = dict(zip([arg.arg for arg in node.args.args][-len(node.args.defaults):],
+                                node.args.defaults))
+            query = defaults["limit"]
+            assert isinstance(query, ast.Call) and isinstance(query.func, ast.Name)
+            assert query.func.id == "Query", node.name
+            values = {kw.arg: ast.literal_eval(kw.value) for kw in query.keywords}
+            assert values["ge"] == 1 and values["le"] == bounds[node.name], node.name
+            found.add(node.name)
+    assert found == set(bounds)
 
 
 def test_compose_propagates_browser_origin_configuration_to_api():

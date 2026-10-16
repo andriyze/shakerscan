@@ -107,9 +107,9 @@ async def restore(conn: Any, target: UUID, before: dict, after: dict, actor: str
             datetime.fromisoformat(finding['resolved_at']) if finding['resolved_at'] else None)
     if before.get('findings'):
         try:
-            from finding_routes.router import _refresh_finding_owner_counts
+            from finding_routes.owner_counts import _refresh_finding_owner_counts
         except ModuleNotFoundError:
-            from ..finding_routes.router import _refresh_finding_owner_counts
+            from ..finding_routes.owner_counts import _refresh_finding_owner_counts
         owners = await conn.fetch('SELECT target_id, device_target_id FROM findings WHERE id = ANY($1::uuid[])',
                                   [UUID(item['id']) for item in before['findings']])
         await _refresh_finding_owner_counts(conn, owners)

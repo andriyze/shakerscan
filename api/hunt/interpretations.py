@@ -593,17 +593,7 @@ async def unknown_records(conn: Any, target_id: Any, refs: list[str]) -> list[st
     return [ref for ref in refs if ref not in known]
 
 
-def _testing_capability(name: Any) -> bool:
-    """Whether ``name`` is a capability that exercises the target (not a control-plane step)."""
-    try:
-        from runtime.capability_registry import CAPABILITY_REGISTRY
-    except ModuleNotFoundError:  # package import
-        from ..runtime.capability_registry import CAPABILITY_REGISTRY
-    try:
-        spec = CAPABILITY_REGISTRY.require(str(name))
-    except KeyError:
-        return False
-    return not spec.placement_requirements.get("control_plane")
+from .condition_receipts import testing_capability as _testing_capability
 
 
 async def _ran_actions(conn: Any, target_id: Any, refs: list[str], states: frozenset[str], *,
@@ -1074,9 +1064,11 @@ async def dismiss_finding(conn: Any, target_id: Any, finding_id: Any, request: D
         if finding["last_seen_at"] is not None:
             conditions["last_seen_at"] = finding["last_seen_at"].isoformat()
         try:
-            from finding_routes.router import FINDING_UPDATE_SQL, _refresh_finding_owner_counts
+            from finding_routes.triage_sql import FINDING_UPDATE_SQL
+            from finding_routes.owner_counts import _refresh_finding_owner_counts
         except ModuleNotFoundError:  # package import
-            from ..finding_routes.router import FINDING_UPDATE_SQL, _refresh_finding_owner_counts
+            from ..finding_routes.triage_sql import FINDING_UPDATE_SQL
+            from ..finding_routes.owner_counts import _refresh_finding_owner_counts
         updated = await conn.fetchrow(FINDING_UPDATE_SQL, _DISMISSAL_STATUS[request.reason], None,
                                       request.reason, identifier, "set")
         await _refresh_finding_owner_counts(conn, [updated])
@@ -1129,9 +1121,11 @@ async def reopen_finding(conn: Any, target_id: Any, finding_id: Any, *, actor: s
         if dismissal is None:
             raise _refusal(409, "not_dismissed", "This finding has no active dismissal.")
         try:
-            from finding_routes.router import FINDING_UPDATE_SQL, _refresh_finding_owner_counts
+            from finding_routes.triage_sql import FINDING_UPDATE_SQL
+            from finding_routes.owner_counts import _refresh_finding_owner_counts
         except ModuleNotFoundError:  # package import
-            from ..finding_routes.router import FINDING_UPDATE_SQL, _refresh_finding_owner_counts
+            from ..finding_routes.triage_sql import FINDING_UPDATE_SQL
+            from ..finding_routes.owner_counts import _refresh_finding_owner_counts
         updated = await conn.fetchrow(FINDING_UPDATE_SQL, "active", None, "needs_review", identifier, "set")
         await _refresh_finding_owner_counts(conn, [updated])
         return {"dismissal": public_interpretation(dismissal, audience="operator"),

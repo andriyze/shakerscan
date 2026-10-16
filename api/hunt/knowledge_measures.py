@@ -189,8 +189,8 @@ async def _actions(conn: Any, target: uuid.UUID, *, after: Any = None, before: A
 
 
 def _testing(name: Any) -> bool:
-    from .interpretations import _testing_capability
-    return _testing_capability(name)
+    from .condition_receipts import testing_capability
+    return testing_capability(name)
 
 
 async def _incorrect_suppression(conn: Any, target: uuid.UUID, since: Any) -> dict[str, Any]:

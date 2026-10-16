@@ -70,6 +70,10 @@ def test_mcp_exposes_no_direct_route_to_instructions_saved_actions_or_their_revi
     """Agents connected over MCP reach target writes only through the Hunt capability route."""
     pattern = re.compile(r"/targets/|instruction-proposals|hunt-authority|/skill/confirm")
     for tool in shakerscan_mcp.HUNT_TOOLS:
+        if tool.name == "shakerscan_knowledge_continue":
+            assert tool.method == "GET" and tool.read_only and not tool.destructive
+            assert tool.path_template == "/targets/{target_id}/knowledge/continue"
+            continue
         assert not pattern.search(tool.path_template), tool.name
     source = (ROOT / "scripts/shakerscan_mcp.py").read_text(encoding="utf-8")
     assert "instruction-proposals" not in source and "/skill/confirm" not in source
