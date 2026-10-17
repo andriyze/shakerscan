@@ -89,7 +89,8 @@ async def target_inventory(response: Response = None,
     list/v1 (any of ``cursor``/``count``/``fields``/``since``): keyset pages of assets, or with
     ``group_by=domain`` of domain groups with at most ``member_limit`` assets each; ``sort`` takes
     ``-`` to descend. Otherwise the deprecated limit/offset response (``sort`` names its own
-    direction: name ascending, the others descending)."""
+    direction: name ascending, the others descending); with ``group_by=domain`` each group holds at
+    most ``member_limit`` assets and a page at most 200 (``member_count``/``members_truncated``)."""
     limit, cursor, fields, count, since, member_limit, web_only = (direct(value) for value in (
         limit, cursor, fields, count, since, member_limit, web_only))
     if wants_list_v1(cursor=cursor, count=count, fields=fields, since=since):
@@ -112,7 +113,7 @@ async def target_inventory(response: Response = None,
                                  limit=limit, offset=offset, group_by=group_by, asset_type=asset_type,
                                  environment=environment, authorization=authorization, findings=findings,
                                  activity=activity, sort=sort, include_facets=include_facets,
-                                 web_only=bool(web_only))
+                                 web_only=bool(web_only), member_limit=member_limit)
 
 
 @router.post('/targets/hosts')

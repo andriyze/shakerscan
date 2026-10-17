@@ -273,3 +273,130 @@ REFUTER_SCANS = """
     WHERE rn <= $1
     ORDER BY target_id, rn
 """
+
+
+# --- The 2.11 candidate's unbounded legacy shapes (api/targets at ad5ce4fd) ----------------------
+#
+# Before the legacy responses were bounded they held every group with every member. Kept here as
+# the oracle: the bounded legacy response and the list/v1 walks must equal these groups.
+
+async def old_grouped(conn: Any, router: Any, *, include_inactive: bool = False, search: str | None = None,
+                      discovery_source: str | None = None, grade: str | None = None,
+                      has_findings: bool | None = None, sort_by: str = "root_domain",
+                      sort_order: str = "asc") -> dict[str, Any]:
+    """GET /targets/grouped without list/v1: every group, every target, sorted in Python."""
+    from targets import grouped_list
+
+    target_columns = f"{router._GROUPED_TARGET_COLUMNS},\n                {router._authorized_for_active_testing_sql()}"
+    query = f"SELECT {target_columns} FROM targets t WHERE 1=1"
+    params: list[Any] = []
+    if not include_inactive:
+        query += " AND t.is_active = true"
+    if discovery_source != "model-intake":
+        query += " AND COALESCE(t.discovery_source, 'manual') NOT IN ('model-intake','host')"
+    if search:
+        params.append(search)
+        n = len(params)
+        query += (f" AND (t.url ILIKE '%' || ${n} || '%' OR t.name ILIKE '%' || ${n} || '%'"
+                  f" OR t.root_domain ILIKE '%' || ${n} || '%')")
+    if discovery_source:
+        params.append(discovery_source)
+        query += f" AND t.discovery_source = ${len(params)}"
+    if grade:
+        params.append(grade)
+        query += f" AND UPPER(t.last_grade) = UPPER(${len(params)})"
+    if has_findings is not None:
+        query += " AND t.active_findings_count > 0" if has_findings else " AND t.active_findings_count = 0"
+    query += " ORDER BY t.root_domain, t.is_root DESC, t.url"
+    rows = router._dedupe_canonical_target_rows(await conn.fetch(query, *params))
+    target_ids = [row["id"] for row in rows]
+    investigator = await grouped_list.investigator_counts(conn, target_ids)
+    asm = await grouped_list.asm_coverage_by_target(conn, target_ids)
+
+    def attach(data: dict) -> dict:
+        data["asm_coverage"] = asm.get(str(data["id"]))
+        data.update(investigator.get(str(data["id"]), {
+            "investigator_verified_count": 0, "investigator_suspected_count": 0}))
+        return data
+
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        rd = row["root_domain"] or "unknown"
+        group = grouped.setdefault(rd, {"root_domain": rd, "root_target": None, "subdomains": []})
+        data = attach(router._public_target_row(row))
+        if row["is_root"]:
+            group["root_target"] = data
+        else:
+            group["subdomains"].append(data)
+    result = []
+    for data in grouped.values():
+        root = data["root_target"]
+        data["subdomain_count"] = len(data["subdomains"])
+        data["total_count"] = data["subdomain_count"] + (1 if root else 0)
+        data["total_findings"] = (root["active_findings_count"] if root else 0) + sum(
+            s["active_findings_count"] for s in data["subdomains"])
+        data["best_score"] = root["last_score"] if root and root["last_score"] is not None else None
+        data["latest_scan"] = root["last_scanned_at"] if root else None
+        data["earliest_created"] = root["created_at"] if root else min(
+            (s["created_at"] for s in data["subdomains"]), default=None)
+        members = ([root] if root else []) + data["subdomains"]
+        data["asm_coverage"] = grouped_list.group_asm_rollup([t.get("asm_coverage") for t in members])
+        result.append(data)
+    reverse = sort_order == "desc"
+
+    def key(item: dict) -> Any:
+        if sort_by == "last_scanned_at":
+            return item["latest_scan"] or ""
+        if sort_by == "active_findings_count":
+            return item["total_findings"]
+        if sort_by == "last_score":
+            return (-1 if reverse else 101) if item["best_score"] is None else item["best_score"]
+        if sort_by == "created_at":
+            return item["earliest_created"] or ""
+        return item["root_domain"].lower()
+
+    result.sort(key=key, reverse=reverse)
+    return {"domains": result, "total_root_domains": len(result),
+            "total_targets": sum(d["total_count"] for d in result)}
+
+
+async def old_inventory_domain_groups(conn: Any, ai: Any, query: Any, *, from_sql: str, sort: str,
+                                      limit: int, offset: int) -> dict[str, Any]:
+    """GET /targets/inventory?group_by=domain without list/v1: every member of each group, the
+    groups formed and ordered in Python over every matching asset."""
+    order, aggregate, direction = ai.SORTS[sort]
+    matching = await conn.fetch(f"""SELECT t.id,target_asset_locator(t.url) AS locator,{order} AS sort_key
+        FROM {from_sql} WHERE {query.where}""", *query.parameters)
+    members: dict[str, list[Any]] = {}
+    for row in matching:
+        members.setdefault(ai.group_domain(row["locator"] or ""), []).append(row)
+    descending = direction == "DESC"
+
+    def present(value: Any) -> tuple[int, Any]:
+        return (1, 0) if value is None else (0, value)
+
+    def group_key(item: tuple[str, list[Any]]) -> Any:
+        domain, rows = item
+        if sort == "name":
+            return domain
+        values = [row["sort_key"] for row in rows if row["sort_key"] is not None]
+        return present((max if aggregate == "max" else min)(values) if values else None)
+
+    ordered = sorted(members.items(), key=lambda item: item[0])
+    ordered.sort(key=group_key, reverse=descending)
+    page = ordered[offset:offset + limit]
+    ids = [row["id"] for _domain, rows in page for row in rows]
+    detail = {row["id"]: row for row in await conn.fetch(f"""SELECT {ai.ROOT_COLUMNS},{ai.DETAIL_COLUMNS}
+        FROM {ai.ROOT_FROM} WHERE t.id = ANY($2::uuid[])""", query.parameters[0], ids)} if ids else {}
+    groups = []
+    for domain, rows in page:
+        rows = sorted(rows, key=lambda row: (str(row["locator"] or ""), str(row["id"])))
+        rows.sort(key=lambda row: present(row["sort_key"]), reverse=descending)
+        rows.sort(key=lambda row: str(row["locator"] or "") != domain)
+        group = {"root_domain": domain, "discoverable": ai.discoverable(domain), "targets": []}
+        for row in rows:
+            asset = ai.public_asset(detail[row["id"]])
+            asset["root_domain"] = domain
+            group["targets"].append(asset)
+        groups.append(group)
+    return {"groups": groups, "total": len(matching), "total_groups": len(members)}

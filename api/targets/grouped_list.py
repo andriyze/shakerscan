@@ -1,7 +1,9 @@
 """``GET /targets/grouped``: targets grouped by root domain, paged over groups (list/v1).
 
-The legacy response (every group with every target, sorted in Python) stays for the 2.11.x line.
-list/v1 pages the groups themselves: the group summary (counts, findings total, the root's score
+The legacy response shape stays for the 2.11.x line, bounded: it is the first list/v1 page
+(``legacy_grouped``: at most 50 groups with at most 20 subdomains each) in the legacy envelope, with ``has_more``/``next_cursor``/``truncated`` saying
+what was left out. It used to hold every group with every target, sorted in Python (6.7 MB and
+every target's enrichment at 10k targets). list/v1 pages the groups themselves: the group summary (counts, findings total, the root's score
 and last scan, earliest creation) is aggregated in SQL over the filtered targets, keyset-paged on
 the chosen sort, and only the page's groups are read in detail, with at most ``member_limit``
 subdomains each (``subdomain_count`` keeps the true number). Group values follow the legacy
@@ -452,6 +454,55 @@ async def grouped_page(
     return body
 
 
+#: A legacy request's ``limit``/``member_limit`` above these is lowered to them: at most 50 groups
+#: of a root and 20 subdomains (under 1 MiB at about 0.7 KB per target). list/v1 pages further.
+LEGACY_MAX_GROUPS = 50
+LEGACY_MAX_MEMBERS = 20
+LEGACY_HINT = ("Deprecated response: at most 50 groups (`limit`) with at most 20 subdomains each "
+               "(`member_limit`). Read the rest with list/v1: the same filters plus "
+               "count=none&cursor=<next_cursor>&member_limit=<member_limit>&limit=<limit>.")
+
+
+async def legacy_grouped(
+    conn: Any,
+    page: Page,
+    *,
+    filters: Mapping[str, Any],
+    member_limit: int,
+    member_columns: str,
+    public_row: Callable[[Any], dict[str, Any]],
+) -> dict[str, Any]:
+    """The deprecated ``{domains, total_root_domains, total_targets}`` response, bounded.
+
+    ``domains`` is the first list/v1 page of groups (``filters`` are the list/v1 route's, so
+    ``next_cursor`` continues on list/v1); each group keeps the legacy fields plus
+    ``subdomains_truncated``. The totals still cover every filtered group and target."""
+    body = await grouped_page(conn, page, filters=filters, member_limit=member_limit,
+                              member_columns=member_columns, public_row=public_row)
+    params = SqlParams()
+    where = filter_clauses(
+        params, include_inactive=bool(filters.get("include_inactive")), search=filters.get("search"),
+        discovery_source=filters.get("discovery_source"), grade=filters.get("grade"),
+        has_findings=filters.get("has_findings"),
+    )
+    totals = await conn.fetchrow(
+        f"SELECT count(*) AS groups, COALESCE(sum(g.total_count), 0) AS targets FROM {groups_sql(where)}",
+        *params.values,
+    )
+    domains = body["items"]
+    return {
+        "domains": domains,
+        "total_root_domains": int(totals["groups"] or 0) if totals else 0,
+        "total_targets": int(totals["targets"] or 0) if totals else 0,
+        "limit": page.limit,
+        "member_limit": member_limit,
+        "has_more": body["has_more"],
+        "next_cursor": body["next_cursor"],
+        "truncated": bool(body["has_more"] or any(group["subdomains_truncated"] for group in domains)),
+        "list_v1_hint": LEGACY_HINT,
+    }
+
+
 __all__ = [
     "ASM_COVERAGE_SQL",
     "ASM_SORTS",
@@ -469,5 +520,8 @@ __all__ = [
     "grouped_page",
     "groups_sql",
     "investigator_counts",
+    "LEGACY_MAX_GROUPS",
+    "LEGACY_MAX_MEMBERS",
+    "legacy_grouped",
     "plan_for",
 ]
