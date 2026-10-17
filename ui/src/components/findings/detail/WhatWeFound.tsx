@@ -1,6 +1,8 @@
 'use client'
 
 import { hasObservation, type FindingObservation } from '@/lib/findingObservation'
+import { findingDetailEvidence, hasDetailEvidence } from '@/lib/findingDetailEvidence'
+import { EvidenceDetails } from './EvidenceDetails'
 import { CopyButton } from './CopyButton'
 import { Section } from './Section'
 
@@ -26,6 +28,7 @@ export function WhatWeFound({
   signals,
   anomaly,
   aiProbe,
+  detailEvidence,
 }: {
   observation: FindingObservation
   description: string | null
@@ -33,13 +36,15 @@ export function WhatWeFound({
   signals: string[]
   anomaly: string | null
   aiProbe: AiProbeEvidence | null
+  detailEvidence?: unknown
 }) {
   const allSignals = Array.from(new Set([...observation.signals, ...signals]))
+  const details = findingDetailEvidence(detailEvidence)
   // The probe block and the payload list already show these; a fact would repeat them.
   const facts = observation.facts.filter((fact) => (
     !(aiProbe && fact.label === 'Technique') && !(payloads.length > 0 && fact.label === 'Payload')
   ))
-  const empty = !description && !aiProbe && !hasObservation(observation) && payloads.length === 0 && allSignals.length === 0 && !anomaly
+  const empty = !description && !aiProbe && !hasObservation(observation) && !hasDetailEvidence(details) && payloads.length === 0 && allSignals.length === 0 && !anomaly
 
   return (
     <Section id="evidence" title="What we found">
@@ -95,6 +100,8 @@ export function WhatWeFound({
             <pre className="max-h-64 overflow-auto rounded-md border border-gray-800 bg-gray-950 p-3 font-mono text-xs leading-5 text-gray-200 whitespace-pre-wrap break-all">{observation.excerpt}</pre>
           </div>
         )}
+
+        <EvidenceDetails details={details} />
 
         {observation.responseHeaders.length > 0 && (
           <div>
