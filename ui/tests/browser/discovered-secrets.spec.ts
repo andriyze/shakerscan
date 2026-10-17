@@ -95,7 +95,10 @@ test('SECRETS-005 a web Scan records secrets on its origin: the asset page shows
   await page.goto(`/targets/${assetId}/asset`)
   const card = page.locator('div').filter({has: page.getByRole('heading', {name: `Discovered secrets · ${originUrl}`})}).last()
   await expect(card.getByText('DB_PASSWORD')).toBeVisible()
-  await expect(page.getByText('None found yet')).toBeVisible()  // the host's own card stays, empty
+  // 2.11 (D1): the host's own empty card no longer says "None found yet" above an origin card
+  // that lists secrets; it is hidden while an origin holds them.
+  await expect(page.getByText(/None found yet/)).toHaveCount(0)
+  await expect(page.getByRole('heading', {name: 'Discovered secrets', exact: true})).toHaveCount(0)
   await expect(page.locator('body')).not.toContainText(VALUE)
   await card.getByRole('button', {name: 'Revoke'}).click()
   await expect.poll(() => writes.map(w => `${w.method} ${w.path}`)).toContain(`POST /targets/${originId}/discovered-secrets/${secretId}/state`)

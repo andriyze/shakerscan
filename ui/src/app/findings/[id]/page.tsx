@@ -34,6 +34,7 @@ import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/
 import { canonicalFindingProofVerified } from '@/lib/findingProof'
 import { retestAuthorizationStopNotice } from '@/lib/authorizationStop'
 import { formatRelativeTime } from '@/lib/format'
+import { usePoll } from '@/lib/usePoll'
 import { findingObservation, hostOf, pathOf, verificationSource } from '@/lib/findingObservation'
 import { ANALYST_VERDICTS, FINDING_STATUS_LABELS, verdictChangeMessage, verdictOptionLabel, verdictRequestStatus, type AnalystVerdict } from '@/lib/analystVerdict'
 import {
@@ -336,19 +337,11 @@ function FindingDetailContent() {
     }
   }, [findingId])
 
-  useEffect(() => {
-    fetchFinding()
-  }, [fetchFinding])
-
   const hasPendingRetest = retestHistory.some((r) => r.status === 'queued' || r.status === 'running')
 
-  // While a retest is queued/running, poll so the verdict and verification
-  // summary update live instead of requiring a manual page refresh.
-  useEffect(() => {
-    if (!hasPendingRetest) return
-    const interval = setInterval(() => { void fetchFinding() }, 4000)
-    return () => clearInterval(interval)
-  }, [hasPendingRetest, fetchFinding])
+  // Load once, then, while a retest is queued/running, poll every 4 s so the verdict and
+  // verification summary update live; polling stops when no retest is pending.
+  usePoll(fetchFinding, { intervalMs: 4000, live: hasPendingRetest, deps: [fetchFinding] })
 
   // Announce the result when a retest transitions from pending -> finished, so
   // the user gets a clear "it ran" signal instead of a banner stuck at "queued".

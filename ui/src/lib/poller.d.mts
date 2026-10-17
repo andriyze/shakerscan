@@ -18,6 +18,7 @@ export function createPoller(options: {
   idleIntervalMs?: number | null
   isLive?: () => boolean
   maxBackoffMs?: number
+  leading?: boolean
   onError?: (error: unknown, failures: number) => void
   onSchedule?: (state: { failures: number; nextDelayMs: number | null }) => void
   visibility?: PollVisibility

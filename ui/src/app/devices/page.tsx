@@ -16,6 +16,7 @@ import {
 } from '@/lib/api'
 import { Button, Card, CardSkeleton, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
 import { deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
+import { usePoll } from '@/lib/usePoll'
 
 const DEVICE_CLASSES = [
   ['generic', 'Connected device'], ['media', 'TV or media device'], ['camera', 'Camera'],
@@ -23,6 +24,8 @@ const DEVICE_CLASSES = [
   ['conference', 'Conference equipment'], ['building', 'Building system'], ['industrial', 'Industrial device'],
 ] as const
 const PAGE_SIZE = 50
+const READINESS_LIVE_REFRESH_MS = 3_000
+const READINESS_IDLE_REFRESH_MS = 60_000
 
 function parsePortHints(value: string): number[] {
   if (!value.trim()) return []
@@ -81,24 +84,22 @@ export default function DevicesPage() {
 
   useEffect(() => { const timer = setTimeout(load, 250); return () => clearTimeout(timer) }, [load])
   useEffect(() => { setPage(0) }, [search])
-  useEffect(() => {
-    let stopped = false
-    const timer = setInterval(async () => {
-      try {
-        const readiness = await getDeviceReadiness()
-        if (stopped) return
-        setEnabled(readiness.enabled)
-        setWorkerReady(readiness.enabled && readiness.status === 'ready')
-        setReadinessState(readiness)
-      } catch {
-        if (!stopped) {
-          setWorkerReady(false)
-          setReadinessState({status:'not_ready',message:'Network scanning availability could not be checked. Try refreshing the page.'})
-        }
-      }
-    }, 3_000)
-    return () => { stopped = true; clearInterval(timer) }
-  }, [])
+  // Readiness polls quickly while the network worker is not ready (it is starting or was just
+  // enabled) and slowly once it is; usePoll pauses it in a hidden tab and backs off on errors.
+  usePoll(async (signal) => {
+    try {
+      const readiness = await getDeviceReadiness()
+      if (signal.aborted) return
+      setEnabled(readiness.enabled)
+      setWorkerReady(readiness.enabled && readiness.status === 'ready')
+      setReadinessState(readiness)
+    } catch (error) {
+      if (signal.aborted) return
+      setWorkerReady(false)
+      setReadinessState({status:'not_ready',message:'Network scanning availability could not be checked. Try refreshing the page.'})
+      throw error
+    }
+  }, { intervalMs: READINESS_LIVE_REFRESH_MS, idleIntervalMs: READINESS_IDLE_REFRESH_MS, live: !workerReady })
 
   async function addDevice() {
     if (!form.primary_locator.trim()) return
