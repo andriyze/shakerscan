@@ -16,7 +16,7 @@ except ModuleNotFoundError:  # package import layout
 try:
     from capabilities.sql_error_signatures import sql_error_signatures
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
-    from runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal_error, refusal_status
+    from runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal, refusal_error
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
     from runtime.request_shape import resolve_json_field_path
@@ -24,7 +24,7 @@ try:
 except ModuleNotFoundError:  # package imports in host-side tests
     from .sql_error_signatures import sql_error_signatures
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
-    from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal_error, refusal_status
+    from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal, refusal_error
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
     from ..runtime.request_shape import resolve_json_field_path
@@ -406,12 +406,12 @@ class RequestMutationVerificationAdapter:
                 parser_version=REQUEST_MUTATION_PARSER_VERSION,
             )
         refused = (
-            refusal_status(control.status_code, control.response_headers)
-            if self.request_class != "safe_authentication" else None
+            refusal(control.status_code, control.response_headers)
+            if self.request_class != "safe_authentication" and not control.error_code else None
         )
-        if refused is not None and not control.error_code:
-            # The target refused the replayed control (a captured request never keeps its
-            # credentials). The mutation would meet the same wall, so it is not sent and the
+        if refused is not None and refused[1] == AUTHENTICATION_REQUIRED:
+            # The target asked the replayed control for credentials (a captured request never
+            # keeps them). The mutation would meet the same wall, so it is not sent and the
             # candidate is inconclusive, not "not proven". A login form's 401 is its answer to a
             # wrong password, so a safe_authentication request is still compared.
             return CapabilityAdapterResult(
@@ -431,7 +431,7 @@ class RequestMutationVerificationAdapter:
                     "inconclusive_reason": AUTHENTICATION_REQUIRED,
                     "secret_values_visible": False,
                 },),
-                errors=(refusal_error(refused),),
+                errors=(refusal_error(*refused),),
                 actual_budget=self._actual_budget(
                     attempted=1,
                     wall_seconds=max(1, math.ceil(time.monotonic() - started)),
@@ -494,6 +494,14 @@ class RequestMutationVerificationAdapter:
         errors = tuple(
             item for item in (control.error_code, changed.error_code) if item
         )
+        if refused is not None and proof_status == "not_proven":
+            # Any other 403 (a WAF, an ownership check) was still sent the mutation, which may
+            # get past it; with no signal, a comparison against the refusal is not a verdict.
+            observation.update({
+                "finding_verdict": "inconclusive", "inconclusive_reason": refused[1],
+            })
+            errors = (refusal_error(*refused), *errors)
+            partial = True
         return CapabilityAdapterResult(
             status="partial" if partial else "success",
             observations=(observation,),

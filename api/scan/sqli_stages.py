@@ -76,7 +76,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .external_process import BATCH_ATTEMPT_REQUEST_HEADROOM, paced_request_delay
-from .verifier_refusal import is_refusal_error
+
+try:
+    from runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal_reason
+except ModuleNotFoundError:  # package import layout
+    from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, refusal_reason
 
 # Requests a negative verdict costs per technique and tested field (soak host, 2026-10-07):
 # the stage order. Cheapest first was kept over sqlmap's own B, E, U, T order and over B, U, E, T
@@ -251,9 +255,11 @@ class PriorStages:
     killed_sent: dict[str, int] = field(default_factory=dict)
     # The candidate's own qualifying rate measurements (``rate_sample``), every action.
     rate_samples: list[RateSample] = field(default_factory=list)
-    # The error of a unit the target refused (``authentication_required:401``): every unit of
-    # the candidate would meet the same refusal, so none is run again.
+    # The error of a unit the target asked for credentials (``authentication_required:401``):
+    # every unit of the candidate would meet the same refusal, so none is run again.
     refusal: str | None = None
+    # Units a plain 403 refused (``target_refused:403``): run, never a verdict, not re-run.
+    refused_units: dict[str, str] = field(default_factory=dict)
 
     @property
     def seconds_per_request(self) -> float | None:
@@ -315,10 +321,13 @@ def prior_stages(
             if sample is not None:
                 prior.rate_samples.append((key, sample))
             refusal = next((
-                str(error) for error in item.get("errors") or () if is_refusal_error(error)
+                str(error) for error in item.get("errors") or () if refusal_reason(error)
             ), None)
             if refusal is not None:
-                prior.refusal = prior.refusal or refusal
+                if refusal_reason(refusal) == AUTHENTICATION_REQUIRED:
+                    prior.refusal = prior.refusal or refusal
+                else:
+                    prior.refused_units.setdefault(key, refusal)
                 continue
             if _status(item.get("status")) in _SUCCESS and not item.get("timed_out"):
                 prior.finished.setdefault(key, (source, item))
@@ -718,13 +727,21 @@ async def run_staged_sqli_attempt(
     samples = list(prior.rate_samples)
     carried_techniques: set[str] = set()
     refusal = prior.refusal
+    # Units a plain 403 refused, here or in an earlier attempt: tested, but never a verdict.
+    refused_units = dict(prior.refused_units)
     if refusal is not None:
-        # An earlier unit was refused (401/403, a redirect to sign-in): every unit would be,
-        # so nothing is sent again and no technique reads as settled by it.
+        # An earlier unit was asked for credentials (401/407, a 403 challenge, a redirect to
+        # sign-in): every unit would be, so nothing is sent again and none reads as settled.
         errors.append(refusal)
     for technique, field_name in stage_units(fields) if refusal is None else ():
         key = unit_key(technique, field_name)
         label = {"technique": technique, **({"field": field_name} if field_name else {})}
+        if key in refused_units and key not in prior.finished:
+            # Refused before and not re-run: still no verdict for this unit.
+            stages.append({**label, "outcome": "target_refused", "source": "carried"})
+            errors.append(refused_units[key])
+            complete = False
+            continue
         finished = prior.finished.get(key) or prior.finished.get(technique)
         if finished is not None:
             source, item = finished
@@ -884,14 +901,21 @@ async def run_staged_sqli_attempt(
             })
         observations.extend(stage_observations)
         errors.extend(stage_errors)
-        refusal = next((item for item in stage_errors if is_refusal_error(item)), None)
-        if refusal is not None:
-            # The target refused this unit's baseline: the technique tested nothing, and the
-            # candidate's other units would meet the same refusal. It is inconclusive for
-            # authentication, never a settled negative, and no continuation resumes it.
-            stages.append({**label, "outcome": "authentication_required"})
+        stage_refusal = next((item for item in stage_errors if refusal_reason(item)), None)
+        if stage_refusal is not None and not _proved(stage_observations):
             complete = False
-            break
+            if refusal_reason(stage_refusal) == AUTHENTICATION_REQUIRED:
+                # The target asked for credentials: the technique tested nothing, and the
+                # candidate's other units would meet the same wall. Inconclusive for
+                # authentication, never a settled negative, and no continuation resumes it.
+                refusal = stage_refusal
+                stages.append({**label, "outcome": AUTHENTICATION_REQUIRED})
+                break
+            # A plain 403 (a WAF, an ownership check): a later technique's payloads may still
+            # get past it, so the others run, but this unit's negative is not a verdict.
+            refused_units[key] = stage_refusal
+            stages.append({**label, "outcome": "target_refused"})
+            continue
         stages.append({**label, "outcome": status, "timed_out": stage_killed})
         if status in _SUCCESS and not stage_killed:
             settled.add(key)
@@ -908,6 +932,9 @@ async def run_staged_sqli_attempt(
         if status not in _SUCCESS:
             complete = False
             break
+    refused_keys = set(refused_units) - settled
+    if refusal is None and refused_keys and not proven:
+        refusal = refused_units[min(refused_keys)]
     if was_cancelled:
         outcome = "cancelled"
     elif refusal is not None and not proven:
@@ -916,11 +943,14 @@ async def run_staged_sqli_attempt(
         outcome = "success"
     else:
         outcome = "partial"
+    authentication = refusal is not None and refusal_reason(refusal) == AUTHENTICATION_REQUIRED
     resume = (
-        Resume(None) if outcome in {"success", "cancelled"} or refusal is not None else resume_plan(
-            settled, wall_killed, fields=fields, field_count=count, rate_samples=samples,
-            killed_sent=killed_sent, round_wall_ceiling=round_wall_ceiling,
-            scan_wall_share=scan_wall_share,
+        Resume(None) if outcome in {"success", "cancelled"} or authentication else resume_plan(
+            # A refused unit is not re-run, so it is planned like a settled one; a continuation
+            # resumes only units the wall stopped.
+            settled | refused_keys, wall_killed, fields=fields, field_count=count,
+            rate_samples=samples, killed_sent=killed_sent,
+            round_wall_ceiling=round_wall_ceiling, scan_wall_share=scan_wall_share,
         )
     )
     if resume.budget_inconclusive:

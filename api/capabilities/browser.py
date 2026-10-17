@@ -24,6 +24,7 @@ from .browser_steps import browser_steps, browser_surface, ELEMENT_DESCRIPTOR, v
 try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from pinned_socks_proxy import PinnedSocksProxy
+    from runtime.auth_refusal import AUTHENTICATION_REQUIRED, is_login_location, refusal
     from runtime.models import PreparedExecution, TargetBinding
     from runtime.request_shape import nested_json_body
     from runtime.secret_material import contains_secret_material
@@ -31,6 +32,7 @@ try:
 except ModuleNotFoundError:  # package imports in host-side tests
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..pinned_socks_proxy import PinnedSocksProxy
+    from ..runtime.auth_refusal import AUTHENTICATION_REQUIRED, is_login_location, refusal
     from ..runtime.models import PreparedExecution, TargetBinding
     from ..runtime.request_shape import nested_json_body
     from ..runtime.secret_material import contains_secret_material
@@ -49,7 +51,6 @@ except ModuleNotFoundError:  # package imports in host-side tests
 
 SAFE_BROWSER_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # Navigation answers that mean the proof never saw the route under test.
-_AUTH_REFUSAL_STATUSES = frozenset({401, 403, 407})
 MAX_BROWSER_RESPONSE_OBSERVATIONS = 200
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _SAFE_CSS_SELECTOR = re.compile(r"^[A-Za-z0-9_.#\-\[\]=:'\" ()>+~,*^$|]+$")
@@ -1065,8 +1066,20 @@ async def _execute_browser_action(
             # completed coverage (an authenticated candidate replayed without its session
             # used to read as "examined, not vulnerable").
             navigation_status = navigation_observation["status_code"]
-            if not proven and navigation_status in _AUTH_REFUSAL_STATUSES:
-                proof_observation["inconclusive_reason"] = "authentication_required"
+            refused = None if proven else refusal(
+                navigation_status,
+                dict(getattr(response, "headers", None) or {}) if response is not None else {},
+            )
+            if refused is None and not proven and is_login_location(page.url) and not (
+                is_login_location(getattr(prepared, "url", ""))
+            ):
+                # The browser followed a redirect to sign-in: the route under test never
+                # rendered.
+                refused = (int(navigation_status or 0), AUTHENTICATION_REQUIRED)
+            if refused is not None:
+                # A 403 that asks for no credentials (a WAF, an access rule) is told apart:
+                # adding a credential profile would not help it.
+                proof_observation["inconclusive_reason"] = refused[1]
                 return _browser_result(
                     prepared,
                     status="partial",
@@ -1075,7 +1088,7 @@ async def _execute_browser_action(
                     started=started,
                     observations=[navigation_observation, proof_observation, *responses],
                     blocked=blocked,
-                    errors=(f"authentication_required:{navigation_status}",),
+                    errors=(f"{refused[1]}:{refused[0]}",),
                 )
             # A pinned browser blocks every off-origin subresource by design, so a real
             # single-page app always reports some blocked requests. That is the transport
