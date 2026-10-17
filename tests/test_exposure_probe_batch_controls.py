@@ -199,3 +199,33 @@ def test_a_verified_exposure_hands_its_values_to_the_backend_and_never_to_the_re
 def test_a_body_served_everywhere_hands_nothing_to_the_backend(monkeypatch):
     _run(monkeypatch, lambda _url: (200, DOTENV), backend_cls=_KeepingBackend)
     assert _run.backend.kept == []
+
+
+class _ReferencingBackend(_KeepingBackend):
+    async def record_discovered_secrets(self, action_id, values, resource):
+        await super().record_discovered_secrets(action_id, values, resource)
+        refs = [f"secret://{uuid.uuid5(uuid.NAMESPACE_URL, label)}" for _value, label in values]
+        return {"stored": len(values), "refreshed": 0, "refs": refs}
+
+
+def test_each_kept_value_links_the_reference_it_is_stored_under(monkeypatch):
+    def answer(url):
+        return (200, DOTENV) if url.endswith("/.env") else (404, b"not found")
+
+    receipt, proofs, _transport = _run(monkeypatch, answer, backend_cls=_ReferencingBackend)
+    verified = [item for item in proofs if item.get("proof_state") == "verified"]
+    linked = {item["field"]: item.get("stored_as") for item in verified[0]["exposure_fingerprints"]}
+    assert linked["DB_PASSWORD"] == f"secret://{uuid.uuid5(uuid.NAMESPACE_URL, 'DB_PASSWORD')}"
+    assert linked["STRIPE_SECRET_KEY"] == f"secret://{uuid.uuid5(uuid.NAMESPACE_URL, 'STRIPE_SECRET_KEY')}"
+    text = json.dumps([receipt.observations, receipt.redacted_execution], default=str)
+    for canary in (PASSWORD, STRIPE):
+        assert canary not in text
+
+
+def test_a_backend_that_returns_counts_only_links_nothing(monkeypatch):
+    def answer(url):
+        return (200, DOTENV) if url.endswith("/.env") else (404, b"not found")
+
+    _receipt, proofs, _transport = _run(monkeypatch, answer, backend_cls=_KeepingBackend)
+    verified = [item for item in proofs if item.get("proof_state") == "verified"]
+    assert all("stored_as" not in item for item in verified[0]["exposure_fingerprints"])

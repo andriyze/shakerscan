@@ -22932,11 +22932,22 @@ async def _run_job_under_lease(redis_client: Any, lease: QueueLease, job_data: d
 DISCOVERED_SECRET_SWEEP_INTERVAL_SECONDS = 3_600
 
 
+DISCOVERED_SECRET_DERIVE_BATCHES = 5
+
+
 async def sweep_discovered_secrets() -> dict[str, int]:
-    """Mark expired discovered secrets and delete long-unusable ciphertexts (hourly)."""
-    from hunt.discovered_secrets import expire_due
+    """Mark expired discovered secrets and delete long-unusable ciphertexts (hourly), and derive
+    the metadata of secrets stored before 2.11 (here, in the worker, which holds the key)."""
+    from hunt.discovered_secrets import DERIVE_BATCH, derive_missing, expire_due
     async with db_pool.acquire() as conn:
-        return await expire_due(conn)
+        counts = await expire_due(conn)
+        derived = 0
+        for _ in range(DISCOVERED_SECRET_DERIVE_BATCHES):
+            done = await derive_missing(conn, limit=DERIVE_BATCH)
+            derived += done
+            if done < DERIVE_BATCH:
+                break
+        return {**counts, "derived": derived}
 
 
 async def sweep_stale_budget_reservations() -> dict[str, int]:

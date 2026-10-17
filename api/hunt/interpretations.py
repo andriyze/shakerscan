@@ -138,12 +138,27 @@ def _escape_invisible(text: str) -> str:
                    for ch in text)
 
 
+# B19: ``password_hash: not returned`` or ``token=absent`` describes a test, it carries no
+# credential. A secret-named key whose value is one of these words is read as prose; any other
+# value (``password: hunter2``) is still refused.
+_DESCRIPTIVE_VALUE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])([A-Za-z_][A-Za-z0-9_-]{0,63})(\s*[=:]\s*)"
+    r"(none|null|nil|empty|absent|missing|present|exposed|hidden|masked|redacted|omitted|"
+    r"returned|leaked|unset|not|no|yes|true|false|n/a|bcrypt|scrypt|argon2(?:id|i|d)?|pbkdf2|"
+    r"sha-?1|sha-?256|sha-?512|md5|plaintext|cleartext|hashed|salted|required|optional|ignored|"
+    r"accepted|rejected|unchanged|changed|valid|invalid|expired|weak|strong|default|shown|visible)"
+    r"(?![A-Za-z0-9_-])")
+
+
 def _looks_secret(text: str) -> bool:
     try:
         from redaction import redact_text
     except ModuleNotFoundError:  # package import in host-side tests
         from scanner.redaction import redact_text
-    return redact_text(text) != text
+    if redact_text(text) == text:
+        return False
+    prose = _DESCRIPTIVE_VALUE.sub(lambda match: f"{match.group(1)} {match.group(3)}", text)
+    return redact_text(prose) != prose
 
 
 def clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:

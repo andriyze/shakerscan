@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import urllib.parse
 from collections import Counter
 from typing import Any, Mapping, Sequence
@@ -192,6 +193,10 @@ _FAMILY_BY_CAPABILITY = {
 
 # The candidate manifests a family's verifier slices index. A family fed only by these whose
 # manifests hold no entry had nothing to test, so planning no action for it was correct.
+# hunt/discovered_secrets.SECRET_REF_PATTERN; a stored observation's reference is kept only in it.
+_SECRET_REF_RE = re.compile(
+    r"secret://[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
 _CANDIDATE_MANIFEST_KINDS_BY_FAMILY: Mapping[str, frozenset[str]] = {
     "xss": frozenset({"candidate", "request_candidate"}),
     "sqli": frozenset({"candidate", "request_candidate"}),
@@ -981,12 +986,21 @@ def _findings_for_action(
             # Only the shape the probe persists: field name, category, fingerprint, length.
             exposure_fingerprints = [
                 {
-                    name: entry.get(name)
-                    for name in ("field", "category", "value_fingerprint", "value_length")
+                    **{
+                        name: entry.get(name)
+                        for name in ("field", "category", "value_fingerprint", "value_length")
+                    },
+                    # The discovered secret the value is kept as, when the worker kept it.
+                    # (``stored_as``: a key name with ``secret`` in it is masked by every redactor.)
+                    **({"stored_as": entry["stored_as"]}
+                       if _SECRET_REF_RE.fullmatch(str(entry.get("stored_as") or "")) else {}),
                 }
                 for entry in list(item.get("exposure_fingerprints") or ())[:50]
                 if isinstance(entry, Mapping)
             ]
+            secret_refs = sorted({
+                entry["stored_as"] for entry in exposure_fingerprints if entry.get("stored_as")
+            })
             graphql_title = _GRAPHQL_EXPOSURE_TITLES.get(exposure_class)
             finding = _base_finding(
                 tool="shakerscan_exposure_probe",
@@ -1011,6 +1025,7 @@ def _findings_for_action(
                     # The class names the contract; a stored observation cannot pick its own.
                     "proof_contract": EXPOSURE_PROOF_CONTRACTS.get(exposure_class),
                     "exposure_fingerprints": exposure_fingerprints,
+                    **({"discovered_refs": secret_refs} if secret_refs else {}),
                     "discovered_via": item.get("discovered_via"),
                     "canonical_capability": result.capability_name,
                     "capability_receipt": receipt,
