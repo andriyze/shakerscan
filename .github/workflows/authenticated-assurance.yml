@@ -38,7 +38,7 @@ jobs:
           mkdir -p artifacts
           git rev-parse HEAD > artifacts/source-commit.txt
           git archive --format=tar.gz --output=artifacts/source.tar.gz HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: assurance-source-${{ github.sha }}
           path: |
@@ -127,7 +127,7 @@ jobs:
           fi
       - name: Upload acceptance results (never database dumps or keys)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: assurance-acceptance-${{ github.sha }}
           path: artifacts/assurance-acceptance.xml

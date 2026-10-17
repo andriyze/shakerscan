@@ -92,7 +92,7 @@ jobs:
           PY
       - name: Retain target migration evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: target-assets-${{ github.sha }}
           path: artifacts/target-assets.xml
@@ -133,7 +133,7 @@ jobs:
           # Include generators and fixtures so contract failures can be reproduced.
           git archive --format=tar.gz HEAD > artifacts/maintenance-source.tar.gz
           sha256sum artifacts/maintenance-source.tar.gz > artifacts/source-sha256.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: maintenance-inputs-${{ github.sha }}
           path: artifacts
@@ -158,7 +158,7 @@ jobs:
               (destination / name).write_text(json.dumps(build(api_module.app), indent=2) + '\n', encoding='utf-8')
           # Deliberately do not update golden fixtures: the full suite still checks drift.
           PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: api-characterization-${{ github.sha }}
           path: artifacts/generated-api-contract
@@ -192,7 +192,7 @@ jobs:
           npx playwright test tests/browser/hunt-review-refresh.spec.ts
       - name: Upload maintenance test evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: maintenance-results-${{ github.sha }}
           path: |
@@ -242,7 +242,7 @@ jobs:
           PY
       - name: Retain collection acceptance evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: collection-postgres-${{ github.sha }}
           path: artifacts/collection-postgres.xml

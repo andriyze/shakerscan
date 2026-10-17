@@ -51,7 +51,7 @@ jobs:
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/browser-qa-source-revision.txt"
           git archive --format=tar.gz --output="$RUNNER_TEMP/browser-qa-source.tar.gz" HEAD
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: browser-qa-source-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
@@ -98,7 +98,7 @@ jobs:
             tests/integration/test_browser_profile_restore.py
       - name: Retain acceptance evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: browser-login-qa-${{ github.event.pull_request.head.sha || github.sha }}
           path: artifacts/browser-login-qa.xml
