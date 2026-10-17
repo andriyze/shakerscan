@@ -215,6 +215,35 @@ def test_ascending_cursor_uses_greater_than_and_typed_values():
     assert nxt.keyset_clauses(lc.SqlParams()) == ["(w.rank, w.id) > ($1, $2)"]
 
 
+COMPOUND = lc.ListSpec(
+    scope="ranked",
+    sorts={"severity": lc.SortKey("w.rank", "int", then=(("w.created_at", "datetime"),))},
+    default_sort="-severity",
+    fields={"id": "w.id", "rank": "w.rank"},
+    id_expr="w.id",
+)
+
+
+def test_a_compound_sort_orders_and_resumes_on_every_key():
+    plan = COMPOUND.plan(lc.Page(limit=1))
+    assert plan.order_by == "w.rank DESC, w.created_at DESC, w.id DESC"
+    assert "w.rank AS __list_sort, w.created_at AS __list_sort_1, w.id AS __list_id" in plan.select_list
+    rows = [{**r, "__list_sort": r["rank"], "__list_sort_1": r["created_at"]} for r in _rows(2)]
+    cursor = plan.envelope(rows)["next_cursor"]
+    nxt = COMPOUND.plan(lc.Page(limit=1, cursor=cursor))
+    assert nxt.position == (0, rows[0]["created_at"], rows[0]["id"])
+    assert nxt.keyset_clauses(lc.SqlParams()) == ["(w.rank, w.created_at, w.id) < ($1, $2, $3)"]
+    # after(): the same position from a fetched row, for endpoints that drop rows and fetch again.
+    assert plan.after(rows[0]).position == nxt.position
+    # A cursor carrying the wrong number of keys is not one this server issued for the sort.
+    payload, _ = cursor.split(".")
+    body = lc._unb64(payload).replace(b'"k":[0,', b'"k":[')
+    forged = lc._b64(body) + "." + lc._mac(lc._b64(body))
+    with pytest.raises(HTTPException) as caught:
+        COMPOUND.plan(lc.Page(limit=1, cursor=forged))
+    assert caught.value.detail["error"] == "invalid_cursor"
+
+
 def _first_cursor(filters=None, page=None):
     page = page or lc.Page(limit=1)
     return SPEC.plan(page, filters).envelope(_rows(2))["next_cursor"]

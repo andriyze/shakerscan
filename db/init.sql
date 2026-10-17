@@ -1297,7 +1297,17 @@ CREATE TABLE findings (
 
     -- Timestamps
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    -- Classification and analyst triage (the startup baseline adds these to older databases).
+    ai_classification_source TEXT,
+    analyst_verdict TEXT,
+    analyst_verdict_at TIMESTAMPTZ,
+    analyst_verdict_notes TEXT,
+
+    -- Indexed list order (critical 5 .. info/other 1), set by trg_finding_severity_rank; a load
+    -- that bypasses the trigger gets 1 and the API's background repair corrects it.
+    severity_rank SMALLINT NOT NULL DEFAULT 1
 );
 
 -- Every Hunt that deterministically verified a finding (D21). findings.hunt_run_id names the
@@ -1793,6 +1803,28 @@ CREATE UNIQUE INDEX idx_findings_target_fingerprint
     ON findings(target_id, fingerprint)
     WHERE target_id IS NOT NULL;
 
+-- Bounded findings lists (2.11): api/finding_routes/list_schema.py installs the same rank function,
+-- trigger and statistics on upgraded databases.
+CREATE OR REPLACE FUNCTION finding_severity_rank(severity TEXT) RETURNS SMALLINT
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT (CASE severity
+        WHEN 'critical' THEN 5 WHEN 'high' THEN 4 WHEN 'medium' THEN 3 WHEN 'low' THEN 2
+        ELSE 1 END)::smallint
+$$;
+CREATE OR REPLACE FUNCTION set_finding_severity_rank() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.severity_rank := finding_severity_rank(NEW.severity);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_finding_severity_rank
+BEFORE INSERT OR UPDATE OF severity, severity_rank ON findings
+FOR EACH ROW EXECUTE FUNCTION set_finding_severity_rank();
+CREATE STATISTICS findings_proof_gate_stats ON (COALESCE(jsonb_typeof(evidence) = 'object' AND evidence ?| ARRAY['browser_proof', 'executed', 'extracted_data', 'extraction_evidence', 'payload_executed', 'proof_contract', 'proof_contract_v2', 'proof_of_exploitation', 'proof_producer', 'proof_type']::text[], false)) FROM findings;
+-- The list indexes (keyset, per-asset counts, proof candidates, trigram search) are built
+-- CONCURRENTLY by the API's background builder (api/runtime/loop_scale_indexes.py), on fresh and
+-- upgraded databases alike; pg_trgm is installed there when this role may.
+
 -- Finding verifications
 CREATE INDEX idx_finding_verifications_finding_id ON finding_verifications(finding_id, created_at DESC);
 CREATE INDEX idx_finding_verifications_status ON finding_verifications(status);
@@ -1885,6 +1917,10 @@ EXECUTE FUNCTION update_target_stats();
 CREATE OR REPLACE FUNCTION update_finding_timestamps()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- A schema backfill (api/finding_routes/list_schema.py) is not an edit: keep updated_at.
+    IF current_setting('shakerscan.findings_backfill', true) = 'on' THEN
+        RETURN NEW;
+    END IF;
     NEW.updated_at = NOW();
     IF NEW.status = 'resolved' AND OLD.status != 'resolved' THEN
         NEW.resolved_at = NOW();

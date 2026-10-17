@@ -58,6 +58,7 @@ install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 
 findings_router = sys.modules["finding_routes.router"]
+from finding_routes.list_query import INDEXED_UNDETERMINED_SQL, VERIFIED_FILTER_SQL  # noqa: E402
 from capabilities import exposure_probe  # noqa: E402
 from finding_routes.list_filters import PROOF_STATES, parse_choice_list  # noqa: E402
 from finding_routes.remediation import finding_remediation  # noqa: E402
@@ -81,35 +82,67 @@ class _Request:
 class _Conn:
     """The database's side of the list query: the SQL proof predicate (answered with the Python
     projection it must equal; tests/test_findings_proof_sql_postgres.py proves that on real
-    PostgreSQL), LIMIT/OFFSET, and the undetermined-row check."""
+    PostgreSQL), LIMIT/OFFSET over the page ids, the page rows, the count and the undetermined-row
+    check."""
 
     def __init__(self, rows, *, undetermined=False):
         self.rows = rows
         self.undetermined = undetermined
         self.queries: list[tuple[str, tuple]] = []
 
-    def _answer(self, query, args):
+    @asynccontextmanager
+    async def transaction(self):
+        yield
+
+    async def execute(self, query, *args):
+        assert query == "SET LOCAL jit = off", query
+
+    def _matching(self, query, args):
         rows = [dict(row) for row in self.rows]
+        if "f.id = ANY(" in query:
+            # Decided rows by the SQL projection, undetermined rows by the ids Python resolved.
+            resolved = next(arg for arg in reversed(args) if isinstance(arg, list) and arg != ["verified"])
+            states = next((arg for arg in args if isinstance(arg, list) and set(arg) <= set(PROOF_STATES)),
+                          ["verified"])
+            return [row for row in rows if (row["id"] in resolved if row.get("_undetermined") else
+                    findings_router.finding_proof_fields(dict(row))["proof_state"] in states)]
         if findings_router.FINDING_PROOF_STATE_SQL in query:
             states = next(arg for arg in args if isinstance(arg, list) and set(arg) <= set(PROOF_STATES))
-            rows = [row for row in rows if findings_router.finding_proof_fields(dict(row))["proof_state"] in states]
-            for row in rows:
-                row["total_count"] = len(rows)
+        elif VERIFIED_FILTER_SQL in query:
+            states = ["verified"]
+        else:
+            return rows
+        return [row for row in rows if findings_router.finding_proof_fields(dict(row))["proof_state"] in states]
+
+    def _answer(self, query, args):
+        if "unnest($1::uuid[])" in query:
+            by_id = {row["id"]: dict(row) for row in self.rows}
+            page = []
+            for identifier in args[0]:
+                row = by_id[identifier]
+                row["_proof_state"] = findings_router.finding_proof_fields(dict(row))["proof_state"]
+                row["_proof_undetermined"] = False
+                row["_proof_evidence"] = None
+                page.append(row)
+            return page
+        rows = self._matching(query, args)
         if "OFFSET $" in query:
             rows = rows[args[-1]:args[-1] + args[-2]]
         elif "LIMIT $" in query:
             rows = rows[:args[-1]]
-        return rows
+        return [{"id": row["id"]} for row in rows]
 
     async def fetch(self, query, *args):
         self.queries.append((query, args))
+        if INDEXED_UNDETERMINED_SQL in query:
+            return [dict(row) for row in self.rows if row.get("_undetermined")]
         return self._answer(query, args)
 
     async def fetchval(self, query, *args):
         self.queries.append((query, args))
         if query.startswith("SELECT EXISTS"):
             return self.undetermined
-        return len(self.rows)
+        return len(self._matching(query, args))
 
 
 def _list(monkeypatch, rows, conn=None, **params):
@@ -166,51 +199,32 @@ def test_the_proof_filter_returns_exactly_what_the_badge_says_and_paginates(monk
     assert [item["id"] for item in proven["findings"]] == ["d"]
     assert proven["findings"][0]["proof_state"] == "verified"
     # The proof filter is one more WHERE clause, paginated by the database like any other.
-    exists, _ = conn.queries[0]
+    undetermined, _ = conn.queries[0]
     query, args = conn.queries[1]
-    assert exists.startswith("SELECT EXISTS") and findings_router.FINDING_PROOF_UNDETERMINED_SQL in exists
-    assert f"{findings_router.FINDING_PROOF_STATE_SQL} = ANY(" in query and ["verified"] in args
+    # First the rows SQL cannot decide, through their partial index (none here).
+    assert INDEXED_UNDETERMINED_SQL in undetermined and "LIMIT 10001" in undetermined
+    # verified alone reads the partial index of rows that could be proven.
+    assert VERIFIED_FILTER_SQL in query
     assert "OFFSET" in query and list(args[-2:]) == [1, 1]
+    several, conn = _list(monkeypatch, rows, proof_state="verified,suspected", limit=1)
+    page_query, page_args = next((q, a) for q, a in conn.queries if q.startswith("SELECT f.id FROM findings f"))
+    assert f"{findings_router.FINDING_PROOF_STATE_SQL} = ANY(" in page_query and ["verified", "suspected"] in page_args
     leads, _ = _list(monkeypatch, rows, proof_state="suspected,unverified")
     assert [(item["id"], item["proof_state"]) for item in leads["findings"]] == [("b", "suspected"), ("c", "unverified")]
 
 
-class _StreamingConn(_Conn):
-    """A connection whose rows include one the SQL projection cannot decide."""
-
-    def __init__(self, rows):
-        super().__init__(rows, undetermined=True)
-        self.streamed: list[str] = []
-
-    @asynccontextmanager
-    async def transaction(self):
-        yield
-
-    def cursor(self, query, *args, prefetch=None):
-        self.streamed.append(query)
-        rows = [dict(row) for row in self.rows]
-
-        class _Cursor:
-            def __aiter__(self):
-                return self._iterate()
-
-            async def _iterate(self):
-                for row in rows:
-                    yield row
-
-        return _Cursor()
-
-
-def test_an_undecidable_row_sends_the_filter_through_the_python_projection(monkeypatch):
+def test_an_undecidable_row_is_projected_in_python_and_the_database_still_pages(monkeypatch):
     rows = [_row(str(n), "high" if n % 3 else "low") for n in range(40)]
-    conn = _StreamingConn(rows)
-    result, _ = _list(monkeypatch, rows, conn=conn, proof_state="suspected", limit=5, offset=20)
-    # Nothing is refused or sampled: every row is projected from a cursor, in query order.
-    expected = [str(n) for n in range(40) if n % 3]
+    # Rows SQL cannot decide: one Python calls suspected (a low with a suspected triage), one not.
+    rows[6].update(_undetermined=True, evidence='{"triage": "{\\"suspected\\": true, \\"x\\": NaN}"}')
+    rows[9].update(_undetermined=True, evidence='{"triage": "{\\"x\\": NaN}"}')
+    result, conn = _list(monkeypatch, rows, proof_state="suspected", limit=5, offset=20)
+    expected = [str(n) for n in range(40) if n % 3 or n == 6]
     assert result["total"] == len(expected)
     assert [item["id"] for item in result["findings"]] == expected[20:25]
-    (query,) = conn.streamed
-    assert findings_router.FINDING_PROOF_STATE_SQL not in query and "LIMIT" not in query.split("ORDER BY")[-1]
+    page_query, page_args = next((q, a) for q, a in conn.queries if q.startswith("SELECT f.id FROM findings f"))
+    # No streaming: the resolved ids join the SQL clause, and LIMIT/OFFSET stay in the database.
+    assert "f.id = ANY(" in page_query and ["6"] in page_args and "OFFSET" in page_query
 
 
 class _ConnWithCandidates(_Conn):

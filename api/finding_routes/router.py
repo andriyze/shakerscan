@@ -42,6 +42,7 @@ try:
     )
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
+    from list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 except ModuleNotFoundError:  # package import in host-side tests
     from ..api_utils import (
         SEVERITY_ORDER, _clean_string_list, _int_or_none, _iso_or_none,
@@ -58,54 +59,34 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..scan.retest_authority import REPLAY_OUT_OF_SCOPE, admit_retest, admitted_authority_json
+    from ..list_contract import DEFAULT_LIMIT, MAX_LIMIT, SqlParams, page_params
 
 
-from .hunt_scope import candidate_hunt_predicate, finding_hunt_predicate
+from .hunt_scope import candidate_hunt_predicate
 from .list_filters import (
-    PROOF_STATES, SEVERITIES, host_in_domain_sql, parse_choice_list, stream_proof_matches,
+    PROOF_STATES, SEVERITIES, host_in_domain_sql, parse_choice_list,
 )
-from .proof_sql import proof_state_sql, undetermined_proof_sql
+from .list_query import (
+    LEGACY_ONLY_PARAMETERS, LIST_V1_PARAMETERS, PROOF_STATE_FILTER_SQL, PROOF_STATE_ROW_SQL,
+    ROW_JOINS_SQL, UNDETERMINED_SQL, FindingFilters, _source_type_clause,
+    legacy_order, legacy_page, resolved_proof_filter, row_select_sql, v1_page,
+    without_jit,
+)
 from .remediation import finding_remediation
 
 
 router = APIRouter()
 
-# GET /findings: one row per finding with its target and latest retest. The proof projection reads
-# the latest retest's mode, so the SQL form of the projection uses the same expression.
-_LATEST_RETEST_MODE_SQL = "CASE WHEN latest_retest.verdict IS NOT NULL THEN latest_retest.verification_mode END"
-FINDINGS_LIST_SELECT_SQL = f"""
-            SELECT f.*,
-                   COALESCE(t.url, ait.endpoint_url, dt.primary_locator) as target_url,
-                   COALESCE(t.name, ait.name, dt.name) as target_name,
-                   t.root_domain,
-                   ait.endpoint_url as ai_target_url,
-                   ait.name as ai_target_name,
-                   latest_retest.status AS latest_retest_status,
-                   latest_retest.result_status AS latest_retest_result_status,
-                   COALESCE(latest_retest.verdict, f.last_verification_verdict) AS latest_retest_verdict,
-                   COALESCE(latest_retest.confidence, f.last_verification_confidence) AS latest_retest_confidence,
-                   COALESCE(latest_retest.completed_at, f.last_verified_at) AS latest_retest_completed_at,
-                   {_LATEST_RETEST_MODE_SQL} AS latest_retest_mode,
-                   COUNT(*) OVER() AS total_count"""
-FINDINGS_LIST_FROM_SQL = """
-            FROM findings f
-            LEFT JOIN targets t ON f.target_id = t.id
-            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
-            LEFT JOIN device_targets dt ON f.device_target_id = dt.id
-            LEFT JOIN LATERAL (
-                SELECT status, result_status, verdict, confidence, completed_at, verification_mode
-                FROM finding_verifications
-                WHERE finding_id=f.id
-                ORDER BY created_at DESC, id DESC
-                LIMIT 1
-            ) latest_retest ON TRUE
-            WHERE 1=1
-        """
-FINDING_PROOF_STATE_SQL = proof_state_sql(
-    evidence="f.evidence", severity="f.severity",
-    verdict="f.last_verification_verdict", retest_mode=_LATEST_RETEST_MODE_SQL,
-)
-FINDING_PROOF_UNDETERMINED_SQL = undetermined_proof_sql("f.evidence")
+# GET /findings proof SQL (list_query.py): over a fetched row (latest retest from its LATERAL) and
+# as a WHERE clause over findings alone. Both answer exactly what finding_proof_fields answers;
+# tests/test_findings_proof_sql_postgres.py holds them together on real PostgreSQL.
+FINDING_PROOF_STATE_SQL = PROOF_STATE_FILTER_SQL
+FINDING_PROOF_ROW_STATE_SQL = PROOF_STATE_ROW_SQL
+FINDING_PROOF_UNDETERMINED_SQL = UNDETERMINED_SQL
+# One row per finding with its target and latest retest (every column, no filter): the row shape
+# the proof projection reads.
+FINDINGS_LIST_SELECT_SQL = f"SELECT {row_select_sql(details=True)}"
+FINDINGS_LIST_FROM_SQL = f" FROM findings f {ROW_JOINS_SQL} WHERE 1=1 "
 
 _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}
@@ -192,46 +173,15 @@ _FINDING_DETAIL_ONLY_FIELDS = {
 
 
 def _source_type_filter_sql(source_type: Optional[str]) -> str:
-    """SQL fragment for the findings `source_type` filter (first-class taxonomy).
+    """SQL fragment (`` AND ...``) for the findings `source_type` filter (first-class taxonomy).
 
     Values: dast / device / ai / ai_gate / ai_session / deep_hunt / autonomous /
     model_intake / asm / manual.
     model_intake, ASM, manual, and the AI sources filter separately from DAST;
     the UI exposes this same product taxonomy.
     """
-    if source_type == "ai":
-        return " AND (f.source IN ('ai_gate', 'ai_session', 'autonomous') OR f.ai_target_id IS NOT NULL)"
-    if source_type == "ai_gate":
-        return " AND f.source = 'ai_gate'"
-    if source_type == "ai_session":
-        return " AND f.source = 'ai_session'"
-    if source_type == "deep_hunt":
-        return (
-            " AND ("
-            "f.source IN ('autonomous', 'deep_hunt')"
-            " OR f.tool = 'autonomous_workflow'"
-            " OR f.evidence->'research'->>'driven_by' = 'autonomous_research'"
-            ")"
-        )
-    if source_type == "autonomous":
-        return " AND (f.source = 'autonomous' OR f.tool = 'autonomous_workflow')"
-    if source_type == "model_intake":
-        return " AND (f.source = 'model_intake' OR f.tool = 'model_intake')"
-    if source_type == "asm":
-        return " AND f.source = 'asm'"
-    if source_type == "manual":
-        return " AND f.source = 'manual'"
-    if source_type == "device":
-        return " AND f.source = 'device'"
-    if source_type == "dast":
-        return (
-            " AND COALESCE(f.source, 'scan') NOT IN "
-            "('ai_gate', 'ai_session', 'autonomous', 'deep_hunt', 'model_intake', 'asm', 'manual', 'device')"
-            " AND f.ai_target_id IS NULL"
-            " AND COALESCE(f.tool, '') NOT IN ('model_intake', 'autonomous_workflow')"
-            " AND COALESCE(f.evidence->'research'->>'driven_by', '') <> 'autonomous_research'"
-        )
-    return ""
+    clause = _source_type_clause(source_type)
+    return f" AND {clause}" if clause else ""
 
 
 def _strip_pagination_for_count(query: str, params: list) -> tuple[str, list]:
@@ -444,12 +394,23 @@ async def list_findings(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     include_details: bool = False,
+    # list/v1 (api/list_contract.py). Plain defaults: in-process callers pass only the legacy set.
+    cursor: Optional[str] = None,
+    sort: Optional[str] = None,
+    fields: Optional[str] = None,
+    count: Optional[Literal["none", "estimate", "exact"]] = None,
+    since: Optional[datetime] = None,
 ):
     """List findings with filtering and sorting.
 
-    The COUNT(*) OVER() window emits the unbounded row total alongside each
-    paginated row, so we only execute the (expensive, ILIKE-heavy) query
-    once instead of twice.
+    Two response shapes. Sending any list-contract parameter (``cursor``, ``sort``, ``fields``,
+    ``count`` or ``since``) selects ``list/v1``: limit 1..200 (default 50), an opaque keyset
+    cursor, ``{items, next_cursor, has_more, total?, total_kind, generated_at}`` and summary rows
+    only. Without one the deprecated limit/offset shape answers as before (``{findings, total,
+    limit, offset, ...}``, limit up to 500), for this minor line.
+
+    Either way the page is chosen over ``findings`` alone (index order, LIMIT) and only that page's
+    rows read their target, latest retest and proof projection.
     """
     # Reject unknown query parameters instead of silently ignoring them. A typo'd
     # filter (e.g. ?domain= instead of ?root_domain=) would otherwise return the
@@ -461,6 +422,7 @@ async def list_findings(
         "seen_within_days", "not_seen_within_days", "first_seen_within_days",
         "resolved_within_days", "sort_by", "sort_order",
         "include_candidates", "include_details", "limit", "offset",
+        *LIST_V1_PARAMETERS,
     }
     unknown_params = sorted({k for k in request.query_params if k not in allowed_params})
     if unknown_params:
@@ -482,324 +444,82 @@ async def list_findings(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    async with _pool().acquire() as conn:
-        query = FINDINGS_LIST_SELECT_SQL + FINDINGS_LIST_FROM_SQL
-        params: list = []
-        param_idx = 1
+    filters = FindingFilters(
+        severities=severities, status=status, source_type=source_type, target_id=target_id,
+        ai_target_id=ai_target_id, device_target_id=device_target_id, scan_id=scan_id,
+        hunt_id=hunt_id, root_domain=root_domain, verification_verdict=verification_verdict,
+        verification_mode=verification_mode, verified_only=verified_only, driven_by=driven_by,
+        research_campaign_id=research_campaign_id, search=search,
+        seen_within_days=seen_within_days, not_seen_within_days=not_seen_within_days,
+        first_seen_within_days=first_seen_within_days, resolved_within_days=resolved_within_days,
+    )
 
-        if severities:
-            query += f" AND f.severity = ANY(${param_idx}::text[])"
-            params.append(severities)
-            param_idx += 1
-
-        if status:
-            query += f" AND f.status = ${param_idx}"
-            params.append(status)
-            param_idx += 1
-
-        query += _source_type_filter_sql(source_type)
-
-        if target_id:
-            query += f" AND f.target_id = ${param_idx}"
-            params.append(uuid.UUID(target_id))
-            param_idx += 1
-
-        if ai_target_id:
-            query += f" AND f.ai_target_id = ${param_idx}"
-            params.append(uuid.UUID(ai_target_id))
-            param_idx += 1
-
-        if device_target_id:
-            query += f" AND f.device_target_id = ${param_idx}"
-            params.append(uuid.UUID(device_target_id))
-            param_idx += 1
-
-        if scan_id:
-            query += f" AND f.scan_id = ${param_idx}"
-            params.append(uuid.UUID(scan_id))
-            param_idx += 1
-
-        if hunt_id:
-            # A family-proof promotion may have no direct hunt_run_id. Its actual
-            # producing verification is durable; another run's observation is not proof.
-            try:
-                hunt_uuid = uuid.UUID(str(hunt_id))
-            except ValueError:
-                raise HTTPException(status_code=400, detail="hunt_id must be a UUID")
-            query += " AND " + finding_hunt_predicate(param_idx)
-            params.append(hunt_uuid)
-            param_idx += 1
-
-        if root_domain:
-            query += f""" AND (
-                t.root_domain = ${param_idx}
-                OR {host_in_domain_sql("ait.endpoint_url", f"${param_idx}")}
-                OR {host_in_domain_sql("dt.primary_locator", f"${param_idx}")}
-            )"""
-            params.append(root_domain)
-            param_idx += 1
-
-        if verification_verdict:
-            query += f" AND f.last_verification_verdict = ${param_idx}"
-            params.append(verification_verdict)
-            param_idx += 1
-
-        if verified_only:
-            query += " AND f.last_verification_verdict = 'exploited'"
-
-        if driven_by == "autonomous_research":
-            # Findings produced by research-driven work (a deep-hunt decision queued the scan
-            # that found them) — stamped by backfill_campaign_scan_finding_links. Distinct from
-            # source_type='autonomous' (agent-native claims) and organic DAST (no marker).
-            query += " AND f.evidence->'research'->>'driven_by' = 'autonomous_research'"
-
-        if research_campaign_id:
-            try:
-                campaign_uuid = uuid.UUID(str(research_campaign_id))
-            except ValueError:
-                raise HTTPException(status_code=400, detail="research_campaign_id must be a UUID")
-            query += f" AND f.evidence->'research'->>'campaign_id' = ${param_idx}"
-            params.append(str(campaign_uuid))
-            param_idx += 1
-
-        if verification_mode:
-            query += f""" AND EXISTS (
-                SELECT 1 FROM finding_verifications fv2
-                WHERE fv2.finding_id = f.id AND fv2.verification_mode = ${param_idx}
-            )"""
-            params.append(verification_mode)
-            param_idx += 1
-
-        if search:
-            search_pattern = f"%{search}%"
-            query += f""" AND (
-                f.title ILIKE ${param_idx}
-                OR f.url ILIKE ${param_idx}
-                OR t.url ILIKE ${param_idx}
-                OR t.name ILIKE ${param_idx}
-                OR ait.endpoint_url ILIKE ${param_idx}
-                OR ait.name ILIKE ${param_idx}
-                OR dt.name ILIKE ${param_idx}
-                OR dt.primary_locator ILIKE ${param_idx}
-            )"""
-            params.append(search_pattern)
-            param_idx += 1
-
-        if seen_within_days:
-            query += f" AND f.last_seen_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
-            params.append(seen_within_days)
-            param_idx += 1
-        if not_seen_within_days:
-            query += f" AND f.last_seen_at < NOW() - INTERVAL '1 day' * ${param_idx}"
-            params.append(not_seen_within_days)
-            param_idx += 1
-
-        if first_seen_within_days:
-            query += f" AND f.first_seen_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
-            params.append(first_seen_within_days)
-            param_idx += 1
-
-        if resolved_within_days:
-            query += f" AND f.resolved_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
-            params.append(resolved_within_days)
-            param_idx += 1
-
-        # Build ORDER BY clause based on sort_by parameter
-        order_dir = "DESC" if sort_order == "desc" else "ASC"
-        if sort_by == "first_seen":
-            order_clause = f"f.first_seen_at {order_dir} NULLS LAST"
-        elif sort_by == "last_seen":
-            order_clause = f"f.last_seen_at {order_dir} NULLS LAST"
-        elif sort_by == "cvss":
-            order_clause = f"f.cvss_score {order_dir} NULLS LAST"
-        else:
-            severity_dir = "ASC" if sort_order == "desc" else "DESC"
-            order_clause = """
-                CASE f.severity
-                    WHEN 'critical' THEN 1
-                    WHEN 'high' THEN 2
-                    WHEN 'medium' THEN 3
-                    WHEN 'low' THEN 4
-                    ELSE 5
-                END""" + f" {severity_dir}, f.last_seen_at DESC NULLS LAST"
-
-        # Open web-plane hunt candidates are an explicit compatibility opt-in. The default
-        # findings contract remains authoritative findings only; candidates have their own
-        # endpoint and UI. When requested, ordinary filters can still exclude them.
-        candidates_included = (
-            include_candidates
-            and source_type in (None, "deep_hunt")
-            and status in (None, "active")
-            and not (
-                scan_id or ai_target_id or device_target_id or verification_verdict
-                or verification_mode or verified_only or driven_by
-                or research_campaign_id or resolved_within_days
-                # A candidate is an unproven Hunt lead and is always labelled `suspected`, so
-                # it belongs exactly to the proof filters that include `suspected`.
-                or (proof_states and "suspected" not in proof_states)
-            )
-        )
-
-        # Proof is the canonical projection stated in SQL (proof_sql.py), so a proof filter is one
-        # more WHERE clause: the database counts and paginates it like any other. A row whose proof
-        # SQL cannot decide exactly sends the request through the streaming projection instead.
-        stream_proof = False
-        if proof_states:
-            stream_proof = bool(await conn.fetchval(
-                f"SELECT EXISTS (SELECT 1 {query[len(FINDINGS_LIST_SELECT_SQL):]}"
-                f" AND {FINDING_PROOF_UNDETERMINED_SQL})",
-                *params,
+    if LIST_V1_PARAMETERS.intersection(request.query_params):
+        legacy = sorted(LEGACY_ONLY_PARAMETERS.intersection(request.query_params))
+        if legacy:
+            raise HTTPException(status_code=400, detail=(
+                f"{', '.join(legacy)} belong to the limit/offset list; with cursor/sort/fields/count/since "
+                "use sort=-severity|severity|-last_seen|last_seen|-first_seen|first_seen|-cvss|cvss and "
+                "next_cursor (candidates: GET /investigation/candidates; bodies: GET /findings/{id})"
             ))
-            if not stream_proof:
-                query += f" AND {FINDING_PROOF_STATE_SQL} = ANY(${param_idx}::text[])"
-                params.append(proof_states)
-                param_idx += 1
+        page_size = limit if "limit" in request.query_params else DEFAULT_LIMIT
+        if page_size > MAX_LIMIT:
+            raise HTTPException(status_code=422, detail=f"limit must be at most {MAX_LIMIT} with the list contract")
+        page = page_params(limit=page_size, cursor=cursor, sort=sort, fields=fields,
+                           count=count or "none", since=since)
+        async with _pool().acquire() as conn, without_jit(conn):
+            return await v1_page(conn, page, filters=filters, proof_states=proof_states,
+                                 project=finding_proof_fields)
 
-        if stream_proof:
-            query += f" ORDER BY {order_clause}"
-        elif candidates_included:
-            # The Python merge below applies offset/limit over the combined list, so the
-            # findings side only needs the same bounded prefix window, not its own OFFSET.
-            query += f"""
-                ORDER BY {order_clause}
-                LIMIT ${param_idx}
-            """
-            params.append(limit + offset)
-        else:
-            query += f"""
-                ORDER BY {order_clause}
-                LIMIT ${param_idx} OFFSET ${param_idx + 1}
-            """
-            params.extend([limit, offset])
+    sort_order = sort_order or "desc"
+    order = legacy_order(sort_by, sort_order)
+    # Open web-plane hunt candidates are an explicit compatibility opt-in. The default
+    # findings contract remains authoritative findings only; candidates have their own
+    # endpoint and UI. When requested, ordinary filters can still exclude them.
+    candidates_included = (
+        include_candidates
+        and source_type in (None, "deep_hunt")
+        and status in (None, "active")
+        and not (
+            scan_id or ai_target_id or device_target_id or verification_verdict
+            or verification_mode or verified_only or driven_by
+            or research_campaign_id or resolved_within_days
+            # A candidate is an unproven Hunt lead and is always labelled `suspected`, so
+            # it belongs exactly to the proof filters that include `suspected`.
+            or (proof_states and "suspected" not in proof_states)
+        )
+    )
 
-        proof_matches: list[dict[str, Any]] | None = None
-        if stream_proof:
-            # Every row the other filters leave is projected in Python, streamed from a cursor:
-            # memory holds the requested prefix only, and nothing is refused or sampled.
-            proof_matches, proof_total = await stream_proof_matches(
-                conn, query, params, proof_states, finding_proof_fields, keep=offset + limit,
-            )
-            rows = []
-        else:
-            rows = await conn.fetch(query, *params)
-
-        # `total_count` is identical on every row of the window. The empty
-        # result set is ambiguous (truly no matches vs offset past end), so
-        # only trust the window count when we got rows back. With offset > 0
-        # and no rows we fall back to a dedicated COUNT(*) query so the UI
-        # paginator can render correctly.
-        if proof_matches is not None:
-            total = proof_total
-        elif rows:
-            total = rows[0]["total_count"]
-        elif offset > 0:
-            # Strip the window column from the SELECT, drop the LIMIT/OFFSET
-            # parameters, and wrap as COUNT(*). The candidates path emits LIMIT only.
-            count_sql, count_args = _strip_pagination_for_count(query, params)
-            if candidates_included:
-                count_args = params[:-1]
-            total = await conn.fetchval(count_sql, *count_args) or 0
-        else:
-            total = 0
+    async with _pool().acquire() as conn, without_jit(conn):
+        params = SqlParams()
+        where = filters.clauses(params)
+        # Proof is the canonical projection stated in SQL (proof_sql.py), so a proof filter is one
+        # more WHERE clause the database pages and counts; the rare row SQL cannot decide is
+        # projected in Python first and enters that clause by id.
+        if proof_states:
+            where.append(await resolved_proof_filter(conn, where, params, proof_states, finding_proof_fields))
+        # With candidates the merge below cuts the page, so the findings side takes the same
+        # offset+limit prefix window instead of its own OFFSET.
+        page_rows, total = await legacy_page(
+            conn, where=where, values=params.values, order=order,
+            limit=limit + offset if candidates_included else limit,
+            offset=0 if candidates_included else offset,
+            details=include_details, project=finding_proof_fields,
+        )
 
         candidates_total = 0
         candidate_items: list[dict[str, Any]] = []
         if candidates_included:
-            candidate_query = f"""
-                SELECT c.id, c.target_id, c.family, c.canonical_locus, c.title,
-                       c.claimed_severity, c.evidence_refs, c.status,
-                       c.first_seen_at, c.last_seen_at,
-                       t.url AS target_url, t.name AS target_name, t.root_domain,
-                       COUNT(*) OVER() AS total_count
-                FROM investigation_candidates c
-                LEFT JOIN targets t ON c.target_id = t.id
-                WHERE c.plane = 'web'
-                  AND c.status = ANY($1::text[])
-                  AND (c.verification_context->>'finding_id') IS NULL
-            """
-            candidate_params: list = [list(_CANDIDATE_OPEN_STATUSES)]
-            cand_idx = 2
-            # Mirror the findings filters that candidates can satisfy.
-            if hunt_id:
-                candidate_query += " AND " + candidate_hunt_predicate(cand_idx)
-                candidate_params.append(hunt_uuid)
-                cand_idx += 1
-            if severities:
-                candidate_query += f" AND c.claimed_severity = ANY(${cand_idx}::text[])"
-                candidate_params.append(severities)
-                cand_idx += 1
-            if target_id:
-                candidate_query += f" AND c.target_id = ${cand_idx}"
-                candidate_params.append(uuid.UUID(target_id))
-                cand_idx += 1
-            if root_domain:
-                candidate_query += f""" AND (
-                    t.root_domain = ${cand_idx}
-                    OR {host_in_domain_sql("t.url", f"${cand_idx}")}
-                )"""
-                candidate_params.append(root_domain)
-                cand_idx += 1
-            if search:
-                candidate_query += f""" AND (
-                    c.title ILIKE ${cand_idx}
-                    OR c.claim ILIKE ${cand_idx}
-                    OR t.url ILIKE ${cand_idx}
-                )"""
-                candidate_params.append(f"%{search}%")
-                cand_idx += 1
-            if seen_within_days:
-                candidate_query += f" AND c.last_seen_at >= NOW() - INTERVAL '1 day' * ${cand_idx}"
-                candidate_params.append(seen_within_days)
-                cand_idx += 1
-            if first_seen_within_days:
-                candidate_query += f" AND c.first_seen_at >= NOW() - INTERVAL '1 day' * ${cand_idx}"
-                candidate_params.append(first_seen_within_days)
-                cand_idx += 1
-            if sort_by == "first_seen":
-                cand_order = f"c.first_seen_at {order_dir} NULLS LAST"
-            elif sort_by == "last_seen":
-                cand_order = f"c.last_seen_at {order_dir} NULLS LAST"
-            else:
-                # Candidates carry no CVSS; the merge re-sorts anyway, so fall back
-                # to the default severity ordering for a deterministic page fetch.
-                cand_severity_dir = "ASC" if sort_order == "desc" else "DESC"
-                cand_order = f"""
-                    CASE c.claimed_severity
-                        WHEN 'critical' THEN 1
-                        WHEN 'high' THEN 2
-                        WHEN 'medium' THEN 3
-                        WHEN 'low' THEN 4
-                        ELSE 5
-                    END {cand_severity_dir}, c.last_seen_at DESC NULLS LAST"""
-            candidate_query += f"""
-                ORDER BY {cand_order}
-                LIMIT ${cand_idx}
-            """
-            candidate_params.append(limit + offset)
-            candidate_rows = await conn.fetch(candidate_query, *candidate_params)
-            if candidate_rows:
-                candidates_total = candidate_rows[0]["total_count"]
-            for cand_row in candidate_rows:
-                cand_dict = dict(cand_row)
-                cand_dict.pop("total_count", None)
-                candidate_items.append(_candidate_to_pseudo_finding(cand_dict))
+            candidate_items, candidates_total = await _open_candidates(
+                conn, hunt_id=hunt_id, severities=severities, target_id=target_id,
+                root_domain=root_domain, search=search, seen_within_days=seen_within_days,
+                first_seen_within_days=first_seen_within_days, sort_by=sort_by,
+                sort_order=sort_order, window=limit + offset,
+            )
 
     findings_out = []
-    # A proof-filtered page is already projected (the filter needed the projection). With
-    # candidates the merge cuts the page, so it gets the same offset+limit prefix as the SQL path.
-    if proof_matches is None:
-        page_rows = rows
-    elif candidates_included:
-        page_rows = proof_matches[:offset + limit]
-    else:
-        page_rows = proof_matches[offset:offset + limit]
     for row in page_rows:
         row_dict = dict(row)
-        row_dict.pop("total_count", None)
-        if proof_matches is None:
-            # Single proof-state so the list distinguishes proven vs suspected at a
-            # glance and agrees with the detail page (docs §7).
-            row_dict.update(finding_proof_fields(row_dict))
         if not include_details:
             for key in _FINDING_DETAIL_ONLY_FIELDS:
                 row_dict.pop(key, None)
@@ -809,7 +529,7 @@ async def list_findings(
     if candidates_included:
         page_items = _merge_findings_and_candidates(
             findings_out, candidate_items,
-            sort_by=sort_by, sort_order=sort_order or "desc",
+            sort_by=sort_by, sort_order=sort_order,
             limit=limit, offset=offset,
         )
         included_candidates = sum(1 for item in page_items if item.get("is_candidate"))
@@ -829,6 +549,94 @@ async def list_findings(
         'candidates_total': candidates_total,
         'included_candidates': included_candidates,
     }
+
+
+async def _open_candidates(
+    conn: Any, *, hunt_id: Optional[str], severities: Optional[list[str]], target_id: Optional[str],
+    root_domain: Optional[str], search: Optional[str], seen_within_days: Optional[int],
+    first_seen_within_days: Optional[int], sort_by: Optional[str], sort_order: str, window: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """The opt-in candidate side of the legacy list: its first ``window`` rows and its total."""
+    order_dir = "DESC" if sort_order == "desc" else "ASC"
+    candidate_query = """
+        SELECT c.id, c.target_id, c.family, c.canonical_locus, c.title,
+               c.claimed_severity, c.evidence_refs, c.status,
+               c.first_seen_at, c.last_seen_at,
+               t.url AS target_url, t.name AS target_name, t.root_domain,
+               COUNT(*) OVER() AS total_count
+        FROM investigation_candidates c
+        LEFT JOIN targets t ON c.target_id = t.id
+        WHERE c.plane = 'web'
+          AND c.status = ANY($1::text[])
+          AND (c.verification_context->>'finding_id') IS NULL
+    """
+    candidate_params: list = [list(_CANDIDATE_OPEN_STATUSES)]
+    cand_idx = 2
+    # Mirror the findings filters that candidates can satisfy.
+    if hunt_id:
+        candidate_query += " AND " + candidate_hunt_predicate(cand_idx)
+        candidate_params.append(uuid.UUID(str(hunt_id)))
+        cand_idx += 1
+    if severities:
+        candidate_query += f" AND c.claimed_severity = ANY(${cand_idx}::text[])"
+        candidate_params.append(severities)
+        cand_idx += 1
+    if target_id:
+        candidate_query += f" AND c.target_id = ${cand_idx}"
+        candidate_params.append(uuid.UUID(target_id))
+        cand_idx += 1
+    if root_domain:
+        candidate_query += f""" AND (
+            t.root_domain = ${cand_idx}
+            OR {host_in_domain_sql("t.url", f"${cand_idx}")}
+        )"""
+        candidate_params.append(root_domain)
+        cand_idx += 1
+    if search:
+        candidate_query += f""" AND (
+            c.title ILIKE ${cand_idx}
+            OR c.claim ILIKE ${cand_idx}
+            OR t.url ILIKE ${cand_idx}
+        )"""
+        candidate_params.append(f"%{search}%")
+        cand_idx += 1
+    if seen_within_days:
+        candidate_query += f" AND c.last_seen_at >= NOW() - INTERVAL '1 day' * ${cand_idx}"
+        candidate_params.append(seen_within_days)
+        cand_idx += 1
+    if first_seen_within_days:
+        candidate_query += f" AND c.first_seen_at >= NOW() - INTERVAL '1 day' * ${cand_idx}"
+        candidate_params.append(first_seen_within_days)
+        cand_idx += 1
+    if sort_by == "first_seen":
+        cand_order = f"c.first_seen_at {order_dir} NULLS LAST"
+    elif sort_by == "last_seen":
+        cand_order = f"c.last_seen_at {order_dir} NULLS LAST"
+    else:
+        # Candidates carry no CVSS; the merge re-sorts anyway, so fall back
+        # to the default severity ordering for a deterministic page fetch.
+        cand_severity_dir = "ASC" if sort_order == "desc" else "DESC"
+        cand_order = f"""
+            CASE c.claimed_severity
+                WHEN 'critical' THEN 1
+                WHEN 'high' THEN 2
+                WHEN 'medium' THEN 3
+                WHEN 'low' THEN 4
+                ELSE 5
+            END {cand_severity_dir}, c.last_seen_at DESC NULLS LAST"""
+    candidate_query += f"""
+        ORDER BY {cand_order}
+        LIMIT ${cand_idx}
+    """
+    candidate_params.append(window)
+    candidate_rows = await conn.fetch(candidate_query, *candidate_params)
+    total = candidate_rows[0]["total_count"] if candidate_rows else 0
+    items = []
+    for cand_row in candidate_rows:
+        cand_dict = dict(cand_row)
+        cand_dict.pop("total_count", None)
+        items.append(_candidate_to_pseudo_finding(cand_dict))
+    return items, total
 
 
 @router.get("/findings/{finding_id}/evidence")
