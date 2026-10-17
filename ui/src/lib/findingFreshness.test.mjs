@@ -88,3 +88,36 @@ test('relative age stays readable across the ranges it spans', () => {
   assert.equal(relativeAge(new Date(NOW.getTime() - 5 * 86_400_000), NOW), '5d ago')
   assert.equal(relativeAge(new Date(NOW.getTime() - 120 * 86_400_000), NOW), '4mo ago')
 })
+
+test('a finding retired by a release is labelled as such, never as resolved or fixed', async () => {
+  const { retirementBadge, retirementLabel, isRetiredByRelease } = await import('./findingFreshness.ts')
+  const retired = {
+    status: 'resolved', resolved_at: ago(2), last_seen_at: ago(30), first_seen_at: ago(60),
+    resolution_reason: 'retired_by_release',
+    retirement: {
+      release: '2.11.0',
+      reason: "Reported by the baseline response's missing-header finding for this origin",
+      label: "Retired by release 2.11.0: Reported by the baseline response's missing-header finding for this origin",
+    },
+  }
+  const state = findingFreshness(retired, NOW)
+  assert.equal(state.badge, 'retired by release 2.11.0')
+  assert.equal(state.tone, 'neutral', 'not the emerald of a fix')
+  assert.doesNotMatch(state.badge, /fixed|resolved/i)
+  assert.equal(isRetiredByRelease(retired), true)
+  assert.equal(retirementBadge(retired), 'retired by release 2.11.0')
+  assert.match(retirementLabel(retired), /^Retired by release 2\.11\.0: Reported by the baseline/)
+  // Without a server label the sentence is built from the release and reason.
+  assert.equal(
+    retirementLabel({ ...retired, retirement: { release: '2.11.0', reason: 'Not a finding' } }),
+    'Retired by release 2.11.0: Not a finding',
+  )
+
+  const fixed = { status: 'resolved', resolved_at: ago(2), resolution_reason: 'resolved', retirement: null }
+  assert.equal(retirementBadge(fixed), null)
+  assert.equal(retirementLabel(fixed), null)
+  assert.match(findingFreshness(fixed, NOW).badge, /^resolved/)
+  assert.equal(findingFreshness(fixed, NOW).tone, 'emerald')
+  // A retired row an operator reopened is active again: no retirement label.
+  assert.equal(retirementLabel({ ...retired, status: 'active' }), null)
+})

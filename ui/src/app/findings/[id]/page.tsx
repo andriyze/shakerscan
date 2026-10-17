@@ -34,6 +34,7 @@ import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/
 import { canonicalFindingProofVerified } from '@/lib/findingProof'
 import { retestAuthorizationStopNotice } from '@/lib/authorizationStop'
 import { formatRelativeTime } from '@/lib/format'
+import { retirementLabel } from '@/lib/findingFreshness'
 import { usePoll } from '@/lib/usePoll'
 import { findingObservation, hostOf, pathOf, verificationSource } from '@/lib/findingObservation'
 import { ANALYST_VERDICTS, FINDING_STATUS_LABELS, verdictChangeMessage, verdictOptionLabel, verdictRequestStatus, type AnalystVerdict } from '@/lib/analystVerdict'
@@ -764,6 +765,15 @@ function FindingDetailContent() {
                 ))}
               </select>
             </label>
+            {retirementLabel(finding) && (
+              <span
+                data-testid="finding-retired-badge"
+                className="rounded-sm bg-gray-800 px-2 py-1 text-xs font-medium text-gray-300"
+                title={retirementLabel(finding) || undefined}
+              >
+                {retirementLabel(finding)}
+              </span>
+            )}
             {retestControls}
             {verifyApplicable && (
               <button
@@ -1246,7 +1256,14 @@ function FindingDetailContent() {
               <Fact label="First seen"><span title={formatDate(finding.first_seen_at)}>{formatRelativeTime(finding.first_seen_at)}</span></Fact>
               <Fact label="Last seen"><span title={formatDate(finding.last_seen_at)}>{formatRelativeTime(finding.last_seen_at)}</span></Fact>
               {finding.resolved_at && (
-                <Fact label="Resolved"><span title={formatDate(finding.resolved_at)}>{formatRelativeTime(finding.resolved_at)}</span></Fact>
+                <Fact label={retirementLabel(finding) ? 'Retired' : 'Resolved'}><span title={formatDate(finding.resolved_at)}>{formatRelativeTime(finding.resolved_at)}</span></Fact>
+              )}
+              {retirementLabel(finding) && (
+                <Fact label="Resolution">
+                  <span data-testid="finding-retirement" className="text-gray-300">
+                    {retirementLabel(finding)} (not counted as a fix)
+                  </span>
+                </Fact>
               )}
               {evidence.duplicateCount > 0 && <Fact label="Occurrences">{evidence.duplicateCount}</Fact>}
               {typeof finding.resurfaced_count === 'number' && finding.resurfaced_count > 0 && (

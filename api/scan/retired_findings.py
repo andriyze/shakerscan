@@ -10,21 +10,31 @@ forever, beside the finding that replaced them.
 ``retire_superseded_findings`` closes exactly those rows, narrowly:
 
 * only after a scan whose finalized report says it completed (``scan_metadata.status ==
-  "complete"``): a partial, failed or cancelled scan retires nothing;
+  "complete"``) and, from the worker, whose final coverage (after the action-receipt rollup) is
+  ``complete`` and whose findings all saved: a partial, failed or cancelled scan, or one whose
+  findings did not persist, retires nothing;
 * only kinds listed in ``RETIRED_FINDING_KINDS``, each with its own predicate:
 
   - ``header``: tool, template and header name, origin scheme, and only on the origin this scan's
     baseline request observed (an application response whose security headers were recorded);
     a duplicate the baseline finding absorbed only for a header this scan's baseline finding
-    reports missing on that origin;
+    reports missing on that origin, and only while that baseline finding's stored row (last seen
+    by this scan, same origin and header) exists and is active or triaged;
   - ``exposure_proof``: a passive-pack template candidate (no header name) whose origin and path
     are those of an exposure THIS scan verified, whose template detects that proof's exposure
     class (``finalizer._TEMPLATE_EXPOSURE_CLASSES``) and whose severity does not exceed the
-    proof's -- the same rule the finalizer folds a fresh candidate by;
+    proof's -- the same rule the finalizer folds a fresh candidate by -- and only while the
+    proof's stored row (last seen by this scan, same origin, path and class) exists and is
+    active or triaged;
 
-* only ``active`` rows nobody has triaged: no analyst verdict (ever set), no analyst notes, and no
-  live finding exception (accepted-risk / approved). Rows with status ``accepted_risk`` or
-  ``false_positive`` are not ``active`` and never touched;
+* only ``active`` rows nobody has touched: no analyst verdict (ever set), no notes or verdict
+  notes, no live finding exception (accepted-risk / approved), no retest queued or running, and
+  never a row retired before and set back to ``active`` by an operator (its ``evidence.retired``
+  survives a status change; a scan that reports the row again replaces its evidence). Rows with
+  status ``accepted_risk`` or ``false_positive`` are not ``active`` and never touched. A row an
+  operator reopened from some other ``resolved`` state carries no durable marker (no triage
+  history is kept outside the optional gateway decision receipts), so it is indistinguishable
+  from one nobody touched; an operator who wants such a row kept adds a note or a verdict;
 * never a row this scan reported again (any of its identity keys, or last seen by this scan);
 * bounded: each statement is limited to one target and the scan's origins (the partial
   ``idx_findings_active_target_origin`` index), updates at most ``RETIRE_BATCH_SIZE`` rows, and a
@@ -32,8 +42,16 @@ forever, beside the finding that replaced them.
 * idempotent: a retired row is ``resolved``, so a repeated call finds nothing to do.
 
 A retired row becomes ``resolved`` (an existing status, so no schema change) with
-``evidence.retired`` naming the kind, the reason, the scan and what superseded it. A later scan
+``evidence.retired`` naming the kind, the reason, the release, the scan and what superseded it.
+Readers tell it apart from a fix (``finding_routes.retirement``): it is labelled "retired by
+release" and never counted as resolved in digests or "resolved within" filters. A later scan
 that reports it again reopens it the usual way.
+
+A pre-2.11 fleet node finalizes its scans with its own (older) finalizer, which still reports
+the template duplicates beside the finding that superseded them. ``without_superseded_duplicates``
+drops exactly those -- a retired kind whose superseding finding is in the same report -- before
+the control plane saves the report's findings, so an older node's scan neither reopens a retired
+row nor keeps it from being retired: the retirement does not flip-flop in a mixed fleet.
 
 To retire another kind, add a ``RetiredFindingKind`` to ``RETIRED_FINDING_KINDS``.
 """
@@ -84,6 +102,8 @@ class RetiredFindingKind:
     #: matched by origin and path to an exposure this scan verified, of one of ``exposure_classes``.
     predicate: Literal["header", "exposure_proof"] = "header"
     exposure_classes: frozenset[str] = frozenset()
+    #: The release that stopped reporting the kind, shown as "Retired by release <release>".
+    release: str = "2.11.0"
 
 
 _MISSING_HEADERS_TEMPLATE = "http-missing-security-headers"
@@ -219,23 +239,48 @@ def verified_exposure_locations(report: Mapping[str, Any]) -> dict[tuple[str, st
     return locations
 
 
-_HEADER_PREDICATE = "lower(COALESCE(evidence->>'header_name', evidence->>'matcher_name')) = ANY($4::text[])"
-# The stored row's path, normalised as finalizer._exposure_location does (no query, no trailing /).
-_FINDING_PATH_SQL = (
-    "COALESCE(NULLIF(rtrim(substring(url from '^[^:/?#]+://[^/?#]*([^?#]*)'), '/'), ''), '/')"
+_HEADER_SQL = "lower(COALESCE({t}evidence->>'header_name', {t}evidence->>'matcher_name'))"
+_HEADER_PREDICATE = f"{_HEADER_SQL.format(t='')} = ANY($4::text[])"
+
+
+def _path_sql(column: str) -> str:
+    """A stored URL's path, normalised as finalizer._exposure_location does (no query, no trailing /)."""
+    return f"COALESCE(NULLIF(rtrim(substring({column} from '^[^:/?#]+://[^/?#]*([^?#]*)'), '/'), ''), '/')"
+
+
+_EXPOSURE_PREDICATE = f"COALESCE(evidence->>'header_name', '') = '' AND {_path_sql('url')} = ANY($4::text[])"
+
+# The finding that now carries a retired row must itself be stored: last seen by this scan, on the
+# same origin, and active or triaged. A report whose findings did not persist retires nothing.
+_REPLACEMENT_SQL = """
+          AND EXISTS (
+              SELECT 1 FROM findings replacement
+              WHERE replacement.target_id = $1 AND replacement.tool = '{tool}'
+                AND replacement.last_seen_scan_id::text = $8::text
+                AND replacement.status IN ('active', 'accepted_risk', 'false_positive')
+                AND lower(substring(replacement.url from '^[^:/?#]+://[^/?#]*')) = ANY($5::text[])
+                AND {match}
+          )"""
+_BASELINE_REPLACEMENT = _REPLACEMENT_SQL.format(
+    tool="http_baseline",
+    match=f"lower(replacement.evidence->>'check') = 'missing_header_' || {_HEADER_SQL.format(t='findings.')}",
 )
-_EXPOSURE_PREDICATE = (
-    f"COALESCE(evidence->>'header_name', '') = '' AND {_FINDING_PATH_SQL} = ANY($4::text[])"
+_EXPOSURE_REPLACEMENT = _REPLACEMENT_SQL.format(
+    tool="shakerscan_exposure_probe",
+    match=f"replacement.evidence->>'exposure_class' = $11::text AND {_path_sql('replacement.url')} = ANY($4::text[])",
 )
 
 
-def _retire_sql(predicate: str) -> str:
+def _retire_sql(predicate: str, replacement: str = "") -> str:
     return f"""
     WITH doomed AS (
         SELECT id FROM findings
         WHERE target_id = $1 AND status = 'active'
           AND analyst_verdict IS NULL AND analyst_verdict_at IS NULL
           AND NULLIF(btrim(COALESCE(notes, '')), '') IS NULL
+          AND NULLIF(btrim(COALESCE(analyst_verdict_notes, '')), '') IS NULL
+          AND COALESCE(last_verification_status, '') NOT IN ('queued', 'running')
+          AND NOT (COALESCE(evidence, '{{}}'::jsonb) ? 'retired')
           AND tool = $2 AND evidence->>'template_id' = $3
           AND {predicate}
           AND {FINDING_ORIGIN_SQL} = ANY($5::text[])
@@ -246,7 +291,7 @@ def _retire_sql(predicate: str) -> str:
               SELECT 1 FROM finding_exceptions exception
               WHERE (exception.finding_id = findings.id::text OR exception.fingerprint = findings.fingerprint)
                 AND exception.status IN ('active', 'approved', 'accepted_risk')
-          )
+          ){replacement}
         ORDER BY id
         LIMIT $10
         FOR UPDATE SKIP LOCKED
@@ -260,8 +305,94 @@ def _retire_sql(predicate: str) -> str:
 """
 
 
+#: A kind that is no longer a finding at all (opt-in header, HSTS over plain HTTP).
 RETIRE_SQL = _retire_sql(_HEADER_PREDICATE)
-RETIRE_EXPOSURE_SQL = _retire_sql(_EXPOSURE_PREDICATE)
+#: A header duplicate the baseline finding carries: that stored baseline row must exist.
+RETIRE_BASELINE_SQL = _retire_sql(_HEADER_PREDICATE, _BASELINE_REPLACEMENT)
+#: A template candidate a verified exposure proof carries: that stored proof row must exist ($11 = class).
+RETIRE_EXPOSURE_SQL = _retire_sql(_EXPOSURE_PREDICATE, _EXPOSURE_REPLACEMENT)
+
+
+@dataclass(frozen=True)
+class _Retirement:
+    """One statement's worth of rows: a kind, what it matches, and what superseded it."""
+
+    kind: RetiredFindingKind
+    sql: str
+    values: list[str]
+    origins: list[str]
+    severities: list[str] | None
+    superseded_by: dict[str, Any]
+    extra: tuple[Any, ...] = ()
+
+    def covers(self, finding: Mapping[str, Any]) -> bool:
+        """True when ``finding`` (a report finding) is a row this statement would retire."""
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), Mapping) else {}
+        if (
+            finding.get("tool") != self.kind.tool
+            or evidence.get("template_id") != self.kind.template_id
+            or not set(_origin_spellings(finding.get("url"))[1]) & set(self.origins)
+        ):
+            return False
+        if self.kind.predicate == "header":
+            header = str(evidence.get("header_name") or evidence.get("matcher_name") or "").lower()
+            return header in self.values
+        try:
+            path = urllib.parse.urlsplit(str(finding.get("url") or "")).path.rstrip("/") or "/"
+        except ValueError:
+            return False
+        return (
+            not evidence.get("header_name") and path in self.values
+            and str(finding.get("severity") or "").lower() in (self.severities or ())
+        )
+
+
+def _retirements(report: Mapping[str, Any], kinds: Iterable[RetiredFindingKind]) -> list[_Retirement]:
+    """What this report proves superseded, kind by kind (no completion check)."""
+    statements: list[_Retirement] = []
+    covered = baseline_covered_origin(report)
+    scheme, baseline_origins = _origin_spellings(covered) if covered else ("", [])
+    superseding = baseline_missing_headers(report, baseline_origins) if covered else frozenset()
+    exposures = verified_exposure_locations(report)
+    for kind in kinds:
+        if kind.predicate == "header":
+            if not covered or scheme not in kind.schemes:
+                continue
+            headers = kind.header_names & superseding if kind.superseded_by_baseline else kind.header_names
+            if headers:
+                sql = RETIRE_BASELINE_SQL if kind.superseded_by_baseline else RETIRE_SQL
+                statements.append(_Retirement(kind, sql, sorted(headers), baseline_origins, None,
+                                              {"origin": covered}))
+        elif kind.predicate == "exposure_proof":
+            for (location, exposure_class), proof in sorted(exposures.items()):
+                if exposure_class not in kind.exposure_classes:
+                    continue
+                severities = sorted(name for name, rank in _SEVERITY_RANK.items() if rank <= proof["rank"])
+                statements.append(_Retirement(
+                    kind, RETIRE_EXPOSURE_SQL, [proof["path"]], proof["origins"], severities,
+                    {"exposure_class": exposure_class, "location": location}, (exposure_class,),
+                ))
+    return statements
+
+
+def without_superseded_duplicates(
+    report: Any, findings: Iterable[Any] | None, *, kinds: Iterable[RetiredFindingKind] = RETIRED_FINDING_KINDS,
+) -> list[Any]:
+    """``findings`` without a retired kind whose superseding finding is in the same report.
+
+    A current finalizer never reports one (it folds them); an older fleet node's finalizer does.
+    Saving them would reopen the very rows a current scan retired.
+    """
+    findings = list(findings or ())
+    if not isinstance(report, Mapping) or not findings:
+        return findings
+    statements = _retirements(report, kinds)
+    if not statements:
+        return findings
+    return [
+        finding for finding in findings
+        if not (isinstance(finding, Mapping) and any(statement.covers(finding) for statement in statements))
+    ]
 
 
 async def retire_superseded_findings(
@@ -280,36 +411,18 @@ async def retire_superseded_findings(
         return 0
     seen = sorted({str(value) for value in seen_fingerprints if value})
     scan = str(scan_id)
-    statements: list[tuple[RetiredFindingKind, str, list[str], list[str], list[str] | None, dict]] = []
-    covered = baseline_covered_origin(report)
-    scheme, baseline_origins = _origin_spellings(covered) if covered else ("", [])
-    superseding = baseline_missing_headers(report, baseline_origins) if covered else frozenset()
-    exposures = verified_exposure_locations(report)
-    for kind in kinds:
-        if kind.predicate == "header":
-            if not covered or scheme not in kind.schemes:
-                continue
-            headers = kind.header_names & superseding if kind.superseded_by_baseline else kind.header_names
-            if headers:
-                statements.append((kind, RETIRE_SQL, sorted(headers), baseline_origins, None,
-                                   {"origin": covered}))
-        elif kind.predicate == "exposure_proof":
-            for (location, exposure_class), proof in sorted(exposures.items()):
-                if exposure_class not in kind.exposure_classes:
-                    continue
-                severities = sorted(name for name, rank in _SEVERITY_RANK.items() if rank <= proof["rank"])
-                statements.append((kind, RETIRE_EXPOSURE_SQL, [proof["path"]], proof["origins"], severities,
-                                   {"exposure_class": exposure_class, "location": location}))
     retired = 0
-    for kind, sql, values, origins, severities, superseded_by in statements:
+    for statement in _retirements(report, kinds):
+        kind = statement.kind
         record = json.dumps({
-            "kind": kind.name, "reason": kind.reason, "scan_id": scan, "superseded_by": superseded_by,
+            "kind": kind.name, "reason": kind.reason, "release": kind.release, "scan_id": scan,
+            "superseded_by": statement.superseded_by,
         })
         while retired < max_rows:
             limit = min(batch_size, max_rows - retired)
             rows = await conn.fetch(
-                sql, target_id, kind.tool, kind.template_id, values, origins, seen, record, scan,
-                severities, limit,
+                statement.sql, target_id, kind.tool, kind.template_id, statement.values, statement.origins,
+                seen, record, scan, statement.severities, limit, *statement.extra,
             )
             retired += len(rows)
             if len(rows) < limit:
@@ -325,20 +438,30 @@ async def retire_after_scan(
     report: Any,
     findings: Iterable[Any] | None,
     refresh_active_count: Callable[[Any, uuid.UUID], Awaitable[Any]],
+    saved_count: int | None,
+    coverage_status: str | None,
     log_prefix: str = "",
 ) -> int:
     """The worker's post-save step: retire superseded rows of one target, never raising.
 
     Runs after the scan's findings are saved, so a row this scan reports again is matched there
-    and never retired here. One transaction; the target's active count is refreshed after it.
+    and never retired here. ``findings`` is what the worker saved (``without_superseded_duplicates``
+    of the report's); ``saved_count`` is what ``save_findings`` returned, ``None`` when it raised.
+    Nothing is retired unless every one of them saved, or unless ``coverage_status`` -- the
+    worker's final coverage after the action-receipt rollup, which can downgrade a report that
+    still says ``complete`` -- is ``complete``. One transaction; the target's active count is
+    refreshed after it.
     """
     if not isinstance(report, Mapping):
         return 0
+    findings = [finding for finding in findings or () if isinstance(finding, Mapping)]
+    if saved_count is None or saved_count != len(findings):
+        print(f"{log_prefix}retire_superseded_findings skipped: findings were not all saved", flush=True)
+        return 0
+    if str(coverage_status or "").strip().lower() not in {"complete", "completed"}:
+        return 0
     try:
-        seen = {
-            key for finding in findings or () if isinstance(finding, Mapping)
-            for key in finding_identity_keys(finding)
-        }
+        seen = {key for finding in findings for key in finding_identity_keys(finding)}
         target_uuid = uuid.UUID(str(target_id))
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -356,7 +479,8 @@ async def retire_after_scan(
 
 
 __all__ = [
-    "RETIRED_FINDING_KINDS", "RETIRE_BATCH_SIZE", "RETIRE_EXPOSURE_SQL", "RETIRE_MAX_ROWS_PER_SCAN",
-    "RETIRE_SQL", "RetiredFindingKind", "baseline_covered_origin", "baseline_missing_headers",
-    "retire_after_scan", "retire_superseded_findings", "scan_completed", "verified_exposure_locations",
+    "RETIRED_FINDING_KINDS", "RETIRE_BASELINE_SQL", "RETIRE_BATCH_SIZE", "RETIRE_EXPOSURE_SQL",
+    "RETIRE_MAX_ROWS_PER_SCAN", "RETIRE_SQL", "RetiredFindingKind", "baseline_covered_origin",
+    "baseline_missing_headers", "retire_after_scan", "retire_superseded_findings", "scan_completed",
+    "verified_exposure_locations", "without_superseded_duplicates",
 ]

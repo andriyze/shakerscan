@@ -458,13 +458,15 @@ except ImportError:
 try:
     from scan.finding_identity import canonical_finding_fingerprint
     from scan.finding_reconciliation import reconcile_legacy_finding_row
-    from scan.retired_findings import retire_after_scan
+    from scan.retired_findings import retire_after_scan, without_superseded_duplicates
+    from devices.posture_completeness import device_missing_resolution
 except ModuleNotFoundError as exc:
     if exc.name not in {"findings", "scan"}:
         raise
     from api.scan.finding_identity import canonical_finding_fingerprint
     from api.scan.finding_reconciliation import reconcile_legacy_finding_row
-    from api.scan.retired_findings import retire_after_scan
+    from api.scan.retired_findings import retire_after_scan, without_superseded_duplicates
+    from api.devices.posture_completeness import device_missing_resolution
 
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
@@ -13722,11 +13724,12 @@ async def process_scan_job(job_data: dict):
         filepath = await persist_result_artifact(result, job_id, scan_id)
 
         # Save findings (pure DB persistence)
-        saved_count = 0
-        if target_id and findings:
+        saved_count, web_findings = 0, without_superseded_duplicates(result, findings) if target_id else []
+        if target_id and web_findings:
             try:
-                saved_count = await save_findings(scan_id, target_id, findings)
+                saved_count = await save_findings(scan_id, target_id, web_findings)
             except Exception as e:
+                saved_count = None
                 print(f"[{job_id[:8]}] save_findings error: {e}", flush=True)
         elif ai_target_id and findings:
             try:
@@ -13735,22 +13738,7 @@ async def process_scan_job(job_data: dict):
                 print(f"[{job_id[:8]}] save_ai_findings error: {e}", flush=True)
         elif device_target_id and (options or {}).get("run_kind") in {"device_posture", "device_probe"} and findings:
             try:
-                posture = result.get("device_posture") if isinstance(result.get("device_posture"), dict) else {}
-                completeness = posture.get("completeness") if isinstance(posture.get("completeness"), dict) else {}
-                web_children = posture.get("web_dast_children") if isinstance(posture.get("web_dast_children"), dict) else {}
-                resolve_posture_missing = bool(
-                    completeness.get("complete")
-                    and completeness.get("tcp_scope") == "all_65535"
-                )
-                resolve_web_missing = bool(
-                    resolve_posture_missing
-                    and not completeness.get("web_probe_truncated")
-                    and (options or {}).get("include_web_dast")
-                    and web_children.get("enabled")
-                    and int(web_children.get("failed") or 0) == 0
-                    and int(web_children.get("truncated") or 0) == 0
-                    and int(web_children.get("completed") or 0) == int(web_children.get("requested") or 0)
-                )
+                resolve_posture_missing, resolve_web_missing = device_missing_resolution(result, options)
                 saved_count = await save_device_findings(
                     scan_id,
                     device_target_id,
@@ -13762,7 +13750,8 @@ async def process_scan_job(job_data: dict):
                 print(f"[{job_id[:8]}] save_device_findings error: {e}", flush=True)
 
         if target_id and not error:
-            await retire_after_scan(db_pool, scan_id=scan_id, target_id=target_id, report=result, findings=findings,
+            await retire_after_scan(db_pool, scan_id=scan_id, target_id=target_id, report=result, findings=web_findings,
+                                    saved_count=saved_count, coverage_status=coverage_status,
                                     refresh_active_count=_refresh_target_active_finding_count, log_prefix=f"[{job_id[:8]}] ")
 
         if device_target_id and not error and (options or {}).get("run_kind") == "device_posture":

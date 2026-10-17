@@ -31,6 +31,11 @@ import time
 from typing import Any, Mapping
 import uuid
 
+try:
+    from finding_routes.retirement import not_retired_sql
+except ModuleNotFoundError:  # package import
+    from ..finding_routes.retirement import not_retired_sql
+
 from .knowledge_dependencies import (
     AUTH_ROUTE_PATTERN, MINOR, SIGNIFICANCE_RULES, SIGNIFICANT, Observer, _time, asset_scope, compare_deployment,
     compare_response, evaluate,
@@ -454,7 +459,8 @@ async def _subdomains(conn: Any, target: uuid.UUID, at: datetime, *, names_allow
 async def _findings(conn: Any, target: uuid.UUID, at: datetime) -> dict[str, Any]:
     scope = asset_scope("target_id")
     new_sql = f"SELECT id FROM findings WHERE {scope} AND first_seen_at > $2"
-    resolved_sql = f"SELECT id FROM findings WHERE {scope} AND resolved_at > $2"
+    # A release's retirement (finding_routes.retirement) is not a fix and is not counted as one.
+    resolved_sql = f"SELECT id FROM findings WHERE {scope} AND resolved_at > $2 AND {not_retired_sql('')}"
     top = await conn.fetch(f"""SELECT id, severity, status, first_seen_at FROM findings WHERE {scope} AND first_seen_at > $2
         ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
                  first_seen_at DESC LIMIT 10""", target, at)
