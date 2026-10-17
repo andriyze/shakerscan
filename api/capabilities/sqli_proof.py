@@ -26,7 +26,7 @@ try:
     from capabilities.sql_error_signatures import SQL_ERROR_PATTERNS
     from capabilities.sqli_path_mutation import prepare_path_candidate, path_field_value, replace_path_field
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
-    from runtime.auth_refusal import refusal, refusal_error
+    from runtime.auth_refusal import is_authentication_request, refusal, refusal_error
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
     from runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
@@ -39,7 +39,7 @@ except ModuleNotFoundError:
     from .sql_error_signatures import SQL_ERROR_PATTERNS
     from .sqli_path_mutation import prepare_path_candidate, path_field_value, replace_path_field
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
-    from ..runtime.auth_refusal import refusal, refusal_error
+    from ..runtime.auth_refusal import is_authentication_request, refusal, refusal_error
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
     from ..runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
@@ -367,7 +367,9 @@ class SQLiProofAdapter:
         verified = proof_contract is not None
         # A control the target refused (a session-less replay, a WAF) leaves nothing proven or
         # refuted: the payloads were compared with a refusal. A login form's 401 is its answer.
-        refused = None if verified or request_class == "safe_authentication" else refusal(
+        refused = None if verified or is_authentication_request(
+            request_class, self.request.url, self.request.body,
+        ) else refusal(
             pairs[0][0].status_code, pairs[0][0].response_headers,
         )
         hashes = [{

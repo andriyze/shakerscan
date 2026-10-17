@@ -250,6 +250,53 @@ def test_a_request_mutation_whose_control_is_refused_is_not_sent():
     assert len(transport.sent) == 2 and result.status == "success"
 
 
+def test_a_captured_login_form_is_compared_although_it_is_a_confirmed_mutation():
+    # Lab Scan 9487605c (2.11.0 candidate 8dcd692b): the browser capture and the seeds replay
+    # POST /hub/login as confirmed_mutation, so its 401 for the wrong password was read as a
+    # refusal and no payload was sent. The login path and its body identify it.
+    def mutation(url):
+        transport = _Transport(401)
+        adapter = RequestMutationVerificationAdapter(
+            specification=CAPABILITY_REGISTRY.require("sqli.request_verify_batch"), target=TARGET,
+            request=_request("POST", url, b'{"username":"x","password":"y"}'),
+            transport=transport,
+            requested_budget={"http_requests": 2, "state_changing_requests": 2, "tool_wall_seconds": 10},
+            candidate={
+                "candidate_id": "d" * 64, "request_ref_id": "request-1", "method": "POST",
+                "family_hints": ["sqli"], "request_class": "confirmed_mutation",
+                "field_path": "username",
+            },
+        )
+        return transport, asyncio.run(
+            adapter.execute(heartbeat=_noop_heartbeat, cancelled=lambda: False),
+        )
+
+    transport, result = mutation("https://app.example.test/hub/login")
+    assert len(transport.sent) == 2 and result.status == "success"
+    transport, result = mutation("https://app.example.test/hub/api/users/1")
+    assert len(transport.sent) == 1 and result.errors == ("authentication_required:401",)
+
+    def nosqli(url):
+        transport = _Transport(401)
+        adapter = NoSQLiVerifyAdapter(
+            specification=CAPABILITY_REGISTRY.require("nosqli.verify_batch"), target=TARGET,
+            request=_request("POST", url, b'{"username":"x","password":"y"}'),
+            transport=transport, requested_budget={"http_requests": 8},
+            candidate={
+                "candidate_id": "e" * 64, "method": "POST", "request_class": "confirmed_mutation",
+                "request_ref_id": "request-1", "field_path": "username",
+            },
+        )
+        return transport, asyncio.run(
+            adapter.execute(heartbeat=_noop_heartbeat, cancelled=lambda: False),
+        )
+
+    transport, result = nosqli("https://app.example.test/hub/login")
+    assert len(transport.sent) > 1 and "authentication_required:401" not in result.errors
+    transport, result = nosqli("https://app.example.test/hub/api/users/1")
+    assert len(transport.sent) == 1 and result.errors[0] == "authentication_required:401"
+
+
 THOROUGH = {"http_requests": 60_000, "state_changing_requests": 6_000, "tool_wall_seconds": 10_800}
 
 
