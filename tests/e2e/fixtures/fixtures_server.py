@@ -475,6 +475,27 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         _record_traffic(self, "HEAD")
         self._send(200, b"", "text/plain")
 
+    def _other_method(self, method: str) -> None:
+        # Active templates may send PUT/DELETE/PATCH/OPTIONS; every one is target traffic the
+        # wire acceptance counts, so it is recorded before any answer.
+        _record_traffic(self, method)
+        length = int(self.headers.get("Content-Length") or 0)
+        if 0 < length <= 1_000_000:
+            self.rfile.read(length)
+        self._send(404, {"error": "not found"})
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._other_method("PUT")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._other_method("DELETE")
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._other_method("PATCH")
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._other_method("OPTIONS")
+
     def log_message(self, *a) -> None:  # silence
         pass
 

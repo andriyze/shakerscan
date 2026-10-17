@@ -80,6 +80,7 @@ try:
         is_sensitive_exposure_class,
         classify_confidential_file,
         classify_exposure,
+        actuator_index_links,
         directory_listing_links,
         redacted_exposure_excerpt,
     )
@@ -164,6 +165,7 @@ except (ImportError, ModuleNotFoundError):
         is_sensitive_exposure_class,
         classify_confidential_file,
         classify_exposure,
+        actuator_index_links,
         directory_listing_links,
         redacted_exposure_excerpt,
     )
@@ -2705,6 +2707,7 @@ class DatabaseNeutralScanActionDispatcher:
         # browsable directory can never starve the probe list that found it.
         follow_up_ceiling = max(DIRECTORY_FOLLOW_UP_FLOOR, http_ceiling // 10)
         follow_up_spent = 0
+        actuator_followed: set[str] = set()
         # A host that answers every path with the same 200 body would make one
         # lucky body match "prove" every seed. Paths that cannot exist are read the
         # first time a signature matches, and a match whose body is byte-identical
@@ -2856,6 +2859,36 @@ class DatabaseNeutralScanActionDispatcher:
                         if child_signature is not None:
                             attempt_observations.append(await asyncio.to_thread(
                                 _exposure_observation, child_url, "directory_listing_follow",
+                                child_signature, child,
+                            ))
+                # An anonymous actuator index names the dumps it serves; the event log is not
+                # one of the seeds, so its advertised read-only endpoints are followed.
+                if (
+                    signature.exposure_class in {"actuator_endpoint", "actuator_heapdump_exposed"}
+                    and consumed["http_requests"] < http_ceiling
+                ):
+                    for child_url in actuator_index_links(result.response_body, probe_url):
+                        if (
+                            self.cancelled() or consumed["http_requests"] >= http_ceiling
+                            or not can_start() or follow_up_spent >= follow_up_ceiling
+                        ):
+                            break
+                        if child_url in actuator_followed or child_url in seed_urls:
+                            continue
+                        actuator_followed.add(child_url)
+                        follow_up_spent += 1
+                        ordinal += 1
+                        child = await probe(child_url, ordinal)
+                        child_signature = await asyncio.to_thread(
+                            functools.partial(
+                                classify_exposure, path=child_url,
+                                status=child.status_code or 0,
+                                headers=child.response_headers, body=child.response_body,
+                            ),
+                        )
+                        if child_signature is not None:
+                            attempt_observations.append(await asyncio.to_thread(
+                                _exposure_observation, child_url, "actuator_index_follow",
                                 child_signature, child,
                             ))
             proven = any(item.get("proof_state") == "verified" for item in attempt_observations)
