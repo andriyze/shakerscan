@@ -681,3 +681,16 @@ async def expire_due(conn: Any) -> dict[str, int]:
     )
     return {"expired": int(str(expired).rsplit(" ", 1)[-1] or 0),
             "deleted": int(str(deleted).rsplit(" ", 1)[-1] or 0)}
+
+
+async def sweep_metadata(pool: Any, *, batches: int = 5) -> dict[str, int]:
+    """Worker-owned key access and bounded legacy metadata derivation, with no model exposure."""
+    async with pool.acquire() as conn:
+        counts = await expire_due(conn)
+        derived = 0
+        for _ in range(max(0, min(int(batches), 5))):
+            done = await derive_missing(conn, limit=DERIVE_BATCH)
+            derived += done
+            if done < DERIVE_BATCH:
+                break
+        return {**counts, "derived": derived}

@@ -70,9 +70,10 @@ try:
 except ModuleNotFoundError:
     from api import asm_dispatch_selection as asm_selection
     from api import loop_leader
-from runtime.loop_scale_indexes import build_loop_scale_indexes_in_background
+from runtime.loop_scale_indexes import build_loop_scale_indexes_in_background, index_health as loop_index_health
 from finding_routes.list_schema import repair_severity_rank_in_background
 from targets.scale_summary import summary_compactor as _summary_compactor
+from targets.insert_race import fetch_target_upsert
 from scan.finding_verification_overrides import scan_result_verification_overrides, matching_verification_override
 from scan.finding_reconciliation import reconcile_legacy_finding_row
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
@@ -3583,35 +3584,7 @@ async def schedule_runner(pool: asyncpg.Pool):
             print(f"[scheduler] Error running schedules: {e}", flush=True)
 
 
-def _asm_dispatch_as_utc(value: datetime) -> datetime:
-    """The dispatcher clock is naive UTC; stored backoffs are aware. Compare in one frame."""
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-
-
-def _asm_dispatch_backoff_until(metadata_json) -> datetime | None:
-    """When the target's last dispatcher decision was a failed dispatch whose
-    ``next_eligible_at`` is still ahead, return that instant; otherwise ``None``."""
-    metadata = metadata_json
-    if isinstance(metadata, (str, bytes)):
-        try:
-            metadata = json.loads(metadata)
-        except ValueError:
-            return None
-    if not isinstance(metadata, dict):
-        return None
-    last = metadata.get("asm_last_decision")
-    if not isinstance(last, dict) or last.get("blocked_by") != "dispatch_failed":
-        return None
-    raw = last.get("next_eligible_at")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+from asm_dispatch_claims import _claim_asm_dispatch, _release_asm_dispatch, _asm_dispatch_as_utc, _asm_dispatch_backoff_until
 
 
 async def run_asm_dispatch(pool: asyncpg.Pool):
@@ -3645,6 +3618,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
         raw_config = _decode_asm_config(t['asm_config'])
         cfg = configs[target_id]
         recorded = None
+        claimed = None  # (column, value read, stamp written) while a claimed dispatch is unfinished
         try:
             async with pool.acquire() as conn:
                 active = counts["active"].get(target_id, 0)
@@ -3687,8 +3661,13 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     decoded_opts if isinstance(decoded_opts, dict) else {}
                 )
                 if action == 'recon':
+                    claim = await _claim_asm_dispatch(conn, t['id'], "asm_last_recon_at", t['asm_last_recon_at'])
+                    if claim is None:
+                        print(f"[asm] recon of {target_url} already dispatched by another tick", flush=True)
+                        continue
+                    claimed = ("asm_last_recon_at", t['asm_last_recon_at'], claim)
                     enq = await _enqueue_asm_recon(conn, r, target_id, target_url, base_opts)
-                    await conn.execute("UPDATE targets SET asm_last_recon_at = NOW() WHERE id = $1", t['id'])
+                    claimed = None
                     recorded = await _persist_asm_decision(
                         conn,
                         target_id,
@@ -3730,12 +3709,19 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     daily_cap = cfg['daily_endpoint_cap']
                     if daily_cap > 0:
                         dispatch_batch_size = min(dispatch_batch_size, max(0, daily_cap - tested_today))
+                    claim = await _claim_asm_dispatch(conn, t['id'], "asm_last_test_at", t['asm_last_test_at'])
+                    if claim is None:
+                        print(f"[asm] test batch of {target_url} already dispatched by another tick", flush=True)
+                        continue
+                    claimed = ("asm_last_test_at", t['asm_last_test_at'], claim)
                     hold_id = str(uuid.uuid4())
                     if cap > 0 and root_domain:
                         dispatch_batch_size = _reserve_asm_domain_rate(
                             r, root_domain, max(0, cap - used), dispatch_batch_size, hold_id=hold_id,
                         )
                     if dispatch_batch_size <= 0:
+                        await _release_asm_dispatch(conn, t['id'], *claimed)
+                        claimed = None
                         recorded = await _persist_asm_decision(
                             conn,
                             target_id,
@@ -3753,7 +3739,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     except Exception:
                         domain_rate.settle(r, root_domain, entry_id=hold_id, consumed=0, finalized=False)
                         raise
-                    await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", t['id'])
+                    claimed = None
                     recorded = await _persist_asm_decision(
                         conn,
                         target_id,
@@ -3765,6 +3751,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                           f"({dispatch_batch_size} eps, {claimable} claimable) -> scan {enq['scan_id'][:8]}", flush=True)
         except Exception as e:
             print(f"[asm] dispatch error for {target_url}: {e}", flush=True)
+
             # A failed dispatch is still an attempt. Record it where every other
             # dispatcher decision is recorded, with a next_eligible_at backoff (the
             # target's own min test interval), so an unreachable host is parked for a
@@ -3772,6 +3759,14 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
             try:
                 eligible_at = _asm_dispatch_as_utc(now) + timedelta(minutes=cfg['min_interval_minutes'])
                 async with pool.acquire() as conn:
+                    if claimed is not None:
+                        # The dispatch did not happen: give the stamp back so the target is not
+                        # reported as tested or reconned now (the backoff still parks it).
+                        try:
+                            await _release_asm_dispatch(conn, t['id'], *claimed)
+                        except Exception as release_exc:
+                            print(f"[asm] could not release dispatch claim for {target_url}: "
+                                  f"{type(release_exc).__name__}", flush=True)
                     recorded = await _persist_asm_decision(
                         conn,
                         target_id,
@@ -8733,9 +8728,15 @@ async def health():
         "inconsistent_count": 0,
     }
     legacy_compatibility = compatibility_snapshot(None)
+    # The background index builder's outcome: an index it gave up on reads "failed" here.
+    loop_indexes: dict[str, Any] = {"status": "unavailable"}
     try:
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
+            try:
+                loop_indexes = await loop_index_health(conn)
+            except Exception:
+                loop_indexes = {"status": "unavailable"}
             try:
                 action_budget_reconciliation = (
                     await scan_action_budget_reconciliation(conn)
@@ -8815,6 +8816,7 @@ async def health():
         "build_fingerprint": expected_fingerprint,
         "worker_build": worker_build,
         "scan_action_budget_reconciliation": action_budget_reconciliation,
+        "loop_indexes": loop_indexes,
         "legacy_compatibility": legacy_compatibility,
         "device_worker": _device_worker_readiness(),
         "agent_tool_worker": _agent_tool_worker_readiness(),
@@ -11163,14 +11165,14 @@ async def _submit_scan(
             target_id = target['id']
         else:
             # Create new target
-            target_id = await conn.fetchval("""
+            target_id = await fetch_target_upsert(conn, """
                 INSERT INTO targets (url, name, root_domain, asm_enabled, asm_config, discovery_source)
                 VALUES ($1, $2, $3, $4, $5, 'scan')
                 ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                 RETURNING id
             """, normalized_target, request.name, extract_root_domain(normalized_target),
                  _default_asm_enabled_for_new_web_target("manual"),
-                 json.dumps(_default_asm_config_for_new_web_target("manual")))
+                 json.dumps(_default_asm_config_for_new_web_target("manual")), method="fetchval")
 
         (
             collection_refs,

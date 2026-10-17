@@ -212,7 +212,7 @@ from scan.worker_dispatch import (
     prepare_worker_dispatch,
 )
 from worker_handlers.retest_candidates import find_retest_candidate
-from worker_handlers.ai_gate import AI_SCAN_CHECKPOINT
+from worker_handlers.ai_gate import AI_SCAN_CHECKPOINT, authority_stopped_result
 from worker_handlers.non_dast import (
     NonDastWorkerHandler,
     NonDastWorkerServices,
@@ -17111,26 +17111,6 @@ async def process_scan_merge_job(job_data: dict):
     )
 
 
-def authority_stopped_result(stopped: ScanAuthorityStopped, target: Any, checkpoint: Mapping[str, Any]) -> dict[str, Any]:
-    """The result of a run stopped on its authorization that did not return a report.
-
-    An AI target scan stopped hard (it did not return within its stop grace) keeps what its
-    finished probes had checkpointed: the report reads partial and names the stop, as the
-    report of one that returned after the stop does. Anything else records the stop error.
-    """
-    result = {'target': target, **stopped.report}
-    if stopped.before_start or not checkpoint.get("findings"):
-        return result
-    from ai_gate_scan import kept_checkpoint_findings
-    kept = kept_checkpoint_findings(checkpoint)
-    if not kept:
-        return result
-    result = {key: value for key, value in result.items() if key != 'error'}
-    result['findings'] = kept
-    result['ai_gate_stopped_hard'] = True
-    return result
-
-
 async def _fold_cancelled_parallel_parent(parent_id: str | None, log_prefix: str) -> int | None:
     return await fold_cancelled_parent(
         db_pool, parent_id, log_prefix, redis_provider=get_redis,
@@ -23021,18 +23001,9 @@ DISCOVERED_SECRET_DERIVE_BATCHES = 5
 
 
 async def sweep_discovered_secrets() -> dict[str, int]:
-    """Mark expired discovered secrets and delete long-unusable ciphertexts (hourly), and derive
-    the metadata of secrets stored before 2.11 (here, in the worker, which holds the key)."""
-    from hunt.discovered_secrets import DERIVE_BATCH, derive_missing, expire_due
-    async with db_pool.acquire() as conn:
-        counts = await expire_due(conn)
-        derived = 0
-        for _ in range(DISCOVERED_SECRET_DERIVE_BATCHES):
-            done = await derive_missing(conn, limit=DERIVE_BATCH)
-            derived += done
-            if done < DERIVE_BATCH:
-                break
-        return {**counts, "derived": derived}
+    """Run the bounded discovered-secret maintenance in its owning domain."""
+    from hunt.discovered_secrets import sweep_metadata
+    return await sweep_metadata(db_pool, batches=DISCOVERED_SECRET_DERIVE_BATCHES)
 
 
 async def sweep_stale_budget_reservations() -> dict[str, int]:
