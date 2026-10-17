@@ -1926,7 +1926,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
-| Canonical scanner wrapper commands | 41 | `scanner.sh` |
+| Canonical scanner wrapper commands | 42 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
@@ -1937,7 +1937,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 117 | `db/init.sql` + migrations |
+| Durable tables | 118 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -2751,7 +2751,7 @@ opaque profile, and collection-reference fields.
 
 | Surface | Names |
 |---|---|
-| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `db-upgrade`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `images`, `install-deps`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `redis`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `secrets`, `shell`, `start`, `status`, `stop`, `version` |
+| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `approve`, `backup`, `build`, `collections`, `credentials`, `db-upgrade`, `deny`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `images`, `install-deps`, `join`, `knowledge`, `logs`, `mcp`, `model-intake`, `model-intake-runner`, `rebuild`, `record`, `redis`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `secrets`, `shell`, `start`, `status`, `stop`, `version` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-hunt-ssh`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
@@ -3368,6 +3368,7 @@ Scan feature or a second orchestration engine.
 | `public_api_idempotency` | `db/init.sql` |
 | `refuter_reviews` | `api/retest_contract.py` |
 | `request_collection_bindings` | `db/init.sql` |
+| `request_collection_capture_batches` | `db/init.sql` |
 | `request_collection_environments` | `db/init.sql` |
 | `request_collection_requests` | `db/init.sql` |
 | `request_collection_selections` | `db/init.sql` |
