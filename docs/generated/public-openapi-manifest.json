@@ -221,7 +221,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "d0e3fbb8a915cd6989e4398858e018d15ae10d3574605e1ff76a41fce474a1a4",
+  "contract_sha256": "86e0738697c0376082cf83469ac153c226ad80be5829e3be0aa8792bb7c30ed4",
   "openapi": "3.1.0",
   "operation_count": 490,
   "operations": {
@@ -3050,7 +3050,7 @@
     "GET /targets/grouped": {
       "deprecated": false,
       "operation_id": "list_targets_grouped_targets_grouped_get",
-      "parameters_sha256": "cbd7056c35b32081904b6b52db414e0b9395ed9a17005d091d99fa8ab4819de9",
+      "parameters_sha256": "bddb5c829f0d3b5fd1f05b252a7f646fa28708fcd045f37a65b138caa305130b",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -3063,7 +3063,7 @@
     "GET /targets/inventory": {
       "deprecated": false,
       "operation_id": "target_inventory_targets_inventory_get",
-      "parameters_sha256": "fc042bcc949075694a938021d028de9aa412af7bbceea5763ea03473e4dbbffb",
+      "parameters_sha256": "6c53769111ba1499bdfc164491d61124914ff979cf8fe4407909b2caac91307e",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -3240,7 +3240,7 @@
     "GET /targets/{target_id}/graph": {
       "deprecated": false,
       "operation_id": "get_application_graph_targets__target_id__graph_get",
-      "parameters_sha256": "8c1275503ab81781344b064cb01a7c9291b03b849723d58166e7b28fa930a30c",
+      "parameters_sha256": "addd087ed721cf5b445e92f4f7f7a580da5bdbd4accfe56e065478e741cfd651",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",

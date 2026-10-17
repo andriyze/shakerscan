@@ -3083,32 +3083,60 @@ async def _append_hypothesis_signal(conn, hypothesis_id: str, req: HypothesisSig
     }
 
 
+# The refuter window's order: critical, then high, then everything else (medium, low, other)
+# that is a weak claim by source or tool; newest seen first within each.
+_REFUTER_WEAK_CLAIM = ("(source IN ('ai_gate', 'model_intake') OR ai_target_id IS NOT NULL "
+                       "OR tool = 'model_intake')")
+
+
+# Targets whose recent scans feed the finding-delta signal: those in the newest completed
+# web-DAST scans, newest first.
+REFUTER_FINDING_DELTA_SCAN_WINDOW = 2000
+REFUTER_FINDING_DELTA_TARGET_WINDOW = 200
+
+
+async def _refuter_window_findings(conn, finding_window: int) -> list[Any]:
+    """Active findings worth a refuter review, in severity order then newest seen.
+
+    The same rows as one query ordered by a severity CASE. Critical and high are read one
+    severity at a time and stop at the window; the remaining weak claims (medium, low, other) are
+    one read, so at most one pass over the findings that are neither.
+    """
+    findings: list[Any] = []
+    for severity in ("critical", "high"):
+        remaining = finding_window - len(findings)
+        if remaining <= 0:
+            return findings
+        findings.extend(await conn.fetch(
+            """
+            SELECT *
+            FROM findings
+            WHERE status = 'active' AND severity = $2
+            ORDER BY last_seen_at DESC NULLS LAST, first_seen_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            remaining, severity,
+        ))
+    remaining = finding_window - len(findings)
+    if remaining > 0:
+        findings.extend(await conn.fetch(
+            f"""
+            SELECT *
+            FROM findings
+            WHERE status = 'active'
+              AND (severity IS NULL OR severity NOT IN ('critical', 'high'))
+              AND {_REFUTER_WEAK_CLAIM}
+            ORDER BY CASE severity WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END,
+                     last_seen_at DESC NULLS LAST, first_seen_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            remaining,
+        ))
+    return findings
+
+
 async def _load_refuter_work_summary(conn, *, limit: int = 20, finding_window: int = 200) -> dict[str, Any]:
-    findings = await conn.fetch(
-        """
-        SELECT *
-        FROM findings
-        WHERE status = 'active'
-          AND (
-            severity IN ('critical', 'high')
-            OR source IN ('ai_gate', 'model_intake')
-            OR ai_target_id IS NOT NULL
-            OR tool = 'model_intake'
-          )
-        ORDER BY
-          CASE severity
-            WHEN 'critical' THEN 1
-            WHEN 'high' THEN 2
-            WHEN 'medium' THEN 3
-            WHEN 'low' THEN 4
-            ELSE 5
-          END,
-          last_seen_at DESC NULLS LAST,
-          first_seen_at DESC NULLS LAST
-        LIMIT $1
-        """,
-        finding_window,
-    )
+    findings = await _refuter_window_findings(conn, finding_window)
     reviews = await conn.fetch(
         """
         SELECT subject_type, subject_id, finding_id
@@ -3119,24 +3147,54 @@ async def _load_refuter_work_summary(conn, *, limit: int = 20, finding_window: i
         max(finding_window, limit),
     )
     # Recent operator-facing web-DAST scans per target (newest first, shards excluded) for
-    # the finding-delta integrity heuristic. Windowed per target so the scan set is bounded.
-    scan_rows = await conn.fetch(
+    # the finding-delta integrity heuristic: the latest few scans of each target scanned in the
+    # most recent REFUTER_FINDING_DELTA_SCAN_WINDOW completed web-DAST scans (at most
+    # REFUTER_FINDING_DELTA_TARGET_WINDOW targets, newest first), one row per target, read per
+    # target from (target_id, created_at): neither read grows with the size of the install.
+    target_rows = await conn.fetch(
         """
-        SELECT target_id, target_url, scan_id, findings_count
+        SELECT recent.target_id,
+               array_agg(s.target_url ORDER BY s.created_at DESC) AS target_urls,
+               array_agg(s.scan_id ORDER BY s.created_at DESC) AS scan_ids,
+               array_agg(s.findings_count ORDER BY s.created_at DESC) AS findings_counts
         FROM (
-            SELECT target_id, target_url, id AS scan_id, findings_count,
-                   ROW_NUMBER() OVER (PARTITION BY target_id ORDER BY created_at DESC) AS rn
+            SELECT target_id
+            FROM (
+                SELECT target_id, created_at
+                FROM scans
+                WHERE status = 'completed'
+                  AND run_kind = 'web_dast'
+                  AND target_id IS NOT NULL
+                  AND (scan_role IS NULL OR scan_role <> 'shard')
+                ORDER BY created_at DESC
+                LIMIT $3
+            ) newest
+            GROUP BY target_id
+            ORDER BY max(created_at) DESC, target_id
+            LIMIT $2
+        ) recent
+        CROSS JOIN LATERAL (
+            SELECT target_url, id AS scan_id, findings_count, created_at
             FROM scans
-            WHERE status = 'completed'
+            WHERE target_id = recent.target_id
+              AND status = 'completed'
               AND run_kind = 'web_dast'
-              AND target_id IS NOT NULL
               AND (scan_role IS NULL OR scan_role <> 'shard')
-        ) ranked
-        WHERE rn <= $1
-        ORDER BY target_id, rn
+            ORDER BY created_at DESC
+            LIMIT $1
+        ) s
+        GROUP BY recent.target_id
+        ORDER BY recent.target_id
         """,
         REFUTER_FINDING_DELTA_MIN_BASELINE + 4,
+        REFUTER_FINDING_DELTA_TARGET_WINDOW,
+        REFUTER_FINDING_DELTA_SCAN_WINDOW,
     )
+    scan_rows = [
+        {"target_id": row["target_id"], "target_url": url, "scan_id": scan_id, "findings_count": count}
+        for row in target_rows
+        for url, scan_id, count in zip(row["target_urls"], row["scan_ids"], row["findings_counts"])
+    ]
     integrity_signals = _finding_delta_refuter_signals(
         _finding_delta_target_stats(scan_rows), limit=limit
     )
@@ -3842,55 +3900,106 @@ def _campaign_deployment_impact(
     }
 
 
+_CANONICAL_UUID_TEXT = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+
+
 async def _campaign_live_finding_impact(
     conn: Any,
     campaign_ids: Sequence[uuid.UUID],
 ) -> dict[uuid.UUID, dict[str, Any]]:
-    """Compute current finding impact across every linked campaign action."""
+    """Compute current finding impact across every linked campaign action.
+
+    Counted in SQL per campaign, severity and status, so a campaign with many linked findings
+    returns a handful of rows. A linked id resolves only when it is a finding id in canonical
+    text form (as ``findings.id::text`` matched before); comparing as uuid keeps the primary-key
+    lookup. Any linked id that resolves to no finding marks that campaign's impact partial.
+    """
     if not campaign_ids:
         return {}
     rows = await conn.fetch(
-        """
-        SELECT ca.mission_campaign_id,
-               linked.finding_id,
-               f.id,
-               f.severity,
-               f.status
-        FROM campaign_actions ca
-        CROSS JOIN LATERAL jsonb_array_elements_text(
-            COALESCE(ca.finding_ids, '[]'::jsonb)
-        ) AS linked(finding_id)
-        LEFT JOIN findings f ON f.id::text = linked.finding_id
-        WHERE ca.mission_campaign_id = ANY($1::uuid[])
+        f"""
+        WITH linked AS MATERIALIZED (
+            SELECT ca.mission_campaign_id AS campaign_id,
+                   CASE WHEN linked.finding_id ~ '{_CANONICAL_UUID_TEXT}'
+                        THEN linked.finding_id::uuid END AS finding_uuid
+            FROM campaign_actions ca
+            CROSS JOIN LATERAL jsonb_array_elements_text(
+                COALESCE(ca.finding_ids, '[]'::jsonb)
+            ) AS linked(finding_id)
+            WHERE ca.mission_campaign_id = ANY($1::uuid[])
+        ),
+        -- Primary-key lookups for the linked ids only (an array probe, never a findings scan).
+        found AS MATERIALIZED (
+            SELECT f.id, f.severity, f.status
+            FROM findings f
+            WHERE f.id = ANY(ARRAY(SELECT DISTINCT finding_uuid FROM linked WHERE finding_uuid IS NOT NULL))
+        ),
+        resolved AS (
+            SELECT DISTINCT l.campaign_id, f.id,
+                   lower(COALESCE(NULLIF(f.severity, ''), 'unknown')) AS severity,
+                   lower(COALESCE(NULLIF(f.status, ''), 'unknown')) AS status
+            FROM linked l
+            JOIN found f ON f.id = l.finding_uuid
+        )
+        SELECT campaign_id, severity, status, COUNT(*) AS n, false AS unresolved
+        FROM resolved
+        GROUP BY campaign_id, severity, status
+        UNION ALL
+        SELECT DISTINCT l.campaign_id, NULL, NULL, 0, true
+        FROM linked l
+        LEFT JOIN found f ON f.id = l.finding_uuid
+        WHERE f.id IS NULL
         """,
         list(campaign_ids),
     )
-    grouped: dict[uuid.UUID, list[dict[str, Any]]] = {campaign_id: [] for campaign_id in campaign_ids}
+    counts: dict[uuid.UUID, list[tuple[str, str, int]]] = {campaign_id: [] for campaign_id in campaign_ids}
     unresolved: set[uuid.UUID] = set()
-    seen: dict[uuid.UUID, set[str]] = {campaign_id: set() for campaign_id in campaign_ids}
     for row in rows:
-        campaign_id = row["mission_campaign_id"]
+        campaign_id = row["campaign_id"]
         if isinstance(campaign_id, str):
             try:
                 campaign_id = uuid.UUID(campaign_id)
             except ValueError:
                 continue
-        data = row_to_dict(row)
-        if campaign_id not in grouped:
+        if campaign_id not in counts:
             continue
-        finding_id = str(data.get("finding_id") or "")
-        if not data.get("id"):
+        if row["unresolved"]:
             unresolved.add(campaign_id)
             continue
-        if finding_id in seen[campaign_id]:
-            continue
-        seen[campaign_id].add(finding_id)
-        grouped[campaign_id].append(data)
+        counts[campaign_id].append((str(row["severity"]), str(row["status"]), int(row["n"])))
     return {
-        campaign_id: _campaign_deployment_impact(
-            grouped[campaign_id], partial=campaign_id in unresolved
+        campaign_id: _campaign_deployment_impact_from_counts(
+            counts[campaign_id], partial=campaign_id in unresolved
         )
         for campaign_id in campaign_ids
+    }
+
+
+def _campaign_deployment_impact_from_counts(
+    counts: Sequence[tuple[str, str, int]],
+    *,
+    partial: bool = False,
+) -> dict[str, Any]:
+    """``_campaign_deployment_impact`` over (severity, status, count) rows already counted."""
+    by_severity: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    active_count = 0
+    active_blocking = 0
+    for severity, finding_status, n in counts:
+        by_severity[severity] = by_severity.get(severity, 0) + n
+        by_status[finding_status] = by_status.get(finding_status, 0) + n
+        if finding_status == "active":
+            active_count += n
+            if severity in {"critical", "high"}:
+                active_blocking += n
+    return {
+        "linked_finding_count": sum(by_status.values()),
+        "active_finding_count": active_count,
+        "by_severity": by_severity,
+        "by_status": by_status,
+        "estimated_default_blockers": active_blocking,
+        "blocks_deployment_estimate": active_blocking > 0,
+        "partial": bool(partial),
     }
 
 

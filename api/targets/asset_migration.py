@@ -311,6 +311,10 @@ async def run_unified_startup(pool: Any, baseline: Any, *, redis_provider: Any =
                 except ModuleNotFoundError:
                     from api.hunt.dismissal_status import reconcile_dismissals
                 await reconcile_dismissals(conn)
+                # Trigger-maintained finding and scan counts (dashboard, inventory, grouped
+                # Targets); backfilled once, under the triggers' table lock (2.11).
+                from .scale_summary import install_summary_counts
+                await install_summary_counts(conn)
             # After the schema commits, still under the startup lock: Hunts granted something by
             # 2.8.0 have no recorded baseline, so their authority is rebuilt from their live
             # grants once (R1), each Hunt in its own short transaction. A Hunt that cannot be

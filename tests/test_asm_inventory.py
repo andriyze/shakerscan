@@ -507,6 +507,12 @@ class _CoverageConn:
 
     async def fetchrow(self, query, *args):
         self.queries.append((query, args))
+        if query == a.LATEST_ATTEMPT_COUNTS_SQL:
+            # PostgreSQL normalizes and counts the latest attempts (equivalence with the Python
+            # rules: tests/test_targets_dashboard_scale_postgres.py); count these the Python way.
+            counted = a.attempt_coverage_from_rows(self.attempt_rows, total=0, basis="fixture")
+            return {key: counted[key] for key in
+                    ("attempted", "completed", "partial", "auth_blocked", "rate_limited", "error")}
         return self.rows.pop(0)
 
     async def fetch(self, query, *args):
