@@ -114,7 +114,7 @@ def build(args: argparse.Namespace) -> int:
 
 
 def verify(args: argparse.Namespace) -> int:
-    keys = intel_bundle.trusted_keys(",".join(args.trusted_key)) if args.trusted_key else None
+    keys = intel_bundle.accepted_signers(",".join(args.trusted_key)) if args.trusted_key else None
     source = Path(args.bundle)
     with tempfile.TemporaryDirectory() as scratch:
         directory = source

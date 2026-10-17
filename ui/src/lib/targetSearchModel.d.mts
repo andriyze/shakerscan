@@ -1,3 +1,4 @@
+export function isTargetId(id: unknown): id is string
 export const TARGET_SEARCH_MAX_PAGES: number
 export function collectAcceptedTargets<T extends { id: string }, P = unknown>(options: {
   fetchPage: (position: P | null) => Promise<{ targets: T[]; hasMore: boolean; next: P | null }>

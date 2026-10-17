@@ -1259,9 +1259,9 @@ def build_parser() -> argparse.ArgumentParser:
                                                      "length, when seen, uses (never the value)")
     listed.add_argument("target_id")
     listed.add_argument("--usable", action="store_true", help="only those a Hunt can use now")
-    listed.add_argument("--limit", type=_secrets_limit, default=SECRETS_LIST_DEFAULT, metavar="N",
-                        help=f"show at most N, newest sighting first (default {SECRETS_LIST_DEFAULT}, "
-                             f"at most {SECRETS_LIST_MAX})")
+    listed.add_argument("--limit", type=_reference_list_limit, default=REFERENCE_LIST_DEFAULT, metavar="N",
+                        help=f"show at most N, newest sighting first (default {REFERENCE_LIST_DEFAULT}, "
+                             f"at most {REFERENCE_LIST_MAX})")
     listed.add_argument("--json", action="store_true", help="print the raw API answer")
     for name, text in (("revoke", "Stop Hunts using a secret (an operator decision later sightings keep)"),
                        ("reactivate", "Let Hunts use a revoked secret again")):
@@ -2357,17 +2357,21 @@ def _run_knowledge_decision(args: argparse.Namespace, client: ApiClient) -> int:
         return 2
 
 
-SECRETS_LIST_DEFAULT = 50
-SECRETS_LIST_MAX = 200
+REFERENCE_LIST_DEFAULT = 50
+REFERENCE_LIST_MAX = 200
+# The listing's rows: secret:// references with metadata (kind, length, state, sightings). The
+# instance never puts a value in them ("values_visible": false); a value is only ever shown by
+# `shakerscan secrets reveal`, after the person's own decision.
+REFERENCE_LIST_FIELD = "secrets"
 
 
-def _secrets_limit(value: str) -> int:
+def _reference_list_limit(value: str) -> int:
     try:
         number = int(value)
     except ValueError:
         raise argparse.ArgumentTypeError("--limit takes a whole number") from None
-    if not 1 <= number <= SECRETS_LIST_MAX:
-        raise argparse.ArgumentTypeError(f"--limit is 1 to {SECRETS_LIST_MAX}")
+    if not 1 <= number <= REFERENCE_LIST_MAX:
+        raise argparse.ArgumentTypeError(f"--limit is 1 to {REFERENCE_LIST_MAX}")
     return number
 
 
@@ -2384,15 +2388,15 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
     if command == "list":
         # One more than shown, so "there are more" is known rather than guessed. An engine before
         # 2.11 ignores limit= and answers its own cap (200); the client cuts to --limit either way.
-        asked = min(args.limit + 1, SECRETS_LIST_MAX)
+        asked = min(args.limit + 1, REFERENCE_LIST_MAX)
         query = urllib.parse.urlencode({**({"usable_only": "true"} if args.usable else {}), "limit": asked})
         body = client.request("GET", f"{base}?{query}")
-        rows = body.get("secrets") or [] if isinstance(body, Mapping) else []
+        rows = body.get(REFERENCE_LIST_FIELD) or [] if isinstance(body, Mapping) else []
         if args.json:
             # The extra row only answers "are there more"; it is never printed.
-            listed = {**body, "secrets": rows[: args.limit], "count": len(rows[: args.limit]),
+            listed = {**body, REFERENCE_LIST_FIELD: rows[: args.limit], "count": len(rows[: args.limit]),
                       "has_more": len(rows) > args.limit,
-                      "may_have_more": len(rows) > args.limit or len(rows) >= SECRETS_LIST_MAX} \
+                      "may_have_more": len(rows) > args.limit or len(rows) >= REFERENCE_LIST_MAX} \
                 if isinstance(body, Mapping) else body
             print(json.dumps(listed, indent=2, sort_keys=True))
             return 0
@@ -2407,10 +2411,10 @@ def _run_secrets(args: argparse.Namespace, client: ApiClient) -> int:
                          f"last {row.get('last_seen_at')}  uses {row.get('uses')}{origin}"))
         if len(rows) > args.limit:
             print(f"showing the {len(shown)} most recently seen; there are more: "
-                  f"show more with --limit (at most {SECRETS_LIST_MAX})")
-        elif len(rows) >= SECRETS_LIST_MAX:
+                  f"show more with --limit (at most {REFERENCE_LIST_MAX})")
+        elif len(rows) >= REFERENCE_LIST_MAX:
             print(f"showing the {len(shown)} most recently seen; there may be more "
-                  f"(the instance lists at most {SECRETS_LIST_MAX})")
+                  f"(the instance lists at most {REFERENCE_LIST_MAX})")
         return 0
     ref_id = _reference_id(args.reference)
     path = f"{base}/{_quoted(ref_id)}"

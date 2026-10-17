@@ -44,6 +44,7 @@ jobs:
           version="$(awk -F '\"' '/^__version__ = / {print $2}' client/src/shakerscan/__init__.py)"
           python scripts/release_sbom.py client --dist dist --version "$version" \
             --source-sha "$(git rev-parse HEAD)" --generator-source-sha "$(git rev-parse HEAD)" \
+            --source-root . \
             --repository "$GITHUB_REPOSITORY" --output client-sbom-smoke
           python scripts/release_sbom.py verify --directory client-sbom-smoke --dist dist
       - name: Validate real client formats

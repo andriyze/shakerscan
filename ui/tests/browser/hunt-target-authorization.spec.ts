@@ -187,3 +187,27 @@ test('a saved run page does not issue the launcher authorization and credential 
   }
   expect(errors).toEqual([])
 })
+
+test('a link whose target cannot be a target id prefills the objective and never asks the API for it', async ({ page }) => {
+  const assetReads: string[] = []
+  const failed: string[] = []
+  page.on('response', response => { if (response.status() >= 400) failed.push(`${response.status()} ${new URL(response.url()).pathname}`) })
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/asset')) {
+      assetReads.push(path)
+      // The real API rejects a malformed id with 400 Invalid target id.
+      return route.fulfill({ status: 400, json: { detail: 'Invalid target id' } })
+    }
+    if (path === '/targets/inventory') return route.fulfill({ json: { targets: [target], total: 1, offset: 0, limit: 25 } })
+    if (path === '/hunts') return route.fulfill({ json: { hunts: [], total: 0 } })
+    return route.fulfill({ json: { status: 'healthy', rows: [], profiles: [], collections: [], requests: [], total: 0, has_more: false } })
+  })
+  await page.goto('/hunt?target=manifest-target&objective=manifest-objective')
+  await expect(page.getByRole('heading', { name: 'New Hunt' })).toBeVisible()
+  await expect(page.locator('textarea').first()).toHaveValue('manifest-objective')
+  await page.waitForTimeout(500)
+  expect(assetReads).toEqual([])
+  expect(failed).toEqual([])
+})

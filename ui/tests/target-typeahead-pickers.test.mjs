@@ -95,3 +95,14 @@ test('after a failed search, newly typed text is loading until answered and old 
   assert.match(hook, /setFailedQuery\(debounced\)/)
   assert.match(hook, /setError\([^)]*\)[\s\S]{0,200}setMatches\(\[\]\)/, 'a failure offers no older matches to Enter')
 })
+
+test('a link value that cannot be a target id is never looked up (the API answers 400)', async () => {
+  const { isTargetId } = await import('../src/lib/targetSearchModel.mjs')
+  assert.equal(isTargetId('2f1c6a3e-9b4d-4c1a-8e2f-0a1b2c3d4e5f'), true)
+  assert.equal(isTargetId('2F1C6A3E-9B4D-4C1A-8E2F-0A1B2C3D4E5F'), true)
+  for (const value of ['manifest-target', '', ' 2f1c6a3e-9b4d-4c1a-8e2f-0a1b2c3d4e5f', null, undefined, 42, '2f1c6a3e-9b4d-4c1a-8e2f-0a1b2c3d4e5f/x']) {
+    assert.equal(isTargetId(value), false, String(value))
+  }
+  const hook = read('src/lib/useTargetSearch.ts')
+  assert.match(hook, /selectedIds\.filter\(\(id\): id is string => isTargetId\(id\)/)
+})

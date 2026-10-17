@@ -134,6 +134,16 @@ def test_b19_a_title_that_carries_a_value_is_still_refused(title):
         _entry(title=title)
 
 
+def test_b19_the_word_after_a_descriptive_value_is_read_in_linear_time():
+    assert interpretations._next_word("x   not returned", 1) == "not"
+    assert interpretations._next_word("x\u2003\tsecond", 1) == "second"  # Unicode whitespace, as \\s
+    assert interpretations._next_word("x", 1) is None and interpretations._next_word("x   ", 1) is None
+    assert interpretations._next_word("xy", 1) is None  # no whitespace: joined to the value
+    # A long run of spaces after a secret-named key no longer backtracks (CodeQL py/polynomial-redos).
+    text = "password: none" + " " * 200_000
+    assert interpretations._looks_secret(text) is False
+
+
 def test_conditions_are_exact_canonical_and_never_broadened():
     canonical = validate_conditions(EXACT, required=True)
     assert canonical["method"] == "GET" and canonical["principals"] == ["tenant-a", "tenant-b"]
