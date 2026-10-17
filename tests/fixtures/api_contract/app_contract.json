@@ -8,7 +8,8 @@
     "RequestGuardMiddleware",
     "PublicV2BodyLimitMiddleware",
     "PublicV2IdempotencyMiddleware",
-    "LegacyHuntIsolationMiddleware"
+    "LegacyHuntIsolationMiddleware",
+    "ListETagMiddleware"
   ],
   "exception_handlers": [
     "HTTPException",
