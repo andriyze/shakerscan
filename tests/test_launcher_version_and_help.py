@@ -16,7 +16,6 @@ def install(tmp_path):
     """A minimal release tree: the launcher, the helper it sources, and a VERSION file."""
     (tmp_path / "scripts").mkdir()
     shutil.copy(ROOT / "scanner.sh", tmp_path / "scanner.sh")
-    shutil.copy(ROOT / "scripts" / "postgres_upgrade.sh", tmp_path / "scripts" / "postgres_upgrade.sh")
     shutil.copy(ROOT / "scripts" / "upgrade_safety.sh", tmp_path / "scripts" / "upgrade_safety.sh")
     (tmp_path / "VERSION").write_text("9.8.7\n", encoding="utf-8")
     return tmp_path

@@ -1,4 +1,4 @@
-"""Opt-in dump/restore acceptance using a labelled, disposable PostgreSQL 16 container."""
+"""Opt-in dump/restore acceptance using a labelled, disposable PostgreSQL 18 container."""
 import asyncio
 from datetime import datetime, timezone
 import json

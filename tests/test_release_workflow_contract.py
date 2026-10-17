@@ -179,7 +179,9 @@ def test_certification_requires_upgrading_a_real_installed_stable_release():
     script = (ROOT / "scripts" / "installed_upgrade_smoke.sh").read_text(encoding="utf-8")
     # The rollback goes through the installer an operator uses, pinned to the stable version.
     assert 'SHAKERSCAN_INSTALL_VERSION="$BASELINE_VERSION"' in script and 'sh "$ROOT/install/index.sh"' in script
-    assert "has been used since it was copied" in script
+    # Only same-major upgrades are tested; the PostgreSQL 16 -> 18 migration has unit tests only.
+    assert '[ "$BASELINE_MAJOR" = "$CANDIDATE_MAJOR" ] || fail' in script
+    assert "a same-major upgrade migrated" in script
 
 
 LAUNCHER_IMAGE_OVERRIDES = ("SCANNER_IMAGE", "API_IMAGE", "UI_IMAGE", "SIGNER_IMAGE", "MODEL_INTAKE_IMAGE")

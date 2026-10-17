@@ -160,9 +160,8 @@ restart_services() { persist_remote_access_env; echo RESTARTED; }
 '''
     script = tmp_path / "scanner.sh"
     script.write_text(before + overrides + "\n# Parse arguments" + after, encoding="utf-8")
-    # The launcher refuses to run without its PostgreSQL upgrade module beside it.
+    # The launcher refuses to run without its upgrade-safety module beside it.
     (tmp_path / "scripts").mkdir(exist_ok=True)
-    shutil.copy(ROOT / "scripts" / "postgres_upgrade.sh", tmp_path / "scripts" / "postgres_upgrade.sh")
     shutil.copy(ROOT / "scripts" / "upgrade_safety.sh", tmp_path / "scripts" / "upgrade_safety.sh")
     return subprocess.run(["bash", str(script), *args], env=_env(), capture_output=True, text=True, timeout=10)
 

@@ -54,7 +54,7 @@ def test_an_explicit_raw_base_still_installs_directly():
 def test_an_explicit_install_version_hands_over_too():
     # install.shakerscan.com serves this file from main, so a pinned rollback runs the CURRENT
     # installer. Without the handover it installed the current manifest from the old tag and failed
-    # on the first file the old release does not have (2.5.6 lacks scripts/postgres_upgrade.sh).
+    # on the first file the old release does not have (a file added after that release).
     source = _source()
     pinned = source.index('if [ -n "$INSTALL_VERSION" ]; then')
     handover = source.index('"$REPO_RAW_BASE/install/index.sh"')
