@@ -1,4 +1,4 @@
-"""A verifier baseline the target refused is inconclusive, never a settled negative.
+"""Refused baselines are inconclusive, and a continuation that sent nothing is not repeated.
 
 Lab Scan 13bd3497 (2.11.0 at 24d32428, thorough honey with a /hub/ browser capture) replayed the
 captured ``/hub/api/<name>/1*`` routes without the captured session (a capture never keeps
@@ -14,6 +14,7 @@ import asyncio
 import dataclasses
 import json
 import uuid
+from types import SimpleNamespace
 
 import agent_tools
 import scan.action_adapter as action_adapter_module
@@ -26,7 +27,9 @@ from runtime.models import ScanPolicy
 from runtime.request_replay_executor import ReplayTransportResult
 from scan.action_adapter import batch_stop_reason
 from scan.action_plan import ScanActionPlan
+from scan.finalizer import _family_action_reason
 from scan.sqli_stages import prior_stages, run_staged_sqli_attempt, stage_attempt_id
+from scan.verification_extension import EXTENDS_ARG, plan_verification_extensions
 from scan.verifier_refusal import mark_refused
 from scan.work_manifests import build_candidate_manifest, build_endpoint_manifest
 from scanner_tools.request_replay import ReplayRequest
@@ -243,3 +246,53 @@ def test_a_request_mutation_whose_control_is_refused_is_not_sent():
     transport, result = run("safe_authentication")
     assert len(transport.sent) == 2 and result.status == "success"
 
+
+THOROUGH = {"http_requests": 60_000, "state_changing_requests": 6_000, "tool_wall_seconds": 10_800}
+
+
+def _link(action_id, extends=None):
+    args = {"slice": {"start": 0, "count": 4}, "candidate_manifest_ref": {"kind": "candidate"}}
+    if extends:
+        args[EXTENDS_ARG] = extends
+    return SimpleNamespace(
+        action_id=action_id, capability_name="sqli.verify_batch", stage="verify_candidates",
+        capability_args=args, dependencies=(),
+        requested_budget={"http_requests": 480, "tool_wall_seconds": 1_173},
+    )
+
+
+def _settled(status, reason, consumed, reserved):
+    return SimpleNamespace(
+        status=SimpleNamespace(value=status), reason_code=SimpleNamespace(value=reason),
+        budget_reserved=dict(reserved), budget_consumed=dict(consumed),
+    )
+
+
+def test_a_link_that_sent_nothing_is_not_extended_again_at_the_same_holds():
+    first, second = _link("verify.sqli.r01"), _link("verify.sqli.r01.ext.r02", "verify.sqli.r01")
+    results = {
+        "verify.sqli.r01": _settled(
+            "timed_out", "timed_out", {"http_requests": 15, "tool_wall_seconds": 11},
+            {"http_requests": 1_600, "tool_wall_seconds": 720},
+        ),
+        "verify.sqli.r01.ext.r02": _settled(
+            "partial", "http_request_budget_exhausted",
+            {"http_requests": 0, "tool_wall_seconds": 1},
+            {"http_requests": 480, "tool_wall_seconds": 1_173},
+        ),
+    }
+    planned = plan_verification_extensions(
+        parent_plan=SimpleNamespace(actions=(first, second)), parent_results=results,
+        profile_limits=THOROUGH, residual={"http_requests": 30_000, "tool_wall_seconds": 1_200},
+        stage_resume_walls={"verify.sqli.r01.ext.r02": 30},
+        stage_remaining_requests={"verify.sqli.r01.ext.r02": 189},
+    )
+    assert planned == ()
+    # The family names why the candidate stayed unverified instead of a budget it never used.
+    finalized = SimpleNamespace(
+        status=SimpleNamespace(value="partial"),
+        reason_code=SimpleNamespace(value="http_request_budget_exhausted"),
+        budget_consumed={"http_requests": 0, "tool_wall_seconds": 1},
+    )
+    assert _family_action_reason(second, finalized) == "insufficient_budget_for_stage"
+    assert _family_action_reason(first, finalized) == "http_request_budget_exhausted"

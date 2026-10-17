@@ -464,6 +464,17 @@ def _request_need(
     return needs or None
 
 
+def _grows_request_holds(budget: Mapping[str, int], reserved: Mapping[str, int]) -> bool:
+    """Whether an extension holds more of every request dimension its link held."""
+    held = [
+        name for name in ("http_requests", "state_changing_requests")
+        if int(reserved.get(name) or 0) > 0
+    ]
+    return bool(held) and all(
+        int(budget.get(name) or 0) > int(reserved.get(name) or 0) for name in held
+    )
+
+
 def _request_scale(reserved: Mapping[str, int], needed: int | None) -> float:
     """How much larger a request-bound slice's holds must be to fund the units it has left."""
     held = min(
@@ -609,6 +620,7 @@ def plan_verification_extensions(
             if held_wall > 0 else 0
         )
         consumed = dict(getattr(result, "budget_consumed", {}) or {})
+        sent_nothing = int(consumed.get("http_requests") or 0) <= 0
         if (
             chained and action.action_id in (stage_resume_walls or {})
             and int(consumed.get("http_requests") or 0) <= 0
@@ -644,12 +656,19 @@ def plan_verification_extensions(
             request_bound=request_bound,
             request_need=request_need,
         )
+        # A link of a chain that its request holds stopped before it sent anything made no
+        # progress: re-extending it at the same holds repeats the same refusal. Lab Scan
+        # 13bd3497 (2.11.0) planned seven 480-request links in a row for one candidate whose
+        # 189-request unit each link refused, and none sent a request. Such a link is extended
+        # again only with request holds larger than the ones it could not use.
+        no_progress = chained and request_bound and sent_nothing
         last_chance_wall = (stage_last_chance_walls or {}).get(action.action_id)
         if last_chance_wall and concluded != "closed":
             last_chance_pool.append({
                 "index": index, "action": action, "reserved": reserved,
                 "request_need": request_need, "last_chance_wall": int(last_chance_wall),
                 "resume_wall": int((stage_resume_walls or {}).get(action.action_id) or 0),
+                "no_progress": no_progress,
             })
         if scale is None:
             continue
@@ -680,6 +699,7 @@ def plan_verification_extensions(
             # Funded only from what the round's new work leaves (``reserved_for_new_work``).
             "low": concluded in {"probe", "degraded"},
             "request_need": request_need,
+            "no_progress": no_progress,
         })
     planned_by_index: dict[int, dict[str, Any]] = {}
     # The residual is shared fairly between the lanes with work waiting, not handed to the
@@ -788,6 +808,8 @@ def plan_verification_extensions(
                 for name, amount in item["reserved"].items()
                 if int(amount) > 0
             }
+            if item["no_progress"] and not _grows_request_holds(budget, item["reserved"]):
+                continue
             for name, amount in budget.items():
                 remaining[name] = remaining.get(name, 0) - amount
                 if name in caps and caps[name] is not None:
@@ -850,6 +872,8 @@ def plan_verification_extensions(
                 budget[name] = min(room, amount)
             else:
                 budget[name] = amount
+        if item["no_progress"] and not _grows_request_holds(budget, item["reserved"]):
+            continue
         floors = batch_attempt_floor(item["action"].capability_name, body_candidate=True)
         if any(
             budget.get(name, 0) < min(int(floors.get(name) or 0), int(item["reserved"].get(name) or 0))

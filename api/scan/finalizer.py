@@ -14,6 +14,7 @@ from . import scoring
 from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
 from .action_plan import ScanActionPlan
 from .capability_result import (
+    BUDGET_EXHAUSTION_REASONS,
     CapabilityResultReason,
     CapabilityResultReference,
     CapabilityResultStatus,
@@ -2384,7 +2385,30 @@ def _evaluate_csp(policy: Any) -> dict[str, Any]:
 
 
 # Family gaps named by their one cause instead of the generic ``action_incomplete``.
-_NAMED_FAMILY_GAP_REASONS = frozenset({CapabilityResultReason.AUTHENTICATION_REQUIRED.value})
+_NAMED_FAMILY_GAP_REASONS = frozenset({
+    CapabilityResultReason.AUTHENTICATION_REQUIRED.value,
+    "insufficient_budget_for_stage",
+})
+
+
+def _family_action_reason(action: Any, result: Any) -> str:
+    """The reason one verifier action contributes to its family's coverage.
+
+    A SQLi continuation link that its request holds stopped before it sent a single request
+    could not fund one technique stage. It is stated as such: the planner does not extend it
+    again at the same holds (``verification_extension``), so the family's gap is that, not a
+    request budget the link never touched (lab Scan 13bd3497).
+    """
+    reason = result.reason_code.value if result.reason_code is not None else ""
+    if (
+        action.capability_name == "sqli.verify_batch"
+        and action.capability_args.get("extends")
+        and result.status.value == "partial"
+        and reason in {item.value for item in BUDGET_EXHAUSTION_REASONS.values()}
+        and int(dict(result.budget_consumed or {}).get("http_requests") or 0) <= 0
+    ):
+        return "insufficient_budget_for_stage"
+    return reason
 
 
 def finalize_scan_report(
@@ -2616,7 +2640,7 @@ def finalize_scan_report(
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
             row["_statuses"].append(result.status.value)
-            row["_reasons"].append(result.reason_code.value if result.reason_code is not None else "")
+            row["_reasons"].append(_family_action_reason(action, result))
             declared = action.capability_args.get("manifest_entries")
             # Every slice of one worklist declares the same manifest size. A passive Scan
             # runs the pack over two worklists -- the admitted surface and the discovered
@@ -2755,7 +2779,8 @@ def finalize_scan_report(
             if not zero_attempts and len(incomplete_reasons) == 1 and (
                 incomplete_reasons <= _NAMED_FAMILY_GAP_REASONS
             ):
-                # Partial for one stated cause: the target refused the unauthenticated requests.
+                # Partial for one stated cause: the target refused the unauthenticated
+                # requests, or a continuation could not fund a single stage.
                 row["reason"] = next(iter(incomplete_reasons))
             if row["required"]:
                 selected_family_gaps.append(family)
