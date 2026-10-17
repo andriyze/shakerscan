@@ -19,7 +19,7 @@
     "tr46": "7.0.0"
   },
   "devDependencies": {
-    "@types/node": "26.6.4",
+    "@types/node": "26.6.5",
     "@types/tr46": "5.0.1",
     "esbuild": "0.28.2",
     "fast-check": "4.10.2",
