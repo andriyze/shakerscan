@@ -16,6 +16,7 @@ from api.runtime.scan_credentials import (
     resolve_scan_http_principal,
     resolve_scan_interactive_credential,
     scan_credential_resolution_capability,
+    scan_replay_resolution_capability,
 )
 
 
@@ -527,3 +528,24 @@ def test_admission_takes_a_profile_shared_with_the_target_and_refuses_one_listed
         admit_scan_credential_profiles(
             [elsewhere.profile_id], [elsewhere], target_id=TARGET_ID, target_kind="web", now=NOW,
         )
+
+
+def test_collection_replay_resolves_only_under_a_capability_the_profile_allows():
+    form_defaults = (
+        "auth.session.establish", "auth.session.refresh", "auth.session.revoke",
+        "http.request",
+    )
+    for capability in ("collections.replay_active", "collections.replay_safe"):
+        # Lab Scan 5c6b0a8f (2.11.0): no replay authority means no resolution at all, never
+        # a resolution under scan.execute the profile does not hold.
+        assert scan_replay_resolution_capability(form_defaults, capability) is None
+        assert scan_replay_resolution_capability((), capability) is None
+        assert scan_replay_resolution_capability(
+            (*form_defaults, capability), capability,
+        ) == capability
+        assert scan_replay_resolution_capability(
+            (SCAN_CREDENTIAL_CAPABILITY,), capability,
+        ) == SCAN_CREDENTIAL_CAPABILITY
+    assert scan_replay_resolution_capability(
+        ("collections.replay_safe",), "collections.replay_active",
+    ) is None

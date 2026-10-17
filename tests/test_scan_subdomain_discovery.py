@@ -296,6 +296,9 @@ def test_collection_replay_uses_only_an_established_interactive_session(
             "auth_kind": "form_login",
             "principal_slot": "primary",
             "scan_lane": "primary",
+            "allowed_capabilities": [
+                "auth.session.establish", "collections.replay_active", "http.request",
+            ],
         }],
     }
     session_cookie = "session=worker-private-replay-cookie"
@@ -330,8 +333,11 @@ def test_collection_replay_uses_only_an_established_interactive_session(
         async def __aexit__(self, *_args):
             return False
 
+    resolved_capabilities = []
+
     class Resolver:
-        def resolve(self, *_args, **_kwargs):
+        def resolve(self, *_args, **kwargs):
+            resolved_capabilities.append(kwargs["capability"])
             return ResolutionContext()
 
     async def validate_authority(*_args, **_kwargs):
@@ -349,10 +355,13 @@ def test_collection_replay_uses_only_an_established_interactive_session(
             target=target,
             scan_id="00000000-0000-0000-0000-000000000001",
             options=options,
+            capability_name="collections.replay_active",
             trusted_primary_headers={"Cookie": session_cookie},
         )
     )
 
+    # The profile is opened under the replay's own allowed capability, never a wider one.
+    assert resolved_capabilities == ["collections.replay_active"]
     assert bound.wire_requests()[0]["headers"]["Cookie"] == session_cookie
     assert session_cookie not in repr(bound.public_dict())
     assert receipt_context["principal_profile_ref"] == profile_id
@@ -365,6 +374,145 @@ def test_collection_replay_uses_only_an_established_interactive_session(
 
 
 
+
+
+def _replay_profile_options(options, allowed_capabilities):
+    return {
+        **options,
+        "credential_profile_refs": [{
+            "profile_id": "00000000-0000-0000-0000-000000000009",
+            "profile_version": 3,
+            "auth_kind": "form_login",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+            "allowed_capabilities": list(allowed_capabilities),
+            "credential_resolution_capability": "auth.session.establish",
+        }],
+    }
+
+
+def test_collection_replay_without_profile_authority_runs_unbound(monkeypatch):
+    """Lab Scan 5c6b0a8f (2.11.0): a primary form_login profile with its safe defaults.
+
+    Both replays resolved the profile under ``scan.execute``, which it does not allow, so the
+    credential store refused, the adapter raised CredentialResolutionError and every request
+    verifier was blocked. The profile does not allow the replay, so the replay must run without
+    it -- and without the profile ever being opened for it.
+    """
+    _plan, target, options = _authority(enabled=True, approval=True)
+    options = _replay_profile_options(options, (
+        "auth.session.establish", "auth.session.refresh", "auth.session.revoke",
+        "http.request",
+    ))
+    replay_plan = build_replay_plan(
+        [{
+            "id": "request-1",
+            "method": "GET",
+            "url": "https://app.example.test/hub/login",
+            "headers": {"Accept": "text/html"},
+            "body": b"",
+        }],
+        allowed_origins=target.allowed_origins,
+        authorization=ReplayAuthorization(),
+    )
+
+    class Resolver:
+        def resolve(self, *_args, **_kwargs):
+            raise AssertionError("a profile was opened for a capability it does not allow")
+
+    async def validate_authority(*_args, **_kwargs):
+        raise AssertionError("credential authority was loaded for an unbound replay")
+
+    monkeypatch.setattr(worker, "WorkerCredentialResolver", Resolver)
+    monkeypatch.setattr(
+        worker, "validate_worker_credential_authority", validate_authority,
+    )
+
+    for capability_name in ("collections.replay_active", "collections.replay_safe"):
+        bound, receipt_context = asyncio.run(
+            worker._bind_scan_replay_primary_credential(
+                object(),
+                plan=replay_plan,
+                target=target,
+                scan_id="00000000-0000-0000-0000-000000000001",
+                options=options,
+                capability_name=capability_name,
+                trusted_primary_headers={},
+            )
+        )
+        assert bound is replay_plan
+        assert receipt_context is None
+        headers = {
+            name.lower() for name in bound.wire_requests()[0]["headers"]
+        }
+        assert not headers & {"cookie", "authorization"}
+
+
+def test_collection_replay_scan_execute_profile_keeps_its_custody_receipt(
+    monkeypatch,
+):
+    _plan, target, options = _authority(enabled=True, approval=True)
+    options = _replay_profile_options(options, ("scan.execute",))
+    replay_plan = build_replay_plan(
+        [{
+            "id": "request-1",
+            "method": "GET",
+            "url": "https://app.example.test/account",
+            "headers": {},
+            "body": b"",
+        }],
+        allowed_origins=target.allowed_origins,
+        authorization=ReplayAuthorization(),
+    )
+    resolved_capabilities = []
+
+    class Resolution:
+        profile = SimpleNamespace(
+            profile_id="00000000-0000-0000-0000-000000000009",
+            current_version=3,
+            auth_kind="form_login",
+            principal_slot="primary",
+            target_kind="web",
+        )
+
+        def http_headers(self):
+            raise worker.CredentialResolutionError("interactive exchange required")
+
+    class ResolutionContext:
+        async def __aenter__(self):
+            return Resolution()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Resolver:
+        def resolve(self, *_args, **kwargs):
+            resolved_capabilities.append(kwargs["capability"])
+            return ResolutionContext()
+
+    async def validate_authority(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    monkeypatch.setattr(worker, "WorkerCredentialResolver", Resolver)
+    monkeypatch.setattr(
+        worker, "validate_worker_credential_authority", validate_authority,
+    )
+
+    bound, receipt_context = asyncio.run(
+        worker._bind_scan_replay_primary_credential(
+            object(),
+            plan=replay_plan,
+            target=target,
+            scan_id="00000000-0000-0000-0000-000000000001",
+            options=options,
+            capability_name="collections.replay_active",
+            trusted_primary_headers={"Cookie": "session=established"},
+        )
+    )
+
+    assert resolved_capabilities == ["scan.execute"]
+    assert bound.wire_requests()[0]["headers"]["Cookie"] == "session=established"
+    assert receipt_context["principal_slot"] == "primary"
 
 
 def test_candidate_verification_never_promotes_sqlmap_label_without_differential():

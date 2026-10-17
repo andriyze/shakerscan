@@ -104,7 +104,7 @@ try:
     from runtime.scan_credentials import (
         bind_scan_session_headers,
         resolve_scan_http_principal,
-        resolve_scan_interactive_credential,
+        resolve_scan_interactive_credential,        scan_credential_allows_capability,
     )
     from runtime.target_bound_socket import FrozenTargetSocketFactory
     from scan.private_state import (
@@ -196,7 +196,7 @@ except (ImportError, ModuleNotFoundError):
     from ..runtime.scan_credentials import (
         bind_scan_session_headers,
         resolve_scan_http_principal,
-        resolve_scan_interactive_credential,
+        resolve_scan_interactive_credential,        scan_credential_allows_capability,
     )
     from ..runtime.target_bound_socket import FrozenTargetSocketFactory
     from .private_state import (
@@ -331,6 +331,18 @@ Cancelled = Callable[[], bool]
 PrivateReplayPlanLoader = Callable[
     [ScanAction, Mapping[str, Any]], Awaitable[ReplayPlan | None]
 ]
+
+
+def _primary_profile_governs(options: Mapping[str, Any], capability_name: str) -> bool:
+    """Whether a bound primary profile allows this capability, so it must carry its session."""
+    return any(
+        isinstance(item, Mapping)
+        and str(item.get("scan_lane") or item.get("auth_state") or "") in {"primary", "user1"}
+        and scan_credential_allows_capability(
+            item.get("allowed_capabilities") or (), capability_name,
+        )
+        for item in options.get("resolved_credential_profiles") or ()
+    )
 
 
 class ObservationBackend(Protocol):
@@ -1161,13 +1173,7 @@ class DatabaseNeutralScanActionDispatcher:
                 self.options, lane="primary",
                 capability_name=action.capability_name,
             )
-            primary_profile_bound = any(
-                isinstance(item, Mapping)
-                and str(item.get("scan_lane") or item.get("auth_state") or "")
-                in {"primary", "user1"}
-                for item in self.options.get("resolved_credential_profiles") or ()
-            )
-            if primary_profile_bound:
+            if _primary_profile_governs(self.options, action.capability_name):
                 if not principal.authenticated:
                     return False
                 plan = bind_replay_credential_headers(
@@ -1642,11 +1648,10 @@ class DatabaseNeutralScanActionDispatcher:
         principal = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=action.capability_name,
         )
-        primary_profile_bound = any(
-            isinstance(item, Mapping)
-            and str(item.get("scan_lane") or item.get("auth_state") or "")
-            in {"primary", "user1"}
-            for item in self.options.get("resolved_credential_profiles") or ()
+        # A primary profile that does not allow this replay leaves it unauthenticated, as with
+        # no profile; one that allows it must carry its established session or not run.
+        primary_profile_bound = _primary_profile_governs(
+            self.options, action.capability_name,
         )
         if primary_profile_bound:
             if not principal.authenticated:

@@ -611,6 +611,111 @@ def test_database_neutral_dispatcher_lazily_loads_local_private_replay(monkeypat
     assert loaded == [(collection.action_id, {})]
 
 
+@pytest.mark.parametrize(
+    ("allowed", "session", "expected_status", "expected_cookie"),
+    [
+        # Lab Scan 5c6b0a8f (2.11.0): a primary form_login profile with its safe defaults
+        # does not allow the replay, so the replay runs as it would with no profile -- it
+        # neither fails nor borrows the session the profile established for other work.
+        (("auth.session.establish", "http.request"), True, "success", None),
+        (("auth.session.establish", "collections.replay_safe"), True, "success",
+         "session=established-primary"),
+        # A profile that allows the replay never lets it fall back to anonymous traffic.
+        (("auth.session.establish", "collections.replay_safe"), False, "skipped", None),
+    ],
+    ids=("profile_does_not_allow_replay", "profile_session_bound", "session_missing"),
+)
+def test_collection_replay_uses_the_primary_profile_only_where_it_allows(
+    monkeypatch, allowed, session, expected_status, expected_cookie,
+):
+    replay_plan = build_replay_plan(
+        [{
+            "id": "local-private-request",
+            "method": "GET",
+            "url": "https://app.example.test/hub/login",
+            "headers": {"Accept": "text/html"},
+            "body": None,
+            "body_mode": "none",
+            "auth_type": "none",
+            "has_sensitive_material": False,
+        }],
+        allowed_origins=TARGET.allowed_origins,
+        default_origin=TARGET.allowed_origins[0],
+        authorization=ReplayAuthorization(),
+    )
+    collection = _action("inputs.collection_00", "collections.replay_safe", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(collection,),
+    )
+    options = {
+        "resolved_credential_profiles": [{
+            "profile_id": str(uuid.uuid4()),
+            "profile_version": 1,
+            "auth_kind": "form_login",
+            "principal_slot": "primary",
+            "scan_lane": "primary",
+            "allowed_capabilities": list(allowed),
+        }],
+    }
+    if session:
+        options["auth_cookies"] = "session=established-primary"
+    else:
+        options["login_username"] = "operator"
+    sent = []
+
+    async def loader(_action, _options):
+        return replay_plan
+
+    class Transport:
+        async def send(self, request, **_kwargs):
+            sent.append(request)
+            return ReplayTransportResult(
+                status_code=200,
+                connected_address="192.0.2.10",
+                final_url=request.url,
+                response_headers={"Content-Type": "text/html"},
+                response_body=b"<html></html>",
+                elapsed_ms=1,
+            )
+
+    monkeypatch.setattr(
+        action_adapter_module, "PinnedAiohttpReplayTransport", Transport,
+    )
+    dispatcher = _dispatcher(
+        plan, Backend(), private_replay_plan_loader=loader, options=options,
+    )
+
+    receipt = asyncio.run(dispatcher(
+        collection, _lease(plan, collection), _noop,
+    ))
+
+    assert receipt.status == expected_status
+    principal_contexts = [
+        item for item in receipt.observations
+        if item.get("kind") == "principal_context"
+    ]
+    # A resumed Scan restores the same replay under the same rule.
+    fresh = _dispatcher(
+        plan, Backend(), private_replay_plan_loader=loader, options=options,
+    )
+    assert asyncio.run(fresh.restore_terminal_state(collection, None)) is (
+        expected_status != "skipped"
+    )
+    if expected_status == "skipped":
+        assert receipt.errors == ("credential_session_unavailable",)
+        assert sent == []
+        return
+    assert len(sent) == 1
+    cookies = [value for name, value in sent[0].headers if name.lower() == "cookie"]
+    assert cookies == ([expected_cookie] if expected_cookie else [])
+    assert not any(name.lower() == "authorization" for name, _ in sent[0].headers)
+    assert bool(principal_contexts) is bool(expected_cookie)
+    assert "established-primary" not in json.dumps(receipt.public_dict())
+
+
 def test_database_neutral_resume_restores_sealed_auth_without_login_traffic():
     pytest.importorskip("cryptography")
     scan_id = str(uuid.uuid4())
