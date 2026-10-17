@@ -18,7 +18,9 @@ export const udpExchange: Exchange = (ip, request, budget) => {
       if (error) reject(error); else resolve(data!);
     };
     const abort = () => finish(new Error('timeout'));
-    const timer = setTimeout(abort, Math.max(1, Math.min(1200, budget.deadline - Date.now())));
+    // A deadline-bound exchange expires the budget (which calls abort) instead of timing out alone.
+    const window = budget.operationWindow(1200, 1);
+    const timer = setTimeout(window.deadlineBound ? () => budget.expire() : abort, window.ms);
     budget.signal.addEventListener('abort', abort, { once: true });
     socket.once('error', finish);
     socket.once('message', (data, remote) => {

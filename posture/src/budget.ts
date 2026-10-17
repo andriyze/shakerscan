@@ -13,6 +13,26 @@ export class Budget {
     parent?.addEventListener('abort', this.onCancel, { once: true });
     if (parent?.aborted) this.controller.abort();
   }
+  // A timer derived from the deadline can fire before this budget's own timer (both are
+  // scheduled against the event loop's cached clock, the deadline against Date.now()),
+  // so whichever deadline-bound timer fires first expires the whole budget.
+  expire() { this.controller.abort(); }
+  // Milliseconds an operation capped at `cap` may run, and whether the deadline (not the cap)
+  // is what bounds it; deadline-bound timers must call expire() rather than abort locally.
+  operationWindow(cap: number, min = 0): { ms: number; deadlineBound: boolean } {
+    const remaining = this.deadline - Date.now();
+    return remaining <= cap ? { ms: Math.max(min, remaining), deadlineBound: true } : { ms: cap, deadlineBound: false };
+  }
+  // Signal for one operation capped at `cap` ms. When the deadline bounds it, reaching the
+  // deadline expires this budget, so a timed-out operation never leaves it admitting more.
+  operationSignal(cap: number): AbortSignal {
+    const { ms, deadlineBound } = this.operationWindow(cap, 1);
+    if (!deadlineBound) return AbortSignal.any([this.signal, AbortSignal.timeout(ms)]);
+    const timer = setTimeout(() => this.expire(), ms);
+    timer.unref?.();
+    this.signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
+    return this.signal;
+  }
   assert() { if (this.signal.aborted || Date.now() >= this.deadline) throw new PublicError('timeout'); }
   reserve() {
     this.assert();
