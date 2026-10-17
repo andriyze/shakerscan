@@ -523,3 +523,38 @@ def test_list_contract_keyset_select_matches_select_list():
     plan = spec.plan(list_contract.Page(limit=5, sort="-priority"))
     assert plan.keyset_select in plan.select_list
     assert plan.keyset_select.count(" AS ") == 4
+
+
+
+def test_a_cold_inventory_is_refreshed_in_bounded_batches_without_omitting_assets(monkeypatch):
+    monkeypatch.setattr(asset_rank, "FACTS_BATCH", 7)
+
+    async def scenario(conn, pool, ids):
+        sizes = []
+
+        class MeasuredConn:
+            def __init__(self, inner):
+                self.inner = inner
+
+            async def fetch(self, query, *args):
+                rows = await self.inner.fetch(query, *args)
+                if query.lstrip().startswith("SELECT t.id, t.url"):
+                    sizes.append(len(rows))
+                return rows
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        # Asset creation also creates canonical host rows; count the current inventory.
+        expected = await conn.fetchval("SELECT count(*) FROM targets WHERE is_active")
+        written = await asset_rank.refresh_facts(MeasuredConn(conn), include_ai=False)
+        assert written == expected
+        assert len(sizes) > 1 and max(sizes) <= 7
+        assert await conn.fetchval("SELECT count(*) FROM exposure_target_facts WHERE state=$1",
+                                   asset_rank.FRESH_STATE) == expected
+        body, _ = await assets(pool, monkeypatch, limit=2000)
+        reference = await reference_exposure_assets(pool)
+        assert _comparable(body) == _comparable(reference)
+        assert await asset_rank.refresh_facts(conn, include_ai=False) == 0
+
+    run(scenario, targets=17, ai_targets=0, findings=0)
