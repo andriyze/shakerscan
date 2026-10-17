@@ -26,6 +26,7 @@ try:
     from capabilities.sql_error_signatures import SQL_ERROR_PATTERNS
     from capabilities.sqli_path_mutation import prepare_path_candidate, path_field_value, replace_path_field
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from runtime.auth_refusal import refusal, refusal_error
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
     from runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
@@ -38,6 +39,7 @@ except ModuleNotFoundError:
     from .sql_error_signatures import SQL_ERROR_PATTERNS
     from .sqli_path_mutation import prepare_path_candidate, path_field_value, replace_path_field
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
+    from ..runtime.auth_refusal import refusal, refusal_error
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
     from ..runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
@@ -363,6 +365,11 @@ class SQLiProofAdapter:
             )
 
         verified = proof_contract is not None
+        # A control the target refused (a session-less replay, a WAF) leaves nothing proven or
+        # refuted: the payloads were compared with a refusal. A login form's 401 is its answer.
+        refused = None if verified or request_class == "safe_authentication" else refusal(
+            pairs[0][0].status_code, pairs[0][0].response_headers,
+        )
         hashes = [{
             "control_request_sha256": control_request.digest_dict()["body_sha256"] if control_request.body else _sha256(control_request.url.encode()),
             "control_response_sha256": keyed_body_digest(control.response_body),
@@ -397,8 +404,12 @@ class SQLiProofAdapter:
             }} if verified and technique == "time_median_repeated" else {}),
             "session_state_discarded": request_class == "safe_authentication",
             "secret_values_visible": False,
+            **({"finding_verdict": "inconclusive", "inconclusive_reason": refused[1]}
+               if refused else {}),
         }
         errors = tuple(item.error_code for item in results if item.error_code)
+        if refused:
+            errors = (refusal_error(*refused), *errors)
         return CapabilityAdapterResult(
             status="partial" if errors else "success", observations=(observation,), errors=errors,
             actual_budget={

@@ -58,6 +58,10 @@ _REASON_LABELS = {
         "The target refused the unauthenticated requests (401/403 or a redirect to sign-in), "
         "so those candidates were not tested; add a credential profile to verify them"
     ),
+    "target_refused": (
+        "The target refused the verifier's requests (403) without asking for credentials, for "
+        "example a firewall or an access rule, so those candidates could not be verified"
+    ),
     "insufficient_budget_for_stage": (
         "A continuation could not fund a single verification stage, so its candidates were "
         "left unverified"

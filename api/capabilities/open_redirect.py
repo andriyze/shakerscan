@@ -18,9 +18,11 @@ import urllib.parse
 from typing import Any, Awaitable, Callable, Iterable, Mapping
 
 try:
+    from runtime.auth_refusal import refusal
     from scan.posture_findings import REDIRECT_CANARY_URL, is_redirect_parameter, redirects_to_canary
     from scan.work_manifests import ScanWorkManifestError, execution_url_for_endpoint
 except ModuleNotFoundError:  # package import in host-side tests
+    from ..runtime.auth_refusal import refusal
     from ..scan.posture_findings import REDIRECT_CANARY_URL, is_redirect_parameter, redirects_to_canary
     from ..scan.work_manifests import ScanWorkManifestError, execution_url_for_endpoint
 
@@ -76,6 +78,9 @@ async def probe_candidate(candidate: Mapping[str, str], send: Callable[[str], Aw
     status, headers = await send(candidate["url"])
     location = _location(headers)
     proven = isinstance(status, int) and status in _REDIRECT_STATUSES and redirects_to_canary(location)
+    # A refused probe (401/403, a redirect to sign-in) never reached the redirect logic: the
+    # parameter is untested, not "not an open redirect".
+    refused = None if proven else refusal(status, headers)
     return {
         "kind": "open_redirect_proof",
         "url": candidate["url"],
@@ -86,6 +91,8 @@ async def probe_candidate(candidate: Mapping[str, str], send: Callable[[str], Aw
         # own redirect target and may carry its state.
         "location": location if proven else "",
         "proof_state": "verified" if proven else "not_proven",
+        **({"finding_verdict": "inconclusive", "inconclusive_reason": refused[1],
+            "refusal_status": refused[0]} if refused else {}),
     }
 
 

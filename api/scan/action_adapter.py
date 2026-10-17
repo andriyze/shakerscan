@@ -67,6 +67,7 @@ try:
         GRAPHQL_PROBE_PARSER_VERSION,
         GRAPHQL_REQUEST_HEADERS,
         INTROSPECTION_QUERY as GRAPHQL_INTROSPECTION_QUERY,
+        TYPENAME_QUERY as GRAPHQL_TYPENAME_QUERY,
         check_endpoint as check_graphql_endpoint,
         endpoint_of as graphql_endpoint_of,
         graphql_request_url,
@@ -93,6 +94,7 @@ try:
     from capabilities.scanner import ScannerExecutionAdapter
     from capabilities.tls import inspect_tls_binding
     from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
+    from runtime.auth_refusal import is_authentication_candidate, refusal, refusal_error
     from runtime.capability_registry import CAPABILITY_REGISTRY
     from runtime.models import TargetBinding
     from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
@@ -157,6 +159,7 @@ except (ImportError, ModuleNotFoundError):
         GRAPHQL_PROBE_PARSER_VERSION,
         GRAPHQL_REQUEST_HEADERS,
         INTROSPECTION_QUERY as GRAPHQL_INTROSPECTION_QUERY,
+        TYPENAME_QUERY as GRAPHQL_TYPENAME_QUERY,
         check_endpoint as check_graphql_endpoint,
         endpoint_of as graphql_endpoint_of,
         graphql_request_url,
@@ -183,6 +186,7 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.scanner import ScannerExecutionAdapter
     from ..capabilities.tls import inspect_tls_binding
     from ..hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
+    from ..runtime.auth_refusal import is_authentication_candidate, refusal, refusal_error
     from ..runtime.capability_registry import CAPABILITY_REGISTRY
     from ..runtime.models import TargetBinding
     from ..runtime.pinned_http_replay import PinnedAiohttpReplayTransport
@@ -244,7 +248,7 @@ from .sqli_stages import (
     prior_stages,
     run_staged_sqli_attempt,
 )
-from .verifier_refusal import is_refusal_error, mark_refused
+from .verifier_refusal import is_refusal_error, mark_refused, refusal_exempt
 from .verification_extension import (
     EXTENDS_ARG,
     LAST_CHANCE_ARG,
@@ -742,9 +746,15 @@ def batch_stop_reason(
     if unattempted or CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value in lowered:
         # A SQLi candidate closed for budget names it (soak N55).
         return CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value
-    if any(is_refusal_error(item) for item in lowered):
-        # The target refused the unauthenticated baseline: nothing failed, nothing was tested.
-        return CapabilityResultReason.AUTHENTICATION_REQUIRED.value
+    refusals = [item.split(":", 1)[0] for item in lowered if is_refusal_error(item)]
+    if refusals:
+        # The target refused the baseline: nothing failed, nothing was tested. A request for
+        # credentials is named before a plain refusal (it has a remedy: a credential profile).
+        return (
+            CapabilityResultReason.AUTHENTICATION_REQUIRED.value
+            if CapabilityResultReason.AUTHENTICATION_REQUIRED.value in refusals
+            else CapabilityResultReason.TARGET_REFUSED.value
+        )
     return CapabilityResultReason.ADAPTER_FAILED.value
 
 
@@ -2354,10 +2364,8 @@ class DatabaseNeutralScanActionDispatcher:
                 ):
                     continue
                 if candidate.get("body_field_names"):
-                    path = str(candidate.get("canonical_path") or "").lower()
                     proof_candidate["request_class"] = (
-                        "safe_authentication"
-                        if any(token in path for token in ("/login", "/auth", "/session"))
+                        "safe_authentication" if is_authentication_candidate(candidate)
                         else "confirmed_mutation"
                     )
                 request = proof_request_for_candidate(
@@ -3066,6 +3074,7 @@ class DatabaseNeutralScanActionDispatcher:
         http_ceiling = int(action.requested_budget.get("http_requests") or 0)
         wall_deadline = time.monotonic() + max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
         errors: list[str] = []
+        refused_probes: list[str] = []
         attempted = resumed = 0
         ordinal = start * 1000
 
@@ -3096,6 +3105,12 @@ class DatabaseNeutralScanActionDispatcher:
                 resumed += 1
                 attempted += 1
                 observations.extend(prior.get("observations") or ())
+                refused_probes.extend(
+                    f"{item['inconclusive_reason']}:{item.get('refusal_status') or 0}"
+                    for item in prior.get("observations") or ()
+                    if isinstance(item, Mapping) and item.get("kind") == "open_redirect_proof"
+                    and item.get("inconclusive_reason")
+                )
                 continue
             if (
                 self.cancelled() or consumed["http_requests"] >= http_ceiling
@@ -3103,10 +3118,14 @@ class DatabaseNeutralScanActionDispatcher:
             ):
                 break
             proof = await probe_redirect_candidate(candidate, send)
+            refused = proof.get("inconclusive_reason")
+            if refused:
+                refused_probes.append(f"{refused}:{proof.get('refusal_status') or 0}")
             bundled = ({
                 "kind": "candidate_attempt", "attempt_id": attempt_id,
                 "candidate_id": attempt_id[:32], "family": "open_redirect",
-                "status": "success", "proof_state": proof["proof_state"],
+                "status": "partial" if refused else "success", "proof_state": proof["proof_state"],
+                **({"verdict": "inconclusive", "inconclusive_reason": refused} if refused else {}),
                 "budget_consumed": {"http_requests": 1},
             }, proof)
             observations.extend(bundled)
@@ -3130,12 +3149,18 @@ class DatabaseNeutralScanActionDispatcher:
             if consumed["http_requests"] >= http_ceiling
             else CapabilityResultReason.TIMED_OUT.value
         )
+        # Every candidate attempted, but the target refused some probes: partial for that
+        # reason (a credential request named before a plain refusal), never "not proven".
+        stated = [stopped_by] if partial else (
+            [batch_stop_reason(refused_probes, unattempted=0)] if refused_probes else []
+        )
         return self._receipt(
-            action, status="partial" if partial else "success",
+            action, status="partial" if partial or refused_probes else "success",
             parser_version=OPEN_REDIRECT_PARSER_VERSION, started_at=started_at,
             observations=tuple(observations),
-            errors=tuple(([stopped_by] if partial else []) + errors[:20]), consumed=consumed,
-            partial=partial, timed_out=partial and stopped_by == CapabilityResultReason.TIMED_OUT.value,
+            errors=tuple(stated + refused_probes[:5] + errors[:20]), consumed=consumed,
+            partial=partial or bool(refused_probes),
+            timed_out=partial and stopped_by == CapabilityResultReason.TIMED_OUT.value,
             redacted_execution={
                 "action_id": action.action_id, "manifest_digest": manifest_digest,
                 "slice": {"start": start, "count": count},
@@ -3209,6 +3234,9 @@ class DatabaseNeutralScanActionDispatcher:
         wall_deadline = time.monotonic() + max(1, int(action.requested_budget.get("tool_wall_seconds") or 1))
         observations: list[Mapping[str, Any]] = list(inapplicable)
         errors: list[str] = []
+        refused_probes: list[str] = []
+        # The refusal each probe URL met (``runtime.auth_refusal``), for discovered endpoints.
+        refusals: dict[str, tuple[int, str]] = {}
         attempted = resumed = 0
         incomplete = False
         ordinal = start * 1000
@@ -3232,6 +3260,9 @@ class DatabaseNeutralScanActionDispatcher:
             consumed["http_requests"] = min(http_ceiling, consumed["http_requests"] + 1)
             if result.error_code:
                 errors.append(str(result.error_code))
+            refused = refusal(result.status_code, result.response_headers)
+            if refused is not None:
+                refusals[url] = refused
             await heartbeat()
             return result.status_code, bytes(result.response_body or b"")
 
@@ -3242,15 +3273,29 @@ class DatabaseNeutralScanActionDispatcher:
                 resumed += 1
                 attempted += 1
                 observations.extend(prior.get("observations") or ())
+                refused_probes.extend(
+                    str(item["refusal"]) for item in prior.get("observations") or ()
+                    if isinstance(item, Mapping) and item.get("refusal")
+                )
                 continue
             if not can_send():
                 break
             outcome = await check_graphql_endpoint(endpoint, send, can_send=can_send)
             proven = bool(outcome["proofs"])
+            # A discovered GraphQL route whose first probe the target refused was never
+            # examined: inconclusive for that reason, not "not GraphQL". A conventional seed
+            # location that refuses is usually just absent behind a site-wide wall, so it is not.
+            refused = None if outcome["graphql"] or endpoint in seeds else refusals.get(
+                graphql_request_url(endpoint, GRAPHQL_TYPENAME_QUERY),
+            )
+            if refused is not None:
+                refused_probes.append(refusal_error(*refused))
             bundled = ({
                 "kind": "candidate_attempt", "attempt_id": attempt_id,
                 "candidate_id": attempt_id[:32], "family": "graphql",
-                "status": "success" if outcome["complete"] else "partial",
+                "status": "success" if outcome["complete"] and refused is None else "partial",
+                **({"verdict": "inconclusive", "inconclusive_reason": refused[1],
+                    "refusal": refusal_error(*refused)} if refused else {}),
                 "proof_state": "verified" if proven else "not_proven",
                 "graphql_endpoint": bool(outcome["graphql"]),
                 "introspection_enabled": bool(outcome["introspection"]),
@@ -3280,12 +3325,16 @@ class DatabaseNeutralScanActionDispatcher:
             if consumed["http_requests"] >= http_ceiling
             else CapabilityResultReason.TIMED_OUT.value
         )
+        stated = [stopped_by] if partial else (
+            [batch_stop_reason(refused_probes, unattempted=0)] if refused_probes else []
+        )
         return self._receipt(
-            action, status="partial" if partial else "success",
+            action, status="partial" if partial or refused_probes else "success",
             parser_version=GRAPHQL_PROBE_PARSER_VERSION, started_at=started_at,
             observations=tuple(observations),
-            errors=tuple(([stopped_by] if partial else []) + errors[:20]), consumed=consumed,
-            partial=partial, timed_out=partial and stopped_by == CapabilityResultReason.TIMED_OUT.value,
+            errors=tuple(stated + refused_probes[:5] + errors[:20]), consumed=consumed,
+            partial=partial or bool(refused_probes),
+            timed_out=partial and stopped_by == CapabilityResultReason.TIMED_OUT.value,
             redacted_execution={
                 "action_id": action.action_id, "manifest_digest": manifest_digest,
                 "slice": {"start": start, "count": count},
@@ -4198,14 +4247,21 @@ class DatabaseNeutralScanActionDispatcher:
                         {"url": redact_url(execution_target),
                          "method": body_request.get("method", "GET"), **verdict},
                     )
-            if any(is_refusal_error(item) for item in result.errors or ()):
-                # The target refused the unauthenticated baseline: inconclusive for
-                # authentication, named on the candidate, and not resumed by an extension.
+            refusals = [
+                str(item).split(":", 1)[0] for item in result.errors or () if is_refusal_error(item)
+            ]
+            if refusals:
+                # The target refused the baseline: inconclusive for that reason, named on the
+                # candidate. With nothing left a continuation could run, it is final.
                 head = dict(attempt_observations[0])
-                head.update({
-                    "verdict": "inconclusive", "inconclusive_reason": "authentication_required",
-                })
-                head.pop("resume_wall_seconds", None)
+                head["inconclusive_reason"] = (
+                    CapabilityResultReason.AUTHENTICATION_REQUIRED.value
+                    if CapabilityResultReason.AUTHENTICATION_REQUIRED.value in refusals
+                    else CapabilityResultReason.TARGET_REFUSED.value
+                )
+                if not getattr(result, "resume_wall_seconds", None):
+                    head["verdict"] = "inconclusive"
+                    head.pop("resume_wall_seconds", None)
                 attempt_observations = (head, *attempt_observations[1:])
             attempt = {
                 "attempt_id": attempt_id,
@@ -4316,6 +4372,23 @@ class DatabaseNeutralScanActionDispatcher:
             attempt_log.append((candidate_id, retry_round, False, False))
             errors.append(f"candidate_failed:{type(exc).__name__}")
 
+        # Candidates an extended action already closed as refused (the target asked for
+        # credentials, or refused every unit): re-run, they send nothing, so they need no hold.
+        refused_final = {
+            str(item.get("attempt_id") or "")
+            for _source, source_attempts in lineage_attempts
+            for item in source_attempts
+            if isinstance(item, Mapping) and any(
+                isinstance(record, Mapping) and record.get("kind") == "candidate_attempt"
+                and record.get("verdict") == "inconclusive"
+                and record.get("inconclusive_reason") in {
+                    CapabilityResultReason.AUTHENTICATION_REQUIRED.value,
+                    CapabilityResultReason.TARGET_REFUSED.value,
+                }
+                for record in item.get("observations") or ()
+            )
+        }
+
         def needs_hold(entry: tuple[int, Mapping[str, Any], int]) -> bool:
             """Whether a work entry will be funded, not carried, resumed or skipped below.
 
@@ -4334,7 +4407,7 @@ class DatabaseNeutralScanActionDispatcher:
             if retry_round:
                 key += f":retry:{retry_round}"
             identity = hashlib.sha256(key.encode()).hexdigest()
-            if identity in completed:
+            if identity in completed or identity in refused_final:
                 return False
             if retry_round:
                 return True
@@ -4733,7 +4806,7 @@ class DatabaseNeutralScanActionDispatcher:
                         args: Mapping[str, Any] = args,
                         socket_factory: FrozenTargetSocketFactory = socket_factory,
                         legacy_spec: Any = legacy_spec,
-                        refusal_exempt: bool = bool(body_request) or tool not in {"sqlmap", "dalfox"},
+                        exempt_refusal: bool = refusal_exempt(tool, {**row, **body_request}),
                     ) -> Any:
                         prepared = fit_prepared_scan_capability(
                             prepare_scan_external_capability(
@@ -4780,7 +4853,7 @@ class DatabaseNeutralScanActionDispatcher:
                             adapter,
                             heartbeat=heartbeat,
                             cancelled=self.cancelled,
-                        ), exempt=refusal_exempt)
+                        ), exempt=exempt_refusal)
 
                     if tool == "sqlmap":
                         # One candidate, verified technique by technique; every finished stage
