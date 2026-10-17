@@ -91,6 +91,9 @@ class _TargetBoundaryConn:
         self.fetchval_queries.append(" ".join(query.split()))
         return 0
 
+    async def execute(self, query, *_args):  # session settings (SET jit = off)
+        return "SET"
+
 
 def test_web_target_apis_exclude_model_intake_subjects_by_default(monkeypatch):
     conn = _TargetBoundaryConn()

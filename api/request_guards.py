@@ -172,6 +172,12 @@ def _inventory_is_heavy(query: Mapping[str, list[str]]) -> bool:
             or (query.get("sort") or [""])[-1] == "risk")
 
 
+def _legacy_list_shape(query: Mapping[str, list[str]]) -> bool:
+    """A reworked list answered in its deprecated legacy shape: no list/v1 opt-in parameter
+    (``list_compat.LIST_V1_OPT_IN``) is present."""
+    return not any(name in query for name in ("cursor", "count", "fields", "since"))
+
+
 @dataclass(frozen=True)
 class RouteRule:
     """One row of ``ROUTE_CLASSES``: GET/HEAD paths matching ``pattern`` (and ``when``, if
@@ -198,9 +204,12 @@ ROUTE_CLASSES: tuple[RouteRule, ...] = (
     # Unbounded today, measured or suspected over 5 s at scale. Interim rows until each
     # endpoint's rework lands; then delete the row.
     _rule(r"^/findings$", HEAVY, "findings"),
-    _rule(r"^/targets/[^/]+/graph$", HEAVY, "target_graph"),
-    _rule(r"^/targets/[^/]+/asm/.+$", HEAVY, "asm"),
-    _rule(r"^/arsenal/campaigns$", HEAVY, "arsenal"),
+    # The graph's list/v1 pages are bounded; its deprecated whole-graph response is not.
+    _rule(r"^/targets/[^/]+/graph$", HEAVY, "target_graph", _legacy_list_shape),
+    # /asm/coverage is counted in SQL (one row); the other ASM reads are not reworked yet.
+    _rule(r"^/targets/[^/]+/asm/(?!coverage$).+$", HEAVY, "asm"),
+    # Bounded to the window, but with few active critical/high findings the weak-claim read is
+    # one pass over the active findings (no findings index for it yet).
     _rule(r"^/arsenal/refuter-reviews/summary$", HEAVY, "arsenal"),
     # Exports with no admission of their own share one slot pool.
     _rule(r"^/evidence/export-(?:bundle|manifest)$", EXPORT, "exports"),
@@ -293,7 +302,10 @@ def statement_timeout_pool_options(default_timeout_ms: int) -> dict[str, Any]:
         if wanted is not None and wanted != default:
             await connection.execute(f"SET statement_timeout = {int(wanted)}")
 
-    return {"server_settings": {"statement_timeout": str(default)}, "setup": setup}
+    # JIT off: the planner prices correlated per-row subqueries high enough to cross the JIT
+    # thresholds, and on the 2.11 scale seed compiling took 0.94 s of a 1.17 s inventory facet
+    # read (0.18 s without it). The API's reads are short; JIT only adds latency.
+    return {"server_settings": {"statement_timeout": str(default), "jit": "off"}, "setup": setup}
 
 
 # --- Admission ---------------------------------------------------------------------------------

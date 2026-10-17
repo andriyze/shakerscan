@@ -377,6 +377,7 @@ from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
 from operations import router as ops_router_module  # noqa: E402
+from operations import dashboard_data  # noqa: E402
 from settings_routes import router as settings_router_module  # noqa: E402
 from model_intake import router as mi_router_module  # noqa: E402
 from fleet_routes import router as fleet_router_module  # noqa: E402
@@ -3198,10 +3199,16 @@ def test_dashboard_action_center_prioritizes_server_derived_items(monkeypatch):
         "pending_names": ["worker-booting"],
     }
 
-    items = asyncio.run(api_module._build_dashboard_action_center(conn, worker_snapshot=snapshot))
+    counts = dashboard_data.DashboardCounts(findings=(
+        ("active", "critical", "scan", False, False, 2),
+        ("active", "high", "", False, False, 1),
+        ("active", "critical", "device", False, False, 5),  # the device plane is not a blocker here
+    ))
+    items = asyncio.run(api_module._build_dashboard_action_center(conn, worker_snapshot=snapshot, counts=counts))
     by_id = {item["id"]: item for item in items}
 
     assert items[0]["id"] == "deploy-gate-blockers"
+    assert by_id["deploy-gate-blockers"]["count"] == 3
     assert by_id["deploy-gate-blockers"]["priority"] == "critical"
     assert by_id["deploy-gate-blockers"]["actions"][0]["href"] == "/findings?status=active&severity=critical"
     assert by_id["worker-build-freshness"]["count"] == 2
@@ -3369,8 +3376,13 @@ def test_dashboard_action_center_surfaces_refuter_integrity_spike(monkeypatch):
             return {}  # no blocker/exception/asm/schedule items
 
         async def fetch(self, query, *args):
-            if "FROM scans" in query and "ROW_NUMBER()" in query:
-                return spike_scans
+            if "FROM scans" in query and "array_agg(s.findings_count" in query:
+                return [{
+                    "target_id": "t1",
+                    "target_urls": [row["target_url"] for row in spike_scans],
+                    "scan_ids": [row["scan_id"] for row in spike_scans],
+                    "findings_counts": [row["findings_count"] for row in spike_scans],
+                }]
             return []  # no weak findings, reviews, failed scans, model intake, or ai targets
 
     items = asyncio.run(
@@ -3478,6 +3490,22 @@ def test_dashboard_action_center_surfaces_ai_control_baseline_gaps():
     assert "AI asset owner" in ai_item["samples"][0]["detail"]
 
 
+# DAST 3 blockers of 5 active, 2 running scans, 1 recent failure, no AI Gate findings, one Model
+# Intake finding, and 1 critical / 4 high across every plane.
+_PRODUCT_STATUS_COUNTS = dashboard_data.DashboardCounts(
+    findings=(
+        ("active", "critical", "scan", False, False, 1),
+        ("active", "high", "scan", False, False, 2),
+        ("active", "low", "", False, False, 2),
+        ("active", "high", "model_intake", False, False, 1),
+        ("active", "high", "asm", False, False, 1),
+        ("resolved", "critical", "scan", False, False, 9),
+    ),
+    scans=(("running", "web_dast", False, 2), ("running", "web_dast", True, 7), ("queued", "ai_api", False, 4)),
+    recent_failed_dast_scans=1,
+)
+
+
 class _ProductStatusConn:
     def __init__(self, *, exceptions=None):
         self.exceptions = exceptions or {"expired": 1, "expiring": 2, "weak_records": 3}
@@ -3533,6 +3561,7 @@ def test_dashboard_product_status_summarizes_cross_product_state():
     items = asyncio.run(api_module._build_dashboard_product_status(
         _ProductStatusConn(),
         worker_snapshot=snapshot,
+        counts=_PRODUCT_STATUS_COUNTS,
     ))
     by_id = {item["id"]: item for item in items}
 
@@ -3575,6 +3604,7 @@ def test_dashboard_product_status_omits_the_removed_exceptions_card():
     items = asyncio.run(api_module._build_dashboard_product_status(
         _ProductStatusConn(exceptions={"expired": 0, "expiring": 0, "weak_records": 3}),
         worker_snapshot=snapshot,
+        counts=_PRODUCT_STATUS_COUNTS,
     ))
 
     assert not [item for item in items if item["id"] == "exceptions"]
@@ -8455,7 +8485,8 @@ def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
         async def fetch(self, query, *args):
             calls["fetch"] += 1
             if "FROM findings" in query:
-                return [
+                # The window reads one severity at a time.
+                rows = [
                     {
                         "id": weak_id,
                         "status": "active",
@@ -8478,6 +8509,9 @@ def test_refuter_queue_from_summary_records_unreviewed_signal_only_reviews():
                         "evidence": json.dumps({}),
                     },
                 ]
+                if "severity = $2" in query:
+                    return [row for row in rows if row["severity"] == args[1]]
+                return [row for row in rows if row["severity"] not in ("critical", "high")]
             if "FROM refuter_reviews" in query:
                 return [{"subject_type": "finding", "subject_id": str(weak_id), "finding_id": weak_id}]
             return []
@@ -11148,30 +11182,15 @@ def test_campaign_deployment_impact_empty_is_non_blocking():
 
 
 class _CampaignImpactConn:
+    """The impact query's rows: counts per campaign/severity/status (the SQL deduplicates linked
+    ids; tests/test_targets_dashboard_scale_postgres.py checks that against real PostgreSQL)
+    and one marker row per campaign with an unresolved link."""
+
     async def fetch(self, _query, _campaign_ids):
         campaign_id = _campaign_ids[0]
         return [
-            {
-                "mission_campaign_id": campaign_id,
-                "finding_id": "f1",
-                "id": "f1",
-                "severity": "high",
-                "status": "active",
-            },
-            {
-                "mission_campaign_id": campaign_id,
-                "finding_id": "f1",
-                "id": "f1",
-                "severity": "high",
-                "status": "active",
-            },
-            {
-                "mission_campaign_id": campaign_id,
-                "finding_id": "missing",
-                "id": None,
-                "severity": None,
-                "status": None,
-            },
+            {"campaign_id": campaign_id, "severity": "high", "status": "active", "n": 1, "unresolved": False},
+            {"campaign_id": campaign_id, "severity": None, "status": None, "n": 0, "unresolved": True},
         ]
 
 
