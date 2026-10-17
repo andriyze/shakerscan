@@ -82,6 +82,7 @@ from .list_query import (
 from .list_groups import groups_page, parse_group_by
 from .list_schema import severity_rank_ready
 from .remediation import finding_remediation
+from .retirement import retirement_fields
 from .triage_sql import FINDING_UPDATE_SQL
 from .owner_counts import (
     _refresh_web_active_finding_counts, _refresh_finding_owner_counts,
@@ -700,6 +701,8 @@ async def get_finding(finding_id: str):
     result = dict(finding)
     # Same single proof-state the list uses, so list and detail never disagree (§7).
     result.update(finding_proof_fields(result))
+    # A release's retirement is labelled as such, never read as a fix.
+    result.update(retirement_fields(result))
     result["remediation"] = finding_remediation(result)
     # The per-class brief (facts, proof, reproduce, fix, verify, severity reason), from stored data.
     # Off the event loop: a CVE brief reads (and on first use hashes) the offline advisory snapshot.

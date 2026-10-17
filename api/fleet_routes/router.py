@@ -1668,6 +1668,7 @@ async def continue_broker_scan_action_plan(
             key: options[key] for key in (
                 "endpoint_manifest_id", "endpoint_manifest_ref", "candidate_manifest_ref",
                 "request_candidate_manifest_ref", "scan_continuation_plan_digest", "scan_plan_revision",
+                "continuation_omitted_capabilities",
             ) if key in options
         }
         time_limit_reached = False

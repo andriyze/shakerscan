@@ -33,6 +33,8 @@ type FreshnessInput = {
   last_seen_at?: string | null
   resolved_at?: string | null
   resurfaced_count?: number | null
+  resolution_reason?: string | null
+  retirement?: { release?: string | null; reason?: string | null; label?: string | null } | null
 }
 
 function parsed(value: unknown): Date | null {
@@ -81,6 +83,11 @@ export function findingFreshness(
     : ''
   const detail = `${seenText}${firstText}${returnedText}`
 
+  // Resolved by a release that stopped reporting the kind: not a fix, so not the fixed tone.
+  const retired = retirementBadge(finding)
+  if (retired) {
+    return { state: 'resolved', badge: retired, detail, tone: 'neutral', ageDays }
+  }
   if (status === 'resolved') {
     const resolved = parsed(finding.resolved_at)
     return {
@@ -106,4 +113,39 @@ export function findingFreshness(
     }
   }
   return { state: 'current', badge: null, detail, tone: 'neutral', ageDays }
+}
+
+// A finding retired by a release is resolved, but nobody fixed anything: the release stopped
+// reporting that kind of finding (a duplicate another finding now carries, or something that was
+// never a finding). The API marks it with `resolution_reason: 'retired_by_release'`; the list and
+// the detail page label it as such so it is never read as remediation.
+
+type RetirementInput = {
+  status?: string | null
+  resolution_reason?: string | null
+  retirement?: {
+    reason?: string | null
+    release?: string | null
+    label?: string | null
+  } | null
+}
+
+export function isRetiredByRelease(finding: RetirementInput): boolean {
+  return String(finding.status || '') === 'resolved' && finding.resolution_reason === 'retired_by_release'
+}
+
+/** Short badge text: "retired by release 2.11.0", or null for any other finding. */
+export function retirementBadge(finding: RetirementInput): string | null {
+  if (!isRetiredByRelease(finding)) return null
+  const release = finding.retirement?.release
+  return release ? `retired by release ${release}` : 'retired by a release'
+}
+
+/** Full sentence: "Retired by release 2.11.0: <reason>", or null for any other finding. */
+export function retirementLabel(finding: RetirementInput): string | null {
+  if (!isRetiredByRelease(finding)) return null
+  const retirement = finding.retirement
+  if (retirement?.label) return retirement.label
+  const head = retirement?.release ? `Retired by release ${retirement.release}` : 'Retired by a release'
+  return retirement?.reason ? `${head}: ${retirement.reason}` : head
 }

@@ -2337,6 +2337,16 @@ export interface FindingRemediation {
   matched_by: 'exposure_class' | 'finding_type' | 'title' | 'producer'
 }
 
+/** A finding kind a release stopped reporting, resolved by that release; never a customer fix. */
+export interface FindingRetirement {
+  kind?: string | null
+  reason?: string | null
+  release?: string | null
+  scan_id?: string | null
+  /** "Retired by release <version>: <reason>". */
+  label?: string | null
+}
+
 export interface Finding {
   id: string
   title: string
@@ -2377,6 +2387,9 @@ export interface Finding {
   first_seen_at: string
   last_seen_at: string
   resolved_at?: string
+  /** A resolved row is either resolved (fixed or triaged) or retired by a release (not a fix). */
+  resolution_reason?: 'resolved' | 'retired_by_release' | null
+  retirement?: FindingRetirement | null
   resurfaced_count?: number
   last_verification_status?: string
   last_verification_verdict?: string

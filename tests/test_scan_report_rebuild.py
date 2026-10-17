@@ -65,6 +65,31 @@ def test_offline_bundle_rebuilds_the_byte_stable_report():
     assert canonical_report_json(rebuilt) == canonical_report_json(expected)
 
 
+def test_offline_bundle_carries_capabilities_a_continuation_left_out():
+    plan = _plan()
+    results = {
+        action.action_id: _result(action, status=CapabilityResultStatus.SUCCESS)
+        for action in plan.actions if action.action_id != "finalize.report"
+    }
+    observations = {action_id: () for action_id in results}
+    common = dict(plan=plan, plan_revision=root_scan_plan_revision(plan), target_url="https://app.example.test",
+                  action_results=results, observations=observations)
+    report = finalize_scan_report(**common, omitted_capabilities=("redirect.verify_batch",))
+    assert "capability_not_in_allocation:redirect.verify_batch" in report["coverage"]["reasons"]
+    bundle = build_scan_report_rebuild_bundle(
+        **common, expected_report_digest=report["report_digest"], omitted_capabilities=("redirect.verify_batch",))
+    assert bundle["omitted_capabilities"] == ["redirect.verify_batch"]
+    assert rebuild_scan_report(json.loads(json.dumps(bundle))) == report
+    # Without the field the rebuilt report differs from the expected digest: it is digest-bound.
+    without = {key: value for key, value in bundle.items() if key != "omitted_capabilities"}
+    with pytest.raises(ScanReportRebuildError, match="digest"):
+        rebuild_scan_report(without)
+    with pytest.raises(ScanReportRebuildError, match="omitted capabilities"):
+        rebuild_scan_report({**bundle, "omitted_capabilities": "redirect.verify_batch"})
+    # An ordinary bundle keeps its exact field set.
+    assert "omitted_capabilities" not in _bundle()[0]
+
+
 def test_offline_rebuild_rejects_tampered_result_authority():
     bundle, _expected = _bundle()
     tampered = copy.deepcopy(bundle)

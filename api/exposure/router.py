@@ -29,6 +29,7 @@ try:
     )
     from serialization import row_to_dict
     from finding_routes.list_query import without_jit
+    from finding_routes.retirement import not_retired_sql
     from list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from list_contract import CURSOR_MAX_LENGTH, EXACT_COUNT_CAP, SqlParams, snapshot_time
 except ModuleNotFoundError:  # package import in host-side tests
@@ -39,6 +40,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..serialization import row_to_dict
     from ..finding_routes.list_query import without_jit
+    from ..finding_routes.retirement import not_retired_sql
     from ..list_compat import direct, mark_deprecated, v1_page, wants_list_v1
     from ..list_contract import CURSOR_MAX_LENGTH, EXACT_COUNT_CAP, SqlParams, snapshot_time
 
@@ -1106,7 +1108,7 @@ async def exposure_changes(
         resolved_count, resolved_findings = await counted(
             conn,
             f"""FROM findings f
-            WHERE f.status = 'resolved' AND f.resolved_at > $1{findings_scope}""",
+            WHERE f.status = 'resolved' AND f.resolved_at > $1 AND {not_retired_sql("f")}{findings_scope}""",
             finding_columns, "f.resolved_at DESC",
         )
         failed_scans_count, failed_scans = await counted(

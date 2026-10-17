@@ -34,9 +34,16 @@ def build_scan_report_rebuild_bundle(
     continuation_allocation: ScanContinuationAllocation | None = None,
     work_manifest_references: Sequence[Mapping[str, Any]] = (),
     expected_report_digest: str | None = None,
+    omitted_capabilities: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """Create the complete private input needed by the offline report builder."""
+    """Create the complete private input needed by the offline report builder.
+
+    ``omitted_capabilities`` (the Scan's ``continuation_omitted_capabilities`` option) is carried
+    only when a continuation left one out, so every other bundle keeps its exact field set.
+    """
+    omitted = sorted({str(name) for name in omitted_capabilities or ()})
     return {
+        **({"omitted_capabilities": omitted} if omitted else {}),
         "schema_version": SCAN_REPORT_REBUILD_BUNDLE_SCHEMA,
         "target_url": str(target_url),
         "plan": plan.canonical_dict(),
@@ -78,7 +85,9 @@ def rebuild_scan_report(bundle: Mapping[str, Any]) -> dict[str, Any]:
         if schema_version == SCAN_REPORT_REBUILD_BUNDLE_SCHEMA
         else common_fields
     )
-    if set(bundle) != expected_fields:
+    if set(bundle) - {"omitted_capabilities"} != expected_fields or (
+        "omitted_capabilities" in bundle and schema_version != SCAN_REPORT_REBUILD_BUNDLE_SCHEMA
+    ):
         raise ScanReportRebuildError("offline report bundle fields are invalid")
     if schema_version not in {
         SCAN_REPORT_REBUILD_BUNDLE_SCHEMA,
@@ -189,6 +198,10 @@ def rebuild_scan_report(bundle: Mapping[str, Any]) -> dict[str, Any]:
                     "offline observations differ from their content digest"
                 )
         manifests = tuple(dict(item) for item in raw_manifests)
+        raw_omitted = bundle.get("omitted_capabilities", [])
+        if not isinstance(raw_omitted, list) or not all(isinstance(item, str) for item in raw_omitted):
+            raise ScanReportRebuildError("offline omitted capabilities must be a list of names")
+        omitted_capabilities = tuple(raw_omitted)
     except (TypeError, ValueError) as exc:
         if isinstance(exc, ScanReportRebuildError):
             raise
@@ -201,6 +214,7 @@ def rebuild_scan_report(bundle: Mapping[str, Any]) -> dict[str, Any]:
         action_results=action_results,
         observations=observations,
         work_manifest_references=manifests,
+        omitted_capabilities=omitted_capabilities,
     )
     expected_digest = bundle.get("expected_report_digest")
     if expected_digest is not None and str(expected_digest).lower() != report["report_digest"]:
