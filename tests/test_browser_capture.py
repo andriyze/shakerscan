@@ -237,6 +237,17 @@ def test_a_capture_replay_never_carries_a_recorded_credential():
         assert set(request["captured_credentials_withheld"]) >= {
             "cookie", "authorization", "proxy-authorization", "x-api-key", "x-csrf-token", "x-xsrf-token",
         }
+        # The password typed into the recorded login form is emptied; other fields stay.
+        assert json.loads(request["body"]) == {"email": "a@example.test", "password": ""}
+        assert request["captured_body_fields_withheld"] == ["password"]
+    form = har_entry(_secret_flow(
+        request_headers=[{"name": "Content-Type", "value": "application/x-www-form-urlencoded"},
+                         {"name": "Content-Length", "value": "99"}],
+        request_body=f"user=alice&pass_token={SECRETS[3]}&passwd={SECRETS[2]}",
+    ))[0]
+    (resolved_form,) = resolve_imported_requests(_capture_payload([form]))
+    assert resolved_form["body"] == b"user=alice&pass_token=&passwd="
+    assert "Content-Length" not in resolved_form["headers"]
     # The same document imported as an ordinary HAR is replayed as the operator supplied it.
     har = resolve_imported_requests({"format": "har", "document": payload["document"]})
     assert har[0]["headers"]["Cookie"] == f"sid={SECRETS[0]}"

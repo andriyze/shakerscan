@@ -210,6 +210,65 @@ def _without_matrix_parameters(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
+_CAPTURE_SECRET_FIELD_RE = re.compile(
+    r"(?:password|passwd|passcode|secret|token|api[-_]?key|credential|private[-_]?key|otp|csrf|xsrf)",
+    re.I,
+)
+
+
+def _blank_secret_fields(value: Any, withheld: set[str]) -> Any:
+    if isinstance(value, dict):
+        blanked = {}
+        for key, item in value.items():
+            if _CAPTURE_SECRET_FIELD_RE.search(str(key)) and isinstance(item, (str, int, float)):
+                withheld.add(str(key)[:160])
+                blanked[key] = ""
+            else:
+                blanked[key] = _blank_secret_fields(item, withheld)
+        return blanked
+    if isinstance(value, list):
+        return [_blank_secret_fields(item, withheld) for item in value]
+    return value
+
+
+def _without_secret_body_fields(request: dict[str, Any]) -> tuple[bytes, list[str]]:
+    """A captured JSON or form body with every password-, token- or secret-named field emptied:
+    the password typed into a recorded login form is never sent again."""
+    body = request.get("body") if isinstance(request.get("body"), bytes) else b""
+    if not body:
+        return body, []
+    content_type = next(
+        (str(value).lower() for name, value in dict(request.get("headers") or {}).items()
+         if str(name).lower() == "content-type"),
+        str(request.get("body_mode") or "").lower(),
+    )
+    withheld: set[str] = set()
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body, []
+    if "json" in content_type or text.lstrip()[:1] in {"{", "["}:
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return body, []
+        blanked = _blank_secret_fields(parsed, withheld)
+        if not withheld:
+            return body, []
+        return json.dumps(blanked, separators=(",", ":"), ensure_ascii=False).encode("utf-8"), sorted(withheld)
+    if "x-www-form-urlencoded" in content_type:
+        pairs = urllib.parse.parse_qsl(text, keep_blank_values=True)
+        kept = []
+        for name, item in pairs:
+            if _CAPTURE_SECRET_FIELD_RE.search(name):
+                withheld.add(name[:160])
+                item = ""
+            kept.append((name, item))
+        if withheld:
+            return urllib.parse.urlencode(kept).encode("utf-8"), sorted(withheld)
+    return body, []
+
+
 def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Resolved capture requests without a single recorded credential header.
 
@@ -217,25 +276,31 @@ def strip_captured_credentials(requests: list[dict[str, Any]]) -> list[dict[str,
     requests) resolves it through ``resolve_imported_requests``, so this is the one place a
     capture's cookies and tokens are removed; a replay that needs a session gets it from a
     credential profile. Path ``;matrix`` parameters (a ``;jsessionid=`` session) are dropped
-    from the replayed URL too. The header names removed are kept
-    (``captured_credentials_withheld``), never their values."""
+    from the replayed URL, and password-, token- and secret-named JSON and form body fields are
+    emptied. The header and field names removed are kept (``captured_credentials_withheld``,
+    ``captured_body_fields_withheld``), never their values."""
     stripped: list[dict[str, Any]] = []
     for request in requests:
+        # Content-Length goes too: an emptied body field changes the length, and the replay
+        # computes it from the body it sends.
         items = [
             (name, value) for name, value in request.get("header_items") or []
-            if not is_captured_credential_header(name)
+            if not is_captured_credential_header(name) and str(name).lower() != "content-length"
         ]
         withheld = sorted({
             str(name).lower() for name in dict(request.get("headers") or {})
             if is_captured_credential_header(name)
         })
+        body, body_fields = _without_secret_body_fields(request)
         stripped.append({
             **request,
+            "body": body,
+            "captured_body_fields_withheld": body_fields,
             "url": _without_matrix_parameters(str(request.get("url") or "")),
             "url_template": _without_matrix_parameters(str(request.get("url_template") or "")),
             "headers": {
                 name: value for name, value in dict(request.get("headers") or {}).items()
-                if not is_captured_credential_header(name)
+                if not is_captured_credential_header(name) and str(name).lower() != "content-length"
             },
             "header_items": items,
             "sensitive_header_names": [],
