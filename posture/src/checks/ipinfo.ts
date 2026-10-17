@@ -30,7 +30,7 @@ export async function ipNetworks(addresses: string[], sampled: string[], ttls: R
       if (missing.length) {
         try {
         budget.reserve();
-        const signal = AbortSignal.any([budget.signal, AbortSignal.timeout(Math.max(1, Math.min(1500, budget.deadline - Date.now())))]);
+        const signal = budget.operationSignal(1500);
         const response = await fetcher('https://api.ipinfo.io/batch/lite', { method: 'POST', redirect: 'manual', signal,
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
           body: JSON.stringify(missing) });

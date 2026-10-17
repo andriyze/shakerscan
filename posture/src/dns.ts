@@ -12,10 +12,10 @@ export async function query(host: string, type: QueryType, budget: Budget, fetch
   const controller = new AbortController();
   const abort = () => controller.abort();
   budget.signal.addEventListener('abort', abort, { once: true });
-  const remaining = budget.deadline - Date.now();
   // When the budget deadline, not the per-query cap, bounds this query, reaching it
   // expires the budget too, so no further operation is reserved after the timeout.
-  const timer = remaining <= 3000 ? setTimeout(() => budget.expire(), Math.max(0, remaining)) : setTimeout(abort, 3000);
+  const window = budget.operationWindow(3000);
+  const timer = setTimeout(window.deadlineBound ? () => budget.expire() : abort, window.ms);
   try {
     budget.reserve();
     const id = crypto.getRandomValues(new Uint16Array(1))[0]!;
