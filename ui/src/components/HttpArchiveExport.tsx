@@ -38,7 +38,14 @@ interface ArchiveDocument {
   total: number
   archive_total?: number
   /** Capabilities whose traffic the engine could not archive, split by reason. */
-  capture_stats?: { unarchived_external_tool_capabilities?: string[] }
+  capture_stats?: {
+    unarchived_external_tool_capabilities?: string[]
+    /** Every origin the archive holds a call or a pinned tunnel to (bounded; see the truncated flag). */
+    destinations?: { origin: string; calls: number }[]
+    destinations_truncated?: boolean
+    /** Destinations a pinned tunnel refused: nothing was sent to them. */
+    refused_destinations?: { destination: string; attempts: number }[]
+  }
   /** Whether this deployment exports verbatim HAR; absent from servers that predate it. */
   raw_har?: { available: boolean; reason?: string | null }
   transactions: ArchivedTransaction[]
@@ -289,6 +296,8 @@ export default function HttpArchiveExport({
   }
 
   const externalTools = archive?.capture_stats?.unarchived_external_tool_capabilities ?? []
+  const destinations = archive?.capture_stats?.destinations ?? []
+  const refusedDestinations = archive?.capture_stats?.refused_destinations ?? []
 
   const body = (
     <>
@@ -302,6 +311,15 @@ export default function HttpArchiveExport({
           {externalTools.length > 0 && (
             <p className="mt-1 text-xs text-amber-300/80">
               External scanner tools ({externalTools.join(', ')}) send their traffic through an opaque tunnel; their requests are counted in the action receipts but not archived.
+            </p>
+          )}
+          {destinations.length > 0 && (
+            <p className="mt-1 text-xs text-gray-500" data-testid="archive-destinations">
+              Destinations: {destinations.map((item) => `${item.origin} (${item.calls})`).join(', ')}
+              {archive?.capture_stats?.destinations_truncated ? ', and more' : ''}
+              {refusedDestinations.length > 0
+                ? `. Refused by the pinned tunnel, nothing sent: ${refusedDestinations.map((item) => item.destination).join(', ')}`
+                : ''}
             </p>
           )}
           {archive && (

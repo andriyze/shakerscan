@@ -137,6 +137,123 @@ def record(call: Mapping[str, Any]) -> None:
         capture.add(call)
 
 
+def note_dropped(count: int) -> None:
+    """Count calls the run made that this capture cannot hold, so the archive says partial."""
+    capture = _active.get()
+    if capture is not None and int(count) > 0:
+        capture.dropped += int(count)
+
+
+TUNNEL_FIDELITY = "pinned_tunnel"
+TUNNEL_REQUEST_FIDELITY = "tunnel_request_line"
+
+
+def _tunnel_origin(tunnel: Mapping[str, Any]) -> str:
+    scheme = str(tunnel.get("scheme") or "http").lower()
+    host = str(tunnel.get("host") or "")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = int(tunnel.get("port") or 0)
+    # Written as the engine's own calls write it, so one origin reads as one destination.
+    if (scheme, port) in {("http", 80), ("https", 443)} or not port:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def record_tunnel(
+    tunnel: Mapping[str, Any],
+    *,
+    capability_name: str | None,
+    tool: str | None,
+    elapsed_ms: int | None = None,
+    error: str | None = None,
+) -> None:
+    """Archive what an external tool sent through its pinned tunnel.
+
+    External tools (templates, crawlers, content discovery, probes, process verifiers) and the
+    engine's browser reach the target only through a pinned tunnel that admits one host and
+    port. One row records that tunnel -- its destination, the frozen addresses it connected
+    to, its byte counts and any destination it refused -- so every destination a Scan's
+    capabilities contacted is in the archive. A cleartext tunnel adds one row per request line
+    it relayed (method, request target and Host header; no other headers, no bodies). An
+    encrypted tunnel is ciphertext to the engine: its row proves where the traffic went and
+    says the content was not readable.
+    """
+    if not capture_active() or not isinstance(tunnel, Mapping) or not tunnel.get("host"):
+        return
+    origin = _tunnel_origin(tunnel)
+    connected = [
+        str(address) for address, count in dict(tunnel.get("address_connections") or {}).items()
+        if count
+    ]
+    request_lines = [
+        item for item in tunnel.get("request_lines") or () if isinstance(item, Mapping)
+    ]
+    dropped = max(0, int(tunnel.get("request_lines_dropped") or 0))
+    summary = {
+        key: tunnel.get(key)
+        for key in (
+            "scheme", "host", "port", "address_connections", "connections_attempted",
+            "connections_opened", "connections_rejected", "bytes_to_target",
+            "bytes_from_target", "http_requests_observed", "content_readable",
+            "methods_observed", "request_lines_dropped", "refused_destinations",
+            "refused_destinations_other",
+        )
+    }
+    summary["tool"] = str(tool or "")
+    summary["request_lines_archived"] = len(request_lines)
+    record({
+        "plane": "scan",
+        "source": "pinned_tunnel",
+        "capability_name": capability_name,
+        "method": "CONNECT",
+        "url": origin + "/",
+        "request_headers": {},
+        "request_body": None,
+        "response_headers": {},
+        "response_body": None,
+        "status_code": None,
+        "elapsed_ms": elapsed_ms,
+        "error": (str(error)[:200] or None) if error else None,
+        "remote_ip": connected[0] if connected else None,
+        "fidelity": TUNNEL_FIDELITY,
+        "tunnel": summary,
+    })
+    for index, line in enumerate(request_lines):
+        target = str(line.get("target") or "")
+        if target.startswith(("http://", "https://")):
+            # Absolute form still went to the tunnel's one destination; the archive URL names
+            # that destination and keeps the target as the tool wrote it.
+            parts = urllib.parse.urlsplit(target)
+            path = urllib.parse.urlunsplit(("", "", parts.path or "/", parts.query, ""))
+        elif target.startswith("/"):
+            path = target
+        else:
+            path = "/"
+        record({
+            "plane": "scan",
+            "source": "pinned_tunnel",
+            "capability_name": capability_name,
+            "method": str(line.get("method") or "GET"),
+            "url": origin + path,
+            "request_headers": (
+                {"host": str(line["host"])} if line.get("host") else {}
+            ),
+            "request_body": None,
+            "response_headers": {},
+            "response_body": None,
+            "status_code": None,
+            "remote_ip": connected[0] if len(connected) == 1 else None,
+            "fidelity": TUNNEL_REQUEST_FIDELITY,
+            "tunnel_request": {
+                "tool": str(tool or ""), "line": index,
+                # Kept only when it is not already the URL's path (absolute form).
+                **({"request_target": target} if not target.startswith("/") else {}),
+            },
+        })
+    note_dropped(dropped)
+
+
 def parse_curl_command(cmd: Sequence[str]) -> dict[str, Any]:
     """Recover method, URL, headers and body from a curl invocation.
 
@@ -340,11 +457,15 @@ __all__ = [
     "drain_capture",
     "max_captured",
     "max_capture_bytes",
+    "TUNNEL_FIDELITY",
+    "TUNNEL_REQUEST_FIDELITY",
+    "note_dropped",
     "parse_curl_command",
     "record",
     "record_client_call",
     "record_curl_invocation",
     "record_scan_call",
+    "record_tunnel",
     "scan_target_host",
     "start_capture",
 ]

@@ -684,12 +684,16 @@ def test_adapter_limited_capture_cannot_be_labelled_complete():
 async def test_scan_stats_find_successful_http_capabilities_with_no_archive_rows():
     class Conn:
         async def fetchrow(self, query, *params):
+            if "tunnel_records" in query:  # the capture detail (fixture: none)
+                return {"capture_limited": 0, "tunnel_records": 0, "opaque_tunnels": 0}
             return {"attempted": 3, "stored": 3, "failed": 0, "dropped": 0}
 
         async def fetchval(self, query, *params):
             return 0
 
         async def fetch(self, query, *params):
+            if "split_part(url" in query or "refused_destinations" in query:
+                return []  # destinations and refusals (fixture: none)
             assert "requested_budget->>'http_requests'" in query
             return [{"capability_name": "web.crawl", "status": "success", "http_consumed": 71}]
 
@@ -1231,12 +1235,16 @@ def test_scan_rows_without_the_private_marker_keep_their_masked_bodies():
 async def test_scan_stats_separate_external_tool_gaps_from_engine_gaps():
     class Conn:
         async def fetchrow(self, query, *params):
+            if "tunnel_records" in query:  # the capture detail (fixture: none)
+                return {"capture_limited": 0, "tunnel_records": 0, "opaque_tunnels": 0}
             return {"attempted": 3, "stored": 3, "failed": 0, "dropped": 0}
 
         async def fetchval(self, query, *params):
             return 0
 
         async def fetch(self, query, *params):
+            if "split_part(url" in query or "refused_destinations" in query:
+                return []  # destinations and refusals (fixture: none)
             return [
                 {"capability_name": "not.a.capability", "status": "success", "http_consumed": 1},
                 {"capability_name": "templates.passive_batch", "status": "success", "http_consumed": 7},
@@ -1352,12 +1360,16 @@ async def test_scan_stats_name_verifier_traffic_that_ended_at_its_wall():
     must be named, not dropped because the action did not end success or partial."""
     class Conn:
         async def fetchrow(self, query, *params):
+            if "tunnel_records" in query:  # the capture detail (fixture: none)
+                return {"capture_limited": 0, "tunnel_records": 0, "opaque_tunnels": 0}
             return {"attempted": 13, "stored": 13, "failed": 0, "dropped": 0}
 
         async def fetchval(self, query, *params):
             return 0
 
         async def fetch(self, query, *params):
+            if "split_part(url" in query or "refused_destinations" in query:
+                return []  # destinations and refusals (fixture: none)
             return [
                 {"capability_name": "sqli.verify_batch", "status": "timed_out", "http_consumed": 110},
                 {"capability_name": "sqli.verify_batch", "status": "timed_out", "http_consumed": 230},

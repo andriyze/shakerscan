@@ -29,7 +29,16 @@ function mergeCaptureStats(pages) {
     if (!stats || typeof stats !== 'object') continue
     for (const [key, value] of Object.entries(stats)) {
       const current = merged[key]
-      if (Array.isArray(value)) merged[key] = [...new Set([...(Array.isArray(current) ? current : []), ...value])]
+      if (Array.isArray(value)) {
+        // Entries may be objects (a destination and its call count): each page restates them,
+        // so they are de-duplicated by content, not by identity.
+        const byContent = new Map()
+        for (const item of [...(Array.isArray(current) ? current : []), ...value]) {
+          const id = item !== null && typeof item === 'object' ? JSON.stringify(item) : item
+          if (!byContent.has(id)) byContent.set(id, item)
+        }
+        merged[key] = [...byContent.values()]
+      }
       else if (typeof value === 'number') merged[key] = typeof current === 'number' ? Math.max(current, value) : value
       else if (!(key in merged)) merged[key] = value
     }

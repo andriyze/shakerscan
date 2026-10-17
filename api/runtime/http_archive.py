@@ -988,6 +988,16 @@ def scan_transactions_from_capture(
                     {"workflow_values_private": True}
                     if call.get("workflow_values_private") is True else {}
                 ),
+                # A pinned tunnel's own account (destination, addresses, bytes, refusals)
+                # and a relayed request line's target as the tool wrote it.
+                **(
+                    {"tunnel": dict(call["tunnel"])}
+                    if isinstance(call.get("tunnel"), Mapping) else {}
+                ),
+                **(
+                    {"tunnel_request": dict(call["tunnel_request"])}
+                    if isinstance(call.get("tunnel_request"), Mapping) else {}
+                ),
                 # Stated on every row so a bounded archive is never mistaken for the
                 # complete traffic of the run.
                 "dropped_calls": dropped,
