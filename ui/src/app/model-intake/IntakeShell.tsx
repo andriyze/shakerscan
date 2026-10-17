@@ -1,5 +1,6 @@
 'use client'
 
+import { CopyButton } from '@/components/CopyButton'
 import { useState } from 'react'
 import { CheckCircle2, Circle, Copy, LockKeyhole, PackageCheck, ShieldAlert, Server } from 'lucide-react'
 import {
@@ -199,7 +200,6 @@ export function RunnerInstallCard({
   const [open, setOpen] = useState(false)
   const [signer, setSigner] = useState('local-pem')
   const [kmsKeyId, setKmsKeyId] = useState('')
-  const [copied, setCopied] = useState(false)
   const installed = readiness?.ready === true
   const signerArgument = signer.startsWith('kms:') ? `kms:${kmsKeyId.trim() || '<key-id>'}` : signer
   const command = (plan?.command || '').replace('<choice>', signerArgument)
@@ -211,16 +211,6 @@ export function RunnerInstallCard({
     if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GiB`
     if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`
     return `${bytes} B`
-  }
-
-  async function copyCommand() {
-    try {
-      await navigator.clipboard.writeText(command)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {
-      setCopied(false)
-    }
   }
 
   return (
@@ -364,9 +354,15 @@ export function RunnerInstallCard({
                 <div className="text-xs font-medium text-gray-300">Run this one command</div>
                 <div className="flex min-w-0 items-center gap-2 rounded-sm border border-gray-800 bg-black/40 p-2">
                   <code className="min-w-0 flex-1 break-all font-mono text-[11px] text-cyan-200">{command}</code>
-                  <button type="button" onClick={copyCommand} disabled={!commandReady} className="shrink-0 rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40">
-                    <Copy className="h-3 w-3" /> {copied ? 'Copied' : 'Copy'}
-                  </button>
+                  {commandReady ? (
+                    <CopyButton text={command} label="Copy command" className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                      Copy
+                    </CopyButton>
+                  ) : (
+                    <button type="button" disabled className="shrink-0 rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 disabled:cursor-not-allowed disabled:opacity-40">
+                      <Copy className="h-3 w-3" /> Copy
+                    </button>
+                  )}
                 </div>
                 <p className="text-[11px] text-gray-500">
                   Runtime: <code className="text-gray-300">{plan.runtime_dir || '~/.shakerscan'}</code>

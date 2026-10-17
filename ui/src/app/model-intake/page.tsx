@@ -1,5 +1,6 @@
 'use client'
 
+import { CopyButton } from '@/components/CopyButton'
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
@@ -8,7 +9,6 @@ import { Card, CardSkeleton, ErrorState, Modal, useToast } from '@/components/ui
 import {
   AlertTriangle,
   CheckCircle2,
-  Clipboard,
   Cloud,
   Database,
   FileJson,
@@ -529,7 +529,6 @@ function ModelIntakeSettingsContent() {
   const [scenario, setScenario] = useState<AITestScenario | null>(null)
   const [scenarioLoading, setScenarioLoading] = useState(true)
   const [scenarioError, setScenarioError] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
 
   const loadScenario = useCallback(async () => {
     setScenarioLoading(true)
@@ -1278,18 +1277,6 @@ function ModelIntakeSettingsContent() {
       toast.error(err instanceof Error ? err.message : 'Failed to download license evidence')
     } finally {
       setAutomaticDownload('')
-    }
-  }
-
-  async function copyPayload() {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(buildPayload(), null, 2))
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to copy payload'
-      setError(msg)
-      toast.error(msg)
     }
   }
 
@@ -2694,10 +2681,9 @@ function ModelIntakeSettingsContent() {
               {submitting ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}
               {scanBlockedByResolver ? 'Resolve an artifact file first' : 'Queue Model Intake Scan'}
             </button>
-            <button type="button" onClick={copyPayload} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
-              <Clipboard className="h-4 w-4" aria-hidden="true" />
-              {copied ? 'Copied' : 'Copy payload'}
-            </button>
+            <CopyButton text={() => JSON.stringify(buildPayload(), null, 2)} label="Copy payload" size="md" className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
+              Copy payload
+            </CopyButton>
           </div>
           {hasFieldErrors && (
             <p role="alert" className="text-sm text-red-400">Fix the highlighted fields above to queue this scan.</p>

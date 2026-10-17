@@ -1,5 +1,6 @@
 'use client'
 
+import { CopyButton } from '@/components/CopyButton'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
@@ -382,7 +383,6 @@ export default function AIGateSettingsPage() {
   const [scenario, setScenario] = useState<AITestScenario | null>(null)
   const [inventory, setInventory] = useState<AIInventory | null>(null)
   const [inventoryError, setInventoryError] = useState<string | null>(null)
-  const [copied, setCopied] = useState<string | null>(null)
   const [aiSettings, setAISettings] = useState<AISettings | null>(null)
   const [showAddTarget, setShowAddTarget] = useState(false)
   const [showAdvancedTarget, setShowAdvancedTarget] = useState(false)
@@ -542,18 +542,6 @@ export default function AIGateSettingsPage() {
     setControlMetadata(jsonText(template.metadata_json || {}))
     setProductionMode(false)
     setShowAdvancedTarget(true)
-  }
-
-  async function copyCurrentPayload() {
-    try {
-      await navigator.clipboard.writeText(jsonText(buildPayload()))
-      setCopied('target-payload')
-      setTimeout(() => setCopied(null), 1500)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to copy payload'
-      setError(msg)
-      toast.error(msg)
-    }
   }
 
   function validateField(field: keyof TargetFormErrors) {
@@ -1161,10 +1149,9 @@ export default function AIGateSettingsPage() {
               {saving ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Plus className="h-4 w-4" aria-hidden="true" />}
               Save AI Target
             </Button>
-            <button type="button" onClick={copyCurrentPayload} className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
-              <Clipboard className="h-4 w-4" aria-hidden="true" />
-              {copied === 'target-payload' ? 'Copied' : 'Copy payload'}
-            </button>
+            <CopyButton text={() => jsonText(buildPayload())} label="Copy payload" size="md" className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800">
+              Copy payload
+            </CopyButton>
           </div>
           {hasFieldErrors && (
             <p role="alert" className="text-sm text-red-400">Fix the highlighted fields above to save this target.</p>

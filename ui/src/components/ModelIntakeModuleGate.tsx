@@ -1,5 +1,6 @@
 'use client'
 
+import { CopyButton } from '@/components/CopyButton'
 import { useEffect, useState, type ReactNode } from 'react'
 import { Card, CardSkeleton, PageHeader } from '@/components/ui'
 import { getHealth } from '@/lib/api'
@@ -12,7 +13,6 @@ const ENABLE_COMMAND = 'shakerscan model-intake enable'
 // request is made). An engine that predates the setting reports no `enabled` field: treated as on.
 export function ModelIntakeModuleGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<'loading' | 'enabled' | 'disabled'>('loading')
-  const [copied, setCopied] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -56,15 +56,13 @@ export function ModelIntakeModuleGate({ children }: { children: ReactNode }) {
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <code className="rounded-sm border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-gray-100">{ENABLE_COMMAND}</code>
-            <button
-              type="button"
-              onClick={() => {
-                void navigator.clipboard?.writeText(ENABLE_COMMAND).then(() => setCopied(true)).catch(() => {})
-              }}
-              className="rounded-sm border border-gray-700 px-3 py-2 text-xs text-gray-200 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+            <CopyButton
+              text={ENABLE_COMMAND}
+              label="Copy install command"
+              className="inline-flex items-center gap-1 rounded-sm border border-gray-700 px-3 py-2 text-xs text-gray-200 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
             >
-              {copied ? 'Copied' : 'Copy'}
-            </button>
+              Copy
+            </CopyButton>
           </div>
           <p className="text-xs text-gray-500">
             The images come from the same verified release as the rest of this install. Existing Model Intake records stay
