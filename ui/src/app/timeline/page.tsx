@@ -5,6 +5,7 @@ import Link from '@/components/WorkspaceLink'
 import { getMissionTimeline, formatDate, type TimelineEvent } from '@/lib/api'
 import { TargetSearchCombobox } from '@/components/targets/TargetSearchCombobox'
 import { useUrlFilters } from '@/lib/useUrlFilters'
+import { usePoll } from '@/lib/usePoll'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import {
   Card,
@@ -21,6 +22,8 @@ import {
 
 const PAGE_SIZE = 30
 const REFRESH_MS = 15000
+const IDLE_REFRESH_MS = 60_000
+const LIVE_EVENT_STATUSES: ReadonlySet<string> = new Set(['queued', 'pending', 'approved', 'running', 'active', 'claimed', 'testing'])
 
 // Each toggle maps a UI label to the GET /timeline include_* query flag. All
 // default ON server-side; the URL only carries a flag when a category is OFF.
@@ -168,7 +171,7 @@ function TimelineContent() {
 
   const targetFilter = (filters.target || '').trim()
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal: AbortSignal) => {
     try {
       const params: Parameters<typeof getMissionTimeline>[0] = { limit: PAGE_SIZE }
       if (targetFilter) params.target_id = targetFilter
@@ -177,23 +180,26 @@ function TimelineContent() {
           ;(params as Record<string, unknown>)[key] = false
         }
       }
-      const res = await getMissionTimeline(params)
+      const res = await getMissionTimeline(params, signal)
+      if (signal.aborted) return
       setData({ events: res.events || [], upcoming: res.upcoming || [] })
       setLoadError(false)
       setLastUpdated(new Date())
-    } catch {
+    } catch (error) {
+      if (signal.aborted) return
       setLoadError(true)
+      throw error
     } finally {
-      setLoading(false)
+      if (!signal.aborted) setLoading(false)
     }
   }, [targetFilter, filters])
 
-  useEffect(() => {
-    setLoading(true)
-    load()
-    const interval = setInterval(load, REFRESH_MS)
-    return () => clearInterval(interval)
-  }, [load])
+  // A filter change shows the skeleton again; declared before usePoll so it lands first.
+  useEffect(() => { setLoading(true) }, [load])
+  // 15 s while something on the feed is still in flight, otherwise a slow refresh for new
+  // activity; paused in a hidden tab, backing off on errors.
+  const timelineLive = Boolean(data?.events.some((event) => LIVE_EVENT_STATUSES.has(String(event.status || '').toLowerCase())))
+  const timelinePoll = usePoll(load, { intervalMs: REFRESH_MS, idleIntervalMs: IDLE_REFRESH_MS, live: timelineLive, deps: [load] })
 
   return (
     <div className="space-y-6">
@@ -204,7 +210,7 @@ function TimelineContent() {
             A live feed of scans, scheduled jobs, autonomous investigations, verification, and exports.
           </p>
         </div>
-        <LastUpdated updatedAt={lastUpdated} onRefresh={load} />
+        <LastUpdated updatedAt={lastUpdated} onRefresh={timelinePoll.refresh} />
       </div>
 
       <Card className="p-4">
@@ -259,7 +265,7 @@ function TimelineContent() {
       </Card>
 
       {loadError ? (
-        <ErrorState message="Failed to load the mission timeline." onRetry={load} />
+        <ErrorState message="Failed to load the mission timeline." onRetry={timelinePoll.refresh} />
       ) : loading && !data ? (
         <TableSkeleton rows={8} />
       ) : (

@@ -10,10 +10,11 @@
  *   it at once while `getJson` revalidates; `maxAgeMs` answers from the cache without a request
  *   while the entry is younger than that. Bodies are retained only where they are reused (an
  *   ETag was sent, or the read asked for `maxAgeMs`), so plain reads hold no memory.
- * - Busy: heavy reads wait out 429/503 + Retry-After (busyRetry.mjs); a refusal that survives
- *   the retries is an `ApiError` carrying `retryAfter`, which the poller turns into backoff.
+ * - Busy: heavy reads wait out 429, and 503 with Retry-After (busyRetry.mjs), within a short total
+ *   budget; a refusal that survives is an `ApiError` carrying `retryAfter`, which the poller turns
+ *   into backoff. A bare 503 ("not ready") fails at once with the server's message.
  */
-import { fetchRetryingBusy, retryAfterSeconds } from './busyRetry.mjs'
+import { HEAVY_READ_MAX_WAIT_SECONDS, fetchRetryingBusy, isBusyAnswer, retryAfterSeconds } from './busyRetry.mjs'
 
 export class ApiError extends Error {
   constructor(message, { status = 0, retryAfter = null, detail = null } = {}) {
@@ -50,7 +51,7 @@ function detailMessage(body) {
 async function failure(response, fallback) {
   let body = null
   try { body = await response.json() } catch { body = null }
-  const busy = response.status === 429 || response.status === 503
+  const busy = isBusyAnswer(response)
   return new ApiError(detailMessage(body) || `${fallback} (${response.status})`, {
     status: response.status,
     retryAfter: busy ? retryAfterSeconds(response) : null,
@@ -96,7 +97,9 @@ export function createFetchLayer({
     const requestInit = { cache: 'no-store', ...init, headers, signal: controller.signal }
     stats.network += 1
     const response = heavy
-      ? await fetchRetryingBusy(url, requestInit, { fetchImpl, onBusy, ...(sleep ? { sleep } : {}) })
+      ? await fetchRetryingBusy(url, requestInit, {
+        fetchImpl, onBusy, maxWaitSeconds: HEAVY_READ_MAX_WAIT_SECONDS, ...(sleep ? { sleep } : {}),
+      })
       : await fetchImpl(url, requestInit)
     if (response.status === 304 && entry) {
       stats.notModified += 1
@@ -118,7 +121,7 @@ export function createFetchLayer({
    * @param {string} url
    * @param {object} [options]
    * @param {AbortSignal} [options.signal]
-   * @param {boolean} [options.heavy] wait out 429/503 + Retry-After before failing
+   * @param {boolean} [options.heavy] briefly wait out busy answers (429, 503 + Retry-After) before failing
    * @param {number} [options.maxAgeMs] answer from the cache while the entry is this fresh
    * @param {boolean} [options.dedupe] share an identical in-flight GET (default true)
    * @param {string} [options.label] failure message prefix

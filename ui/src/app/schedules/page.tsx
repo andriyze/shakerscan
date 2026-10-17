@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, Suspense } from 'react'
+import { useEffect, useRef, useState, useCallback, Suspense } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import {
   getSchedules, createSchedule, updateSchedule, deleteSchedule,
@@ -15,6 +15,7 @@ import type { TargetAsset } from '@/lib/targetAssetApi'
 /** Schedules run web scans: active targets with a usable web URL are the choices. */
 const scheduleTargetChoice = (asset: TargetAsset) => usableWebTargets([asset]).length === 1
 import { utcTimeToLocalLabel } from '@/lib/format'
+import { usePoll } from '@/lib/usePoll'
 import {
   buildAsmScheduleOptions,
   buildScheduleMutation,
@@ -23,6 +24,8 @@ import {
   type AsmFamily,
   type ScheduleKind,
 } from '@/lib/deferredWorkContracts'
+
+const SCHEDULES_REFRESH_MS = 30_000
 
 const DAYS_OF_WEEK = [
   { value: 0, label: 'Monday' },
@@ -134,7 +137,7 @@ function SchedulesContent() {
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
-  const fetchSchedules = useCallback(async (opts?: { background?: boolean }) => {
+  const fetchSchedules = useCallback(async (opts?: { background?: boolean; rethrow?: boolean }) => {
     if (!opts?.background) setLoading(true)
     try {
       const params: { is_active?: boolean } = {}
@@ -146,16 +149,23 @@ function SchedulesContent() {
     } catch (err) {
       console.error('Failed to fetch schedules:', err)
       if (!opts?.background) setFetchError(true)
+      if (opts?.rethrow) throw err
     } finally {
       if (!opts?.background) setLoading(false)
     }
   }, [statusFilter])
 
-  useEffect(() => {
-    fetchSchedules()
-    const interval = setInterval(() => fetchSchedules({ background: true }), 30000)
-    return () => clearInterval(interval)
-  }, [fetchSchedules])
+  // First load shows the skeleton; later ticks refresh quietly every 30 s while any listed
+  // schedule is enabled (a disabled one never fires on its own). usePoll pauses in a hidden tab
+  // and backs off on errors.
+  const schedulesLoaded = useRef(false)
+  useEffect(() => { schedulesLoaded.current = false }, [fetchSchedules])
+  const anyScheduleEnabled = schedules.some((schedule) => schedule.is_active)
+  usePoll(async () => {
+    const background = schedulesLoaded.current
+    await fetchSchedules({ background, rethrow: background })
+    schedulesLoaded.current = true
+  }, { intervalMs: SCHEDULES_REFRESH_MS, live: anyScheduleEnabled, deps: [fetchSchedules] })
 
   // Handle ?create=true&target_id=... from targets page
   useEffect(() => {

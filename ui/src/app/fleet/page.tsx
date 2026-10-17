@@ -47,6 +47,7 @@ import {
   ScanStatusBadge,
   useToast,
 } from '@/components/ui'
+import { usePoll } from '@/lib/usePoll'
 
 const REFRESH_MS = 10_000
 const OPERATOR_TOKEN_KEY = 'shakerscan:fleet-operator-token'
@@ -245,9 +246,10 @@ export default function FleetPage() {
   useEffect(() => {
     setOperatorToken(sessionStorage.getItem(OPERATOR_TOKEN_KEY) || '')
     void loadFleet()
-    const timer = window.setInterval(() => void loadFleet(true), REFRESH_MS)
-    return () => window.clearInterval(timer)
   }, [loadFleet])
+  // Quiet refresh every 10 s after the first load while the fleet is enabled; a disabled fleet
+  // has nothing to watch. Paused in a hidden tab.
+  usePoll(() => loadFleet(true), { intervalMs: REFRESH_MS, live: workers?.fleet?.enabled !== false, leading: false, deps: [loadFleet] })
 
   function changeOperatorToken(value: string) {
     setOperatorToken(value)

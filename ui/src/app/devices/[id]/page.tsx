@@ -15,6 +15,11 @@ import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollect
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 import { devicePortCoverage, deviceReachabilityServiceSummary, deviceScorePresentation, deviceServiceDetails, deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { networkScanTcpHints } from '@/lib/networkScanHints.mjs'
+import { usePoll } from '@/lib/usePoll'
+
+const DEVICE_LIVE_REFRESH_MS = 10_000
+const DEVICE_IDLE_REFRESH_MS = 60_000
+const TERMINAL_SCAN_STATUSES: readonly string[] = ['completed', 'failed', 'cancelled']
 
 const policyBadgeClass: Record<string, string> = {
   allow: 'bg-emerald-500/15 text-emerald-300',
@@ -159,55 +164,51 @@ function DeviceDetailContent() {
     }
   }, [deviceId])
 
-  useEffect(() => { load(); const timer = setInterval(load, 10_000); return () => clearInterval(timer) }, [load])
+  // 10 s while a device scan is queued/running or the network worker is not ready yet, then a
+  // slow refresh; usePoll pauses in a hidden tab and backs off on errors.
+  const deviceLive = !workerReady || Boolean(data?.scans?.some((item) => item.status === 'pending' || item.status === 'running'))
+  usePoll(load, { intervalMs: DEVICE_LIVE_REFRESH_MS, idleIntervalMs: DEVICE_IDLE_REFRESH_MS, live: deviceLive, deps: [load] })
 
   useEffect(() => {
-    let stopped = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-    if (!selectedScanId) {
-      setSelectedScan(null)
-      setSelectedScanError(null)
-      setSelectedScanLoading(false)
-      return () => undefined
-    }
-    setSelectedScanLoading(true)
-    const refresh = async () => {
-      try {
-        const next = await getScan(selectedScanId)
-        if (stopped) return
-        if (next.device_target_id !== deviceId || !['device_posture', 'device_probe'].includes(String(next.run_kind || next.scan_type))) {
-          setSelectedScan(null)
-          setSelectedScanError('That scan does not belong to this connected device.')
-          return
-        }
-        setSelectedScan(next)
-        setSelectedScanError(null)
-        if (!['completed', 'failed', 'cancelled'].includes(next.status)) timer = setTimeout(refresh, 5_000)
-      } catch (error) {
-        if (!stopped) setSelectedScanError(error instanceof Error ? error.message : 'Could not load the selected device scan')
-      } finally {
-        if (!stopped) setSelectedScanLoading(false)
-      }
-    }
-    refresh()
-    return () => { stopped = true; if (timer) clearTimeout(timer) }
+    setSelectedScan(null)
+    setSelectedScanError(null)
+    setSelectedScanLoading(Boolean(selectedScanId))
+    setScanActivity(null)
   }, [deviceId, selectedScanId])
 
-  useEffect(() => {
-    let stopped = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-    if (!selectedScanId) { setScanActivity(null); return () => undefined }
-    const refresh = async () => {
-      try {
-        const activity = await getDeviceScanActivity(selectedScanId)
-        if (stopped) return
-        setScanActivity(activity)
-        if (!['completed', 'failed', 'cancelled'].includes(activity.status)) timer = setTimeout(refresh, 3_000)
-      } catch { if (!stopped) setScanActivity(null) }
+  // The selected scan and its activity refresh until the scan is terminal, then stop.
+  const selectedScanLive = !selectedScan || !TERMINAL_SCAN_STATUSES.includes(selectedScan.status)
+  usePoll(async (signal) => {
+    if (!selectedScanId) return
+    try {
+      const next = await getScan(selectedScanId)
+      if (signal.aborted) return
+      if (next.device_target_id !== deviceId || !['device_posture', 'device_probe'].includes(String(next.run_kind || next.scan_type))) {
+        setSelectedScan(null)
+        setSelectedScanError('That scan does not belong to this connected device.')
+        return
+      }
+      setSelectedScan(next)
+      setSelectedScanError(null)
+    } catch (error) {
+      if (!signal.aborted) setSelectedScanError(error instanceof Error ? error.message : 'Could not load the selected device scan')
+      throw error
+    } finally {
+      if (!signal.aborted) setSelectedScanLoading(false)
     }
-    refresh()
-    return () => { stopped = true; if (timer) clearTimeout(timer) }
-  }, [selectedScanId])
+  }, { intervalMs: 5_000, live: selectedScanLive && !selectedScanError, enabled: Boolean(selectedScanId), deps: [deviceId, selectedScanId] })
+
+  const activityLive = !scanActivity || !TERMINAL_SCAN_STATUSES.includes(scanActivity.status)
+  usePoll(async (signal) => {
+    if (!selectedScanId) return
+    try {
+      const activity = await getDeviceScanActivity(selectedScanId)
+      if (!signal.aborted) setScanActivity(activity)
+    } catch (error) {
+      if (!signal.aborted) setScanActivity(null)
+      throw error
+    }
+  }, { intervalMs: 3_000, live: activityLive, enabled: Boolean(selectedScanId), deps: [selectedScanId] })
 
   async function queueScan() {
     if (!workerReady) {

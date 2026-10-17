@@ -9,6 +9,7 @@ import {
   createWebTarget, enableTargetNetworkView, getTargetAssets, revokeTargetAsset,
   type InventoryFacets, type TargetAsset, type TargetAssetGroup,
 } from '@/lib/targetAssetApi'
+import { usePoll } from '@/lib/usePoll'
 import { filtersFromQuery, groupSections, inventoryParams, queryFromFilters } from '@/lib/targetInventoryModel.mjs'
 import { AddTargetsDialog } from './inventory/AddTargetsDialog'
 import { AuthorizeDialog } from './inventory/AuthorizeDialog'
@@ -96,11 +97,8 @@ export function TargetInventory() {
 
   const assets = useMemo(() => groups.flatMap(group => group.targets), [groups])
   const scanningNow = assets.some(asset => asset.scanning)
-  useEffect(() => {
-    if (!scanningNow) return
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') refresh() }, SCANNING_REFRESH_MS)
-    return () => clearInterval(timer)
-  }, [scanningNow, refresh])
+  // Re-read the page every 10 s while a listed target is scanning; paused in a hidden tab.
+  usePoll(async () => refresh(), { intervalMs: SCANNING_REFRESH_MS, enabled: scanningNow, leading: false, deps: [refresh] })
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

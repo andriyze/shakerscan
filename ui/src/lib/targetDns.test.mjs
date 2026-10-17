@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { discoveryOutcomeMessage, scanStartFailureReasons, targetForRegisteredDnsFallback, targetWithResolvedHost } from './targetDns.ts'
+import { discoveryOutcomeMessage, scanStartFailureReasons, sourceFailureReason, targetForRegisteredDnsFallback, targetWithResolvedHost } from './targetDns.ts'
 import { getApiErrorMessage } from './apiConfig.ts'
 
 const DNS_REASON = 'www.example.net does not resolve in DNS (no A/AAAA record), so it cannot be scanned. example.net does resolve; use example.net instead.'
@@ -84,9 +84,26 @@ test('a source that failed never reads as "no subdomains exist"', () => {
     status: 'completed', subdomains_found: 0, new_subdomains: 0, resolution: { added: 0, unresolved_count: 0 },
     source_errors: { crtsh: 'crt.sh HTTP 503; Certificate Transparency results are incomplete' },
   })
-  assert.equal(partial.kind, 'info')
-  assert.match(partial.message, /Results may be incomplete: crt\.sh \(crt\.sh HTTP 503/)
+  assert.equal(partial.kind, 'warning')
+  assert.equal(partial.persistent, true)
+  // The source is named once, and its reason does not repeat the incompleteness the sentence states.
+  assert.match(partial.message, /Results may be incomplete: crt\.sh \(HTTP 503\) did not answer/)
+  assert.equal(partial.message.match(/crt\.sh/g).length, 1)
   assert.match(partial.message, /run discovery again later/)
+
+  const allFailed = discoveryOutcomeMessage('example.com', {
+    status: 'failed',
+    error_message: 'No discovery source answered (crt.sh: crt.sh HTTP 503; results are incomplete); subdomains were not checked, try again later',
+    source_errors: { crtsh: 'crt.sh HTTP 503; results are incomplete' },
+  })
+  assert.equal(allFailed.kind, 'error')
+  assert.equal(allFailed.persistent, true)
+  assert.equal(allFailed.message.match(/crt\.sh/g).length, 1)
+  assert.match(allFailed.message, /crt\.sh \(HTTP 503\)/)
+
+  assert.equal(sourceFailureReason('subfinder', 'subfinder timed out'), 'timed out')
+  assert.equal(sourceFailureReason('crtsh', 'connection refused'), 'connection refused')
+  assert.equal(sourceFailureReason('crtsh', 'crt.sh: results are incomplete'), 'crt.sh: results are incomplete')
 
   const none = discoveryOutcomeMessage('example.com', {
     status: 'completed', subdomains_found: 0, new_subdomains: 0, resolution: { added: 0, unresolved_count: 0 },

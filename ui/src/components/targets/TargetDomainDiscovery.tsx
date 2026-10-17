@@ -36,7 +36,7 @@ export function TargetDomainDiscovery({ domain, onSettled, menuItem = false }: {
           if (!mounted.current) return
           if (run.status === 'completed' || run.status === 'failed') {
             const outcome = discoveryOutcomeMessage(domain, run)
-            toast[outcome.kind](outcome.message)
+            toast[outcome.kind](outcome.message, { persistent: outcome.persistent })
             finish()
             return
           }
