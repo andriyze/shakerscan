@@ -116,6 +116,8 @@ ALLOWED_PLAIN_DIGESTS = {
     ("api/capabilities/ssh_command_worker.py", "execute"): "request",
     ("api/capabilities/ssh_transport.py", "connect"): "public",
     ("api/capabilities/tls.py", "_certificate_chain_summary"): "public",
+    # Presented public DER certificates have standard interoperable SHA-256 fingerprints.
+    ("api/capabilities/tls.py", "_chain_details"): "public",
     ("api/capabilities/tls.py", "inspect_tls_origin"): "public",
     ("api/device_agent.py", "_read_local_intel_snapshot"): "integrity",
     ("api/devices/collection_environments.py", "hydrate_environment"): "request",
