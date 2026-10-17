@@ -103,6 +103,26 @@ def scan_credential_allows_capability(
     )
 
 
+def scan_replay_resolution_capability(
+    allowed_capabilities: Sequence[str], capability_name: str,
+) -> str | None:
+    """The custody receipt a collection replay resolves its primary profile under, or None.
+
+    None when the profile does not allow this replay: the replay then runs without the
+    managed identity, exactly as in a Scan with no profile (a browser capture's recorded
+    credentials are withheld either way). Resolving under ``scan.execute`` regardless made
+    every profile without it -- a form_login profile with its safe defaults among them --
+    fail both replays and block the whole request lane (lab Scan 5c6b0a8f, 2.11.0).
+    """
+    if not scan_credential_allows_capability(allowed_capabilities, capability_name):
+        return None
+    allowed = {str(item or "").strip() for item in allowed_capabilities}
+    return (
+        SCAN_CREDENTIAL_CAPABILITY if SCAN_CREDENTIAL_CAPABILITY in allowed
+        else str(capability_name).strip()
+    )
+
+
 @dataclass(frozen=True, repr=False)
 class ScanHTTPPrincipal:
     """Worker-private immediate HTTP identity with content-free public metadata."""

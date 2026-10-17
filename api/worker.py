@@ -160,13 +160,13 @@ from runtime.request_collection_store import (
 )
 from runtime.scan_credential_guard import build_scan_credential_check
 from runtime.scan_credentials import (
-    SCAN_CREDENTIAL_CAPABILITY,
     ScanCredentialError,
     bind_resolved_scan_credential,
     bind_scan_session_headers,
     resolve_scan_http_principal,
     resolve_scan_interactive_credential,
     scan_credential_resolution_capability,
+    scan_replay_resolution_capability,
 )
 from operations.discovery import discovery_domain, queued_domain_refusal
 from scope.roots import binding_roots
@@ -12160,19 +12160,17 @@ async def _bind_scan_replay_primary_credential(
     target: TargetBinding,
     scan_id: str,
     options: Mapping[str, Any],
+    capability_name: str,
     trusted_primary_headers: Mapping[str, str] | None = None,
 ) -> tuple[Any, dict[str, Any] | None]:
-    """Independently resolve the Scan primary identity into one exact replay plan."""
-    refs = [
-        dict(item)
-        for item in options.get("credential_profile_refs") or []
-        if isinstance(item, Mapping)
-    ]
-    primary = next(
-        (item for item in refs if str(item.get("scan_lane") or "") == "primary"),
-        None,
-    )
-    if primary is None:
+    """Independently resolve the Scan primary identity into one exact replay plan.
+
+    A primary profile that does not allow this replay leaves the plan unbound, as with no profile."""
+    primary = next((dict(item) for item in options.get("credential_profile_refs") or []
+        if isinstance(item, Mapping) and str(item.get("scan_lane") or "") == "primary"), None)
+    resolution_capability = primary and scan_replay_resolution_capability(
+        primary.get("allowed_capabilities") or (), capability_name)
+    if not resolution_capability:
         return plan, None
     try:
         expected_version = int(primary.get("profile_version") or 0)
@@ -12197,7 +12195,7 @@ async def _bind_scan_replay_primary_credential(
         conn,
         profile_id=profile_id,
         target=target,
-        capability=SCAN_CREDENTIAL_CAPABILITY,
+        capability=resolution_capability,
         authority=authority,
     ) as resolved:
         if (
@@ -12668,6 +12666,7 @@ async def _execute_scan_request_collections(
                 target=target_binding,
                 scan_id=scan_id,
                 options=persisted_options,
+                capability_name=replay_capability_name,
                 trusted_primary_headers=trusted_primary_headers,
             )
         if principal_receipt_context:
