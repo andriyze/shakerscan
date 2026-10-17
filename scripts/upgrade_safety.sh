@@ -759,8 +759,7 @@ upgrade_safety_warnings() {
     if [ -f "$SCRIPT_DIR/.env" ] && grep -q '^POSTGRES_PASSWORD=' "$SCRIPT_DIR/.env" 2>/dev/null \
         && [ -f "$RELEASE_STATE_CURRENT" ] \
         && docker_cli volume ls -q >/dev/null 2>&1 \
-        && ! docker_cli volume inspect "${project}_postgres-cluster" >/dev/null 2>&1 \
-        && ! docker_cli volume inspect "${project}_postgres-data" >/dev/null 2>&1; then
+        && ! docker_cli volume inspect "${project}_postgres-cluster" >/dev/null 2>&1; then
         echo "ShakerScan's database volume is missing although this install has started before; restore it from a backup in $SCRIPT_DIR/backups before using it."
     fi
     if [ -f "$RELEASE_STATE_CURRENT" ] && docker_cli volume ls -q >/dev/null 2>&1 \
@@ -883,7 +882,6 @@ ensure_database_volume_present() {
     [ -f "$RELEASE_STATE_CURRENT" ] || return 0
     docker_cli volume ls -q >/dev/null 2>&1 || return 0   # Docker cannot say: never guess "missing"
     docker_cli volume inspect "${project}_postgres-cluster" >/dev/null 2>&1 && return 0
-    docker_cli volume inspect "${project}_postgres-data" >/dev/null 2>&1 && return 0
     echo -e "${RED}ShakerScan's database volume (${project}_postgres-cluster) is missing although this install has started before.${NC}" >&2
     echo "Starting now would create an empty database. Nothing was changed." >&2
     echo "Restore the database from a backup in $SCRIPT_DIR/backups ('$(cli_hint) backup list'), or, to start with" >&2

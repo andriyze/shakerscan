@@ -14,14 +14,6 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# PostgreSQL major upgrades run before anything can start PostgreSQL (see compose()). Without the
-# module a start could initialize an empty cluster beside the real data, so refuse to run instead.
-if [ ! -f "$SCRIPT_DIR/scripts/postgres_upgrade.sh" ]; then
-    echo -e "${RED}Error: $SCRIPT_DIR/scripts/postgres_upgrade.sh is missing; re-run the installer.${NC}" >&2
-    exit 1
-fi
-# shellcheck source=scripts/postgres_upgrade.sh
-source "$SCRIPT_DIR/scripts/postgres_upgrade.sh"
 if [ ! -f "$SCRIPT_DIR/scripts/upgrade_safety.sh" ]; then
     echo -e "${RED}Error: $SCRIPT_DIR/scripts/upgrade_safety.sh is missing; re-run the installer.${NC}" >&2
     exit 1
@@ -261,8 +253,7 @@ postgres_data_volume_exists() {
     local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
 
     command_exists docker || return 1
-    docker volume inspect "${project}_postgres-cluster" > /dev/null 2>&1 || \
-        docker volume inspect "${project}_postgres-data" > /dev/null 2>&1
+    docker volume inspect "${project}_postgres-cluster" > /dev/null 2>&1
 }
 
 # Whether a numeric id is unused by host accounts and groups (true when it cannot be checked).
@@ -644,15 +635,6 @@ compose() {
         echo -e "${RED}Error: Docker Compose is not installed${NC}"
         return 1
     fi
-
-    # up/run/create can start PostgreSQL directly or as a dependency; an older cluster must be
-    # migrated first, or PostgreSQL would initialize an empty database beside the real one. Its
-    # progress goes to stderr so callers that discard or capture Compose's stdout still show it.
-    case "$(compose_subcommand "$@")" in
-        up|run|create)
-            ensure_postgres_cluster_current >&2 || return 1
-            ;;
-    esac
 
     "${DOCKER_COMPOSE_CMD[@]}" "${COMPOSE_FILE_ARGS[@]}" "$@"
 }
@@ -1540,7 +1522,7 @@ install_dependencies() {
 
 command_needs_docker_runtime() {
     case "$1" in
-        start|stop|restart|status|scale|logs|gungnir|devices|build|rebuild|reset|shell|db-upgrade|images|redis|intel)
+        start|stop|restart|status|scale|logs|gungnir|devices|build|rebuild|reset|shell|images|redis|intel)
             return 0
             ;;
         *)
@@ -2508,7 +2490,6 @@ print_help() {
     echo "                     SHAKERSCAN_BACKUP_KEEP=5 backups)"
     echo "  backup list        List backups and whether each holds the encryption key"
     echo "  backup delete <name|all> [--yes]  Permanently delete a backup, or every backup"
-    echo "  db-upgrade         Migrate older PostgreSQL data now (--status, --remigrate, --keep-current, --remove-legacy)"
     echo "  images [prune]     List ShakerScan images and why each is kept; prune removes the ones nothing keeps"
     echo "                     (SHAKERSCAN_KEEP_RELEASES=2 keeps this release and one to roll back to; never a volume)"
     echo "  redis [status]     Redis health, persistence and volume"
@@ -3615,9 +3596,6 @@ reset_database() {
         remove_containers_outside_compose_down
         compose down -v --remove-orphans
         remove_scan_worker_containers "Removing API-scaled worker containers left outside Compose..."
-        # Data kept for rolling back a PostgreSQL upgrade is not a Compose volume; without removing
-        # it the fresh start would migrate the old data straight back in.
-        docker_cli volume rm -f "$(postgres_legacy_volume)" > /dev/null 2>&1 || true
         echo "Starting fresh..."
         # Exactly as `start`: the build environment (release version and image identity), the
         # runtime files, Redis readiness and the health and identity checks. The database was just
@@ -3908,7 +3886,6 @@ list_backups() {
         state="complete"
         [ ! -e "$dir/.incomplete" ] || state="incomplete"
         key="$(backup_key_state "$dir")"
-        case "$(basename "$dir")" in postgres-*) key="PostgreSQL upgrade copy" ;; esac
         printf '%-44s %-11s %-24s %s\n' "$(basename "$dir")" "$state" "$key" "$(du -sh "$dir" 2>/dev/null | cut -f1)"
     done < <(find "$backup_root" -mindepth 1 -maxdepth 1 -type d | sort)
 }
@@ -3978,32 +3955,6 @@ backup_cmd() {
         delete) delete_backups "${2:-}" "$SCRIPT_DIR/backups" "${3:-}" ;;
         prune) prune_backups "${2:-}" ;;
         *) create_backup "$@" ;;
-    esac
-}
-
-db_upgrade_cmd() {
-    case "${1:-}" in
-        "")
-            # start/restart and the installer do this automatically; this runs it without starting.
-            ensure_postgres_cluster_current || return 1
-            postgres_upgrade_status
-            ;;
-        --status)
-            postgres_upgrade_status
-            ;;
-        --remove-legacy)
-            remove_legacy_postgres_data
-            ;;
-        --remigrate)
-            remigrate_postgres_cluster
-            ;;
-        --keep-current)
-            keep_current_postgres_cluster
-            ;;
-        *)
-            echo "Usage: $(cli_hint) db-upgrade [--status|--remigrate|--keep-current|--remove-legacy]" >&2
-            return 1
-            ;;
     esac
 }
 
@@ -4834,9 +4785,6 @@ case $COMMAND in
         ;;
     backup)
         backup_cmd "${ARGS[@]}"
-        ;;
-    db-upgrade)
-        db_upgrade_cmd "${ARGS[@]}"
         ;;
     images)
         set_build_env
